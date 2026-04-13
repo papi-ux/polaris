@@ -74,7 +74,77 @@ using namespace std::literals;
 namespace confighttp {
   namespace fs = std::filesystem;
 
-  using https_server_t = SimpleWeb::Server<SimpleWeb::HTTPS>;
+  class PolarisConfigHTTPSServer: public SimpleWeb::ServerBase<SimpleWeb::HTTPS> {
+  public:
+    PolarisConfigHTTPSServer(const std::string &certification_file, const std::string &private_key_file):
+        ServerBase<SimpleWeb::HTTPS>::ServerBase(443),
+        context(boost::asio::ssl::context::tls_server) {
+      context.set_options(boost::asio::ssl::context::no_tlsv1);
+      context.set_options(boost::asio::ssl::context::no_tlsv1_1);
+      context.use_certificate_chain_file(certification_file);
+      context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
+    }
+
+    std::function<void(std::shared_ptr<Request>, SSL*)> verify;
+
+  protected:
+    boost::asio::ssl::context context;
+
+    void after_bind() override {
+      if (verify) {
+        context.set_verify_mode(boost::asio::ssl::verify_peer | boost::asio::ssl::verify_client_once);
+        context.set_verify_callback([](int, boost::asio::ssl::verify_context &) {
+          // Allow the handshake to complete, then validate against the paired-client store.
+          return true;
+        });
+      }
+    }
+
+    void accept() override {
+      auto connection = create_connection(*io_service, context);
+
+      acceptor->async_accept(connection->socket->lowest_layer(), [this, connection](const SimpleWeb::error_code &ec) {
+        auto lock = connection->handler_runner->continue_lock();
+        if (!lock) {
+          return;
+        }
+
+        if (ec != SimpleWeb::error::operation_aborted) {
+          this->accept();
+        }
+
+        auto session = std::make_shared<Session>(config.max_request_streambuf_size, connection);
+
+        if (!ec) {
+          boost::asio::ip::tcp::no_delay option(true);
+          SimpleWeb::error_code set_option_ec;
+          session->connection->socket->lowest_layer().set_option(option, set_option_ec);
+
+          session->connection->set_timeout(config.timeout_request);
+          session->connection->socket->async_handshake(boost::asio::ssl::stream_base::server, [this, session](const SimpleWeb::error_code &handshake_ec) {
+            session->connection->cancel_timeout();
+            auto lock = session->connection->handler_runner->continue_lock();
+            if (!lock) {
+              return;
+            }
+
+            if (!handshake_ec) {
+              if (verify) {
+                verify(session->request, session->connection->socket->native_handle());
+              }
+              this->read(session);
+            } else if (this->on_error) {
+              this->on_error(session->request, handshake_ec);
+            }
+          });
+        } else if (this->on_error) {
+          this->on_error(session->request, ec);
+        }
+      });
+    }
+  };
+
+  using https_server_t = PolarisConfigHTTPSServer;
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request>;
@@ -250,6 +320,14 @@ namespace confighttp {
     return true;
   }
 
+  crypto::named_cert_t *getVerifiedClientCert(const req_https_t &request) {
+    return static_cast<crypto::named_cert_t *>(request->userp.get());
+  }
+
+  bool hasVerifiedClientCert(const req_https_t &request) {
+    return getVerifiedClientCert(request) != nullptr;
+  }
+
   /**
    * @brief Validate the CSRF token on a mutating request (POST/PUT/DELETE).
    * @param request The HTTP request object.
@@ -377,6 +455,13 @@ namespace confighttp {
       return false;
     fg.disable();
     return true;
+  }
+
+  bool authenticatePolarisSession(resp_https_t response, req_https_t request, bool needsRedirect = false) {
+    if (hasVerifiedClientCert(request)) {
+      return true;
+    }
+    return authenticate(response, request, needsRedirect);
   }
 
   /**
@@ -3270,6 +3355,12 @@ namespace confighttp {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
 
+    server.verify = [](req_https_t request, SSL *ssl) {
+      if (auto named_cert_p = nvhttp::verify_client_cert(ssl)) {
+        request->userp = named_cert_p;
+      }
+    };
+
     // Helper lambda to wrap a handler with CSRF validation.
     // API key (Bearer token) requests bypass CSRF since they are not cookie-based.
     // -----------------------------------------------------------------------
@@ -3278,7 +3369,7 @@ namespace confighttp {
     // -----------------------------------------------------------------------
 
     auto getPolarisEventsSSE = [](resp_https_t response, req_https_t request) {
-      if (!authenticate(response, request)) return;
+      if (!authenticatePolarisSession(response, request)) return;
       print_req(request);
 
       std::thread([response]() {
@@ -3343,7 +3434,7 @@ namespace confighttp {
     // -----------------------------------------------------------------------
 
     auto getPolarisSession = [](resp_https_t response, req_https_t request) {
-      if (!authenticate(response, request)) return;
+      if (!authenticatePolarisSession(response, request)) return;
       print_req(request);
 
       nlohmann::json output;
@@ -3364,7 +3455,7 @@ namespace confighttp {
     };
 
     auto postPolarisUnlock = [](resp_https_t response, req_https_t request) {
-      if (!authenticate(response, request)) return;
+      if (!authenticatePolarisSession(response, request)) return;
       print_req(request);
 
       nlohmann::json output;
@@ -3389,7 +3480,7 @@ namespace confighttp {
         auto auth_header = request->header.find("authorization");
         bool has_bearer = auth_header != request->header.end() &&
                           auth_header->second.substr(0, 7) == "Bearer ";
-        if (!has_bearer && !validateCsrf(request)) {
+        if (!has_bearer && !hasVerifiedClientCert(request) && !validateCsrf(request)) {
           BOOST_LOG(warning) << "CSRF token validation failed for "sv << request->path;
           bad_request(response, request, "CSRF token missing or invalid");
           return;

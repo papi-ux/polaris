@@ -12,7 +12,7 @@ Version: %{build_version}
 Release: 1%{?dist}
 Summary: Self-hosted game stream host for Moonlight.
 License: GPLv3-only
-URL: https://github.com/papi/Polaris
+URL: https://github.com/papi-ux/polaris
 Source0: tarball.tar.gz
 
 BuildRequires: appstream
@@ -122,8 +122,8 @@ cmake_args=(
   "-DPOLARIS_ENABLE_X11=ON"
   "-DPOLARIS_ENABLE_DRM=ON"
   "-DPOLARIS_PUBLISHER_NAME=papi"
-  "-DPOLARIS_PUBLISHER_WEBSITE=https://github.com/papi/Polaris"
-  "-DPOLARIS_PUBLISHER_ISSUE_URL=https://github.com/papi/Polaris/issues"
+  "-DPOLARIS_PUBLISHER_WEBSITE=https://github.com/papi-ux/polaris"
+  "-DPOLARIS_PUBLISHER_ISSUE_URL=https://github.com/papi-ux/polaris/issues"
 )
 
 export CC=gcc-%{gcc_version}

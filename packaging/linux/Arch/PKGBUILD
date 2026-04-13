@@ -1,4 +1,4 @@
-# Edit on github: https://github.com/papi/Polaris/blob/master/packaging/linux/Arch/PKGBUILD
+# Edit on github: https://github.com/papi-ux/polaris/blob/master/packaging/linux/Arch/PKGBUILD
 # Reference: https://wiki.archlinux.org/title/PKGBUILD
 
 ## options
@@ -121,8 +121,8 @@ build() {
       -D POLARIS_EXECUTABLE_PATH=/usr/bin/polaris
       -D POLARIS_ASSETS_DIR="share/polaris"
       -D POLARIS_PUBLISHER_NAME='Polaris Project'
-      -D POLARIS_PUBLISHER_WEBSITE='https://github.com/papi/Polaris'
-      -D POLARIS_PUBLISHER_ISSUE_URL='https://github.com/papi/Polaris/issues'
+      -D POLARIS_PUBLISHER_WEBSITE='https://github.com/papi-ux/polaris'
+      -D POLARIS_PUBLISHER_ISSUE_URL='https://github.com/papi-ux/polaris/issues'
     )
 
     if [[ "${_use_cuda::1}" != "t" ]]; then

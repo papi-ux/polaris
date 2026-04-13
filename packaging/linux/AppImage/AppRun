@@ -91,7 +91,7 @@ if [ "x$1" == "xremove" ] || [ "x$1" == "x--remove" ] || [ "x$1" == "x-r" ] ; th
 fi
 
 # create config directory if it doesn't exist
-# https://github.com/papi/Polaris/issues/324
+# https://github.com/papi-ux/polaris/issues/324
 mkdir -p ~/.config/polaris
 
 # run polaris

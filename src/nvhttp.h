@@ -13,6 +13,7 @@
 // lib includes
 #include <boost/property_tree/ptree.hpp>
 #include <nlohmann/json.hpp>
+#include <openssl/ssl.h>
 #include <Simple-Web-Server/server_https.hpp>
 
 // local includes
@@ -61,6 +62,13 @@ namespace nvhttp {
    * @examples_end
    */
   void start();
+
+  /**
+   * @brief Verify a presented client certificate against the paired client store.
+   * @param ssl Active TLS session handle.
+   * @return The paired client entry when the certificate is recognized, otherwise null.
+   */
+  crypto::p_named_cert_t verify_client_cert(SSL *ssl);
 
   std::string
   get_arg(const args_t &args, const char *name, const char *default_value = nullptr);

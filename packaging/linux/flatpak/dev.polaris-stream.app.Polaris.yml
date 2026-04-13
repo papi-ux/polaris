@@ -75,8 +75,8 @@ modules:
       - -DPOLARIS_ENABLE_DRM=ON
       - -DPOLARIS_ENABLE_CUDA=ON
       - -DPOLARIS_PUBLISHER_NAME='papi'
-      - -DPOLARIS_PUBLISHER_WEBSITE='https://github.com/papi/Polaris'
-      - -DPOLARIS_PUBLISHER_ISSUE_URL='https://github.com/papi/Polaris/issues'
+      - -DPOLARIS_PUBLISHER_WEBSITE='https://github.com/papi-ux/polaris'
+      - -DPOLARIS_PUBLISHER_ISSUE_URL='https://github.com/papi-ux/polaris/issues'
     no-make-install: false
     post-install:
       - install -D $FLATPAK_BUILDER_BUILDDIR/packaging/linux/flatpak/scripts/* /app/bin

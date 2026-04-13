@@ -1,0 +1,18 @@
+name: Public Hygiene
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  public-hygiene:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check public repo surface
+        run: bash scripts/check-public-surface.sh

@@ -37,11 +37,19 @@
 # VSCode IDE
 .vscode/
 .codex
+CLAUDE.md
+AGENTS.md
+.private/
+*.code-workspace
 
 # build directories
 build/
+build-local/
+build-test/
 cmake-*/
 docs/doxyconfig*
+arch-pkgbuild/
+compile_commands.json
 
 # npm
 node_modules/
@@ -57,3 +65,5 @@ package-lock.json
 # Python
 *.pyc
 venv/
+.env
+.env.*

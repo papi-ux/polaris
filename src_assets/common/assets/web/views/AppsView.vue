@@ -781,7 +781,7 @@ function exportLauncherFile(app) {
   const link = document.createElement('a')
   const fileContent = `# Polaris app entry
 # Exported by Polaris
-# https://github.com/papi/Polaris
+# https://github.com/papi-ux/polaris
 
 [host_uuid] ${hostUUID.value}
 [host_name] ${hostName.value}

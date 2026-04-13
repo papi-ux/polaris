@@ -127,7 +127,7 @@
           </button>
         </div>
         <p class="text-storm mt-3">{{ $t('pin.device_management_desc') }}</p>
-        <p class="text-storm">{{ $t('pin.device_management_warning') }} <a href="https://github.com/papi/Polaris/wiki/Permission-System" target="_blank" class="text-ice hover:text-ice/80">{{ $t('_common.learn_more') }}</a></p>
+        <p class="text-storm">{{ $t('pin.device_management_warning') }} <a href="https://github.com/papi-ux/polaris/wiki/Permission-System" target="_blank" class="text-ice hover:text-ice/80">{{ $t('_common.learn_more') }}</a></p>
 
         <div class="flex items-center gap-3 bg-twilight/50 border-l-4 border-green-500 text-silver p-3 rounded-lg mt-3" v-if="showApplyMessage">
           <div><b>{{ $t('_common.success') }}</b> {{ $t('pin.unpair_single_success') }}</div>
@@ -198,7 +198,7 @@
                 placeholder="1920x1080x59.94"
                 @input="validateModeOverride"
               />
-              <div class="text-sm text-storm mt-1">{{ $t('pin.display_mode_override_desc') }} <a href="https://github.com/papi/Polaris/wiki/Display-Mode-Override" target="_blank" class="text-ice hover:text-ice/80">{{ $t('_common.learn_more') }}</a></div>
+              <div class="text-sm text-storm mt-1">{{ $t('pin.display_mode_override_desc') }} <a href="https://github.com/papi-ux/polaris/wiki/Display-Mode-Override" target="_blank" class="text-ice hover:text-ice/80">{{ $t('_common.learn_more') }}</a></div>
             </div>
 
             <!-- Display Profile -->
@@ -275,7 +275,7 @@
             <!-- connect/disconnect commands -->
             <div class="mb-3 mt-2 flex flex-col" v-for="cmdType in ['do', 'undo']" v-if="client.editAllowClientCommands">
               <label class="block text-sm font-medium text-storm mb-1">{{ $t(`pin.client_${cmdType}_cmd`) }}</label>
-              <div class="text-sm text-storm">{{ $t(`pin.client_${cmdType}_cmd_desc`) }} <a href="https://github.com/papi/Polaris/wiki/Client-Commands" target="_blank" class="text-ice hover:text-ice/80">{{ $t('_common.learn_more') }}</a></div>
+              <div class="text-sm text-storm">{{ $t(`pin.client_${cmdType}_cmd_desc`) }} <a href="https://github.com/papi-ux/polaris/wiki/Client-Commands" target="_blank" class="text-ice hover:text-ice/80">{{ $t('_common.learn_more') }}</a></div>
               <table class="mt-2 w-full text-left" v-if="client[`edit_${cmdType}`].length > 0">
                 <thead>
                   <tr class="border-b border-storm">

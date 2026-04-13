@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Polaris VERSION 1.0.0
         DESCRIPTION "Self-hosted game stream host for Moonlight"
-        HOMEPAGE_URL "https://github.com/papi/Polaris")
+        HOMEPAGE_URL "https://github.com/papi-ux/polaris")
 
 set(PROJECT_LICENSE "GPL-3.0-only")
 

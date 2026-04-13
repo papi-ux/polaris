@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/papi/Polaris/master/polaris.png" />
+  <img src="https://raw.githubusercontent.com/papi-ux/polaris/master/polaris.png" />
   <h1 align="center">Polaris</h1>
   <h4 align="center">Self-hosted game stream host for Moonlight.</h4>
 </div>
@@ -13,10 +13,10 @@
 
 Polaris is a self-hosted game stream host for Moonlight.
 
-Polaris Project has the full documentation hosted on [Read the Docs](https://github.com/papi/Polaris)
+Polaris Project has the full documentation hosted on [GitHub](https://github.com/papi-ux/polaris)
 
-* [Stable](https://github.com/papi/Polaris)
-* [Beta](https://github.com/papi/Polaris)
+* [Stable](https://github.com/papi-ux/polaris)
+* [Beta](https://github.com/papi-ux/polaris)
 
-This repo is synced from the upstream [Polaris](https://github.com/papi/Polaris) repo.
+This repo is synced from the upstream [Polaris](https://github.com/papi-ux/polaris) repo.
 Please report issues and contribute to the upstream repo.

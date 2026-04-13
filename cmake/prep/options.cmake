@@ -1,9 +1,9 @@
 # Publisher Metadata
 set(POLARIS_PUBLISHER_NAME "Polaris Project"
         CACHE STRING "The name of the publisher (or fork developer) of the application.")
-set(POLARIS_PUBLISHER_WEBSITE "https://github.com/papi/Polaris"
+set(POLARIS_PUBLISHER_WEBSITE "https://github.com/papi-ux/polaris"
         CACHE STRING "The URL of the publisher's website.")
-set(POLARIS_PUBLISHER_ISSUE_URL "https://github.com/papi/Polaris/issues"
+set(POLARIS_PUBLISHER_ISSUE_URL "https://github.com/papi-ux/polaris/issues"
         CACHE STRING "The URL of the publisher's support site or issue tracker.
         If you provide a modified version of Polaris, we kindly request that you use your own url.")
 

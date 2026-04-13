@@ -281,8 +281,9 @@ namespace nvhttp {
         std::ifstream in(config::nvhttp.file_state);
         in >> root;
       } catch (std::exception &e) {
-        BOOST_LOG(error) << "Couldn't read "sv << config::nvhttp.file_state << ": "sv << e.what();
-        return;
+        BOOST_LOG(warning) << "Couldn't read existing state "sv << config::nvhttp.file_state
+                           << ": "sv << e.what() << "; rewriting from in-memory state";
+        root = nlohmann::json::object();
       }
     }
 
@@ -369,6 +370,7 @@ namespace nvhttp {
       in >> tree;
     } catch (std::exception &e) {
       BOOST_LOG(error) << "Couldn't read "sv << config::nvhttp.file_state << ": "sv << e.what();
+      http::unique_id = uuid_util::uuid_t::generate().string();
       return;
     }
 
@@ -438,6 +440,8 @@ namespace nvhttp {
   void add_authorized_client(const p_named_cert_t& named_cert_p) {
     client_t &client = client_root;
     client.named_devices.push_back(named_cert_p);
+    auto live_named_cert_p = named_cert_p;
+    cert_chain.add(live_named_cert_p);
 
 #if defined POLARIS_TRAY && POLARIS_TRAY >= 1
     system_tray::update_tray_paired(named_cert_p->name);
@@ -734,6 +738,33 @@ namespace nvhttp {
 
   inline crypto::named_cert_t* get_verified_cert(req_https_t request) {
     return (crypto::named_cert_t*)request->userp.get();
+  }
+
+  crypto::p_named_cert_t verify_client_cert(SSL *ssl) {
+    if (!ssl) {
+      return {};
+    }
+
+    crypto::x509_t x509 {
+#if OPENSSL_VERSION_MAJOR >= 3
+      SSL_get1_peer_certificate(ssl)
+#else
+      SSL_get_peer_certificate(ssl)
+#endif
+    };
+
+    if (!x509) {
+      return {};
+    }
+
+    p_named_cert_t named_cert_p;
+    auto err_str = cert_chain.verify(x509.get(), named_cert_p);
+    if (err_str) {
+      BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
+      return {};
+    }
+
+    return named_cert_p;
   }
 
   template <class T>
@@ -1757,42 +1788,14 @@ namespace nvhttp {
 
     // Verify certificates after establishing connection
     https_server.verify = [](req_https_t req, SSL *ssl) {
-      crypto::x509_t x509 {
-#if OPENSSL_VERSION_MAJOR >= 3
-        SSL_get1_peer_certificate(ssl)
-#else
-        SSL_get_peer_certificate(ssl)
-#endif
-      };
-      if (!x509) {
+      auto named_cert_p = verify_client_cert(ssl);
+      if (!named_cert_p) {
         BOOST_LOG(info) << "unknown -- denied"sv;
         return false;
       }
 
-      bool verified = false;
-      p_named_cert_t named_cert_p;
-
-      auto fg = util::fail_guard([&]() {
-        char subject_name[256];
-
-        X509_NAME_oneline(X509_get_subject_name(x509.get()), subject_name, sizeof(subject_name));
-
-        if (verified) {
-          BOOST_LOG(debug) << subject_name << " -- "sv << "verified, device name: "sv << named_cert_p->name;
-        } else {
-          BOOST_LOG(debug) << subject_name << " -- "sv << "denied"sv;
-        }
-
-      });
-
-      auto err_str = cert_chain.verify(x509.get(), named_cert_p);
-      if (err_str) {
-        BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
-        return verified;
-      }
-
-      verified = true;
       req->userp = named_cert_p;
+      BOOST_LOG(debug) << named_cert_p->name << " -- verified"sv;
 
       return true;
     };
@@ -1841,12 +1844,12 @@ namespace nvhttp {
 
       nlohmann::json output;
       output["server"] = "polaris";
-      output["version"] = "1.0.0";
+      output["version"] = PROJECT_VERSION;
 
       // Feature flags
       auto &features = output["features"];
       features["ai_optimizer"] = ai_optimizer::is_enabled();
-      features["game_library"] = false;  // Phase 3
+      features["game_library"] = true;
       features["session_lifecycle"] = true;
       features["device_profiles"] = true;
       features["lock_screen_control"] = false;
@@ -1963,12 +1966,14 @@ namespace nvhttp {
 
         nlohmann::json game;
         game["id"] = app.uuid;
+        game["app_id"] = app.id;
         game["name"] = app.name;
         game["source"] = app.steam_appid.empty() ? "other" : "steam";
         game["steam_appid"] = app.steam_appid;
         game["category"] = app.game_category;
         game["source"] = app.source;
         game["installed"] = true;
+        game["hdr_supported"] = video::active_hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
         game["last_launched"] = app.last_launched;
 

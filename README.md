@@ -41,7 +41,7 @@ Polaris takes a different route. Games run inside a dedicated **[labwc](https://
 
 - **Desktop-safe streaming**: no HDMI dummy plugs, no `kscreen-doctor` juggling, no physical display switching as part of the normal stream path.
 - **Mission Control dashboard**: live preview, six real-time charts, GPU telemetry, quick controls, recording, and a `Runtime Path` card that exposes the session's real backend and capture transport.
-- **Smarter quality control**: adaptive bitrate, per-device and per-game AI optimization via Claude, OpenAI, Gemini, or local models, and explicit visibility when the Linux stack falls back away from the GPU-native path.
+- **Optional optimization guidance**: adaptive bitrate, per-device and per-game tuning suggestions via local or hosted models, and explicit visibility when the Linux stack falls back away from the GPU-native path.
 - **Better library and pairing UX**: Steam, Lutris, and Heroic import; SteamGridDB art; TOFU, QR, and PIN pairing flows.
 - **Shared-session streaming**: multiple viewers can watch the same stream, with session quality tracking and feedback instead of a black box.
 
@@ -437,7 +437,7 @@ ai_base_url = http://127.0.0.1:1234/v1
 
 ### [Nova](https://github.com/papi-ux/nova)
 
-The Polaris-aware Android client: TOFU auto-pairing, interactive HUD, AI quality presets,
+The Polaris-aware Android client: TOFU auto-pairing, interactive HUD, quality presets,
 gyro aiming, audio haptics, and Material You styling.
 
 [![Get it on Obtainium](https://img.shields.io/badge/Obtainium-Get_Nova-7c73ff?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTEyIDJMMi41IDcuNVYxNi41TDEyIDIybDkuNS01LjVWNy41TDEyIDJ6bTAgMi4xN2w2LjkgNHYuMDFsLTYuOSA0LTYuOS00di0uMDFMNiA4LjE3bDYtMy44M3oiLz48L3N2Zz4=&labelColor=1a1a2e)](https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%20%22com.papi.nova%22%2C%20%22url%22%3A%20%22https%3A//github.com/papi-ux/nova%22%2C%20%22author%22%3A%20%22papi-ux%22%2C%20%22name%22%3A%20%22Nova%22%7D)
@@ -453,7 +453,7 @@ Also compatible with standard [Moonlight](https://moonlight-stream.org) clients 
 <details>
 <summary><b>Does Polaris work with Moonlight on iOS, PC, and macOS?</b></summary>
 
-Yes. Polaris speaks the Moonlight protocol. Any Moonlight client can connect and stream. Polaris-specific features such as AI optimization, TOFU pairing, and session-quality reporting require [Nova](https://github.com/papi-ux/nova) on Android.
+Yes. Polaris speaks the Moonlight protocol. Any Moonlight client can connect and stream. Polaris-specific features such as optimization suggestions, TOFU pairing, and session-quality reporting require [Nova](https://github.com/papi-ux/nova) on Android.
 
 </details>
 
@@ -481,7 +481,7 @@ That problem is the reason Polaris exists. Enable headless mode with `headless_m
 <details>
 <summary><b>How does the AI optimizer work, and does it phone home?</b></summary>
 
-The AI optimizer sends device specs, app metadata, and recent session history to the provider you configure: Anthropic, OpenAI, Gemini, or a local OpenAI-compatible endpoint such as Ollama or LM Studio. Results are cached locally for 7 days per provider and model. If you use a local endpoint, the traffic stays on-box unless that local server is itself configured to proxy elsewhere. You can disable the feature entirely with `ai_enabled = disabled`.
+The AI optimizer is optional and disabled by default. When enabled, it sends device specs, app metadata, and recent session history to the provider you configure: Anthropic, OpenAI, Gemini, or a local OpenAI-compatible endpoint such as Ollama or LM Studio. Results are cached locally for 7 days per provider and model. If you use a local endpoint, the traffic stays on-box unless that local server is itself configured to proxy elsewhere.
 
 </details>
 
