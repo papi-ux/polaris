@@ -564,7 +564,7 @@ import { useGameScanner } from '../composables/useGameScanner'
 const { toast: showToast } = useToast()
 const {
   scanning: gameScanning, importing: gameImporting,
-  steamGames, lutrisGames, heroicGames, error: gameScanError,
+  steamGames, lutrisGames, heroicGames,
   scan: scanGames, importSelected, toggleAll: gameToggleAll
 } = useGameScanner()
 const showImport = ref(false)
@@ -613,7 +613,6 @@ const apps = ref([])
 const showEditForm = ref(false)
 const actionDisabled = ref(false)
 const editForm = ref(null)
-const detachedCmd = ref("")
 const coverSearching = ref(false)
 const coverFinderBusy = ref(false)
 const coverFinderOpen = ref(false)

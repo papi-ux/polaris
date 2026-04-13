@@ -35,7 +35,7 @@ function sizeCanvasToFit() {
   let maxWidth = 0
   for (const t of sampleTexts) {
     const prepared = prepare(t, fontStr())
-    const result = layout(prepared, 9999, props.fontSize * 1.2)
+    layout(prepared, 9999, props.fontSize * 1.2)
     // result.height gives single-line height; for width we can use a secondary
     // layout at 0 maxWidth to force one-char-per-line, but that would be wrong.
     // Instead, layout at a huge maxWidth guarantees 1 line, so height = lineHeight.
@@ -68,10 +68,10 @@ function draw() {
   // Use pretext to verify layout fits in a single line at current canvas width.
   // This is a cheap arithmetic-only call (~0.0002ms).
   const prepared = prepare(text, fontStr())
-  const result = layout(prepared, canvasWidth.value, props.fontSize * 1.2)
+  const textLayout = layout(prepared, canvasWidth.value, props.fontSize * 1.2)
 
   // If pretext says we'd need more than 1 line, grow the canvas
-  if (result.lineCount > 1) {
+  if (textLayout.lineCount > 1) {
     sizeCanvasToFit()
   }
 

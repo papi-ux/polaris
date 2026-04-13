@@ -463,7 +463,7 @@ import { useI18n } from 'vue-i18n'
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
 const { sessions, clearHistory } = useSessionHistory(stats)
-const { status: aiStatus, devices: aiDevices, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices, getSuggestion: getAiSuggestion } = useAiOptimizer()
+const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices, getSuggestion: getAiSuggestion } = useAiOptimizer()
 
 // AI optimization state for current stream
 const aiOptimization = ref(null)

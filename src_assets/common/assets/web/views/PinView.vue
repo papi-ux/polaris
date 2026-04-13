@@ -550,7 +550,7 @@ async function saveHost() {
   saveHostCacheFn(hostAddr.value, hostPort.value, true)
 }
 
-function registerDevice(e) {
+function registerDevice() {
   let pin = document.querySelector("#pin-input").value
   let name = document.querySelector("#name-input").value
   document.querySelector("#status").innerHTML = ""

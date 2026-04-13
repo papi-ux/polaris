@@ -158,7 +158,6 @@ import AudioVideo from '../configs/tabs/AudioVideo.vue'
 import AiOptimizer from '../configs/tabs/AiOptimizer.vue'
 import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
 import Skeleton from '../components/Skeleton.vue'
-import {$tp, usePlatformI18n} from '../platform-i18n'
 import { useToast } from '../composables/useToast'
 
 const { toast } = useToast()

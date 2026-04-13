@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 
-const props = defineProps({
+defineProps({
   platform: String,
   config: Object,
 })

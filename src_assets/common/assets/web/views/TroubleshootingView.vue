@@ -94,7 +94,6 @@ import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
 
-const clients = ref([])
 const closeAppPressed = ref(false)
 const closeAppStatus = ref(null)
 const ddResetPressed = ref(false)

@@ -8,128 +8,208 @@ on:
   workflow_dispatch:
 
 jobs:
+  web-checks:
+    name: Web checks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install web dependencies
+        run: npm ci --no-audit --fund=false
+
+      - name: Lint web UI
+        run: npm run lint
+
+      - name: Test web UI
+        run: npm run test
+
   arch-build:
     name: Arch build
+    needs: web-checks
     runs-on: ubuntu-24.04
     container:
       image: archlinux:latest
+    env:
+      CCACHE_DIR: /github/home/.cache/ccache
+      CCACHE_COMPILERCHECK: content
 
     steps:
-    - name: Bootstrap Arch container
-      run: pacman -Syu --noconfirm --needed archlinux-keyring git
+      - name: Bootstrap Arch container
+        run: pacman -Syu --noconfirm --needed archlinux-keyring git
 
-    - uses: actions/checkout@v5
-      with:
-        submodules: recursive
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
-    - name: Install dependencies
-      run: |
-        pacman -S --noconfirm --needed \
-          appstream appstream-glib avahi base-devel boost cmake curl \
-          desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
-          gcc libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
-          libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
-          npm numactl openssl opus pipewire wayland wayland-protocols which
+      - name: Cache C++ compiler outputs
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/ccache
+          key: polaris-arch-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          restore-keys: |
+            polaris-arch-ccache-
 
-    - name: Configure
-      run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=OFF -DCUDA_FAIL_ON_MISSING=OFF
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.npm
+          key: polaris-arch-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            polaris-arch-npm-
 
-    - name: Build
-      run: cmake --build build -j$(nproc)
+      - name: Install dependencies
+        run: |
+          pacman -S --noconfirm --needed \
+            appstream appstream-glib avahi base-devel boost ccache cmake curl \
+            desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
+            gcc libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
+            libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
+            npm numactl openssl opus pipewire wayland wayland-protocols which
 
-    - name: Generate Arch package files
-      run: |
-        BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
-        BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-        COMMIT="${GITHUB_SHA}"
-        env \
-          BRANCH="$BRANCH" \
-          BUILD_VERSION="$BUILD_VERSION" \
-          CLONE_URL="file://$GITHUB_WORKSPACE" \
-          COMMIT="$COMMIT" \
-          cmake -S . -B arch-pkgbuild \
-            -DPOLARIS_CONFIGURE_PKGBUILD=ON \
-            -DPOLARIS_CONFIGURE_ONLY=ON
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DBUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPOLARIS_ENABLE_CUDA=OFF \
+            -DCUDA_FAIL_ON_MISSING=OFF
 
-    - name: Validate Arch package
-      run: |
-        useradd -m builder
-        chown -R builder:builder "$GITHUB_WORKSPACE"
-        su builder -c "git config --global protocol.file.allow always"
-        su builder -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'"
-        su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && makepkg --nodeps --noconfirm --nocheck"
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
 
-    - name: Summarize Arch validation
-      if: always()
-      run: |
-        {
-          echo "## Arch validation"
-          echo
-          echo "- Generated package files: \`arch-pkgbuild/PKGBUILD\`, \`arch-pkgbuild/polaris.install\`"
-          echo "- Built package directory: \`arch-pkgbuild/\`"
-          echo "- Build tree directory: \`build/\`"
-          echo "- Package artifacts and generated packaging files are uploaded from this job."
-        } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run fast C++ tests
+        run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
 
-    - name: Upload Arch packaging artifacts
-      if: always()
-      uses: actions/upload-artifact@v6
-      with:
-        name: arch-packaging-files
-        path: |
-          arch-pkgbuild/PKGBUILD
-          arch-pkgbuild/polaris.install
-        if-no-files-found: warn
+      - name: Generate Arch package files
+        run: |
+          BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
+          BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          COMMIT="${GITHUB_SHA}"
+          env \
+            BRANCH="$BRANCH" \
+            BUILD_VERSION="$BUILD_VERSION" \
+            CLONE_URL="file://$GITHUB_WORKSPACE" \
+            COMMIT="$COMMIT" \
+            cmake -S . -B arch-pkgbuild \
+              -DPOLARIS_CONFIGURE_PKGBUILD=ON \
+              -DPOLARIS_CONFIGURE_ONLY=ON
 
-    - name: Upload Arch package outputs
-      if: always()
-      uses: actions/upload-artifact@v6
-      with:
-        name: arch-package-outputs
-        path: |
-          arch-pkgbuild/*.pkg.tar.*
-          arch-pkgbuild/*.pkg.tar.*.sig
-          arch-pkgbuild/*.src.tar.*
-          arch-pkgbuild/*.log
-        if-no-files-found: warn
+      - name: Validate Arch package
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "git config --global protocol.file.allow always"
+          su builder -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'"
+          su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && makepkg --nodeps --noconfirm --nocheck"
 
-    - name: Upload Arch build metadata
-      if: always()
-      uses: actions/upload-artifact@v6
-      with:
-        name: arch-build-metadata
-        path: |
-          build/dev.polaris-stream.app.Polaris.metainfo.xml
-          build/dev.polaris-stream.app.Polaris.desktop
-          build/dev.polaris-stream.app.Polaris.terminal.desktop
-        if-no-files-found: warn
+      - name: Summarize Arch validation
+        if: always()
+        run: |
+          {
+            echo "## Arch validation"
+            echo
+            echo "- Generated package files: \`arch-pkgbuild/PKGBUILD\`, \`arch-pkgbuild/polaris.install\`"
+            echo "- Built package directory: \`arch-pkgbuild/\`"
+            echo "- Build tree directory: \`build/\`"
+            echo "- Package artifacts and generated packaging files are uploaded from this job."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Arch packaging artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: arch-packaging-files
+          path: |
+            arch-pkgbuild/PKGBUILD
+            arch-pkgbuild/polaris.install
+          if-no-files-found: warn
+
+      - name: Upload Arch package outputs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: arch-package-outputs
+          path: |
+            arch-pkgbuild/*.pkg.tar.*
+            arch-pkgbuild/*.pkg.tar.*.sig
+            arch-pkgbuild/*.src.tar.*
+            arch-pkgbuild/*.log
+          if-no-files-found: warn
+
+      - name: Upload Arch build metadata
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: arch-build-metadata
+          path: |
+            build/dev.polaris-stream.app.Polaris.metainfo.xml
+            build/dev.polaris-stream.app.Polaris.desktop
+            build/dev.polaris-stream.app.Polaris.terminal.desktop
+          if-no-files-found: warn
 
   ubuntu-build:
     name: Ubuntu build
+    needs: web-checks
     runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ~/.cache/ccache
+      CCACHE_COMPILERCHECK: content
 
     steps:
-    - uses: actions/checkout@v5
-      with:
-        submodules: recursive
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential cmake ninja-build \
-          libboost-all-dev libssl-dev libevdev-dev \
-          libpulse-dev libopus-dev libcurl4-openssl-dev \
-          libdrm-dev libgbm-dev libcap-dev libwayland-dev \
-          libpipewire-0.3-dev libx11-dev libxrandr-dev \
-          libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
-          libva-dev libminiupnpc-dev libnotify-dev \
-          libappindicator3-dev libgtk-3-dev \
-          libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-          npm nodejs wayland-protocols
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
 
-    - name: Configure
-      run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=OFF -DCUDA_FAIL_ON_MISSING=OFF
+      - name: Cache C++ compiler outputs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: polaris-ubuntu-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          restore-keys: |
+            polaris-ubuntu-ccache-
 
-    - name: Build
-      run: cmake --build build -j$(nproc)
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ccache cmake ninja-build \
+            libboost-all-dev libssl-dev libevdev-dev \
+            libpulse-dev libopus-dev libcurl4-openssl-dev \
+            libdrm-dev libgbm-dev libcap-dev libwayland-dev \
+            libpipewire-0.3-dev libx11-dev libxrandr-dev \
+            libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libva-dev libminiupnpc-dev libnotify-dev \
+            libappindicator3-dev libgtk-3-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            wayland-protocols
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DBUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPOLARIS_ENABLE_CUDA=OFF \
+            -DCUDA_FAIL_ON_MISSING=OFF
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run fast C++ tests
+        run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'

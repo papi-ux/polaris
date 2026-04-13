@@ -63,10 +63,12 @@ endif()
 add_custom_target(web-ui ALL
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Installing NPM Dependencies and Building the Web UI"
-        COMMAND "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" install ${NPM_INSTALL_FLAGS}
+        COMMAND "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" ci --no-audit --fund=false ${NPM_INSTALL_FLAGS}
         COMMAND "${CMAKE_COMMAND}" -E env "POLARIS_BUILD_HOMEBREW=${NPM_BUILD_HOMEBREW}" "POLARIS_SOURCE_ASSETS_DIR=${NPM_SOURCE_ASSETS_DIR}" "POLARIS_ASSETS_DIR=${NPM_ASSETS_DIR}" "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" run build  # cmake-lint: disable=C0301
         COMMAND_EXPAND_LISTS
         VERBATIM)
+
+add_dependencies(polaris web-ui)
 
 # docs
 if(BUILD_DOCS)

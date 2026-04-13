@@ -32,6 +32,7 @@
 // local includes
 #include "config.h"
 #include "confighttp.h"
+#include "confighttp_validation.h"
 #include "crypto.h"
 #include "display_device.h"
 #include "file_handler.h"
@@ -730,10 +731,13 @@ namespace confighttp {
 
     BOOST_LOG(info) << config::stream.file_apps;
     try {
-      // TODO: Input Validation
-
       // Read the input JSON from the request body.
       nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+      std::string validation_error;
+      if (!validation::validate_app_payload(inputTree, validation_error)) {
+        bad_request(response, request, validation_error);
+        return;
+      }
 
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
@@ -1935,10 +1939,14 @@ namespace confighttp {
     std::stringstream ss;
     ss << request->content.rdbuf();
     try {
-      // TODO: Input Validation
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
+      std::string validation_error;
+      if (!validation::validate_config_payload(input_tree, validation_error)) {
+        bad_request(response, request, validation_error);
+        return;
+      }
       for (const auto &[k, v] : input_tree.items()) {
         if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;

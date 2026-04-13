@@ -62,6 +62,7 @@ set(TEST_MAIN_SOURCE
 )
 
 set(TEST_SUPPORT_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
@@ -69,6 +70,7 @@ set(TEST_SUPPORT_SOURCES
 )
 
 set(TEST_FAST_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
@@ -89,6 +91,7 @@ set(TEST_FULL_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_mouse.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_network.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_process_migration.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
 )
@@ -143,6 +146,8 @@ function(configure_polaris_test_target target_name)
     target_compile_definitions(${target_name} PUBLIC ${POLARIS_DEFINITIONS} ${TEST_DEFINITIONS})
     target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${POLARIS_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${POLARIS_COMPILE_OPTIONS_CUDA};-std=c++17>)
     target_link_options(${target_name} PRIVATE)
+    add_test(NAME ${target_name} COMMAND ${target_name})
+    set_tests_properties(${target_name} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
     if (WIN32)
         set_target_properties(${target_name} PROPERTIES LINK_SEARCH_START_STATIC 1)

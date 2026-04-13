@@ -1,5 +1,5 @@
 <script setup>
-const props = defineProps({
+defineProps({
   platform: {
     type: String,
     required: true

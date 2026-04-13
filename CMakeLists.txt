@@ -8,6 +8,8 @@ project(Polaris VERSION 1.0.0
         DESCRIPTION "Self-hosted game stream host for Moonlight"
         HOMEPAGE_URL "https://github.com/papi-ux/polaris")
 
+include(CTest)
+
 set(PROJECT_LICENSE "GPL-3.0-only")
 
 set(PROJECT_FQDN "dev.polaris-stream.app.Polaris")
