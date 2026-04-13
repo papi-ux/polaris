@@ -1,0 +1,30 @@
+{
+  "name": "polaris",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "vite build --debug",
+    "build-clean": "vite build --debug --emptyOutDir",
+    "dev": "vite build --watch",
+    "serve": "serve ./tests/fixtures/http --no-port-switching"
+  },
+  "type": "module",
+  "dependencies": {
+    "@chenglou/pretext": "^0.0.4",
+    "@tailwindcss/vite": "^4.2.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.2",
+    "uplot": "^1.6.32",
+    "vue": "3.5.22",
+    "vue-i18n": "11.1.12",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@codecov/vite-plugin": "1.9.1",
+    "@vitejs/plugin-vue": "6.0.1",
+    "serve": "14.2.5",
+    "vite": "^6.4.2",
+    "vite-plugin-ejs": "1.7.0"
+  }
+}

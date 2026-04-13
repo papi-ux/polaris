@@ -1,0 +1,8 @@
+#!/bin/sh
+
+echo "Polaris no longer mutates Linux host setup automatically during package install."
+echo "Run one of the following commands explicitly after install:"
+echo "  sudo polaris --setup-host"
+echo "  sudo polaris --setup-host --enable-kms   # only if you need DRM/KMS capture"
+echo "Optional background autostart remains available via:"
+echo "  systemctl --user enable --now polaris"

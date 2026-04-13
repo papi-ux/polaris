@@ -1,0 +1,2236 @@
+/**
+ * @file src/process.cpp
+ * @brief Definitions for the startup and shutdown of the apps started by a streaming Session.
+ */
+#define BOOST_BIND_GLOBAL_PLACEHOLDERS
+
+#ifndef BOOST_PROCESS_VERSION
+ #define BOOST_PROCESS_VERSION 1
+#endif
+// standard includes
+#include <array>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <vector>
+
+// lib includes
+#include <boost/algorithm/string.hpp>
+#include <boost/crc.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/program_options/parsers.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+
+// local includes
+#include "client_profiles.h"
+#include "config.h"
+#include "crypto.h"
+#include "display_device.h"
+#include "file_handler.h"
+#include "logging.h"
+#include "platform/common.h"
+#include "confighttp.h"
+#include "process.h"
+#include "httpcommon.h"
+#include "system_tray.h"
+#include "utility.h"
+#include "video.h"
+#include "uuid.h"
+
+#ifdef _WIN32
+  // from_utf8() string conversion function
+  #include "platform/windows/misc.h"
+  #include "platform/windows/utils.h"
+  #include <Windows.h>
+
+  // _SH constants for _wfsopen()
+  #include <share.h>
+#elif __linux__
+  #include "platform/linux/virtual_display.h"
+  #include "platform/linux/session_manager.h"
+  #include "platform/linux/cage_display_router.h"
+  #include <unistd.h>
+#elif __APPLE__
+  #include <mach-o/dyld.h>
+#endif
+
+#include "device_db.h"
+#include "ai_optimizer.h"
+#include "stream_stats.h"
+#include "game_classifier.h"
+
+#define DEFAULT_APP_IMAGE_PATH POLARIS_ASSETS_DIR "/box.png"
+
+namespace proc {
+  using namespace std::literals;
+  namespace pt = boost::property_tree;
+
+  proc_t proc;
+
+  int input_only_app_id = -1;
+  std::string input_only_app_id_str;
+  int terminate_app_id = -1;
+  std::string terminate_app_id_str;
+
+  namespace {
+    std::optional<std::filesystem::path> executable_dir() {
+#ifdef _WIN32
+      wchar_t path[MAX_PATH];
+      const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+      if (len == 0 || len == MAX_PATH) {
+        return std::nullopt;
+      }
+      return std::filesystem::path(path).parent_path();
+#elif __linux__
+      std::array<char, 4096> path {};
+      const auto len = readlink("/proc/self/exe", path.data(), path.size() - 1);
+      if (len <= 0) {
+        return std::nullopt;
+      }
+      path[len] = '\0';
+      return std::filesystem::path(path.data()).parent_path();
+#elif __APPLE__
+      uint32_t size = 0;
+      _NSGetExecutablePath(nullptr, &size);
+      std::string buffer(size, '\0');
+      if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        return std::nullopt;
+      }
+      return std::filesystem::path(buffer.c_str()).parent_path();
+#else
+      return std::nullopt;
+#endif
+    }
+
+    std::string resolve_bundled_asset(const std::string &asset_name) {
+      const auto installed_path = std::filesystem::path(POLARIS_ASSETS_DIR) / asset_name;
+      if (std::filesystem::exists(installed_path)) {
+        return installed_path.string();
+      }
+
+      const auto exe_dir = executable_dir();
+      if (exe_dir) {
+        const auto local_build_path = *exe_dir / "assets" / asset_name;
+        if (std::filesystem::exists(local_build_path)) {
+          return local_build_path.string();
+        }
+      }
+
+      return installed_path.string();
+    }
+  }  // namespace
+
+#ifdef _WIN32
+  VDISPLAY::DRIVER_STATUS vDisplayDriverStatus = VDISPLAY::DRIVER_STATUS::UNKNOWN;
+
+  void onVDisplayWatchdogFailed() {
+    vDisplayDriverStatus = VDISPLAY::DRIVER_STATUS::WATCHDOG_FAILED;
+    VDISPLAY::closeVDisplayDevice();
+  }
+
+  void initVDisplayDriver() {
+    vDisplayDriverStatus = VDISPLAY::openVDisplayDevice();
+    if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+      if (!VDISPLAY::startPingThread(onVDisplayWatchdogFailed)) {
+        onVDisplayWatchdogFailed();
+        return;
+      }
+    }
+  }
+#endif
+
+#ifdef __linux__
+  // Linux virtual display state — holds the active virtual display instance, if any
+  static std::optional<virtual_display::vdisplay_t> linux_vdisplay;
+  static bool linux_vdisplay_available_checked = false;
+  static bool linux_vdisplay_available = false;
+
+  /**
+   * @brief Check and cache whether Linux virtual display support is available.
+   */
+  bool isLinuxVDisplayAvailable() {
+    if (!linux_vdisplay_available_checked) {
+      linux_vdisplay_available = virtual_display::is_available();
+      linux_vdisplay_available_checked = true;
+      if (linux_vdisplay_available) {
+        auto backend = virtual_display::detect_backend();
+        BOOST_LOG(info) << "Linux virtual display support available via "sv
+                        << virtual_display::backend_name(backend);
+      }
+    }
+    return linux_vdisplay_available;
+  }
+
+  namespace linux_display {
+    /**
+     * @brief Enable the streaming display and set display priorities for a streaming session.
+     * Uses kscreen-doctor to enable the streaming output and set it as priority 1.
+     */
+    void enable_streaming_display() {
+      const auto &cfg = config::video.linux_display;
+      if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
+        return;
+      }
+
+      // Enable streaming output but keep primary display as priority 1
+      // so KDE taskbar stays on the main display
+      std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
+      if (!cfg.primary_output.empty()) {
+        cmd += " output." + cfg.primary_output + ".priority.1";
+        cmd += " output." + cfg.streaming_output + ".priority.2";
+      }
+
+      BOOST_LOG(info) << "Linux display management: enabling streaming display ["sv << cmd << "]"sv;
+      int ret = std::system(cmd.c_str());
+      if (ret != 0) {
+        BOOST_LOG(error) << "Linux display management: enable command failed with code ["sv << ret << "]"sv;
+      }
+      // Wait for display to come online before capture starts
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+
+    /**
+     * @brief Disable the streaming display and restore the primary display after a streaming session ends.
+     * Uses kscreen-doctor to restore priority and disable the streaming output.
+     */
+    void disable_streaming_display() {
+      const auto &cfg = config::video.linux_display;
+      if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
+        return;
+      }
+
+      std::string cmd = "kscreen-doctor";
+      if (!cfg.primary_output.empty()) {
+        cmd += " output." + cfg.primary_output + ".priority.1";
+      }
+      cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
+
+      BOOST_LOG(info) << "Linux display management: disabling streaming display ["sv << cmd << "]"sv;
+      int ret = std::system(cmd.c_str());
+      if (ret != 0) {
+        BOOST_LOG(error) << "Linux display management: disable command failed with code ["sv << ret << "]"sv;
+      }
+    }
+  }  // namespace linux_display
+#endif
+
+  class deinit_t: public platf::deinit_t {
+  public:
+    ~deinit_t() {
+      proc.terminate();
+    }
+  };
+
+  std::unique_ptr<platf::deinit_t> init() {
+    return std::make_unique<deinit_t>();
+  }
+
+  void terminate_process_group(boost::process::v1::child &proc, boost::process::v1::group &group, std::chrono::seconds exit_timeout) {
+    if (group.valid() && platf::process_group_running((std::uintptr_t) group.native_handle())) {
+      if (exit_timeout.count() > 0) {
+        // Request processes in the group to exit gracefully
+        if (platf::request_process_group_exit((std::uintptr_t) group.native_handle())) {
+          // If the request was successful, wait for a little while for them to exit.
+          BOOST_LOG(info) << "Successfully requested the app to exit. Waiting up to "sv << exit_timeout.count() << " seconds for it to close."sv;
+
+          // group::wait_for() and similar functions are broken and deprecated, so we use a simple polling loop
+          while (platf::process_group_running((std::uintptr_t) group.native_handle()) && (--exit_timeout).count() >= 0) {
+            std::this_thread::sleep_for(1s);
+          }
+
+          if (exit_timeout.count() < 0) {
+            BOOST_LOG(warning) << "App did not fully exit within the timeout. Terminating the app's remaining processes."sv;
+          } else {
+            BOOST_LOG(info) << "All app processes have successfully exited."sv;
+          }
+        } else {
+          BOOST_LOG(info) << "App did not respond to a graceful termination request. Forcefully terminating the app's processes."sv;
+        }
+      } else {
+        BOOST_LOG(info) << "No graceful exit timeout was specified for this app. Forcefully terminating the app's processes."sv;
+      }
+
+      // We always call terminate() even if we waited successfully for all processes above.
+      // This ensures the process group state is consistent with the OS in boost.
+      std::error_code ec;
+      group.terminate(ec);
+      group.detach();
+    }
+
+    if (proc.valid()) {
+      // avoid zombie process
+      proc.detach();
+    }
+  }
+
+  boost::filesystem::path find_working_directory(const std::string &cmd, const boost::process::v1::environment &env) {
+    // Parse the raw command string into parts to get the actual command portion
+#ifdef _WIN32
+    auto parts = boost::program_options::split_winmain(cmd);
+#else
+    auto parts = boost::program_options::split_unix(cmd);
+#endif
+    if (parts.empty()) {
+      BOOST_LOG(error) << "Unable to parse command: "sv << cmd;
+      return boost::filesystem::path();
+    }
+
+    BOOST_LOG(debug) << "Parsed target ["sv << parts.at(0) << "] from command ["sv << cmd << ']';
+
+    // If the target is a URL, don't parse any further here
+    if (parts.at(0).find("://") != std::string::npos) {
+      return boost::filesystem::path();
+    }
+
+    // If the cmd path is not an absolute path, resolve it using our PATH variable
+    boost::filesystem::path cmd_path(parts.at(0));
+    if (!cmd_path.is_absolute()) {
+      cmd_path = boost::process::v1::search_path(parts.at(0));
+      if (cmd_path.empty()) {
+        BOOST_LOG(error) << "Unable to find executable ["sv << parts.at(0) << "]. Is it in your PATH?"sv;
+        return boost::filesystem::path();
+      }
+    }
+
+    BOOST_LOG(debug) << "Resolved target ["sv << parts.at(0) << "] to path ["sv << cmd_path << ']';
+
+    // Now that we have a complete path, we can just use parent_path()
+    return cmd_path.parent_path();
+  }
+
+  void proc_t::launch_input_only() {
+    _app_id = input_only_app_id;
+    _app_name = "Remote Input";
+    _app.uuid = REMOTE_INPUT_UUID;
+    _app.terminate_on_pause = true;
+    allow_client_commands = false;
+    placebo = true;
+
+#if defined POLARIS_TRAY && POLARIS_TRAY >= 1
+    system_tray::update_tray_playing(_app_name);
+#endif
+  }
+
+  int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    if (_app_id == input_only_app_id) {
+      terminate(false, false);
+      std::this_thread::sleep_for(1s);
+    } else {
+      // Ensure starting from a clean slate
+      terminate(false, false);
+    }
+
+    _app = app;
+    _app_id = util::from_view(app.id);
+    _app_name = app.name;
+    _launch_session = launch_session;
+    allow_client_commands = app.allow_client_commands;
+
+    uint32_t client_width = launch_session->width ? launch_session->width : 1920;
+    uint32_t client_height = launch_session->height ? launch_session->height : 1080;
+
+    uint32_t render_width = client_width;
+    uint32_t render_height = client_height;
+
+    int scale_factor = launch_session->scale_factor;
+    if (_app.scale_factor != 100) {
+      scale_factor = _app.scale_factor;
+    }
+
+    if (scale_factor != 100) {
+      render_width *= ((float)scale_factor / 100);
+      render_height *= ((float)scale_factor / 100);
+
+      // Chop the last bit to ensure the scaled resolution is even numbered
+      // Most odd resolutions won't work well
+      render_width &= ~1;
+      render_height &= ~1;
+    }
+
+    launch_session->width = render_width;
+    launch_session->height = render_height;
+
+    this->initial_display = config::video.output_name;
+
+    // Runtime game detection: extract Steam AppID and classify if not already set
+    std::string game_category = _app.game_category;
+    if (game_category.empty()) {
+      std::string detected_appid = _app.steam_appid;
+      if (detected_appid.empty()) {
+        static const std::string steam_prefix = "steam://rungameid/";
+        auto detect_from = [&](const std::string &s) {
+          auto pos = s.find(steam_prefix);
+          if (pos != std::string::npos) {
+            detected_appid = s.substr(pos + steam_prefix.size());
+            auto space = detected_appid.find_first_of(" \t\n");
+            if (space != std::string::npos) detected_appid = detected_appid.substr(0, space);
+          }
+        };
+        detect_from(_app.cmd);
+        if (detected_appid.empty()) {
+          for (const auto &cmd : _app.detached) {
+            detect_from(cmd);
+            if (!detected_appid.empty()) break;
+          }
+        }
+      }
+      if (!detected_appid.empty()) {
+        BOOST_LOG(debug) << "game_classifier: Detected Steam AppID "sv << detected_appid << " for \""sv << _app.name << '"';
+      }
+    }
+    if (!game_category.empty() && game_category != "unknown") {
+      BOOST_LOG(info) << "game_classifier: "sv << _app.name << " classified as "sv << game_category;
+    }
+
+    // Apply per-client display profile overrides
+    int saved_color_range = config::video.color_range;
+    auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
+    if (client_profile) {
+      BOOST_LOG(info) << "Applying client profile for \""sv << launch_session->device_name << '"';
+
+      if (!client_profile->output_name.empty()) {
+        BOOST_LOG(info) << "Client profile: overriding output_name to \""sv << client_profile->output_name << '"';
+        config::video.output_name = client_profile->output_name;
+      }
+
+      if (client_profile->color_range.has_value()) {
+        BOOST_LOG(info) << "Client profile: overriding color_range to "sv << client_profile->color_range.value();
+        config::video.color_range = client_profile->color_range.value();
+      }
+
+      if (client_profile->hdr.has_value()) {
+        BOOST_LOG(info) << "Client profile: overriding HDR to "sv << (client_profile->hdr.value() ? "enabled"sv : "disabled"sv);
+        launch_session->enable_hdr = client_profile->hdr.value();
+      }
+    }
+
+    // Apply device database optimization (fills gaps not set by user or client_profile)
+    {
+      auto opt = device_db::get_optimization(launch_session->device_name, _app.name);
+      // Only apply display_mode if user hasn't manually set one
+      if (opt.display_mode && launch_session->width == 0) {
+        // Parse WxHxFPS
+        int w = 0, h = 0;
+        float f = 60;
+        if (sscanf(opt.display_mode->c_str(), "%dx%dx%f", &w, &h, &f) >= 2) {
+          BOOST_LOG(info) << "device_db: Setting display mode to "sv << *opt.display_mode;
+          launch_session->width = w;
+          launch_session->height = h;
+          launch_session->fps = static_cast<int>(f * 1000);
+        }
+      }
+      if (opt.color_range && config::video.color_range == 0) {
+        BOOST_LOG(info) << "device_db: Setting color_range to "sv << *opt.color_range;
+        config::video.color_range = *opt.color_range;
+      }
+      if (opt.hdr) {
+        BOOST_LOG(info) << "device_db: Setting HDR to "sv << (*opt.hdr ? "enabled"sv : "disabled"sv);
+        launch_session->enable_hdr = *opt.hdr;
+      }
+    }
+
+    // AI optimizer: check cache for a smarter optimization, fire async if miss
+    bool ai_applied = false;
+    if (ai_optimizer::is_enabled()) {
+      auto ai_opt = ai_optimizer::get_cached(launch_session->device_name, _app.name);
+      if (ai_opt) {
+        BOOST_LOG(info) << "ai_optimizer: Applying cached AI optimization for \""sv
+                        << launch_session->device_name << "\" + \""sv << _app.name
+                        << "\" — "sv << ai_opt->reasoning;
+        // AI overrides device_db (but not manual user settings)
+        if (ai_opt->display_mode && launch_session->width == 0) {
+          int w = 0, h = 0; float f = 60;
+          if (sscanf(ai_opt->display_mode->c_str(), "%dx%dx%f", &w, &h, &f) >= 2) {
+            launch_session->width = w;
+            launch_session->height = h;
+            launch_session->fps = static_cast<int>(f * 1000);
+          }
+        }
+        if (ai_opt->color_range && config::video.color_range == 0)
+          config::video.color_range = *ai_opt->color_range;
+        if (ai_opt->hdr)
+          launch_session->enable_hdr = *ai_opt->hdr;
+        if (ai_opt->nvenc_tune)
+          config::video.nvenc_tune = *ai_opt->nvenc_tune;
+        if (ai_opt->target_bitrate_kbps && config::video.max_bitrate == 0) {
+          config::video.max_bitrate = *ai_opt->target_bitrate_kbps;
+          // Also inform adaptive bitrate controller of the AI-recommended ceiling
+          if (config::video.adaptive_bitrate.enabled) {
+            config::video.adaptive_bitrate.max_bitrate_kbps = *ai_opt->target_bitrate_kbps;
+            BOOST_LOG(info) << "ai_optimizer: Set adaptive bitrate ceiling to "sv
+                            << *ai_opt->target_bitrate_kbps << " kbps"sv;
+          }
+        }
+        ai_applied = true;
+      } else {
+        // No cache hit — check if device is known in device_db
+        std::string gpu_info = config::video.adapter_name.empty()
+          ? "NVIDIA GPU (NVENC)"s
+          : config::video.adapter_name;
+        auto history = ai_optimizer::get_session_history(launch_session->device_name, _app.name);
+        auto device_info = device_db::get_device(launch_session->device_name);
+
+        if (!device_info) {
+          // Unknown device — do a SYNC AI call so the first session gets proper settings.
+          // The AI can interpret "Pixel10Pro" or "Samsung Galaxy S24" from the name alone.
+          BOOST_LOG(info) << "ai_optimizer: Unknown device \""sv << launch_session->device_name
+                          << "\" — requesting sync AI optimization"sv;
+          auto sync_opt = ai_optimizer::request_sync(
+            launch_session->device_name, _app.name, gpu_info, game_category, history);
+          if (sync_opt) {
+            BOOST_LOG(info) << "ai_optimizer: AI identified device — "sv << sync_opt->reasoning;
+            if (sync_opt->display_mode && launch_session->width == 0) {
+              int w = 0, h = 0; float f = 60;
+              if (sscanf(sync_opt->display_mode->c_str(), "%dx%dx%f", &w, &h, &f) >= 2) {
+                launch_session->width = w;
+                launch_session->height = h;
+                launch_session->fps = static_cast<int>(f * 1000);
+              }
+            }
+            if (sync_opt->target_bitrate_kbps && config::video.max_bitrate == 0)
+              config::video.max_bitrate = *sync_opt->target_bitrate_kbps;
+            if (sync_opt->preferred_codec)
+              BOOST_LOG(info) << "ai_optimizer: Recommended codec: "sv << *sync_opt->preferred_codec;
+            if (sync_opt->nvenc_tune)
+              config::video.nvenc_tune = *sync_opt->nvenc_tune;
+            ai_applied = true;
+          }
+        } else {
+          // Known device — async is fine, device_db already applied reasonable defaults
+          ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
+          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
+                          << "\" — fired async request for next session"sv;
+        }
+      }
+    }
+
+    // Polaris session setup: cage-as-window architecture
+    // Games render inside cage (a Wayland compositor window on DP-3).
+    // No display switching, no kscreen-doctor, no HDMI-A-1.
+    confighttp::set_session_state(confighttp::session_state_e::initializing);
+    confighttp::emit_session_event("session_starting", "Preparing streaming session");
+#ifdef __linux__
+    auto session_state = session_manager::save_state();
+
+    // Inhibit lock screen during streaming
+    if (session_manager::inhibit_lock()) {
+      session_state.lock_inhibited = true;
+    }
+
+    // Start edit mode watchdog — KDE enters edit mode on labwc window state changes
+    session_manager::start_edit_mode_watchdog();
+
+    // Cage start is deferred — it launches with the game command below
+#endif
+
+    // Executed when returning from function
+    auto fg = util::fail_guard([&, saved_color_range
+#ifdef __linux__
+      , session_state
+#endif
+    ]() {
+      // Restore to user defined output name and color range
+      config::video.output_name = this->initial_display;
+      config::video.color_range = saved_color_range;
+      terminate();
+      display_device::revert_configuration();
+#ifdef __linux__
+      confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+      confighttp::emit_session_event("session_ending", "Cleaning up");
+      // Stop cage compositor (kills the game running inside it)
+      if (config::video.linux_display.use_cage_compositor) {
+        cage_display_router::stop();
+      }
+      session_manager::restore_state(session_state);
+#endif
+    });
+
+    if (!app.gamepad.empty()) {
+      _saved_input_config = std::make_shared<config::input_t>(config::input);
+      if (app.gamepad == "disabled") {
+        config::input.controller = false;
+      } else {
+        config::input.controller = true;
+        config::input.gamepad = app.gamepad;
+      }
+    }
+
+#ifdef _WIN32
+    if (
+      config::video.linux_display.headless_mode        // Headless mode
+      || launch_session->virtual_display // User requested virtual display
+      || _app.virtual_display            // App is configured to use virtual display
+      || !video::allow_encoder_probing() // No active display presents
+    ) {
+      if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+        // Try init driver again
+        initVDisplayDriver();
+      }
+
+      if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+        // Try set the render adapter matching the capture adapter if user has specified one
+        if (!config::video.adapter_name.empty()) {
+          VDISPLAY::setRenderAdapterByName(platf::from_utf8(config::video.adapter_name));
+        }
+
+        std::string device_name;
+        std::string device_uuid_str;
+        uuid_util::uuid_t device_uuid;
+
+        if (_app.use_app_identity) {
+          device_name = _app.name;
+          if (_app.per_client_app_identity) {
+            device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
+            auto app_uuid = uuid_util::uuid_t::parse(_app.uuid);
+
+            // Use XOR to mix the two UUIDs
+            device_uuid.b64[0] ^= app_uuid.b64[0];
+            device_uuid.b64[1] ^= app_uuid.b64[1];
+
+            device_uuid_str = device_uuid.string();
+          } else {
+            device_uuid_str = _app.uuid;
+            device_uuid = uuid_util::uuid_t::parse(_app.uuid);
+          }
+        } else {
+          device_name = launch_session->device_name;
+          device_uuid_str = launch_session->unique_id;
+          device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
+        }
+
+        memcpy(&launch_session->display_guid, &device_uuid, sizeof(GUID));
+
+        int target_fps = launch_session->fps ? launch_session->fps : 60000;
+
+        if (target_fps < 1000) {
+          target_fps *= 1000;
+        }
+
+        if (config::video.double_refreshrate) {
+          target_fps *= 2;
+        }
+
+        std::wstring vdisplayName = VDISPLAY::createVirtualDisplay(
+          device_uuid_str.c_str(),
+          device_name.c_str(),
+          render_width,
+          render_height,
+          target_fps,
+          launch_session->display_guid
+        );
+
+        // No matter we get the display name or not, the virtual display might still be created.
+        // We need to track it properly to remove the display when the session terminates.
+        launch_session->virtual_display = true;
+
+        if (!vdisplayName.empty()) {
+          BOOST_LOG(info) << "Virtual Display created at " << vdisplayName;
+
+          // Don't change display settings when no params are given
+          if (launch_session->width && launch_session->height && launch_session->fps) {
+            // Apply display settings
+            VDISPLAY::changeDisplaySettings(vdisplayName.c_str(), render_width, render_height, target_fps);
+          }
+
+          // Check the ISOLATED DISPLAY configuration setting and rearrange the displays
+          if (config::video.isolated_virtual_display_option == true) {
+            // Apply the isolated display settings
+            VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
+          }
+
+          // Set virtual_display to true when everything went fine
+          this->virtual_display = true;
+          this->display_name = platf::to_utf8(vdisplayName);
+
+          // When using virtual display, we don't care which display user configured to use.
+          // So we always set output_name to the newly created virtual display as a workaround for
+          // empty name when probing graphics cards.
+
+          config::video.output_name = display_device::map_display_name(this->display_name);
+        } else {
+          BOOST_LOG(warning) << "Virtual Display creation failed, or cannot get created display name in time!";
+        }
+      } else {
+        // Driver isn't working so we don't need to track virtual display.
+        launch_session->virtual_display = false;
+      }
+    }
+
+    display_device::configure_display(config::video, *launch_session);
+
+    // We should not preserve display state when using virtual display.
+    // It is already handled by Windows properly.
+    if (this->virtual_display) {
+      display_device::reset_persistence();
+    }
+
+#elif __linux__
+
+    // Linux virtual display creation — analogous to Windows SUDOVDA path above
+    // Skip if linux_auto_manage_displays is enabled (user manages displays via kscreen-doctor config)
+    bool using_headless_cage =
+      config::video.linux_display.headless_mode &&
+      config::video.linux_display.use_cage_compositor;
+
+    if (
+      !using_headless_cage &&
+      !config::video.linux_display.auto_manage_displays && (
+        config::video.linux_display.headless_mode        // Headless mode
+        || launch_session->virtual_display // User requested virtual display
+        || _app.virtual_display            // App is configured to use virtual display
+      )
+    ) {
+      if (isLinuxVDisplayAvailable()) {
+        int target_fps = launch_session->fps ? launch_session->fps : 60000;
+
+        // Convert from milliHz to Hz if needed (Apollo uses milliHz internally)
+        if (target_fps >= 1000) {
+          target_fps /= 1000;
+        }
+
+        if (config::video.double_refreshrate) {
+          target_fps *= 2;
+        }
+
+        auto vdisplay = virtual_display::create(render_width, render_height, target_fps);
+
+        if (vdisplay.has_value()) {
+          linux_vdisplay = std::move(vdisplay);
+          launch_session->virtual_display = true;
+          this->virtual_display = true;
+          this->display_name = linux_vdisplay->output_name;
+
+          BOOST_LOG(info) << "Virtual Display created: "sv << linux_vdisplay->output_name
+                          << " ("sv << render_width << "x"sv << render_height
+                          << "@"sv << target_fps << "Hz) via "sv
+                          << virtual_display::backend_name(linux_vdisplay->backend);
+
+          // Set output_name to the newly created virtual display so the
+          // capture pipeline uses the correct output
+          config::video.output_name = display_device::map_display_name(this->display_name);
+        } else {
+          BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
+          launch_session->virtual_display = false;
+        }
+      } else {
+        BOOST_LOG(warning) << "Virtual display requested but no backend available on Linux"sv;
+        launch_session->virtual_display = false;
+      }
+    } else if (using_headless_cage) {
+      // labwc headless mode already provides its own HEADLESS-* output.
+      // Creating an additional Linux virtual display here only adds setup
+      // overhead and can confuse output selection.
+      BOOST_LOG(info) << "Linux virtual display: skipped because labwc headless compositor owns the streaming output"sv;
+    }
+
+    display_device::configure_display(config::video, *launch_session);
+
+    // Reset persistence when using virtual display (same as Windows behavior)
+    if (this->virtual_display) {
+      display_device::reset_persistence();
+    }
+
+#else
+
+    display_device::configure_display(config::video, *launch_session);
+
+#endif
+
+#ifdef __linux__
+    // Enable streaming display BEFORE encoder probe so HDMI-A-1 is available
+    if (config::video.linux_display.auto_manage_displays) {
+      linux_display::enable_streaming_display();
+    }
+#endif
+
+    // Probe encoders again before streaming to ensure our chosen
+    // encoder matches the active GPU (which could have changed
+    // due to hotplugging, driver crash, primary monitor change,
+    // or any number of other factors).
+    if (rtsp_stream::session_count() == 0 && video::probe_encoders()) {
+      if (config::video.ignore_encoder_probe_failure) {
+        BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
+      } else {
+        return 503;
+      }
+    }
+
+    std::string fps_str;
+    char fps_buf[8];
+    snprintf(fps_buf, sizeof(fps_buf), "%.3f", (float)launch_session->fps / 1000.0f);
+    fps_str = fps_buf;
+
+    // Add Stream-specific environment variables
+    // Polaris Compatibility (legacy Sunshine env vars)
+    _env["POLARIS_APP_ID"] = _app.id;
+    _env["POLARIS_APP_NAME"] = _app.name;
+    _env["POLARIS_CLIENT_WIDTH"] = std::to_string(render_width);
+    _env["POLARIS_CLIENT_HEIGHT"] = std::to_string(render_height);
+    _env["POLARIS_CLIENT_FPS"] = config::sunshine.envvar_compatibility_mode ? std::to_string(std::round((float)launch_session->fps / 1000.0f)) : fps_str;
+    _env["POLARIS_CLIENT_HDR"] = launch_session->enable_hdr ? "true" : "false";
+    _env["POLARIS_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
+    _env["POLARIS_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
+    _env["POLARIS_CLIENT_ENABLE_SOPS"] = launch_session->enable_sops ? "true" : "false";
+
+    _env["POLARIS_APP_ID"] = _app.id;
+    _env["POLARIS_APP_NAME"] = _app.name;
+    _env["POLARIS_APP_UUID"] = _app.uuid;
+    _env["POLARIS_APP_STATUS"] = "STARTING";
+    _env["POLARIS_CLIENT_UUID"] = launch_session->unique_id;
+    _env["POLARIS_CLIENT_NAME"] = launch_session->device_name;
+    _env["POLARIS_CLIENT_WIDTH"] = std::to_string(render_width);
+    _env["POLARIS_CLIENT_HEIGHT"] = std::to_string(render_height);
+    _env["POLARIS_CLIENT_RENDER_WIDTH"] = std::to_string(launch_session->width);
+    _env["POLARIS_CLIENT_RENDER_HEIGHT"] = std::to_string(launch_session->height);
+    _env["POLARIS_CLIENT_SCALE_FACTOR"] = std::to_string(scale_factor);
+    _env["POLARIS_CLIENT_FPS"] = fps_str;
+    _env["POLARIS_CLIENT_HDR"] = launch_session->enable_hdr ? "true" : "false";
+    _env["POLARIS_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
+    _env["POLARIS_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
+    _env["POLARIS_CLIENT_ENABLE_SOPS"] = launch_session->enable_sops ? "true" : "false";
+
+    int channelCount = launch_session->surround_info & 65535;
+    switch (channelCount) {
+      case 2:
+        _env["POLARIS_CLIENT_AUDIO_CONFIGURATION"] = "2.0";
+        _env["POLARIS_CLIENT_AUDIO_CONFIGURATION"] = "2.0";
+        break;
+      case 6:
+        _env["POLARIS_CLIENT_AUDIO_CONFIGURATION"] = "5.1";
+        _env["POLARIS_CLIENT_AUDIO_CONFIGURATION"] = "5.1";
+        break;
+      case 8:
+        _env["POLARIS_CLIENT_AUDIO_CONFIGURATION"] = "7.1";
+        _env["POLARIS_CLIENT_AUDIO_CONFIGURATION"] = "7.1";
+        break;
+    }
+    _env["POLARIS_CLIENT_AUDIO_SURROUND_PARAMS"] = launch_session->surround_params;
+    _env["POLARIS_CLIENT_AUDIO_SURROUND_PARAMS"] = launch_session->surround_params;
+
+#ifdef __linux__
+    // Display-hint environment variables for game engines and runtimes.
+    // These encourage games to fullscreen on the streaming display instead of the primary.
+    if (!config::video.linux_display.streaming_output.empty()) {
+      // Determine the streaming display's xrandr index by querying connected outputs.
+      // After kscreen-doctor enables HDMI-A-1, xrandr lists it alongside DP-3.
+      int display_index = 0;
+      {
+        FILE *pipe = popen("xrandr --query 2>/dev/null | grep ' connected' | awk '{print $1}'", "r");
+        if (pipe) {
+          char buf[128];
+          int idx = 0;
+          while (fgets(buf, sizeof(buf), pipe)) {
+            std::string name(buf);
+            while (!name.empty() && (name.back() == '\n' || name.back() == '\r'))
+              name.pop_back();
+            if (name == config::video.linux_display.streaming_output) {
+              display_index = idx;
+              break;
+            }
+            idx++;
+          }
+          pclose(pipe);
+        }
+      }
+
+      // SDL: which display head to fullscreen on (0-indexed)
+      _env["SDL_VIDEO_FULLSCREEN_HEAD"] = std::to_string(display_index);
+
+      // Prevent SDL games from minimizing when focus moves to the main display
+      _env["SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS"] = "0";
+
+      BOOST_LOG(info) << "Display hints: SDL_VIDEO_FULLSCREEN_HEAD="sv << display_index
+                      << ", SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0"sv;
+    }
+#endif
+
+    if (!_app.output.empty() && _app.output != "null"sv) {
+#ifdef _WIN32
+      // fopen() interprets the filename as an ANSI string on Windows, so we must convert it
+      // to UTF-16 and use the wchar_t variants for proper Unicode log file path support.
+      auto woutput = platf::from_utf8(_app.output);
+
+      // Use _SH_DENYNO to allow us to open this log file again for writing even if it is
+      // still open from a previous execution. This is required to handle the case of a
+      // detached process executing again while the previous process is still running.
+      _pipe.reset(_wfsopen(woutput.c_str(), L"a", _SH_DENYNO));
+#else
+      _pipe.reset(fopen(_app.output.c_str(), "a"));
+#endif
+    }
+
+    std::error_code ec;
+    _app_prep_begin = std::begin(_app.prep_cmds);
+    _app_prep_it = _app_prep_begin;
+
+    for (; _app_prep_it != std::end(_app.prep_cmds); ++_app_prep_it) {
+      auto &cmd = *_app_prep_it;
+
+      // Skip empty commands
+      if (cmd.do_cmd.empty()) {
+        continue;
+      }
+
+      boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                              find_working_directory(cmd.do_cmd, _env) :
+                                              boost::filesystem::path(_app.working_dir);
+      BOOST_LOG(info) << "Executing Do Cmd: ["sv << cmd.do_cmd << "] elevated: " << cmd.elevated;
+      auto child = platf::run_command(cmd.elevated, true, cmd.do_cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+
+      if (ec) {
+        BOOST_LOG(warning) << "Couldn't run ["sv << cmd.do_cmd << "]: System: "sv << ec.message();
+        confighttp::emit_session_event("warning", "Prep command failed: " + cmd.do_cmd);
+        // Non-fatal: continue session even if prep-cmd fails
+        continue;
+      }
+
+      child.wait();
+      auto ret = child.exit_code();
+      if (ret != 0) {
+        BOOST_LOG(warning) << '[' << cmd.do_cmd << "] returned code ["sv << ret << ']';
+        confighttp::emit_session_event("warning", "Prep command returned " + std::to_string(ret));
+        // Non-fatal: continue session
+      }
+    }
+
+    _env["POLARIS_APP_STATUS"] = "RUNNING";
+
+    // Apply per-app environment variables (e.g., MANGOHUD=1, PROTON_NO_FSYNC=1)
+    // Set on both boost _env (for non-cage launches) and real environ (for fork/exec in cage)
+    for (const auto &[key, val] : _app.env_vars) {
+      _env[key] = val;
+      setenv(key.c_str(), val.c_str(), 1);
+      BOOST_LOG(info) << "Per-app env: " << key << "=" << val;
+    }
+    // If MangoHud is enabled, also set DLSYM mode for safer Vulkan hooking
+    // (prevents crashes in Wine utilities like d3ddriverquery64.exe)
+    if (_app.env_vars.count("MANGOHUD") && _app.env_vars.at("MANGOHUD") == "1") {
+      _env["MANGOHUD_DLSYM"] = "1";
+      setenv("MANGOHUD_DLSYM", "1", 1);
+    }
+
+#ifdef __linux__
+    bool force_windowed_cage_for_gpu_native =
+      config::video.linux_display.use_cage_compositor &&
+      config::video.linux_display.headless_mode &&
+      config::video.linux_display.prefer_gpu_native_capture &&
+      video::active_encoder_requires_gpu_native_capture();
+
+    auto log_runtime_state = []() {
+      auto runtime_state = cage_display_router::runtime_state();
+      stream_stats::update_runtime_state(runtime_state);
+      BOOST_LOG(info) << "session_runtime: backend="sv << runtime_state.backend_name
+                      << " requested_headless="sv << runtime_state.requested_headless
+                      << " effective_headless="sv << runtime_state.effective_headless
+                      << " gpu_native_override_active="sv << runtime_state.gpu_native_override_active;
+    };
+
+    if (force_windowed_cage_for_gpu_native) {
+      auto encoder_name = video::active_encoder_name();
+      BOOST_LOG(warning) << "session_manager: Headless cage requested, but encoder ["
+                         << (encoder_name.empty() ? "unknown" : encoder_name)
+                         << "] requires a GPU-native capture path; starting labwc windowed instead"sv;
+    }
+
+    // Start cage with the first detached command as its primary client.
+    // Cage is a kiosk compositor — it only displays its main process fullscreen.
+    if (config::video.linux_display.use_cage_compositor && !_app.detached.empty()) {
+      // Stop the probe cage (running sleep infinity) and restart with the game
+      if (cage_display_router::is_running()) {
+        cage_display_router::stop();
+      }
+      std::string game_cmd = _app.detached[0];
+      confighttp::set_session_state(confighttp::session_state_e::cage_starting);
+      confighttp::emit_session_event("cage_starting", "Starting compositor");
+      if (!cage_display_router::start(render_width, render_height, game_cmd, force_windowed_cage_for_gpu_native)) {
+        BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
+        confighttp::emit_session_event("error", "Failed to start cage compositor");
+      } else {
+        log_runtime_state();
+        confighttp::set_session_state(confighttp::session_state_e::game_launching);
+        confighttp::emit_session_event("game_launching", "Launching " + _app.name);
+      }
+      // Launch remaining detached commands (if any) with cage's WAYLAND_DISPLAY
+      for (size_t i = 1; i < _app.detached.size(); ++i) {
+        auto &cmd = _app.detached[i];
+        auto cage_socket = cage_display_router::get_wayland_socket();
+        if (!cage_socket.empty()) {
+          _env["WAYLAND_DISPLAY"] = cage_socket;
+          _env["AT_SPI_BUS_ADDRESS"] = "";
+        }
+        boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                                find_working_directory(cmd, _env) :
+                                                boost::filesystem::path(_app.working_dir);
+        BOOST_LOG(info) << "Spawning ["sv << cmd << "] in ["sv << working_dir << ']';
+        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+        if (ec) {
+          BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
+        } else {
+          child.detach();
+        }
+      }
+    } else if (config::video.linux_display.use_cage_compositor) {
+      // No detached commands — start cage empty, game will use _app.cmd
+      if (cage_display_router::start(render_width, render_height, "", force_windowed_cage_for_gpu_native)) {
+        log_runtime_state();
+      }
+    } else
+#endif
+    {
+      // Non-cage path: launch detached commands normally
+      for (auto &cmd : _app.detached) {
+        boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                                find_working_directory(cmd, _env) :
+                                                boost::filesystem::path(_app.working_dir);
+        BOOST_LOG(info) << "Spawning ["sv << cmd << "] in ["sv << working_dir << ']';
+        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+        if (ec) {
+          BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
+        } else {
+          child.detach();
+        }
+      }
+    }
+
+#ifdef __linux__
+    // Set cage environment for the app command (if cage is running and app has a cmd)
+    std::string effective_cmd = _app.cmd;
+    if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running() && !_app.cmd.empty()) {
+      auto cage_socket = cage_display_router::get_wayland_socket();
+      if (!cage_socket.empty()) {
+        _env["WAYLAND_DISPLAY"] = cage_socket;
+        _env["AT_SPI_BUS_ADDRESS"] = "";
+        BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket << " for app command"sv;
+      }
+    }
+#else
+    const std::string &effective_cmd = _app.cmd;
+#endif
+
+    if (_app.cmd.empty()) {
+      BOOST_LOG(info) << "No commands configured, showing desktop..."sv;
+      placebo = true;
+    } else {
+      boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                              find_working_directory(effective_cmd, _env) :
+                                              boost::filesystem::path(_app.working_dir);
+      BOOST_LOG(info) << "Executing: ["sv << effective_cmd << "] in ["sv << working_dir << ']';
+      _process = platf::run_command(_app.elevated, true, effective_cmd, working_dir, _env, _pipe.get(), ec, &_process_group);
+      if (ec) {
+        BOOST_LOG(warning) << "Couldn't run ["sv << effective_cmd << "]: System: "sv << ec.message();
+        return -1;
+      }
+    }
+
+    _app_launch_time = std::chrono::steady_clock::now();
+
+  #ifdef _WIN32
+    auto resetHDRThread = std::thread([this, enable_hdr = launch_session->enable_hdr]{
+      // Windows doesn't seem to be able to set HDR correctly when a display is just connected / changed resolution,
+      // so we have tooggle HDR for the virtual display manually after a delay.
+      auto retryInterval = 200ms;
+      while (is_changing_settings_going_to_fail()) {
+        if (retryInterval > 2s) {
+          BOOST_LOG(warning) << "Restoring HDR settings failed due to retry timeout!";
+          return;
+        }
+        std::this_thread::sleep_for(retryInterval);
+        retryInterval *= 2;
+      }
+
+      retryInterval = 200ms;
+      while (this->display_name.empty()) {
+        if (retryInterval > 2s) {
+          BOOST_LOG(warning) << "Not getting current display in time! HDR will not be toggled.";
+          return;
+        }
+        std::this_thread::sleep_for(retryInterval);
+        retryInterval *= 2;
+      }
+
+      // We should have got the actual streaming display by now
+      std::string currentDisplay = this->display_name;
+      auto currentDisplayW = platf::from_utf8(currentDisplay);
+
+      initial_hdr = VDISPLAY::getDisplayHDRByName(currentDisplayW.c_str());
+
+      if (config::video.dd.hdr_option == config::video_t::dd_t::hdr_option_e::automatic) {
+        mode_changed_display = currentDisplay;
+
+        // Try turn off HDR whatever
+        // As we always have to apply the workaround by turining off HDR first
+        VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), false);
+
+        if (enable_hdr) {
+          if (VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), true)) {
+            BOOST_LOG(info) << "HDR enabled for display " << currentDisplay;
+          } else {
+            BOOST_LOG(info) << "HDR enable failed for display " << currentDisplay;
+          }
+        }
+      } else if (initial_hdr) {
+        if (VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), false) && VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), true)) {
+          BOOST_LOG(info) << "HDR toggled successfully for display " << currentDisplay;
+        } else {
+          BOOST_LOG(info) << "HDR toggle failed for display " << currentDisplay;
+        }
+      }
+    });
+
+    resetHDRThread.detach();
+  #endif
+
+    fg.disable();
+
+#if defined POLARIS_TRAY && POLARIS_TRAY >= 1
+    system_tray::update_tray_playing(_app.name);
+#endif
+
+    return 0;
+  }
+
+  int proc_t::running() {
+#ifndef _WIN32
+    // On POSIX OSes, we must periodically wait for our children to avoid
+    // them becoming zombies. This must be synchronized carefully with
+    // calls to bp::wait() and platf::process_group_running() which both
+    // invoke waitpid() under the hood.
+    auto reaper = util::fail_guard([]() {
+      while (waitpid(-1, nullptr, WNOHANG) > 0);
+    });
+#endif
+
+    if (placebo) {
+      return _app_id;
+    } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {
+      // The app is still running if any process in the group is still running
+      return _app_id;
+    } else if (_process.running()) {
+      // The app is still running only if the initial process launched is still running
+      return _app_id;
+    } else if (_app.auto_detach && std::chrono::steady_clock::now() - _app_launch_time < 5s) {
+      BOOST_LOG(info) << "App exited with code ["sv << _process.native_exit_code() << "] within 5 seconds of launch. Treating the app as a detached command."sv;
+      BOOST_LOG(info) << "Adjust this behavior in the Applications tab or apps.json if this is not what you want."sv;
+      placebo = true;
+
+    #if defined POLARIS_TRAY && POLARIS_TRAY >= 1
+      if (_process.native_exit_code() != 0) {
+        system_tray::update_tray_launch_error(proc::proc.get_last_run_app_name(), _process.native_exit_code());
+      }
+    #endif
+
+      return _app_id;
+    }
+
+    // Perform cleanup actions now if needed
+    if (_process) {
+      terminate();
+    }
+
+    return 0;
+  }
+
+  void proc_t::resume() {
+    BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
+
+    if (!_app.state_cmds.empty()) {
+      auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
+
+        _env["POLARIS_APP_STATUS"] = "RESUMING";
+
+        std::error_code ec;
+        auto _state_resume_it = std::begin(cmd_list);
+
+        for (; _state_resume_it != std::end(cmd_list); ++_state_resume_it) {
+          auto &cmd = *_state_resume_it;
+
+          // Skip empty commands
+          if (cmd.do_cmd.empty()) {
+            continue;
+          }
+
+          boost::filesystem::path working_dir = app_working_dir.empty() ?
+                                                  find_working_directory(cmd.do_cmd, _env) :
+                                                  boost::filesystem::path(app_working_dir);
+          BOOST_LOG(info) << "Executing Resume Cmd: ["sv << cmd.do_cmd << "] elevated: " << cmd.elevated;
+          auto child = platf::run_command(cmd.elevated, true, cmd.do_cmd, working_dir, _env, nullptr, ec, nullptr);
+
+          if (ec) {
+            BOOST_LOG(error) << "Couldn't run ["sv << cmd.do_cmd << "]: System: "sv << ec.message();
+            break;
+          }
+
+          child.wait();
+
+          auto ret = child.exit_code();
+          if (ret != 0 && ec != std::errc::permission_denied) {
+            BOOST_LOG(error) << '[' << cmd.do_cmd << "] failed with code ["sv << ret << ']';
+            break;
+          }
+        }
+      });
+
+      exec_thread.detach();
+    }
+  }
+
+  void proc_t::pause() {
+    if (!running()) {
+      BOOST_LOG(info) << "Session already stopped, do not run pause commands.";
+      return;
+    }
+
+    if (_app.terminate_on_pause) {
+      BOOST_LOG(info) << "Terminating app [" << _app_name << "] when all clients are disconnected. Pause commands are skipped.";
+      terminate();
+      return;
+    }
+
+    BOOST_LOG(info) << "Session pausing for app [" << _app_name << "].";
+
+    // Record session quality for AI feedback loop
+    if (ai_optimizer::is_enabled() && _launch_session) {
+      auto stats = stream_stats::get_current();
+      if (stats.streaming || stats.fps > 0) {
+        ai_optimizer::session_history_t session;
+        session.avg_fps = stats.fps;
+        session.avg_latency_ms = stats.latency_ms;
+        session.avg_bitrate_kbps = stats.bitrate_kbps;
+        session.packet_loss_pct = stats.packet_loss;
+        session.codec = stats.codec;
+        session.session_count = 1;
+
+        // Quality grade: A (great) → F (terrible)
+        if (stats.fps >= 55 && stats.packet_loss < 0.5 && stats.latency_ms < 20)
+          session.quality_grade = "A";
+        else if (stats.fps >= 45 && stats.packet_loss < 2 && stats.latency_ms < 40)
+          session.quality_grade = "B";
+        else if (stats.fps >= 30 && stats.packet_loss < 5)
+          session.quality_grade = "C";
+        else if (stats.fps >= 20)
+          session.quality_grade = "D";
+        else
+          session.quality_grade = "F";
+
+        ai_optimizer::record_session(_launch_session->device_name, _app.name, session);
+      }
+    }
+
+    if (!_app.state_cmds.empty()) {
+      auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
+        _env["POLARIS_APP_STATUS"] = "PAUSING";
+
+        std::error_code ec;
+        auto _state_pause_it = std::begin(cmd_list);
+
+        for (; _state_pause_it != std::end(cmd_list); ++_state_pause_it) {
+          auto &cmd = *_state_pause_it;
+
+          // Skip empty commands
+          if (cmd.undo_cmd.empty()) {
+            continue;
+          }
+
+          boost::filesystem::path working_dir = app_working_dir.empty() ?
+                                                  find_working_directory(cmd.undo_cmd, _env) :
+                                                  boost::filesystem::path(app_working_dir);
+          BOOST_LOG(info) << "Executing Pause Cmd: ["sv << cmd.undo_cmd << "] elevated: " << cmd.elevated;
+          auto child = platf::run_command(cmd.elevated, true, cmd.undo_cmd, working_dir, _env, nullptr, ec, nullptr);
+
+          if (ec) {
+            BOOST_LOG(error) << "Couldn't run ["sv << cmd.undo_cmd << "]: System: "sv << ec.message();
+            break;
+          }
+
+          child.wait();
+
+          auto ret = child.exit_code();
+          if (ret != 0 && ec != std::errc::permission_denied) {
+            BOOST_LOG(error) << '[' << cmd.undo_cmd << "] failed with code ["sv << ret << ']';
+            break;
+          }
+        }
+      });
+
+      exec_thread.detach();
+    }
+
+#if defined POLARIS_TRAY && POLARIS_TRAY >= 1
+    system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
+#endif
+  }
+
+  void proc_t::terminate(bool immediate, bool needs_refresh) {
+    std::error_code ec;
+    placebo = false;
+
+    if (!immediate) {
+      terminate_process_group(_process, _process_group, _app.exit_timeout);
+    }
+
+    _process = boost::process::v1::child();
+    _process_group = boost::process::v1::group();
+
+    _env["POLARIS_APP_STATUS"] = "TERMINATING";
+
+    // Clean up per-app env vars so they don't leak to the next session
+    for (const auto &[key, val] : _app.env_vars) {
+      unsetenv(key.c_str());
+    }
+    unsetenv("MANGOHUD_DLSYM");
+
+#ifdef __linux__
+    // Stop labwc compositor — this kills all games running inside it.
+    // Without this, games launched with setsid escape the process group
+    // and keep running after the stream ends.
+    if (config::video.linux_display.use_cage_compositor) {
+      cage_display_router::stop();
+    }
+#endif
+
+    for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {
+      auto &cmd = *(_app_prep_it - 1);
+
+      if (cmd.undo_cmd.empty()) {
+        continue;
+      }
+
+      boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                              find_working_directory(cmd.undo_cmd, _env) :
+                                              boost::filesystem::path(_app.working_dir);
+      BOOST_LOG(info) << "Executing Undo Cmd: ["sv << cmd.undo_cmd << ']';
+      auto child = platf::run_command(cmd.elevated, true, cmd.undo_cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+
+      if (ec) {
+        BOOST_LOG(warning) << "System: "sv << ec.message();
+      }
+
+      child.wait();
+      auto ret = child.exit_code();
+
+      if (ret != 0) {
+        BOOST_LOG(warning) << "Return code ["sv << ret << ']';
+      }
+    }
+
+#ifdef __linux__
+    // Disable streaming display after undo commands have run.
+    // Skip if a virtual display was created (it will be destroyed below).
+    if (!linux_vdisplay.has_value() || !linux_vdisplay->active) {
+      linux_display::disable_streaming_display();
+    }
+#endif
+
+    _pipe.reset();
+
+    bool has_run = _app_id > 0;
+
+#ifdef _WIN32
+    // Revert HDR state
+    if (has_run && !mode_changed_display.empty()) {
+      auto displayNameW = platf::from_utf8(mode_changed_display);
+      if (VDISPLAY::setDisplayHDRByName(displayNameW.c_str(), initial_hdr)) {
+        BOOST_LOG(info) << "HDR reverted for display " << mode_changed_display;
+      } else {
+        BOOST_LOG(info) << "HDR revert failed for display " << mode_changed_display;
+      }
+    }
+
+    bool used_virtual_display = vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK && _launch_session && _launch_session->virtual_display;
+    if (used_virtual_display) {
+      if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
+        BOOST_LOG(info) << "Virtual Display removed successfully";
+      } else if (this->virtual_display) {
+        BOOST_LOG(warning) << "Virtual Display remove failed";
+      } else {
+        BOOST_LOG(warning) << "Virtual Display remove failed, but it seems it was not created correctly either.";
+      }
+    }
+
+    // Only show the Stopped notification if we actually have an app to stop
+    // Since terminate() is always run when a new app has started
+    if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
+      if (used_virtual_display) {
+        display_device::reset_persistence();
+      } else {
+        display_device::revert_configuration();
+      }
+#elif __linux__
+    // Destroy Linux virtual display if one was created
+    bool used_linux_vdisplay = linux_vdisplay.has_value() && linux_vdisplay->active;
+    if (used_linux_vdisplay) {
+      virtual_display::destroy(*linux_vdisplay);
+      linux_vdisplay.reset();
+      BOOST_LOG(info) << "Linux Virtual Display removed successfully"sv;
+    }
+
+    if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
+      if (used_linux_vdisplay) {
+        display_device::reset_persistence();
+      } else {
+        display_device::revert_configuration();
+      }
+#else
+    if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
+      display_device::revert_configuration();
+#endif
+
+#if defined POLARIS_TRAY && POLARIS_TRAY >= 1
+      system_tray::update_tray_stopped(proc::proc.get_last_run_app_name());
+#endif
+    }
+
+    // Load the configured output_name first
+    // to prevent the value being write to empty when the initial terminate happens
+    if (!has_run && initial_display.empty()) {
+      initial_display = config::video.output_name;
+    } else {
+      // Restore output name to its original value
+      config::video.output_name = initial_display;
+    }
+
+    _app_id = -1;
+    _app_name.clear();
+    _app = {};
+    display_name.clear();
+    initial_display.clear();
+    mode_changed_display.clear();
+    _launch_session.reset();
+    virtual_display = false;
+    allow_client_commands = false;
+
+    if (_saved_input_config) {
+      config::input = *_saved_input_config;
+      _saved_input_config.reset();
+    }
+
+    if (needs_refresh) {
+      refresh(config::stream.file_apps, false);
+    }
+  }
+
+  const std::vector<ctx_t> &proc_t::get_apps() const {
+    return _apps;
+  }
+
+  std::vector<ctx_t> &proc_t::get_apps() {
+    return _apps;
+  }
+
+  // Gets application image from application list.
+  // Returns image from assets directory if found there.
+  // Returns default image if image configuration is not set.
+  // Returns http content-type header compatible image type.
+  std::string proc_t::get_app_image(int app_id) {
+    auto iter = std::find_if(_apps.begin(), _apps.end(), [&app_id](const auto app) {
+      return app.id == std::to_string(app_id);
+    });
+    auto app_image_path = iter == _apps.end() ? std::string() : iter->image_path;
+
+    return validate_app_image_path(app_image_path);
+  }
+
+  std::string proc_t::get_last_run_app_name() {
+    return _app_name;
+  }
+
+  std::string proc_t::get_running_app_uuid() {
+    return _app.uuid;
+  }
+
+  boost::process::environment proc_t::get_env() {
+    return _env;
+  }
+
+  proc_t::~proc_t() {
+    // It's not safe to call terminate() here because our proc_t is a static variable
+    // that may be destroyed after the Boost loggers have been destroyed. Instead,
+    // we return a deinit_t to main() to handle termination when we're exiting.
+    // Once we reach this point here, termination must have already happened.
+    assert(!placebo);
+    assert(!_process.running());
+  }
+
+  std::string_view::iterator find_match(std::string_view::iterator begin, std::string_view::iterator end) {
+    int stack = 0;
+
+    --begin;
+    do {
+      ++begin;
+      switch (*begin) {
+        case '(':
+          ++stack;
+          break;
+        case ')':
+          --stack;
+      }
+    } while (begin != end && stack != 0);
+
+    if (begin == end) {
+      throw std::out_of_range("Missing closing bracket \')\'");
+    }
+    return begin;
+  }
+
+  std::string parse_env_val(boost::process::v1::native_environment &env, const std::string_view &val_raw) {
+    auto pos = std::begin(val_raw);
+    auto dollar = std::find(pos, std::end(val_raw), '$');
+
+    std::stringstream ss;
+
+    while (dollar != std::end(val_raw)) {
+      auto next = dollar + 1;
+      if (next != std::end(val_raw)) {
+        switch (*next) {
+          case '(':
+            {
+              ss.write(pos, (dollar - pos));
+              auto var_begin = next + 1;
+              auto var_end = find_match(next, std::end(val_raw));
+              auto var_name = std::string {var_begin, var_end};
+
+#ifdef _WIN32
+              // Windows treats environment variable names in a case-insensitive manner,
+              // so we look for a case-insensitive match here. This is critical for
+              // correctly appending to PATH on Windows.
+              auto itr = std::find_if(env.cbegin(), env.cend(), [&](const auto &e) {
+                return boost::iequals(e.get_name(), var_name);
+              });
+              if (itr != env.cend()) {
+                // Use an existing case-insensitive match
+                var_name = itr->get_name();
+              }
+#endif
+
+              ss << env[var_name].to_string();
+
+              pos = var_end + 1;
+              next = var_end;
+
+              break;
+            }
+          case '$':
+            ss.write(pos, (next - pos));
+            pos = next + 1;
+            ++next;
+            break;
+        }
+
+        dollar = std::find(next, std::end(val_raw), '$');
+      } else {
+        dollar = next;
+      }
+    }
+
+    ss.write(pos, (dollar - pos));
+
+    return ss.str();
+  }
+
+  std::string validate_app_image_path(std::string app_image_path) {
+    if (app_image_path.empty()) {
+      return resolve_bundled_asset("box.png");
+    }
+
+    // get the image extension and convert it to lowercase
+    auto image_extension = std::filesystem::path(app_image_path).extension().string();
+    boost::to_lower(image_extension);
+
+    // return the default box image if extension is not "png"
+    if (image_extension != ".png") {
+      return resolve_bundled_asset("box.png");
+    }
+
+    if (app_image_path == "./assets/steam.png") {
+      // handle old default steam image definition
+      return resolve_bundled_asset("steam.png");
+    }
+
+    // check if image is in assets directory
+    if (!std::filesystem::path(app_image_path).is_absolute()) {
+      const auto bundled_asset = resolve_bundled_asset(app_image_path);
+      if (std::filesystem::exists(bundled_asset)) {
+        return bundled_asset;
+      }
+    }
+
+    // check if specified image exists
+    std::error_code code;
+    if (!std::filesystem::exists(app_image_path, code)) {
+      // return default box image if image does not exist
+      BOOST_LOG(warning) << "Couldn't find app image at path ["sv << app_image_path << ']';
+      return resolve_bundled_asset("box.png");
+    }
+
+    // image is a png, and not in assets directory
+    // return only "content-type" http header compatible image type
+    return app_image_path;
+  }
+
+  std::optional<std::string> calculate_sha256(const std::string &filename) {
+    crypto::md_ctx_t ctx {EVP_MD_CTX_create()};
+    if (!ctx) {
+      return std::nullopt;
+    }
+
+    if (!EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr)) {
+      return std::nullopt;
+    }
+
+    // Read file and update calculated SHA
+    char buf[1024 * 16];
+    std::ifstream file(filename, std::ifstream::binary);
+    while (file.good()) {
+      file.read(buf, sizeof(buf));
+      if (!EVP_DigestUpdate(ctx.get(), buf, file.gcount())) {
+        return std::nullopt;
+      }
+    }
+    file.close();
+
+    unsigned char result[SHA256_DIGEST_LENGTH];
+    if (!EVP_DigestFinal_ex(ctx.get(), result, nullptr)) {
+      return std::nullopt;
+    }
+
+    // Transform byte-array to string
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (const auto &byte : result) {
+      ss << std::setw(2) << (int) byte;
+    }
+    return ss.str();
+  }
+
+  uint32_t calculate_crc32(const std::string &input) {
+    boost::crc_32_type result;
+    result.process_bytes(input.data(), input.length());
+    return result.checksum();
+  }
+
+  std::tuple<std::string, std::string> calculate_app_id(const std::string &app_name, std::string app_image_path, int index) {
+    // Generate id by hashing name with image data if present
+    std::vector<std::string> to_hash;
+    to_hash.push_back(app_name);
+    auto file_path = validate_app_image_path(app_image_path);
+    if (file_path != DEFAULT_APP_IMAGE_PATH) {
+      auto file_hash = calculate_sha256(file_path);
+      if (file_hash) {
+        to_hash.push_back(file_hash.value());
+      } else {
+        // Fallback to just hashing image path
+        to_hash.push_back(file_path);
+      }
+    }
+
+    // Create combined strings for hash
+    std::stringstream ss;
+    for_each(to_hash.begin(), to_hash.end(), [&ss](const std::string &s) {
+      ss << s;
+    });
+    auto input_no_index = ss.str();
+    ss << index;
+    auto input_with_index = ss.str();
+
+    // CRC32 then truncate to signed 32-bit range due to client limitations
+    auto id_no_index = std::to_string(abs((int32_t) calculate_crc32(input_no_index)));
+    auto id_with_index = std::to_string(abs((int32_t) calculate_crc32(input_with_index)));
+
+    return std::make_tuple(id_no_index, id_with_index);
+  }
+
+  /**
+   * @brief Migrate the applications stored in the file tree by merging in a new app.
+   *
+   * This function updates the application entries in *fileTree_p* using the data in *inputTree_p*.
+   * If an app in the file tree does not have a UUID, one is generated and inserted.
+   * If an app with the same UUID as the new app is found, it is replaced.
+   * Additionally, empty keys (such as "prep-cmd" or "detached") and keys no longer needed ("launching", "index")
+   * are removed from the input.
+   *
+   * Legacy versions of Sunshine/Apollo stored boolean and integer values as strings.
+   * The following keys are converted:
+   *   - Boolean keys: "exclude-global-prep-cmd", "elevated", "auto-detach", "wait-all",
+   *                     "use-app-identity", "per-client-app-identity", "virtual-display"
+   *   - Integer keys: "exit-timeout"
+   *
+   * A migration version is stored in the file tree (under "version") so that future changes can be applied.
+   *
+   * @param fileTree_p Pointer to the JSON object representing the file tree.
+   * @param inputTree_p Pointer to the JSON object representing the new app.
+   */
+  void migrate_apps(nlohmann::json* fileTree_p, nlohmann::json* inputTree_p) {
+    std::string new_app_uuid;
+
+    if (inputTree_p) {
+      // If the input contains a non-empty "uuid", use it; otherwise generate one.
+      if (inputTree_p->contains("uuid") && !(*inputTree_p)["uuid"].get<std::string>().empty()) {
+        new_app_uuid = (*inputTree_p)["uuid"].get<std::string>();
+      } else {
+        new_app_uuid = uuid_util::uuid_t::generate().string();
+        (*inputTree_p)["uuid"] = new_app_uuid;
+      }
+
+      // Remove "prep-cmd" if empty.
+      if (inputTree_p->contains("prep-cmd") && (*inputTree_p)["prep-cmd"].empty()) {
+        inputTree_p->erase("prep-cmd");
+      }
+
+      // Remove "detached" if empty.
+      if (inputTree_p->contains("detached") && (*inputTree_p)["detached"].empty()) {
+        inputTree_p->erase("detached");
+      }
+
+      // Remove keys that are no longer needed.
+      inputTree_p->erase("launching");
+      inputTree_p->erase("index");
+    }
+
+    // Get the current apps array; if it doesn't exist, create one.
+    nlohmann::json newApps = nlohmann::json::array();
+    if (fileTree_p->contains("apps") && (*fileTree_p)["apps"].is_array()) {
+      for (auto &app : (*fileTree_p)["apps"]) {
+        // For apps without a UUID, generate one and remove "launching".
+        if (!app.contains("uuid") || app["uuid"].get<std::string>().empty()) {
+          app["uuid"] = uuid_util::uuid_t::generate().string();
+          app.erase("launching");
+          newApps.push_back(std::move(app));
+        } else {
+          // If an app with the same UUID as the new app is found, replace it.
+          if (!new_app_uuid.empty() && app["uuid"].get<std::string>() == new_app_uuid) {
+            newApps.push_back(*inputTree_p);
+            new_app_uuid.clear();
+          } else {
+            newApps.push_back(std::move(app));
+          }
+        }
+      }
+    }
+    // If the new app's UUID has not been merged yet, add it.
+    if (!new_app_uuid.empty() && inputTree_p) {
+      newApps.push_back(*inputTree_p);
+    }
+    (*fileTree_p)["apps"] = newApps;
+  }
+
+  void migration_v2(nlohmann::json& fileTree) {
+    static const int this_version = 2;
+    // Determine the current migration version (default to 1 if not present).
+    int file_version = 1;
+    if (fileTree.contains("version")) {
+      try {
+        file_version = fileTree["version"].get<int>();
+      } catch (const std::exception& e) {
+        BOOST_LOG(info) << "Cannot parse apps.json version, treating as v1: " << e.what();
+      }
+    }
+
+    // If the version is less than this_version, perform legacy conversion.
+    if (file_version < this_version) {
+      BOOST_LOG(info) << "Migrating app list from v1 to v2...";
+      migrate_apps(&fileTree, nullptr);
+
+      // List of keys to convert to booleans.
+      std::vector<std::string> boolean_keys = {
+        "allow-client-commands",
+        "exclude-global-prep-cmd",
+        "elevated",
+        "auto-detach",
+        "wait-all",
+        "use-app-identity",
+        "per-client-app-identity",
+        "virtual-display"
+      };
+
+      // List of keys to convert to integers.
+      std::vector<std::string> integer_keys = {
+        "exit-timeout",
+        "scale-factor"
+      };
+
+      // Walk through each app and convert legacy string values.
+      for (auto &app : fileTree["apps"]) {
+        for (const auto &key : boolean_keys) {
+          if (app.contains(key)) {
+            auto& _key = app[key];
+            if (_key.is_string()) {
+              std::string s = _key.get<std::string>();
+              std::transform(s.begin(), s.end(), s.begin(), ::tolower);  // Normalize to lowercase for comparison
+              _key = (s == "true" || s == "on" || s == "yes");
+            } else if (_key.is_array()) {
+              // Check if the array contains at least one item and interpret the first element
+              if (!_key.empty() && _key[0].is_string()) {
+                std::string first = _key[0].get<std::string>();
+                std::transform(first.begin(), first.end(), first.begin(), ::tolower);  // Normalize
+                if (first == "on" || first == "true" || first == "yes") {
+                  _key = true;
+                } else if (first == "off" || first == "false" || first == "no") {
+                  _key = false;
+                } else {
+                  _key = false;  // Default for unknown values
+                }
+              } else {
+                _key = false;  // Treat empty arrays or non-string first elements as false
+              }
+            } else {
+              // Fallback: Treat truthy/falsey cases
+              if (_key.is_boolean()) {
+                // Leave booleans as they are
+              } else if (_key.is_number()) {
+                _key = (_key.get<double>() != 0);  // Non-zero numbers are truthy
+              } else if (_key.is_null()) {
+                _key = false;  // Null is false
+              } else {
+                _key = !_key.empty();  // Non-empty objects/arrays are truthy, empty ones are falsey
+              }
+            }
+          }
+        }
+
+        for (const auto &key : integer_keys) {
+          if (app.contains(key) && app[key].is_string()) {
+            std::string s = app[key].get<std::string>();
+            app[key] = std::stoi(s);
+          }
+        }
+
+        // For each entry in the "prep-cmd" array, convert "elevated" if necessary.
+        if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
+          for (auto &prep : app["prep-cmd"]) {
+            if (prep.contains("elevated") && prep["elevated"].is_string()) {
+              std::string s = prep["elevated"].get<std::string>();
+              prep["elevated"] = (s == "true");
+            }
+          }
+        }
+      }
+
+      // Update migration version to this_version.
+      fileTree["version"] = this_version;
+
+      BOOST_LOG(info) << "Migrated app list from v1 to v2.";
+    }
+  }
+
+  void migrate(nlohmann::json& fileTree, const std::string& fileName) {
+    int last_version = 2;
+
+    int file_version = 0;
+    if (fileTree.contains("version")) {
+      file_version = fileTree["version"].get<int>();
+    }
+
+    if (file_version < last_version) {
+      migration_v2(fileTree);
+      file_handler::write_file(fileName.c_str(), fileTree.dump(4));
+    }
+  }
+
+  std::optional<proc::proc_t> parse(const std::string &file_name) {
+
+    // Prepare environment variables.
+    auto this_env = boost::this_process::environment();
+
+    std::set<std::string> ids;
+    std::vector<proc::ctx_t> apps;
+    int i = 0;
+
+    size_t fail_count = 0;
+    do {
+      // Read the JSON file into a tree.
+      nlohmann::json tree;
+      try {
+        std::string content = file_handler::read_file(file_name.c_str());
+        tree = nlohmann::json::parse(content);
+      } catch (const std::exception& e) {
+        BOOST_LOG(warning) << "Couldn't read apps.json properly! Apps will not be loaded."sv;
+        break;
+      }
+
+      try {
+        migrate(tree, file_name);
+
+        if (tree.contains("env") && tree["env"].is_object()) {
+          for (auto &item : tree["env"].items()) {
+            this_env[item.key()] = parse_env_val(this_env, item.value().get<std::string>());
+          }
+        }
+
+        // Ensure the "apps" array exists.
+        if (!tree.contains("apps") || !tree["apps"].is_array()) {
+          BOOST_LOG(warning) << "No apps were defined in apps.json!!!"sv;
+          break;
+        }
+
+        // Iterate over each application in the "apps" array.
+        for (auto &app_node : tree["apps"]) {
+          proc::ctx_t ctx;
+          ctx.idx = std::to_string(i);
+          ctx.uuid = app_node.at("uuid");
+
+          // Build the list of preparation commands.
+          std::vector<proc::cmd_t> prep_cmds;
+          bool exclude_global_prep = app_node.value("exclude-global-prep-cmd", false);
+          if (!exclude_global_prep) {
+            prep_cmds.reserve(config::sunshine.prep_cmds.size());
+            for (auto &prep_cmd : config::sunshine.prep_cmds) {
+              auto do_cmd = parse_env_val(this_env, prep_cmd.do_cmd);
+              auto undo_cmd = parse_env_val(this_env, prep_cmd.undo_cmd);
+              prep_cmds.emplace_back(
+                std::move(do_cmd),
+                std::move(undo_cmd),
+                std::move(prep_cmd.elevated)
+              );
+            }
+          }
+          if (app_node.contains("prep-cmd") && app_node["prep-cmd"].is_array()) {
+            for (auto &prep_node : app_node["prep-cmd"]) {
+              std::string do_cmd = parse_env_val(this_env, prep_node.value("do", ""));
+              std::string undo_cmd = parse_env_val(this_env, prep_node.value("undo", ""));
+              bool elevated = prep_node.value("elevated", false);
+              prep_cmds.emplace_back(
+                std::move(do_cmd),
+                std::move(undo_cmd),
+                std::move(elevated)
+              );
+            }
+          }
+
+          // Build the list of pause/resume commands.
+          std::vector<proc::cmd_t> state_cmds;
+          bool exclude_global_state_cmds = app_node.value("exclude-global-state-cmd", false);
+          if (!exclude_global_state_cmds) {
+            state_cmds.reserve(config::sunshine.state_cmds.size());
+            for (auto &state_cmd : config::sunshine.state_cmds) {
+              auto do_cmd = parse_env_val(this_env, state_cmd.do_cmd);
+              auto undo_cmd = parse_env_val(this_env, state_cmd.undo_cmd);
+              state_cmds.emplace_back(
+                std::move(do_cmd),
+                std::move(undo_cmd),
+                std::move(state_cmd.elevated)
+              );
+            }
+          }
+          if (app_node.contains("state-cmd") && app_node["state-cmd"].is_array()) {
+            for (auto &prep_node : app_node["state-cmd"]) {
+              std::string do_cmd = parse_env_val(this_env, prep_node.value("do", ""));
+              std::string undo_cmd = parse_env_val(this_env, prep_node.value("undo", ""));
+              bool elevated = prep_node.value("elevated", false);
+              state_cmds.emplace_back(
+                std::move(do_cmd),
+                std::move(undo_cmd),
+                std::move(elevated)
+              );
+            }
+          }
+
+          // Build the list of detached commands.
+          std::vector<std::string> detached;
+          if (app_node.contains("detached") && app_node["detached"].is_array()) {
+            for (auto &detached_val : app_node["detached"]) {
+              detached.emplace_back(parse_env_val(this_env, detached_val.get<std::string>()));
+            }
+          }
+
+          // Process other fields.
+          if (app_node.contains("output"))
+            ctx.output = parse_env_val(this_env, app_node.value("output", ""));
+          std::string name = parse_env_val(this_env, app_node.value("name", ""));
+          if (app_node.contains("cmd"))
+            ctx.cmd = parse_env_val(this_env, app_node.value("cmd", ""));
+          if (app_node.contains("working-dir")) {
+            ctx.working_dir = parse_env_val(this_env, app_node.value("working-dir", ""));
+    #ifdef _WIN32
+            // The working directory, unlike the command itself, should not be quoted.
+            boost::erase_all(ctx.working_dir, "\"");
+            ctx.working_dir += '\\';
+    #endif
+          }
+          if (app_node.contains("image-path"))
+            ctx.image_path = parse_env_val(this_env, app_node.value("image-path", ""));
+
+          ctx.elevated = app_node.value("elevated", false);
+          ctx.auto_detach = app_node.value("auto-detach", true);
+          ctx.wait_all = app_node.value("wait-all", true);
+          ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
+          ctx.virtual_display = app_node.value("virtual-display", false);
+          ctx.scale_factor = app_node.value("scale-factor", 100);
+          ctx.use_app_identity = app_node.value("use-app-identity", false);
+          ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);
+          ctx.allow_client_commands = app_node.value("allow-client-commands", true);
+          ctx.terminate_on_pause = app_node.value("terminate-on-pause", false);
+          ctx.gamepad = app_node.value("gamepad", "");
+          ctx.steam_appid = app_node.value("steam-appid", "");
+          ctx.game_category = app_node.value("game-category", "");
+          ctx.source = app_node.value("source", ctx.steam_appid.empty() ? "manual" : "steam");
+          ctx.last_launched = app_node.value("last-launched", (int64_t)0);
+          if (app_node.contains("genres") && app_node["genres"].is_array()) {
+            for (const auto &g : app_node["genres"]) {
+              if (g.is_string()) ctx.genres.push_back(g.get<std::string>());
+            }
+          }
+          if (app_node.contains("env") && app_node["env"].is_object()) {
+            for (auto &[key, val] : app_node["env"].items()) {
+              if (val.is_string()) ctx.env_vars[key] = val.get<std::string>();
+            }
+          }
+
+          // Calculate a unique application id.
+          auto possible_ids = calculate_app_id(name, ctx.image_path, i++);
+          if (ids.count(std::get<0>(possible_ids)) == 0) {
+            ctx.id = std::get<0>(possible_ids);
+          } else {
+            ctx.id = std::get<1>(possible_ids);
+          }
+          ids.insert(ctx.id);
+
+          ctx.name = std::move(name);
+          ctx.prep_cmds = std::move(prep_cmds);
+          ctx.state_cmds = std::move(state_cmds);
+          ctx.detached = std::move(detached);
+
+          apps.emplace_back(std::move(ctx));
+        }
+
+        fail_count = 0;
+      } catch (std::exception &e) {
+        BOOST_LOG(error) << "Error happened during app loading: "sv << e.what();
+
+        fail_count += 1;
+
+        if (fail_count >= 3) {
+          // No hope for recovering
+          BOOST_LOG(warning) << "Couldn't parse/migrate apps.json properly! Apps will not be loaded."sv;
+          break;
+        }
+
+        BOOST_LOG(warning) << "App format is still invalid! Trying to re-migrate the app list..."sv;
+
+        // Always try migrating from scratch when error happened
+        tree["version"] = 0;
+
+        try {
+          migrate(tree, file_name);
+        } catch (std::exception &e) {
+          BOOST_LOG(error) << "Error happened during migration: "sv << e.what();
+          break;
+        }
+
+        this_env = boost::this_process::environment();
+        ids.clear();
+        apps.clear();
+        i = 0;
+
+        continue;
+      }
+
+      break;
+    } while (fail_count < 3);
+
+    if (fail_count > 0) {
+      BOOST_LOG(warning) << "No applications configured, adding fallback Desktop entry.";
+      proc::ctx_t ctx;
+      ctx.idx = std::to_string(i);
+      ctx.uuid = FALLBACK_DESKTOP_UUID; // Placeholder UUID
+      ctx.name = "Desktop (fallback)";
+      ctx.image_path = parse_env_val(this_env, "desktop-alt.png");
+      ctx.virtual_display = false;
+      ctx.scale_factor = 100;
+      ctx.use_app_identity = false;
+      ctx.per_client_app_identity = false;
+      ctx.allow_client_commands = false;
+      ctx.terminate_on_pause = false;
+
+      ctx.elevated = false;
+      ctx.auto_detach = true;
+      ctx.wait_all = false; // Desktop doesn't have a specific command to wait for
+      ctx.exit_timeout = 5s;
+
+      // Calculate unique ID
+      auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
+      if (ids.count(std::get<0>(possible_ids)) == 0) {
+        // Avoid using index to generate id if possible
+        ctx.id = std::get<0>(possible_ids);
+      } else {
+        // Fallback to include index on collision
+        ctx.id = std::get<1>(possible_ids);
+      }
+      ids.insert(ctx.id);
+
+      apps.emplace_back(std::move(ctx));
+    }
+
+    // Virtual Display entry
+  #ifdef _WIN32
+    if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+      proc::ctx_t ctx;
+      ctx.idx = std::to_string(i);
+      ctx.uuid = VIRTUAL_DISPLAY_UUID;
+      ctx.name = "Virtual Display";
+      ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
+      ctx.virtual_display = true;
+      ctx.scale_factor = 100;
+      ctx.use_app_identity = false;
+      ctx.per_client_app_identity = false;
+      ctx.allow_client_commands = false;
+      ctx.terminate_on_pause = false;
+
+      ctx.elevated = false;
+      ctx.auto_detach = true;
+      ctx.wait_all = false;
+      ctx.exit_timeout = 5s;
+
+      auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
+      if (ids.count(std::get<0>(possible_ids)) == 0) {
+        // Avoid using index to generate id if possible
+        ctx.id = std::get<0>(possible_ids);
+      }
+      else {
+        // Fallback to include index on collision
+        ctx.id = std::get<1>(possible_ids);
+      }
+      ids.insert(ctx.id);
+
+      apps.emplace_back(std::move(ctx));
+    }
+  #elif defined(__linux__)
+    // Linux virtual display entry — shown when any virtual display backend is available
+    if (isLinuxVDisplayAvailable()) {
+      proc::ctx_t ctx;
+      ctx.idx = std::to_string(i);
+      ctx.uuid = VIRTUAL_DISPLAY_UUID;
+      ctx.name = "Virtual Display";
+      ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
+      ctx.virtual_display = true;
+      ctx.scale_factor = 100;
+      ctx.use_app_identity = false;
+      ctx.per_client_app_identity = false;
+      ctx.allow_client_commands = false;
+      ctx.terminate_on_pause = false;
+
+      ctx.elevated = false;
+      ctx.auto_detach = true;
+      ctx.wait_all = false;
+      ctx.exit_timeout = 5s;
+
+      auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
+      if (ids.count(std::get<0>(possible_ids)) == 0) {
+        ctx.id = std::get<0>(possible_ids);
+      }
+      else {
+        ctx.id = std::get<1>(possible_ids);
+      }
+      ids.insert(ctx.id);
+
+      apps.emplace_back(std::move(ctx));
+    }
+  #endif
+
+    if (config::input.enable_input_only_mode) {
+      // Input Only entry
+      {
+        proc::ctx_t ctx;
+        ctx.idx = std::to_string(i);
+        ctx.uuid = REMOTE_INPUT_UUID;
+        ctx.name = "Remote Input";
+        ctx.image_path = parse_env_val(this_env, "input_only.png");
+        ctx.virtual_display = false;
+        ctx.scale_factor = 100;
+        ctx.use_app_identity = false;
+        ctx.per_client_app_identity = false;
+        ctx.allow_client_commands = false;
+        ctx.terminate_on_pause = true; // There's no need to keep an active input only session ongoing
+
+        ctx.elevated = false;
+        ctx.auto_detach = true;
+        ctx.wait_all = true;
+        ctx.exit_timeout = 5s;
+
+        auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
+        if (ids.count(std::get<0>(possible_ids)) == 0) {
+          // Avoid using index to generate id if possible
+          ctx.id = std::get<0>(possible_ids);
+        }
+        else {
+          // Fallback to include index on collision
+          ctx.id = std::get<1>(possible_ids);
+        }
+        ids.insert(ctx.id);
+
+        input_only_app_id_str = ctx.id;
+        input_only_app_id = util::from_view(ctx.id);
+
+        apps.emplace_back(std::move(ctx));
+      }
+
+      // Terminate entry
+      {
+        proc::ctx_t ctx;
+        ctx.idx = std::to_string(i);
+        ctx.uuid = TERMINATE_APP_UUID;
+        ctx.name = "Terminate";
+        ctx.image_path = parse_env_val(this_env, "terminate.png");
+        ctx.virtual_display = false;
+        ctx.scale_factor = 100;
+        ctx.use_app_identity = false;
+        ctx.per_client_app_identity = false;
+        ctx.allow_client_commands = false;
+        ctx.terminate_on_pause = false;
+
+        ctx.elevated = false;
+        ctx.auto_detach = true;
+        ctx.wait_all = true;
+        ctx.exit_timeout = 5s;
+
+        auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
+        if (ids.count(std::get<0>(possible_ids)) == 0) {
+          // Avoid using index to generate id if possible
+          ctx.id = std::get<0>(possible_ids);
+        }
+        else {
+          // Fallback to include index on collision
+          ctx.id = std::get<1>(possible_ids);
+        }
+        // ids.insert(ctx.id);
+
+        terminate_app_id_str = ctx.id;
+        terminate_app_id = util::from_view(ctx.id);
+
+        apps.emplace_back(std::move(ctx));
+      }
+    }
+
+    return proc::proc_t {
+      std::move(this_env),
+      std::move(apps)
+    };
+  }
+
+  void refresh(const std::string &file_name, bool needs_terminate) {
+    if (needs_terminate) {
+      proc.terminate(false, false);
+    }
+
+  #ifdef _WIN32
+    size_t fail_count = 0;
+    while (fail_count < 5 && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+      initVDisplayDriver();
+      if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+        break;
+      }
+
+      fail_count += 1;
+      std::this_thread::sleep_for(1s);
+    }
+  #endif
+
+    auto proc_opt = proc::parse(file_name);
+
+    if (proc_opt) {
+      proc = std::move(*proc_opt);
+    }
+  }
+}  // namespace proc

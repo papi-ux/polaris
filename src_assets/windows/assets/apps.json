@@ -1,0 +1,24 @@
+{
+  "env": {},
+  "apps": [
+    {
+      "name": "Desktop",
+      "image-path": "desktop.png",
+      "allow-client-commands": false
+    },
+    {
+      "name": "Steam Big Picture",
+      "prep-cmd": [
+        {
+          "do": "",
+          "undo": "steam://close/bigpicture",
+          "elevated": false
+        }
+      ],
+      "detached": [
+        "steam://open/bigpicture"
+      ],
+      "image-path": "steam.png"
+    }
+  ]
+}

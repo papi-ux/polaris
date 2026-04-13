@@ -1,0 +1,7 @@
+/* Polaris custom styles - Space Whale theme */
+/* Most styling is now handled by Tailwind CSS via app.css */
+
+/* Hide pages while localization is loading */
+[v-cloak] {
+    display: none;
+}

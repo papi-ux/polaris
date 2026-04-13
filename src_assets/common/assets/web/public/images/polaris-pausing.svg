@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Polaris tray: Pausing — dimmed white star -->
+  <g transform="translate(128,128)" opacity="0.5">
+    <polygon points="0,-110 18,-20 0,-32 -18,-20" fill="#ffffff"/>
+    <polygon points="0,110 18,20 0,32 -18,20" fill="#ffffff"/>
+    <polygon points="-110,0 -20,-18 -32,0 -20,18" fill="#ffffff"/>
+    <polygon points="110,0 20,-18 32,0 20,18" fill="#ffffff"/>
+  </g>
+  <circle cx="128" cy="128" r="14" fill="#ffffff" opacity="0.5"/>
+  <circle cx="128" cy="128" r="6" fill="#a8b0b8"/>
+</svg>

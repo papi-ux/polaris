@@ -1,0 +1,193 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Space Whale Palette ── */
+  --color-ice: #c8d6e5;
+  --color-silver: #979f9e;
+  --color-storm: #687b81;
+  --color-twilight: #4c5265;
+  --color-deep: #393c51;
+  --color-void: #2a2840;
+  --color-accent: #7c73ff;
+
+  /* ── Semantic Tokens ── */
+  --color-primary: var(--color-ice);
+  --color-surface: var(--color-twilight);
+  --color-background: var(--color-deep);
+  --color-foreground: var(--color-silver);
+  --color-muted: var(--color-storm);
+  --color-border: var(--color-storm);
+
+  /* ── Typography ── */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+
+  /* ── Shadows ── */
+  --shadow-glow: 0 0 20px rgba(200, 214, 229, 0.08);
+  --shadow-glow-lg: 0 0 40px rgba(200, 214, 229, 0.12);
+  --shadow-glow-ice: 0 0 24px rgba(200, 214, 229, 0.15);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(200, 214, 229, 0.03);
+  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(200, 214, 229, 0.06);
+  --shadow-inset-glow: inset 0 1px 0 rgba(200, 214, 229, 0.05);
+
+  /* ── Animations ── */
+  --animate-fade-in: fade-in 0.2s ease-out;
+  --animate-slide-up: slide-up 0.25s ease-out;
+  --animate-scale-in: scale-in 0.15s ease-out;
+  --animate-shimmer: shimmer 2s infinite linear;
+  --animate-pulse-glow: pulse-glow 2s ease-in-out infinite;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes slide-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes scale-in {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 8px rgba(200, 214, 229, 0.1); }
+    50% { box-shadow: 0 0 20px rgba(200, 214, 229, 0.2); }
+  }
+}
+
+/* ── OLED Dark Galaxy Theme ── */
+[data-theme="oled"] {
+  --color-ice: #e8edf3;
+  --color-silver: #c0c8d0;
+  --color-storm: #6e7880;
+  --color-twilight: #181820;
+  --color-deep: #000000;
+  --color-void: #000000;
+  --color-accent: #8b80ff;
+  --color-surface: #0c0c12;
+  --color-background: #000000;
+  --color-foreground: #c0c8d0;
+  --color-muted: #6e7880;
+  --color-border: #222230;
+}
+[data-theme="oled"] .glass {
+  background: rgba(12, 12, 18, 0.85);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme="oled"] .card {
+  background: rgba(12, 12, 18, 0.9);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme="oled"] .sidebar-link {
+  color: #c0c8d0;
+}
+[data-theme="oled"] .sidebar-link.active {
+  color: #e8edf3;
+  background: rgba(139, 128, 255, 0.12);
+}
+[data-theme="oled"] aside {
+  border-color: transparent !important;
+}
+[data-theme="oled"] aside .border-b,
+[data-theme="oled"] aside .border-t {
+  border-color: rgba(255, 255, 255, 0.04) !important;
+}
+[data-theme="oled"] .border-storm {
+  border-color: rgba(255, 255, 255, 0.04);
+}
+[data-theme="oled"] .pulse-dot {
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.6);
+}
+[data-theme="oled"] .skeleton-shimmer {
+  background: linear-gradient(90deg, #0a0a0e 25%, rgba(255,255,255,0.03) 50%, #0a0a0e 75%);
+  background-size: 200% 100%;
+}
+
+/* ── Base ── */
+[v-cloak] {
+  display: none;
+}
+
+/* ── Glass Surface ── */
+.glass {
+  background: rgba(76, 82, 101, 0.5);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(200, 214, 229, 0.08);
+}
+
+/* ── Card System ── */
+.card {
+  background: rgba(76, 82, 101, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(200, 214, 229, 0.06);
+  border-radius: 0.75rem;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.card-interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card-hover);
+}
+.card-interactive:active {
+  transform: translateY(0);
+}
+
+/* ── Gradient Accents ── */
+.gradient-border-top {
+  position: relative;
+}
+.gradient-border-top::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-ice), transparent);
+  opacity: 0.3;
+}
+.gradient-border-top-green::before {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+  opacity: 0.8;
+}
+
+/* ── Hidden Scrollbar ── */
+.scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Shimmer Skeleton ── */
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-twilight) 25%,
+    rgba(200, 214, 229, 0.06) 50%,
+    var(--color-twilight) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite linear;
+}
+
+/* ── Streaming Pulse ── */
+.pulse-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  animation: pulse-glow 2s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
+}
+
+/* ── Page Enter Animation ── */
+.page-enter {
+  animation: slide-up 0.2s ease-out both;
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=@PROJECT_DESCRIPTION@
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+# Avoid starting Polaris before the desktop is fully initialized.
+ExecStartPre=/bin/sleep 5
+@POLARIS_SERVICE_START_COMMAND@
+@POLARIS_SERVICE_STOP_COMMAND@
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=xdg-desktop-autostart.target

@@ -1,0 +1,22 @@
+print_host_setup_hint() {
+  cat <<'EOF'
+Polaris host integration is now explicit instead of automatic.
+
+Run after install if you want virtual input and controller support:
+  sudo polaris --setup-host
+
+Only add KMS capability if you plan to use DRM/KMS capture:
+  sudo polaris --setup-host --enable-kms
+
+Optional background autostart:
+  systemctl --user enable --now polaris
+EOF
+}
+
+post_install() {
+  print_host_setup_hint
+}
+
+post_upgrade() {
+  print_host_setup_hint
+}

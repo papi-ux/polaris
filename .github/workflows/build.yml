@@ -1,0 +1,38 @@
+name: Build Polaris
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential cmake ninja-build \
+          libboost-all-dev libssl-dev libevdev-dev \
+          libpulse-dev libopus-dev libcurl4-openssl-dev \
+          libdrm-dev libgbm-dev libcap-dev libwayland-dev \
+          libpipewire-0.3-dev libx11-dev libxrandr-dev \
+          libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+          libva-dev libminiupnpc-dev libnotify-dev \
+          libappindicator3-dev libgtk-3-dev \
+          libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+          npm nodejs wayland-protocols
+
+    - name: Configure
+      run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=OFF -DCUDA_FAIL_ON_MISSING=OFF
+
+    - name: Build
+      run: cmake --build build -j$(nproc)

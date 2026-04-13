@@ -1,0 +1,94 @@
+---
+app-id: "@PROJECT_FQDN@"
+runtime: org.freedesktop.Platform
+runtime-version: "23.08"  # requires CUDA >= 12.2
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node20
+command: polaris
+separate-locales: false
+finish-args:
+  - --device=all  # access all devices
+  - --env=PULSE_PROP_media.category=Manager  # allow polaris to manage audio sinks
+  - --env=POLARIS_MIGRATE_CONFIG=1  # migrate config files to the new location
+  - --filesystem=home  # need to save files in user's home directory
+  - --share=ipc  # required for X11 shared memory extension
+  - --share=network  # access network
+  - --socket=pulseaudio  # play sounds using pulseaudio
+  - --socket=wayland  # show windows using Wayland
+  - --socket=fallback-x11  # show windows using X11
+  - --system-talk-name=org.freedesktop.Avahi  # talk to avahi on the system bus
+  - --talk-name=org.freedesktop.Flatpak  # talk to flatpak on the session bus
+
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /lib/*.la
+  - /lib/*.a
+  - /share/man
+
+modules:
+  # Test dependencies
+  - "modules/xvfb/xvfb.json"
+
+  # Build dependencies
+  - "modules/nlohmann_json.json"
+
+  # Runtime dependencies
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+  - "modules/avahi.json"
+  - "modules/boost.json"
+  - "modules/libevdev.json"
+  - "modules/libnotify.json"
+  - "modules/miniupnpc.json"
+  - "modules/numactl.json"
+
+  # Caching is configured until here, not including CUDA, since it is too large for GitHub cache
+  - "modules/cuda.json"
+
+  - name: polaris
+    builddir: true
+    build-options:
+      append-path: /usr/lib/sdk/node20/bin
+      env:
+        BUILD_VERSION: "@BUILD_VERSION@"
+        BRANCH: "@GITHUB_BRANCH@"
+        COMMIT: "@GITHUB_COMMIT@"
+        XDG_CACHE_HOME: /run/build/polaris/flatpak-node/cache
+        npm_config_cache: /run/build/polaris/flatpak-node/npm-cache
+        npm_config_nodedir: /usr/lib/sdk/node20
+        npm_config_offline: 'true'
+        NPM_CONFIG_LOGLEVEL: info
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DBOOST_USE_STATIC=OFF
+      - -DBUILD_DOCS=OFF
+      - -DBUILD_WERROR=ON
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_CUDA_COMPILER=/app/cuda/bin/nvcc
+      - -DPOLARIS_ASSETS_DIR=share/polaris
+      - -DPOLARIS_BUILD_FLATPAK=ON
+      - -DPOLARIS_EXECUTABLE_PATH=/app/bin/polaris
+      - -DPOLARIS_ENABLE_WAYLAND=ON
+      - -DPOLARIS_ENABLE_X11=ON
+      - -DPOLARIS_ENABLE_DRM=ON
+      - -DPOLARIS_ENABLE_CUDA=ON
+      - -DPOLARIS_PUBLISHER_NAME='papi'
+      - -DPOLARIS_PUBLISHER_WEBSITE='https://github.com/papi/Polaris'
+      - -DPOLARIS_PUBLISHER_ISSUE_URL='https://github.com/papi/Polaris/issues'
+    no-make-install: false
+    post-install:
+      - install -D $FLATPAK_BUILDER_BUILDDIR/packaging/linux/flatpak/scripts/* /app/bin
+      - install -D $FLATPAK_BUILDER_BUILDDIR/packaging/linux/flatpak/apps.json /app/share/polaris/apps.json
+    run-tests: true
+    test-rule: ""  # empty to disable
+    test-commands:
+      - npm run serve & xvfb-run tests/test_polaris --gtest_color=yes
+    sources:
+      - generated-sources.json
+      - type: git
+        url: "@GITHUB_CLONE_URL@"
+        commit: "@GITHUB_COMMIT@"
+      - type: file
+        path: package-lock.json

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Polaris tray: Playing — bright white star, high contrast -->
+  <g transform="translate(128,128)">
+    <polygon points="0,-110 18,-20 0,-32 -18,-20" fill="#ffffff"/>
+    <polygon points="0,110 18,20 0,32 -18,20" fill="#ffffff"/>
+    <polygon points="-110,0 -20,-18 -32,0 -20,18" fill="#ffffff"/>
+    <polygon points="110,0 20,-18 32,0 20,18" fill="#ffffff"/>
+  </g>
+  <circle cx="128" cy="128" r="14" fill="#ffffff"/>
+  <circle cx="128" cy="128" r="6" fill="#7c73ff"/>
+</svg>

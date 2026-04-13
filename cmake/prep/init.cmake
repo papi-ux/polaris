@@ -1,0 +1,22 @@
+if (WIN32)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15.0)
+            add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-template-body>) # Workaround for WinRT headers
+        endif()
+    endif()
+elseif (APPLE)
+elseif (UNIX)
+    include(GNUInstallDirs)
+
+    if(NOT DEFINED POLARIS_EXECUTABLE_PATH)
+        set(POLARIS_EXECUTABLE_PATH "polaris")
+    endif()
+
+    if(POLARIS_BUILD_FLATPAK)
+        set(POLARIS_SERVICE_START_COMMAND "ExecStart=flatpak run --command=polaris ${PROJECT_FQDN}")
+        set(POLARIS_SERVICE_STOP_COMMAND "ExecStop=flatpak kill ${PROJECT_FQDN}")
+    else()
+        set(POLARIS_SERVICE_START_COMMAND "ExecStart=${POLARIS_EXECUTABLE_PATH}")
+        set(POLARIS_SERVICE_STOP_COMMAND "")
+    endif()
+endif()

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Polaris — North Star tray/app icon (transparent bg, silver for dark panels) -->
+  <g transform="translate(128,128)">
+    <!-- Diagonal subtle points -->
+    <g transform="rotate(45)">
+      <polygon points="0,-100 12,-18 0,-28 -12,-18" fill="#687b81" opacity="0.5"/>
+      <polygon points="0,100 12,18 0,28 -12,18" fill="#687b81" opacity="0.5"/>
+      <polygon points="-100,0 -18,-12 -28,0 -18,12" fill="#687b81" opacity="0.5"/>
+      <polygon points="100,0 18,-12 28,0 18,12" fill="#687b81" opacity="0.5"/>
+    </g>
+    <!-- Main four-pointed star -->
+    <polygon points="0,-115 18,-20 0,-32 -18,-20" fill="#979f9e"/>
+    <polygon points="0,115 18,20 0,32 -18,20" fill="#979f9e"/>
+    <polygon points="-115,0 -20,-18 -32,0 -20,18" fill="#979f9e"/>
+    <polygon points="115,0 20,-18 32,0 20,18" fill="#979f9e"/>
+  </g>
+  <!-- Core -->
+  <circle cx="128" cy="128" r="14" fill="#c8d6e5"/>
+  <circle cx="128" cy="128" r="6" fill="#ffffff" opacity="0.9"/>
+</svg>

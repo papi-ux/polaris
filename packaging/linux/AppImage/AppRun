@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# custom AppRun for Polaris AppImage
+
+# path of the extracted AppRun
+HERE="$(dirname "$(readlink -f "${0}")")"
+POLARIS_PATH=/usr/bin/polaris
+POLARIS_BIN_HERE=$HERE/usr/bin/polaris
+POLARIS_SHARE_HERE=$HERE/usr/share/polaris
+
+# Set APPDIR when running directly from the AppDir:
+if [ -z "$APPDIR" ]; then
+    ARGV0="AppRun"
+fi
+
+cd "$HERE" || exit 1
+
+function help() {
+echo "
+ ------------------------------
+   Polaris AppImage package.
+ ------------------------------
+
+ polaris.AppImage options
+ ------------------------
+
+ Usage:  $ARGV0  --help, -h
+ ------            # This message
+
+         $ARGV0  --install, -i
+                   # Install input rules polaris.service files. Restart required.
+
+         $ARGV0  --remove, -r
+                   # Remove input rules polaris.service files.
+
+         $ARGV0  --appimage-help
+                   # Show available AppImage options
+
+ polaris options
+ ----------------
+"
+# print polaris binary help, replacing the polaris command in usage statement
+"$POLARIS_BIN_HERE" --help | sed -e "s#$POLARIS_BIN_HERE#$ARGV0#g"
+}
+
+function install() {
+  # user input rules
+  # shellcheck disable=SC2002
+  cat "$POLARIS_SHARE_HERE/udev/rules.d/60-polaris.rules" | sudo tee /etc/udev/rules.d/60-polaris.rules
+  cat "$POLARIS_SHARE_HERE/modules-load.d/60-polaris.conf" | sudo tee /etc/modules-load.d/60-polaris.conf
+  sudo modprobe uhid
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --property-match=DEVNAME=/dev/uinput
+  sudo udevadm trigger --property-match=DEVNAME=/dev/uhid
+
+  # polaris service
+  mkdir -p ~/.config/systemd/user
+  cp -r "$POLARIS_SHARE_HERE/systemd/user/" ~/.config/systemd/
+  # patch service executable path
+  sed -i -e "s#$POLARIS_PATH#$(readlink -f $ARGV0)#g" ~/.config/systemd/user/polaris.service
+
+  # setcap
+  sudo setcap cap_sys_admin+ep "$(readlink -f "$POLARIS_BIN_HERE")" || true
+}
+
+function remove() {
+  # remove input rules
+  sudo rm -f /etc/udev/rules.d/60-polaris.rules
+
+  # remove uhid module loading config
+  sudo rm -f /etc/modules-load.d/60-polaris.conf
+
+  # remove service
+  sudo rm -f ~/.config/systemd/user/polaris.service
+}
+
+# process arguments
+if [ "x$1" == "xhelp" ] || [ "x$1" == "x--help" ] || [ "x$1" == "x-h" ] ; then
+    help
+    exit $?
+fi
+
+if [ "x$1" == "xinstall" ] || [ "x$1" == "x--install" ] || [ "x$1" == "x-i" ] ; then
+    install
+    exit $?
+fi
+
+if [ "x$1" == "xremove" ] || [ "x$1" == "x--remove" ] || [ "x$1" == "x-r" ] ; then
+    remove
+    exit $?
+fi
+
+# create config directory if it doesn't exist
+# https://github.com/papi/Polaris/issues/324
+mkdir -p ~/.config/polaris
+
+# run polaris
+"$POLARIS_BIN_HERE" $@
