@@ -1559,6 +1559,72 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  void testAiConfig(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    print_req(request);
+
+    nlohmann::json output;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      auto body = nlohmann::json::parse(ss.str());
+
+      auto get_string = [&](const char *key, const char *fallback = "") {
+        return body.value(key, std::string {fallback});
+      };
+      auto get_enabled = [&](const char *key, bool fallback = false) {
+        if (!body.contains(key)) return fallback;
+        const auto &value = body[key];
+        if (value.is_boolean()) return value.get<bool>();
+        if (value.is_string()) {
+          auto text = boost::algorithm::to_lower_copy(value.get<std::string>());
+          return text == "enabled" || text == "true" || text == "1" || text == "yes";
+        }
+        return fallback;
+      };
+
+      std::string device = get_string("device_name", "Test Device");
+      std::string app = get_string("app_name", "Test App");
+      std::string gpu = get_string("gpu_info", "NVIDIA RTX (NVENC)");
+
+      ai_optimizer::config_t ai_cfg;
+      ai_cfg.enabled = true;
+      ai_cfg.provider = get_string("ai_provider");
+      ai_cfg.model = get_string("ai_model");
+      ai_cfg.auth_mode = get_string("ai_auth_mode");
+      ai_cfg.api_key = get_string("ai_api_key");
+      ai_cfg.base_url = get_string("ai_base_url");
+      ai_cfg.use_subscription = get_enabled("ai_use_subscription", false);
+      ai_cfg.timeout_ms = body.value("ai_timeout_ms", config::video.ai_optimizer.timeout_ms);
+      ai_cfg.cache_ttl_hours = body.value("ai_cache_ttl_hours", config::video.ai_optimizer.cache_ttl_hours);
+
+      auto result = ai_optimizer::request_sync_with_config(ai_cfg, device, app, gpu);
+      if (result) {
+        output["status"] = true;
+        output["provider"] = ai_cfg.provider;
+        output["model"] = ai_cfg.model;
+        output["auth_mode"] = ai_cfg.auth_mode;
+        output["base_url"] = ai_cfg.base_url;
+        if (result->display_mode) output["display_mode"] = *result->display_mode;
+        if (result->color_range) output["color_range"] = *result->color_range;
+        if (result->hdr) output["hdr"] = *result->hdr;
+        if (result->virtual_display) output["virtual_display"] = *result->virtual_display;
+        if (result->target_bitrate_kbps) output["target_bitrate_kbps"] = *result->target_bitrate_kbps;
+        if (result->nvenc_tune) output["nvenc_tune"] = *result->nvenc_tune;
+        if (result->preferred_codec) output["preferred_codec"] = *result->preferred_codec;
+        output["reasoning"] = result->reasoning;
+        output["source"] = result->source;
+      } else {
+        output["status"] = false;
+        output["error"] = "Connection test failed — check provider settings and logs";
+      }
+    } catch (const std::exception &e) {
+      output["status"] = false;
+      output["error"] = e.what();
+    }
+    send_response(response, output);
+  }
+
   void triggerAiOptimize(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -1593,7 +1659,7 @@ namespace confighttp {
         output["source"] = result->source;
       } else {
         output["status"] = false;
-        output["error"] = "AI optimization failed — check API key and logs";
+        output["error"] = "AI optimization failed — check provider settings and logs";
       }
     } catch (const std::exception &e) {
       output["status"] = false;
@@ -2515,28 +2581,6 @@ namespace confighttp {
    * @brief Capture a single screenshot and return as JPEG.
    * Uses spectacle (KDE) or grim (wlroots) for Wayland-compatible capture.
    */
-  /**
-   * @brief Parse xrandr output to find a specific output's geometry.
-   * @returns "WxH+X+Y" string, or empty if not found.
-   */
-  static std::string get_output_geometry(const std::string &output_name) {
-    std::string cmd = "xrandr --query 2>/dev/null | grep '" + output_name + " connected'";
-    FILE *pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return "";
-    char buf[512];
-    std::string line;
-    if (fgets(buf, sizeof(buf), pipe)) line = buf;
-    pclose(pipe);
-
-    // Parse geometry like "1920x1080+7680+0" from the line
-    std::regex re(R"((\d+)x(\d+)\+(\d+)\+(\d+))");
-    std::smatch match;
-    if (std::regex_search(line, match, re) && match.size() >= 5) {
-      return match[1].str() + ":" + match[2].str() + ":" + match[3].str() + ":" + match[4].str();
-    }
-    return "";
-  }
-
   void getDisplayScreenshot(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -3176,7 +3220,11 @@ namespace confighttp {
     {
       ai_optimizer::config_t ai_cfg;
       ai_cfg.enabled = config::video.ai_optimizer.enabled;
+      ai_cfg.provider = config::video.ai_optimizer.provider;
+      ai_cfg.model = config::video.ai_optimizer.model;
+      ai_cfg.auth_mode = config::video.ai_optimizer.auth_mode;
       ai_cfg.api_key = config::video.ai_optimizer.api_key;
+      ai_cfg.base_url = config::video.ai_optimizer.base_url;
       ai_cfg.use_subscription = config::video.ai_optimizer.use_subscription;
       ai_cfg.timeout_ms = config::video.ai_optimizer.timeout_ms;
       ai_cfg.cache_ttl_hours = config::video.ai_optimizer.cache_ttl_hours;
@@ -3371,6 +3419,7 @@ namespace confighttp {
     server.resource["^/api/ai/cache$"]["GET"] = getAiCache;
     server.resource["^/api/ai/history$"]["GET"] = getAiHistory;
     server.resource["^/api/ai/cache/clear$"]["POST"] = withCsrf(clearAiCache);
+    server.resource["^/api/ai/test$"]["POST"] = withCsrf(testAiConfig);
     server.resource["^/api/ai/optimize$"]["POST"] = withCsrf(triggerAiOptimize);
     server.resource["^/api/devices$"]["GET"] = getDevices;
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;

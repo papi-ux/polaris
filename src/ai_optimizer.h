@@ -1,14 +1,14 @@
 /**
  * @file src/ai_optimizer.h
- * @brief AI-powered streaming optimization using Claude API.
+ * @brief AI-powered streaming optimization using pluggable model providers.
  *
- * Provides intelligent device + game optimization by calling the Claude API
- * with device specs and game metadata. Results are cached aggressively
+ * Provides intelligent device + game optimization by calling a configured LLM
+ * provider with device specs and game metadata. Results are cached aggressively
  * (1 week TTL) so the API is only called once per device+game combination.
  *
- * Supports two authentication methods:
- * 1. Direct API key (from console.anthropic.com)
- * 2. Claude subscription proxy (via local Claude Code session)
+ * Current provider families:
+ * 1. Anthropic API / Claude CLI subscription proxy
+ * 2. OpenAI-compatible chat completion endpoints
  */
 #pragma once
 
@@ -24,8 +24,12 @@ namespace ai_optimizer {
    */
   struct config_t {
     bool enabled = false;
-    std::string api_key;             ///< Anthropic API key (sk-ant-...)
-    bool use_subscription = false;   ///< Use Claude subscription instead of API key
+    std::string provider;            ///< anthropic, openai, gemini, local
+    std::string model;               ///< Provider-specific model id
+    std::string auth_mode;           ///< api_key, subscription, none
+    std::string api_key;             ///< Provider API key when auth_mode == api_key
+    std::string base_url;            ///< Provider base URL or local endpoint
+    bool use_subscription = false;   ///< Legacy compatibility for older configs/UI
     int timeout_ms = 5000;           ///< Max wait for API response
     int cache_ttl_hours = 168;       ///< Cache TTL (default 1 week)
   };
@@ -63,7 +67,7 @@ namespace ai_optimizer {
 
   /**
    * @brief Request an AI optimization asynchronously.
-   * Fires a background thread that calls the Claude API and caches the result.
+   * Fires a background thread that calls the configured provider and caches the result.
    * Does NOT block the caller.
    */
   void request_async(const std::string &device_name,
@@ -77,6 +81,18 @@ namespace ai_optimizer {
    * Blocks until the API responds or times out.
    */
   std::optional<device_db::optimization_t> request_sync(
+    const std::string &device_name,
+    const std::string &app_name,
+    const std::string &gpu_info,
+    const std::string &game_category = "",
+    const std::optional<session_history_t> &history = std::nullopt);
+
+  /**
+   * @brief Request an AI optimization synchronously using ad-hoc config.
+   * Intended for testing draft provider settings without mutating live runtime state.
+   */
+  std::optional<device_db::optimization_t> request_sync_with_config(
+    const config_t &config,
     const std::string &device_name,
     const std::string &app_name,
     const std::string &gpu_info,

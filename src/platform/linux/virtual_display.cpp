@@ -46,8 +46,13 @@ namespace virtual_display {
   static std::string exec_cmd(const std::string &cmd) {
     std::array<char, 256> buffer;
     std::string result;
+    auto pipe_closer = [](FILE *pipe) {
+      if (pipe) {
+        pclose(pipe);
+      }
+    };
 
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+    std::unique_ptr<FILE, decltype(pipe_closer)> pipe(popen(cmd.c_str(), "r"), pipe_closer);
     if (!pipe) {
       return {};
     }

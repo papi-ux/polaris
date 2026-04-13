@@ -121,8 +121,8 @@
                 <span class="text-xs text-silver font-medium">{{ captureFormatLabel }}</span>
               </div>
             </div>
-            <div v-if="stats.runtime_gpu_native_override_active" class="text-[10px] text-amber-300 mt-2">
-              GPU-native capture preference forced a visible compositor path for the active encoder.
+            <div v-if="runtimePathNote" class="text-[10px] mt-2" :class="runtimePathNoteTone">
+              {{ runtimePathNote }}
             </div>
           </div>
 
@@ -568,6 +568,17 @@ const runtimeOverrideTone = computed(() => {
   return stats.value?.runtime_gpu_native_override_active ? 'text-amber-300' : 'text-green-400'
 })
 
+const nestedLabwcShmFallbackActive = computed(() => {
+  if (!stats.value?.streaming) return false
+
+  const backend = String(stats.value?.runtime_backend || '').toLowerCase()
+  const transport = String(stats.value?.capture_transport || '').toLowerCase()
+
+  return backend === 'labwc' &&
+    !Boolean(stats.value?.runtime_effective_headless) &&
+    transport === 'shm'
+})
+
 const captureTransportLabel = computed(() => {
   if (!stats.value?.streaming) return '--'
   return titleizeToken(stats.value?.capture_transport || 'unknown')
@@ -583,6 +594,26 @@ const captureFormatLabel = computed(() => {
   const format = stats.value?.capture_format
   if (!format) return '--'
   return String(format).toUpperCase()
+})
+
+const runtimePathNote = computed(() => {
+  if (!stats.value?.streaming) return ''
+
+  if (nestedLabwcShmFallbackActive.value) {
+    return 'Nested labwc fallback is active: Polaris is capturing the windowed compositor through SHM instead of the GPU-native fast path.'
+  }
+
+  if (stats.value?.runtime_gpu_native_override_active) {
+    return 'GPU-native capture preference forced a visible compositor path for the active encoder.'
+  }
+
+  return ''
+})
+
+const runtimePathNoteTone = computed(() => {
+  if (!runtimePathNote.value) return 'text-storm'
+  if (nestedLabwcShmFallbackActive.value) return 'text-orange-300'
+  return 'text-amber-300'
 })
 
 // Check if a specific client name has AI-optimized settings (for multi-viewer list)

@@ -10,7 +10,7 @@ if(APPLE)
     endif()
 elseif(UNIX)
     # configure the .desktop file
-    set(POLARIS_DESKTOP_ICON "polaris.svg")
+    set(POLARIS_DESKTOP_ICON "polaris")
     if(${POLARIS_BUILD_APPIMAGE})
         configure_file(packaging/linux/AppImage/${PROJECT_FQDN}.desktop ${PROJECT_FQDN}.desktop @ONLY)
     elseif(${POLARIS_BUILD_FLATPAK})

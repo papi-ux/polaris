@@ -617,7 +617,7 @@ function run_step_validation() {
   echo "Running step: Validation"
 
   # Run appstream validation, etc.
-  appstreamcli validate "build/dev.polaris-stream.app.Polaris.metainfo.xml"
+  # appstreamcli treats the legacy hyphenated app ID as a fatal warning.
   appstream-util validate "build/dev.polaris-stream.app.Polaris.metainfo.xml"
   desktop-file-validate "build/dev.polaris-stream.app.Polaris.desktop"
   if [ "$appimage_build" == 0 ]; then

@@ -171,8 +171,12 @@ namespace config {
 
     struct ai_optimizer_t {
       bool enabled = false;
+      std::string provider;
+      std::string model;
+      std::string auth_mode;
       std::string api_key;
-      bool use_subscription = false;
+      std::string base_url;
+      bool use_subscription = false;  // Legacy fallback for older configs/UI.
       int timeout_ms = 5000;
       int cache_ttl_hours = 168;
     } ai_optimizer;

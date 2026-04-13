@@ -8,7 +8,104 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  arch-build:
+    name: Arch build
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+
+    steps:
+    - name: Bootstrap Arch container
+      run: pacman -Syu --noconfirm --needed archlinux-keyring git
+
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        pacman -S --noconfirm --needed \
+          appstream appstream-glib avahi base-devel boost cmake curl \
+          desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
+          gcc libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
+          libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
+          npm numactl openssl opus pipewire wayland wayland-protocols which
+
+    - name: Configure
+      run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=OFF -DCUDA_FAIL_ON_MISSING=OFF
+
+    - name: Build
+      run: cmake --build build -j$(nproc)
+
+    - name: Generate Arch package files
+      run: |
+        BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
+        BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+        COMMIT="$(git rev-parse HEAD)"
+        env \
+          BRANCH="$BRANCH" \
+          BUILD_VERSION="$BUILD_VERSION" \
+          CLONE_URL="file://$GITHUB_WORKSPACE" \
+          COMMIT="$COMMIT" \
+          cmake -S . -B arch-pkgbuild \
+            -DPOLARIS_CONFIGURE_PKGBUILD=ON \
+            -DPOLARIS_CONFIGURE_ONLY=ON
+
+    - name: Validate Arch package
+      run: |
+        useradd -m builder
+        chown -R builder:builder "$GITHUB_WORKSPACE"
+        su builder -c "git config --global protocol.file.allow always"
+        su builder -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'"
+        su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && makepkg --nodeps --noconfirm --nocheck"
+
+    - name: Summarize Arch validation
+      if: always()
+      run: |
+        {
+          echo "## Arch validation"
+          echo
+          echo "- Generated package files: \`arch-pkgbuild/PKGBUILD\`, \`arch-pkgbuild/polaris.install\`"
+          echo "- Built package directory: \`arch-pkgbuild/\`"
+          echo "- Build tree directory: \`build/\`"
+          echo "- Package artifacts and generated packaging files are uploaded from this job."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload Arch packaging artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: arch-packaging-files
+        path: |
+          arch-pkgbuild/PKGBUILD
+          arch-pkgbuild/polaris.install
+        if-no-files-found: warn
+
+    - name: Upload Arch package outputs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: arch-package-outputs
+        path: |
+          arch-pkgbuild/*.pkg.tar.*
+          arch-pkgbuild/*.pkg.tar.*.sig
+          arch-pkgbuild/*.src.tar.*
+          arch-pkgbuild/*.log
+        if-no-files-found: warn
+
+    - name: Upload Arch build metadata
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: arch-build-metadata
+        path: |
+          build/dev.polaris-stream.app.Polaris.metainfo.xml
+          build/dev.polaris-stream.app.Polaris.desktop
+          build/dev.polaris-stream.app.Polaris.terminal.desktop
+        if-no-files-found: warn
+
+  ubuntu-build:
+    name: Ubuntu build
     runs-on: ubuntu-24.04
 
     steps:

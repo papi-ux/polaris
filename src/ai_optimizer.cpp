@@ -1,6 +1,6 @@
 /**
  * @file src/ai_optimizer.cpp
- * @brief Claude API integration for streaming optimization.
+ * @brief Provider-agnostic API integration for streaming optimization.
  */
 
 #include "ai_optimizer.h"
@@ -8,6 +8,7 @@
 #include "logging.h"
 #include "platform/common.h"
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -26,16 +28,166 @@ namespace ai_optimizer {
   static config_t cfg;
   static std::mutex cache_mutex;
 
+  namespace {
+    constexpr const char *PROVIDER_ANTHROPIC = "anthropic";
+    constexpr const char *PROVIDER_OPENAI = "openai";
+    constexpr const char *PROVIDER_GEMINI = "gemini";
+    constexpr const char *PROVIDER_LOCAL = "local";
+
+    constexpr const char *AUTH_API_KEY = "api_key";
+    constexpr const char *AUTH_SUBSCRIPTION = "subscription";
+    constexpr const char *AUTH_NONE = "none";
+
+    constexpr const char *DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
+    constexpr const char *DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
+    constexpr const char *DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+    constexpr const char *DEFAULT_LOCAL_MODEL = "gpt-oss";
+
+    constexpr const char *DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
+    constexpr const char *DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+    constexpr const char *DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
+    constexpr const char *DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
+  }  // namespace
+
   struct cache_entry_t {
+    std::string provider;
+    std::string model;
+    std::string base_url;
+    std::string device_name;
+    std::string app_name;
     device_db::optimization_t optimization;
     int64_t timestamp;  // Unix epoch seconds
+  };
+
+  struct http_response_t {
+    CURLcode curl_code = CURLE_OK;
+    long http_code = 0;
+    std::string body;
   };
 
   static std::unordered_map<std::string, cache_entry_t> cache;
   static std::unordered_map<std::string, session_history_t> session_history;
 
-  static std::string cache_key(const std::string &device, const std::string &app) {
+  static std::string to_lower_copy(std::string value) {
+    for (char &ch : value) {
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+  }
+
+  static std::string trim_trailing_slashes(std::string value) {
+    while (!value.empty() && value.back() == '/') {
+      value.pop_back();
+    }
+    return value;
+  }
+
+  static std::string normalize_provider(std::string provider) {
+    provider = to_lower_copy(provider);
+    if (provider == "claude" || provider == "anthropic") return PROVIDER_ANTHROPIC;
+    if (provider == "openai") return PROVIDER_OPENAI;
+    if (provider == "google" || provider == "google-ai" || provider == "gemini") return PROVIDER_GEMINI;
+    if (provider == "ollama" || provider == "lmstudio" || provider == "lm-studio" || provider == "openai_compatible" || provider == "local") {
+      return PROVIDER_LOCAL;
+    }
+    return PROVIDER_ANTHROPIC;
+  }
+
+  static std::string default_model_for_provider(const std::string &provider) {
+    if (provider == PROVIDER_OPENAI) return DEFAULT_OPENAI_MODEL;
+    if (provider == PROVIDER_GEMINI) return DEFAULT_GEMINI_MODEL;
+    if (provider == PROVIDER_LOCAL) return DEFAULT_LOCAL_MODEL;
+    return DEFAULT_ANTHROPIC_MODEL;
+  }
+
+  static std::string default_base_url_for_provider(const std::string &provider) {
+    if (provider == PROVIDER_OPENAI) return DEFAULT_OPENAI_BASE_URL;
+    if (provider == PROVIDER_GEMINI) return DEFAULT_GEMINI_BASE_URL;
+    if (provider == PROVIDER_LOCAL) return DEFAULT_LOCAL_BASE_URL;
+    return DEFAULT_ANTHROPIC_BASE_URL;
+  }
+
+  static std::string normalize_auth_mode(std::string auth_mode, const std::string &provider, bool legacy_subscription, const std::string &api_key) {
+    auth_mode = to_lower_copy(auth_mode);
+
+    if (auth_mode.empty()) {
+      if (legacy_subscription && provider == PROVIDER_ANTHROPIC) {
+        return AUTH_SUBSCRIPTION;
+      }
+      if (provider == PROVIDER_LOCAL && api_key.empty()) {
+        return AUTH_NONE;
+      }
+      return AUTH_API_KEY;
+    }
+
+    if (auth_mode == "subscription" || auth_mode == "cli" || auth_mode == "claude_cli") {
+      return provider == PROVIDER_ANTHROPIC ? AUTH_SUBSCRIPTION : (provider == PROVIDER_LOCAL && api_key.empty() ? AUTH_NONE : AUTH_API_KEY);
+    }
+    if (auth_mode == "none" || auth_mode == "disabled") {
+      return AUTH_NONE;
+    }
+    return AUTH_API_KEY;
+  }
+
+  static std::string normalize_base_url(const std::string &provider, std::string base_url) {
+    base_url = trim_trailing_slashes(base_url);
+    if (!base_url.empty()) {
+      return base_url;
+    }
+    return default_base_url_for_provider(provider);
+  }
+
+  static std::string normalize_model(const std::string &provider, std::string model) {
+    if (!model.empty()) {
+      return model;
+    }
+    return default_model_for_provider(provider);
+  }
+
+  static std::string history_key(const std::string &device, const std::string &app) {
     return device + ":" + app;
+  }
+
+  static std::string cache_key(const std::string &provider,
+                               const std::string &model,
+                               const std::string &base_url,
+                               const std::string &device,
+                               const std::string &app) {
+    return provider + "\t" + model + "\t" + base_url + "\t" + device + "\t" + app;
+  }
+
+  static std::string current_cache_key(const std::string &device, const std::string &app) {
+    return cache_key(cfg.provider, cfg.model, cfg.base_url, device, app);
+  }
+
+  static std::string current_cache_key(const config_t &active_cfg, const std::string &device, const std::string &app) {
+    return cache_key(active_cfg.provider, active_cfg.model, active_cfg.base_url, device, app);
+  }
+
+  static std::string join_url(const std::string &base_url, const std::string &path) {
+    return trim_trailing_slashes(base_url) + path;
+  }
+
+  static config_t resolved_config(config_t config) {
+    config.provider = normalize_provider(config.provider);
+    config.model = normalize_model(config.provider, config.model);
+    config.base_url = normalize_base_url(config.provider, config.base_url);
+    config.auth_mode = normalize_auth_mode(config.auth_mode, config.provider, config.use_subscription, config.api_key);
+    if (config.provider != PROVIDER_ANTHROPIC) {
+      config.use_subscription = false;
+    }
+    return config;
+  }
+
+  static bool is_config_enabled(const config_t &active_cfg) {
+    if (!active_cfg.enabled || active_cfg.model.empty()) return false;
+    if (active_cfg.provider == PROVIDER_ANTHROPIC) {
+      return active_cfg.auth_mode == AUTH_SUBSCRIPTION || (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty());
+    }
+    if (active_cfg.auth_mode == AUTH_NONE) {
+      return true;
+    }
+    return !active_cfg.api_key.empty();
   }
 
   // ---- Cache persistence ----
@@ -54,6 +206,30 @@ namespace ai_optimizer {
       for (auto &[key, val] : root.items()) {
         cache_entry_t entry;
         entry.timestamp = val.value("timestamp", 0);
+        entry.provider = normalize_provider(val.value("provider", PROVIDER_ANTHROPIC));
+        entry.model = normalize_model(entry.provider, val.value("model", ""));
+        entry.base_url = normalize_base_url(entry.provider, val.value("base_url", ""));
+        entry.device_name = val.value("device_name", "");
+        entry.app_name = val.value("app_name", "");
+
+        if (entry.device_name.empty()) {
+          if (key.find('\t') != std::string::npos) {
+            std::stringstream ss(key);
+            std::getline(ss, entry.provider, '\t');
+            std::getline(ss, entry.model, '\t');
+            std::getline(ss, entry.base_url, '\t');
+            std::getline(ss, entry.device_name, '\t');
+            std::getline(ss, entry.app_name, '\t');
+            entry.provider = normalize_provider(entry.provider);
+            entry.model = normalize_model(entry.provider, entry.model);
+            entry.base_url = normalize_base_url(entry.provider, entry.base_url);
+          } else {
+            auto pos = key.find(':');
+            entry.device_name = pos == std::string::npos ? key : key.substr(0, pos);
+            entry.app_name = pos == std::string::npos ? std::string {} : key.substr(pos + 1);
+          }
+        }
+
         auto &o = entry.optimization;
         if (val.contains("display_mode")) o.display_mode = val["display_mode"].get<std::string>();
         if (val.contains("color_range")) o.color_range = val["color_range"].get<int>();
@@ -64,7 +240,7 @@ namespace ai_optimizer {
         if (val.contains("preferred_codec")) o.preferred_codec = val["preferred_codec"].get<std::string>();
         o.reasoning = val.value("reasoning", "");
         o.source = "ai_cached";
-        cache[key] = entry;
+        cache[cache_key(entry.provider, entry.model, entry.base_url, entry.device_name, entry.app_name)] = entry;
       }
       BOOST_LOG(info) << "ai_optimizer: Loaded "sv << cache.size() << " cached optimizations"sv;
     } catch (const std::exception &e) {
@@ -78,6 +254,11 @@ namespace ai_optimizer {
     for (const auto &[key, entry] : cache) {
       nlohmann::json val;
       val["timestamp"] = entry.timestamp;
+      val["provider"] = entry.provider;
+      val["model"] = entry.model;
+      val["base_url"] = entry.base_url;
+      val["device_name"] = entry.device_name;
+      val["app_name"] = entry.app_name;
       auto &o = entry.optimization;
       if (o.display_mode) val["display_mode"] = *o.display_mode;
       if (o.color_range) val["color_range"] = *o.color_range;
@@ -98,6 +279,41 @@ namespace ai_optimizer {
   static size_t write_callback(void *contents, size_t size, size_t nmemb, std::string *out) {
     out->append(static_cast<char *>(contents), size * nmemb);
     return size * nmemb;
+  }
+
+  static http_response_t post_json(const std::string &url,
+                                   const nlohmann::json &request_body,
+                                   int timeout_ms,
+                                   const std::vector<std::string> &header_values) {
+    http_response_t response;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      response.curl_code = CURLE_FAILED_INIT;
+      return response;
+    }
+
+    struct curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    for (const auto &header_value : header_values) {
+      headers = curl_slist_append(headers, header_value.c_str());
+    }
+
+    std::string post_data = request_body.dump();
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+
+    response.curl_code = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return response;
   }
 
   // ---- Prompt builder (shared by both API and CLI paths) ----
@@ -197,13 +413,90 @@ namespace ai_optimizer {
     return opt;
   }
 
-  // ---- Claude CLI (subscription mode) ----
+  static nlohmann::json optimization_response_format() {
+    nlohmann::json schema;
+    schema["type"] = "object";
+    schema["additionalProperties"] = false;
+    schema["properties"] = {
+      {"display_mode", {{"type", "string"}, {"description", "Display mode in WIDTHxHEIGHTxFPS format, such as 1920x1080x60."}}},
+      {"color_range", {{"type", "integer"}, {"enum", nlohmann::json::array({0, 1, 2})}}},
+      {"hdr", {{"type", "boolean"}}},
+      {"virtual_display", {{"type", "boolean"}}},
+      {"target_bitrate_kbps", {{"type", "integer"}, {"minimum", 1000}, {"maximum", 200000}}},
+      {"nvenc_tune", {{"type", "integer"}, {"enum", nlohmann::json::array({1, 2, 3})}}},
+      {"preferred_codec", {{"type", "string"}, {"enum", nlohmann::json::array({"h264", "hevc", "av1"})}}},
+      {"reasoning", {{"type", "string"}}},
+    };
+    schema["required"] = nlohmann::json::array({
+      "display_mode",
+      "color_range",
+      "hdr",
+      "virtual_display",
+      "target_bitrate_kbps",
+      "nvenc_tune",
+      "preferred_codec",
+      "reasoning"
+    });
 
-  /**
-   * @brief Call Claude via the `claude` CLI using the user's subscription.
-   * No API key needed — uses the locally authenticated Claude Code session.
-   */
-  static std::optional<device_db::optimization_t> call_claude_cli(
+    return {
+      {"type", "json_schema"},
+      {"json_schema", {
+        {"name", "polaris_optimization"},
+        {"strict", true},
+        {"schema", schema},
+      }}
+    };
+  }
+
+  static std::string anthropic_cli_model(const config_t &active_cfg) {
+    auto model = to_lower_copy(active_cfg.model);
+    if (model.find("haiku") != std::string::npos) return "haiku";
+    if (model.find("sonnet") != std::string::npos) return "sonnet";
+    if (model.find("opus") != std::string::npos) return "opus";
+    return active_cfg.model.empty() ? "haiku" : active_cfg.model;
+  }
+
+  static std::string extract_anthropic_text(const nlohmann::json &api_response) {
+    if (api_response.contains("content") && api_response["content"].is_array()) {
+      for (const auto &block : api_response["content"]) {
+        if (block.value("type", "") == "text") {
+          return block.value("text", "");
+        }
+      }
+    }
+    return {};
+  }
+
+  static std::string extract_openai_compatible_text(const nlohmann::json &api_response) {
+    if (!api_response.contains("choices") || !api_response["choices"].is_array() || api_response["choices"].empty()) {
+      return {};
+    }
+
+    const auto &message = api_response["choices"][0].value("message", nlohmann::json::object());
+    if (message.contains("content")) {
+      if (message["content"].is_string()) {
+        return message["content"].get<std::string>();
+      }
+      if (message["content"].is_array()) {
+        for (const auto &part : message["content"]) {
+          if (part.value("type", "") == "text") {
+            return part.value("text", "");
+          }
+        }
+      }
+    }
+
+    if (message.contains("refusal")) {
+      BOOST_LOG(error) << "ai_optimizer: Provider refused optimization request: "sv << message["refusal"].dump();
+    }
+
+    return {};
+  }
+
+  // ---- Anthropic CLI (subscription mode) ----
+
+  static std::optional<device_db::optimization_t> call_anthropic_cli(
+      const config_t &active_cfg,
       const std::string &device_name,
       const std::string &app_name,
       const std::string &gpu_info,
@@ -213,7 +506,6 @@ namespace ai_optimizer {
     std::string prompt = build_user_prompt(device_name, app_name, gpu_info, game_category, history);
     std::string system = build_system_prompt();
 
-    // Escape single quotes in the prompt for shell safety
     auto escape_sh = [](const std::string &s) {
       std::string out;
       for (char c : s) {
@@ -223,7 +515,6 @@ namespace ai_optimizer {
       return out;
     };
 
-    // Find claude CLI — check common locations since daemon may lack user's PATH
     std::string claude_bin;
     for (const auto &path : {
       std::string(getenv("HOME") ? getenv("HOME") : "/home") + "/.local/bin/claude",
@@ -239,7 +530,6 @@ namespace ai_optimizer {
       claude_bin = "claude";
     }
 
-    // Write prompt and system prompt to temp files to avoid shell quoting issues
     auto prompt_file = std::filesystem::temp_directory_path() / "polaris_ai_prompt.txt";
     auto system_file = std::filesystem::temp_directory_path() / "polaris_ai_system.txt";
     {
@@ -249,15 +539,14 @@ namespace ai_optimizer {
       sf << system;
     }
 
-    // Build the command using temp files for reliable prompt passing
     std::string cmd =
       "'" + claude_bin + "' --print "
-      "--model haiku "
+      "--model '" + escape_sh(anthropic_cli_model(active_cfg)) + "' "
       "--system-prompt \"$(cat " + system_file.string() + ")\" "
       "< " + prompt_file.string() + " "
       "2>/dev/null";
 
-    BOOST_LOG(debug) << "ai_optimizer: Running claude CLI for "sv << device_name;
+    BOOST_LOG(debug) << "ai_optimizer: Running anthropic CLI for "sv << device_name;
 
     FILE *pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
@@ -273,7 +562,6 @@ namespace ai_optimizer {
 
     int exit_code = pclose(pipe);
 
-    // Clean up temp files
     std::filesystem::remove(prompt_file);
     std::filesystem::remove(system_file);
 
@@ -291,136 +579,155 @@ namespace ai_optimizer {
     }
 
     try {
-      return parse_optimization_json(output, "CLI");
+      return parse_optimization_json(output, "Anthropic CLI");
     } catch (const std::exception &e) {
       BOOST_LOG(error) << "ai_optimizer: Failed to parse CLI response: "sv << e.what();
       return std::nullopt;
     }
   }
 
-  // ---- Claude API (API key mode) ----
+  // ---- Anthropic API ----
 
-  /**
-   * @brief Call the Claude API directly with an API key.
-   */
-  static std::optional<device_db::optimization_t> call_claude_api(
+  static std::optional<device_db::optimization_t> call_anthropic_api(
+      const config_t &active_cfg,
       const std::string &device_name,
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
       const std::optional<session_history_t> &history = std::nullopt) {
 
-    std::string user_msg = build_user_prompt(device_name, app_name, gpu_info, game_category, history);
-
     nlohmann::json request_body;
-    request_body["model"] = "claude-haiku-4-5-20251001";
+    request_body["model"] = active_cfg.model;
     request_body["max_tokens"] = 256;
     request_body["temperature"] = 0;
     request_body["messages"] = nlohmann::json::array({
-      {{"role", "user"}, {"content", user_msg}}
+      {{"role", "user"}, {"content", build_user_prompt(device_name, app_name, gpu_info, game_category, history)}}
     });
     request_body["system"] = build_system_prompt();
 
-    std::string post_data = request_body.dump();
-    std::string auth_header = "x-api-key: " + cfg.api_key;
+    auto response = post_json(
+      join_url(active_cfg.base_url, "/v1/messages"),
+      request_body,
+      active_cfg.timeout_ms,
+      {
+        "x-api-key: " + active_cfg.api_key,
+        "anthropic-version: 2023-06-01"
+      });
 
-    CURL *curl = curl_easy_init();
-    if (!curl) return std::nullopt;
-
-    std::string response_data;
-    struct curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, auth_header.c_str());
-    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
-
-    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(cfg.timeout_ms));
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-
-    CURLcode res = curl_easy_perform(curl);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK) {
-      BOOST_LOG(error) << "ai_optimizer: API request failed: "sv << curl_easy_strerror(res);
+    if (response.curl_code != CURLE_OK) {
+      BOOST_LOG(error) << "ai_optimizer: Anthropic request failed: "sv << curl_easy_strerror(response.curl_code);
       return std::nullopt;
     }
 
-    if (http_code != 200) {
-      BOOST_LOG(error) << "ai_optimizer: API returned HTTP "sv << http_code << ": "sv << response_data.substr(0, 200);
+    if (response.http_code != 200) {
+      BOOST_LOG(error) << "ai_optimizer: Anthropic returned HTTP "sv << response.http_code << ": "sv << response.body.substr(0, 200);
       return std::nullopt;
     }
 
     try {
-      auto api_response = nlohmann::json::parse(response_data);
-
-      // Extract text content from Claude's response
-      std::string content_text;
-      if (api_response.contains("content") && api_response["content"].is_array()) {
-        for (const auto &block : api_response["content"]) {
-          if (block.value("type", "") == "text") {
-            content_text = block["text"].get<std::string>();
-            break;
-          }
-        }
-      }
-
+      auto api_response = nlohmann::json::parse(response.body);
+      auto content_text = extract_anthropic_text(api_response);
       if (content_text.empty()) {
-        BOOST_LOG(error) << "ai_optimizer: Empty response from Claude API"sv;
+        BOOST_LOG(error) << "ai_optimizer: Empty response from Anthropic API"sv;
         return std::nullopt;
       }
-
-      return parse_optimization_json(content_text, "API");
-
+      return parse_optimization_json(content_text, "Anthropic API");
     } catch (const std::exception &e) {
-      BOOST_LOG(error) << "ai_optimizer: Failed to parse API response: "sv << e.what();
+      BOOST_LOG(error) << "ai_optimizer: Failed to parse Anthropic response: "sv << e.what();
+      return std::nullopt;
+    }
+  }
+
+  // ---- OpenAI-compatible API ----
+
+  static std::optional<device_db::optimization_t> call_openai_compatible_api(
+      const config_t &active_cfg,
+      const std::string &device_name,
+      const std::string &app_name,
+      const std::string &gpu_info,
+      const std::string &game_category = "",
+      const std::optional<session_history_t> &history = std::nullopt) {
+
+    nlohmann::json request_body;
+    request_body["model"] = active_cfg.model;
+    request_body["temperature"] = 0;
+    request_body["max_tokens"] = 256;
+    request_body["messages"] = nlohmann::json::array({
+      {{"role", "system"}, {"content", build_system_prompt()}},
+      {{"role", "user"}, {"content", build_user_prompt(device_name, app_name, gpu_info, game_category, history)}}
+    });
+    request_body["response_format"] = optimization_response_format();
+
+    std::vector<std::string> headers;
+    if (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty()) {
+      headers.push_back("Authorization: Bearer " + active_cfg.api_key);
+    }
+
+    auto response = post_json(join_url(active_cfg.base_url, "/chat/completions"), request_body, active_cfg.timeout_ms, headers);
+    if (response.curl_code != CURLE_OK) {
+      BOOST_LOG(error) << "ai_optimizer: OpenAI-compatible request failed: "sv << curl_easy_strerror(response.curl_code);
+      return std::nullopt;
+    }
+
+    if (response.http_code != 200) {
+      BOOST_LOG(error) << "ai_optimizer: OpenAI-compatible endpoint returned HTTP "sv << response.http_code << ": "sv << response.body.substr(0, 200);
+      return std::nullopt;
+    }
+
+    try {
+      auto api_response = nlohmann::json::parse(response.body);
+      auto content_text = extract_openai_compatible_text(api_response);
+      if (content_text.empty()) {
+        BOOST_LOG(error) << "ai_optimizer: Empty response from OpenAI-compatible endpoint"sv;
+        return std::nullopt;
+      }
+      return parse_optimization_json(content_text, "OpenAI-compatible API");
+    } catch (const std::exception &e) {
+      BOOST_LOG(error) << "ai_optimizer: Failed to parse OpenAI-compatible response: "sv << e.what();
       return std::nullopt;
     }
   }
 
   // ---- Unified dispatch ----
 
-  /**
-   * @brief Route to either CLI (subscription) or API (key) based on config.
-   */
-  static std::optional<device_db::optimization_t> call_claude(
+  static std::optional<device_db::optimization_t> call_provider(
+      const config_t &active_cfg,
       const std::string &device_name,
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
       const std::optional<session_history_t> &history = std::nullopt) {
-    if (cfg.use_subscription) {
-      return call_claude_cli(device_name, app_name, gpu_info, game_category, history);
+    if (active_cfg.provider == PROVIDER_ANTHROPIC) {
+      if (active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+        return call_anthropic_cli(active_cfg, device_name, app_name, gpu_info, game_category, history);
+      }
+      return call_anthropic_api(active_cfg, device_name, app_name, gpu_info, game_category, history);
     }
-    return call_claude_api(device_name, app_name, gpu_info, game_category, history);
+
+    return call_openai_compatible_api(active_cfg, device_name, app_name, gpu_info, game_category, history);
   }
 
   // ---- Public API ----
 
   void init(const config_t &config) {
-    cfg = config;
+    cfg = resolved_config(config);
     load_cache();
     if (cfg.enabled) {
-      BOOST_LOG(info) << "ai_optimizer: Enabled with "sv
-                      << (cfg.use_subscription ? "subscription"sv : "API key"sv)
+      BOOST_LOG(info) << "ai_optimizer: Enabled provider="sv << cfg.provider
+                      << ", model="sv << cfg.model
+                      << ", auth="sv << cfg.auth_mode
                       << ", cache TTL "sv << cfg.cache_ttl_hours << "h"sv;
     }
   }
 
   bool is_enabled() {
-    return cfg.enabled && (!cfg.api_key.empty() || cfg.use_subscription);
+    return is_config_enabled(cfg);
   }
 
   std::optional<device_db::optimization_t> get_cached(
       const std::string &device_name, const std::string &app_name) {
     std::lock_guard<std::mutex> lock(cache_mutex);
-    auto key = cache_key(device_name, app_name);
+    auto key = current_cache_key(device_name, app_name);
     auto it = cache.find(key);
     if (it == cache.end()) return std::nullopt;
 
@@ -441,13 +748,19 @@ namespace ai_optimizer {
                      const std::string &game_category,
                      const std::optional<session_history_t> &history) {
     if (!is_enabled()) return;
+    auto active_cfg = cfg;
 
-    std::thread([device_name, app_name, gpu_info, game_category, history]() {
-      auto result = call_claude(device_name, app_name, gpu_info, game_category, history);
+    std::thread([active_cfg, device_name, app_name, gpu_info, game_category, history]() {
+      auto result = call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history);
       if (result) {
         std::lock_guard<std::mutex> lock(cache_mutex);
         auto now = std::chrono::system_clock::now().time_since_epoch();
-        cache[cache_key(device_name, app_name)] = {
+        cache[current_cache_key(active_cfg, device_name, app_name)] = {
+          active_cfg.provider,
+          active_cfg.model,
+          active_cfg.base_url,
+          device_name,
+          app_name,
           *result,
           std::chrono::duration_cast<std::chrono::seconds>(now).count()
         };
@@ -463,12 +776,18 @@ namespace ai_optimizer {
       const std::string &game_category,
       const std::optional<session_history_t> &history) {
     if (!is_enabled()) return std::nullopt;
+    auto active_cfg = cfg;
 
-    auto result = call_claude(device_name, app_name, gpu_info, game_category, history);
+    auto result = call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history);
     if (result) {
       std::lock_guard<std::mutex> lock(cache_mutex);
       auto now = std::chrono::system_clock::now().time_since_epoch();
-      cache[cache_key(device_name, app_name)] = {
+      cache[current_cache_key(active_cfg, device_name, app_name)] = {
+        active_cfg.provider,
+        active_cfg.model,
+        active_cfg.base_url,
+        device_name,
+        app_name,
         *result,
         std::chrono::duration_cast<std::chrono::seconds>(now).count()
       };
@@ -477,17 +796,35 @@ namespace ai_optimizer {
     return result;
   }
 
+  std::optional<device_db::optimization_t> request_sync_with_config(
+      const config_t &config,
+      const std::string &device_name,
+      const std::string &app_name,
+      const std::string &gpu_info,
+      const std::string &game_category,
+      const std::optional<session_history_t> &history) {
+    auto active_cfg = resolved_config(config);
+    if (!is_config_enabled(active_cfg)) {
+      return std::nullopt;
+    }
+
+    return call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history);
+  }
+
   std::string get_status_json() {
     nlohmann::json status;
     status["enabled"] = cfg.enabled;
+    status["provider"] = cfg.provider;
+    status["model"] = cfg.model;
+    status["auth_mode"] = cfg.auth_mode;
+    status["base_url"] = cfg.base_url;
     status["has_api_key"] = !cfg.api_key.empty();
-    status["use_subscription"] = cfg.use_subscription;
+    status["use_subscription"] = cfg.auth_mode == AUTH_SUBSCRIPTION;
     status["timeout_ms"] = cfg.timeout_ms;
     status["cache_ttl_hours"] = cfg.cache_ttl_hours;
     status["cache_count"] = cache.size();
 
-    // Check if claude CLI is available for subscription mode
-    if (cfg.use_subscription) {
+    if (cfg.provider == PROVIDER_ANTHROPIC && cfg.auth_mode == AUTH_SUBSCRIPTION) {
       int rc = system("command -v claude >/dev/null 2>&1");
       status["cli_available"] = (rc == 0);
     }
@@ -499,8 +836,14 @@ namespace ai_optimizer {
     std::lock_guard<std::mutex> lock(cache_mutex);
     nlohmann::json root = nlohmann::json::object();
     for (const auto &[key, entry] : cache) {
+      if (entry.provider != cfg.provider || entry.model != cfg.model || entry.base_url != cfg.base_url) {
+        continue;
+      }
       nlohmann::json val;
       val["timestamp"] = entry.timestamp;
+      val["provider"] = entry.provider;
+      val["model"] = entry.model;
+      val["base_url"] = entry.base_url;
       auto &o = entry.optimization;
       if (o.display_mode) val["display_mode"] = *o.display_mode;
       if (o.target_bitrate_kbps) val["target_bitrate_kbps"] = *o.target_bitrate_kbps;
@@ -508,7 +851,7 @@ namespace ai_optimizer {
       if (o.preferred_codec) val["preferred_codec"] = *o.preferred_codec;
       val["reasoning"] = o.reasoning;
       val["source"] = o.source;
-      root[key] = val;
+      root[history_key(entry.device_name, entry.app_name)] = val;
     }
     return root.dump(2);
   }
@@ -565,7 +908,7 @@ namespace ai_optimizer {
   void record_session(const std::string &device_name,
                       const std::string &app_name,
                       const session_history_t &session) {
-    auto key = cache_key(device_name, app_name);
+    auto key = history_key(device_name, app_name);
     auto &existing = session_history[key];
 
     // Rolling average with the new session
@@ -590,7 +933,7 @@ namespace ai_optimizer {
     // If quality is poor (D or F), invalidate cache to force re-optimization
     if (session.quality_grade == "D" || session.quality_grade == "F") {
       std::lock_guard<std::mutex> lock(cache_mutex);
-      cache.erase(key);
+      cache.erase(current_cache_key(device_name, app_name));
       save_cache_locked();
       BOOST_LOG(info) << "ai_optimizer: Poor quality — invalidated cache for "sv << key;
     }
@@ -601,7 +944,7 @@ namespace ai_optimizer {
     static std::once_flag history_load_flag;
     std::call_once(history_load_flag, load_history);
 
-    auto key = cache_key(device_name, app_name);
+    auto key = history_key(device_name, app_name);
     auto it = session_history.find(key);
     if (it == session_history.end()) return std::nullopt;
     return it->second;

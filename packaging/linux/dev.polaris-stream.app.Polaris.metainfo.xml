@@ -15,10 +15,7 @@
     <control>gamepad</control>
   </supports>
 
-  <url type="homepage">@PROJECT_HOMEPAGE_URL@</url>
-  <url type="bugtracker">https://github.com/papi/Polaris/issues</url>
-  <url type="help">https://github.com/papi/Polaris/wiki</url>
-  <url type="contact">https://github.com/papi/Polaris/discussions</url>
+  <url type="homepage">https://github.com/papi-ux</url>
 
   <description>
     <p>
@@ -51,12 +48,6 @@
   <developer id="app.polaris-stream">
     <name>papi</name>
   </developer>
-  <screenshots>
-    <screenshot type="default">
-      <image>https://github.com/papi/Polaris/raw/master/assets/img/screenshots/01-polaris-welcome-page.png</image>
-      <caption>Polaris welcome page</caption>
-    </screenshot>
-  </screenshots>
   <content_rating type="oars-1.0">
     <content_attribute id="language-profanity">moderate</content_attribute>
     <content_attribute id="language-humor">mild</content_attribute>

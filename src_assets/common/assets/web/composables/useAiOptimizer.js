@@ -80,6 +80,31 @@ export function useAiOptimizer() {
     return { status: false, error: 'Request failed' }
   }
 
+  async function testConnection(configDraft, deviceName, appName, gpuInfo) {
+    loading.value = true
+    try {
+      const res = await fetch('./api/ai/test', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...configDraft,
+          device_name: deviceName || 'Test Device',
+          app_name: appName || 'Test App',
+          gpu_info: gpuInfo || 'NVIDIA RTX (NVENC)'
+        })
+      })
+      if (res.ok) {
+        return await res.json()
+      }
+    } catch (e) {
+      console.error('AI connection test failed:', e)
+    } finally {
+      loading.value = false
+    }
+    return { status: false, error: 'Request failed' }
+  }
+
   async function fetchDevices() {
     try {
       const res = await fetch('./api/devices', { credentials: 'include' })
@@ -119,6 +144,7 @@ export function useAiOptimizer() {
     fetchCache,
     clearCache,
     optimize,
+    testConnection,
     fetchDevices,
     getSuggestion
   }

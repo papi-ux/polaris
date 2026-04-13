@@ -433,7 +433,6 @@ namespace proc {
     }
 
     // AI optimizer: check cache for a smarter optimization, fire async if miss
-    bool ai_applied = false;
     if (ai_optimizer::is_enabled()) {
       auto ai_opt = ai_optimizer::get_cached(launch_session->device_name, _app.name);
       if (ai_opt) {
@@ -464,7 +463,6 @@ namespace proc {
                             << *ai_opt->target_bitrate_kbps << " kbps"sv;
           }
         }
-        ai_applied = true;
       } else {
         // No cache hit — check if device is known in device_db
         std::string gpu_info = config::video.adapter_name.empty()
@@ -496,7 +494,6 @@ namespace proc {
               BOOST_LOG(info) << "ai_optimizer: Recommended codec: "sv << *sync_opt->preferred_codec;
             if (sync_opt->nvenc_tune)
               config::video.nvenc_tune = *sync_opt->nvenc_tune;
-            ai_applied = true;
           }
         } else {
           // Known device — async is fine, device_db already applied reasonable defaults

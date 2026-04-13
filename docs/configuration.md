@@ -2646,13 +2646,88 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### ai_provider
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Select the AI provider used for optimization requests.
+            Supported values are `anthropic`, `openai`, `gemini`, and `local`.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            anthropic
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            ai_provider = openai
+            @endcode</td>
+    </tr>
+</table>
+
+### ai_model
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Model identifier sent to the selected AI provider.
+            If omitted, Polaris uses the provider default:
+            Anthropic = `claude-haiku-4-5-20251001`,
+            OpenAI = `gpt-5.4-mini`,
+            Gemini = `gemini-2.5-flash`,
+            Local = `gpt-oss`.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Provider-specific default</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            ai_model = gpt-5.4-mini
+            @endcode</td>
+    </tr>
+</table>
+
+### ai_auth_mode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Authentication mode used for AI requests.
+            Supported values are `api_key`, `subscription`, and `none`.
+            `subscription` is only meaningful for Anthropic via the local `claude` CLI session.
+            `none` is intended for local OpenAI-compatible endpoints that do not require a key.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Provider-specific default</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            ai_auth_mode = api_key
+            @endcode</td>
+    </tr>
+</table>
+
 ### ai_api_key
 
 <table>
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Anthropic API key used when AI optimization runs in direct API mode.
+            Provider API key used when AI optimization runs in direct API mode.
+            This applies to Anthropic, OpenAI, Gemini, or any local endpoint that expects a bearer token.
         </td>
     </tr>
     <tr>
@@ -2662,7 +2737,34 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            ai_api_key = sk-ant-api03-...
+            ai_api_key = sk-proj-...
+            @endcode</td>
+    </tr>
+</table>
+
+### ai_base_url
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Base URL for the AI provider endpoint.
+            Leave empty to use the provider default.
+            Defaults are:
+            Anthropic = `https://api.anthropic.com`,
+            OpenAI = `https://api.openai.com/v1`,
+            Gemini = `https://generativelanguage.googleapis.com/v1beta/openai`,
+            Local = `http://127.0.0.1:11434/v1`.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Provider-specific default</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            ai_base_url = http://127.0.0.1:11434/v1
             @endcode</td>
     </tr>
 </table>
@@ -2673,7 +2775,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Use the local `claude` CLI session instead of a direct API key for AI optimization.
+            Legacy compatibility toggle for Anthropic.
+            When `ai_auth_mode` is unset, enabling this makes Polaris use the local `claude` CLI session instead of a direct API key.
+            New configs should prefer `ai_auth_mode = subscription`.
         </td>
     </tr>
     <tr>
@@ -2720,6 +2824,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Cache lifetime in hours for AI optimization results.
+            Cache entries are scoped by provider, model, device, and app.
         </td>
     </tr>
     <tr>

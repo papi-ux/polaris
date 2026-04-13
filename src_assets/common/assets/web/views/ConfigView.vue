@@ -307,7 +307,11 @@ const tabs = ref([
     name: "AI",
     options: {
       "ai_enabled": "disabled",
+      "ai_provider": "anthropic",
+      "ai_model": "",
+      "ai_auth_mode": "",
       "ai_api_key": "",
+      "ai_base_url": "",
       "ai_use_subscription": "disabled",
       "ai_timeout_ms": 5000,
       "ai_cache_ttl_hours": 168,

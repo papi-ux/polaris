@@ -538,7 +538,11 @@ namespace config {
 
     {     // ai_optimizer
       false,  // enabled
+      "anthropic",  // provider
+      {},     // model
+      {},     // auth_mode
       {},     // api_key
+      {},     // base_url
       false,  // use_subscription
       5000,   // timeout_ms
       168,    // cache_ttl_hours (1 week)
@@ -1268,7 +1272,11 @@ namespace config {
 
     // AI Optimizer
     bool_f(vars, "ai_enabled", video.ai_optimizer.enabled);
+    string_f(vars, "ai_provider", video.ai_optimizer.provider);
+    string_f(vars, "ai_model", video.ai_optimizer.model);
+    string_f(vars, "ai_auth_mode", video.ai_optimizer.auth_mode);
     string_f(vars, "ai_api_key", video.ai_optimizer.api_key);
+    string_f(vars, "ai_base_url", video.ai_optimizer.base_url);
     bool_f(vars, "ai_use_subscription", video.ai_optimizer.use_subscription);
     int_f(vars, "ai_timeout_ms", video.ai_optimizer.timeout_ms);
     int_f(vars, "ai_cache_ttl_hours", video.ai_optimizer.cache_ttl_hours);

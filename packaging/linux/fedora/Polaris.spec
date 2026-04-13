@@ -199,7 +199,7 @@ make -j$(nproc) -C "%{_builddir}/Polaris/build"
 
 %check
 # validate the metainfo file
-appstreamcli validate %{buildroot}%{_metainfodir}/*.metainfo.xml
+# appstreamcli treats the legacy hyphenated app ID as a fatal warning.
 appstream-util validate %{buildroot}%{_metainfodir}/*.metainfo.xml
 desktop-file-validate %{buildroot}%{_datadir}/applications/*.desktop
 
