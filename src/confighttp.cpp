@@ -1526,6 +1526,34 @@ namespace confighttp {
 
   // ---- AI Optimizer API ----
 
+  ai_optimizer::config_t parseAiDraftConfig(const nlohmann::json &body) {
+    auto get_string = [&](const char *key, const char *fallback = "") {
+      return body.value(key, std::string {fallback});
+    };
+    auto get_enabled = [&](const char *key, bool fallback = false) {
+      if (!body.contains(key)) return fallback;
+      const auto &value = body[key];
+      if (value.is_boolean()) return value.get<bool>();
+      if (value.is_string()) {
+        auto text = boost::algorithm::to_lower_copy(value.get<std::string>());
+        return text == "enabled" || text == "true" || text == "1" || text == "yes";
+      }
+      return fallback;
+    };
+
+    ai_optimizer::config_t ai_cfg;
+    ai_cfg.enabled = get_enabled("ai_enabled", true);
+    ai_cfg.provider = get_string("ai_provider");
+    ai_cfg.model = get_string("ai_model");
+    ai_cfg.auth_mode = get_string("ai_auth_mode");
+    ai_cfg.api_key = get_string("ai_api_key");
+    ai_cfg.base_url = get_string("ai_base_url");
+    ai_cfg.use_subscription = get_enabled("ai_use_subscription", false);
+    ai_cfg.timeout_ms = body.value("ai_timeout_ms", config::video.ai_optimizer.timeout_ms);
+    ai_cfg.cache_ttl_hours = body.value("ai_cache_ttl_hours", config::video.ai_optimizer.cache_ttl_hours);
+    return ai_cfg;
+  }
+
   void getAiStatus(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -1559,6 +1587,31 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  void getAiModels(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    print_req(request);
+
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      auto body = nlohmann::json::parse(ss.str());
+
+      auto ai_cfg = parseAiDraftConfig(body);
+
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(ai_optimizer::get_models_json_with_config(ai_cfg), headers);
+    } catch (const std::exception &e) {
+      nlohmann::json output;
+      output["status"] = false;
+      output["discovered"] = false;
+      output["models"] = nlohmann::json::array();
+      output["fallback_models"] = nlohmann::json::array();
+      output["error"] = e.what();
+      send_response(response, output);
+    }
+  }
+
   void testAiConfig(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -1569,34 +1622,12 @@ namespace confighttp {
       ss << request->content.rdbuf();
       auto body = nlohmann::json::parse(ss.str());
 
-      auto get_string = [&](const char *key, const char *fallback = "") {
-        return body.value(key, std::string {fallback});
-      };
-      auto get_enabled = [&](const char *key, bool fallback = false) {
-        if (!body.contains(key)) return fallback;
-        const auto &value = body[key];
-        if (value.is_boolean()) return value.get<bool>();
-        if (value.is_string()) {
-          auto text = boost::algorithm::to_lower_copy(value.get<std::string>());
-          return text == "enabled" || text == "true" || text == "1" || text == "yes";
-        }
-        return fallback;
-      };
+      std::string device = body.value("device_name", std::string {"Test Device"});
+      std::string app = body.value("app_name", std::string {"Test App"});
+      std::string gpu = body.value("gpu_info", std::string {"NVIDIA RTX (NVENC)"});
 
-      std::string device = get_string("device_name", "Test Device");
-      std::string app = get_string("app_name", "Test App");
-      std::string gpu = get_string("gpu_info", "NVIDIA RTX (NVENC)");
-
-      ai_optimizer::config_t ai_cfg;
+      auto ai_cfg = parseAiDraftConfig(body);
       ai_cfg.enabled = true;
-      ai_cfg.provider = get_string("ai_provider");
-      ai_cfg.model = get_string("ai_model");
-      ai_cfg.auth_mode = get_string("ai_auth_mode");
-      ai_cfg.api_key = get_string("ai_api_key");
-      ai_cfg.base_url = get_string("ai_base_url");
-      ai_cfg.use_subscription = get_enabled("ai_use_subscription", false);
-      ai_cfg.timeout_ms = body.value("ai_timeout_ms", config::video.ai_optimizer.timeout_ms);
-      ai_cfg.cache_ttl_hours = body.value("ai_cache_ttl_hours", config::video.ai_optimizer.cache_ttl_hours);
 
       auto result = ai_optimizer::request_sync_with_config(ai_cfg, device, app, gpu);
       if (result) {
@@ -3419,6 +3450,7 @@ namespace confighttp {
     server.resource["^/api/ai/cache$"]["GET"] = getAiCache;
     server.resource["^/api/ai/history$"]["GET"] = getAiHistory;
     server.resource["^/api/ai/cache/clear$"]["POST"] = withCsrf(clearAiCache);
+    server.resource["^/api/ai/models$"]["POST"] = withCsrf(getAiModels);
     server.resource["^/api/ai/test$"]["POST"] = withCsrf(testAiConfig);
     server.resource["^/api/ai/optimize$"]["POST"] = withCsrf(triggerAiOptimize);
     server.resource["^/api/devices$"]["GET"] = getDevices;

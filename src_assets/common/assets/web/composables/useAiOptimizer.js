@@ -5,6 +5,8 @@ const status = ref(null)
 const cache = ref([])
 const devices = ref([])
 const loading = ref(false)
+const modelCatalog = ref(null)
+const modelsLoading = ref(false)
 
 export function useAiOptimizer() {
   async function fetchStatus() {
@@ -105,6 +107,34 @@ export function useAiOptimizer() {
     return { status: false, error: 'Request failed' }
   }
 
+  async function fetchModels(configDraft) {
+    modelsLoading.value = true
+    try {
+      const res = await fetch('./api/ai/models', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(configDraft)
+      })
+      if (res.ok) {
+        modelCatalog.value = await res.json()
+        return modelCatalog.value
+      }
+    } catch (e) {
+      console.error('AI model catalog fetch failed:', e)
+    } finally {
+      modelsLoading.value = false
+    }
+    modelCatalog.value = {
+      status: false,
+      discovered: false,
+      models: [],
+      fallback_models: [],
+      error: 'Request failed'
+    }
+    return modelCatalog.value
+  }
+
   async function fetchDevices() {
     try {
       const res = await fetch('./api/devices', { credentials: 'include' })
@@ -140,11 +170,14 @@ export function useAiOptimizer() {
     cache: readonly(cache),
     devices: readonly(devices),
     loading: readonly(loading),
+    modelCatalog: readonly(modelCatalog),
+    modelsLoading: readonly(modelsLoading),
     fetchStatus,
     fetchCache,
     clearCache,
     optimize,
     testConnection,
+    fetchModels,
     fetchDevices,
     getSuggestion
   }

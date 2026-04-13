@@ -18,7 +18,7 @@ jobs:
     - name: Bootstrap Arch container
       run: pacman -Syu --noconfirm --needed archlinux-keyring git
 
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -41,7 +41,7 @@ jobs:
       run: |
         BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
         BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-        COMMIT="$(git rev-parse HEAD)"
+        COMMIT="${GITHUB_SHA}"
         env \
           BRANCH="$BRANCH" \
           BUILD_VERSION="$BUILD_VERSION" \
@@ -73,7 +73,7 @@ jobs:
 
     - name: Upload Arch packaging artifacts
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: arch-packaging-files
         path: |
@@ -83,7 +83,7 @@ jobs:
 
     - name: Upload Arch package outputs
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: arch-package-outputs
         path: |
@@ -95,7 +95,7 @@ jobs:
 
     - name: Upload Arch build metadata
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: arch-build-metadata
         path: |
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 

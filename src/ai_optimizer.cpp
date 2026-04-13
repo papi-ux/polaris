@@ -16,6 +16,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <curl/curl.h>
@@ -316,6 +317,38 @@ namespace ai_optimizer {
     return response;
   }
 
+  static http_response_t get_json(const std::string &url,
+                                  int timeout_ms,
+                                  const std::vector<std::string> &header_values) {
+    http_response_t response;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      response.curl_code = CURLE_FAILED_INIT;
+      return response;
+    }
+
+    struct curl_slist *headers = nullptr;
+    for (const auto &header_value : header_values) {
+      headers = curl_slist_append(headers, header_value.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout_ms));
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+
+    response.curl_code = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return response;
+  }
+
   // ---- Prompt builder (shared by both API and CLI paths) ----
 
   static std::string build_system_prompt() {
@@ -491,6 +524,46 @@ namespace ai_optimizer {
     }
 
     return {};
+  }
+
+  static void append_unique_model(nlohmann::json &models,
+                                  std::unordered_set<std::string> &seen_ids,
+                                  const std::string &id,
+                                  const std::string &label = "") {
+    if (id.empty() || !seen_ids.emplace(id).second) {
+      return;
+    }
+
+    nlohmann::json model;
+    model["id"] = id;
+    model["label"] = label.empty() ? id : label;
+    models.push_back(model);
+  }
+
+  static nlohmann::json fallback_model_list(const config_t &active_cfg) {
+    nlohmann::json models = nlohmann::json::array();
+    std::unordered_set<std::string> seen_ids;
+
+    append_unique_model(models, seen_ids, active_cfg.model, "Current selection");
+    append_unique_model(models, seen_ids, default_model_for_provider(active_cfg.provider), "Provider default");
+
+    if (active_cfg.provider == PROVIDER_ANTHROPIC) {
+      append_unique_model(models, seen_ids, "claude-haiku-4-5-20251001");
+      append_unique_model(models, seen_ids, "claude-sonnet-4-20250514");
+      append_unique_model(models, seen_ids, "claude-opus-4-20250514");
+    } else if (active_cfg.provider == PROVIDER_OPENAI) {
+      append_unique_model(models, seen_ids, "gpt-5.4-mini");
+      append_unique_model(models, seen_ids, "gpt-5.4");
+      append_unique_model(models, seen_ids, "gpt-4.1-mini");
+    } else if (active_cfg.provider == PROVIDER_GEMINI) {
+      append_unique_model(models, seen_ids, "gemini-2.5-flash");
+      append_unique_model(models, seen_ids, "gemini-2.5-pro");
+    } else if (active_cfg.provider == PROVIDER_LOCAL) {
+      append_unique_model(models, seen_ids, "gpt-oss");
+      append_unique_model(models, seen_ids, "qwen3-8b");
+    }
+
+    return models;
   }
 
   // ---- Anthropic CLI (subscription mode) ----
@@ -809,6 +882,96 @@ namespace ai_optimizer {
     }
 
     return call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history);
+  }
+
+  std::string get_models_json_with_config(const config_t &config) {
+    auto active_cfg = resolved_config(config);
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["provider"] = active_cfg.provider;
+    output["model"] = active_cfg.model;
+    output["auth_mode"] = active_cfg.auth_mode;
+    output["base_url"] = active_cfg.base_url;
+    output["discovered"] = false;
+    output["source"] = "fallback";
+    output["models"] = nlohmann::json::array();
+    output["fallback_models"] = fallback_model_list(active_cfg);
+
+    if (active_cfg.provider == PROVIDER_ANTHROPIC && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      output["error"] = "Live model discovery is unavailable for Claude CLI subscription mode.";
+      return output.dump(2);
+    }
+
+    if (active_cfg.auth_mode == AUTH_API_KEY && active_cfg.api_key.empty()) {
+      output["error"] = "Enter an API key to fetch the live model list.";
+      return output.dump(2);
+    }
+
+    http_response_t response;
+    if (active_cfg.provider == PROVIDER_ANTHROPIC) {
+      response = get_json(
+        join_url(active_cfg.base_url, "/v1/models"),
+        active_cfg.timeout_ms,
+        {
+          "x-api-key: " + active_cfg.api_key,
+          "anthropic-version: 2023-06-01"
+        });
+    } else {
+      std::vector<std::string> headers;
+      if (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty()) {
+        headers.push_back("Authorization: Bearer " + active_cfg.api_key);
+      }
+      response = get_json(join_url(active_cfg.base_url, "/models"), active_cfg.timeout_ms, headers);
+    }
+
+    if (response.curl_code != CURLE_OK) {
+      output["error"] = std::string("Model discovery request failed: ") + curl_easy_strerror(response.curl_code);
+      return output.dump(2);
+    }
+
+    if (response.http_code != 200) {
+      output["error"] = "Model discovery endpoint returned HTTP " + std::to_string(response.http_code);
+      return output.dump(2);
+    }
+
+    try {
+      auto api_response = nlohmann::json::parse(response.body);
+      nlohmann::json discovered_models = nlohmann::json::array();
+      std::unordered_set<std::string> seen_ids;
+
+      if (active_cfg.provider == PROVIDER_ANTHROPIC) {
+        for (const auto &item : api_response.value("data", nlohmann::json::array())) {
+          append_unique_model(
+            discovered_models,
+            seen_ids,
+            item.value("id", std::string {}),
+            item.value("display_name", std::string {}));
+        }
+      } else {
+        for (const auto &item : api_response.value("data", nlohmann::json::array())) {
+          append_unique_model(
+            discovered_models,
+            seen_ids,
+            item.value("id", std::string {}),
+            item.value("id", std::string {}));
+        }
+      }
+
+      if (discovered_models.empty()) {
+        output["error"] = "Provider returned an empty model list.";
+        return output.dump(2);
+      }
+
+      output["discovered"] = true;
+      output["source"] = "live";
+      output["models"] = discovered_models;
+      output["model_count"] = discovered_models.size();
+    } catch (const std::exception &e) {
+      output["error"] = std::string("Failed to parse model list: ") + e.what();
+    }
+
+    return output.dump(2);
   }
 
   std::string get_status_json() {

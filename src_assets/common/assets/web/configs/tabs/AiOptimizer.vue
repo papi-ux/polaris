@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAiOptimizer } from '../../composables/useAiOptimizer'
 import { useToast } from '../../composables/useToast'
 
@@ -9,15 +9,19 @@ const config = ref(props.config)
 const { toast } = useToast()
 const {
   status: aiStatus, cache: aiCache, devices: aiDevices, loading: aiLoading,
-  fetchStatus, fetchCache, fetchDevices, clearCache, testConnection
+  modelCatalog, modelsLoading,
+  fetchStatus, fetchCache, fetchDevices, fetchModels, clearCache, testConnection
 } = useAiOptimizer()
 
 const showApiKey = ref(false)
 const testResult = ref(null)
 const testLoading = ref(false)
+const testDeviceName = ref('')
+const testAppName = ref('')
 const deviceSearch = ref('')
 const cacheExpanded = ref(false)
 const filteredDevices = ref([])
+let modelRefreshTimer = null
 
 const providerOptions = [
   {
@@ -33,6 +37,24 @@ const providerOptions = [
     pill: 'text-amber-200 border-amber-300/30',
     keyPlaceholder: 'sk-ant-api03-...',
     keyHint: 'Anthropic API key from console.anthropic.com.',
+    profiles: [
+      {
+        id: 'claude-cli',
+        name: 'Claude CLI',
+        description: 'Use the local Claude subscription session through the CLI.',
+        model: 'claude-haiku-4-5-20251001',
+        baseUrl: 'https://api.anthropic.com',
+        authMode: 'subscription'
+      },
+      {
+        id: 'anthropic-api',
+        name: 'Anthropic API',
+        description: 'Use direct Anthropic API access with a bearer key.',
+        model: 'claude-haiku-4-5-20251001',
+        baseUrl: 'https://api.anthropic.com',
+        authMode: 'api_key'
+      }
+    ]
   },
   {
     id: 'openai',
@@ -47,6 +69,16 @@ const providerOptions = [
     pill: 'text-emerald-200 border-emerald-300/30',
     keyPlaceholder: 'sk-proj-...',
     keyHint: 'OpenAI API key from platform.openai.com.',
+    profiles: [
+      {
+        id: 'openai-default',
+        name: 'Hosted API',
+        description: 'Use the default OpenAI endpoint with the documented starter model.',
+        model: 'gpt-5.4-mini',
+        baseUrl: 'https://api.openai.com/v1',
+        authMode: 'api_key'
+      }
+    ]
   },
   {
     id: 'gemini',
@@ -61,6 +93,16 @@ const providerOptions = [
     pill: 'text-sky-200 border-sky-300/30',
     keyPlaceholder: 'AIza...',
     keyHint: 'Gemini API key from Google AI Studio.',
+    profiles: [
+      {
+        id: 'gemini-default',
+        name: 'Gemini API',
+        description: 'Use Google AI Studio through the OpenAI-compatible endpoint.',
+        model: 'gemini-2.5-flash',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+        authMode: 'api_key'
+      }
+    ]
   },
   {
     id: 'local',
@@ -75,6 +117,24 @@ const providerOptions = [
     pill: 'text-stone-200 border-stone-300/25',
     keyPlaceholder: 'optional',
     keyHint: 'Usually not required for local endpoints. LM Studio or reverse proxies may add one.',
+    profiles: [
+      {
+        id: 'ollama',
+        name: 'Ollama',
+        description: 'Target the default Ollama OpenAI-compatible endpoint on localhost.',
+        model: 'gpt-oss',
+        baseUrl: 'http://127.0.0.1:11434/v1',
+        authMode: 'none'
+      },
+      {
+        id: 'lm-studio',
+        name: 'LM Studio',
+        description: 'Use LM Studio\'s local server endpoint with the documented starter model.',
+        model: 'qwen3-8b',
+        baseUrl: 'http://127.0.0.1:1234/v1',
+        authMode: 'none'
+      }
+    ]
   }
 ]
 
@@ -93,16 +153,165 @@ const liveProvider = computed(() =>
 )
 
 const availableAuthModes = computed(() => currentProvider.value.authModes)
+const currentProfiles = computed(() => currentProvider.value.profiles || [])
+const modelOptionsId = computed(() => `ai-model-options-${config.value.ai_provider || 'default'}`)
+
+const providerModelCatalog = computed(() => {
+  if (!modelCatalog.value) return null
+  if (modelCatalog.value.provider !== config.value.ai_provider) return null
+  if (modelCatalog.value.base_url !== config.value.ai_base_url) return null
+  if (modelCatalog.value.auth_mode !== config.value.ai_auth_mode) return null
+  return modelCatalog.value
+})
+
+const canRefreshModels = computed(() => {
+  if (!config.value.ai_base_url) return false
+  if (config.value.ai_auth_mode === 'subscription') return false
+  if (config.value.ai_auth_mode === 'none') return true
+  return !!config.value.ai_api_key
+})
 
 const canTestDraft = computed(() => {
+  if (!config.value.ai_model || !config.value.ai_base_url) return false
   if (config.value.ai_auth_mode === 'subscription') return true
   if (config.value.ai_auth_mode === 'none') return true
   return !!config.value.ai_api_key
 })
 
+const draftMatchesRuntime = computed(() => {
+  if (!aiStatus.value) return false
+
+  return aiStatus.value.enabled === (config.value.ai_enabled === 'enabled')
+    && aiStatus.value.provider === config.value.ai_provider
+    && aiStatus.value.model === config.value.ai_model
+    && aiStatus.value.auth_mode === config.value.ai_auth_mode
+    && aiStatus.value.base_url === config.value.ai_base_url
+    && Number(aiStatus.value.timeout_ms || 0) === (Number(config.value.ai_timeout_ms) || 5000)
+    && Number(aiStatus.value.cache_ttl_hours || 0) === (Number(config.value.ai_cache_ttl_hours) || 168)
+})
+
+function uniqueModelSuggestions(sources) {
+  const merged = []
+  const seen = new Set()
+
+  sources.flat().forEach(model => {
+    if (!model?.id || seen.has(model.id)) return
+    seen.add(model.id)
+    merged.push({
+      id: model.id,
+      label: model.label || model.id,
+      origin: model.origin || 'preset'
+    })
+  })
+
+  return merged
+}
+
+const discoveredModelSuggestions = computed(() =>
+  ((providerModelCatalog.value?.models) || []).map(model => ({
+    id: model.id,
+    label: model.label || model.id,
+    origin: 'live'
+  }))
+)
+
+const fallbackModelSuggestions = computed(() => {
+  const runtimeSuggestions = aiStatus.value?.provider === config.value.ai_provider && aiStatus.value?.model
+    ? [{ id: aiStatus.value.model, label: 'Live runtime', origin: 'runtime' }]
+    : []
+
+  const profileSuggestions = currentProfiles.value
+    .filter(profile => profile.model)
+    .map(profile => ({
+      id: profile.model,
+      label: profile.name,
+      origin: 'profile'
+    }))
+
+  const backendFallback = ((providerModelCatalog.value?.fallback_models) || []).map(model => ({
+    id: model.id,
+    label: model.label || model.id,
+    origin: 'fallback'
+  }))
+
+  const currentSelection = config.value.ai_model
+    ? [{ id: config.value.ai_model, label: 'Current selection', origin: 'current' }]
+    : []
+
+  return uniqueModelSuggestions([
+    currentSelection,
+    runtimeSuggestions,
+    backendFallback,
+    profileSuggestions,
+    [{ id: currentProvider.value.defaultModel, label: 'Provider default', origin: 'default' }]
+  ])
+})
+
+const modelSuggestions = computed(() =>
+  uniqueModelSuggestions([discoveredModelSuggestions.value, fallbackModelSuggestions.value])
+)
+
+const featuredModelSuggestions = computed(() => modelSuggestions.value.slice(0, 8))
+
+const modelDiscoverySummary = computed(() => {
+  if (modelsLoading.value) {
+    return { tone: 'text-ice', badge: 'Refreshing', text: 'Checking the provider for a live model catalog.' }
+  }
+
+  if (providerModelCatalog.value?.discovered) {
+    const count = providerModelCatalog.value.model_count || providerModelCatalog.value.models?.length || 0
+    return {
+      tone: 'text-emerald-300',
+      badge: 'Live list',
+      text: `Discovered ${count} model${count === 1 ? '' : 's'} from ${currentProvider.value.name}.`
+    }
+  }
+
+  if (providerModelCatalog.value?.error) {
+    return {
+      tone: config.value.ai_auth_mode === 'subscription' ? 'text-amber-200' : 'text-storm',
+      badge: 'Preset hints',
+      text: providerModelCatalog.value.error
+    }
+  }
+
+  return {
+    tone: 'text-storm',
+    badge: 'Preset hints',
+    text: 'Using provider defaults, profiles, and runtime hints for autocomplete suggestions.'
+  }
+})
+
 function providerPill(providerId) {
   const provider = providerOptions.find(item => item.id === providerId)
   return provider?.pill || 'text-silver border-storm/40'
+}
+
+function applyProviderProfile(profile) {
+  config.value.ai_model = profile.model || currentProvider.value.defaultModel
+  config.value.ai_base_url = profile.baseUrl || currentProvider.value.defaultBaseUrl
+  config.value.ai_auth_mode = profile.authMode || currentProvider.value.defaultAuth
+  config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
+
+  if (config.value.ai_auth_mode === 'none') {
+    config.value.ai_api_key = ''
+  }
+
+  testResult.value = null
+}
+
+function resetProviderDefaults() {
+  applyProviderProfile({
+    model: currentProvider.value.defaultModel,
+    baseUrl: currentProvider.value.defaultBaseUrl,
+    authMode: currentProvider.value.defaultAuth
+  })
+}
+
+function isProfileActive(profile) {
+  return config.value.ai_model === (profile.model || currentProvider.value.defaultModel)
+    && config.value.ai_base_url === (profile.baseUrl || currentProvider.value.defaultBaseUrl)
+    && config.value.ai_auth_mode === (profile.authMode || currentProvider.value.defaultAuth)
 }
 
 function syncProviderDefaults(previousProviderId) {
@@ -136,6 +345,23 @@ function syncProviderDefaults(previousProviderId) {
   }
 }
 
+async function refreshModelCatalog({ silent = false } = {}) {
+  const result = await fetchModels(buildDraftPayload())
+  if (!silent && result?.discovered) {
+    toast(`${currentProvider.value.name} model list refreshed`, 'success')
+  }
+}
+
+function scheduleModelRefresh() {
+  if (modelRefreshTimer) {
+    clearTimeout(modelRefreshTimer)
+  }
+
+  modelRefreshTimer = setTimeout(() => {
+    refreshModelCatalog({ silent: true })
+  }, 350)
+}
+
 watch(() => config.value.ai_provider, (nextProvider, previousProvider) => {
   syncProviderDefaults(previousProvider)
 }, { immediate: true })
@@ -146,6 +372,20 @@ watch(() => config.value.ai_auth_mode, (nextMode) => {
     config.value.ai_api_key = ''
   }
 })
+
+watch(() => config.value.ai_api_key, (nextKey, previousKey) => {
+  if (!!nextKey !== !!previousKey) {
+    scheduleModelRefresh()
+  }
+})
+
+watch(
+  () => [config.value.ai_provider, config.value.ai_auth_mode, config.value.ai_base_url],
+  () => {
+    scheduleModelRefresh()
+  },
+  { immediate: true }
+)
 
 function buildDraftPayload() {
   return {
@@ -165,20 +405,25 @@ async function testProviderConfig() {
   testResult.value = null
 
   const provider = currentProvider.value
-  const result = await testConnection(buildDraftPayload(), 'Test Device', 'Test App')
+  const result = await testConnection(
+    buildDraftPayload(),
+    testDeviceName.value || 'Steam Deck OLED',
+    testAppName.value || 'Rocket League'
+  )
 
   testLoading.value = false
   if (result.status) {
     const message = provider.id === 'local'
-      ? 'Local endpoint responded with a valid optimization payload.'
-      : `${provider.name} responded with a valid optimization payload.`
-    testResult.value = { success: true, message, detail: result.reasoning || '' }
+      ? `Local endpoint returned a valid optimization for ${testDeviceName.value || 'the selected device'}.`
+      : `${provider.name} returned a valid optimization for ${testDeviceName.value || 'the selected device'}.`
+    testResult.value = { success: true, message, detail: result.reasoning || '', payload: result }
     toast(`${provider.name} draft settings verified`, 'success')
   } else {
     testResult.value = {
       success: false,
       message: result.error || 'Connection test failed',
-      detail: ''
+      detail: '',
+      payload: null
     }
     toast(`${provider.name} test failed: ${result.error || 'Unknown error'}`, 'error')
   }
@@ -214,7 +459,20 @@ function filterDevices() {
 
 onMounted(async () => {
   await Promise.all([fetchStatus(), fetchCache(), fetchDevices()])
+  if (!testDeviceName.value) {
+    const preferredDevice = aiDevices.value.find(device => /steam deck/i.test(device.name)) || aiDevices.value[0]
+    testDeviceName.value = preferredDevice?.name || 'Test Device'
+  }
+  if (!testAppName.value) {
+    testAppName.value = 'Rocket League'
+  }
   filterDevices()
+})
+
+onBeforeUnmount(() => {
+  if (modelRefreshTimer) {
+    clearTimeout(modelRefreshTimer)
+  }
 })
 </script>
 
@@ -282,9 +540,37 @@ onMounted(async () => {
                 Model choice, authentication, and endpoint are all provider-specific. Polaris will resolve sensible defaults if you keep the standard values.
               </p>
             </div>
-            <span class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium" :class="providerPill(currentProvider.id)">
-              {{ currentProvider.name }}
-            </span>
+            <div class="flex items-center gap-2">
+              <button
+                @click="resetProviderDefaults"
+                class="inline-flex items-center rounded-full border border-storm/40 px-2.5 py-1 text-[11px] font-medium text-storm transition-colors hover:border-ice/30 hover:text-silver">
+                Reset defaults
+              </button>
+              <span class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium" :class="providerPill(currentProvider.id)">
+                {{ currentProvider.name }}
+              </span>
+            </div>
+          </div>
+
+          <div class="space-y-3">
+            <div class="flex items-center justify-between gap-4">
+              <div class="text-xs font-semibold uppercase tracking-[0.2em] text-storm">Quick Profiles</div>
+              <div class="text-[11px] text-storm">Apply model, endpoint, and auth together.</div>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <button
+                v-for="profile in currentProfiles"
+                :key="profile.id"
+                @click="applyProviderProfile(profile)"
+                class="rounded-xl border px-4 py-3 text-left transition-all duration-200"
+                :class="isProfileActive(profile) ? 'border-ice/40 bg-ice/10 text-ice' : 'border-storm/40 bg-void/30 text-silver hover:border-ice/30'">
+                <div class="text-sm font-medium">{{ profile.name }}</div>
+                <div class="text-xs text-storm mt-1">{{ profile.description }}</div>
+                <div class="text-[11px] font-mono mt-2" :class="isProfileActive(profile) ? 'text-ice/90' : 'text-silver/70'">
+                  {{ profile.model }}
+                </div>
+              </button>
+            </div>
           </div>
 
           <div class="space-y-3">
@@ -304,13 +590,45 @@ onMounted(async () => {
 
           <div class="grid gap-4 lg:grid-cols-2">
             <div>
-              <label class="block text-sm font-medium text-silver mb-1">Model</label>
+              <div class="flex items-center justify-between gap-3 mb-1">
+                <label class="block text-sm font-medium text-silver">Model</label>
+                <button
+                  @click="refreshModelCatalog()"
+                  :disabled="modelsLoading || !canRefreshModels"
+                  class="inline-flex items-center gap-2 rounded-full border border-storm/40 px-2.5 py-1 text-[11px] font-medium text-storm transition-colors hover:border-ice/30 hover:text-silver disabled:cursor-not-allowed disabled:opacity-50">
+                  <svg v-if="modelsLoading" class="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                  <span>{{ modelsLoading ? 'Refreshing…' : 'Refresh list' }}</span>
+                </button>
+              </div>
               <input
                 v-model="config.ai_model"
+                :list="modelOptionsId"
                 type="text"
                 class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
                 :placeholder="currentProvider.defaultModel" />
-              <div class="text-xs text-storm mt-1">Default for {{ currentProvider.name }}: <span class="font-mono text-silver/80">{{ currentProvider.defaultModel }}</span></div>
+              <datalist :id="modelOptionsId">
+                <option
+                  v-for="model in modelSuggestions"
+                  :key="model.id"
+                  :value="model.id"
+                  :label="model.label || model.id" />
+              </datalist>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <button
+                  v-for="model in featuredModelSuggestions"
+                  :key="model.id"
+                  @click="config.ai_model = model.id"
+                  class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors"
+                  :class="config.ai_model === model.id ? 'border-ice/40 bg-ice/10 text-ice' : model.origin === 'live' ? 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200 hover:border-emerald-300/35' : 'border-storm/40 bg-void/30 text-storm hover:border-ice/30 hover:text-silver'">
+                  {{ model.id }}
+                </button>
+              </div>
+              <div class="mt-2 flex items-start justify-between gap-3 text-xs">
+                <div :class="modelDiscoverySummary.tone">{{ modelDiscoverySummary.text }}</div>
+                <span class="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]" :class="providerModelCatalog?.discovered ? 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200' : 'border-storm/40 bg-void/30 text-storm'">
+                  {{ modelDiscoverySummary.badge }}
+                </span>
+              </div>
             </div>
 
             <div>
@@ -400,19 +718,72 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div class="grid gap-4 lg:grid-cols-2">
+            <div>
+              <label class="block text-sm font-medium text-silver mb-1">Test Device</label>
+              <input
+                v-model="testDeviceName"
+                list="ai-device-options"
+                type="text"
+                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                placeholder="Steam Deck OLED" />
+              <div class="text-xs text-storm mt-1">Use a real device name so the returned optimization is meaningful.</div>
+              <datalist id="ai-device-options">
+                <option v-for="device in aiDevices" :key="device.name" :value="device.name" />
+              </datalist>
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-silver mb-1">Test App</label>
+              <input
+                v-model="testAppName"
+                type="text"
+                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                placeholder="Rocket League" />
+              <div class="text-xs text-storm mt-1">Optional title or genre cue for the provider to tune against.</div>
+            </div>
+          </div>
+
           <div v-if="testResult" class="rounded-xl border px-4 py-3" :class="testResult.success ? 'border-green-400/20 bg-green-400/8' : 'border-red-400/20 bg-red-400/8'">
             <div class="text-sm font-medium" :class="testResult.success ? 'text-green-300' : 'text-red-300'">{{ testResult.message }}</div>
             <div v-if="testResult.detail" class="text-xs text-silver/70 mt-2">{{ testResult.detail }}</div>
+            <div v-if="testResult.success && testResult.payload" class="grid gap-2 mt-3 sm:grid-cols-2">
+              <div v-if="testResult.payload.display_mode" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wider text-storm">Display</div>
+                <div class="text-sm font-mono text-silver mt-1">{{ testResult.payload.display_mode }}</div>
+              </div>
+              <div v-if="testResult.payload.target_bitrate_kbps" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wider text-storm">Bitrate</div>
+                <div class="text-sm font-mono text-silver mt-1">{{ (testResult.payload.target_bitrate_kbps / 1000).toFixed(1) }} Mbps</div>
+              </div>
+              <div v-if="testResult.payload.preferred_codec" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wider text-storm">Codec</div>
+                <div class="text-sm font-mono text-silver mt-1">{{ testResult.payload.preferred_codec.toUpperCase() }}</div>
+              </div>
+              <div v-if="testResult.payload.hdr != null" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wider text-storm">HDR</div>
+                <div class="text-sm font-mono mt-1" :class="testResult.payload.hdr ? 'text-green-300' : 'text-storm'">
+                  {{ testResult.payload.hdr ? 'Enabled' : 'Disabled' }}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       <div class="space-y-6">
         <div class="rounded-2xl border border-storm/40 bg-deep p-5 space-y-4">
-          <div>
-            <div class="text-[10px] font-semibold text-storm uppercase tracking-[0.24em]">Live Runtime</div>
-            <div class="text-base font-semibold text-silver mt-2">Saved optimizer status</div>
-            <div class="text-sm text-storm mt-1">This reflects the currently loaded runtime config, not the unsaved draft on the left.</div>
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <div class="text-[10px] font-semibold text-storm uppercase tracking-[0.24em]">Live Runtime</div>
+              <div class="text-base font-semibold text-silver mt-2">Saved optimizer status</div>
+              <div class="text-sm text-storm mt-1">This reflects the currently loaded runtime config, not the unsaved draft on the left.</div>
+            </div>
+            <span
+              class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
+              :class="draftMatchesRuntime ? 'border-green-400/20 bg-green-400/8 text-green-300' : 'border-amber-300/20 bg-amber-300/8 text-amber-200'">
+              {{ draftMatchesRuntime ? 'In sync' : 'Unsaved draft' }}
+            </span>
           </div>
 
           <div class="grid gap-3">
@@ -453,6 +824,11 @@ onMounted(async () => {
               <div class="text-sm mt-2" :class="aiStatus?.cli_available ? 'text-green-300' : 'text-red-300'">
                 {{ aiStatus?.cli_available ? 'Detected in PATH' : 'Not found in PATH' }}
               </div>
+            </div>
+
+            <div v-if="aiStatus && !draftMatchesRuntime" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-3">
+              <div class="text-xs uppercase tracking-wider text-storm">Pending Change</div>
+              <div class="text-sm text-silver mt-2">The draft on the left differs from the loaded runtime. Save and apply before expecting live sessions to switch providers or models.</div>
             </div>
           </div>
         </div>

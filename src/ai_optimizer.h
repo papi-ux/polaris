@@ -100,6 +100,12 @@ namespace ai_optimizer {
     const std::optional<session_history_t> &history = std::nullopt);
 
   /**
+   * @brief Get a provider-aware model catalog as JSON using ad-hoc config.
+   * Uses the draft provider settings without mutating live runtime state.
+   */
+  std::string get_models_json_with_config(const config_t &config);
+
+  /**
    * @brief Record session quality for feedback loop.
    */
   void record_session(const std::string &device_name,
