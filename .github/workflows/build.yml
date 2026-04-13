@@ -73,7 +73,7 @@ jobs:
 
     - name: Upload Arch packaging artifacts
       if: always()
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: arch-packaging-files
         path: |
@@ -83,7 +83,7 @@ jobs:
 
     - name: Upload Arch package outputs
       if: always()
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: arch-package-outputs
         path: |
@@ -95,7 +95,7 @@ jobs:
 
     - name: Upload Arch build metadata
       if: always()
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: arch-build-metadata
         path: |
