@@ -29,7 +29,7 @@ if [[ -n "$path_hits" ]]; then
 fi
 
 content_hits="$(
-  git grep -nIE '(agent handoff|project memory anchor|VS Code sessions|/home/[^/[:space:]]+|/Users/[^/[:space:]]+|tinyurl\.com)' -- . || true
+  git grep -nIE '(agent handoff|project memory anchor|VS Code sessions|/home/[^/[:space:]]+|/Users/[^/[:space:]]+|tinyurl\.com)' -- . ':(exclude)scripts/check-public-surface.sh' || true
 )"
 if [[ -n "$content_hits" ]]; then
   echo "Suspicious private or maintainer-only strings detected in tracked files:" >&2
