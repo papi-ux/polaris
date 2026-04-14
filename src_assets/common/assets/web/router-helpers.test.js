@@ -59,6 +59,7 @@ describe('router helpers', () => {
   it('tracks public auth routes explicitly', () => {
     expect(isPublicRoute('/login')).toBe(true)
     expect(isPublicRoute('/welcome')).toBe(true)
+    expect(isPublicRoute('/recover')).toBe(true)
     expect(isPublicRoute('/config')).toBe(false)
   })
 

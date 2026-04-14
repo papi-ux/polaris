@@ -1,4 +1,4 @@
-const PUBLIC_ROUTES = new Set(['/login', '/welcome'])
+const PUBLIC_ROUTES = new Set(['/login', '/welcome', '/recover'])
 
 export function getIpv4LoopbackUrl(locationLike = window.location, hash = locationLike.hash || '#/') {
   return `${locationLike.protocol}//127.0.0.1:${locationLike.port}${locationLike.pathname}${hash}`

@@ -152,7 +152,8 @@ namespace {
 #endif
 
 void launch_ui(const std::optional<std::string> &path) {
-  std::string url = std::format("https://localhost:{}", static_cast<int>(net::map_port(confighttp::PORT_HTTPS)));
+  const auto local_host = config::sunshine.address_family == "ipv4" ? "127.0.0.1" : "localhost";
+  std::string url = std::format("https://{}:{}", local_host, static_cast<int>(net::map_port(confighttp::PORT_HTTPS)));
   if (path) {
     url += *path;
   }

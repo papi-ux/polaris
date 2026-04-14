@@ -521,7 +521,40 @@
     "wan_encryption_mode_desc": "This determines when encryption will be used when streaming over the Internet. Encryption can reduce streaming performance, particularly on less powerful hosts and clients."
   },
   "login": {
-    "save_password": "Remember Password"
+    "save_password": "Remember Password",
+    "forgot_password": "Forgot password?",
+    "recovery_hint": "Need to reset your web credentials?"
+  },
+  "recovery": {
+    "title": "Recover Access",
+    "subtitle": "Reset web credentials from the Polaris host.",
+    "browser_reset_unavailable": "Password reset is not available directly in the browser.",
+    "browser_reset_reason": "Polaris avoids exposing a remote recovery path. To recover access, run a reset command on the host machine that is running Polaris.",
+    "steps_title": "Recovery Steps",
+    "copy": "Copy",
+    "copied": "Copied",
+    "back_to_login": "Back to Login",
+    "notes_title": "Notes",
+    "commands": {
+      "installed_title": "Installed Binary",
+      "installed_desc": "Use this when `polaris` is already on your PATH.",
+      "source_title": "Source Build",
+      "source_desc": "Use this when you built Polaris locally from source.",
+      "appimage_title": "AppImage",
+      "appimage_desc": "Use this when you launch Polaris from an AppImage file.",
+      "flatpak_title": "Flatpak",
+      "flatpak_desc": "Use this when Polaris is installed from Flathub or another Flatpak remote."
+    },
+    "steps": {
+      "open_terminal": "Open a terminal on the host machine running Polaris.",
+      "run_command": "Run the command that matches how Polaris is installed on that host.",
+      "return_login": "Return here and sign in with the new username and password."
+    },
+    "notes": {
+      "full_path": "If `polaris` is not on your PATH, use the full path to the executable instead.",
+      "source_build": "Source builds often use `./build/polaris` from the repository root.",
+      "keep_safe": "Store the new credentials somewhere safe. Polaris does not expose a remote self-service reset flow."
+    }
   },
   "index": {
     "description": "Polaris is a self-hosted game stream host for Moonlight.",
