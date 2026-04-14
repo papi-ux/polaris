@@ -70,9 +70,7 @@ Polaris is built around a dashboard that answers the questions stream hosts usua
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/dashboard-framed.png" width="900" />
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-oled-framed.png" width="900" />
-    <img src="docs/screenshots/dashboard-oled-framed.png" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
+    <img src="docs/screenshots/mission-control-tour.gif" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
   </picture>
 </p>
 
@@ -82,9 +80,7 @@ When a stream is active, Polaris shifts from setup to live operations: preview, 
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/streaming-framed.png" width="900" />
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/streaming-oled-framed.png" width="900" />
-    <img src="docs/screenshots/streaming-oled-framed.png" width="900" alt="Polaris live streaming view with preview, charts, runtime path, and recording controls" />
+    <img src="docs/screenshots/live-session-tour.gif" width="900" alt="Polaris live streaming view with preview, charts, runtime path, and recording controls" />
   </picture>
 </p>
 
@@ -96,17 +92,13 @@ The rest of the product follows the same principle: fewer hidden states, fewer h
   <tr>
     <td width="50%" valign="top">
       <picture>
-        <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/applications-framed.png" width="100%" />
-        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/applications-oled-framed.png" width="100%" />
-        <img src="docs/screenshots/applications-oled-framed.png" alt="Polaris application library with imported games, cover art, and categories" />
+        <img src="docs/screenshots/game-library-tour.gif" width="100%" alt="Polaris application library with imported games, cover art, and categories" />
       </picture>
       <p><strong>Game library</strong><br/>Import from Steam, Lutris, and Heroic, attach art, organize categories, and tune per-game launch behavior.</p>
     </td>
     <td width="50%" valign="top">
       <picture>
-        <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/pairing-framed.png" width="100%" />
-        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/pairing-oled-framed.png" width="100%" />
-        <img src="docs/screenshots/pairing-oled-framed.png" alt="Polaris pairing interface with QR code, TOFU, PIN pairing, and device management" />
+        <img src="docs/screenshots/pairing-tour.gif" width="100%" alt="Polaris pairing interface with QR code, TOFU, PIN pairing, and device management" />
       </picture>
       <p><strong>Pairing</strong><br/>Use TOFU on trusted LAN subnets, QR for Nova, or manual PIN pairing for standard Moonlight clients.</p>
     </td>
