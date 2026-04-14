@@ -34,6 +34,12 @@ namespace device_db {
     devices["Retroid Pocket 6"] = devices["RP6"];
     devices["RetroidPocket6"] = devices["RP6"];
 
+    devices["Retroid Pocket Flip 2"] = {
+      "handheld", "1920x1080x60", "hevc", 15000, 2, false, true, 3,
+      "Retroid Pocket Flip 2 — Android clamshell handheld, 5.5-inch 1080p, WiFi 6"
+    };
+    devices["RetroidPocketFlip2"] = devices["Retroid Pocket Flip 2"];
+
     devices["RP5"] = {
       "handheld", "1280x720x60", "hevc", 10000, 2, false, true, 3,
       "Retroid Pocket 5 — Android handheld, 720p, WiFi 5"

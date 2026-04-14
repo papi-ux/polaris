@@ -47,6 +47,7 @@ build/
 build-local/
 build-test/
 cmake-*/
+test-results/
 docs/doxyconfig*
 arch-pkgbuild/
 compile_commands.json
