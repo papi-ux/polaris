@@ -11,7 +11,7 @@
   },
   "type": "module",
   "dependencies": {
-    "@chenglou/pretext": "^0.0.4",
+    "@chenglou/pretext": "^0.0.5",
     "@tailwindcss/vite": "^4.2.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -31,7 +31,7 @@
     "eslint-plugin-vue": "10.8.0",
     "globals": "17.5.0",
     "jsdom": "29.0.2",
-    "serve": "14.2.5",
+    "serve": "^14.2.6",
     "vite": "^6.4.2",
     "vite-plugin-ejs": "1.7.0",
     "vitest": "4.1.4",
