@@ -122,6 +122,125 @@ namespace proc {
 
       return installed_path.string();
     }
+
+    std::string json_app_label(const nlohmann::json &app) {
+      if (app.is_object()) {
+        if (const auto it = app.find("name"); it != app.end() && it->is_string()) {
+          return it->get<std::string>();
+        }
+        if (const auto it = app.find("uuid"); it != app.end() && it->is_string()) {
+          return it->get<std::string>();
+        }
+      }
+
+      return "(unnamed)";
+    }
+
+    std::string normalized_json_string(const std::string &value) {
+      auto normalized = boost::algorithm::trim_copy(value);
+      boost::algorithm::to_lower(normalized);
+      return normalized;
+    }
+
+    std::string json_string_member_or(const nlohmann::json &node, const char *key, const std::string &default_value = {}) {
+      if (!node.is_object()) {
+        return default_value;
+      }
+
+      const auto it = node.find(key);
+      if (it == node.end() || !it->is_string()) {
+        return default_value;
+      }
+
+      return it->get<std::string>();
+    }
+
+    std::optional<int> coerce_json_int(const nlohmann::json &value) {
+      try {
+        if (value.is_number_integer() || value.is_number_unsigned()) {
+          return value.get<int>();
+        }
+
+        if (value.is_number_float()) {
+          return static_cast<int>(value.get<double>());
+        }
+
+        if (value.is_boolean()) {
+          return value.get<bool>() ? 1 : 0;
+        }
+
+        if (value.is_string()) {
+          const auto normalized = normalized_json_string(value.get<std::string>());
+          if (normalized.empty()) {
+            return std::nullopt;
+          }
+
+          size_t parsed_chars = 0;
+          const int parsed_value = std::stoi(normalized, &parsed_chars);
+          if (parsed_chars == normalized.size()) {
+            return parsed_value;
+          }
+        }
+      } catch (const std::exception &) {
+      }
+
+      return std::nullopt;
+    }
+
+    bool coerce_json_bool(const nlohmann::json &value, bool default_value) {
+      try {
+        if (value.is_boolean()) {
+          return value.get<bool>();
+        }
+
+        if (value.is_number()) {
+          return value.get<double>() != 0.0;
+        }
+
+        if (value.is_string()) {
+          const auto normalized = normalized_json_string(value.get<std::string>());
+          if (normalized == "true" || normalized == "on" || normalized == "yes" || normalized == "1") {
+            return true;
+          }
+          if (normalized == "false" || normalized == "off" || normalized == "no" || normalized == "0") {
+            return false;
+          }
+          return default_value;
+        }
+
+        if (value.is_array()) {
+          if (value.empty()) {
+            return default_value;
+          }
+          return coerce_json_bool(value[0], default_value);
+        }
+
+        if (value.is_null()) {
+          return default_value;
+        }
+
+        if (value.is_object()) {
+          return !value.empty();
+        }
+      } catch (const std::exception &) {
+      }
+
+      return default_value;
+    }
+
+    int json_int_member_or(const nlohmann::json &node, const char *key, int default_value) {
+      if (!node.is_object()) {
+        return default_value;
+      }
+
+      const auto it = node.find(key);
+      if (it == node.end()) {
+        return default_value;
+      }
+
+      const auto parsed_value = coerce_json_int(*it);
+      return parsed_value.value_or(default_value);
+    }
   }  // namespace
 
 #ifdef _WIN32
@@ -1676,8 +1795,9 @@ namespace proc {
 
     if (inputTree_p) {
       // If the input contains a non-empty "uuid", use it; otherwise generate one.
-      if (inputTree_p->contains("uuid") && !(*inputTree_p)["uuid"].get<std::string>().empty()) {
-        new_app_uuid = (*inputTree_p)["uuid"].get<std::string>();
+      new_app_uuid = json_string_member_or(*inputTree_p, "uuid");
+      if (!new_app_uuid.empty()) {
+        (*inputTree_p)["uuid"] = new_app_uuid;
       } else {
         new_app_uuid = uuid_util::uuid_t::generate().string();
         (*inputTree_p)["uuid"] = new_app_uuid;
@@ -1703,13 +1823,16 @@ namespace proc {
     if (fileTree_p->contains("apps") && (*fileTree_p)["apps"].is_array()) {
       for (auto &app : (*fileTree_p)["apps"]) {
         // For apps without a UUID, generate one and remove "launching".
-        if (!app.contains("uuid") || app["uuid"].get<std::string>().empty()) {
-          app["uuid"] = uuid_util::uuid_t::generate().string();
+        const auto existing_uuid = json_string_member_or(app, "uuid");
+        if (existing_uuid.empty()) {
+          const auto generated_uuid = uuid_util::uuid_t::generate().string();
+          BOOST_LOG(warning) << "App [" << json_app_label(app) << "] has missing or invalid [uuid] in apps.json; generating a new UUID.";
+          app["uuid"] = generated_uuid;
           app.erase("launching");
           newApps.push_back(std::move(app));
         } else {
           // If an app with the same UUID as the new app is found, replace it.
-          if (!new_app_uuid.empty() && app["uuid"].get<std::string>() == new_app_uuid) {
+          if (!new_app_uuid.empty() && existing_uuid == new_app_uuid) {
             newApps.push_back(*inputTree_p);
             new_app_uuid.clear();
           } else {
@@ -1728,13 +1851,9 @@ namespace proc {
   void migration_v2(nlohmann::json& fileTree) {
     static const int this_version = 2;
     // Determine the current migration version (default to 1 if not present).
-    int file_version = 1;
-    if (fileTree.contains("version")) {
-      try {
-        file_version = fileTree["version"].get<int>();
-      } catch (const std::exception& e) {
-        BOOST_LOG(info) << "Cannot parse apps.json version, treating as v1: " << e.what();
-      }
+    int file_version = json_int_member_or(fileTree, "version", 1);
+    if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
+      BOOST_LOG(info) << "Cannot parse apps.json version, treating as v1.";
     }
 
     // If the version is less than this_version, perform legacy conversion.
@@ -1742,76 +1861,56 @@ namespace proc {
       BOOST_LOG(info) << "Migrating app list from v1 to v2...";
       migrate_apps(&fileTree, nullptr);
 
-      // List of keys to convert to booleans.
-      std::vector<std::string> boolean_keys = {
-        "allow-client-commands",
-        "exclude-global-prep-cmd",
-        "elevated",
-        "auto-detach",
-        "wait-all",
-        "use-app-identity",
-        "per-client-app-identity",
-        "virtual-display"
+      // Keys to convert to booleans along with the parser defaults for invalid legacy values.
+      const std::vector<std::pair<std::string, bool>> boolean_keys = {
+        {"allow-client-commands", true},
+        {"exclude-global-prep-cmd", false},
+        {"exclude-global-state-cmd", false},
+        {"elevated", false},
+        {"auto-detach", true},
+        {"wait-all", true},
+        {"use-app-identity", false},
+        {"per-client-app-identity", false},
+        {"virtual-display", false},
+        {"virtual-display-primary", false},
+        {"terminate-on-pause", false}
       };
 
-      // List of keys to convert to integers.
-      std::vector<std::string> integer_keys = {
-        "exit-timeout",
-        "scale-factor"
+      // Keys to convert to integers along with the parser defaults for invalid legacy values.
+      const std::vector<std::pair<std::string, int>> integer_keys = {
+        {"exit-timeout", 5},
+        {"scale-factor", 100},
+        {"last-launched", 0}
       };
 
       // Walk through each app and convert legacy string values.
+      if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+        fileTree["apps"] = nlohmann::json::array();
+      }
+
       for (auto &app : fileTree["apps"]) {
-        for (const auto &key : boolean_keys) {
+        for (const auto &[key, default_value] : boolean_keys) {
           if (app.contains(key)) {
-            auto& _key = app[key];
-            if (_key.is_string()) {
-              std::string s = _key.get<std::string>();
-              std::transform(s.begin(), s.end(), s.begin(), ::tolower);  // Normalize to lowercase for comparison
-              _key = (s == "true" || s == "on" || s == "yes");
-            } else if (_key.is_array()) {
-              // Check if the array contains at least one item and interpret the first element
-              if (!_key.empty() && _key[0].is_string()) {
-                std::string first = _key[0].get<std::string>();
-                std::transform(first.begin(), first.end(), first.begin(), ::tolower);  // Normalize
-                if (first == "on" || first == "true" || first == "yes") {
-                  _key = true;
-                } else if (first == "off" || first == "false" || first == "no") {
-                  _key = false;
-                } else {
-                  _key = false;  // Default for unknown values
-                }
-              } else {
-                _key = false;  // Treat empty arrays or non-string first elements as false
-              }
-            } else {
-              // Fallback: Treat truthy/falsey cases
-              if (_key.is_boolean()) {
-                // Leave booleans as they are
-              } else if (_key.is_number()) {
-                _key = (_key.get<double>() != 0);  // Non-zero numbers are truthy
-              } else if (_key.is_null()) {
-                _key = false;  // Null is false
-              } else {
-                _key = !_key.empty();  // Non-empty objects/arrays are truthy, empty ones are falsey
-              }
-            }
+            app[key] = coerce_json_bool(app[key], default_value);
           }
         }
 
-        for (const auto &key : integer_keys) {
-          if (app.contains(key) && app[key].is_string()) {
-            std::string s = app[key].get<std::string>();
-            app[key] = std::stoi(s);
+        for (const auto &[key, default_value] : integer_keys) {
+          if (app.contains(key)) {
+            if (const auto parsed_value = coerce_json_int(app[key]); parsed_value.has_value()) {
+              app[key] = *parsed_value;
+            } else {
+              BOOST_LOG(warning) << "App [" << json_app_label(app) << "] has invalid [" << key << "] in legacy apps.json; using default [" << default_value << "].";
+              app[key] = default_value;
+            }
           }
         }
 
         // For each entry in the "prep-cmd" array, convert "elevated" if necessary.
         if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
           for (auto &prep : app["prep-cmd"]) {
-            if (prep.contains("elevated") && prep["elevated"].is_string()) {
-              std::string s = prep["elevated"].get<std::string>();
-              prep["elevated"] = (s == "true");
+            if (prep.contains("elevated")) {
+              prep["elevated"] = coerce_json_bool(prep["elevated"], false);
             }
           }
         }
@@ -1827,9 +1926,9 @@ namespace proc {
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
     int last_version = 2;
 
-    int file_version = 0;
-    if (fileTree.contains("version")) {
-      file_version = fileTree["version"].get<int>();
+    int file_version = json_int_member_or(fileTree, "version", 0);
+    if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
+      BOOST_LOG(info) << "Cannot parse apps.json version while checking migrations, treating as v0.";
     }
 
     if (file_version < last_version) {
