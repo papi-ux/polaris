@@ -527,8 +527,10 @@ namespace platf {
       auto runtime_state = cage_display_router::runtime_state();
       if (!runtime_state.effective_headless) {
         prefer_ram_capture = true;
-        BOOST_LOG(warning)
-          << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
+        if (cage_display_router::should_log_windowed_ram_capture_warning()) {
+          BOOST_LOG(warning)
+            << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
+        }
       }
     }
 #endif

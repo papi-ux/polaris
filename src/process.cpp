@@ -154,13 +154,9 @@ namespace proc {
    */
   bool isLinuxVDisplayAvailable() {
     if (!linux_vdisplay_available_checked) {
-      linux_vdisplay_available = virtual_display::is_available();
+      const auto backend = virtual_display::detect_backend();
+      linux_vdisplay_available = (backend != virtual_display::backend_e::NONE);
       linux_vdisplay_available_checked = true;
-      if (linux_vdisplay_available) {
-        auto backend = virtual_display::detect_backend();
-        BOOST_LOG(info) << "Linux virtual display support available via "sv
-                        << virtual_display::backend_name(backend);
-      }
     }
     return linux_vdisplay_available;
   }
@@ -911,11 +907,16 @@ namespace proc {
     }
 
 #ifdef __linux__
-    bool force_windowed_cage_for_gpu_native =
+    const bool requested_headless = config::video.linux_display.headless_mode;
+    const bool prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
+    const bool encoder_requires_gpu_native_capture = video::active_encoder_requires_gpu_native_capture();
+    const bool force_windowed_cage_for_gpu_native =
       config::video.linux_display.use_cage_compositor &&
-      config::video.linux_display.headless_mode &&
-      config::video.linux_display.prefer_gpu_native_capture &&
-      video::active_encoder_requires_gpu_native_capture();
+      cage_display_router::should_force_windowed_for_gpu_native_capture(
+        requested_headless,
+        prefer_gpu_native_capture,
+        encoder_requires_gpu_native_capture
+      );
 
     auto log_runtime_state = []() {
       auto runtime_state = cage_display_router::runtime_state();
@@ -926,11 +927,19 @@ namespace proc {
                       << " gpu_native_override_active="sv << runtime_state.gpu_native_override_active;
     };
 
+    auto encoder_name = video::active_encoder_name();
+    auto encoder_label = encoder_name.empty() ? "unknown" : encoder_name;
     if (force_windowed_cage_for_gpu_native) {
-      auto encoder_name = video::active_encoder_name();
       BOOST_LOG(warning) << "session_manager: Headless cage requested, but encoder ["
-                         << (encoder_name.empty() ? "unknown" : encoder_name)
+                         << encoder_label
                          << "] requires a GPU-native capture path; starting labwc windowed instead"sv;
+    } else if (config::video.linux_display.use_cage_compositor &&
+               requested_headless &&
+               prefer_gpu_native_capture &&
+               encoder_requires_gpu_native_capture) {
+      BOOST_LOG(info) << "session_manager: Headless cage requested with encoder ["
+                      << encoder_label
+                      << "], but windowed labwc does not currently provide a reliable GPU-native capture path on this stack; staying headless"sv;
     }
 
     // Start cage with the first detached command as its primary client.

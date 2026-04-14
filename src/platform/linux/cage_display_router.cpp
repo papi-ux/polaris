@@ -19,6 +19,7 @@
 #include "cage_display_router.h"
 #include "../../logging.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -41,6 +42,7 @@ namespace cage_display_router {
 
   static pid_t cage_pid = 0;
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
+  static std::atomic_bool windowed_ram_capture_warning_logged {false};
   static platf::runtime_state_t cage_runtime_state {
     .requested_headless = false,
     .effective_headless = false,
@@ -145,6 +147,33 @@ namespace cage_display_router {
       }
     );
   }
+
+  bool windowed_gpu_native_capture_supported() {
+    // wlgrab currently forces SHM for windowed labwc because nested DMA-BUF
+    // screencopy is not reliable on this stack.
+    return false;
+  }
+
+  bool should_force_windowed_for_gpu_native_capture(
+    bool requested_headless,
+    bool prefer_gpu_native_capture,
+    bool encoder_requires_gpu_native_capture
+  ) {
+    return requested_headless &&
+           prefer_gpu_native_capture &&
+           encoder_requires_gpu_native_capture &&
+           windowed_gpu_native_capture_supported();
+  }
+
+  bool should_log_windowed_ram_capture_warning() {
+    return !windowed_ram_capture_warning_logged.exchange(true);
+  }
+
+#ifdef POLARIS_TESTS
+  void reset_windowed_ram_capture_warning_for_tests() {
+    windowed_ram_capture_warning_logged.store(false);
+  }
+#endif
 
   // -----------------------------------------------------------------------
   // Public API

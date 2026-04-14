@@ -14,6 +14,7 @@
 
 // standard includes
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -39,6 +40,34 @@ using namespace std::literals;
 namespace fs = std::filesystem;
 
 namespace virtual_display {
+  namespace {
+    constexpr auto backend_detection_cache_ttl = 30s;
+    std::optional<backend_e> cached_backend;
+    std::chrono::steady_clock::time_point cached_backend_time {};
+    backend_detection_log_cache_t backend_detection_log_cache;
+
+    void log_detected_backend(backend_e backend) {
+      if (!backend_detection_log_cache.note(backend)) {
+        return;
+      }
+
+      switch (backend) {
+        case backend_e::EVDI:
+          BOOST_LOG(info) << "Virtual display: EVDI backend available"sv;
+          break;
+        case backend_e::WAYLAND_WLR:
+          BOOST_LOG(info) << "Virtual display: Wayland headless output backend available"sv;
+          break;
+        case backend_e::KSCREEN_DOCTOR:
+          BOOST_LOG(info) << "Virtual display: kscreen-doctor backend available"sv;
+          break;
+        case backend_e::NONE:
+        default:
+          BOOST_LOG(info) << "Virtual display: no backend available"sv;
+          break;
+      }
+    }
+  }  // namespace
 
   // ---------------------------------------------------------------------------
   // Utility: run a shell command and capture stdout
@@ -311,11 +340,16 @@ namespace virtual_display {
      * @return true if module is now loaded.
      */
     static bool load_module() {
+      static bool module_load_attempt_logged = false;
+
       if (is_module_loaded()) {
         return true;
       }
 
-      BOOST_LOG(info) << "Virtual display: attempting to load EVDI kernel module"sv;
+      if (!module_load_attempt_logged) {
+        BOOST_LOG(info) << "Virtual display: attempting to load EVDI kernel module"sv;
+        module_load_attempt_logged = true;
+      }
       int ret = exec_cmd_rc("modprobe evdi 2>/dev/null");
       if (ret != 0) {
         BOOST_LOG(debug) << "Virtual display: modprobe evdi failed (rc="sv << ret << "), module may not be installed"sv;
@@ -848,28 +882,34 @@ namespace virtual_display {
   }
 
   backend_e detect_backend() {
+    const auto now = std::chrono::steady_clock::now();
+    if (cached_backend.has_value() && (now - cached_backend_time) <= backend_detection_cache_ttl) {
+      return *cached_backend;
+    }
+
+    backend_e backend = backend_e::NONE;
+
     // Priority 1: EVDI — creates true virtual connectors
     if (evdi::is_module_loaded() || evdi::load_module()) {
       if (evdi::load_library()) {
-        BOOST_LOG(info) << "Virtual display: EVDI backend available"sv;
-        return backend_e::EVDI;
+        backend = backend_e::EVDI;
       }
     }
 
     // Priority 2: Wayland compositor headless outputs
-    if (wayland_wlr::is_available()) {
-      BOOST_LOG(info) << "Virtual display: Wayland headless output backend available"sv;
-      return backend_e::WAYLAND_WLR;
+    if (backend == backend_e::NONE && wayland_wlr::is_available()) {
+      backend = backend_e::WAYLAND_WLR;
     }
 
     // Priority 3: kscreen-doctor (KDE Plasma)
-    if (kscreen::is_available()) {
-      BOOST_LOG(info) << "Virtual display: kscreen-doctor backend available"sv;
-      return backend_e::KSCREEN_DOCTOR;
+    if (backend == backend_e::NONE && kscreen::is_available()) {
+      backend = backend_e::KSCREEN_DOCTOR;
     }
 
-    BOOST_LOG(info) << "Virtual display: no backend available"sv;
-    return backend_e::NONE;
+    cached_backend = backend;
+    cached_backend_time = now;
+    log_detected_backend(backend);
+    return backend;
   }
 
   bool is_available() {
