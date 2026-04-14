@@ -242,6 +242,7 @@ namespace config {
 
     bool keyboard;
     bool mouse;
+    bool mouse_cursor_visible;
     bool controller;
 
     bool always_send_scancodes;

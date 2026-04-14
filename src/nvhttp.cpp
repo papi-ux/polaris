@@ -1852,6 +1852,7 @@ namespace nvhttp {
       features["game_library"] = true;
       features["session_lifecycle"] = true;
       features["device_profiles"] = true;
+      features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
 #ifdef __linux__
       features["lock_screen_control"] = true;
@@ -1899,6 +1900,7 @@ namespace nvhttp {
 
       // Game info
       output["game"] = proc::proc.get_last_run_app_name();
+      output["cursor_visible"] = cursor::visible();
 
       // Capture info
       auto &capture_info = output["capture"];
@@ -2254,6 +2256,44 @@ namespace nvhttp {
       }
     };
 
+    auto polarisSetCursorVisibility = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      try {
+        std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+        auto body = nlohmann::json::parse(body_str);
+        if (!body.contains("visible") || !body["visible"].is_boolean()) {
+          nlohmann::json err;
+          err["error"] = "visible must be a boolean";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+          return;
+        }
+
+        const bool visible = body["visible"].get<bool>();
+        cursor::set_visible(visible);
+        BOOST_LOG(info) << "Client requested cursor visibility change: " << (visible ? "visible" : "hidden");
+
+        nlohmann::json output;
+        output["status"] = true;
+        output["visible"] = visible;
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+      } catch (std::exception &e) {
+        nlohmann::json err;
+        err["error"] = e.what();
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+      }
+    };
+
     // Client session report — Nova sends quality summary at session end
     auto polarisSessionReport = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
@@ -2366,6 +2406,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
     https_server.resource["^/polaris/v1/session/bitrate$"]["POST"] = polarisSetBitrate;
+    https_server.resource["^/polaris/v1/session/cursor$"]["POST"] = polarisSetCursorVisibility;
     https_server.resource["^/polaris/v1/games$"]["GET"] = polarisGames;
     https_server.resource["^/polaris/v1/games/.+/cover$"]["GET"] = polarisGameCover;
     https_server.resource["^/polaris/v1/games/.+/mangohud$"]["POST"] = polarisToggleMangoHud;

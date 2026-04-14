@@ -30,6 +30,7 @@
 #include "crypto.h"
 #include "display_device.h"
 #include "file_handler.h"
+#include "globals.h"
 #include "logging.h"
 #include "platform/common.h"
 #include "confighttp.h"
@@ -1403,6 +1404,8 @@ namespace proc {
       config::input = *_saved_input_config;
       _saved_input_config.reset();
     }
+
+    cursor::set_visible(config::input.mouse_cursor_visible);
 
     if (needs_refresh) {
       refresh(config::stream.file_apps, false);

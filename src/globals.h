@@ -18,6 +18,23 @@ extern thread_pool_util::ThreadPool task_pool;
  */
 extern bool display_cursor;
 
+namespace cursor {
+  /**
+   * @brief Set the current cursor visibility used by the capture path.
+   */
+  void set_visible(bool visible);
+
+  /**
+   * @brief Get the current cursor visibility used by the capture path.
+   */
+  bool visible();
+
+  /**
+   * @brief Toggle the current cursor visibility and return the new state.
+   */
+  bool toggle_visible();
+}  // namespace cursor
+
 #ifdef _WIN32
   // Declare global singleton used for NVIDIA control panel modifications
   #include "platform/windows/nvprefs/nvprefs_interface.h"

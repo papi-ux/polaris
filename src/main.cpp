@@ -170,6 +170,8 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
+  cursor::set_visible(config::input.mouse_cursor_visible);
+
   auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);
   if (!log_deinit_guard) {
     BOOST_LOG(error) << "Logging failed to initialize"sv;
