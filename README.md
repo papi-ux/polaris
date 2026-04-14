@@ -306,7 +306,7 @@ systemctl --user enable --now polaris
 
 ```bash
 cpack --config build/CPackConfig.cmake -G RPM
-sudo rpm -i build/cpack_rpm/Polaris.rpm
+sudo rpm -i build/cpack_artifacts/Polaris.rpm
 ```
 
 </details>

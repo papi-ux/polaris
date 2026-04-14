@@ -214,3 +214,98 @@ jobs:
 
       - name: Run fast C++ tests
         run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
+
+  fedora-rpm-build:
+    name: Fedora RPM build
+    needs: web-checks
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:42
+    env:
+      CCACHE_DIR: /github/home/.cache/ccache
+      CCACHE_COMPILERCHECK: content
+      NPM_CONFIG_CACHE: /github/home/.npm
+      CC: gcc-14
+      CXX: g++-14
+
+    steps:
+      - name: Bootstrap Fedora container
+        run: dnf install -y dnf-plugins-core git
+
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Cache C++ compiler outputs
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/ccache
+          key: polaris-fedora-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          restore-keys: |
+            polaris-fedora-ccache-
+
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.npm
+          key: polaris-fedora-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            polaris-fedora-npm-
+
+      - name: Install Fedora build dependencies
+        run: dnf builddep -y packaging/linux/fedora/Polaris.spec
+
+      - name: Install CI helper packages
+        run: dnf install -y ccache ninja-build
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DBUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPOLARIS_ENABLE_CUDA=OFF \
+            -DCUDA_FAIL_ON_MISSING=OFF
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run fast C++ tests
+        run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
+
+      - name: Build RPM package
+        run: cpack -G RPM --config ./build/CPackConfig.cmake
+
+      - name: Summarize Fedora RPM validation
+        if: always()
+        run: |
+          {
+            echo "## Fedora RPM validation"
+            echo
+            echo "- Spec dependency source: \`packaging/linux/fedora/Polaris.spec\`"
+            echo "- Build tree directory: \`build/\`"
+            echo "- RPM output directory: \`build/cpack_artifacts/\`"
+            echo "- RPM artifacts and generated CPack RPM metadata are uploaded from this job."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Fedora RPM artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fedora-rpm-artifacts
+          path: |
+            build/cpack_artifacts/*.rpm
+            build/cpack_artifacts/*.src.rpm
+          if-no-files-found: warn
+
+      - name: Upload Fedora RPM metadata
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fedora-rpm-metadata
+          path: |
+            build/cpack_artifacts/_CPack_Packages/Linux/RPM/SPECS/*.spec
+            build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.out
+            build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.err
+          if-no-files-found: warn
