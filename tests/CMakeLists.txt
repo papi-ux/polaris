@@ -85,6 +85,8 @@ set(TEST_AUDIT_SOURCES
 set(TEST_FULL_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_external_commands.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_common.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cage_display_router.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_audio.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_entry_handler.cpp

@@ -27,6 +27,24 @@ namespace virtual_display {
   };
 
   /**
+   * @brief Tracks whether a backend observation should be logged.
+   *
+   * The first observation of a backend should log. Repeated observations of
+   * the same backend stay quiet. If the detected backend changes, log again.
+   */
+  struct backend_detection_log_cache_t {
+    bool initialized = false;
+    backend_e last_backend = backend_e::NONE;
+
+    bool note(backend_e backend) {
+      const bool should_log = !initialized || last_backend != backend;
+      initialized = true;
+      last_backend = backend;
+      return should_log;
+    }
+  };
+
+  /**
    * @brief Represents an active virtual display instance.
    */
   struct vdisplay_t {
