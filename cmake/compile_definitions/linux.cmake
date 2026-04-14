@@ -107,7 +107,10 @@ endif()
 include(dependencies/libevdev_Polaris)
 
 # pipewire
-if(${POLARIS_ENABLE_PIPEWIRE})
+#
+# Portal capture also consumes PipeWire directly, even when native PipeWire
+# audio is disabled, so detect the transport whenever either feature is on.
+if(${POLARIS_ENABLE_PIPEWIRE} OR ${POLARIS_ENABLE_PORTAL})
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(PIPEWIRE libpipewire-0.3)
@@ -116,12 +119,16 @@ else()
     set(PIPEWIRE_FOUND OFF)
 endif()
 if(PIPEWIRE_FOUND)
-    add_compile_definitions(POLARIS_BUILD_PIPEWIRE)
     include_directories(SYSTEM ${PIPEWIRE_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${PIPEWIRE_LIBRARIES})
-    message(STATUS "PipeWire support enabled")
+    if(${POLARIS_ENABLE_PIPEWIRE})
+        add_compile_definitions(POLARIS_BUILD_PIPEWIRE)
+        message(STATUS "PipeWire support enabled")
+    endif()
 else()
-    message(STATUS "PipeWire not found, using PulseAudio only")
+    if(${POLARIS_ENABLE_PIPEWIRE})
+        message(STATUS "PipeWire not found, using PulseAudio only")
+    endif()
 endif()
 
 # xdg desktop portal (screen capture via org.freedesktop.portal.ScreenCast)
@@ -133,13 +140,15 @@ if(${POLARIS_ENABLE_PORTAL})
 else()
     set(GIO_FOUND OFF)
 endif()
-if(GIO_FOUND)
+if(GIO_FOUND AND PIPEWIRE_FOUND)
     add_compile_definitions(POLARIS_BUILD_PORTAL)
     include_directories(SYSTEM ${GIO_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${GIO_LIBRARIES})
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp")
     message(STATUS "XDG Desktop Portal capture support enabled")
+elseif(GIO_FOUND)
+    message(STATUS "XDG Desktop Portal capture not available (libpipewire-0.3 not found)")
 else()
     message(STATUS "XDG Desktop Portal capture not available (gio-2.0 not found)")
 endif()
@@ -212,7 +221,7 @@ if(NOT ${CUDA_FOUND}
         AND NOT ${X11_FOUND}
         AND NOT (${LIBDRM_FOUND} AND ${LIBCAP_FOUND})
         AND NOT ${LIBVA_FOUND}
-        AND NOT ${GIO_FOUND})
+        AND NOT (${GIO_FOUND} AND ${PIPEWIRE_FOUND}))
     message(FATAL_ERROR "Couldn't find either cuda, wayland, x11, (libdrm and libcap), libva, or gio-2.0 (portal)")
 endif()
 
