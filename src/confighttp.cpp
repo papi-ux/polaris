@@ -20,6 +20,7 @@
 #include <thread>
 #include <numeric>
 #include <algorithm>
+#include <vector>
 
 // lib includes
 #include <boost/algorithm/string.hpp>
@@ -171,6 +172,46 @@ namespace confighttp {
   constexpr auto LOGIN_BLOCK_DURATION = std::chrono::seconds(60);
 
   namespace {
+    std::mutex s_background_tasks_mutex;
+    std::vector<std::future<void>> s_background_tasks;
+
+    void prune_background_tasks_locked() {
+      auto it = s_background_tasks.begin();
+      while (it != s_background_tasks.end()) {
+        if (it->wait_for(0s) == std::future_status::ready) {
+          try {
+            it->get();
+          } catch (...) {
+          }
+          it = s_background_tasks.erase(it);
+          continue;
+        }
+        ++it;
+      }
+    }
+
+    template<typename Fn>
+    void launch_background_task(Fn &&fn) {
+      std::lock_guard lock(s_background_tasks_mutex);
+      prune_background_tasks_locked();
+      s_background_tasks.emplace_back(std::async(std::launch::async, std::forward<Fn>(fn)));
+    }
+
+    void wait_for_background_tasks() {
+      std::vector<std::future<void>> tasks;
+      {
+        std::lock_guard lock(s_background_tasks_mutex);
+        tasks.swap(s_background_tasks);
+      }
+
+      for (auto &task : tasks) {
+        try {
+          task.get();
+        } catch (...) {
+        }
+      }
+    }
+
     std::optional<fs::path> executable_dir() {
 #ifdef _WIN32
       wchar_t path[MAX_PATH];
@@ -2474,11 +2515,10 @@ namespace confighttp {
       lifetime::exit_sunshine(0, true);
     }
     // If exit fails, write a response after 5 seconds.
-    std::thread write_resp([response]{
+    launch_background_task([response] {
       std::this_thread::sleep_for(5s);
       response->write();
     });
-    write_resp.detach();
   }
 
   /**
@@ -2641,8 +2681,25 @@ namespace confighttp {
       return;
     }
 
-    // Rate limiting: check if this IP is blocked
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    const auto write_login_error = [&](SimpleWeb::StatusCode code, const std::string &error_message, bool record_failure) {
+      if (record_failure) {
+        recordLoginFailure(address);
+      }
+
+      nlohmann::json tree;
+      tree["status_code"] = static_cast<int>(code);
+      tree["status"] = false;
+      tree["error"] = error_message;
+      const SimpleWeb::CaseInsensitiveMultimap headers {
+        {"Content-Type", "application/json"},
+        {"X-Frame-Options", "DENY"},
+        {"Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';"}
+      };
+      response->write(code, tree.dump(), headers);
+    };
+
+    // Rate limiting: check if this IP is blocked
     if (isLoginRateLimited(address)) {
       BOOST_LOG(warning) << "Web UI: ["sv << address << "] -- rate limited (too many failed login attempts)"sv;
       nlohmann::json tree;
@@ -2655,10 +2712,14 @@ namespace confighttp {
       return;
     }
 
-    auto fg = util::fail_guard([&]{
-      recordLoginFailure(address);
-      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
-    });
+    if (config::sunshine.username.empty()) {
+      write_login_error(
+        SimpleWeb::StatusCode::client_error_conflict,
+        "No web credentials are configured yet. Finish setup on the welcome page.",
+        false
+      );
+      return;
+    }
 
     try {
       std::stringstream ss;
@@ -2667,8 +2728,14 @@ namespace confighttp {
       std::string username = input_tree.value("username", "");
       std::string password = input_tree.value("password", "");
       std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
-      if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password)
+      if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password) {
+        write_login_error(
+          SimpleWeb::StatusCode::client_error_unauthorized,
+          "Invalid username or password. If you forgot your credentials, reset them on the host with the --creds command.",
+          true
+        );
         return;
+      }
       clearLoginFailures(address);
       std::string sessionCookieRaw = crypto::rand_alphabet(64);
       sessionCookie = util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string();
@@ -2677,12 +2744,14 @@ namespace confighttp {
         { "Set-Cookie", "auth=" + sessionCookieRaw + "; Secure; SameSite=Strict; Max-Age=2592000; Path=/" }
       };
       response->write(headers);
-      fg.disable();
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Web UI Login failed: ["sv << address
                                << "]: "sv << e.what();
-      response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
-      fg.disable();
+      write_login_error(
+        SimpleWeb::StatusCode::client_error_bad_request,
+        "Invalid login request.",
+        false
+      );
       return;
     }
   }
@@ -2781,7 +2850,7 @@ namespace confighttp {
 
     response->close_connection_after_response = true;
 
-    std::thread([response, target_fps, shutdown_event]() {
+    launch_background_task([response, target_fps, shutdown_event]() {
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "multipart/x-mixed-replace; boundary=frame");
       headers.emplace("Cache-Control", "no-cache");
@@ -2835,7 +2904,7 @@ namespace confighttp {
       }
 
       std::remove(tmpfile.c_str());
-    }).detach();
+    });
   }
 
   void getVDisplayStatus(resp_https_t response, req_https_t request) {
@@ -3277,9 +3346,8 @@ namespace confighttp {
 
     print_req(request);
 
-    // Spawn a detached thread that streams SSE events.
-    // The shared_ptr to response keeps the connection alive.
-    std::thread([response]() {
+    // Run the SSE stream in a tracked background task so shutdown can wait for it.
+    launch_background_task([response]() {
       auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
       // Tell SimpleWeb this is a streaming response with no content-length
@@ -3323,7 +3391,7 @@ namespace confighttp {
           std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
       }
-    }).detach();
+    });
   }
 
   // Session event bus (file-scope for access from emit_session_event and SSE handler)
@@ -3380,7 +3448,7 @@ namespace confighttp {
       if (!authenticatePolarisSession(response, request)) return;
       print_req(request);
 
-      std::thread([response]() {
+      launch_background_task([response]() {
         auto shutdown_event = mail::man->event<bool>(mail::shutdown);
         response->close_connection_after_response = true;
 
@@ -3434,7 +3502,7 @@ namespace confighttp {
             std::this_thread::sleep_for(100ms);
           }
         }
-      }).detach();
+      });
     };
 
     // -----------------------------------------------------------------------
@@ -3518,6 +3586,7 @@ namespace confighttp {
     server.resource["^/password/?$"]["GET"] = getSpaPage;
     server.resource["^/welcome/?$"]["GET"] = getSpaPage;
     server.resource["^/login/?$"]["GET"] = getSpaPage;
+    server.resource["^/recover/?$"]["GET"] = getSpaPage;
     server.resource["^/troubleshooting/?$"]["GET"] = getSpaPage;
     // Login is exempt from CSRF (it's the entry point; rate limiting protects it instead)
     server.resource["^/api/login"]["POST"] = login;
@@ -3592,8 +3661,9 @@ namespace confighttp {
 
     auto accept_and_run = [&](auto *server) {
       try {
-        server->start([port_https](unsigned short port) {
-          BOOST_LOG(info) << "Configuration UI available at [https://localhost:"sv << port << "]";
+        server->start([port_https, address_family](unsigned short port) {
+          const auto local_host = address_family == net::af_e::IPV4 ? "127.0.0.1"sv : "localhost"sv;
+          BOOST_LOG(info) << "Configuration UI available at [https://"sv << local_host << ':' << port << ']';
         });
       } catch (boost::system::system_error &err) {
         // It's possible the exception gets thrown after calling server->stop() from a different thread
@@ -3610,6 +3680,7 @@ namespace confighttp {
     shutdown_event->view();
 
     server.stop();
+    wait_for_background_tasks();
 
     tcp.join();
   }
