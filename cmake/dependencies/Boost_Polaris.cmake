@@ -101,3 +101,13 @@ endif()
 
 message(STATUS "Boost include dirs: ${Boost_INCLUDE_DIRS}")
 message(STATUS "Boost libraries: ${Boost_LIBRARIES}")
+
+# Newer Boost package configs expose the umbrella header target as Boost::headers.
+# Keep providing the older Boost::boost name expected by Simple-Web-Server.
+if(TARGET Boost::headers AND NOT TARGET Boost::boost)
+    get_target_property(BOOST_HEADERS_TARGET Boost::headers ALIASED_TARGET)
+    if(BOOST_HEADERS_TARGET STREQUAL "BOOST_HEADERS_TARGET-NOTFOUND")
+        set(BOOST_HEADERS_TARGET Boost::headers)
+    endif()
+    add_library(Boost::boost ALIAS ${BOOST_HEADERS_TARGET})
+endif()

@@ -31,9 +31,10 @@ else()
     # https://github.com/nocnokneo/cmake-git-versioning-example/blob/master/LICENSE
     find_package(Git)
     if(GIT_EXECUTABLE AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+        set(GIT_SAFE_DIRECTORY_ARGS -c "safe.directory=${CMAKE_SOURCE_DIR}")
         #Get current Branch
         execute_process(
-                COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
+                COMMAND ${GIT_EXECUTABLE} ${GIT_SAFE_DIRECTORY_ARGS} rev-parse --abbrev-ref HEAD
                 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
                 OUTPUT_VARIABLE GIT_DESCRIBE_BRANCH
                 RESULT_VARIABLE GIT_DESCRIBE_ERROR_CODE
@@ -41,7 +42,7 @@ else()
         )
         # Gather current commit
         execute_process(
-                COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+                COMMAND ${GIT_EXECUTABLE} ${GIT_SAFE_DIRECTORY_ARGS} rev-parse --short HEAD
                 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
                 OUTPUT_VARIABLE GIT_DESCRIBE_VERSION
                 RESULT_VARIABLE GIT_DESCRIBE_ERROR_CODE
@@ -49,7 +50,7 @@ else()
         )
         # Check if Dirty
         execute_process(
-                COMMAND ${GIT_EXECUTABLE} diff -b --quiet --exit-code
+                COMMAND ${GIT_EXECUTABLE} ${GIT_SAFE_DIRECTORY_ARGS} diff -b --quiet --exit-code
                 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
                 RESULT_VARIABLE GIT_IS_DIRTY
                 OUTPUT_STRIP_TRAILING_WHITESPACE
