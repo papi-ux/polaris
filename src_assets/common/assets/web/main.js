@@ -41,7 +41,7 @@ const router = createRouter({
 // Uses a cached auth flag to avoid making a fetch on every navigation,
 // which exhausts server connections when response bodies aren't consumed.
 let authed = false
-router.beforeEach(async (to, from) => {
+router.beforeEach(async (to, _from) => {
   if (to.path !== '/login' && to.path !== '/welcome') {
     if (authed) return
     try {
