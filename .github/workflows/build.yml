@@ -107,7 +107,9 @@ jobs:
       - name: Validate Arch package
         run: |
           useradd -m builder
+          install -d "$CCACHE_DIR"
           chown -R builder:builder "$GITHUB_WORKSPACE"
+          chown -R builder:builder "$CCACHE_DIR"
           su builder -c "git config --global protocol.file.allow always"
           su builder -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'"
           su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && makepkg --nodeps --noconfirm --nocheck"
