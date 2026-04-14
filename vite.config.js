@@ -57,6 +57,48 @@ export default defineConfig({
         tailwindcss(),
         vue(),
         ViteEjsPlugin({ header }),
+        {
+            name: 'inline-main-stylesheet',
+            apply: 'build',
+            writeBundle() {
+                const indexPath = resolve(assetsDstPath, 'index.html');
+                if (!fs.existsSync(indexPath)) {
+                    return;
+                }
+
+                let html = fs.readFileSync(indexPath, 'utf8');
+                const stylesheetMatch = html.match(/<link rel="stylesheet"[^>]*href="([^"]+)"[^>]*>/);
+                const moduleScriptTag = html.match(/<script type="module"[^>]*><\/script>/)?.[0];
+
+                if (!stylesheetMatch) {
+                    return;
+                }
+
+                const [stylesheetTag, stylesheetHref] = stylesheetMatch;
+                const stylesheetPath = resolve(assetsDstPath, stylesheetHref.replace(/^\.\//, ''));
+                if (!fs.existsSync(stylesheetPath)) {
+                    return;
+                }
+
+                // Chrome was intermittently failing the first CSS request against the local
+                // self-signed Polaris host, leaving auth pages unstyled. Inline the emitted
+                // stylesheet so the first paint does not depend on a second HTTPS asset fetch.
+                const inlineStyleTag = `<style>\n${fs.readFileSync(stylesheetPath, 'utf8')}\n</style>`;
+                html = html.replace(stylesheetTag, '');
+
+                if (moduleScriptTag) {
+                    html = html.replace(moduleScriptTag, '');
+                    html = html.replace(
+                        '</head>',
+                        `  ${inlineStyleTag}\n  ${moduleScriptTag}\n</head>`
+                    );
+                } else {
+                    html = html.replace('</head>', `  ${inlineStyleTag}\n</head>`);
+                }
+
+                fs.writeFileSync(indexPath, html);
+            },
+        },
         // The Codecov vite plugin should be after all other plugins
         codecovVitePlugin({
             enableBundleAnalysis: process.env.CODECOV_TOKEN !== undefined,
