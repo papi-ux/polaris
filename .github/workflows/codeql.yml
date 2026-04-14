@@ -31,21 +31,42 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Detect code scanning availability
+        id: code-scanning
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          status="$(
+            curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/code-scanning/alerts?per_page=1"
+          )"
+
+          if [[ "$status" == "200" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Code scanning is not enabled or not accessible for ${GITHUB_REPOSITORY} (HTTP ${status}); skipping CodeQL."
+          fi
+
       - name: Initialize CodeQL
+        if: steps.code-scanning.outputs.enabled == 'true'
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
       - name: Set up Node.js
-        if: matrix.language == 'cpp'
+        if: matrix.language == 'cpp' && steps.code-scanning.outputs.enabled == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install native build dependencies
-        if: matrix.language == 'cpp'
+        if: matrix.language == 'cpp' && steps.code-scanning.outputs.enabled == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -61,7 +82,7 @@ jobs:
             nodejs npm wayland-protocols
 
       - name: Build for CodeQL
-        if: matrix.language == 'cpp'
+        if: matrix.language == 'cpp' && steps.code-scanning.outputs.enabled == 'true'
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -69,5 +90,10 @@ jobs:
             -DCUDA_FAIL_ON_MISSING=OFF
           cmake --build build -j"$(nproc)"
 
+      - name: Skip CodeQL
+        if: steps.code-scanning.outputs.enabled != 'true'
+        run: echo "CodeQL skipped because code scanning is not enabled for this repository."
+
       - name: Analyze
+        if: steps.code-scanning.outputs.enabled == 'true'
         uses: github/codeql-action/analyze@v4

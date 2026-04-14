@@ -53,7 +53,7 @@ compile_commands.json
 
 # npm
 node_modules/
-package-lock.json
+!/package-lock.json
 
 # Translations
 *.mo
