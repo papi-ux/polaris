@@ -132,9 +132,10 @@ const navItems = computed(() => [
 const currentPageLabel = computed(() => navItems.value.find((item) => item.to === route.path)?.label || 'Polaris')
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
 const compactVersion = computed(() => appVersion.value.split('.')[0] || '1')
+const authRoutes = new Set(['/login', '/welcome', '/recover'])
 
 const showNav = computed(() => {
-  return route.path !== '/login' && route.path !== '/welcome'
+  return !authRoutes.has(route.path)
 })
 
 function toggleCollapse() {
