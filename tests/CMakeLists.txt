@@ -71,6 +71,7 @@ set(TEST_SUPPORT_SOURCES
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp

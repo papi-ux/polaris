@@ -750,6 +750,30 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### mouse_cursor_visible
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Whether Polaris should draw the host cursor into the video stream.
+            This only affects capture visibility, not whether mouse input is allowed.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            mouse_cursor_visible = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### high_resolution_scrolling
 
 <table>

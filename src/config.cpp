@@ -604,6 +604,7 @@ namespace config {
 
     true,  // keyboard enabled
     true,  // mouse enabled
+    false, // mouse cursor visible in stream
     true,  // controller enabled
     true,  // always send scancodes
     true,  // high resolution scrolling
@@ -1360,6 +1361,7 @@ namespace config {
     bool_f(vars, "ds5_inputtino_randomize_mac", input.ds5_inputtino_randomize_mac);
 
     bool_f(vars, "mouse", input.mouse);
+    bool_f(vars, "mouse_cursor_visible", input.mouse_cursor_visible);
     bool_f(vars, "keyboard", input.keyboard);
     bool_f(vars, "controller", input.controller);
 

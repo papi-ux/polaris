@@ -214,6 +214,7 @@ const tabs = ref([
       "always_send_scancodes": "enabled",
       "key_rightalt_to_key_win": "disabled",
       "mouse": "enabled",
+      "mouse_cursor_visible": "disabled",
       "high_resolution_scrolling": "enabled",
       "native_pen_touch": "enabled",
       "enable_input_only_mode": "disabled",
