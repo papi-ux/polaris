@@ -60,13 +60,40 @@ else()
     set(NPM_INSTALL_FLAGS "")
 endif()
 
-add_custom_target(web-ui ALL
+file(GLOB_RECURSE WEB_UI_SOURCE_FILES CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/src_assets/common/assets/web/*")
+
+# Keep the npm stamp under node_modules so removing node_modules invalidates incremental builds.
+set(WEB_UI_NPM_STAMP "${CMAKE_SOURCE_DIR}/node_modules/.polaris-web-ui-npm.stamp")
+set(WEB_UI_BUILD_STAMP "${CMAKE_BINARY_DIR}/CMakeFiles/web-ui-build.stamp")
+
+add_custom_command(
+        OUTPUT "${WEB_UI_NPM_STAMP}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Installing NPM Dependencies and Building the Web UI"
+        COMMENT "Installing NPM dependencies for the Web UI"
         COMMAND "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" ci --no-audit --fund=false ${NPM_INSTALL_FLAGS}
-        COMMAND "${CMAKE_COMMAND}" -E env "POLARIS_BUILD_HOMEBREW=${NPM_BUILD_HOMEBREW}" "POLARIS_SOURCE_ASSETS_DIR=${NPM_SOURCE_ASSETS_DIR}" "POLARIS_ASSETS_DIR=${NPM_ASSETS_DIR}" "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" run build  # cmake-lint: disable=C0301
+        COMMAND "${CMAKE_COMMAND}" -E touch "${WEB_UI_NPM_STAMP}"
+        DEPENDS
+            "${CMAKE_SOURCE_DIR}/package.json"
+            "${CMAKE_SOURCE_DIR}/package-lock.json"
         COMMAND_EXPAND_LISTS
         VERBATIM)
+
+add_custom_command(
+        OUTPUT "${WEB_UI_BUILD_STAMP}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Building the Web UI"
+        COMMAND "${CMAKE_COMMAND}" -E env "POLARIS_BUILD_HOMEBREW=${NPM_BUILD_HOMEBREW}" "POLARIS_SOURCE_ASSETS_DIR=${NPM_SOURCE_ASSETS_DIR}" "POLARIS_ASSETS_DIR=${NPM_ASSETS_DIR}" "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" run build  # cmake-lint: disable=C0301
+        COMMAND "${CMAKE_COMMAND}" -E touch "${WEB_UI_BUILD_STAMP}"
+        DEPENDS
+            "${WEB_UI_NPM_STAMP}"
+            "${CMAKE_SOURCE_DIR}/vite.config.js"
+            "${CMAKE_SOURCE_DIR}/eslint.config.js"
+            ${WEB_UI_SOURCE_FILES}
+        COMMAND_EXPAND_LISTS
+        VERBATIM)
+
+add_custom_target(web-ui ALL DEPENDS "${WEB_UI_BUILD_STAMP}")
 
 add_dependencies(polaris web-ui)
 

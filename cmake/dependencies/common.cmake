@@ -10,7 +10,11 @@ set(ENET_NO_INSTALL ON CACHE BOOL "Don't install any libraries built for enet")
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/enet")
 
 # web server
+set(POLARIS_BUILD_TESTING_PRE_SWS "${BUILD_TESTING}")
+set(BUILD_TESTING OFF CACHE BOOL "Disable vendored dependency tests during Polaris builds" FORCE)
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/Simple-Web-Server")
+set(BUILD_TESTING "${POLARIS_BUILD_TESTING_PRE_SWS}" CACHE BOOL "Restore parent BUILD_TESTING setting after vendored dependency configuration" FORCE)
+unset(POLARIS_BUILD_TESTING_PRE_SWS)
 
 # libdisplaydevice
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/libdisplaydevice")

@@ -46,8 +46,13 @@ AGENTS.md
 build/
 build-local/
 build-test/
+build-tests/
 cmake-*/
 test-results/
+playwright-report/
+/playwright/.cache/
+.envrc
+.direnv/
 docs/doxyconfig*
 arch-pkgbuild/
 compile_commands.json
