@@ -14,7 +14,7 @@ shows the real capture path instead of leaving you guessing.
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
-[Why Polaris](#why-polaris) · [Quick Start](#quick-start) · [Tour](#tour) · [Platform Status](#platform-status) · [Install from Source](#install-from-source) · [Client Apps](#client-apps) · [FAQ](#faq)
+[Why Polaris](#why-polaris) · [Quick Start](#quick-start) · [Tour](#tour) · [Platform Status](#platform-status) · [Install Packages](#install-packages) · [Install from Source](#install-from-source) · [Client Apps](#client-apps) · [FAQ](#faq)
 
 **Support**: [Issues](https://github.com/papi-ux/polaris/issues) · **Donate**: [Ko-fi](https://ko-fi.com/papiux) · [PayPal](https://www.paypal.com/donate/?hosted_button_id=KD9R5KLYF6GN4)
 
@@ -29,7 +29,7 @@ shows the real capture path instead of leaving you guessing.
 </div>
 
 > [!IMPORTANT]
-> Polaris is Linux-first today and still source-build oriented. Fedora is the most complete path right now, Arch is actively being tightened, Debian is still being aligned, and Windows is a future port rather than a supported target.
+> Polaris is Linux-first today. Fedora has a direct GitHub release RPM path, while Arch and Debian are still primarily source-build oriented. Windows is a future port rather than a supported target.
 
 ## Why Polaris
 
@@ -61,6 +61,8 @@ Open **https://localhost:47990**, create your password, and pair a client.
 
 > [!NOTE]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is available at `https://localhost:<port + 1>`. If you want background autostart instead of direct launch, enable the optional user service with `systemctl --user enable --now polaris`.
+>
+> Fedora users can skip the source build entirely with the release RPM in [Install Packages](#install-packages).
 
 ## Tour
 
@@ -212,9 +214,29 @@ Endpoints live at `https://localhost:47984/polaris/v1/` and are authenticated wi
 > [!NOTE]
 > CI coverage is practical rather than exhaustive: Ubuntu validates the shared Linux build path, while Arch validates both the native build and generated `PKGBUILD` flow. The Arch job also uploads generated package files and any package outputs as artifacts for inspection.
 
+## Install Packages
+
+### Fedora RPM
+
+Use the release RPM if you want the shortest install path on Fedora:
+
+```bash
+sudo dnf install https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
+sudo polaris --setup-host
+polaris
+```
+
+Optional autostart:
+
+```bash
+systemctl --user enable --now polaris
+```
+
+The published release RPM is currently built on Fedora 42 x86_64. If you want a local build, need a different distro, or want to regenerate packages yourself, use the source path below.
+
 ## Install from Source
 
-Current install guidance is for Linux source builds.
+Use this path on Arch, Debian, development machines, or whenever you want a local/custom build.
 
 ### Core dependencies
 

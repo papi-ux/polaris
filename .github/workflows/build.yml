@@ -3,6 +3,7 @@ name: Build Polaris
 on:
   push:
     branches: [ master ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ master ]
   workflow_dispatch:
@@ -311,3 +312,59 @@ jobs:
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.out
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.err
           if-no-files-found: warn
+
+  release-rpm-assets:
+    name: Release RPM assets
+    needs: fedora-rpm-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Fedora RPM artifacts
+        uses: actions/download-artifact@v6
+        with:
+          name: fedora-rpm-artifacts
+          path: release-assets/raw
+
+      - name: Prepare release asset names
+        run: |
+          shopt -s nullglob
+          mkdir -p release-assets/final
+
+          binary_rpms=()
+          source_rpms=()
+          for rpm_path in release-assets/raw/*.rpm; do
+            if [[ "$rpm_path" == *.src.rpm ]]; then
+              source_rpms+=("$rpm_path")
+            else
+              binary_rpms+=("$rpm_path")
+            fi
+          done
+
+          if [ "${#binary_rpms[@]}" -eq 0 ]; then
+            echo "No binary RPMs were produced by the Fedora packaging job" >&2
+            exit 1
+          fi
+
+          cp "${binary_rpms[0]}" release-assets/final/Polaris-fedora42-x86_64.rpm
+
+          if [ "${#source_rpms[@]}" -gt 0 ]; then
+            cp "${source_rpms[0]}" release-assets/final/Polaris-fedora42-src.rpm
+          fi
+
+          ls -la release-assets/final
+
+      - name: Upload RPM assets to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --verify-tag \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated release assets for ${GITHUB_REF_NAME}."
+          fi
+
+          gh release upload "${GITHUB_REF_NAME}" release-assets/final/* --clobber
