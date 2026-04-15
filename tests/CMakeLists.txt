@@ -69,6 +69,12 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/rswrapper.c
 )
 
+set(TEST_AUDIT_SUPPORT_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/globals.cpp
+    ${CMAKE_SOURCE_DIR}/src/logging.cpp
+)
+
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
@@ -82,20 +88,44 @@ set(TEST_AUDIT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_locale_consistency.cpp
 )
 
-set(TEST_FULL_SOURCES
+set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_external_commands.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_common.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cage_display_router.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_audio.cpp
+)
+
+set(TEST_INPUT_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_mouse.cpp
+)
+
+set(TEST_CONFIG_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_entry_handler.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_http_pairing.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_mouse.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_network.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_process_migration.cpp
+)
+
+set(TEST_PAIRING_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_http_pairing.cpp
+)
+
+set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
+)
+
+set(TEST_NETWORK_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_network.cpp
+)
+
+set(TEST_AUDIO_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_audio.cpp
+)
+
+set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream.cpp
+)
+
+set(TEST_VIDEO_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
 )
 
@@ -131,23 +161,35 @@ add_custom_target(sync_locale_files ALL
     VERBATIM
 )
 
-function(configure_polaris_test_target target_name)
-    add_executable(${target_name} ${ARGN})
+function(apply_polaris_test_target_settings target_name)
+    set_target_properties(${target_name} PROPERTIES CXX_STANDARD 23)
+    set_target_properties(${target_name} PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
 
     foreach(dep ${POLARIS_TARGET_DEPENDENCIES})
         add_dependencies(${target_name} ${dep})
     endforeach()
 
     add_dependencies(${target_name} sync_locale_files)
+    target_compile_definitions(${target_name} PUBLIC ${POLARIS_DEFINITIONS} ${TEST_DEFINITIONS})
+    target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${POLARIS_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${POLARIS_COMPILE_OPTIONS_CUDA};-std=c++17>)
+endfunction()
 
-    set_target_properties(${target_name} PROPERTIES CXX_STANDARD 23)
-    set_target_properties(${target_name} PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+function(configure_polaris_test_object_library target_name)
+    add_library(${target_name} OBJECT ${ARGN})
+    apply_polaris_test_target_settings(${target_name})
+    target_link_libraries(${target_name}
+            PRIVATE
+            ${POLARIS_EXTERNAL_LIBRARIES}
+            ${PLATFORM_LIBRARIES})
+endfunction()
+
+function(configure_polaris_test_target target_name)
+    add_executable(${target_name} ${ARGN})
+    apply_polaris_test_target_settings(${target_name})
     target_link_libraries(${target_name}
             ${POLARIS_EXTERNAL_LIBRARIES}
             gtest
             ${PLATFORM_LIBRARIES})
-    target_compile_definitions(${target_name} PUBLIC ${POLARIS_DEFINITIONS} ${TEST_DEFINITIONS})
-    target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${POLARIS_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${POLARIS_COMPILE_OPTIONS_CUDA};-std=c++17>)
     target_link_options(${target_name} PRIVATE)
     add_test(NAME ${target_name} COMMAND ${target_name})
     set_tests_properties(${target_name} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
@@ -157,18 +199,84 @@ function(configure_polaris_test_target target_name)
     endif ()
 endfunction()
 
-configure_polaris_test_target(${PROJECT_NAME}
+function(configure_polaris_full_test_target target_name)
+    configure_polaris_test_target(${target_name}
+        $<TARGET_OBJECTS:test_polaris_main_objects>
+        $<TARGET_OBJECTS:test_polaris_runtime_objects>
+        ${ARGN}
+    )
+endfunction()
+
+configure_polaris_test_object_library(test_polaris_main_objects
     ${TEST_MAIN_SOURCE}
+)
+
+configure_polaris_test_target(${PROJECT_NAME}
+    $<TARGET_OBJECTS:test_polaris_main_objects>
     ${TEST_SUPPORT_SOURCES}
     ${TEST_FAST_SOURCES}
 )
 
 if (BUILD_FULL_TESTS)
-    configure_polaris_test_target(test_polaris_full
-        ${TEST_MAIN_SOURCE}
-        ${TEST_AUDIT_SOURCES}
-        ${TEST_FAST_SOURCES}
-        ${TEST_FULL_SOURCES}
+    configure_polaris_test_object_library(test_polaris_runtime_objects
         ${POLARIS_SOURCES}
+    )
+
+    configure_polaris_test_target(test_polaris_audit
+        $<TARGET_OBJECTS:test_polaris_main_objects>
+        ${TEST_AUDIT_SUPPORT_SOURCES}
+        ${TEST_AUDIT_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_platform
+        ${TEST_PLATFORM_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_input
+        ${TEST_INPUT_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_config
+        ${TEST_CONFIG_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_pairing
+        ${TEST_PAIRING_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_http
+        ${TEST_HTTP_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_network
+        ${TEST_NETWORK_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_audio
+        ${TEST_AUDIO_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_stream
+        ${TEST_STREAM_SOURCES}
+    )
+
+    configure_polaris_full_test_target(test_polaris_video
+        ${TEST_VIDEO_SOURCES}
+    )
+
+    # Keep the historical target name as a build aggregate while the runtime coverage
+    # lives in smaller executables that are easier to run and debug independently.
+    add_custom_target(test_polaris_full
+        DEPENDS
+            test_polaris_audit
+            test_polaris_platform
+            test_polaris_input
+            test_polaris_config
+            test_polaris_pairing
+            test_polaris_http
+            test_polaris_network
+            test_polaris_audio
+            test_polaris_stream
+            test_polaris_video
     )
 endif ()
