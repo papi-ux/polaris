@@ -1023,6 +1023,23 @@ namespace rtsp_stream {
       config.monitor.chromaSamplingType = util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
+      if (session.preferred_codec) {
+        int preferred_video_format = config.monitor.videoFormat;
+        if (*session.preferred_codec == "h264") {
+          preferred_video_format = 0;
+        } else if (*session.preferred_codec == "hevc") {
+          preferred_video_format = 1;
+        } else if (*session.preferred_codec == "av1") {
+          preferred_video_format = 2;
+        }
+
+        if (preferred_video_format != config.monitor.videoFormat) {
+          BOOST_LOG(info) << "Session codec override: preferring "sv << *session.preferred_codec
+                          << " over client requested format "sv << config.monitor.videoFormat;
+          config.monitor.videoFormat = preferred_video_format;
+        }
+      }
+
       if (config::video.limit_framerate) {
         config.monitor.encodingFramerate = session.fps;
       } else {
@@ -1130,6 +1147,37 @@ namespace rtsp_stream {
 
       BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
       config.monitor.bitrate = configuredBitrateKbps;
+    }
+
+    if (config.monitor.videoFormat != 0) {
+      const auto codec_name_for_format = [](int video_format) -> std::string_view {
+        switch (video_format) {
+          case 1:
+            return "hevc"sv;
+          case 2:
+            return "av1"sv;
+          default:
+            return "h264"sv;
+        }
+      };
+
+      if (!video::active_encoder_runtime_supports_config(config.monitor)) {
+        auto fallback_config = config.monitor;
+        fallback_config.videoFormat = 0;
+
+        if (video::active_encoder_runtime_supports_config(fallback_config)) {
+          BOOST_LOG(warning)
+            << "Session codec fallback: requested "sv << codec_name_for_format(config.monitor.videoFormat)
+            << " is not operational on encoder ["sv << video::active_encoder_name()
+            << "] for the current runtime; falling back to h264"sv;
+          config.monitor.videoFormat = 0;
+        } else {
+          BOOST_LOG(warning)
+            << "Session codec fallback: requested "sv << codec_name_for_format(config.monitor.videoFormat)
+            << " is not operational on encoder ["sv << video::active_encoder_name()
+            << "], but h264 validation also failed; keeping requested codec"sv;
+        }
+      }
     }
 
     if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {

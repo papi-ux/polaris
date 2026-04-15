@@ -140,10 +140,13 @@ if(${POLARIS_ENABLE_PORTAL})
 else()
     set(GIO_FOUND OFF)
 endif()
-if(GIO_FOUND AND PIPEWIRE_FOUND)
-    add_compile_definitions(POLARIS_BUILD_PORTAL)
+if(GIO_FOUND)
+    add_compile_definitions(POLARIS_BUILD_GIO)
     include_directories(SYSTEM ${GIO_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${GIO_LIBRARIES})
+endif()
+if(GIO_FOUND AND PIPEWIRE_FOUND)
+    add_compile_definitions(POLARIS_BUILD_PORTAL)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp")
     message(STATUS "XDG Desktop Portal capture support enabled")
@@ -266,6 +269,9 @@ set(LIBEVDEV_CUSTOM_INCLUDE_DIR "${EVDEV_INCLUDE_DIR}")
 set(LIBEVDEV_CUSTOM_LIBRARY "${EVDEV_LIBRARY}")
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/inputtino")
+set_target_properties(libinputtino PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON)
 list(APPEND POLARIS_EXTERNAL_LIBRARIES inputtino::libinputtino)
 file(GLOB_RECURSE INPUTTINO_SOURCES
         ${CMAKE_SOURCE_DIR}/src/platform/linux/input/inputtino*.h

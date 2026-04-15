@@ -79,9 +79,18 @@ namespace stream_stats {
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
     j["fps"] = fps;
+    j["requested_client_fps"] = requested_client_fps;
+    j["session_target_fps"] = session_target_fps;
+    j["encode_target_fps"] = encode_target_fps;
     j["bitrate_kbps"] = bitrate_kbps;
     j["encode_time_ms"] = encode_time_ms;
+    j["duplicate_frame_ratio"] = duplicate_frame_ratio;
+    j["dropped_frame_ratio"] = dropped_frame_ratio;
+    j["avg_frame_age_ms"] = avg_frame_age_ms;
+    j["frame_jitter_ms"] = frame_jitter_ms;
     j["codec"] = codec;
+    j["pacing_policy"] = pacing_policy;
+    j["optimization_source"] = optimization_source;
     j["width"] = width;
     j["height"] = height;
     j["latency_ms"] = latency_ms;
@@ -217,6 +226,32 @@ namespace stream_stats {
       current_stats.width = width;
       current_stats.height = height;
     }
+  }
+
+  void update_session_targets(double requested_client_fps,
+                              double session_target_fps,
+                              double encode_target_fps,
+                              const std::string &pacing_policy,
+                              const std::string &optimization_source) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+
+    current_stats.requested_client_fps = requested_client_fps;
+    current_stats.session_target_fps = session_target_fps;
+    current_stats.encode_target_fps = encode_target_fps;
+    current_stats.pacing_policy = pacing_policy;
+    current_stats.optimization_source = optimization_source;
+  }
+
+  void update_frame_delivery(double duplicate_frame_ratio,
+                             double dropped_frame_ratio,
+                             double avg_frame_age_ms,
+                             double frame_jitter_ms) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+
+    current_stats.duplicate_frame_ratio = duplicate_frame_ratio;
+    current_stats.dropped_frame_ratio = dropped_frame_ratio;
+    current_stats.avg_frame_age_ms = avg_frame_age_ms;
+    current_stats.frame_jitter_ms = frame_jitter_ms;
   }
 
   void update_network_stats(double latency_ms, double packet_loss, uint64_t bytes_sent) {

@@ -4,10 +4,12 @@
  */
 
 #include "device_db.h"
+#include "config.h"
 #include "logging.h"
 #include "platform/common.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <mutex>
 #include <unordered_map>
@@ -233,6 +235,54 @@ namespace device_db {
                     << opt.target_bitrate_kbps.value_or(0) << "kbps, tune="sv
                     << opt.nvenc_tune.value_or(3);
     return opt;
+  }
+
+  std::optional<std::string> normalize_preferred_codec(
+    const std::string &device_name,
+    const std::string &app_name,
+    const std::optional<std::string> &preferred_codec,
+    const std::optional<int> &target_bitrate_kbps,
+    bool hdr_requested
+  ) {
+    if (!preferred_codec || *preferred_codec != "hevc") {
+      return preferred_codec;
+    }
+
+    if (!config::video.linux_display.use_cage_compositor || !config::video.linux_display.headless_mode) {
+      return preferred_codec;
+    }
+
+    auto dev = get_device(device_name);
+    if (!dev) {
+      return preferred_codec;
+    }
+
+    if (dev->type != "handheld" && dev->type != "phone") {
+      return preferred_codec;
+    }
+
+    if (hdr_requested) {
+      return preferred_codec;
+    }
+
+    const auto bitrate_kbps = target_bitrate_kbps.value_or(dev->ideal_bitrate_kbps);
+    // Only back off HEVC for truly modest-bitrate handheld UI sessions.
+    // At 15 Mbps on Retroid Big Picture, HEVC has already proven stable and
+    // forcing H.264 regressed the stream.
+    if (bitrate_kbps <= 0 || bitrate_kbps > 9000) {
+      return preferred_codec;
+    }
+
+    std::string lower_app = app_name;
+    std::transform(lower_app.begin(), lower_app.end(), lower_app.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+
+    if (lower_app.find("big picture") == std::string::npos) {
+      return preferred_codec;
+    }
+
+    return "h264"s;
   }
 
   std::string get_all_devices_json() {

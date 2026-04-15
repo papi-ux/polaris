@@ -418,6 +418,10 @@ namespace stream {
     std::uint32_t launch_session_id;
     std::string device_name;
     std::string device_uuid;
+    int requested_fps = 0;
+    int session_target_fps = 0;
+    std::string pacing_policy;
+    std::string optimization_source;
     crypto::PERM permission;
 
     std::list<crypto::command_entry_t> do_cmds;
@@ -2216,6 +2220,15 @@ namespace stream {
 
       // Track this client in multi-client stats
       stream_stats::add_client(addr_string, session.device_name);
+      stream_stats::update_session_targets(
+        session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
+        session.session_target_fps > 0 ? static_cast<double>(session.session_target_fps) / 1000.0 : 0.0,
+        session.config.monitor.encodingFramerate > 1000 ?
+          static_cast<double>(session.config.monitor.encodingFramerate) / 1000.0 :
+          static_cast<double>(session.config.monitor.encodingFramerate),
+        session.pacing_policy,
+        session.optimization_source
+      );
       stream_stats::update_video_stats(addr_string,
         0,  // fps starts at 0
         session.config.monitor.bitrate,
@@ -2280,6 +2293,10 @@ namespace stream {
       session->launch_session_id = launch_session.id;
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
+      session->requested_fps = launch_session.requested_fps;
+      session->session_target_fps = launch_session.fps;
+      session->pacing_policy = launch_session.pacing_policy;
+      session->optimization_source = launch_session.optimization_source;
       session->permission = launch_session.perm;
 
       session->do_cmds = std::move(launch_session.client_do_cmds);

@@ -15,6 +15,7 @@
 // standard includes
 #include <map>
 #include <optional>
+#include <unordered_set>
 #include <unordered_map>
 
 // lib includes
@@ -117,6 +118,10 @@ namespace proc {
     bool initial_hdr = false;
     bool virtual_display = false;
     bool allow_client_commands = false;
+    int initial_color_range = 0;
+    int initial_nvenc_tune = 0;
+    int initial_max_bitrate = 0;
+    int initial_adaptive_max_bitrate = 0;
 
     proc_t(
       boost::process::v1::environment &&env,
@@ -167,6 +172,7 @@ namespace proc {
     boost::process::v1::group _process_group;
 
     file_t _pipe;
+    std::unordered_set<std::string> _session_env_keys;
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
   };

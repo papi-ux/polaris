@@ -163,10 +163,11 @@ flowchart TB
 <summary><b>Linux runtime notes</b></summary>
 
 - `headless_mode` requests an invisible `labwc` session.
-- `linux_prefer_gpu_native_capture=enabled` allows Polaris to override true headless mode and run `labwc` windowed when NVENC or VAAPI needs the GPU-native path.
+- `linux_prefer_gpu_native_capture=enabled` keeps the intent to prefer DMA-BUF and GPU-native capture, but Polaris will stay headless and surface SHM fallback explicitly on stacks where nested `labwc` DMA-BUF import is still unreliable.
 - The dashboard and stream stats surface:
   requested headless mode, effective runtime mode, whether the GPU-native override is active, and the actual capture transport, residency, and format.
 - `linux_capture_profile=enabled` logs p50 and p99 capture timings for dispatch, ingest, and total capture time, tagged by transport.
+- Polaris now uses RealtimeKit on Linux when available, so thread-priority elevation can still succeed even if the user service inherits `RLIMIT_NICE=0` and `RLIMIT_RTPRIO=0`.
 - Current Linux behavior is pragmatic rather than magical: preserve GPU-native capture when the stack allows it, and make SHM fallback obvious when it does not.
 
 </details>
@@ -174,7 +175,8 @@ flowchart TB
 <details>
 <summary><b>Session lifecycle details</b></summary>
 
-- MangoHud environment is isolated from the compositor, then re-injected into the game launch command.
+- MangoHud environment is isolated from the compositor, then re-injected selectively into the game launch command.
+- Steam Big Picture and Steam/Proton helper paths are treated conservatively because MangoHud can crash Proton helpers and leave the session black-screened.
 - D-Bus lock screen inhibition prevents idle lock during active streaming.
 - XWayland persistence improves Proton and Wine game compatibility.
 - The end button kills `labwc` and its child process tree cleanly.
@@ -426,7 +428,7 @@ ai_base_url = http://127.0.0.1:1234/v1
 |-----|---------|-------------|
 | `headless_mode` | `disabled` | Request an invisible `labwc` runtime |
 | `linux_use_cage_compositor` | `false` | Enable the isolated `labwc` capture runtime |
-| `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF and GPU-native capture even if `labwc` must run windowed |
+| `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF and GPU-native capture; Polaris may still stay headless and use SHM when nested `labwc` DMA-BUF is not reliable on the current stack |
 | `trusted_subnets` | `[]` | CIDR blocks that enable TOFU auto-pairing |
 | `encoder` | `nvenc` | Encoder: `nvenc`, `vaapi`, `software` |
 | `ai_enabled` | `disabled` | Enable AI-assisted stream optimization |
@@ -488,7 +490,7 @@ The headless `labwc` compositor is display-server agnostic because it creates it
 <details>
 <summary><b>My KDE display layout gets corrupted after streaming</b></summary>
 
-That problem is the reason Polaris exists. Enable headless mode with `headless_mode = enabled` and `linux_use_cage_compositor = true`, and Polaris will stop treating your physical displays as part of the stream path. If `linux_prefer_gpu_native_capture = enabled`, Polaris may temporarily choose a visible `labwc` window instead of true headless mode when that is required to preserve the GPU-native path.
+That problem is the reason Polaris exists. Enable headless mode with `headless_mode = enabled` and `linux_use_cage_compositor = true`, and Polaris will stop treating your physical displays as part of the stream path. Keep `linux_prefer_gpu_native_capture = enabled` so Polaris can take the GPU-native path on stacks that support it, but expect current NVIDIA + nested `labwc` setups to remain headless and report SHM fallback in the runtime stats.
 
 </details>
 
@@ -516,7 +518,16 @@ You have three paths: **TOFU** on trusted LAN subnets, **QR** pairing for Nova, 
 <details>
 <summary><b>Steam Big Picture shows a black screen or tiny window</b></summary>
 
-Clear Steam's HTML cache with `rm -rf ~/.local/share/Steam/config/htmlcache/`. Steam can cache a broken geometry from a previous session and then render inside the compositor at unusable dimensions.
+First clear Steam's HTML cache with `rm -rf ~/.local/share/Steam/config/htmlcache/`. Steam can cache a broken geometry from a previous session and then render inside the compositor at unusable dimensions.
+
+If the session still comes up black, disable MangoHud for Steam Big Picture and Steam/Proton titles. Polaris now treats those launch paths conservatively because MangoHud can crash Proton helpers before the stream ever gets a usable frame.
+
+</details>
+
+<details>
+<summary><b>I see `Missing Wayland wire for wlr-export-dmabuf` or SHM screencopy warnings</b></summary>
+
+Those messages are expected on some headless `labwc` paths. They mean Polaris is using screencopy with SHM-backed frames instead of a zero-copy DMA-BUF handoff. That is slower than the ideal path, but it is still a valid and supported runtime. Check the dashboard or stream stats for the actual active path: `capture_transport`, `frame_residency`, and `frame_format`.
 
 </details>
 

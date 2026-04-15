@@ -9,8 +9,10 @@
 #endif
 
 // standard includes
+#include <atomic>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 // platform includes
 #include <arpa/inet.h>
@@ -20,6 +22,8 @@
 #include <pthread.h>
 #include <pwd.h>
 #include <sched.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 
 // lib includes
 #include <boost/asio/ip/address.hpp>
@@ -34,6 +38,10 @@
 #include <boost/process/v1/start_dir.hpp>
 #include <fcntl.h>
 #include <unistd.h>
+
+#ifdef POLARIS_BUILD_GIO
+  #include <gio/gio.h>
+#endif
 
 // local includes
 #include "graphics.h"
@@ -57,6 +65,123 @@ namespace fs = std::filesystem;
 namespace bp = boost::process::v1;
 
 window_system_e window_system;
+
+namespace {
+  std::atomic_bool thread_priority_permission_denied {false};
+  std::atomic_bool thread_priority_permission_warning_logged {false};
+
+  std::string format_rlimit_value(rlim_t value) {
+    if (value == RLIM_INFINITY) {
+      return "infinity";
+    }
+
+    return std::to_string(value);
+  }
+
+  void log_thread_priority_permission_warning_once() {
+    if (thread_priority_permission_warning_logged.exchange(true)) {
+      return;
+    }
+
+    struct rlimit rtprio_limit {};
+    struct rlimit nice_limit {};
+    const bool have_rtprio_limit = getrlimit(RLIMIT_RTPRIO, &rtprio_limit) == 0;
+    const bool have_nice_limit = getrlimit(RLIMIT_NICE, &nice_limit) == 0;
+
+    std::ostringstream message;
+    message << "Thread priority elevation unavailable; continuing with the default scheduler";
+
+    if (have_rtprio_limit || have_nice_limit) {
+      message << " (";
+      bool wrote_one = false;
+      if (have_rtprio_limit) {
+        message << "RLIMIT_RTPRIO=" << format_rlimit_value(rtprio_limit.rlim_cur);
+        wrote_one = true;
+      }
+      if (have_nice_limit) {
+        if (wrote_one) {
+          message << ", ";
+        }
+        message << "RLIMIT_NICE=" << format_rlimit_value(nice_limit.rlim_cur);
+      }
+      message << ")";
+    }
+
+    message << ". Configure LimitRTPRIO/LimitNICE, CAP_SYS_NICE, or RealtimeKit to enable realtime or negative-nice worker threads.";
+    BOOST_LOG(warning) << message.str();
+  }
+
+  std::uint64_t current_thread_id() {
+    return static_cast<std::uint64_t>(syscall(SYS_gettid));
+  }
+
+#ifdef POLARIS_BUILD_GIO
+  bool invoke_rtkit_method(const char *method, GVariant *params) {
+    GError *gerr = nullptr;
+    GDBusConnection *connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, &gerr);
+    if (!connection) {
+      if (gerr) {
+        BOOST_LOG(debug) << "RealtimeKit: could not connect to system bus: "sv << gerr->message;
+        g_error_free(gerr);
+      }
+      return false;
+    }
+
+    GVariant *result = g_dbus_connection_call_sync(
+      connection,
+      "org.freedesktop.RealtimeKit1",
+      "/org/freedesktop/RealtimeKit1",
+      "org.freedesktop.RealtimeKit1",
+      method,
+      params,
+      nullptr,
+      G_DBUS_CALL_FLAGS_NONE,
+      3000,
+      nullptr,
+      &gerr
+    );
+
+    if (!result) {
+      if (gerr) {
+        BOOST_LOG(debug) << "RealtimeKit "sv << method << " failed: "sv << gerr->message;
+        g_error_free(gerr);
+      }
+      g_object_unref(connection);
+      return false;
+    }
+
+    g_variant_unref(result);
+    g_object_unref(connection);
+    return true;
+  }
+#endif
+
+  bool request_rtkit_realtime(unsigned priority) {
+#ifdef POLARIS_BUILD_GIO
+    const auto pid = static_cast<std::uint64_t>(getpid());
+    const auto tid = current_thread_id();
+    return invoke_rtkit_method(
+      "MakeThreadRealtimeWithPID",
+      g_variant_new("(ttu)", static_cast<guint64>(pid), static_cast<guint64>(tid), static_cast<guint>(priority))
+    );
+#else
+    return false;
+#endif
+  }
+
+  bool request_rtkit_high_priority(int nice_level) {
+#ifdef POLARIS_BUILD_GIO
+    const auto pid = static_cast<std::uint64_t>(getpid());
+    const auto tid = current_thread_id();
+    return invoke_rtkit_method(
+      "MakeThreadHighPriorityWithPID",
+      g_variant_new("(tti)", static_cast<guint64>(pid), static_cast<guint64>(tid), static_cast<gint>(nice_level))
+    );
+#else
+    return false;
+#endif
+  }
+}  // namespace
 
 namespace dyn {
   void *handle(const std::vector<const char *> &libs) {
@@ -425,6 +550,12 @@ std::string get_local_ip_for_gateway() {
         return;
     }
 
+    if (priority >= thread_priority_e::high && thread_priority_permission_denied.load()) {
+      return;
+    }
+
+    int fifo_error = 0;
+
     // Try SCHED_FIFO for critical/high priority threads first (requires CAP_SYS_NICE)
     if (priority >= thread_priority_e::high) {
       struct sched_param param {};
@@ -435,12 +566,37 @@ std::string get_local_ip_for_gateway() {
         return;
       }
 
+      fifo_error = errno;
+
+      if ((fifo_error == EPERM || fifo_error == EACCES) &&
+          priority == thread_priority_e::critical &&
+          request_rtkit_realtime(20)) {
+        BOOST_LOG(debug) << "Granted critical thread realtime priority via RealtimeKit"sv;
+        return;
+      }
+
       BOOST_LOG(debug) << "SCHED_FIFO unavailable, falling back to nice value"sv;
     }
 
     // Fall back to adjusting nice value
     errno = 0;
     if (nice(nice_value) == -1 && errno != 0) {
+      const int nice_error = errno;
+      const bool permission_denied =
+        priority >= thread_priority_e::high &&
+        (fifo_error == EPERM || fifo_error == EACCES || nice_error == EPERM || nice_error == EACCES);
+
+      if (permission_denied) {
+        if (request_rtkit_high_priority(nice_value)) {
+          BOOST_LOG(debug) << "Granted thread high priority via RealtimeKit (nice="sv << nice_value << ')';
+          return;
+        }
+
+        thread_priority_permission_denied.store(true);
+        log_thread_priority_permission_warning_once();
+        return;
+      }
+
       BOOST_LOG(warning) << "Unable to set thread nice value to "sv << nice_value << ": "sv << strerror(errno);
     }
   }

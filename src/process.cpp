@@ -8,8 +8,13 @@
  #define BOOST_PROCESS_VERSION 1
 #endif
 // standard includes
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -155,6 +160,124 @@ namespace proc {
       return it->get<std::string>();
     }
 
+    bool is_steam_big_picture_name(const std::string &name) {
+      return boost::iequals(boost::trim_copy(name), "Steam Big Picture");
+    }
+
+    bool command_contains_steam_big_picture_open(const std::string &cmd) {
+      return boost::icontains(cmd, "steam://open/bigpicture");
+    }
+
+    bool command_contains_steam_big_picture_close(const std::string &cmd) {
+      return boost::icontains(cmd, "steam://close/bigpicture");
+    }
+
+    bool command_uses_steam_gamepadui_flag(const std::string &cmd) {
+      return boost::icontains(cmd, "steam -gamepadui");
+    }
+
+    bool command_targets_steam_big_picture(const std::string &cmd) {
+      return command_contains_steam_big_picture_open(cmd) ||
+             command_contains_steam_big_picture_close(cmd) ||
+             command_uses_steam_gamepadui_flag(cmd);
+    }
+
+    bool is_steam_big_picture_app(const proc::ctx_t &ctx) {
+      if (is_steam_big_picture_name(ctx.name)) {
+        return true;
+      }
+
+      if (command_targets_steam_big_picture(ctx.cmd)) {
+        return true;
+      }
+
+      if (std::any_of(ctx.detached.begin(), ctx.detached.end(), command_targets_steam_big_picture)) {
+        return true;
+      }
+
+      return std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), [](const proc::cmd_t &cmd) {
+        return command_targets_steam_big_picture(cmd.do_cmd) ||
+               command_targets_steam_big_picture(cmd.undo_cmd);
+      });
+    }
+
+    std::string steam_big_picture_command_prefix(const std::string &cmd) {
+      return boost::istarts_with(boost::trim_copy(cmd), "setsid ") ? "setsid " : "";
+    }
+
+    std::string canonical_steam_big_picture_command(const std::string &reference_cmd, std::string_view action) {
+      return steam_big_picture_command_prefix(reference_cmd) + "steam steam://" + std::string(action);
+    }
+
+    bool prep_cmd_closes_steam_big_picture(const proc::cmd_t &cmd) {
+      return command_contains_steam_big_picture_close(cmd.do_cmd) ||
+             command_contains_steam_big_picture_close(cmd.undo_cmd);
+    }
+
+    void normalize_steam_big_picture_app(proc::ctx_t &ctx) {
+      if (!is_steam_big_picture_app(ctx)) {
+        return;
+      }
+
+      auto normalize_open_command = [&](const std::string &cmd) {
+        return canonical_steam_big_picture_command(cmd.empty() ? "steam" : cmd, "open/bigpicture");
+      };
+
+      for (auto &cmd : ctx.detached) {
+        if (!command_uses_steam_gamepadui_flag(cmd)) {
+          continue;
+        }
+
+        const auto normalized = normalize_open_command(cmd);
+        if (normalized == cmd) {
+          continue;
+        }
+
+        BOOST_LOG(info) << "process: normalized Steam Big Picture detached launch command from ["
+                        << cmd << "] to [" << normalized << ']';
+        cmd = normalized;
+      }
+
+      if (!ctx.cmd.empty() &&
+          (command_uses_steam_gamepadui_flag(ctx.cmd) || command_contains_steam_big_picture_open(ctx.cmd))) {
+        const auto normalized = normalize_open_command(ctx.cmd);
+        if (std::find(ctx.detached.begin(), ctx.detached.end(), normalized) == ctx.detached.end()) {
+          ctx.detached.emplace_back(normalized);
+        }
+        BOOST_LOG(info) << "process: converted Steam Big Picture primary command into detached launch ["
+                        << normalized << ']';
+        ctx.cmd.clear();
+      }
+
+      bool stripped_mangohud = false;
+      for (const char *key : {"MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG"}) {
+        if (ctx.env_vars.erase(key) > 0) {
+          stripped_mangohud = true;
+        }
+      }
+
+      if (stripped_mangohud) {
+        BOOST_LOG(info) << "process: removed MangoHud environment from Steam Big Picture to avoid Steam helper crashes";
+      }
+
+      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_closes_steam_big_picture)) {
+        return;
+      }
+
+      std::string reference_cmd;
+      if (!ctx.detached.empty()) {
+        reference_cmd = ctx.detached.front();
+      } else if (!ctx.cmd.empty()) {
+        reference_cmd = ctx.cmd;
+      } else {
+        reference_cmd = "steam";
+      }
+
+      auto close_cmd = canonical_steam_big_picture_command(reference_cmd, "close/bigpicture");
+      BOOST_LOG(info) << "process: added Steam Big Picture cleanup undo command [" << close_cmd << ']';
+      ctx.prep_cmds.emplace_back(""s, std::move(close_cmd), false);
+    }
+
     std::optional<int> coerce_json_int(const nlohmann::json &value) {
       try {
         if (value.is_number_integer() || value.is_number_unsigned()) {
@@ -240,6 +363,242 @@ namespace proc {
 
       const auto parsed_value = coerce_json_int(*it);
       return parsed_value.value_or(default_value);
+    }
+
+    struct parsed_display_mode_t {
+      int width = 0;
+      int height = 0;
+      int fps = 0;  // milliHz
+    };
+
+    struct resolved_session_optimization_t {
+      std::optional<parsed_display_mode_t> display_mode;
+      std::optional<int> color_range;
+      std::optional<bool> hdr;
+      std::optional<bool> virtual_display;
+      std::optional<int> target_bitrate_kbps;
+      std::optional<int> nvenc_tune;
+      std::optional<std::string> preferred_codec;
+      std::string display_mode_source;
+      std::string color_range_source;
+      std::string hdr_source;
+      std::string virtual_display_source;
+      std::string bitrate_source;
+      std::string nvenc_tune_source;
+      std::string preferred_codec_source;
+      std::vector<std::string> reasoning;
+      std::vector<std::string> layers;
+    };
+
+    struct optimization_locks_t {
+      bool display_mode = false;
+      bool color_range = false;
+      bool hdr = false;
+      bool virtual_display = false;
+      bool bitrate = false;
+      bool nvenc_tune = false;
+      bool preferred_codec = false;
+    };
+
+    bool parse_display_mode_string(const std::string &value, parsed_display_mode_t &parsed) {
+      if (value.empty()) {
+        return false;
+      }
+
+      int width = 0;
+      int height = 0;
+      float fps = 60.0f;
+      if (sscanf(value.c_str(), "%dx%dx%f", &width, &height, &fps) < 2) {
+        return false;
+      }
+
+      if (width <= 0 || height <= 0 || fps <= 0.0f) {
+        return false;
+      }
+
+      parsed.width = width;
+      parsed.height = height;
+      parsed.fps = fps < 1000.0f ? static_cast<int>(std::round(fps * 1000.0f)) : static_cast<int>(std::round(fps));
+      return parsed.fps > 0;
+    }
+
+    std::string format_session_fps(int fps) {
+      if (fps <= 0) {
+        return "0";
+      }
+
+      const double fps_value = fps >= 1000 ? static_cast<double>(fps) / 1000.0 : static_cast<double>(fps);
+      std::ostringstream stream;
+      stream << std::fixed << std::setprecision(fps % 1000 == 0 ? 0 : 3) << fps_value;
+      return stream.str();
+    }
+
+    void note_layer(resolved_session_optimization_t &resolved, const std::string &layer) {
+      if (layer.empty() || std::find(resolved.layers.begin(), resolved.layers.end(), layer) != resolved.layers.end()) {
+        return;
+      }
+
+      resolved.layers.push_back(layer);
+    }
+
+    void note_reasoning(resolved_session_optimization_t &resolved, const std::string &reasoning) {
+      if (reasoning.empty()) {
+        return;
+      }
+
+      resolved.reasoning.push_back(reasoning);
+    }
+
+    void apply_optimization_layer(resolved_session_optimization_t &resolved,
+                                  const optimization_locks_t &locks,
+                                  const device_db::optimization_t &optimization,
+                                  const std::string &layer) {
+      bool touched = false;
+
+      if (optimization.display_mode && !locks.display_mode) {
+        parsed_display_mode_t parsed;
+        if (parse_display_mode_string(*optimization.display_mode, parsed)) {
+          resolved.display_mode = parsed;
+          resolved.display_mode_source = layer;
+          touched = true;
+        } else {
+          BOOST_LOG(warning) << "session_optimization: Ignoring invalid display mode ["sv
+                             << *optimization.display_mode << "] from "sv << layer;
+        }
+      }
+
+      if (optimization.color_range && !locks.color_range) {
+        resolved.color_range = *optimization.color_range;
+        resolved.color_range_source = layer;
+        touched = true;
+      }
+
+      if (optimization.hdr.has_value() && !locks.hdr) {
+        resolved.hdr = *optimization.hdr;
+        resolved.hdr_source = layer;
+        touched = true;
+      }
+
+      if (optimization.virtual_display.has_value() && !locks.virtual_display) {
+        resolved.virtual_display = *optimization.virtual_display;
+        resolved.virtual_display_source = layer;
+        touched = true;
+      }
+
+      if (optimization.target_bitrate_kbps && !locks.bitrate) {
+        resolved.target_bitrate_kbps = *optimization.target_bitrate_kbps;
+        resolved.bitrate_source = layer;
+        touched = true;
+      }
+
+      if (optimization.nvenc_tune && !locks.nvenc_tune) {
+        resolved.nvenc_tune = *optimization.nvenc_tune;
+        resolved.nvenc_tune_source = layer;
+        touched = true;
+      }
+
+      if (optimization.preferred_codec && !locks.preferred_codec) {
+        resolved.preferred_codec = *optimization.preferred_codec;
+        resolved.preferred_codec_source = layer;
+        touched = true;
+      }
+
+      if (touched) {
+        note_layer(resolved, layer);
+        note_reasoning(resolved, optimization.reasoning);
+      }
+    }
+
+    std::string join_layers(const std::vector<std::string> &layers) {
+      std::ostringstream stream;
+      for (std::size_t index = 0; index < layers.size(); ++index) {
+        if (index > 0) {
+          stream << '+';
+        }
+        stream << layers[index];
+      }
+      return stream.str();
+    }
+
+    std::string join_reasons(const std::vector<std::string> &reasons) {
+      std::ostringstream stream;
+      for (std::size_t index = 0; index < reasons.size(); ++index) {
+        if (index > 0) {
+          stream << " | ";
+        }
+        stream << reasons[index];
+      }
+      return stream.str();
+    }
+
+    void set_session_env_var(boost::process::v1::environment &env,
+                             std::unordered_set<std::string> &tracked_keys,
+                             const std::string &key,
+                             const std::string &value) {
+      env[key] = value;
+      platf::set_env(key, value);
+      tracked_keys.insert(key);
+    }
+
+#ifdef __linux__
+    std::optional<std::string> copy_env_var(const char *key) {
+      if (const char *value = std::getenv(key); value != nullptr) {
+        return std::string(value);
+      }
+
+      return std::nullopt;
+    }
+
+    void restore_env_var(const char *key, const std::optional<std::string> &value) {
+      if (value) {
+        platf::set_env(key, *value);
+      } else {
+        platf::unset_env(key);
+      }
+    }
+#endif
+
+    std::string env_value(const proc::ctx_t &app, const boost::process::v1::environment &env, const std::string &key) {
+      if (const auto it = app.env_vars.find(key); it != app.env_vars.end()) {
+        return it->second;
+      }
+
+      const char *current_value = getenv(key.c_str());
+      if (current_value && *current_value) {
+        return current_value;
+      }
+
+      const auto env_it = env.find(key);
+      if (env_it != env.end()) {
+        return env_it->to_string();
+      }
+
+      return {};
+    }
+
+    bool session_pacing_is_enabled(const proc::ctx_t &app,
+                                   const rtsp_stream::launch_session_t &launch_session,
+                                   const std::string &game_category) {
+      if (launch_session.input_only) {
+        return false;
+      }
+      if (game_category == "desktop") {
+        return false;
+      }
+      if (app.cmd.empty() && app.detached.empty()) {
+        return false;
+      }
+      const int target_fps = launch_session.fps >= 1000 ? static_cast<int>(std::round(static_cast<double>(launch_session.fps) / 1000.0)) : launch_session.fps;
+      return target_fps > 0;
+    }
+
+    bool env_flag_enabled(const proc::ctx_t &app, const boost::process::v1::environment &env, const std::string &key) {
+      const auto value = normalized_json_string(env_value(app, env, key));
+      if (value.empty()) {
+        return false;
+      }
+
+      return value != "0" && value != "false" && value != "off" && value != "no";
     }
   }  // namespace
 
@@ -341,6 +700,9 @@ namespace proc {
   };
 
   std::unique_ptr<platf::deinit_t> init() {
+#ifdef __linux__
+    virtual_display::cleanup_stale();
+#endif
     return std::make_unique<deinit_t>();
   }
 
@@ -445,31 +807,21 @@ namespace proc {
     _launch_session = launch_session;
     allow_client_commands = app.allow_client_commands;
 
-    uint32_t client_width = launch_session->width ? launch_session->width : 1920;
-    uint32_t client_height = launch_session->height ? launch_session->height : 1080;
-
-    uint32_t render_width = client_width;
-    uint32_t render_height = client_height;
-
-    int scale_factor = launch_session->scale_factor;
-    if (_app.scale_factor != 100) {
-      scale_factor = _app.scale_factor;
-    }
-
-    if (scale_factor != 100) {
-      render_width *= ((float)scale_factor / 100);
-      render_height *= ((float)scale_factor / 100);
-
-      // Chop the last bit to ensure the scaled resolution is even numbered
-      // Most odd resolutions won't work well
-      render_width &= ~1;
-      render_height &= ~1;
-    }
-
-    launch_session->width = render_width;
-    launch_session->height = render_height;
-
     this->initial_display = config::video.output_name;
+    this->initial_color_range = config::video.color_range;
+    this->initial_nvenc_tune = config::video.nvenc_tune;
+    this->initial_max_bitrate = config::video.max_bitrate;
+    this->initial_adaptive_max_bitrate = config::video.adaptive_bitrate.max_bitrate_kbps;
+
+    launch_session->width = launch_session->requested_width;
+    launch_session->height = launch_session->requested_height;
+    launch_session->fps = launch_session->requested_fps;
+    launch_session->target_bitrate_kbps.reset();
+    launch_session->nvenc_tune.reset();
+    launch_session->preferred_codec.reset();
+    launch_session->optimization_source.clear();
+    launch_session->optimization_reasoning.clear();
+    launch_session->pacing_policy.clear();
 
     // Runtime game detection: extract Steam AppID and classify if not already set
     std::string game_category = _app.game_category;
@@ -501,8 +853,14 @@ namespace proc {
       BOOST_LOG(info) << "game_classifier: "sv << _app.name << " classified as "sv << game_category;
     }
 
-    // Apply per-client display profile overrides
-    int saved_color_range = config::video.color_range;
+    // Resolve session overrides in a strict order:
+    // explicit user/client locks -> client profile -> device DB -> AI.
+    optimization_locks_t optimization_locks;
+    optimization_locks.display_mode = launch_session->user_locked_display_mode || !launch_session->enable_sops;
+    optimization_locks.virtual_display = launch_session->user_locked_virtual_display;
+    optimization_locks.bitrate = config::video.max_bitrate > 0;
+
+    resolved_session_optimization_t resolved_optimization;
     auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
     if (client_profile) {
       BOOST_LOG(info) << "Applying client profile for \""sv << launch_session->device_name << '"';
@@ -513,112 +871,157 @@ namespace proc {
       }
 
       if (client_profile->color_range.has_value()) {
+        optimization_locks.color_range = true;
+        resolved_optimization.color_range = client_profile->color_range;
+        resolved_optimization.color_range_source = "client_profile";
+        note_layer(resolved_optimization, "client_profile");
         BOOST_LOG(info) << "Client profile: overriding color_range to "sv << client_profile->color_range.value();
         config::video.color_range = client_profile->color_range.value();
       }
 
       if (client_profile->hdr.has_value()) {
+        optimization_locks.hdr = true;
+        resolved_optimization.hdr = client_profile->hdr;
+        resolved_optimization.hdr_source = "client_profile";
+        note_layer(resolved_optimization, "client_profile");
         BOOST_LOG(info) << "Client profile: overriding HDR to "sv << (client_profile->hdr.value() ? "enabled"sv : "disabled"sv);
         launch_session->enable_hdr = client_profile->hdr.value();
       }
     }
 
-    // Apply device database optimization (fills gaps not set by user or client_profile)
-    {
-      auto opt = device_db::get_optimization(launch_session->device_name, _app.name);
-      // Only apply display_mode if user hasn't manually set one
-      if (opt.display_mode && launch_session->width == 0) {
-        // Parse WxHxFPS
-        int w = 0, h = 0;
-        float f = 60;
-        if (sscanf(opt.display_mode->c_str(), "%dx%dx%f", &w, &h, &f) >= 2) {
-          BOOST_LOG(info) << "device_db: Setting display mode to "sv << *opt.display_mode;
-          launch_session->width = w;
-          launch_session->height = h;
-          launch_session->fps = static_cast<int>(f * 1000);
-        }
-      }
-      if (opt.color_range && config::video.color_range == 0) {
-        BOOST_LOG(info) << "device_db: Setting color_range to "sv << *opt.color_range;
-        config::video.color_range = *opt.color_range;
-      }
-      if (opt.hdr) {
-        BOOST_LOG(info) << "device_db: Setting HDR to "sv << (*opt.hdr ? "enabled"sv : "disabled"sv);
-        launch_session->enable_hdr = *opt.hdr;
-      }
-    }
+    auto device_optimization = device_db::get_optimization(launch_session->device_name, _app.name);
+    apply_optimization_layer(resolved_optimization, optimization_locks, device_optimization, "device_db");
 
-    // AI optimizer: check cache for a smarter optimization, fire async if miss
+    // AI optimizer: cached results override device DB; unknown devices get a sync request.
     if (ai_optimizer::is_enabled()) {
+      std::string gpu_info = config::video.adapter_name.empty()
+        ? "NVIDIA GPU (NVENC)"s
+        : config::video.adapter_name;
+      auto history = ai_optimizer::get_session_history(launch_session->device_name, _app.name);
+      auto device_info = device_db::get_device(launch_session->device_name);
       auto ai_opt = ai_optimizer::get_cached(launch_session->device_name, _app.name);
       if (ai_opt) {
         BOOST_LOG(info) << "ai_optimizer: Applying cached AI optimization for \""sv
                         << launch_session->device_name << "\" + \""sv << _app.name
                         << "\" — "sv << ai_opt->reasoning;
-        // AI overrides device_db (but not manual user settings)
-        if (ai_opt->display_mode && launch_session->width == 0) {
-          int w = 0, h = 0; float f = 60;
-          if (sscanf(ai_opt->display_mode->c_str(), "%dx%dx%f", &w, &h, &f) >= 2) {
-            launch_session->width = w;
-            launch_session->height = h;
-            launch_session->fps = static_cast<int>(f * 1000);
-          }
-        }
-        if (ai_opt->color_range && config::video.color_range == 0)
-          config::video.color_range = *ai_opt->color_range;
-        if (ai_opt->hdr)
-          launch_session->enable_hdr = *ai_opt->hdr;
-        if (ai_opt->nvenc_tune)
-          config::video.nvenc_tune = *ai_opt->nvenc_tune;
-        if (ai_opt->target_bitrate_kbps && config::video.max_bitrate == 0) {
-          config::video.max_bitrate = *ai_opt->target_bitrate_kbps;
-          // Also inform adaptive bitrate controller of the AI-recommended ceiling
-          if (config::video.adaptive_bitrate.enabled) {
-            config::video.adaptive_bitrate.max_bitrate_kbps = *ai_opt->target_bitrate_kbps;
-            BOOST_LOG(info) << "ai_optimizer: Set adaptive bitrate ceiling to "sv
-                            << *ai_opt->target_bitrate_kbps << " kbps"sv;
-          }
+        apply_optimization_layer(resolved_optimization, optimization_locks, *ai_opt, ai_opt->source);
+      } else if (!device_info) {
+        BOOST_LOG(info) << "ai_optimizer: Unknown device \""sv << launch_session->device_name
+                        << "\" — requesting sync AI optimization"sv;
+        if (auto sync_opt = ai_optimizer::request_sync(
+              launch_session->device_name, _app.name, gpu_info, game_category, history)) {
+          BOOST_LOG(info) << "ai_optimizer: AI identified device — "sv << sync_opt->reasoning;
+          apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
         }
       } else {
-        // No cache hit — check if device is known in device_db
-        std::string gpu_info = config::video.adapter_name.empty()
-          ? "NVIDIA GPU (NVENC)"s
-          : config::video.adapter_name;
-        auto history = ai_optimizer::get_session_history(launch_session->device_name, _app.name);
-        auto device_info = device_db::get_device(launch_session->device_name);
-
-        if (!device_info) {
-          // Unknown device — do a SYNC AI call so the first session gets proper settings.
-          // The AI can interpret "Pixel10Pro" or "Samsung Galaxy S24" from the name alone.
-          BOOST_LOG(info) << "ai_optimizer: Unknown device \""sv << launch_session->device_name
-                          << "\" — requesting sync AI optimization"sv;
-          auto sync_opt = ai_optimizer::request_sync(
-            launch_session->device_name, _app.name, gpu_info, game_category, history);
-          if (sync_opt) {
-            BOOST_LOG(info) << "ai_optimizer: AI identified device — "sv << sync_opt->reasoning;
-            if (sync_opt->display_mode && launch_session->width == 0) {
-              int w = 0, h = 0; float f = 60;
-              if (sscanf(sync_opt->display_mode->c_str(), "%dx%dx%f", &w, &h, &f) >= 2) {
-                launch_session->width = w;
-                launch_session->height = h;
-                launch_session->fps = static_cast<int>(f * 1000);
-              }
-            }
-            if (sync_opt->target_bitrate_kbps && config::video.max_bitrate == 0)
-              config::video.max_bitrate = *sync_opt->target_bitrate_kbps;
-            if (sync_opt->preferred_codec)
-              BOOST_LOG(info) << "ai_optimizer: Recommended codec: "sv << *sync_opt->preferred_codec;
-            if (sync_opt->nvenc_tune)
-              config::video.nvenc_tune = *sync_opt->nvenc_tune;
-          }
-        } else {
-          // Known device — async is fine, device_db already applied reasonable defaults
-          ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
-          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
-                          << "\" — fired async request for next session"sv;
-        }
+        ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
+        BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
+                        << "\" — fired async request for next session"sv;
       }
     }
+
+    if (resolved_optimization.display_mode) {
+      launch_session->width = resolved_optimization.display_mode->width;
+      launch_session->height = resolved_optimization.display_mode->height;
+      launch_session->fps = resolved_optimization.display_mode->fps;
+    }
+
+    if (resolved_optimization.color_range) {
+      config::video.color_range = *resolved_optimization.color_range;
+    }
+
+    if (resolved_optimization.hdr.has_value()) {
+      launch_session->enable_hdr = *resolved_optimization.hdr;
+    }
+
+    if (resolved_optimization.virtual_display.has_value()) {
+      launch_session->virtual_display = *resolved_optimization.virtual_display;
+    }
+
+    if (resolved_optimization.target_bitrate_kbps.has_value()) {
+      launch_session->target_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
+      config::video.max_bitrate = *resolved_optimization.target_bitrate_kbps;
+      if (config::video.adaptive_bitrate.enabled) {
+        config::video.adaptive_bitrate.max_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
+      }
+    }
+
+    if (resolved_optimization.nvenc_tune.has_value()) {
+      launch_session->nvenc_tune = *resolved_optimization.nvenc_tune;
+      config::video.nvenc_tune = *resolved_optimization.nvenc_tune;
+    }
+
+    auto normalized_preferred_codec = device_db::normalize_preferred_codec(
+      launch_session->device_name,
+      _app.name,
+      resolved_optimization.preferred_codec,
+      resolved_optimization.target_bitrate_kbps,
+      resolved_optimization.hdr.value_or(launch_session->enable_hdr)
+    );
+    if (normalized_preferred_codec != resolved_optimization.preferred_codec) {
+      BOOST_LOG(info) << "session_optimization: normalized preferred_codec from "sv
+                      << resolved_optimization.preferred_codec.value_or("(none)"s)
+                      << " to "sv
+                      << normalized_preferred_codec.value_or("(client)"s)
+                      << " for headless handheld UI streaming on the RAM capture path"sv;
+      resolved_optimization.preferred_codec = normalized_preferred_codec;
+      resolved_optimization.preferred_codec_source = "runtime_policy";
+      note_layer(resolved_optimization, "runtime_policy");
+      note_reasoning(
+        resolved_optimization,
+        "Headless labwc handheld UI sessions at modest bitrates prefer H.264 over forced HEVC"
+      );
+    }
+
+    if (resolved_optimization.preferred_codec.has_value()) {
+      launch_session->preferred_codec = *resolved_optimization.preferred_codec;
+    }
+
+    launch_session->optimization_source = join_layers(resolved_optimization.layers);
+    if (launch_session->optimization_source.empty()) {
+      launch_session->optimization_source = "default";
+    }
+    launch_session->optimization_reasoning = join_reasons(resolved_optimization.reasoning);
+    const auto preferred_codec = launch_session->preferred_codec.value_or("client"s);
+
+    BOOST_LOG(info) << "session_optimization: requested="sv
+                    << launch_session->requested_width << "x"sv
+                    << launch_session->requested_height << "x"sv
+                    << format_session_fps(launch_session->requested_fps)
+                    << " selected="sv
+                    << launch_session->width << "x"sv
+                    << launch_session->height << "x"sv
+                    << format_session_fps(launch_session->fps)
+                    << " virtual_display="sv << (launch_session->virtual_display ? "true"sv : "false"sv)
+                    << " color_range="sv << config::video.color_range
+                    << " max_bitrate="sv << config::video.max_bitrate
+                    << " nvenc_tune="sv << config::video.nvenc_tune
+                    << " preferred_codec="sv << preferred_codec
+                    << " layers="sv << launch_session->optimization_source;
+
+    uint32_t client_width = launch_session->width ? launch_session->width : 1920;
+    uint32_t client_height = launch_session->height ? launch_session->height : 1080;
+
+    uint32_t render_width = client_width;
+    uint32_t render_height = client_height;
+
+    int scale_factor = launch_session->scale_factor;
+    if (_app.scale_factor != 100) {
+      scale_factor = _app.scale_factor;
+    }
+
+    if (scale_factor != 100) {
+      render_width *= ((float)scale_factor / 100);
+      render_height *= ((float)scale_factor / 100);
+
+      // Chop the last bit to ensure the scaled resolution is even numbered
+      // Most odd resolutions won't work well
+      render_width &= ~1;
+      render_height &= ~1;
+    }
+
+    launch_session->width = render_width;
+    launch_session->height = render_height;
 
     // Polaris session setup: cage-as-window architecture
     // Games render inside cage (a Wayland compositor window on DP-3).
@@ -640,14 +1043,17 @@ namespace proc {
 #endif
 
     // Executed when returning from function
-    auto fg = util::fail_guard([&, saved_color_range
+    auto fg = util::fail_guard([&
 #ifdef __linux__
       , session_state
 #endif
     ]() {
-      // Restore to user defined output name and color range
+      // Restore session-scoped config overrides before unwinding.
       config::video.output_name = this->initial_display;
-      config::video.color_range = saved_color_range;
+      config::video.color_range = this->initial_color_range;
+      config::video.nvenc_tune = this->initial_nvenc_tune;
+      config::video.max_bitrate = this->initial_max_bitrate;
+      config::video.adaptive_bitrate.max_bitrate_kbps = this->initial_adaptive_max_bitrate;
       terminate();
       display_device::revert_configuration();
 #ifdef __linux__
@@ -863,7 +1269,14 @@ namespace proc {
     // encoder matches the active GPU (which could have changed
     // due to hotplugging, driver crash, primary monitor change,
     // or any number of other factors).
-    if (rtsp_stream::session_count() == 0 && video::probe_encoders()) {
+#ifdef __linux__
+    const bool delay_encoder_probe_until_cage = config::video.linux_display.use_cage_compositor;
+#else
+    constexpr bool delay_encoder_probe_until_cage = false;
+#endif
+    if (!delay_encoder_probe_until_cage &&
+        rtsp_stream::session_count() == 0 &&
+        video::probe_encoders()) {
       if (config::video.ignore_encoder_probe_failure) {
         BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
       } else {
@@ -1015,17 +1428,96 @@ namespace proc {
     // Set on both boost _env (for non-cage launches) and real environ (for fork/exec in cage)
     for (const auto &[key, val] : _app.env_vars) {
       _env[key] = val;
-      setenv(key.c_str(), val.c_str(), 1);
+      platf::set_env(key, val);
       BOOST_LOG(info) << "Per-app env: " << key << "=" << val;
     }
+    _session_env_keys.clear();
+
     // If MangoHud is enabled, also set DLSYM mode for safer Vulkan hooking
     // (prevents crashes in Wine utilities like d3ddriverquery64.exe)
     if (_app.env_vars.count("MANGOHUD") && _app.env_vars.at("MANGOHUD") == "1") {
       _env["MANGOHUD_DLSYM"] = "1";
-      setenv("MANGOHUD_DLSYM", "1", 1);
+      platf::set_env("MANGOHUD_DLSYM", "1");
+      _session_env_keys.insert("MANGOHUD_DLSYM");
+    }
+    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_REQUESTED_FPS", format_session_fps(launch_session->requested_fps));
+    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_TARGET_FPS", format_session_fps(launch_session->fps));
+    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_OPTIMIZATION_SOURCE", launch_session->optimization_source);
+
+    const bool enable_session_pacing = session_pacing_is_enabled(_app, *launch_session, game_category);
+    const int pacing_target_fps = launch_session->fps >= 1000 ?
+      static_cast<int>(std::round(static_cast<double>(launch_session->fps) / 1000.0)) :
+      launch_session->fps;
+    launch_session->pacing_policy = enable_session_pacing ? "client_fps_limit" : "none";
+    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_PACING_POLICY", launch_session->pacing_policy);
+
+    if (launch_session->target_bitrate_kbps) {
+      set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_TARGET_BITRATE_KBPS",
+                          std::to_string(*launch_session->target_bitrate_kbps));
+    }
+
+    if (enable_session_pacing) {
+      if (env_value(_app, _env, "DXVK_FRAME_RATE").empty()) {
+        set_session_env_var(_env, _session_env_keys, "DXVK_FRAME_RATE", std::to_string(pacing_target_fps));
+      }
+
+      if (env_flag_enabled(_app, _env, "MANGOHUD")) {
+        auto mangohud_config = env_value(_app, _env, "MANGOHUD_CONFIG");
+        if (mangohud_config.find("fps_limit=") == std::string::npos) {
+          if (!mangohud_config.empty() && mangohud_config.back() != ',') {
+            mangohud_config += ',';
+          }
+          mangohud_config += "fps_limit=" + std::to_string(pacing_target_fps);
+          set_session_env_var(_env, _session_env_keys, "MANGOHUD_CONFIG", mangohud_config);
+        }
+      }
+
+      BOOST_LOG(info) << "session_pacing: policy="sv << launch_session->pacing_policy
+                      << " target_fps="sv << pacing_target_fps;
     }
 
 #ifdef __linux__
+    auto reprobe_encoders_for_cage = [&]() -> bool {
+      if (!config::video.linux_display.use_cage_compositor || rtsp_stream::session_count() != 0) {
+        return true;
+      }
+
+      const auto cage_socket = cage_display_router::get_wayland_socket();
+      if (cage_socket.empty()) {
+        BOOST_LOG(error) << "session_manager: Cage compositor started without an active WAYLAND_DISPLAY socket for encoder reprobe"sv;
+        if (config::video.ignore_encoder_probe_failure) {
+          BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
+          return true;
+        }
+        return false;
+      }
+
+      BOOST_LOG(info) << "session_manager: Reprobing encoders against cage socket ["sv << cage_socket << ']';
+      const auto original_wayland_display = copy_env_var("WAYLAND_DISPLAY");
+      const auto original_at_spi_bus_address = copy_env_var("AT_SPI_BUS_ADDRESS");
+
+      platf::set_env("WAYLAND_DISPLAY", cage_socket);
+      platf::set_env("AT_SPI_BUS_ADDRESS", "");
+
+      const int probe_status = video::probe_encoders();
+
+      restore_env_var("AT_SPI_BUS_ADDRESS", original_at_spi_bus_address);
+      restore_env_var("WAYLAND_DISPLAY", original_wayland_display);
+
+      if (probe_status == 0) {
+        BOOST_LOG(info) << "session_manager: Cage reprobe selected encoder ["
+                        << video::active_encoder_name() << ']';
+        return true;
+      }
+
+      if (config::video.ignore_encoder_probe_failure) {
+        BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
+        return true;
+      }
+
+      return false;
+    };
+
     const bool requested_headless = config::video.linux_display.headless_mode;
     const bool prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
     const bool encoder_requires_gpu_native_capture = video::active_encoder_requires_gpu_native_capture();
@@ -1074,6 +1566,11 @@ namespace proc {
       if (!cage_display_router::start(render_width, render_height, game_cmd, force_windowed_cage_for_gpu_native)) {
         BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
         confighttp::emit_session_event("error", "Failed to start cage compositor");
+      } else if (!reprobe_encoders_for_cage()) {
+        BOOST_LOG(error) << "session_manager: Encoder reprobe against cage compositor failed"sv;
+        cage_display_router::stop();
+        confighttp::emit_session_event("error", "Failed to initialize encoder for cage compositor");
+        return 503;
       } else {
         log_runtime_state();
         confighttp::set_session_state(confighttp::session_state_e::game_launching);
@@ -1101,6 +1598,11 @@ namespace proc {
     } else if (config::video.linux_display.use_cage_compositor) {
       // No detached commands — start cage empty, game will use _app.cmd
       if (cage_display_router::start(render_width, render_height, "", force_windowed_cage_for_gpu_native)) {
+        if (!reprobe_encoders_for_cage()) {
+          BOOST_LOG(error) << "session_manager: Encoder reprobe against cage compositor failed"sv;
+          cage_display_router::stop();
+          return 503;
+        }
         log_runtime_state();
       }
     } else
@@ -1404,9 +1906,12 @@ namespace proc {
 
     // Clean up per-app env vars so they don't leak to the next session
     for (const auto &[key, val] : _app.env_vars) {
-      unsetenv(key.c_str());
+      platf::unset_env(key);
     }
-    unsetenv("MANGOHUD_DLSYM");
+    for (const auto &key : _session_env_keys) {
+      platf::unset_env(key);
+    }
+    _session_env_keys.clear();
 
 #ifdef __linux__
     // Stop labwc compositor — this kills all games running inside it.
@@ -1517,12 +2022,20 @@ namespace proc {
       // Restore output name to its original value
       config::video.output_name = initial_display;
     }
+    config::video.color_range = initial_color_range;
+    config::video.nvenc_tune = initial_nvenc_tune;
+    config::video.max_bitrate = initial_max_bitrate;
+    config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
 
     _app_id = -1;
     _app_name.clear();
     _app = {};
     display_name.clear();
     initial_display.clear();
+    initial_color_range = 0;
+    initial_nvenc_tune = 0;
+    initial_max_bitrate = 0;
+    initial_adaptive_max_bitrate = 0;
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;
@@ -2099,6 +2612,7 @@ namespace proc {
           ctx.prep_cmds = std::move(prep_cmds);
           ctx.state_cmds = std::move(state_cmds);
           ctx.detached = std::move(detached);
+          normalize_steam_big_picture_app(ctx);
 
           apps.emplace_back(std::move(ctx));
         }

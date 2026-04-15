@@ -149,11 +149,14 @@ namespace wl {
       } while (dmabuf.status == dmabuf_t::WAITING);
 
       auto current_frame = dmabuf.current_frame;
+      const bool shm_frame_ready = dmabuf.shm_frame_ready && dmabuf.shm_data;
+      const auto captured_width = shm_frame_ready ? static_cast<int>(dmabuf.shm_info.width) : static_cast<int>(current_frame->sd.width);
+      const auto captured_height = shm_frame_ready ? static_cast<int>(dmabuf.shm_info.height) : static_cast<int>(current_frame->sd.height);
 
       if (
         dmabuf.status == dmabuf_t::REINIT ||
-        current_frame->sd.width != width ||
-        current_frame->sd.height != height
+        captured_width != width ||
+        captured_height != height
       ) {
         return platf::capture_e::reinit;
       }
@@ -241,11 +244,33 @@ namespace wl {
         auto *src = static_cast<uint8_t *>(dmabuf.shm_data);
         auto *dst = img_out->data;
         int copy_h = std::min((int) dmabuf.shm_info.height, img_out->height);
+        int copy_w = std::min((int) dmabuf.shm_info.width, img_out->width);
         int src_stride = dmabuf.shm_info.stride;
         int dst_stride = img_out->row_pitch;
         int copy_bytes = std::min(src_stride, dst_stride);
+        const bool is_3bpp = (src_stride == dmabuf.shm_info.width * 3);
 
-        if (src_stride == dst_stride && copy_bytes == src_stride) {
+        if (is_3bpp) {
+          static bool logged_bgr888_conversion = false;
+          if (!logged_bgr888_conversion) {
+            BOOST_LOG(info)
+              << "wlr: SHM screencopy is 3bpp BGR888; expanding to 4bpp BGRA for software encoding"sv;
+            logged_bgr888_conversion = true;
+          }
+
+          for (int y = 0; y < copy_h; ++y) {
+            const uint8_t *src_line = src + y * src_stride;
+            uint8_t *dst_line = dst + y * dst_stride;
+            for (int x = 0; x < copy_w; ++x) {
+              // Match the portal screencopy path: headless wlroots SHM frames
+              // report BGR888 but the byte order is effectively RGB.
+              dst_line[x * 4 + 0] = src_line[x * 3 + 2];
+              dst_line[x * 4 + 1] = src_line[x * 3 + 1];
+              dst_line[x * 4 + 2] = src_line[x * 3 + 0];
+              dst_line[x * 4 + 3] = 255;
+            }
+          }
+        } else if (src_stride == dst_stride && copy_bytes == src_stride) {
           std::memcpy(dst, src, static_cast<std::size_t>(copy_h) * copy_bytes);
         } else {
           for (int y = 0; y < copy_h; ++y) {
@@ -524,13 +549,18 @@ namespace platf {
     if (!prefer_ram_capture &&
         config::video.linux_display.use_cage_compositor &&
         cage_display_router::is_running()) {
+      prefer_ram_capture = true;
+
       auto runtime_state = cage_display_router::runtime_state();
-      if (!runtime_state.effective_headless) {
-        prefer_ram_capture = true;
-        if (cage_display_router::should_log_windowed_ram_capture_warning()) {
-          BOOST_LOG(warning)
-            << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
+      if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
+        if (cage_display_router::should_log_headless_ram_capture_warning()) {
+          BOOST_LOG(info)
+            << "wlr: Using RAM capture path for headless labwc because cage sessions do not expose a stable zero-copy encoder upload path on this stack"sv;
         }
+      } else if (cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state) &&
+                 cage_display_router::should_log_windowed_ram_capture_warning()) {
+        BOOST_LOG(warning)
+          << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
       }
     }
 #endif

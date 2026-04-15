@@ -40,6 +40,9 @@ namespace rtsp_stream {
 
     bool input_only;
     bool host_audio;
+    int requested_width;
+    int requested_height;
+    int requested_fps;
     int width;
     int height;
     int fps;
@@ -49,7 +52,15 @@ namespace rtsp_stream {
     bool enable_hdr;
     bool enable_sops;
     bool virtual_display;
+    bool user_locked_display_mode;
+    bool user_locked_virtual_display;
     uint32_t scale_factor;
+    std::optional<int> target_bitrate_kbps;
+    std::optional<int> nvenc_tune;
+    std::optional<std::string> preferred_codec;
+    std::string optimization_source;
+    std::string optimization_reasoning;
+    std::string pacing_policy;
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
     std::string rtsp_url_scheme;

@@ -525,6 +525,10 @@ namespace nvhttp {
       launch_session->fps = 60000; // 60fps * 1000 denominator
     }
 
+    launch_session->requested_width = launch_session->width;
+    launch_session->requested_height = launch_session->height;
+    launch_session->requested_fps = launch_session->fps;
+
     launch_session->device_name = named_cert_p->name.empty() ? "PolarisDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
     launch_session->perm = named_cert_p->perm;
@@ -533,7 +537,10 @@ namespace nvhttp {
     launch_session->surround_params = (get_arg(args, "surroundParams", ""));
     launch_session->gcmap = util::from_view(get_arg(args, "gcmap", "0"));
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
-    launch_session->virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0")) || named_cert_p->always_use_virtual_display;
+    const bool client_requested_virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0"));
+    launch_session->virtual_display = client_requested_virtual_display || named_cert_p->always_use_virtual_display;
+    launch_session->user_locked_display_mode = !named_cert_p->display_mode.empty();
+    launch_session->user_locked_virtual_display = client_requested_virtual_display || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
 
     launch_session->client_do_cmds = named_cert_p->do_cmds;
@@ -2369,14 +2376,21 @@ namespace nvhttp {
       std::string game = args.count("game") ? args.find("game")->second : "";
 
       nlohmann::json output;
+      std::optional<std::string> suggested_codec;
+      std::optional<int> target_bitrate_kbps;
+      bool hdr_requested = false;
 
       // Try AI cache first, then device_db
       auto ai_opt = ai_optimizer::get_cached(device, game);
       if (ai_opt) {
         output["source"] = ai_opt->source;
         if (ai_opt->display_mode) output["display_mode"] = *ai_opt->display_mode;
-        if (ai_opt->target_bitrate_kbps) output["target_bitrate_kbps"] = *ai_opt->target_bitrate_kbps;
-        if (ai_opt->preferred_codec) output["preferred_codec"] = *ai_opt->preferred_codec;
+        if (ai_opt->target_bitrate_kbps) {
+          target_bitrate_kbps = *ai_opt->target_bitrate_kbps;
+          output["target_bitrate_kbps"] = *ai_opt->target_bitrate_kbps;
+        }
+        suggested_codec = ai_opt->preferred_codec;
+        hdr_requested = ai_opt->hdr.value_or(false);
         if (ai_opt->nvenc_tune) output["nvenc_tune"] = *ai_opt->nvenc_tune;
         output["reasoning"] = ai_opt->reasoning;
       } else {
@@ -2384,16 +2398,30 @@ namespace nvhttp {
         if (dev) {
           output["source"] = "device_db";
           output["display_mode"] = dev->display_mode;
+          target_bitrate_kbps = dev->ideal_bitrate_kbps;
           output["target_bitrate_kbps"] = dev->ideal_bitrate_kbps;
-          output["preferred_codec"] = dev->preferred_codec;
+          suggested_codec = dev->preferred_codec;
+          hdr_requested = dev->hdr_capable;
           output["reasoning"] = dev->notes;
         } else {
           output["source"] = "defaults";
           output["display_mode"] = "1280x720x60";
+          target_bitrate_kbps = 15000;
           output["target_bitrate_kbps"] = 15000;
-          output["preferred_codec"] = "hevc";
+          suggested_codec = "hevc";
           output["reasoning"] = "Unknown device — using safe defaults";
         }
+      }
+
+      suggested_codec = device_db::normalize_preferred_codec(
+        device,
+        game,
+        suggested_codec,
+        target_bitrate_kbps,
+        hdr_requested
+      );
+      if (suggested_codec) {
+        output["preferred_codec"] = *suggested_codec;
       }
 
       SimpleWeb::CaseInsensitiveMultimap headers;

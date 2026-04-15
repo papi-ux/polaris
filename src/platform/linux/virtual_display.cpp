@@ -19,20 +19,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <errno.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <signal.h>
 #include <sstream>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 // platform includes
 #include <dlfcn.h>
+#include <nlohmann/json.hpp>
 #include <sys/wait.h>
 
 // local includes
 #include "misc.h"
 #include "virtual_display.h"
+#include "src/platform/common.h"
 #include "src/config.h"
 #include "src/logging.h"
 
@@ -45,6 +50,109 @@ namespace virtual_display {
     std::optional<backend_e> cached_backend;
     std::chrono::steady_clock::time_point cached_backend_time {};
     backend_detection_log_cache_t backend_detection_log_cache;
+
+    fs::path persisted_state_path() {
+      return platf::appdata() / "virtual_display_state.json";
+    }
+
+    bool pid_is_alive(pid_t pid) {
+      if (pid <= 0) {
+        return false;
+      }
+
+      if (kill(pid, 0) == 0) {
+        return true;
+      }
+
+      return errno == EPERM;
+    }
+
+    std::optional<vdisplay_t> load_persisted_state(pid_t &owner_pid) {
+      owner_pid = 0;
+      std::ifstream file(persisted_state_path());
+      if (!file.is_open()) {
+        return std::nullopt;
+      }
+
+      try {
+        nlohmann::json root = nlohmann::json::parse(file);
+        if (!root.is_object()) {
+          return std::nullopt;
+        }
+
+        owner_pid = root.value("pid", 0);
+        vdisplay_t display;
+        display.device_path = root.value("device_path", "");
+        display.output_name = root.value("output_name", "");
+        display.width = root.value("width", 0);
+        display.height = root.value("height", 0);
+        display.fps = root.value("fps", 0);
+        display.active = root.value("active", false);
+
+        const auto backend_name_value = root.value("backend", "none");
+        if (backend_name_value == "evdi") {
+          display.backend = backend_e::EVDI;
+        } else if (backend_name_value == "wayland_wlr") {
+          display.backend = backend_e::WAYLAND_WLR;
+        } else if (backend_name_value == "kscreen_doctor") {
+          display.backend = backend_e::KSCREEN_DOCTOR;
+        } else {
+          display.backend = backend_e::NONE;
+        }
+
+        if (!display.active || display.backend == backend_e::NONE || display.output_name.empty()) {
+          return std::nullopt;
+        }
+
+        return display;
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "Virtual display: failed to parse persisted state: "sv << e.what();
+        return std::nullopt;
+      }
+    }
+
+    void clear_persisted_state() {
+      std::error_code ec;
+      fs::remove(persisted_state_path(), ec);
+    }
+
+    void save_persisted_state(const vdisplay_t &display) {
+      std::error_code ec;
+      fs::create_directories(persisted_state_path().parent_path(), ec);
+
+      nlohmann::json root;
+      root["pid"] = static_cast<int>(getpid());
+      root["device_path"] = display.device_path;
+      root["output_name"] = display.output_name;
+      root["width"] = display.width;
+      root["height"] = display.height;
+      root["fps"] = display.fps;
+      root["active"] = display.active;
+
+      switch (display.backend) {
+        case backend_e::EVDI:
+          root["backend"] = "evdi";
+          break;
+        case backend_e::WAYLAND_WLR:
+          root["backend"] = "wayland_wlr";
+          break;
+        case backend_e::KSCREEN_DOCTOR:
+          root["backend"] = "kscreen_doctor";
+          break;
+        case backend_e::NONE:
+        default:
+          root["backend"] = "none";
+          break;
+      }
+
+      std::ofstream file(persisted_state_path());
+      if (!file.is_open()) {
+        BOOST_LOG(warning) << "Virtual display: failed to persist state at "sv << persisted_state_path().string();
+        return;
+      }
+
+      file << root.dump(2);
+    }
 
     void log_detected_backend(backend_e backend) {
       if (!backend_detection_log_cache.note(backend)) {
@@ -916,7 +1024,30 @@ namespace virtual_display {
     return detect_backend() != backend_e::NONE;
   }
 
+  bool cleanup_stale() {
+    pid_t owner_pid = 0;
+    auto stale_display = load_persisted_state(owner_pid);
+    if (!stale_display) {
+      clear_persisted_state();
+      return false;
+    }
+
+    if (owner_pid > 0 && owner_pid != getpid() && pid_is_alive(owner_pid)) {
+      BOOST_LOG(info) << "Virtual display: persisted state belongs to live pid "sv << owner_pid
+                      << ", skipping stale cleanup"sv;
+      return false;
+    }
+
+    BOOST_LOG(info) << "Virtual display: cleaning up stale persisted display ["sv
+                    << stale_display->output_name << "] from pid "sv << owner_pid;
+    destroy(*stale_display);
+    clear_persisted_state();
+    return true;
+  }
+
   std::optional<vdisplay_t> create(int width, int height, int fps) {
+    cleanup_stale();
+
     backend_e backend = detect_backend();
 
     BOOST_LOG(info) << "Virtual display: creating "sv << width << "x"sv << height
@@ -924,13 +1055,25 @@ namespace virtual_display {
 
     switch (backend) {
       case backend_e::EVDI:
-        return evdi::create(width, height, fps);
+        if (auto display = evdi::create(width, height, fps)) {
+          save_persisted_state(*display);
+          return display;
+        }
+        return std::nullopt;
 
       case backend_e::WAYLAND_WLR:
-        return wayland_wlr::create(width, height, fps);
+        if (auto display = wayland_wlr::create(width, height, fps)) {
+          save_persisted_state(*display);
+          return display;
+        }
+        return std::nullopt;
 
       case backend_e::KSCREEN_DOCTOR:
-        return kscreen::create(width, height, fps);
+        if (auto display = kscreen::create(width, height, fps)) {
+          save_persisted_state(*display);
+          return display;
+        }
+        return std::nullopt;
 
       case backend_e::NONE:
       default:
@@ -964,6 +1107,8 @@ namespace virtual_display {
       default:
         break;
     }
+
+    clear_persisted_state();
   }
 
 }  // namespace virtual_display

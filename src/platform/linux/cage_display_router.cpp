@@ -20,6 +20,7 @@
 #include "../../logging.h"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -42,6 +43,7 @@ namespace cage_display_router {
 
   static pid_t cage_pid = 0;
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
+  static std::atomic_bool headless_ram_capture_warning_logged {false};
   static std::atomic_bool windowed_ram_capture_warning_logged {false};
   static platf::runtime_state_t cage_runtime_state {
     .requested_headless = false,
@@ -148,6 +150,62 @@ namespace cage_display_router {
     );
   }
 
+  static bool output_reports_current_mode(
+    std::string_view wlr_randr_output,
+    std::string_view output_name,
+    int width,
+    int height
+  ) {
+    const std::string mode = std::to_string(width) + "x" + std::to_string(height);
+    std::istringstream stream(std::string {wlr_randr_output});
+    std::string line;
+    bool in_target_output = false;
+
+    while (std::getline(stream, line)) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+
+      if (line.empty()) {
+        continue;
+      }
+
+      if (!std::isspace(static_cast<unsigned char>(line.front()))) {
+        in_target_output = line.rfind(std::string {output_name}, 0) == 0;
+        continue;
+      }
+
+      if (!in_target_output) {
+        continue;
+      }
+
+      if (line.find(mode) != std::string::npos &&
+          (line.find("current") != std::string::npos || line.find('*') != std::string::npos)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  static bool wait_for_requested_mode(
+    const std::string &socket_name,
+    const std::string &output_name,
+    int width,
+    int height,
+    int max_wait_ms = 5000
+  ) {
+    return wait_for_condition(
+      "labwc output mode",
+      std::chrono::milliseconds(max_wait_ms),
+      50ms,
+      [&]() {
+        auto outputs = exec_capture("WAYLAND_DISPLAY=" + socket_name + " wlr-randr 2>/dev/null");
+        return output_reports_current_mode(outputs, output_name, width, height);
+      }
+    );
+  }
+
   bool windowed_gpu_native_capture_supported() {
     // wlgrab currently forces SHM for windowed labwc because nested DMA-BUF
     // screencopy is not reliable on this stack.
@@ -165,13 +223,36 @@ namespace cage_display_router {
            windowed_gpu_native_capture_supported();
   }
 
+  bool should_report_headless_ram_capture_fallback(const platf::runtime_state_t &runtime_state) {
+    return runtime_state.effective_headless ||
+           (runtime_state.requested_headless && !runtime_state.gpu_native_override_active);
+  }
+
+  bool should_report_windowed_ram_capture_fallback(const platf::runtime_state_t &runtime_state) {
+    return !should_report_headless_ram_capture_fallback(runtime_state);
+  }
+
+  bool should_log_headless_ram_capture_warning() {
+    return !headless_ram_capture_warning_logged.exchange(true);
+  }
+
   bool should_log_windowed_ram_capture_warning() {
     return !windowed_ram_capture_warning_logged.exchange(true);
   }
 
 #ifdef POLARIS_TESTS
   void reset_windowed_ram_capture_warning_for_tests() {
+    headless_ram_capture_warning_logged.store(false);
     windowed_ram_capture_warning_logged.store(false);
+  }
+
+  bool output_reports_current_mode_for_tests(
+    std::string_view wlr_randr_output,
+    std::string_view output_name,
+    int width,
+    int height
+  ) {
+    return output_reports_current_mode(wlr_randr_output, output_name, width, height);
   }
 #endif
 
@@ -340,6 +421,12 @@ namespace cage_display_router {
       BOOST_LOG(error) << "labwc: Output ["sv << output_name << "] did not become ready on "sv << cage_wayland_socket;
       stop();
       return false;
+    }
+
+    if (!wait_for_requested_mode(cage_wayland_socket, output_name, width, height, 5000)) {
+      BOOST_LOG(warning) << "labwc: Output ["sv << output_name << "] did not settle to "
+                         << width << "x"sv << height
+                         << " before startup continued"sv;
     }
 
     BOOST_LOG(info) << "labwc: Ready — "sv

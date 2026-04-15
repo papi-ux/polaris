@@ -79,3 +79,87 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   std::filesystem::remove(file_path);
 }
+
+TEST(ProcessMigrationTests, ParseNormalizesSteamBigPictureLaunchAndAddsCleanupUndo) {
+  const auto file_path = test_paths::root() / "steam_big_picture_normalization.json";
+
+  const nlohmann::json apps = {
+    {"version", 2},
+    {"apps", {
+      {
+        {"name", "Steam Big Picture"},
+        {"uuid", "steam-big-picture-test"},
+        {"cmd", ""},
+        {"detached", {"setsid steam -gamepadui"}},
+        {"prep-cmd", nlohmann::json::array()},
+        {"env", {
+          {"MANGOHUD", "1"},
+          {"MANGOHUD_CONFIG", "fps_limit=60"}
+        }},
+        {"image-path", "./assets/steam.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Steam Big Picture";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+  ASSERT_EQ(steam_ctx->detached.size(), 1);
+  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://open/bigpicture");
+  EXPECT_TRUE(steam_ctx->cmd.empty());
+  ASSERT_FALSE(steam_ctx->prep_cmds.empty());
+  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, "setsid steam steam://close/bigpicture");
+  EXPECT_TRUE(steam_ctx->env_vars.empty());
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, ParseStripsSteamBigPictureMangoHudEvenWithExistingCleanupUndo) {
+  const auto file_path = test_paths::root() / "steam_big_picture_existing_cleanup.json";
+
+  const nlohmann::json apps = {
+    {"version", 2},
+    {"apps", {
+      {
+        {"name", "Steam Big Picture"},
+        {"uuid", "steam-big-picture-existing-cleanup"},
+        {"cmd", ""},
+        {"detached", {"setsid steam steam://open/bigpicture"}},
+        {"prep-cmd", {{
+          {"undo", "setsid steam steam://close/bigpicture"}
+        }}},
+        {"env", {
+          {"MANGOHUD", "1"},
+          {"MANGOHUD_DLSYM", "1"},
+          {"MANGOHUD_CONFIG", "fps_limit=60"}
+        }},
+        {"image-path", "./assets/steam.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Steam Big Picture";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+  ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam steam://close/bigpicture");
+  EXPECT_TRUE(steam_ctx->env_vars.empty());
+
+  std::filesystem::remove(file_path);
+}
