@@ -36,7 +36,7 @@ namespace stream_stats {
 
     // Network
     double latency_ms = 0;
-    int packet_loss = 0;
+    double packet_loss = 0;
     uint64_t bytes_sent = 0;
 
     // Adaptive bitrate
@@ -73,7 +73,7 @@ namespace stream_stats {
 
     // Network
     double latency_ms = 0;
-    int packet_loss = 0;
+    double packet_loss = 0;
     uint64_t bytes_sent = 0;
 
     // Adaptive bitrate
@@ -139,19 +139,19 @@ namespace stream_stats {
   /**
    * @brief Update network statistics.
    * @param latency_ms Current latency in milliseconds.
-   * @param packet_loss Current packet loss count.
+   * @param packet_loss Current packet loss percentage (0-100).
    * @param bytes_sent Total bytes sent.
    */
-  void update_network_stats(double latency_ms, int packet_loss, uint64_t bytes_sent);
+  void update_network_stats(double latency_ms, double packet_loss, uint64_t bytes_sent);
 
   /**
    * @brief Update network statistics for a specific client.
    * @param client_ip IP address of the client.
    * @param latency_ms Current latency in milliseconds.
-   * @param packet_loss Current packet loss count.
+   * @param packet_loss Current packet loss percentage (0-100).
    * @param bytes_sent Total bytes sent.
    */
-  void update_network_stats(const std::string &client_ip, double latency_ms, int packet_loss, uint64_t bytes_sent);
+  void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent);
 
   /**
    * @brief Update runtime mode metadata exposed to the dashboard.

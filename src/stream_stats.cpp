@@ -219,7 +219,7 @@ namespace stream_stats {
     }
   }
 
-  void update_network_stats(double latency_ms, int packet_loss, uint64_t bytes_sent) {
+  void update_network_stats(double latency_ms, double packet_loss, uint64_t bytes_sent) {
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.latency_ms = latency_ms;
@@ -227,7 +227,7 @@ namespace stream_stats {
     current_stats.bytes_sent = bytes_sent;
   }
 
-  void update_network_stats(const std::string &client_ip, double latency_ms, int packet_loss, uint64_t bytes_sent) {
+  void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent) {
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     auto it = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),

@@ -976,21 +976,27 @@ namespace stream {
         << "last good frame [" << lastGoodFrame << ']' << std::endl
         << "---end stats---";
 
-      // Feed loss statistics to adaptive bitrate controller
-      if (adaptive_bitrate::is_enabled() && t.count() > 0) {
-        // Estimate packet loss percentage from count and time interval.
-        // The count is lost packets since last report; approximate a percentage
-        // based on expected packets in that interval. We use a simplified
-        // heuristic: treat count directly as a loss indicator, scaled by time.
-        // A typical stream sends ~1000 packets/sec, so normalize accordingly.
-        double estimated_total_packets = t.count();  // ~1 packet per ms as rough estimate
-        double loss_pct = (estimated_total_packets > 0) ? (count * 100.0 / estimated_total_packets) : 0.0;
-        loss_pct = std::clamp(loss_pct, 0.0, 100.0);
-
-        // RTT is not directly available from loss stats, use 0 (RTT spike detection
-        // will not trigger without real RTT data, but loss-based adaptation will work)
-        adaptive_bitrate::update_network_stats(loss_pct, 0.0);
+      double loss_pct = 0.0;
+      if (t.count() > 0) {
+        double estimated_total_packets = t.count();
+        loss_pct = std::clamp(count * 100.0 / estimated_total_packets, 0.0, 100.0);
       }
+
+      double rtt_ms = 0.0;
+      std::string client_ip;
+      if (session->control.peer) {
+        rtt_ms = (double) session->control.peer->roundTripTime;
+        client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
+      }
+
+      if (adaptive_bitrate::is_enabled() && t.count() > 0) {
+        adaptive_bitrate::update_network_stats(loss_pct, rtt_ms);
+      }
+
+      if (!client_ip.empty()) {
+        stream_stats::update_network_stats(client_ip, rtt_ms, loss_pct, 0);
+      }
+      stream_stats::update_network_stats(rtt_ms, loss_pct, 0);
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
