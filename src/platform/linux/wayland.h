@@ -6,6 +6,7 @@
 
 // standard includes
 #include <bitset>
+#include <sys/types.h>
 #include <string_view>
 
 #ifdef POLARIS_BUILD_WAYLAND
@@ -27,6 +28,25 @@ struct gbm_device;
 #ifdef POLARIS_BUILD_WAYLAND
 
 namespace wl {
+  struct dmabuf_feedback_format_modifier_t {
+    std::uint32_t format {};
+    std::uint64_t modifier {};
+  };
+
+  struct dmabuf_feedback_tranche_t {
+    bool target_device_valid {false};
+    dev_t target_device {};
+    std::uint32_t flags {0};
+    std::vector<dmabuf_feedback_format_modifier_t> format_modifiers;
+  };
+
+  struct dmabuf_feedback_t {
+    bool available {false};
+    bool main_device_valid {false};
+    dev_t main_device {};
+    std::vector<dmabuf_feedback_tranche_t> tranches;
+  };
+
   using display_internal_t = util::safe_ptr<wl_display, wl_display_disconnect>;
 
   class frame_t {
@@ -64,6 +84,9 @@ namespace wl {
     dmabuf_t &operator=(dmabuf_t &&) = delete;
 
     void listen(zwlr_screencopy_manager_v1 *screencopy_manager, zwp_linux_dmabuf_v1 *dmabuf_interface, wl_output *output, bool blend_cursor = false, wl_shm *shm = nullptr);
+    void set_feedback(const dmabuf_feedback_t *feedback) {
+      this->feedback = feedback;
+    }
     static void buffer_params_created(void *data, struct zwp_linux_buffer_params_v1 *params, struct wl_buffer *wl_buffer);
     static void buffer_params_failed(void *data, struct zwp_linux_buffer_params_v1 *params);
     void buffer(zwlr_screencopy_frame_v1 *frame, std::uint32_t format, std::uint32_t width, std::uint32_t height, std::uint32_t stride);
@@ -98,6 +121,7 @@ namespace wl {
 
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
     wl_shm *shm_global {nullptr};
+    const dmabuf_feedback_t *feedback {nullptr};
 
     struct {
       bool supported {false};
@@ -111,6 +135,7 @@ namespace wl {
     void *shm_data {nullptr};
     bool shm_frame_ready {false};  ///< Set by ready(), cleared after copy
     bool prefer_shm {false};
+    bool prefer_linear_dmabuf {false};
 
   private:
     ::gbm_device *gbm_device {nullptr};
@@ -129,6 +154,8 @@ namespace wl {
     } shm_buffer_info;
     bool logged_preferred_shm_capture {false};
     bool logged_shm_fallback_capture {false};
+    bool logged_linear_dmabuf_attempt {false};
+    bool logged_linear_dmabuf_unsupported {false};
     std::uint64_t next_buffer_key {1};
 
     void create_and_copy_shm(zwlr_screencopy_frame_v1 *frame);
@@ -183,6 +210,7 @@ namespace wl {
     };
 
     interface_t() noexcept;
+    ~interface_t();
 
     interface_t(interface_t &&) = delete;
     interface_t(const interface_t &) = delete;
@@ -198,15 +226,31 @@ namespace wl {
     std::vector<std::unique_ptr<monitor_t>> monitors;
     zwlr_screencopy_manager_v1 *screencopy_manager {nullptr};
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
+    dmabuf_feedback_t dmabuf_feedback;
     zxdg_output_manager_v1 *output_manager {nullptr};
     wl_shm *shm {nullptr};
 
   private:
+    void begin_feedback_update();
+    void feedback_done(zwp_linux_dmabuf_feedback_v1 *feedback);
+    void feedback_format_table(zwp_linux_dmabuf_feedback_v1 *feedback, int32_t fd, std::uint32_t size);
+    void feedback_main_device(zwp_linux_dmabuf_feedback_v1 *feedback, wl_array *device);
+    void feedback_tranche_done(zwp_linux_dmabuf_feedback_v1 *feedback);
+    void feedback_tranche_target_device(zwp_linux_dmabuf_feedback_v1 *feedback, wl_array *device);
+    void feedback_tranche_formats(zwp_linux_dmabuf_feedback_v1 *feedback, wl_array *indices);
+    void feedback_tranche_flags(zwp_linux_dmabuf_feedback_v1 *feedback, std::uint32_t flags);
     void add_interface(wl_registry *registry, std::uint32_t id, const char *interface, std::uint32_t version);
     void del_interface(wl_registry *registry, uint32_t id);
 
     std::bitset<MAX_INTERFACES> interface;
     wl_registry_listener listener;
+    zwp_linux_dmabuf_feedback_v1 *dmabuf_feedback_object {nullptr};
+    zwp_linux_dmabuf_feedback_v1_listener dmabuf_feedback_listener;
+    dmabuf_feedback_t pending_dmabuf_feedback;
+    dmabuf_feedback_tranche_t pending_dmabuf_feedback_tranche;
+    std::vector<dmabuf_feedback_format_modifier_t> dmabuf_feedback_table;
+    bool dmabuf_feedback_update_in_progress {false};
+    bool dmabuf_feedback_tranche_active {false};
   };
 
   class display_t {

@@ -140,6 +140,7 @@ namespace wl {
 
       // Dispatch events until we get a new frame or the timeout expires
       dmabuf.prefer_shm = prefer_shm_screencopy;
+      dmabuf.set_feedback(&interface.dmabuf_feedback);
       dmabuf.listen(interface.screencopy_manager, interface.dmabuf_interface, output, cursor, interface.shm);
       do {
         auto remaining_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(to - std::chrono::steady_clock::now());
@@ -378,7 +379,11 @@ namespace wl {
 
 #ifdef POLARIS_BUILD_CUDA
       if (mem_type == platf::mem_type_e::cuda) {
-        return cuda::make_avcodec_encode_device(width, height, false);
+        if (pix_fmt == platf::pix_fmt_e::nv12) {
+          return cuda::make_avcodec_encode_device(width, height, false);
+        }
+
+        return std::make_unique<platf::avcodec_encode_device_t>();
       }
 #endif
 
@@ -545,28 +550,40 @@ namespace platf {
     }
 
     bool prefer_ram_capture = (hwdevice_type == platf::mem_type_e::system);
+    bool prefer_linear_dmabuf = false;
 #ifdef __linux__
     if (!prefer_ram_capture &&
         config::video.linux_display.use_cage_compositor &&
         cage_display_router::is_running()) {
-      prefer_ram_capture = true;
-
       auto runtime_state = cage_display_router::runtime_state();
-      if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
-        if (cage_display_router::should_log_headless_ram_capture_warning()) {
+      if (cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state)) {
+        static bool logged_windowed_gpu_native_attempt = false;
+        if (!logged_windowed_gpu_native_attempt) {
           BOOST_LOG(info)
-            << "wlr: Using RAM capture path for headless labwc because cage sessions do not expose a stable zero-copy encoder upload path on this stack"sv;
+            << "wlr: Attempting GPU-native DMA-BUF capture on windowed labwc override"sv;
+          logged_windowed_gpu_native_attempt = true;
         }
-      } else if (cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state) &&
-                 cage_display_router::should_log_windowed_ram_capture_warning()) {
-        BOOST_LOG(warning)
-          << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
+        prefer_linear_dmabuf = true;
+      } else {
+        prefer_ram_capture = true;
+
+        if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
+          if (cage_display_router::should_log_headless_ram_capture_warning()) {
+            BOOST_LOG(info)
+              << "wlr: Using RAM capture path for headless labwc because cage sessions do not expose a stable zero-copy encoder upload path on this stack"sv;
+          }
+        } else if (cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state) &&
+                   cage_display_router::should_log_windowed_ram_capture_warning()) {
+          BOOST_LOG(warning)
+            << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
+        }
       }
     }
 #endif
 
     if (!prefer_ram_capture && (hwdevice_type == platf::mem_type_e::vaapi || hwdevice_type == platf::mem_type_e::cuda)) {
       auto wlr = std::make_shared<wl::wlr_vram_t>();
+      wlr->dmabuf.prefer_linear_dmabuf = prefer_linear_dmabuf;
       if (wlr->init(hwdevice_type, display_name, config)) {
         return nullptr;
       }

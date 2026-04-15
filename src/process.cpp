@@ -182,6 +182,15 @@ namespace proc {
              command_uses_steam_gamepadui_flag(cmd);
     }
 
+    bool daemon_shutdown_requested() {
+      if (!mail::man) {
+        return false;
+      }
+
+      auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+      return shutdown_event && shutdown_event->peek();
+    }
+
     bool is_steam_big_picture_app(const proc::ctx_t &ctx) {
       if (is_steam_big_picture_name(ctx.name)) {
         return true;
@@ -1521,13 +1530,35 @@ namespace proc {
     const bool requested_headless = config::video.linux_display.headless_mode;
     const bool prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
     const bool encoder_requires_gpu_native_capture = video::active_encoder_requires_gpu_native_capture();
-    const bool force_windowed_cage_for_gpu_native =
+    const bool should_probe_windowed_cage_for_gpu_native =
       config::video.linux_display.use_cage_compositor &&
-      cage_display_router::should_force_windowed_for_gpu_native_capture(
+      cage_display_router::should_attempt_windowed_gpu_native_probe(
         requested_headless,
         prefer_gpu_native_capture,
         encoder_requires_gpu_native_capture
       );
+    const auto cached_windowed_gpu_native_probe_result =
+      should_probe_windowed_cage_for_gpu_native ?
+        cage_display_router::cached_windowed_gpu_native_probe_result() :
+        std::optional<bool> {};
+    bool force_windowed_cage_for_gpu_native = false;
+
+    const int gpu_native_probe_fps = std::max(pacing_target_fps, 1);
+    const video::config_t gpu_native_probe_config {
+      static_cast<int>(render_width),
+      static_cast<int>(render_height),
+      gpu_native_probe_fps,
+      1000,
+      1,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      gpu_native_probe_fps,
+      false,
+    };
 
     auto log_runtime_state = []() {
       auto runtime_state = cage_display_router::runtime_state();
@@ -1538,41 +1569,105 @@ namespace proc {
                       << " gpu_native_override_active="sv << runtime_state.gpu_native_override_active;
     };
 
+    auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed) -> bool {
+      if (cage_display_router::is_running()) {
+        cage_display_router::stop();
+      }
+
+      if (!cage_display_router::start(render_width, render_height, startup_cmd, force_windowed)) {
+        return false;
+      }
+
+      if (!reprobe_encoders_for_cage()) {
+        cage_display_router::stop();
+        return false;
+      }
+
+      log_runtime_state();
+      return true;
+    };
+
+    auto probe_windowed_gpu_native_cage = [&]() -> bool {
+      if (!should_probe_windowed_cage_for_gpu_native || rtsp_stream::session_count() != 0) {
+        return false;
+      }
+
+      auto encoder_name = video::active_encoder_name();
+      auto encoder_label = encoder_name.empty() ? "unknown" : encoder_name;
+      BOOST_LOG(info) << "session_manager: Probing windowed labwc for GPU-native capture with encoder ["
+                      << encoder_label << ']';
+
+      auto stop_probe_cage = util::fail_guard([&]() {
+        if (cage_display_router::is_running()) {
+          cage_display_router::stop();
+        }
+      });
+
+      if (!start_cage_session("", true)) {
+        cage_display_router::update_windowed_gpu_native_probe_result(false);
+        BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe could not initialize the compositor/encoder path; staying headless"sv;
+        return false;
+      }
+
+      if (!video::active_encoder_runtime_supports_live_gpu_capture(gpu_native_probe_config)) {
+        cage_display_router::update_windowed_gpu_native_probe_result(false);
+        BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe did not deliver a live DMA-BUF frame; staying headless"sv;
+        return false;
+      }
+
+      cage_display_router::update_windowed_gpu_native_probe_result(true);
+      BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe succeeded with encoder ["
+                      << video::active_encoder_name() << ']';
+      return true;
+    };
+
+    if (cached_windowed_gpu_native_probe_result == std::optional<bool> {true}) {
+      force_windowed_cage_for_gpu_native = true;
+      BOOST_LOG(info) << "session_manager: Reusing cached windowed GPU-native cage probe result; attempting nested DMA-BUF capture"sv;
+    } else if (cached_windowed_gpu_native_probe_result == std::optional<bool> {false}) {
+      BOOST_LOG(info) << "session_manager: Cached windowed GPU-native cage probe result indicates nested DMA-BUF capture is unavailable on this runtime; staying headless"sv;
+    } else {
+      force_windowed_cage_for_gpu_native = probe_windowed_gpu_native_cage();
+    }
+
     auto encoder_name = video::active_encoder_name();
     auto encoder_label = encoder_name.empty() ? "unknown" : encoder_name;
     if (force_windowed_cage_for_gpu_native) {
-      BOOST_LOG(warning) << "session_manager: Headless cage requested, but encoder ["
+      BOOST_LOG(warning) << "session_manager: Headless cage requested, and runtime probing confirmed encoder ["
                          << encoder_label
-                         << "] requires a GPU-native capture path; starting labwc windowed instead"sv;
-    } else if (config::video.linux_display.use_cage_compositor &&
-               requested_headless &&
-               prefer_gpu_native_capture &&
-               encoder_requires_gpu_native_capture) {
+                         << "] can use a GPU-native capture path; starting labwc windowed instead"sv;
+    } else if (should_probe_windowed_cage_for_gpu_native && !cached_windowed_gpu_native_probe_result.has_value()) {
       BOOST_LOG(info) << "session_manager: Headless cage requested with encoder ["
                       << encoder_label
-                      << "], but windowed labwc does not currently provide a reliable GPU-native capture path on this stack; staying headless"sv;
+                      << "], but the runtime probe could not validate nested DMA-BUF capture; staying headless"sv;
     }
+
+    auto start_cage_with_runtime_fallback = [&](const std::string &startup_cmd) -> bool {
+      confighttp::set_session_state(confighttp::session_state_e::cage_starting);
+      confighttp::emit_session_event("cage_starting", "Starting compositor");
+
+      if (force_windowed_cage_for_gpu_native && start_cage_session(startup_cmd, true)) {
+        return true;
+      }
+
+      if (force_windowed_cage_for_gpu_native) {
+        cage_display_router::update_windowed_gpu_native_probe_result(false);
+        BOOST_LOG(warning) << "session_manager: Windowed GPU-native cage start failed; falling back to headless RAM capture"sv;
+        force_windowed_cage_for_gpu_native = false;
+      }
+
+      return start_cage_session(startup_cmd, false);
+    };
 
     // Start cage with the first detached command as its primary client.
     // Cage is a kiosk compositor — it only displays its main process fullscreen.
     if (config::video.linux_display.use_cage_compositor && !_app.detached.empty()) {
-      // Stop the probe cage (running sleep infinity) and restart with the game
-      if (cage_display_router::is_running()) {
-        cage_display_router::stop();
-      }
       std::string game_cmd = _app.detached[0];
-      confighttp::set_session_state(confighttp::session_state_e::cage_starting);
-      confighttp::emit_session_event("cage_starting", "Starting compositor");
-      if (!cage_display_router::start(render_width, render_height, game_cmd, force_windowed_cage_for_gpu_native)) {
+      if (!start_cage_with_runtime_fallback(game_cmd)) {
         BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
         confighttp::emit_session_event("error", "Failed to start cage compositor");
-      } else if (!reprobe_encoders_for_cage()) {
-        BOOST_LOG(error) << "session_manager: Encoder reprobe against cage compositor failed"sv;
-        cage_display_router::stop();
-        confighttp::emit_session_event("error", "Failed to initialize encoder for cage compositor");
         return 503;
       } else {
-        log_runtime_state();
         confighttp::set_session_state(confighttp::session_state_e::game_launching);
         confighttp::emit_session_event("game_launching", "Launching " + _app.name);
       }
@@ -1597,13 +1692,9 @@ namespace proc {
       }
     } else if (config::video.linux_display.use_cage_compositor) {
       // No detached commands — start cage empty, game will use _app.cmd
-      if (cage_display_router::start(render_width, render_height, "", force_windowed_cage_for_gpu_native)) {
-        if (!reprobe_encoders_for_cage()) {
-          BOOST_LOG(error) << "session_manager: Encoder reprobe against cage compositor failed"sv;
-          cage_display_router::stop();
-          return 503;
-        }
-        log_runtime_state();
+      if (!start_cage_with_runtime_fallback("")) {
+        BOOST_LOG(error) << "session_manager: Failed to start cage compositor"sv;
+        return 503;
       }
     } else
 #endif
@@ -1926,6 +2017,12 @@ namespace proc {
       auto &cmd = *(_app_prep_it - 1);
 
       if (cmd.undo_cmd.empty()) {
+        continue;
+      }
+
+      if (daemon_shutdown_requested() && command_contains_steam_big_picture_close(cmd.undo_cmd)) {
+        BOOST_LOG(info) << "Skipping Steam Big Picture undo command during daemon shutdown ["sv
+                        << cmd.undo_cmd << ']';
         continue;
       }
 

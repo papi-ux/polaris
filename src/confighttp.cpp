@@ -1983,12 +1983,28 @@ namespace confighttp {
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
+      const auto is_response_only_config_key = [](const std::string_view key) {
+        return key == "status"sv ||
+               key == "platform"sv ||
+               key == "version"sv ||
+               key == "vdisplayStatus"sv ||
+               key == "vdisplayAvailable"sv ||
+               key == "vdisplayBackend"sv ||
+               key == "runtime_backend"sv ||
+               key == "runtime_requested_headless"sv ||
+               key == "runtime_effective_headless"sv ||
+               key == "runtime_gpu_native_override_active"sv;
+      };
       std::string validation_error;
       if (!validation::validate_config_payload(input_tree, validation_error)) {
         bad_request(response, request, validation_error);
         return;
       }
       for (const auto &[k, v] : input_tree.items()) {
+        if (is_response_only_config_key(k)) {
+          continue;
+        }
+
         if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;
         }

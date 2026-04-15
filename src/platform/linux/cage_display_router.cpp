@@ -45,6 +45,7 @@ namespace cage_display_router {
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
   static std::atomic_bool headless_ram_capture_warning_logged {false};
   static std::atomic_bool windowed_ram_capture_warning_logged {false};
+  static std::atomic<int> windowed_gpu_native_probe_result {0};
   static platf::runtime_state_t cage_runtime_state {
     .requested_headless = false,
     .effective_headless = false,
@@ -206,21 +207,33 @@ namespace cage_display_router {
     );
   }
 
-  bool windowed_gpu_native_capture_supported() {
-    // wlgrab currently forces SHM for windowed labwc because nested DMA-BUF
-    // screencopy is not reliable on this stack.
-    return false;
-  }
-
-  bool should_force_windowed_for_gpu_native_capture(
+  bool should_attempt_windowed_gpu_native_probe(
     bool requested_headless,
     bool prefer_gpu_native_capture,
     bool encoder_requires_gpu_native_capture
   ) {
     return requested_headless &&
            prefer_gpu_native_capture &&
-           encoder_requires_gpu_native_capture &&
-           windowed_gpu_native_capture_supported();
+           encoder_requires_gpu_native_capture;
+  }
+
+  bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state) {
+    return runtime_state.gpu_native_override_active;
+  }
+
+  std::optional<bool> cached_windowed_gpu_native_probe_result() {
+    switch (windowed_gpu_native_probe_result.load()) {
+      case 1:
+        return false;
+      case 2:
+        return true;
+      default:
+        return std::nullopt;
+    }
+  }
+
+  void update_windowed_gpu_native_probe_result(bool supported) {
+    windowed_gpu_native_probe_result.store(supported ? 2 : 1);
   }
 
   bool should_report_headless_ram_capture_fallback(const platf::runtime_state_t &runtime_state) {
@@ -244,6 +257,7 @@ namespace cage_display_router {
   void reset_windowed_ram_capture_warning_for_tests() {
     headless_ram_capture_warning_logged.store(false);
     windowed_ram_capture_warning_logged.store(false);
+    windowed_gpu_native_probe_result.store(0);
   }
 
   bool output_reports_current_mode_for_tests(

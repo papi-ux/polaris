@@ -7,9 +7,8 @@
 #ifdef __linux__
   #include <src/platform/linux/cage_display_router.h>
 
-TEST(CageDisplayRouterPolicyTests, HeadlessNvencDoesNotForceWindowedWhenNestedGpuNativeCaptureIsUnavailable) {
-  EXPECT_FALSE(cage_display_router::windowed_gpu_native_capture_supported());
-  EXPECT_FALSE(cage_display_router::should_force_windowed_for_gpu_native_capture(
+TEST(CageDisplayRouterPolicyTests, HeadlessNvencRequestsWindowedGpuNativeProbeWhenAllConditionsMatch) {
+  EXPECT_TRUE(cage_display_router::should_attempt_windowed_gpu_native_probe(
     true,
     true,
     true
@@ -17,21 +16,43 @@ TEST(CageDisplayRouterPolicyTests, HeadlessNvencDoesNotForceWindowedWhenNestedGp
 }
 
 TEST(CageDisplayRouterPolicyTests, OverrideRequiresHeadlessGpuPreferenceAndEncoderRequirement) {
-  EXPECT_FALSE(cage_display_router::should_force_windowed_for_gpu_native_capture(
+  EXPECT_FALSE(cage_display_router::should_attempt_windowed_gpu_native_probe(
     false,
     true,
     true
   ));
-  EXPECT_FALSE(cage_display_router::should_force_windowed_for_gpu_native_capture(
+  EXPECT_FALSE(cage_display_router::should_attempt_windowed_gpu_native_probe(
     true,
     false,
     true
   ));
-  EXPECT_FALSE(cage_display_router::should_force_windowed_for_gpu_native_capture(
+  EXPECT_FALSE(cage_display_router::should_attempt_windowed_gpu_native_probe(
     true,
     true,
     false
   ));
+}
+
+TEST(CageDisplayRouterPolicyTests, WindowedOverrideAttemptsGpuNativeCapture) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
+}
+
+TEST(CageDisplayRouterPolicyTests, HeadlessRuntimeDoesNotAttemptGpuNativeCapture) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_FALSE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
 }
 
 TEST(CageDisplayRouterPolicyTests, RequestedHeadlessWithoutOverrideStillReportsHeadlessFallback) {
@@ -91,6 +112,28 @@ TEST(CageDisplayRouterPolicyTests, HeadlessRamCaptureFallbackWarningLogsOnlyOnce
 
   EXPECT_TRUE(cage_display_router::should_log_headless_ram_capture_warning());
   EXPECT_FALSE(cage_display_router::should_log_headless_ram_capture_warning());
+}
+
+TEST(CageDisplayRouterPolicyTests, WindowedGpuNativeProbeResultDefaultsToUnknown) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+
+  EXPECT_FALSE(cage_display_router::cached_windowed_gpu_native_probe_result().has_value());
+}
+
+TEST(CageDisplayRouterPolicyTests, WindowedGpuNativeProbeResultCachesFailure) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+
+  cage_display_router::update_windowed_gpu_native_probe_result(false);
+
+  EXPECT_EQ(cage_display_router::cached_windowed_gpu_native_probe_result(), std::optional<bool> {false});
+}
+
+TEST(CageDisplayRouterPolicyTests, WindowedGpuNativeProbeResultCachesSuccess) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+
+  cage_display_router::update_windowed_gpu_native_probe_result(true);
+
+  EXPECT_EQ(cage_display_router::cached_windowed_gpu_native_probe_result(), std::optional<bool> {true});
 }
 
 TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentMode) {

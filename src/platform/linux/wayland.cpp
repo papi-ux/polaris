@@ -3,13 +3,18 @@
  * @brief Definitions for Wayland capture.
  */
 // standard includes
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <cstdio>
 
 // platform includes
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <gbm.h>
+#include <limits.h>
 #include <poll.h>
+#include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -36,12 +41,78 @@ using namespace std::literals;
 namespace wl {
 
   namespace {
+    struct format_modifier_blob_t {
+      std::uint32_t format;
+      std::uint32_t pad;
+      std::uint64_t modifier;
+    };
+
     struct pending_buffer_create_t {
       dmabuf_t *self {};
       frame_t *target {};
       zwlr_screencopy_frame_v1 *frame {};
       int wl_buffer_fd {-1};
     };
+
+    std::string path_for_fd(int fd) {
+      if (fd < 0) {
+        return {};
+      }
+
+      char path[64] {};
+      std::snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+
+      char resolved[PATH_MAX] {};
+      auto bytes = readlink(path, resolved, sizeof(resolved) - 1);
+      if (bytes < 0) {
+        return {};
+      }
+
+      resolved[bytes] = '\0';
+      return resolved;
+    }
+
+    bool decode_dev_id(const wl_array *device_array, dev_t &device_id) {
+      if (!device_array || device_array->size != sizeof(device_id) || !device_array->data) {
+        return false;
+      }
+
+      std::memcpy(&device_id, device_array->data, sizeof(device_id));
+      return true;
+    }
+
+    bool drm_devices_equal_by_devid(dev_t lhs, dev_t rhs) {
+      drmDevicePtr lhs_device = nullptr;
+      drmDevicePtr rhs_device = nullptr;
+
+      if (drmGetDeviceFromDevId(lhs, 0, &lhs_device) != 0) {
+        return lhs == rhs;
+      }
+
+      if (drmGetDeviceFromDevId(rhs, 0, &rhs_device) != 0) {
+        drmFreeDevice(&lhs_device);
+        return lhs == rhs;
+      }
+
+      const bool equal = drmDevicesEqual(lhs_device, rhs_device);
+      drmFreeDevice(&lhs_device);
+      drmFreeDevice(&rhs_device);
+      return equal;
+    }
+
+    std::string modifier_list_string(const std::vector<std::uint64_t> &modifiers) {
+      std::string formatted;
+
+      for (std::size_t i = 0; i < modifiers.size(); ++i) {
+        if (i != 0) {
+          formatted += ", ";
+        }
+
+        formatted += std::to_string(modifiers[i]);
+      }
+
+      return formatted;
+    }
   }  // namespace
 
   // Helper to call C++ method from wayland C callback
@@ -184,11 +255,196 @@ namespace wl {
       listener {
         &CLASS_CALL(interface_t, add_interface),
         &CLASS_CALL(interface_t, del_interface)
+      },
+      dmabuf_feedback_listener {
+        &CLASS_CALL(interface_t, feedback_done),
+        &CLASS_CALL(interface_t, feedback_format_table),
+        &CLASS_CALL(interface_t, feedback_main_device),
+        &CLASS_CALL(interface_t, feedback_tranche_done),
+        &CLASS_CALL(interface_t, feedback_tranche_target_device),
+        &CLASS_CALL(interface_t, feedback_tranche_formats),
+        &CLASS_CALL(interface_t, feedback_tranche_flags),
       } {
+  }
+
+  interface_t::~interface_t() {
+    if (dmabuf_feedback_object) {
+      zwp_linux_dmabuf_feedback_v1_destroy(dmabuf_feedback_object);
+      dmabuf_feedback_object = nullptr;
+    }
   }
 
   void interface_t::listen(wl_registry *registry) {
     wl_registry_add_listener(registry, &listener, this);
+  }
+
+  void interface_t::begin_feedback_update() {
+    if (dmabuf_feedback_update_in_progress) {
+      return;
+    }
+
+    pending_dmabuf_feedback = {};
+    pending_dmabuf_feedback_tranche = {};
+    dmabuf_feedback_update_in_progress = true;
+    dmabuf_feedback_tranche_active = false;
+  }
+
+  void interface_t::feedback_done(zwp_linux_dmabuf_feedback_v1 *feedback) {
+    if (!dmabuf_feedback_update_in_progress) {
+      return;
+    }
+
+    if (dmabuf_feedback_tranche_active) {
+      pending_dmabuf_feedback.tranches.emplace_back(std::move(pending_dmabuf_feedback_tranche));
+      pending_dmabuf_feedback_tranche = {};
+      dmabuf_feedback_tranche_active = false;
+    }
+
+    pending_dmabuf_feedback.available =
+      pending_dmabuf_feedback.main_device_valid ||
+      !pending_dmabuf_feedback.tranches.empty();
+
+    dmabuf_feedback = std::move(pending_dmabuf_feedback);
+    pending_dmabuf_feedback = {};
+    dmabuf_feedback_update_in_progress = false;
+
+    BOOST_LOG(info) << "Wayland DMA-BUF feedback ready: main_device_valid="sv
+                    << dmabuf_feedback.main_device_valid
+                    << " tranches="sv << dmabuf_feedback.tranches.size()
+                    << " format_table_entries="sv << dmabuf_feedback_table.size();
+  }
+
+  void interface_t::feedback_format_table(
+    zwp_linux_dmabuf_feedback_v1 *feedback,
+    int32_t fd,
+    std::uint32_t size
+  ) {
+    begin_feedback_update();
+    dmabuf_feedback_table.clear();
+
+    if (fd < 0 || size == 0 || (size % sizeof(format_modifier_blob_t)) != 0) {
+      if (fd >= 0) {
+        close(fd);
+      }
+
+      BOOST_LOG(warning) << "Wayland DMA-BUF feedback provided an invalid format table (fd="sv
+                         << fd << ", size="sv << size << ')';
+      return;
+    }
+
+    void *mapping = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapping == MAP_FAILED) {
+      BOOST_LOG(warning) << "Wayland DMA-BUF feedback format table mmap failed"sv;
+      return;
+    }
+
+    const auto *entries = static_cast<const format_modifier_blob_t *>(mapping);
+    const std::size_t count = size / sizeof(format_modifier_blob_t);
+    dmabuf_feedback_table.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      dmabuf_feedback_table.emplace_back(dmabuf_feedback_format_modifier_t {
+        .format = entries[i].format,
+        .modifier = entries[i].modifier,
+      });
+    }
+
+    munmap(mapping, size);
+  }
+
+  void interface_t::feedback_main_device(
+    zwp_linux_dmabuf_feedback_v1 *feedback,
+    wl_array *device
+  ) {
+    begin_feedback_update();
+
+    dev_t main_device {};
+    if (!decode_dev_id(device, main_device)) {
+      BOOST_LOG(warning) << "Wayland DMA-BUF feedback main_device payload was invalid"sv;
+      return;
+    }
+
+    pending_dmabuf_feedback.main_device_valid = true;
+    pending_dmabuf_feedback.main_device = main_device;
+  }
+
+  void interface_t::feedback_tranche_done(zwp_linux_dmabuf_feedback_v1 *feedback) {
+    begin_feedback_update();
+
+    if (!dmabuf_feedback_tranche_active) {
+      return;
+    }
+
+    pending_dmabuf_feedback.tranches.emplace_back(std::move(pending_dmabuf_feedback_tranche));
+    pending_dmabuf_feedback_tranche = {};
+    dmabuf_feedback_tranche_active = false;
+  }
+
+  void interface_t::feedback_tranche_target_device(
+    zwp_linux_dmabuf_feedback_v1 *feedback,
+    wl_array *device
+  ) {
+    begin_feedback_update();
+
+    if (!dmabuf_feedback_tranche_active) {
+      pending_dmabuf_feedback_tranche = {};
+      dmabuf_feedback_tranche_active = true;
+    }
+
+    dev_t target_device {};
+    if (!decode_dev_id(device, target_device)) {
+      BOOST_LOG(warning) << "Wayland DMA-BUF feedback tranche_target_device payload was invalid"sv;
+      pending_dmabuf_feedback_tranche = {};
+      dmabuf_feedback_tranche_active = false;
+      return;
+    }
+
+    pending_dmabuf_feedback_tranche.target_device_valid = true;
+    pending_dmabuf_feedback_tranche.target_device = target_device;
+  }
+
+  void interface_t::feedback_tranche_formats(
+    zwp_linux_dmabuf_feedback_v1 *feedback,
+    wl_array *indices
+  ) {
+    begin_feedback_update();
+
+    if (!dmabuf_feedback_tranche_active) {
+      pending_dmabuf_feedback_tranche = {};
+      dmabuf_feedback_tranche_active = true;
+    }
+
+    if (!indices || !indices->data || (indices->size % sizeof(std::uint16_t)) != 0) {
+      BOOST_LOG(warning) << "Wayland DMA-BUF feedback tranche_formats payload was invalid"sv;
+      return;
+    }
+
+    const auto *format_indices = static_cast<const std::uint16_t *>(indices->data);
+    const auto count = indices->size / sizeof(std::uint16_t);
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto index = format_indices[i];
+      if (index >= dmabuf_feedback_table.size()) {
+        BOOST_LOG(warning) << "Wayland DMA-BUF feedback tranche_formats referenced out-of-range index ["sv
+                           << index << ']';
+        continue;
+      }
+
+      pending_dmabuf_feedback_tranche.format_modifiers.emplace_back(dmabuf_feedback_table[index]);
+    }
+  }
+
+  void interface_t::feedback_tranche_flags(
+    zwp_linux_dmabuf_feedback_v1 *feedback,
+    std::uint32_t flags
+  ) {
+    begin_feedback_update();
+
+    if (!dmabuf_feedback_tranche_active) {
+      pending_dmabuf_feedback_tranche = {};
+      dmabuf_feedback_tranche_active = true;
+    }
+
+    pending_dmabuf_feedback_tranche.flags |= flags;
   }
 
   void interface_t::add_interface(
@@ -221,6 +477,13 @@ namespace wl {
       dmabuf_interface = (zwp_linux_dmabuf_v1 *) wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, version);
 
       this->interface[LINUX_DMABUF] = true;
+
+      if (zwp_linux_dmabuf_v1_get_version(dmabuf_interface) >= 4) {
+        dmabuf_feedback_object = zwp_linux_dmabuf_v1_get_default_feedback(dmabuf_interface);
+        if (dmabuf_feedback_object) {
+          zwp_linux_dmabuf_feedback_v1_add_listener(dmabuf_feedback_object, &dmabuf_feedback_listener, this);
+        }
+      }
     } else if (!std::strcmp(interface, wl_shm_interface.name)) {
       shm = (wl_shm *) wl_registry_bind(registry, id, &wl_shm_interface, 1);
     }
@@ -265,6 +528,14 @@ namespace wl {
       close(drm_fd);
       BOOST_LOG(error) << "Failed to create GBM device"sv;
       return false;
+    }
+
+    static bool logged_gbm_backend = false;
+    if (!logged_gbm_backend) {
+      BOOST_LOG(info) << "Wayland DMA-BUF capture using GBM backend ["sv
+                      << gbm_device_get_backend_name(gbm_device)
+                      << "] render_node=["sv << path_for_fd(gbm_device_get_fd(gbm_device)) << ']';
+      logged_gbm_backend = true;
     }
 
     return true;
@@ -405,6 +676,60 @@ namespace wl {
       return true;
     };
 
+    struct modifier_selection_t {
+      bool from_feedback {false};
+      bool implicit_supported {false};
+      std::vector<std::uint64_t> explicit_modifiers;
+    };
+
+    auto select_feedback_modifiers = [&]() -> modifier_selection_t {
+      modifier_selection_t selection;
+
+      if (!feedback || !feedback->available) {
+        return selection;
+      }
+
+      struct stat render_node_stat {};
+      if (fstat(gbm_device_get_fd(gbm_device), &render_node_stat) != 0) {
+        BOOST_LOG(warning) << "Wayland DMA-BUF feedback selection could not stat render node ["sv
+                           << path_for_fd(gbm_device_get_fd(gbm_device)) << ']';
+        return selection;
+      }
+
+      for (const auto &tranche : feedback->tranches) {
+        if (!tranche.target_device_valid ||
+            !drm_devices_equal_by_devid(render_node_stat.st_rdev, tranche.target_device)) {
+          continue;
+        }
+
+        for (const auto &entry : tranche.format_modifiers) {
+          if (entry.format != dmabuf_info.format) {
+            continue;
+          }
+
+          selection.from_feedback = true;
+          if (entry.modifier == DRM_FORMAT_MOD_INVALID) {
+            selection.implicit_supported = true;
+          } else if (std::find(selection.explicit_modifiers.begin(), selection.explicit_modifiers.end(), entry.modifier) == selection.explicit_modifiers.end()) {
+            selection.explicit_modifiers.emplace_back(entry.modifier);
+          }
+        }
+
+        if (selection.from_feedback) {
+          BOOST_LOG(info) << "Wayland DMA-BUF feedback selected tranche for format="sv
+                          << dmabuf_info.format
+                          << " explicit_modifiers=["sv << modifier_list_string(selection.explicit_modifiers)
+                          << "] implicit_modifier="sv << selection.implicit_supported;
+          return selection;
+        }
+      }
+
+      BOOST_LOG(info) << "Wayland DMA-BUF feedback had no tranche for format="sv
+                      << dmabuf_info.format
+                      << " on render_node=["sv << path_for_fd(gbm_device_get_fd(gbm_device)) << ']';
+      return selection;
+    };
+
     const bool needs_new_buffer =
       !next_frame->bo ||
       !next_frame->buffer ||
@@ -427,13 +752,104 @@ namespace wl {
     }
 
     next_frame->destroy();
-    next_frame->bo = gbm_bo_create(gbm_device, dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, GBM_BO_USE_RENDERING);
+    std::uint32_t bo_flags = GBM_BO_USE_RENDERING;
+    bool using_linear_dmabuf = false;
+    bool use_implicit_modifier_protocol = false;
+    const auto feedback_selection = select_feedback_modifiers();
+    if (!feedback_selection.explicit_modifiers.empty()) {
+      auto requested_modifiers = feedback_selection.explicit_modifiers;
+
+      if (prefer_linear_dmabuf) {
+        auto linear_it = std::find(requested_modifiers.begin(), requested_modifiers.end(), DRM_FORMAT_MOD_LINEAR);
+        if (linear_it != requested_modifiers.end()) {
+          const std::uint64_t linear_modifier = *linear_it;
+          requested_modifiers.erase(linear_it);
+          if (!logged_linear_dmabuf_attempt) {
+            BOOST_LOG(info) << "Wayland DMA-BUF capture: preferring linear modifier advertised by feedback for nested labwc probe"sv;
+            logged_linear_dmabuf_attempt = true;
+          }
+
+          next_frame->bo = gbm_bo_create_with_modifiers2(
+            gbm_device,
+            dmabuf_info.width,
+            dmabuf_info.height,
+            dmabuf_info.format,
+            &linear_modifier,
+            1,
+            GBM_BO_USE_RENDERING
+          );
+          using_linear_dmabuf = next_frame->bo != nullptr;
+        }
+      }
+
+      if (!next_frame->bo && !requested_modifiers.empty()) {
+        next_frame->bo = gbm_bo_create_with_modifiers2(
+          gbm_device,
+          dmabuf_info.width,
+          dmabuf_info.height,
+          dmabuf_info.format,
+          requested_modifiers.data(),
+          requested_modifiers.size(),
+          GBM_BO_USE_RENDERING
+        );
+      }
+
+      if (!next_frame->bo) {
+        BOOST_LOG(info) << "Wayland DMA-BUF capture: feedback-constrained GBM allocation failed for format ["sv
+                        << dmabuf_info.format
+                        << "] modifiers=["sv << modifier_list_string(feedback_selection.explicit_modifiers)
+                        << "]; retrying with legacy GBM allocation heuristics"sv;
+      }
+    }
+
+    if (!next_frame->bo && prefer_linear_dmabuf) {
+      const auto linear_flags = static_cast<std::uint32_t>(GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+      if (gbm_device_is_format_supported(gbm_device, dmabuf_info.format, linear_flags)) {
+        bo_flags = linear_flags;
+        using_linear_dmabuf = true;
+        if (!logged_linear_dmabuf_attempt) {
+          BOOST_LOG(info) << "Wayland DMA-BUF capture: preferring linear GBM allocation for nested labwc probe"sv;
+          logged_linear_dmabuf_attempt = true;
+        }
+      } else if (!logged_linear_dmabuf_unsupported) {
+        BOOST_LOG(info) << "Wayland DMA-BUF capture: compositor-facing format ["sv
+                        << dmabuf_info.format
+                        << "] does not report GBM linear support on render_node=["sv
+                        << path_for_fd(gbm_device_get_fd(gbm_device))
+                        << "]; retrying with driver default modifiers"sv;
+        logged_linear_dmabuf_unsupported = true;
+      }
+    }
+
     if (!next_frame->bo) {
-      BOOST_LOG(error) << "Failed to create GBM buffer"sv;
+      next_frame->bo = gbm_bo_create(gbm_device, dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, bo_flags);
+    }
+    if (!next_frame->bo && using_linear_dmabuf) {
+      BOOST_LOG(info) << "Wayland DMA-BUF capture: linear GBM allocation failed for format ["sv
+                      << dmabuf_info.format
+                      << "] on render_node=["sv << path_for_fd(gbm_device_get_fd(gbm_device))
+                      << "]; retrying with driver default modifiers"sv;
+      using_linear_dmabuf = false;
+      bo_flags = GBM_BO_USE_RENDERING;
+      next_frame->bo = gbm_bo_create(gbm_device, dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, bo_flags);
+    }
+    if (!next_frame->bo) {
+      BOOST_LOG(error) << "Failed to create GBM buffer"sv
+                       << " format="sv << dmabuf_info.format
+                       << " flags="sv << bo_flags
+                       << " render_node=["sv << path_for_fd(gbm_device_get_fd(gbm_device)) << ']';
       zwlr_screencopy_frame_v1_destroy(frame);
       status = REINIT;
       return;
     }
+
+    if (!feedback_selection.explicit_modifiers.empty()) {
+      using_linear_dmabuf = gbm_bo_get_modifier(next_frame->bo) == DRM_FORMAT_MOD_LINEAR;
+    }
+    use_implicit_modifier_protocol =
+      feedback_selection.from_feedback &&
+      feedback_selection.implicit_supported &&
+      feedback_selection.explicit_modifiers.empty();
 
     next_frame->buffer_width = dmabuf_info.width;
     next_frame->buffer_height = dmabuf_info.height;
@@ -448,6 +864,7 @@ namespace wl {
     }
 
     auto modifier = next_frame->sd.modifier;
+    auto protocol_modifier = use_implicit_modifier_protocol ? DRM_FORMAT_MOD_INVALID : modifier;
     auto stride = next_frame->sd.pitches[0];
     auto wl_buffer_fd = gbm_bo_get_fd(next_frame->bo);
     if (wl_buffer_fd < 0) {
@@ -459,7 +876,15 @@ namespace wl {
     }
 
     auto params = zwp_linux_dmabuf_v1_create_params(dmabuf_interface);
-    zwp_linux_buffer_params_v1_add(params, wl_buffer_fd, 0, 0, stride, modifier >> 32, modifier & 0xffffffff);
+    zwp_linux_buffer_params_v1_add(params, wl_buffer_fd, 0, 0, stride, protocol_modifier >> 32, protocol_modifier & 0xffffffff);
+
+    BOOST_LOG(info) << "Wayland DMA-BUF capture target: size="sv
+                    << dmabuf_info.width << 'x' << dmabuf_info.height
+                    << " format="sv << dmabuf_info.format
+                    << " stride="sv << stride
+                    << " modifier="sv << modifier
+                    << " protocol_modifier="sv << protocol_modifier
+                    << " linear="sv << using_linear_dmabuf;
 
     auto *pending = new pending_buffer_create_t {
       .self = this,
@@ -675,9 +1100,14 @@ namespace wl {
 
   // Failed callback
   void dmabuf_t::failed(zwlr_screencopy_frame_v1 *frame) {
-    BOOST_LOG(error) << "Frame capture failed"sv;
-
     auto next_frame = get_next_frame();
+    BOOST_LOG(error) << "Frame capture failed"sv
+                     << " dmabuf_supported="sv << dmabuf_info.supported
+                     << " shm_supported="sv << shm_info.supported
+                     << " prefer_linear_dmabuf="sv << prefer_linear_dmabuf
+                     << " target_size="sv << next_frame->buffer_width << 'x' << next_frame->buffer_height
+                     << " target_format="sv << next_frame->buffer_format
+                     << " target_modifier="sv << next_frame->buffer_modifier;
     next_frame->destroy();
 
     zwlr_screencopy_frame_v1_destroy(frame);
