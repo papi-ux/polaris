@@ -479,7 +479,10 @@ namespace wl {
     const bool can_use_dmabuf = dmabuf_info.supported && dmabuf_interface;
 
     if (prefer_shm && can_use_shm) {
-      BOOST_LOG(info) << "Using SHM screencopy (preferred for this runtime)"sv;
+      if (!logged_preferred_shm_capture) {
+        BOOST_LOG(info) << "Using SHM screencopy (preferred for this runtime)"sv;
+        logged_preferred_shm_capture = true;
+      }
       create_and_copy_shm(frame);
     } else if (can_use_dmabuf) {
       // Prefer DMA-BUF if supported unless SHM was explicitly requested.
@@ -492,7 +495,10 @@ namespace wl {
       create_and_copy_dmabuf(frame);
     } else if (can_use_shm) {
       // SHM fallback — works on all drivers including NVIDIA
-      BOOST_LOG(info) << "Using SHM screencopy (DMA-BUF not available)"sv;
+      if (!logged_shm_fallback_capture) {
+        BOOST_LOG(info) << "Using SHM screencopy (DMA-BUF not available)"sv;
+        logged_shm_fallback_capture = true;
+      }
       create_and_copy_shm(frame);
     } else {
       BOOST_LOG(error) << "No supported buffer types"sv;

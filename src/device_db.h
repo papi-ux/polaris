@@ -62,6 +62,21 @@ namespace device_db {
                                    const std::string &app_name = "");
 
   /**
+   * @brief Adjust an optimization-suggested codec to fit the active runtime.
+   *
+   * This is used to keep API recommendations and launch-time session policy
+   * aligned when a codec suggestion is technically valid but not a good fit
+   * for the current capture stack.
+   */
+  std::optional<std::string> normalize_preferred_codec(
+    const std::string &device_name,
+    const std::string &app_name,
+    const std::optional<std::string> &preferred_codec,
+    const std::optional<int> &target_bitrate_kbps,
+    bool hdr_requested
+  );
+
+  /**
    * @brief Get all devices as JSON string.
    */
   std::string get_all_devices_json();

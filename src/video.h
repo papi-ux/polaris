@@ -488,6 +488,13 @@ namespace video {
    */
   bool active_encoder_requires_gpu_native_capture();
 
+  /**
+   * @brief Validate that the active encoder can start the requested codec/runtime path right now.
+   * @details This is intended for per-session checks after topology/runtime changes such as cage startup.
+   * @return True when the active encoder can open and validate the requested codec configuration.
+   */
+  bool active_encoder_runtime_supports_config(const config_t &config);
+
 #ifdef POLARIS_TESTS
   bool write_driver_version_cache_for_tests(
     const std::filesystem::path &cache_path,

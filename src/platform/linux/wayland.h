@@ -6,6 +6,7 @@
 
 // standard includes
 #include <bitset>
+#include <string_view>
 
 #ifdef POLARIS_BUILD_WAYLAND
   #include <linux-dmabuf-unstable-v1.h>
@@ -126,6 +127,8 @@ namespace wl {
       std::uint32_t height {0};
       std::uint32_t stride {0};
     } shm_buffer_info;
+    bool logged_preferred_shm_capture {false};
+    bool logged_shm_fallback_capture {false};
     std::uint64_t next_buffer_key {1};
 
     void create_and_copy_shm(zwlr_screencopy_frame_v1 *frame);

@@ -27,6 +27,7 @@
 #include "src/platform/common.h"
 
 #include <string>
+#include <string_view>
 #include <unistd.h>
 
 namespace cage_display_router {
@@ -114,6 +115,24 @@ namespace cage_display_router {
   );
 
   /**
+   * @brief Returns whether RAM-capture fallback logging should describe the
+   *        current labwc runtime as headless.
+   */
+  bool should_report_headless_ram_capture_fallback(const platf::runtime_state_t &runtime_state);
+
+  /**
+   * @brief Returns whether RAM-capture fallback logging should describe the
+   *        current labwc runtime as windowed.
+   */
+  bool should_report_windowed_ram_capture_fallback(const platf::runtime_state_t &runtime_state);
+
+  /**
+   * @brief Returns whether the headless labwc RAM-capture fallback warning
+   *        should be emitted for this process.
+   */
+  bool should_log_headless_ram_capture_warning();
+
+  /**
    * @brief Returns whether the windowed labwc RAM-capture fallback warning
    *        should be emitted for this process.
    */
@@ -124,6 +143,17 @@ namespace cage_display_router {
    * @brief Reset the warning dedupe state for unit tests.
    */
   void reset_windowed_ram_capture_warning_for_tests();
+
+  /**
+   * @brief Test helper for parsing wlr-randr output and determining whether
+   *        an output has settled to the requested current mode.
+   */
+  bool output_reports_current_mode_for_tests(
+    std::string_view wlr_randr_output,
+    std::string_view output_name,
+    int width,
+    int height
+  );
 #endif
 
 }  // namespace cage_display_router

@@ -2291,7 +2291,6 @@ namespace confighttp {
       return;
     }
 
-    print_req(request);
     std::string content = file_handler::read_file(config::sunshine.log_file.c_str());
     SimpleWeb::CaseInsensitiveMultimap headers;
     std::string contentType = "text/plain";
@@ -2303,6 +2302,27 @@ namespace confighttp {
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
+  }
+
+  /**
+   * @brief Clear the active log file.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/logs/clear| POST| null}
+   */
+  void clearLogs(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    nlohmann::json output;
+    output["status"] = logging::clear_log_file();
+    if (!output["status"].get<bool>()) {
+      output["error"] = "Failed to clear active log file";
+    }
+
+    send_response(response, output);
   }
 
   /**
@@ -2465,6 +2485,31 @@ namespace confighttp {
 
     nlohmann::json output_tree;
     output_tree["status"] = display_device::reset_persistence();
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Clean up stale persisted virtual display state.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/virtual-display/cleanup-stale| POST| null}
+   */
+  void cleanupStaleVirtualDisplay(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+#ifdef __linux__
+    output_tree["status"] = true;
+    output_tree["cleaned"] = virtual_display::cleanup_stale();
+#else
+    output_tree["status"] = false;
+    output_tree["error"] = "Virtual display cleanup is only available on Linux";
+#endif
     send_response(response, output_tree);
   }
 
@@ -3601,12 +3646,14 @@ namespace confighttp {
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
     server.resource["^/api/logs$"]["GET"] = getLogs;
+    server.resource["^/api/logs/clear$"]["POST"] = withCsrf(clearLogs);
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = withCsrf(saveConfig);
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = withCsrf(restart);
     server.resource["^/api/quit$"]["POST"] = withCsrf(quit);
     server.resource["^/api/reset-display-device-persistence$"]["POST"] = withCsrf(resetDisplayDevicePersistence);
+    server.resource["^/api/virtual-display/cleanup-stale$"]["POST"] = withCsrf(cleanupStaleVirtualDisplay);
     server.resource["^/api/password$"]["POST"] = withCsrf(savePassword);
     server.resource["^/api/clients/unpair-all$"]["POST"] = withCsrf(unpairAll);
     server.resource["^/api/clients/list$"]["GET"] = getClients;

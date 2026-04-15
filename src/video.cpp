@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <cmath>
 #include <filesystem>
 #include <fcntl.h>
 #include <fstream>
@@ -56,6 +57,27 @@ namespace video {
 
     frame_t make_frame(std::shared_ptr<platf::img_t> image) {
       return frame_t {std::move(image)};
+    }
+
+    struct owned_dummy_img_t: platf::img_t {
+      ~owned_dummy_img_t() override {
+        delete[] data;
+      }
+    };
+
+    std::shared_ptr<platf::img_t> make_cpu_dummy_img(int width, int height) {
+      auto img = std::make_shared<owned_dummy_img_t>();
+      img->width = width;
+      img->height = height;
+      img->pixel_pitch = 4;
+      img->row_pitch = width * img->pixel_pitch;
+      img->data = new std::uint8_t[static_cast<std::size_t>(height) * img->row_pitch]();
+      img->frame_metadata = {
+        .transport = platf::frame_transport_e::internal,
+        .residency = platf::frame_residency_e::cpu,
+        .format = platf::frame_format_e::bgra8,
+      };
+      return img;
     }
 
 #ifdef __linux__
@@ -140,6 +162,24 @@ namespace video {
           return platf::frame_format_e::yuv444p16;
         case platf::pix_fmt_e::y410:
           return platf::frame_format_e::y410;
+        default:
+          return platf::frame_format_e::unknown;
+      }
+    }
+
+    platf::frame_format_e frame_format_from_av_pix_fmt(AVPixelFormat pix_fmt) {
+      switch (pix_fmt) {
+        case AV_PIX_FMT_BGR0:
+        case AV_PIX_FMT_BGRA:
+          return platf::frame_format_e::bgra8;
+        case AV_PIX_FMT_YUV420P:
+          return platf::frame_format_e::yuv420p;
+        case AV_PIX_FMT_NV12:
+          return platf::frame_format_e::nv12;
+        case AV_PIX_FMT_P010:
+          return platf::frame_format_e::p010;
+        case AV_PIX_FMT_YUV444P16:
+          return platf::frame_format_e::yuv444p16;
         default:
           return platf::frame_format_e::unknown;
       }
@@ -373,6 +413,31 @@ namespace video {
       return cached_driver_version;
     }
 
+    std::string current_encoder_topology_key() {
+      std::ostringstream topology;
+      const auto output_name = display_device::map_output_name(config::video.output_name);
+      const auto display_names = platf::display_names(platf::mem_type_e::unknown);
+
+      topology << "capture=" << config::video.capture
+               << ";encoder=" << config::video.encoder
+               << ";adapter=" << config::video.adapter_name
+               << ";output=" << output_name;
+#ifdef __linux__
+      topology << ";cage=" << (config::video.linux_display.use_cage_compositor ? 1 : 0)
+               << ";headless=" << (config::video.linux_display.headless_mode ? 1 : 0)
+               << ";auto_manage=" << (config::video.linux_display.auto_manage_displays ? 1 : 0);
+#endif
+      topology << ";displays=";
+      for (std::size_t index = 0; index < display_names.size(); ++index) {
+        if (index > 0) {
+          topology << ',';
+        }
+        topology << display_names[index];
+      }
+
+      return topology.str();
+    }
+
     std::chrono::milliseconds reset_display_retry_delay(int attempt) {
       const auto shift = std::clamp(attempt, 0, 2);
       return std::min(50ms * (1 << shift), 200ms);
@@ -485,7 +550,15 @@ namespace video {
       auto status = sws_scale_frame(sws.get(), requires_padding ? sws_output_frame.get() : sw_frame.get(), sws_input_frame.get());
       if (status < 0) {
         char string[AV_ERROR_MAX_STRING_SIZE];
-        BOOST_LOG(error) << "Couldn't scale frame: "sv << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status);
+        auto *dst_frame = requires_padding ? sws_output_frame.get() : sw_frame.get();
+        BOOST_LOG(error)
+          << "Couldn't scale frame: "sv << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status)
+          << " src_fmt="sv << av_get_pix_fmt_name((AVPixelFormat) sws_input_frame->format)
+          << " src="sv << sws_input_frame->width << 'x' << sws_input_frame->height
+          << " src_stride="sv << sws_input_frame->linesize[0]
+          << " dst_fmt="sv << av_get_pix_fmt_name((AVPixelFormat) dst_frame->format)
+          << " dst="sv << dst_frame->width << 'x' << dst_frame->height
+          << " dst_stride0="sv << dst_frame->linesize[0];
         return -1;
       }
 
@@ -546,8 +619,28 @@ namespace video {
      */
     void prefill() {
       auto frame = sw_frame ? sw_frame.get() : this->frame;
-      av_frame_get_buffer(frame, 0);
-      av_frame_make_writable(frame);
+      auto status = av_frame_get_buffer(frame, 0);
+      if (status < 0) {
+        char string[AV_ERROR_MAX_STRING_SIZE];
+        BOOST_LOG(error)
+          << "Failed to allocate destination frame buffer for software encode path: "sv
+          << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status)
+          << " format="sv << av_get_pix_fmt_name((AVPixelFormat) frame->format)
+          << " size="sv << frame->width << 'x' << frame->height;
+        return;
+      }
+
+      status = av_frame_make_writable(frame);
+      if (status < 0) {
+        char string[AV_ERROR_MAX_STRING_SIZE];
+        BOOST_LOG(error)
+          << "Failed to make destination frame writable for software encode path: "sv
+          << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status)
+          << " format="sv << av_get_pix_fmt_name((AVPixelFormat) frame->format)
+          << " size="sv << frame->width << 'x' << frame->height;
+        return;
+      }
+
       ptrdiff_t linesize[4] = {frame->linesize[0], frame->linesize[1], frame->linesize[2], frame->linesize[3]};
       av_image_fill_black(frame->data, linesize, (AVPixelFormat) frame->format, frame->color_range, frame->width, frame->height);
     }
@@ -584,6 +677,29 @@ namespace video {
       sws_output_frame->width = out_width;
       sws_output_frame->height = out_height;
       sws_output_frame->format = format;
+      if (out_width != frame->width || out_height != frame->height) {
+        auto status = av_frame_get_buffer(sws_output_frame.get(), 0);
+        if (status < 0) {
+          char string[AV_ERROR_MAX_STRING_SIZE];
+          BOOST_LOG(error)
+            << "Failed to allocate intermediate scaling frame for software encode path: "sv
+            << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status)
+            << " format="sv << av_get_pix_fmt_name((AVPixelFormat) sws_output_frame->format)
+            << " size="sv << sws_output_frame->width << 'x' << sws_output_frame->height;
+          return -1;
+        }
+
+        status = av_frame_make_writable(sws_output_frame.get());
+        if (status < 0) {
+          char string[AV_ERROR_MAX_STRING_SIZE];
+          BOOST_LOG(error)
+            << "Failed to make intermediate scaling frame writable for software encode path: "sv
+            << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status)
+            << " format="sv << av_get_pix_fmt_name((AVPixelFormat) sws_output_frame->format)
+            << " size="sv << sws_output_frame->width << 'x' << sws_output_frame->height;
+          return -1;
+        }
+      }
 
       // Result is always positive
       offsetW = (frame->width - out_width) / 2;
@@ -1985,7 +2101,8 @@ namespace video {
       return nullptr;
     }
 
-    bool hardware = platform_formats->avcodec_base_dev_type != AV_HWDEVICE_TYPE_NONE;
+    const bool hardware_codec = platform_formats->avcodec_base_dev_type != AV_HWDEVICE_TYPE_NONE;
+    const bool use_hardware_frames = hardware_codec && encode_device && encode_device->data;
 
     auto &video_format = encoder.codec_from_config(config);
     if (!video_format[encoder_t::PASSED] || !disp->is_codec_supported(video_format.name, config)) {
@@ -2016,6 +2133,18 @@ namespace video {
                   (colorspace.bit_depth == 10 && config.chromaSamplingType == 0) ? platform_formats->avcodec_pix_fmt_10bit :
                   (colorspace.bit_depth == 10 && config.chromaSamplingType == 1) ? platform_formats->avcodec_pix_fmt_yuv444_10bit :
                                                                                    AV_PIX_FMT_NONE;
+
+    auto input_sw_fmt = sw_fmt;
+    if (!use_hardware_frames && encoder.name == "nvenc"sv && sw_fmt == AV_PIX_FMT_NV12) {
+      input_sw_fmt = AV_PIX_FMT_YUV420P;
+    }
+
+    if (!use_hardware_frames && input_sw_fmt != sw_fmt) {
+      BOOST_LOG(info)
+        << "Using software encoder input format ["sv << av_get_pix_fmt_name(input_sw_fmt)
+        << "] instead of ["sv << av_get_pix_fmt_name(sw_fmt)
+        << "] for codec ["sv << video_format.name << "] on the CPU capture path"sv;
+    }
 
     // Allow up to 1 retry to apply the set of fallback options.
     //
@@ -2086,9 +2215,9 @@ namespace video {
       ctx->colorspace = avcodec_colorspace.matrix;
 
       // Used by cbs::make_sps_hevc
-      ctx->sw_pix_fmt = sw_fmt;
+      ctx->sw_pix_fmt = input_sw_fmt;
 
-      if (hardware) {
+      if (use_hardware_frames) {
         avcodec_buffer_t encoding_stream_context;
 
         ctx->pix_fmt = platform_formats->avcodec_dev_pix_fmt;
@@ -2126,7 +2255,7 @@ namespace video {
 
           auto frame_ctx = (AVHWFramesContext *) frame_ref->data;
           frame_ctx->format = ctx->pix_fmt;
-          frame_ctx->sw_format = sw_fmt;
+          frame_ctx->sw_format = input_sw_fmt;
           frame_ctx->height = ctx->height;
           frame_ctx->width = ctx->width;
           frame_ctx->initial_pool_size = 0;
@@ -2143,7 +2272,13 @@ namespace video {
 
         ctx->slices = config.slicesPerFrame;
       } else /* software */ {
-        ctx->pix_fmt = sw_fmt;
+        ctx->pix_fmt = input_sw_fmt;
+
+        if (hardware_codec) {
+          BOOST_LOG(info)
+            << "Using software input frames for codec ["sv << video_format.name
+            << "] because the active capture backend does not expose a hardware upload device"sv;
+        }
 
         // Clients will request for the fewest slices per frame to get the
         // most efficient encode, but we may want to provide more slices than
@@ -2226,7 +2361,7 @@ namespace video {
       }
 
       if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
-        if (!hardware && (ctx->slices > 1 || config.videoFormat == 1)) {
+        if (!use_hardware_frames && (ctx->slices > 1 || config.videoFormat == 1)) {
           // Use a larger rc_buffer_size for software encoding when slices are enabled,
           // because libx264 can severely degrade quality if the buffer is too small.
           // libx265 encounters this issue more frequently, so always scale the
@@ -2267,6 +2402,21 @@ namespace video {
 
       // Successfully opened the codec
       break;
+    }
+
+    auto software_frame_fmt = input_sw_fmt;
+    if (!use_hardware_frames) {
+      auto resolved_fmt = static_cast<AVPixelFormat>(ctx->pix_fmt);
+      if (resolved_fmt != AV_PIX_FMT_NONE) {
+        software_frame_fmt = resolved_fmt;
+      }
+
+      if (software_frame_fmt != input_sw_fmt) {
+        BOOST_LOG(info)
+          << "Codec ["sv << video_format.name << "] resolved software input format ["sv
+          << av_get_pix_fmt_name(software_frame_fmt) << "] from requested ["sv
+          << av_get_pix_fmt_name(input_sw_fmt) << ']';
+      }
     }
 
     avcodec_frame_t frame {av_frame_alloc()};
@@ -2317,7 +2467,7 @@ namespace video {
     if (!encode_device->data) {
       auto software_encode_device = std::make_unique<avcodec_software_encode_device_t>();
 
-      if (software_encode_device->init(width, height, frame.get(), sw_fmt, hardware)) {
+      if (software_encode_device->init(width, height, frame.get(), software_frame_fmt, use_hardware_frames)) {
         return nullptr;
       }
       software_encode_device->colorspace = colorspace;
@@ -2333,12 +2483,29 @@ namespace video {
 
     encode_device_final->apply_colorspace();
 
-    auto conversion_request = make_conversion_request(
-      encoder,
-      config,
-      colorspace,
-      hardware ? platform_formats->dev_type : platf::mem_type_e::system
-    );
+    std::optional<conversion_request_t> conversion_request;
+    if (use_hardware_frames) {
+      conversion_request = make_conversion_request(
+        encoder,
+        config,
+        colorspace,
+        platform_formats->dev_type
+      );
+    } else {
+      auto frame_format = frame_format_from_av_pix_fmt(software_frame_fmt);
+      if (frame_format == platf::frame_format_e::unknown) {
+        BOOST_LOG(error)
+          << "Could not derive software avcodec conversion request from pixel format ["sv
+          << av_get_pix_fmt_name(software_frame_fmt) << ']';
+        return nullptr;
+      }
+
+      conversion_request = conversion_request_t {
+        .target_format = frame_format,
+        .target_residency = platf::frame_residency_e::cpu,
+        .target_device = platf::mem_type_e::system,
+      };
+    }
     if (!conversion_request) {
       BOOST_LOG(error) << "Could not derive avcodec conversion request from encoder configuration"sv;
       return nullptr;
@@ -2494,6 +2661,21 @@ namespace video {
 
     std::chrono::steady_clock::time_point encode_frame_timestamp;
     bool missing_frame_timestamp_warning_logged = false;
+    auto fps_window_start = std::chrono::steady_clock::now();
+    int fps_window_frames = 0;
+    double measured_fps = 0.0;
+    std::uint64_t frames_encoded = 0;
+    std::uint64_t duplicate_frames = 0;
+    std::uint64_t dropped_frames = 0;
+    std::uint64_t frames_with_age = 0;
+    std::uint64_t jitter_samples = 0;
+    double accumulated_frame_age_ms = 0.0;
+    double accumulated_jitter_ms = 0.0;
+    std::optional<std::chrono::steady_clock::time_point> last_source_frame_timestamp;
+    const double encode_target_fps = config.encodingFramerate > 1000 ?
+      static_cast<double>(config.encodingFramerate) / 1000.0 :
+      static_cast<double>(config.encodingFramerate);
+    const double target_frame_interval_ms = encode_target_fps > 0.0 ? 1000.0 / encode_target_fps : 0.0;
 
     while (true) {
       // Break out of the encoding loop if any of the following are true:
@@ -2525,6 +2707,7 @@ namespace video {
       }
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+      bool reused_previous_frame = true;
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
@@ -2545,8 +2728,20 @@ namespace video {
 
           // If new frame comes in way too fast, just drop
           if (time_diff < -frame_variation_threshold) {
+            dropped_frames++;
             continue;
           }
+
+          reused_previous_frame = false;
+
+          if (last_source_frame_timestamp && target_frame_interval_ms > 0.0) {
+            const auto actual_interval_ms = std::chrono::duration<double, std::milli>(
+              current_timestamp - *last_source_frame_timestamp
+            ).count();
+            accumulated_jitter_ms += std::abs(actual_interval_ms - target_frame_interval_ms);
+            jitter_samples++;
+          }
+          last_source_frame_timestamp = current_timestamp;
 
           if (session->convert(frame)) {
             BOOST_LOG(error) << "Could not convert image"sv;
@@ -2567,20 +2762,26 @@ namespace video {
 
       {
         auto encode_start = std::chrono::steady_clock::now();
+        if (frame_timestamp) {
+          accumulated_frame_age_ms += std::chrono::duration<double, std::milli>(
+            encode_start - *frame_timestamp
+          ).count();
+          frames_with_age++;
+        }
         if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
           BOOST_LOG(error) << "Could not encode video packet"sv;
           break;
         }
         auto encode_end = std::chrono::steady_clock::now();
         auto encode_duration = std::chrono::duration<double, std::milli>(encode_end - encode_start).count();
+        frames_encoded++;
+        if (reused_previous_frame || !frame_timestamp.has_value()) {
+          duplicate_frames++;
+        }
 
         // Update stream stats periodically (every ~30 frames to avoid lock contention)
         // Track all frames for FPS calculation (outside the % 30 gate)
         {
-          static std::chrono::steady_clock::time_point fps_window_start = std::chrono::steady_clock::now();
-          static int fps_window_frames = 0;
-          static double measured_fps = 0.0;
-
           fps_window_frames++;
           auto now = std::chrono::steady_clock::now();
           auto window_elapsed = std::chrono::duration<double>(now - fps_window_start).count();
@@ -2610,6 +2811,15 @@ namespace video {
               }
             }
           }
+
+          stream_stats::update_frame_delivery(
+            frames_encoded > 0 ? static_cast<double>(duplicate_frames) / static_cast<double>(frames_encoded) : 0.0,
+            (frames_encoded + dropped_frames) > 0 ?
+              static_cast<double>(dropped_frames) / static_cast<double>(frames_encoded + dropped_frames) :
+              0.0,
+            frames_with_age > 0 ? accumulated_frame_age_ms / static_cast<double>(frames_with_age) : 0.0,
+            jitter_samples > 0 ? accumulated_jitter_ms / static_cast<double>(jitter_samples) : 0.0
+          );
 
           stream_stats::update_video_stats(
             current_fps,
@@ -3049,6 +3259,10 @@ namespace video {
       return -1;
     }
 
+    const bool needs_cpu_dummy_image =
+      dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get()) &&
+      !static_cast<platf::avcodec_encode_device_t *>(encode_device.get())->data;
+
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
       return -1;
@@ -3057,6 +3271,10 @@ namespace video {
     {
       // Image buffers are large, so we use a separate scope to free it immediately after convert()
       auto img = disp->alloc_img();
+      if (needs_cpu_dummy_image && (!img || !img->data || img->row_pitch <= 0)) {
+        img = make_cpu_dummy_img(disp->width, disp->height);
+      }
+
       if (!img || disp->dummy_img(img.get())) {
         return -1;
       }
@@ -3298,11 +3516,19 @@ namespace video {
     if (!std::filesystem::exists(path)) return "";
 
     std::ifstream f(path);
-    std::string cached_driver, cached_encoder;
+    std::string cached_driver, cached_topology, cached_encoder;
     std::getline(f, cached_driver);
+    std::getline(f, cached_topology);
     std::getline(f, cached_encoder);
 
+    // Backward compatibility for the legacy two-line cache format.
+    if (cached_encoder.empty()) {
+      cached_encoder = cached_topology;
+      cached_topology.clear();
+    }
+
     cached_driver = trim_trailing_ascii_whitespace(std::move(cached_driver));
+    cached_topology = trim_trailing_ascii_whitespace(std::move(cached_topology));
     cached_encoder = trim_trailing_ascii_whitespace(std::move(cached_encoder));
     if (cached_encoder.empty()) return "";
 
@@ -3313,6 +3539,16 @@ namespace video {
       BOOST_LOG(info) << "Encoder cache invalidated: driver changed from " << cached_driver << " to " << current_driver;
       std::filesystem::remove(path);
       return "";
+    }
+
+    if (!cached_topology.empty()) {
+      const auto current_topology = current_encoder_topology_key();
+      if (cached_topology != current_topology) {
+        BOOST_LOG(info) << "Encoder cache invalidated: topology changed from ["sv
+                        << cached_topology << "] to ["sv << current_topology << ']';
+        std::filesystem::remove(path);
+        return "";
+      }
     }
 
     return cached_encoder;
@@ -3331,9 +3567,11 @@ namespace video {
 
     // Save driver version as cache key
     auto driver = current_nvidia_driver_version();
+    auto topology = current_encoder_topology_key();
 
-    f << driver << "\n" << encoder_name << "\n";
-    BOOST_LOG(info) << "Encoder cache saved: " << encoder_name << " (driver " << driver << ")";
+    f << driver << "\n" << topology << "\n" << encoder_name << "\n";
+    BOOST_LOG(info) << "Encoder cache saved: " << encoder_name << " (driver " << driver
+                    << ", topology " << topology << ")";
   }
 
   int probe_encoders() {
@@ -3705,6 +3943,26 @@ namespace video {
       default:
         return false;
     }
+  }
+
+  bool active_encoder_runtime_supports_config(const config_t &config) {
+    if (!chosen_encoder || !chosen_encoder->platform_formats) {
+      return false;
+    }
+
+    const auto output_name {display_device::map_output_name(config::video.output_name)};
+    std::shared_ptr<platf::display_t> disp;
+    reset_display(disp, chosen_encoder->platform_formats->dev_type, output_name, config);
+    if (!disp) {
+      return false;
+    }
+
+    const auto &codec = chosen_encoder->codec_from_config(config);
+    if (!codec[encoder_t::PASSED] || !disp->is_codec_supported(codec.name, config)) {
+      return false;
+    }
+
+    return validate_config(disp, *chosen_encoder, config) >= 0;
   }
 
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt) {

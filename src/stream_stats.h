@@ -65,9 +65,18 @@ namespace stream_stats {
 
     // Video (primary/first client for backward compatibility)
     double fps = 0;
+    double requested_client_fps = 0;
+    double session_target_fps = 0;
+    double encode_target_fps = 0;
     int bitrate_kbps = 0;
     double encode_time_ms = 0;
+    double duplicate_frame_ratio = 0;
+    double dropped_frame_ratio = 0;
+    double avg_frame_age_ms = 0;
+    double frame_jitter_ms = 0;
     std::string codec;
+    std::string pacing_policy;
+    std::string optimization_source;
     int width = 0;
     int height = 0;
 
@@ -135,6 +144,32 @@ namespace stream_stats {
    * @param height Current video height.
    */
   void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height);
+
+  /**
+   * @brief Update static session targets for pacing and optimization telemetry.
+   * @param requested_client_fps FPS originally requested by the client session.
+   * @param session_target_fps FPS Polaris selected for the session before encode pacing.
+   * @param encode_target_fps FPS the encoder loop is targeting.
+   * @param pacing_policy Human-readable pacing policy label.
+   * @param optimization_source Optimization layer(s) that influenced the session.
+   */
+  void update_session_targets(double requested_client_fps,
+                              double session_target_fps,
+                              double encode_target_fps,
+                              const std::string &pacing_policy,
+                              const std::string &optimization_source);
+
+  /**
+   * @brief Update frame delivery telemetry derived from the encode loop.
+   * @param duplicate_frame_ratio Ratio of encoded frames that reused a prior image.
+   * @param dropped_frame_ratio Ratio of capture frames dropped before encode.
+   * @param avg_frame_age_ms Mean frame age at encode submission time.
+   * @param frame_jitter_ms Mean absolute inter-frame timing error.
+   */
+  void update_frame_delivery(double duplicate_frame_ratio,
+                             double dropped_frame_ratio,
+                             double avg_frame_age_ms,
+                             double frame_jitter_ms);
 
   /**
    * @brief Update network statistics.

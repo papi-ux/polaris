@@ -101,6 +101,15 @@ namespace virtual_display {
   void destroy(vdisplay_t &display);
 
   /**
+   * @brief Clean up a persisted virtual display from a dead Polaris process.
+   *
+   * If a previous Polaris session crashed after creating a virtual display,
+   * this attempts one best-effort destroy during startup or before the next
+   * create. Returns true when stale state was found and cleanup was attempted.
+   */
+  bool cleanup_stale();
+
+  /**
    * @brief Get a human-readable name for a backend.
    * @param backend The backend to describe.
    * @return A string like "EVDI", "Wayland (wlr)", or "kscreen-doctor".

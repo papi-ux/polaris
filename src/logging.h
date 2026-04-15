@@ -77,6 +77,12 @@ namespace logging {
   void log_flush();
 
   /**
+   * @brief Clear the active log file while keeping logging enabled.
+   * @return True on success, false otherwise.
+   */
+  bool clear_log_file();
+
+  /**
    * @brief Print help to stdout.
    * @param name The name of the program.
    * @examples

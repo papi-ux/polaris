@@ -36,6 +36,8 @@ using namespace std::literals;
 namespace bl = boost::log;
 
 boost::shared_ptr<boost::log::sinks::asynchronous_sink<boost::log::sinks::text_ostream_backend>> sink;
+boost::shared_ptr<std::ofstream> log_file_stream;
+std::string active_log_file_path;
 
 bl::sources::severity_logger<int> verbose(0);  // Dominating output
 bl::sources::severity_logger<int> debug(1);  // Follow what is happening
@@ -58,6 +60,12 @@ namespace logging {
     log_flush();
     bl::core::get()->remove_sink(sink);
     sink.reset();
+    if (log_file_stream) {
+      log_file_stream->flush();
+      log_file_stream->close();
+      log_file_stream.reset();
+    }
+    active_log_file_path.clear();
   }
 
   void formatter(const boost::log::record_view &view, boost::log::formatting_ostream &os) {
@@ -174,13 +182,15 @@ namespace logging {
 #endif
 
     sink = boost::make_shared<text_sink>();
+    active_log_file_path = log_file;
 
 #ifndef POLARIS_TESTS
     boost::shared_ptr<std::ostream> stream {&std::cout, boost::null_deleter()};
     sink->locked_backend()->add_stream(stream);
 #endif
 
-    sink->locked_backend()->add_stream(boost::make_shared<std::ofstream>(log_file));
+    log_file_stream = boost::make_shared<std::ofstream>(log_file);
+    sink->locked_backend()->add_stream(log_file_stream);
     sink->set_filter(severity >= min_log_level);
     sink->set_formatter(&formatter);
 
@@ -261,6 +271,22 @@ namespace logging {
     if (sink) {
       sink->flush();
     }
+  }
+
+  bool clear_log_file() {
+    if (!sink || !log_file_stream || active_log_file_path.empty()) {
+      return false;
+    }
+
+    log_flush();
+
+    auto backend = sink->locked_backend();
+    log_file_stream->flush();
+    log_file_stream->close();
+    log_file_stream->clear();
+    log_file_stream->open(active_log_file_path, std::ios::out | std::ios::trunc);
+
+    return log_file_stream->is_open() && log_file_stream->good();
   }
 
   void print_help(const char *name) {
