@@ -1211,7 +1211,11 @@ namespace platf {
 
 #ifdef POLARIS_BUILD_CUDA
         if (mem_type == mem_type_e::cuda) {
-          return cuda::make_avcodec_encode_device(width, height, false);
+          if (pix_fmt == pix_fmt_e::nv12) {
+            return cuda::make_avcodec_encode_device(width, height, false);
+          }
+
+          return std::make_unique<avcodec_encode_device_t>();
         }
 #endif
 

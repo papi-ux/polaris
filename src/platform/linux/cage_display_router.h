@@ -26,6 +26,7 @@
 
 #include "src/platform/common.h"
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -97,22 +98,32 @@ namespace cage_display_router {
   platf::runtime_state_t runtime_state();
 
   /**
-   * @brief Returns whether windowed labwc can currently preserve GPU-native capture.
-   *
-   * This reflects the effective capabilities of the current Linux capture stack,
-   * not just the preferred policy.
+   * @brief Returns whether a session should attempt a windowed labwc probe
+   *        to validate GPU-native capture.
    */
-  bool windowed_gpu_native_capture_supported();
-
-  /**
-   * @brief Returns whether a headless request should be overridden to windowed
-   *        in order to preserve a GPU-native capture path.
-   */
-  bool should_force_windowed_for_gpu_native_capture(
+  bool should_attempt_windowed_gpu_native_probe(
     bool requested_headless,
     bool prefer_gpu_native_capture,
     bool encoder_requires_gpu_native_capture
   );
+
+  /**
+   * @brief Returns whether the current cage runtime should attempt GPU-native
+   *        capture instead of forcing SHM fallback.
+   */
+  bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state);
+
+  /**
+   * @brief Returns the cached result of the windowed GPU-native probe for the
+   *        current Polaris process, if one exists.
+   */
+  std::optional<bool> cached_windowed_gpu_native_probe_result();
+
+  /**
+   * @brief Update the cached result of the windowed GPU-native probe for the
+   *        current Polaris process.
+   */
+  void update_windowed_gpu_native_probe_result(bool supported);
 
   /**
    * @brief Returns whether RAM-capture fallback logging should describe the

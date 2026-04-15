@@ -49,6 +49,20 @@ using namespace std::literals;
 #define APPS_JSON_PATH platf::appdata().string() + "/apps.json"
 
 namespace config {
+  namespace {
+    bool is_response_only_config_key(const std::string_view key) {
+      return key == "status"sv ||
+             key == "platform"sv ||
+             key == "version"sv ||
+             key == "vdisplayStatus"sv ||
+             key == "vdisplayAvailable"sv ||
+             key == "vdisplayBackend"sv ||
+             key == "runtime_backend"sv ||
+             key == "runtime_requested_headless"sv ||
+             key == "runtime_effective_headless"sv ||
+             key == "runtime_gpu_native_override_active"sv;
+    }
+  }  // namespace
 
   namespace nv {
 
@@ -1138,6 +1152,14 @@ namespace config {
       fs::copy_file(POLARIS_ASSETS_DIR "/apps.json", stream.file_apps);
     }
 #endif
+
+    for (auto it = vars.begin(); it != vars.end();) {
+      if (is_response_only_config_key(it->first)) {
+        it = vars.erase(it);
+      } else {
+        ++it;
+      }
+    }
 
     for (auto &[name, val] : vars) {
       // Mask sensitive config values in logs

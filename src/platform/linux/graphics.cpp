@@ -168,9 +168,13 @@ namespace gl {
     std::string string;
     string.resize(length);
 
-    ctx.GetShaderInfoLog(handle(), length, &length, string.data());
+    ctx.GetProgramInfoLog(handle(), length, &length, string.data());
 
-    string.resize(length - 1);
+    if (length > 0) {
+      string.resize(length - 1);
+    } else {
+      string.clear();
+    }
 
     return string;
   }

@@ -1267,7 +1267,10 @@ std::string get_local_ip_for_gateway() {
 #endif
 
 #ifdef POLARIS_BUILD_CUDA
-    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc") {
+    const bool force_cage_wlr_capture = config::video.linux_display.use_cage_compositor
+                                     && (config::video.capture.empty() || config::video.capture == "wlr");
+
+    if (!force_cage_wlr_capture && ((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc")) {
       if (verify_nvfbc()) {
         sources[source::NVFBC] = true;
       }

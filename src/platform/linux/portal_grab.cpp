@@ -1139,7 +1139,11 @@ namespace portal {
 #endif
 #ifdef POLARIS_BUILD_CUDA
       if (mem_type == platf::mem_type_e::cuda) {
-        return cuda::make_avcodec_encode_device(w, h, false);
+        if (pix_fmt == platf::pix_fmt_e::nv12) {
+          return cuda::make_avcodec_encode_device(w, h, false);
+        }
+
+        return std::make_unique<platf::avcodec_encode_device_t>();
       }
 #endif
       return std::make_unique<platf::avcodec_encode_device_t>();

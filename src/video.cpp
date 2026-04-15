@@ -39,7 +39,10 @@ extern "C" {
 #include "video.h"
 
 #ifdef __linux__
+  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/cuda.h"
   #include "platform/linux/graphics.h"
+  #include "platform/linux/vaapi.h"
 #endif
 
 #ifdef _WIN32
@@ -130,6 +133,24 @@ namespace video {
       }
 
       return clone;
+    }
+
+    std::shared_ptr<platf::img_t> make_gpu_dummy_img(int width, int height) {
+      auto img = std::make_shared<egl::img_descriptor_t>();
+      img->width = width;
+      img->height = height;
+      img->sequence = 0;
+      img->serial = std::numeric_limits<decltype(img->serial)>::max();
+      img->dmabuf_buffer_key = 0;
+      img->data = nullptr;
+      img->frame_metadata = {
+        .transport = platf::frame_transport_e::internal,
+        .residency = platf::frame_residency_e::gpu,
+        .format = platf::frame_format_e::bgra8,
+      };
+
+      std::fill_n(img->sd.fds, 4, -1);
+      return img;
     }
 
     std::shared_ptr<platf::img_t> clone_compat_image_for_conversion(const frame_t &frame) {
@@ -254,6 +275,27 @@ namespace video {
         .target_device = target_device,
       };
     }
+
+#ifdef __linux__
+    std::unique_ptr<platf::avcodec_encode_device_t> make_direct_linux_gpu_native_encode_device(const encoder_t &encoder, const config_t &config) {
+      if (!encoder.platform_formats) {
+        return {};
+      }
+
+      switch (encoder.platform_formats->dev_type) {
+#ifdef POLARIS_BUILD_CUDA
+        case platf::mem_type_e::cuda:
+          return cuda::make_avcodec_gl_encode_device(config.width, config.height, 0, 0);
+#endif
+#ifdef POLARIS_BUILD_VAAPI
+        case platf::mem_type_e::vaapi:
+          return va::make_avcodec_encode_device(config.width, config.height, 0, 0, true);
+#endif
+        default:
+          return {};
+      }
+    }
+#endif
 
     std::string trim_trailing_ascii_whitespace(std::string value) {
       while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ' || value.back() == '\t')) {
@@ -2630,7 +2672,22 @@ namespace video {
       // even if we timeout waiting on the first frame. This is a relatively large
       // allocation which can be freed immediately after convert(), so we do this
       // in a separate scope.
-      auto dummy_img = disp->alloc_img();
+      std::shared_ptr<platf::img_t> dummy_img;
+#ifdef __linux__
+      if (auto *av_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
+          av_session &&
+          av_session->conversion_request.target_residency == platf::frame_residency_e::gpu &&
+          (av_session->conversion_request.target_device == platf::mem_type_e::cuda ||
+           av_session->conversion_request.target_device == platf::mem_type_e::vaapi) &&
+          ::config::video.linux_display.use_cage_compositor &&
+          cage_display_router::is_running() &&
+          cage_display_router::runtime_state().gpu_native_override_active) {
+        dummy_img = make_gpu_dummy_img(config.width, config.height);
+      } else
+#endif
+      {
+        dummy_img = disp->alloc_img();
+      }
       if (!dummy_img || disp->dummy_img(dummy_img.get())) {
         return;
       }
@@ -2742,6 +2799,20 @@ namespace video {
             jitter_samples++;
           }
           last_source_frame_timestamp = current_timestamp;
+
+#ifdef __linux__
+          if (auto *av_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
+              av_session &&
+              av_session->conversion_request.target_residency == platf::frame_residency_e::gpu &&
+              frame.source_metadata.transport != platf::frame_transport_e::dmabuf &&
+              ::config::video.linux_display.use_cage_compositor &&
+              cage_display_router::is_running() &&
+              cage_display_router::runtime_state().gpu_native_override_active) {
+            BOOST_LOG(warning)
+              << "GPU-native encode session received non-DMA-BUF frame; rebuilding encoder session to match the active capture path"sv;
+            break;
+          }
+#endif
 
           if (session->convert(frame)) {
             BOOST_LOG(error) << "Could not convert image"sv;
@@ -2899,6 +2970,24 @@ namespace video {
     } else if (dynamic_cast<const encoder_platform_formats_nvenc *>(encoder.platform_formats.get())) {
       result = disp.make_nvenc_encode_device(*pix_fmt);
     }
+
+#ifdef __linux__
+    if (auto *avcodec_device = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
+        avcodec_device &&
+        !avcodec_device->data &&
+        ::config::video.linux_display.use_cage_compositor &&
+        cage_display_router::is_running()) {
+      const auto runtime_state = cage_display_router::runtime_state();
+      if (runtime_state.gpu_native_override_active) {
+        auto direct_device = make_direct_linux_gpu_native_encode_device(encoder, config);
+        if (direct_device && direct_device->data) {
+          BOOST_LOG(info)
+            << "Using direct GPU-native avcodec encode device for active windowed cage runtime"sv;
+          result = std::move(direct_device);
+        }
+      }
+    }
+#endif
 
     if (result) {
       result->colorspace = colorspace;
@@ -3963,6 +4052,66 @@ namespace video {
     }
 
     return validate_config(disp, *chosen_encoder, config) >= 0;
+  }
+
+  bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config) {
+    if (!chosen_encoder || !chosen_encoder->platform_formats) {
+      return false;
+    }
+
+    const auto output_name {display_device::map_output_name(config::video.output_name)};
+    std::shared_ptr<platf::display_t> disp;
+    reset_display(disp, chosen_encoder->platform_formats->dev_type, output_name, config);
+    if (!disp) {
+      return false;
+    }
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      bool cursor = false;
+      int timeout_count = 0;
+      std::shared_ptr<platf::img_t> captured_img;
+
+      auto pull_free_image_cb = [&disp](std::shared_ptr<platf::img_t> &img_out) -> bool {
+        img_out = disp->alloc_img();
+        return static_cast<bool>(img_out);
+      };
+
+      auto push_captured_image_cb = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+        if (frame_captured) {
+          captured_img = std::move(img);
+          return false;
+        }
+
+        return ++timeout_count < 3;
+      };
+
+      const auto status = disp->capture(push_captured_image_cb, pull_free_image_cb, &cursor);
+      if (!captured_img) {
+        BOOST_LOG(debug) << "Live GPU capture probe did not receive a frame on attempt "sv
+                         << (attempt + 1)
+                         << "; capture status="sv << static_cast<int>(status);
+        if (status == platf::capture_e::reinit && attempt == 0) {
+          continue;
+        }
+        return false;
+      }
+
+      const auto &metadata = captured_img->frame_metadata;
+      const bool gpu_native =
+        metadata.transport == platf::frame_transport_e::dmabuf &&
+        metadata.residency == platf::frame_residency_e::gpu;
+
+      if (!gpu_native) {
+        BOOST_LOG(debug)
+          << "Live GPU capture probe fell back to transport="sv << platf::from_frame_transport(metadata.transport)
+          << " residency="sv << platf::from_frame_residency(metadata.residency)
+          << " format="sv << platf::from_frame_format(metadata.format);
+      }
+
+      return gpu_native;
+    }
+
+    return false;
   }
 
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt) {

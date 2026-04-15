@@ -65,6 +65,14 @@ namespace nvhttp {
   namespace fs = std::filesystem;
   namespace pt = boost::property_tree;
 
+#ifdef __linux__
+  namespace {
+    bool should_defer_encoder_probe_until_cage() {
+      return config::video.linux_display.use_cage_compositor;
+    }
+  }  // namespace
+#endif
+
   using p_named_cert_t = crypto::p_named_cert_t;
   using PERM = crypto::PERM;
 
@@ -1382,7 +1390,14 @@ namespace nvhttp {
       // Still probe encoders once, if input only session is launched first
       // But we're ignoring if it's successful or not
       if (no_active_sessions && !proc::proc.virtual_display) {
-        video::probe_encoders();
+#ifdef __linux__
+        if (should_defer_encoder_probe_until_cage()) {
+          BOOST_LOG(info) << "nvhttp: Deferring input-only encoder probe until the cage runtime is available"sv;
+        } else
+#endif
+        {
+          video::probe_encoders();
+        }
         if (current_appid == 0) {
           proc::proc.launch_input_only();
         }
@@ -1404,6 +1419,11 @@ namespace nvhttp {
 
         if (no_active_sessions && !proc::proc.virtual_display) {
           display_device::configure_display(config::video, *launch_session);
+#ifdef __linux__
+          if (should_defer_encoder_probe_until_cage()) {
+            BOOST_LOG(info) << "nvhttp: Deferring resume-time encoder probe until the cage runtime is available"sv;
+          } else
+#endif
           if (video::probe_encoders()) {
             tree.put("root.resume", 0);
             tree.put("root.<xmlattr>.status_code", 503);
@@ -1553,6 +1573,11 @@ namespace nvhttp {
       // encoder matches the active GPU (which could have changed
       // due to hotplugging, driver crash, primary monitor change,
       // or any number of other factors).
+#ifdef __linux__
+      if (should_defer_encoder_probe_until_cage()) {
+        BOOST_LOG(info) << "nvhttp: Deferring launch-time encoder probe until the cage runtime is available"sv;
+      } else
+#endif
       if (video::probe_encoders()) {
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 503);

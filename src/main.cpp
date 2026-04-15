@@ -374,7 +374,14 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(warning) << "No gamepad input is available"sv;
   }
 
-  if (video::probe_encoders()) {
+  bool defer_encoder_probe_until_cage = false;
+#ifdef __linux__
+  defer_encoder_probe_until_cage = config::video.linux_display.use_cage_compositor;
+#endif
+
+  if (defer_encoder_probe_until_cage) {
+    BOOST_LOG(info) << "Linux cage compositor is enabled; deferring encoder probe until the session-time cage runtime is available"sv;
+  } else if (video::probe_encoders()) {
 #ifdef _WIN32
     bool allow_probing = video::allow_encoder_probing();
     // Create a temporary virtual display for encoder capability probing

@@ -673,7 +673,9 @@ namespace cuda {
         handle_t handle;
         auto status = func.nvFBCCreateHandle(&handle.handle, &params);
         if (status) {
-          BOOST_LOG(error) << "Failed to create session: "sv << handle.last_error();
+          auto *last_error = handle.handle ? func.nvFBCGetLastErrorStr(handle.handle) : nullptr;
+          auto error_text = (last_error && *last_error) ? std::string_view {last_error} : "no NvFBC error string available"sv;
+          BOOST_LOG(error) << "Failed to create NvFBC session handle: status="sv << static_cast<int>(status) << " error="sv << error_text;
 
           return std::nullopt;
         }
