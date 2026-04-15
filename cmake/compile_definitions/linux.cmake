@@ -216,12 +216,12 @@ if(X11_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/x11grab.cpp")
 endif()
 
-if(NOT ${CUDA_FOUND}
-        AND NOT ${WAYLAND_FOUND}
-        AND NOT ${X11_FOUND}
-        AND NOT (${LIBDRM_FOUND} AND ${LIBCAP_FOUND})
-        AND NOT ${LIBVA_FOUND}
-        AND NOT (${GIO_FOUND} AND ${PIPEWIRE_FOUND}))
+if(NOT CUDA_FOUND
+        AND NOT WAYLAND_FOUND
+        AND NOT X11_FOUND
+        AND NOT (LIBDRM_FOUND AND LIBCAP_FOUND)
+        AND NOT LIBVA_FOUND
+        AND NOT (GIO_FOUND AND PIPEWIRE_FOUND))
     message(FATAL_ERROR "Couldn't find either cuda, wayland, x11, (libdrm and libcap), libva, or gio-2.0 (portal)")
 endif()
 
