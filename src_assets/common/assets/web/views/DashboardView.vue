@@ -1053,7 +1053,7 @@ watch(stats, (newStats, oldStats) => {
   bitrateHistory.value.push(newStats.bitrate_kbps / 1000)
   encodeHistory.value.push(newStats.encode_time_ms)
   latencyHistory.value.push(newStats.latency_ms)
-  gpuHistory.value.push(newStats.gpu_usage || 0)
+  gpuHistory.value.push(gpu.value?.utilization_pct || 0)
   lossHistory.value.push(newStats.packet_loss || 0)
 
   // Keep rolling window

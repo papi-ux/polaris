@@ -3,6 +3,7 @@
  * @brief Definitions for video.
  */
 // standard includes
+#include <algorithm>
 #include <atomic>
 #include <bitset>
 #include <filesystem>
@@ -212,6 +213,169 @@ namespace video {
         .target_residency = frame_residency_from_mem_type(target_device),
         .target_device = target_device,
       };
+    }
+
+    std::string trim_trailing_ascii_whitespace(std::string value) {
+      while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ' || value.back() == '\t')) {
+        value.pop_back();
+      }
+
+      return value;
+    }
+
+    std::optional<std::filesystem::path> find_command_on_path(std::string_view command_name) {
+      if (command_name.empty()) {
+        return std::nullopt;
+      }
+
+      const auto *path_env = std::getenv("PATH");
+      if (!path_env || !*path_env) {
+        return std::nullopt;
+      }
+
+      std::string path_list {path_env};
+      std::size_t start = 0;
+      while (start <= path_list.size()) {
+        auto end = path_list.find(':', start);
+        auto path_entry = path_list.substr(start, end == std::string::npos ? std::string::npos : end - start);
+
+        std::filesystem::path candidate = path_entry.empty() ? std::filesystem::current_path() : std::filesystem::path(path_entry);
+        candidate /= command_name;
+
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec) && !std::filesystem::is_directory(candidate, ec)) {
+          return std::filesystem::weakly_canonical(candidate, ec);
+        }
+
+        if (end == std::string::npos) {
+          break;
+        }
+        start = end + 1;
+      }
+
+      return std::nullopt;
+    }
+
+    std::string binary_mtime_cache_key(const std::filesystem::path &binary_path) {
+      std::error_code ec;
+      auto write_time = std::filesystem::last_write_time(binary_path, ec);
+      if (ec) {
+        return {};
+      }
+
+      auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(write_time.time_since_epoch());
+      return std::to_string(timestamp.count());
+    }
+
+    std::filesystem::path get_driver_version_cache_path() {
+      return platf::appdata() / "driver_version_cache.txt";
+    }
+
+    bool write_driver_version_cache(
+      const std::filesystem::path &cache_path,
+      const std::filesystem::path &binary_path,
+      std::string_view binary_mtime,
+      std::string_view driver_version
+    ) {
+      std::error_code ec;
+      if (!cache_path.parent_path().empty()) {
+        std::filesystem::create_directories(cache_path.parent_path(), ec);
+        if (ec) {
+          return false;
+        }
+      }
+
+      std::ofstream f(cache_path);
+      if (!f) {
+        return false;
+      }
+
+      f << binary_path.string() << '\n'
+        << binary_mtime << '\n'
+        << driver_version << '\n';
+      return static_cast<bool>(f);
+    }
+
+    std::string read_driver_version_cache(
+      const std::filesystem::path &cache_path,
+      const std::filesystem::path &binary_path,
+      std::string_view binary_mtime
+    ) {
+      std::ifstream f(cache_path);
+      if (!f) {
+        return {};
+      }
+
+      std::string cached_binary_path;
+      std::string cached_binary_mtime;
+      std::string cached_driver_version;
+      std::getline(f, cached_binary_path);
+      std::getline(f, cached_binary_mtime);
+      std::getline(f, cached_driver_version);
+
+      if (cached_binary_path != binary_path.string() || cached_binary_mtime != binary_mtime) {
+        return {};
+      }
+
+      return trim_trailing_ascii_whitespace(std::move(cached_driver_version));
+    }
+
+    std::string query_nvidia_driver_version_uncached() {
+      std::string driver_version;
+      FILE *pipe = popen("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null", "r");
+      if (!pipe) {
+        return {};
+      }
+
+      char buf[128];
+      if (fgets(buf, sizeof(buf), pipe)) {
+        driver_version = trim_trailing_ascii_whitespace(buf);
+      }
+      pclose(pipe);
+      return driver_version;
+    }
+
+    std::string current_nvidia_driver_version() {
+      static std::once_flag once;
+      static std::string cached_driver_version;
+
+      std::call_once(once, []() {
+        auto nvidia_smi_path = find_command_on_path("nvidia-smi");
+        std::string nvidia_smi_mtime;
+        if (nvidia_smi_path) {
+          nvidia_smi_mtime = binary_mtime_cache_key(*nvidia_smi_path);
+          if (!nvidia_smi_mtime.empty()) {
+            cached_driver_version = read_driver_version_cache(
+              get_driver_version_cache_path(),
+              *nvidia_smi_path,
+              nvidia_smi_mtime
+            );
+          }
+        }
+
+        if (!cached_driver_version.empty()) {
+          return;
+        }
+
+        cached_driver_version = query_nvidia_driver_version_uncached();
+        if (cached_driver_version.empty() || !nvidia_smi_path || nvidia_smi_mtime.empty()) {
+          return;
+        }
+
+        (void) write_driver_version_cache(
+          get_driver_version_cache_path(),
+          *nvidia_smi_path,
+          nvidia_smi_mtime,
+          cached_driver_version
+        );
+      });
+
+      return cached_driver_version;
+    }
+
+    std::chrono::milliseconds reset_display_retry_delay(int attempt) {
+      const auto shift = std::clamp(attempt, 0, 2);
+      return std::min(50ms * (1 << shift), 200ms);
     }
 
   }  // namespace
@@ -1353,16 +1517,20 @@ namespace video {
   };
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
-    // We try this twice, in case we still get an error on reinitialization
-    for (int x = 0; x < 2; ++x) {
+    constexpr int max_attempts = 3;
+
+    for (int x = 0; x < max_attempts; ++x) {
       disp.reset();
       disp = platf::display(type, display_name, config);
       if (disp) {
         break;
       }
 
-      // The capture code depends on us to sleep between failures
-      std::this_thread::sleep_for(200ms);
+      if (x + 1 >= max_attempts) {
+        break;
+      }
+
+      std::this_thread::sleep_for(reset_display_retry_delay(x));
     }
   }
 
@@ -3116,8 +3284,8 @@ namespace video {
   /**
    * @brief Get the path for the encoder probe cache file.
    */
-  static std::string get_encoder_cache_path() {
-    return platf::appdata().string() + "/encoder_cache.txt";
+  static std::filesystem::path get_encoder_cache_path() {
+    return platf::appdata() / "encoder_cache.txt";
   }
 
   /**
@@ -3134,20 +3302,12 @@ namespace video {
     std::getline(f, cached_driver);
     std::getline(f, cached_encoder);
 
+    cached_driver = trim_trailing_ascii_whitespace(std::move(cached_driver));
+    cached_encoder = trim_trailing_ascii_whitespace(std::move(cached_encoder));
     if (cached_encoder.empty()) return "";
 
     // Verify GPU driver hasn't changed (would invalidate encoder capabilities)
-    std::string current_driver;
-    FILE *pipe = popen("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null", "r");
-    if (pipe) {
-      char buf[128];
-      if (fgets(buf, sizeof(buf), pipe)) {
-        current_driver = buf;
-        while (!current_driver.empty() && (current_driver.back() == '\n' || current_driver.back() == ' '))
-          current_driver.pop_back();
-      }
-      pclose(pipe);
-    }
+    std::string current_driver = current_nvidia_driver_version();
 
     if (!current_driver.empty() && cached_driver != current_driver) {
       BOOST_LOG(info) << "Encoder cache invalidated: driver changed from " << cached_driver << " to " << current_driver;
@@ -3163,20 +3323,14 @@ namespace video {
    */
   static void save_encoder_cache(const std::string &encoder_name) {
     auto path = get_encoder_cache_path();
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+      std::filesystem::create_directories(path.parent_path(), ec);
+    }
     std::ofstream f(path);
 
     // Save driver version as cache key
-    std::string driver;
-    FILE *pipe = popen("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null", "r");
-    if (pipe) {
-      char buf[128];
-      if (fgets(buf, sizeof(buf), pipe)) {
-        driver = buf;
-        while (!driver.empty() && (driver.back() == '\n' || driver.back() == ' '))
-          driver.pop_back();
-      }
-      pclose(pipe);
-    }
+    auto driver = current_nvidia_driver_version();
 
     f << driver << "\n" << encoder_name << "\n";
     BOOST_LOG(info) << "Encoder cache saved: " << encoder_name << " (driver " << driver << ")";
@@ -3573,5 +3727,28 @@ namespace video {
 
     return platf::pix_fmt_e::unknown;
   }
+
+#ifdef POLARIS_TESTS
+  bool write_driver_version_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    const std::filesystem::path &binary_path,
+    std::string_view binary_mtime,
+    std::string_view driver_version
+  ) {
+    return write_driver_version_cache(cache_path, binary_path, binary_mtime, driver_version);
+  }
+
+  std::string read_driver_version_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    const std::filesystem::path &binary_path,
+    std::string_view binary_mtime
+  ) {
+    return read_driver_version_cache(cache_path, binary_path, binary_mtime);
+  }
+
+  std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {
+    return reset_display_retry_delay(attempt);
+  }
+#endif
 
 }  // namespace video

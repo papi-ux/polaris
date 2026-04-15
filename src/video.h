@@ -487,4 +487,21 @@ namespace video {
    * @return True for GPU-backed encoder paths such as CUDA and VAAPI.
    */
   bool active_encoder_requires_gpu_native_capture();
+
+#ifdef POLARIS_TESTS
+  bool write_driver_version_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    const std::filesystem::path &binary_path,
+    std::string_view binary_mtime,
+    std::string_view driver_version
+  );
+
+  std::string read_driver_version_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    const std::filesystem::path &binary_path,
+    std::string_view binary_mtime
+  );
+
+  std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
+#endif
 }  // namespace video
