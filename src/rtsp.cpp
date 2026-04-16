@@ -10,6 +10,7 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <format>
@@ -537,6 +538,13 @@ namespace rtsp_stream {
       return _session_slots->size();
     }
 
+    int viewer_count() {
+      auto lg = _session_slots.lock();
+      return std::count_if(_session_slots->begin(), _session_slots->end(), [](const auto &slot) {
+        return slot && stream::session::is_watch_only(*slot);
+      });
+    }
+
     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;
 
     /**
@@ -655,6 +663,11 @@ namespace rtsp_stream {
     server.clear(false);
 
     return server.session_count();
+  }
+
+  int viewer_count() {
+    server.clear(false);
+    return server.viewer_count();
   }
 
   std::shared_ptr<stream::session_t> find_session(const std::string_view& uuid) {

@@ -344,6 +344,10 @@ namespace nvhttp {
   using req_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request>;
 
   namespace {
+    bool watch_requested(const args_t &args) {
+      return util::from_view(get_arg(args, "watch", "0"));
+    }
+
     bool session_token_matches_request(const args_t &args) {
       const auto expected_token = get_arg(args, "sessiontoken", "");
       const auto active_token = proc::proc.get_session_token();
@@ -357,6 +361,7 @@ namespace nvhttp {
 
       tree.put("root.currentgamesessiontoken", current_session_token);
       tree.put("root.currentgameowner", current_session_owner);
+      tree.put("root.currentgameviewercount", rtsp_stream::viewer_count());
       tree.put(
         "root.currentgameowned",
         has_current_owner && named_cert_p && proc::proc.is_session_owner(named_cert_p->uuid) ? 1 : 0
@@ -724,7 +729,8 @@ namespace nvhttp {
 
     launch_session->device_name = named_cert_p->name.empty() ? "PolarisDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
-    launch_session->perm = named_cert_p->perm;
+    launch_session->watch_only = watch_requested(args);
+    launch_session->perm = launch_session->watch_only ? PERM::view : named_cert_p->perm;
     launch_session->enable_sops = util::from_view(get_arg(args, "sops", "0"));
     launch_session->surround_info = util::from_view(get_arg(args, "surroundAudioInfo", "196610"));
     launch_session->surround_params = (get_arg(args, "surroundParams", ""));
@@ -736,8 +742,10 @@ namespace nvhttp {
     launch_session->user_locked_virtual_display = client_requested_virtual_display || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
 
-    launch_session->client_do_cmds = named_cert_p->do_cmds;
-    launch_session->client_undo_cmds = named_cert_p->undo_cmds;
+    if (!launch_session->watch_only) {
+      launch_session->client_do_cmds = named_cert_p->do_cmds;
+      launch_session->client_undo_cmds = named_cert_p->undo_cmds;
+    }
 
     launch_session->input_only = input_only;
 
@@ -1323,6 +1331,7 @@ namespace nvhttp {
       tree.put("root.state", "POLARIS_SERVER_FREE");
       tree.put("root.currentgamesessiontoken", "");
       tree.put("root.currentgameowner", "");
+      tree.put("root.currentgameviewercount", 0);
       tree.put("root.currentgameowned", 0);
     }
 
@@ -1561,6 +1570,7 @@ namespace nvhttp {
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p);
+    const bool watch_only = launch_session->watch_only;
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
     if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
@@ -1574,6 +1584,13 @@ namespace nvhttp {
     }
 
     bool no_active_sessions = rtsp_stream::session_count() == 0;
+    if (watch_only && (current_appid == 0 || no_active_sessions)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "No active stream is available to watch");
+
+      return;
+    }
 
     if (is_input_only) {
       BOOST_LOG(info) << "Launching input only session..."sv;
@@ -1582,14 +1599,14 @@ namespace nvhttp {
       launch_session->client_undo_cmds.clear();
 
       if (current_appid != 0) {
-        if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
+        if (!watch_only && !proc::proc.is_session_owner(named_cert_p->uuid)) {
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 470);
           tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
 
           return;
         }
-        if (!session_token_matches_request(args)) {
+        if (!watch_only && !session_token_matches_request(args)) {
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 470);
           tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
@@ -1621,14 +1638,14 @@ namespace nvhttp {
 
         BOOST_LOG(debug) << "Resuming app [" << proc::proc.get_last_run_app_name() << "] from launch app path...";
 
-        if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
+        if (!watch_only && !proc::proc.is_session_owner(named_cert_p->uuid)) {
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 470);
           tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
 
           return;
         }
-        if (!session_token_matches_request(args)) {
+        if (!watch_only && !session_token_matches_request(args)) {
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 470);
           tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
@@ -1638,7 +1655,7 @@ namespace nvhttp {
 
         launch_session->session_token = proc::proc.get_session_token();
 
-        if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
+        if (watch_only || !proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
           launch_session->client_do_cmds.clear();
           launch_session->client_undo_cmds.clear();
         }
@@ -1784,15 +1801,24 @@ namespace nvhttp {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
     auto launch_session = make_launch_session(host_audio, false, args, named_cert_p);
+    const bool watch_only = launch_session->watch_only;
 
-    if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
+    if (watch_only && no_active_sessions) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "No active stream is available to watch");
+
+      return;
+    }
+
+    if (!watch_only && !proc::proc.is_session_owner(named_cert_p->uuid)) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 470);
       tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
 
       return;
     }
-    if (!session_token_matches_request(args)) {
+    if (!watch_only && !session_token_matches_request(args)) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 470);
       tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
@@ -1801,7 +1827,7 @@ namespace nvhttp {
     }
     launch_session->session_token = proc::proc.get_session_token();
 
-    if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
+    if (watch_only || !proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
       launch_session->client_do_cmds.clear();
       launch_session->client_undo_cmds.clear();
     }
@@ -2200,6 +2226,13 @@ namespace nvhttp {
       output["owner_device_name"] = proc::proc.get_session_owner_device_name();
       output["owned_by_client"] =
         !proc::proc.get_session_token().empty() && proc::proc.is_session_owner(named_cert_p->uuid);
+      output["viewer_count"] = rtsp_stream::viewer_count();
+
+      std::string client_role = "none";
+      if (const auto session = rtsp_stream::find_session(named_cert_p->uuid)) {
+        client_role = stream::session::is_watch_only(*session) ? "viewer" : "owner";
+      }
+      output["client_role"] = client_role;
 
       // Game info
       output["game_id"] = proc::proc.running();
