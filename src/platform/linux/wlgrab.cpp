@@ -667,7 +667,7 @@ namespace wl {
 
 #ifdef POLARIS_BUILD_CUDA
       if (mem_type == platf::mem_type_e::cuda) {
-        if (pix_fmt == platf::pix_fmt_e::nv12) {
+        if (pix_fmt == platf::pix_fmt_e::nv12 || pix_fmt == platf::pix_fmt_e::p010) {
           return cuda::make_avcodec_gl_encode_device(width, height, 0, 0);
         }
 

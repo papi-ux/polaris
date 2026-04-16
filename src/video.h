@@ -441,10 +441,20 @@ namespace video {
 
   using hdr_info_t = std::unique_ptr<hdr_info_raw_t>;
 
+  struct codec_capability_state_t {
+    int hevc_mode = 0;
+    int av1_mode = 0;
+    std::array<bool, 3> yuv444_for_codec = {false, false, false};
+  };
+
   extern int active_hevc_mode;
   extern int active_av1_mode;
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
   extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
+
+  codec_capability_state_t advertised_codec_capability_state();
+  bool advertised_codec_capability_state_ready();
+  void reset_encoder_probe_state();
 
   void capture(
     safe::mail_t mail,
@@ -504,6 +514,12 @@ namespace video {
   bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config);
 
 #ifdef POLARIS_TESTS
+  struct encoder_probe_cache_snapshot_t {
+    std::string encoder_name;
+    codec_capability_state_t capability_state {};
+    bool has_capability_data = false;
+  };
+
   bool write_driver_version_cache_for_tests(
     const std::filesystem::path &cache_path,
     const std::filesystem::path &binary_path,
@@ -515,6 +531,20 @@ namespace video {
     const std::filesystem::path &cache_path,
     const std::filesystem::path &binary_path,
     std::string_view binary_mtime
+  );
+
+  bool write_encoder_probe_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    std::string_view driver_version,
+    std::string_view topology,
+    std::string_view encoder_name,
+    const codec_capability_state_t &capability_state
+  );
+
+  encoder_probe_cache_snapshot_t read_encoder_probe_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    std::string_view current_driver,
+    std::string_view current_topology
   );
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
