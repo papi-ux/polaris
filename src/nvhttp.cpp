@@ -6,6 +6,8 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -159,6 +161,79 @@ namespace nvhttp {
       }
 #endif
       return video::advertised_codec_capability_state();
+    }
+
+    std::optional<int> rounded_refresh_rate_hz(const display_device::FloatingPoint &value) {
+      return std::visit(
+        [](const auto &refresh_rate) -> std::optional<int> {
+          using value_t = std::decay_t<decltype(refresh_rate)>;
+          if constexpr (std::is_same_v<value_t, display_device::Rational>) {
+            if (refresh_rate.m_denominator == 0) {
+              return std::nullopt;
+            }
+
+            return static_cast<int>(std::lround(static_cast<double>(refresh_rate.m_numerator) /
+                                                static_cast<double>(refresh_rate.m_denominator)));
+          } else {
+            return static_cast<int>(std::lround(refresh_rate));
+          }
+        },
+        value
+      );
+    }
+
+    std::optional<int> active_output_refresh_rate_hz_hint() {
+      const auto configured_display_name = display_device::map_output_name(config::video.output_name);
+      const auto enumerated_devices = display_device::enumerate_devices();
+
+      std::optional<int> primary_refresh_rate;
+      std::optional<int> any_active_refresh_rate;
+
+      for (const auto &device : enumerated_devices) {
+        if (!device.m_info) {
+          continue;
+        }
+
+        const auto refresh_rate_hz = rounded_refresh_rate_hz(device.m_info->m_refresh_rate);
+        if (!refresh_rate_hz || *refresh_rate_hz <= 0) {
+          continue;
+        }
+
+        const bool matches_configured_output = !configured_display_name.empty() &&
+                                              (device.m_display_name == configured_display_name ||
+                                               device.m_device_id == config::video.output_name);
+        if (matches_configured_output) {
+          return refresh_rate_hz;
+        }
+
+        if (device.m_info->m_primary &&
+            (!primary_refresh_rate || *refresh_rate_hz > *primary_refresh_rate)) {
+          primary_refresh_rate = refresh_rate_hz;
+        }
+
+        if (!any_active_refresh_rate || *refresh_rate_hz > *any_active_refresh_rate) {
+          any_active_refresh_rate = refresh_rate_hz;
+        }
+      }
+
+      return primary_refresh_rate ? primary_refresh_rate : any_active_refresh_rate;
+    }
+
+    int advertised_max_launch_refresh_rate_for_http() {
+#ifdef __linux__
+      if (config::video.linux_display.use_cage_compositor &&
+          config::video.linux_display.headless_mode) {
+        // Headless cage sessions aren't tied to a physical panel refresh, so advertise the
+        // highest stock launch rate Nova currently exposes without custom entry.
+        return 120;
+      }
+#endif
+
+      if (const auto refresh_rate_hz = active_output_refresh_rate_hz_hint()) {
+        return *refresh_rate_hz;
+      }
+
+      return 60;
     }
   }  // namespace
 
@@ -1205,6 +1280,7 @@ namespace nvhttp {
       }
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
+    tree.put("root.ServerMaxLaunchRefreshRate", advertised_max_launch_refresh_rate_for_http());
 
     tree.put("root.PairStatus", pair_status);
 
