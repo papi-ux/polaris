@@ -1590,6 +1590,11 @@ namespace wl {
       return;
     }
 
+    if (status == WAITING && capture_frame_object) {
+      wait_for_status(display, 1000ms);
+      return;
+    }
+
     auto next_frame = get_next_frame();
     if (!next_frame->buffer && !allocate_buffer(display, *next_frame)) {
       status = REINIT;
@@ -1614,12 +1619,7 @@ namespace wl {
     ext_image_copy_capture_frame_v1_damage_buffer(capture_frame_object, 0, 0, frame_width, frame_height);
     ext_image_copy_capture_frame_v1_capture(capture_frame_object);
     status = WAITING;
-
-    if (!wait_for_status(display, 1000ms)) {
-      BOOST_LOG(error) << "Extcopy DMA-BUF capture timed out waiting for a frame"sv;
-      destroy_capture_frame();
-      status = REINIT;
-    }
+    wait_for_status(display, 1000ms);
   }
 
   void extcopy_t::session_buffer_size(
