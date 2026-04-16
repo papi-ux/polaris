@@ -10,6 +10,8 @@
 #include <string_view>
 
 #ifdef POLARIS_BUILD_WAYLAND
+  #include <ext-image-capture-source-v1.h>
+  #include <ext-image-copy-capture-v1.h>
   #include <linux-dmabuf-unstable-v1.h>
   #include <wlr-screencopy-unstable-v1.h>
   #include <xdg-output-unstable-v1.h>
@@ -162,6 +164,101 @@ namespace wl {
     void cleanup_shm();
   };
 
+  class display_t;
+
+  class extcopy_t {
+  public:
+    enum status_e {
+      WAITING,  ///< Waiting for constraints or a frame
+      READY,  ///< Frame is ready
+      REINIT,  ///< Reinitialize the frame/session
+    };
+
+    extcopy_t();
+    ~extcopy_t();
+
+    extcopy_t(extcopy_t &&) = delete;
+    extcopy_t(const extcopy_t &) = delete;
+    extcopy_t &operator=(const extcopy_t &) = delete;
+    extcopy_t &operator=(extcopy_t &&) = delete;
+
+    int init(
+      display_t &display,
+      ext_image_copy_capture_manager_v1 *copy_capture_manager,
+      ext_output_image_capture_source_manager_v1 *output_capture_source_manager,
+      zwp_linux_dmabuf_v1 *dmabuf_interface,
+      wl_output *output,
+      bool blend_cursor = false
+    );
+    void capture(display_t &display);
+    static void buffer_params_created(void *data, struct zwp_linux_buffer_params_v1 *params, struct wl_buffer *wl_buffer);
+    static void buffer_params_failed(void *data, struct zwp_linux_buffer_params_v1 *params);
+
+    frame_t *get_next_frame() {
+      return current_frame == &frames[0] ? &frames[1] : &frames[0];
+    }
+
+    status_e status;
+    std::array<frame_t, 2> frames;
+    frame_t *current_frame;
+
+  private:
+    struct format_constraints_t {
+      std::uint32_t format {};
+      bool implicit_modifier {false};
+      std::vector<std::uint64_t> modifiers;
+    };
+
+    bool init_gbm_for_device(dev_t device);
+    void cleanup_gbm();
+    void destroy_capture_frame();
+    void destroy_session();
+    bool wait_for_status(display_t &display, std::chrono::milliseconds timeout);
+    bool ensure_session(display_t &display);
+    bool choose_format();
+    bool populate_capture_descriptor(frame_t &target);
+    bool allocate_buffer(display_t &display, frame_t &target);
+    void reset_constraints();
+
+    void session_buffer_size(ext_image_copy_capture_session_v1 *session, std::uint32_t width, std::uint32_t height);
+    void session_shm_format(ext_image_copy_capture_session_v1 *session, std::uint32_t format);
+    void session_dmabuf_format(ext_image_copy_capture_session_v1 *session, std::uint32_t format, wl_array *modifiers);
+    void session_dmabuf_device(ext_image_copy_capture_session_v1 *session, wl_array *device);
+    void session_done(ext_image_copy_capture_session_v1 *session);
+    void session_stopped(ext_image_copy_capture_session_v1 *session);
+    void frame_transform(ext_image_copy_capture_frame_v1 *frame, std::uint32_t transform);
+    void frame_damage(ext_image_copy_capture_frame_v1 *frame, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height);
+    void frame_presentation_time(ext_image_copy_capture_frame_v1 *frame, std::uint32_t tv_sec_hi, std::uint32_t tv_sec_lo, std::uint32_t tv_nsec);
+    void frame_ready(ext_image_copy_capture_frame_v1 *frame);
+    void frame_failed(ext_image_copy_capture_frame_v1 *frame, std::uint32_t reason);
+
+    ext_image_copy_capture_session_v1_listener session_listener;
+    ext_image_copy_capture_frame_v1_listener frame_listener;
+    ext_image_copy_capture_manager_v1 *copy_capture_manager {nullptr};
+    ext_output_image_capture_source_manager_v1 *output_capture_source_manager {nullptr};
+    zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
+    wl_output *output {nullptr};
+    ext_image_capture_source_v1 *capture_source {nullptr};
+    ext_image_copy_capture_session_v1 *capture_session {nullptr};
+    ext_image_copy_capture_frame_v1 *capture_frame_object {nullptr};
+    ::gbm_device *gbm_device {nullptr};
+    dev_t gbm_device_id {};
+    bool gbm_device_id_valid {false};
+    bool blend_cursor {false};
+    bool constraints_ready {false};
+    bool buffer_size_valid {false};
+    bool device_valid {false};
+    bool chosen_format_valid {false};
+    bool buffer_create_done {false};
+    bool buffer_create_success {false};
+    std::uint32_t frame_width {0};
+    std::uint32_t frame_height {0};
+    dev_t device_id {};
+    format_constraints_t chosen_format;
+    std::vector<format_constraints_t> dmabuf_formats;
+    std::uint64_t next_buffer_key {1};
+  };
+
   class monitor_t {
   public:
     explicit monitor_t(wl_output *output);
@@ -206,6 +303,8 @@ namespace wl {
       XDG_OUTPUT,  ///< xdg-output
       WLR_EXPORT_DMABUF,  ///< screencopy manager
       LINUX_DMABUF,  ///< linux-dmabuf protocol
+      EXT_OUTPUT_CAPTURE_SOURCE,  ///< ext output image capture source manager
+      EXT_IMAGE_COPY_CAPTURE,  ///< ext image copy capture manager
       MAX_INTERFACES,  ///< Maximum number of interfaces
     };
 
@@ -226,6 +325,8 @@ namespace wl {
     std::vector<std::unique_ptr<monitor_t>> monitors;
     zwlr_screencopy_manager_v1 *screencopy_manager {nullptr};
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
+    ext_output_image_capture_source_manager_v1 *output_capture_source_manager {nullptr};
+    ext_image_copy_capture_manager_v1 *copy_capture_manager {nullptr};
     dmabuf_feedback_t dmabuf_feedback;
     zxdg_output_manager_v1 *output_manager {nullptr};
     wl_shm *shm {nullptr};
