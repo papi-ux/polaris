@@ -4323,6 +4323,10 @@ namespace video {
     };
   }
 
+  std::string current_encoder_topology_key_for_tests() {
+    return current_encoder_topology_key();
+  }
+
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {
     return reset_display_retry_delay(attempt);
   }
