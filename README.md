@@ -42,6 +42,7 @@ Polaris takes a different route. Games run inside a dedicated **[labwc](https://
 - **Desktop-safe streaming**: no HDMI dummy plugs, no `kscreen-doctor` juggling, no physical display switching as part of the normal stream path.
 - **Mission Control dashboard**: live preview, six real-time charts, GPU telemetry, quick controls, recording, and a `Runtime Path` card that exposes the session's real backend and capture transport.
 - **Optional optimization guidance**: adaptive bitrate, per-device and per-game tuning suggestions via local or hosted models, and explicit visibility when the Linux stack falls back away from the GPU-native path.
+- **Accurate cold-launch negotiation**: deferred headless encoder capabilities are primed and cached before first launch, so Main10 support is advertised correctly without needing a warm resume.
 - **Better library and pairing UX**: Steam, Lutris, and Heroic import; SteamGridDB art; TOFU, QR, and PIN pairing flows.
 - **Shared-session streaming**: multiple viewers can watch the same stream, with session quality tracking and feedback instead of a black box.
 
@@ -164,6 +165,7 @@ flowchart TB
 
 - `headless_mode` requests an invisible `labwc` session.
 - `linux_prefer_gpu_native_capture=enabled` keeps the intent to prefer DMA-BUF and GPU-native capture, but Polaris will stay headless and surface SHM fallback explicitly on stacks where nested `labwc` DMA-BUF import is still unreliable.
+- On deferred headless cage setups, Polaris primes encoder capabilities with a temporary runtime before launch negotiation, then caches a stable capability snapshot so HEVC/AV1 Main10 is visible on the first real launch.
 - The dashboard and stream stats surface:
   requested headless mode, effective runtime mode, whether the GPU-native override is active, and the actual capture transport, residency, and format.
 - `linux_capture_profile=enabled` logs p50 and p99 capture timings for dispatch, ingest, and total capture time, tagged by transport.
@@ -180,7 +182,7 @@ flowchart TB
 - D-Bus lock screen inhibition prevents idle lock during active streaming.
 - XWayland persistence improves Proton and Wine game compatibility.
 - The end button kills `labwc` and its child process tree cleanly.
-- Encoder capabilities are probed once and cached by driver version for faster restarts.
+- Encoder capabilities are probed and cached with driver/topology metadata so deferred headless launches can advertise accurate codec support before the session-time reprobe.
 - Multi-viewer support currently allows up to 8 simultaneous viewers on one stream.
 
 </details>
@@ -505,6 +507,13 @@ The AI optimizer is optional and disabled by default. When enabled, it sends dev
 <summary><b>Can multiple people watch the same stream?</b></summary>
 
 Yes. Set `max_sessions = N` in your config. The current default is 2 and the current hard max is 8. Viewers share the same encoded stream output, so GPU load does not scale linearly with viewer count.
+
+</details>
+
+<details>
+<summary><b>Can Polaris stream 10-bit to an SDR handheld screen?</b></summary>
+
+Yes, if the client explicitly requests a 10-bit path and the active encoder/runtime support Main10. This is most useful with Nova: enabling HDR in Nova can request a 10-bit SDR stream even when the handheld panel itself is not HDR10-capable. On a working headless NVENC fast path, Polaris will show `Client dynamicRange: 1`, `target_format=p010`, and `capture_transport=dmabuf` in the logs or runtime stats.
 
 </details>
 
