@@ -14,9 +14,11 @@ extern "C" {
 #include <array>
 #include <cctype>
 #include <format>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -46,6 +48,82 @@ namespace rtsp_stream {
 
     delete msg;
   }
+
+  namespace {
+    std::string_view codec_name_for_video_format(int video_format) {
+      switch (video_format) {
+        case 1:
+          return "hevc"sv;
+        case 2:
+          return "av1"sv;
+        default:
+          return "h264"sv;
+      }
+    }
+
+    std::string format_profile_fps(int fps) {
+      if (fps <= 0) {
+        return "0"s;
+      }
+      if (fps % 1000 == 0) {
+        return std::to_string(fps / 1000);
+      }
+      return std::format("{:.3f}", static_cast<double>(fps) / 1000.0);
+    }
+
+    std::string format_watch_profile(const launch_session_t &session) {
+      return std::format("{}x{}@{} {} {}-bit {}kbps",
+                         session.width,
+                         session.height,
+                         format_profile_fps(session.fps),
+                         session.preferred_codec.value_or(std::string {codec_name_for_video_format(0)}),
+                         session.enable_hdr ? 10 : 8,
+                         session.target_bitrate_kbps.value_or(0));
+    }
+
+    std::optional<std::string> watch_profile_mismatch(const launch_session_t &session, const stream::config_t &config) {
+      if (!session.watch_only) {
+        return std::nullopt;
+      }
+
+      std::vector<std::string_view> mismatches;
+      if (config.monitor.width != session.width || config.monitor.height != session.height) {
+        mismatches.emplace_back("resolution");
+      }
+      if (config.monitor.encodingFramerate != session.fps) {
+        mismatches.emplace_back("fps");
+      }
+      if (config.monitor.dynamicRange != (session.enable_hdr ? 1 : 0)) {
+        mismatches.emplace_back("dynamic range");
+      }
+      if (session.target_bitrate_kbps && config.monitor.bitrate != *session.target_bitrate_kbps) {
+        mismatches.emplace_back("bitrate");
+      }
+      if (session.preferred_codec) {
+        const auto requested_codec = codec_name_for_video_format(config.monitor.videoFormat);
+        if (requested_codec != *session.preferred_codec) {
+          mismatches.emplace_back("codec");
+        }
+      }
+
+      if (mismatches.empty()) {
+        return std::nullopt;
+      }
+
+      std::string mismatch_summary;
+      for (std::size_t i = 0; i < mismatches.size(); ++i) {
+        if (i != 0) {
+          mismatch_summary += ", ";
+        }
+        mismatch_summary += mismatches[i];
+      }
+
+      return std::format("Watch profile mismatch ({}) for [{}]; active profile is {}",
+                         mismatch_summary,
+                         session.device_name,
+                         format_watch_profile(session));
+    }
+  }  // namespace
 
 #pragma pack(push, 1)
 
@@ -1204,6 +1282,12 @@ namespace rtsp_stream {
       BOOST_LOG(warning) << "AV1 is disabled, yet the client requested AV1"sv;
 
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+
+    if (const auto mismatch = watch_profile_mismatch(session, config)) {
+      BOOST_LOG(warning) << *mismatch;
+      respond(sock, session, &option, 412, "Precondition Failed", req->sequenceNumber, {});
       return;
     }
 
