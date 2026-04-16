@@ -661,14 +661,14 @@ namespace wl {
     std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(platf::pix_fmt_e pix_fmt) override {
 #ifdef POLARIS_BUILD_VAAPI
       if (mem_type == platf::mem_type_e::vaapi) {
-        return va::make_avcodec_encode_device(width, height, false);
+        return va::make_avcodec_encode_device(width, height, 0, 0, true);
       }
 #endif
 
 #ifdef POLARIS_BUILD_CUDA
       if (mem_type == platf::mem_type_e::cuda) {
         if (pix_fmt == platf::pix_fmt_e::nv12) {
-          return cuda::make_avcodec_encode_device(width, height, false);
+          return cuda::make_avcodec_gl_encode_device(width, height, 0, 0);
         }
 
         return std::make_unique<platf::avcodec_encode_device_t>();
