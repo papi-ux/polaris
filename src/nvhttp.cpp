@@ -235,6 +235,90 @@ namespace nvhttp {
 
       return 60;
     }
+
+    std::string_view codec_name_for_video_format(int video_format) {
+      switch (video_format) {
+        case 1:
+          return "hevc"sv;
+        case 2:
+          return "av1"sv;
+        default:
+          return "h264"sv;
+      }
+    }
+
+    std::string format_profile_fps(int fps) {
+      if (fps <= 0) {
+        return "0"s;
+      }
+      if (fps % 1000 == 0) {
+        return std::to_string(fps / 1000);
+      }
+      return std::format("{:.3f}", static_cast<double>(fps) / 1000.0);
+    }
+
+    std::string format_watch_profile(const stream::session_profile_t &profile) {
+      return std::format("{}x{}@{} {} {}-bit {}kbps",
+                         profile.width,
+                         profile.height,
+                         format_profile_fps(profile.session_target_fps),
+                         codec_name_for_video_format(profile.video_format),
+                         profile.dynamic_range > 0 ? 10 : 8,
+                         profile.bitrate_kbps);
+    }
+
+    std::optional<stream::session_profile_t> active_owner_watch_profile() {
+      const auto owner_uuid = proc::proc.get_session_owner_unique_id();
+      if (owner_uuid.empty()) {
+        return std::nullopt;
+      }
+
+      const auto owner_session = rtsp_stream::find_session(owner_uuid);
+      if (!owner_session || stream::session::is_watch_only(*owner_session)) {
+        return std::nullopt;
+      }
+
+      return stream::session::profile(*owner_session);
+    }
+
+    std::optional<std::pair<int, std::string>> pin_watch_session_to_active_profile(rtsp_stream::launch_session_t &launch_session) {
+      if (!launch_session.watch_only) {
+        return std::nullopt;
+      }
+
+      const auto owner_profile = active_owner_watch_profile();
+      if (!owner_profile) {
+        return std::make_pair(409, "No active owner stream is available to watch"s);
+      }
+
+      const int requested_dynamic_range = launch_session.enable_hdr ? 1 : 0;
+      if (launch_session.requested_width != owner_profile->width ||
+          launch_session.requested_height != owner_profile->height ||
+          launch_session.requested_fps != owner_profile->session_target_fps ||
+          requested_dynamic_range != owner_profile->dynamic_range) {
+        return std::make_pair(
+          412,
+          std::format("Watch mode must match the active stream profile ({})", format_watch_profile(*owner_profile))
+        );
+      }
+
+      launch_session.requested_width = owner_profile->width;
+      launch_session.requested_height = owner_profile->height;
+      launch_session.requested_fps = owner_profile->session_target_fps;
+      launch_session.width = owner_profile->width;
+      launch_session.height = owner_profile->height;
+      launch_session.fps = owner_profile->session_target_fps;
+      launch_session.enable_hdr = owner_profile->dynamic_range > 0;
+      launch_session.target_bitrate_kbps = owner_profile->bitrate_kbps;
+      launch_session.preferred_codec = std::string {codec_name_for_video_format(owner_profile->video_format)};
+      launch_session.optimization_source = "watch_owner_profile";
+
+      BOOST_LOG(info) << "Watch session pinned to active owner profile ["sv
+                      << owner_profile->device_name << "]: "sv
+                      << format_watch_profile(*owner_profile);
+
+      return std::nullopt;
+    }
   }  // namespace
 
   using p_named_cert_t = crypto::p_named_cert_t;
@@ -1592,6 +1676,14 @@ namespace nvhttp {
       return;
     }
 
+    if (const auto watch_error = pin_watch_session_to_active_profile(*launch_session)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", watch_error->first);
+      tree.put("root.<xmlattr>.status_message", watch_error->second);
+
+      return;
+    }
+
     if (is_input_only) {
       BOOST_LOG(info) << "Launching input only session..."sv;
 
@@ -1807,6 +1899,14 @@ namespace nvhttp {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 409);
       tree.put("root.<xmlattr>.status_message", "No active stream is available to watch");
+
+      return;
+    }
+
+    if (const auto watch_error = pin_watch_session_to_active_profile(*launch_session)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", watch_error->first);
+      tree.put("root.<xmlattr>.status_message", watch_error->second);
 
       return;
     }

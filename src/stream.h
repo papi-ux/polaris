@@ -5,6 +5,8 @@
 #pragma once
 
 // standard includes
+#include <optional>
+#include <string>
 #include <utility>
 
 // lib includes
@@ -21,6 +23,17 @@ namespace stream {
   constexpr auto AUDIO_STREAM_PORT = 11;
 
   struct session_t;
+
+  struct session_profile_t {
+    std::string device_name;
+    int width = 0;
+    int height = 0;
+    int bitrate_kbps = 0;
+    int video_format = 0;
+    int dynamic_range = 0;
+    int requested_fps = 0;
+    int session_target_fps = 0;
+  };
 
   struct config_t {
     audio::config_t audio;
@@ -47,6 +60,7 @@ namespace stream {
     };
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
+    session_profile_t profile(const session_t& session);
     std::string uuid(const session_t& session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);
     bool is_watch_only(const session_t& session);

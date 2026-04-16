@@ -2018,6 +2018,19 @@ namespace stream {
   namespace session {
     std::atomic_uint running_sessions;
 
+    session_profile_t profile(const session_t &session) {
+      return session_profile_t {
+        .device_name = session.device_name,
+        .width = session.config.monitor.width,
+        .height = session.config.monitor.height,
+        .bitrate_kbps = session.config.monitor.bitrate,
+        .video_format = session.config.monitor.videoFormat,
+        .dynamic_range = session.config.monitor.dynamicRange,
+        .requested_fps = session.requested_fps,
+        .session_target_fps = session.session_target_fps,
+      };
+    }
+
     state_e state(session_t &session) {
       return session.state.load(std::memory_order_relaxed);
     }
