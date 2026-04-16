@@ -54,6 +54,12 @@ namespace wl {
       int wl_buffer_fd {-1};
     };
 
+    struct pending_extcopy_buffer_create_t {
+      extcopy_t *self {};
+      frame_t *target {};
+      int wl_buffer_fd {-1};
+    };
+
     std::string path_for_fd(int fd) {
       if (fd < 0) {
         return {};
@@ -113,6 +119,21 @@ namespace wl {
 
       return formatted;
     }
+
+    int extcopy_format_rank(std::uint32_t format) {
+      switch (format) {
+        case DRM_FORMAT_XBGR8888:
+          return 0;
+        case DRM_FORMAT_ABGR8888:
+          return 1;
+        case DRM_FORMAT_XRGB8888:
+          return 2;
+        case DRM_FORMAT_ARGB8888:
+          return 3;
+        default:
+          return 100;
+      }
+    }
   }  // namespace
 
   // Helper to call C++ method from wayland C callback
@@ -127,6 +148,11 @@ namespace wl {
   static const struct zwp_linux_buffer_params_v1_listener params_listener = {
     .created = dmabuf_t::buffer_params_created,
     .failed = dmabuf_t::buffer_params_failed
+  };
+
+  static const struct zwp_linux_buffer_params_v1_listener extcopy_params_listener = {
+    .created = extcopy_t::buffer_params_created,
+    .failed = extcopy_t::buffer_params_failed
   };
 
   int display_t::init(const char *display_name) {
@@ -271,6 +297,16 @@ namespace wl {
     if (dmabuf_feedback_object) {
       zwp_linux_dmabuf_feedback_v1_destroy(dmabuf_feedback_object);
       dmabuf_feedback_object = nullptr;
+    }
+
+    if (copy_capture_manager) {
+      ext_image_copy_capture_manager_v1_destroy(copy_capture_manager);
+      copy_capture_manager = nullptr;
+    }
+
+    if (output_capture_source_manager) {
+      ext_output_image_capture_source_manager_v1_destroy(output_capture_source_manager);
+      output_capture_source_manager = nullptr;
     }
   }
 
@@ -484,6 +520,16 @@ namespace wl {
           zwp_linux_dmabuf_feedback_v1_add_listener(dmabuf_feedback_object, &dmabuf_feedback_listener, this);
         }
       }
+    } else if (!std::strcmp(interface, ext_output_image_capture_source_manager_v1_interface.name)) {
+      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      output_capture_source_manager =
+        (ext_output_image_capture_source_manager_v1 *) wl_registry_bind(registry, id, &ext_output_image_capture_source_manager_v1_interface, version);
+      this->interface[EXT_OUTPUT_CAPTURE_SOURCE] = true;
+    } else if (!std::strcmp(interface, ext_image_copy_capture_manager_v1_interface.name)) {
+      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      copy_capture_manager =
+        (ext_image_copy_capture_manager_v1 *) wl_registry_bind(registry, id, &ext_image_copy_capture_manager_v1_interface, version);
+      this->interface[EXT_IMAGE_COPY_CAPTURE] = true;
     } else if (!std::strcmp(interface, wl_shm_interface.name)) {
       shm = (wl_shm *) wl_registry_bind(registry, id, &wl_shm_interface, 1);
     }
@@ -1121,6 +1167,576 @@ namespace wl {
     std::uint32_t width,
     std::uint32_t height
   ) {};
+
+  extcopy_t::extcopy_t():
+      status {READY},
+      frames {},
+      current_frame {&frames[0]},
+      session_listener {
+        &CLASS_CALL(extcopy_t, session_buffer_size),
+        &CLASS_CALL(extcopy_t, session_shm_format),
+        &CLASS_CALL(extcopy_t, session_dmabuf_device),
+        &CLASS_CALL(extcopy_t, session_dmabuf_format),
+        &CLASS_CALL(extcopy_t, session_done),
+        &CLASS_CALL(extcopy_t, session_stopped),
+      },
+      frame_listener {
+        &CLASS_CALL(extcopy_t, frame_transform),
+        &CLASS_CALL(extcopy_t, frame_damage),
+        &CLASS_CALL(extcopy_t, frame_presentation_time),
+        &CLASS_CALL(extcopy_t, frame_ready),
+        &CLASS_CALL(extcopy_t, frame_failed),
+      } {
+  }
+
+  extcopy_t::~extcopy_t() {
+    destroy_capture_frame();
+    destroy_session();
+    cleanup_gbm();
+  }
+
+  bool extcopy_t::init_gbm_for_device(dev_t device) {
+    if (gbm_device && gbm_device_id_valid && drm_devices_equal_by_devid(gbm_device_id, device)) {
+      return true;
+    }
+
+    cleanup_gbm();
+
+    drmDevicePtr drm_device = nullptr;
+    if (drmGetDeviceFromDevId(device, 0, &drm_device) != 0 || !drm_device) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture could not resolve DRM device for dev_t ["sv << device << ']';
+      return false;
+    }
+
+    const char *node = nullptr;
+    if (drm_device->available_nodes & (1 << DRM_NODE_RENDER)) {
+      node = drm_device->nodes[DRM_NODE_RENDER];
+    } else if (drm_device->available_nodes & (1 << DRM_NODE_PRIMARY)) {
+      node = drm_device->nodes[DRM_NODE_PRIMARY];
+    }
+
+    if (!node) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture could not find a renderable DRM node"sv;
+      drmFreeDevice(&drm_device);
+      return false;
+    }
+
+    auto drm_fd = open(node, O_RDWR | O_CLOEXEC);
+    drmFreeDevice(&drm_device);
+    if (drm_fd < 0) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to open DRM node ["sv << node << ']';
+      return false;
+    }
+
+    gbm_device = gbm_create_device(drm_fd);
+    if (!gbm_device) {
+      close(drm_fd);
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to create GBM device"sv;
+      return false;
+    }
+
+    gbm_device_id = device;
+    gbm_device_id_valid = true;
+
+    BOOST_LOG(info) << "Extcopy DMA-BUF capture using GBM backend ["sv
+                    << gbm_device_get_backend_name(gbm_device)
+                    << "] render_node=["sv << path_for_fd(gbm_device_get_fd(gbm_device)) << ']';
+    return true;
+  }
+
+  void extcopy_t::cleanup_gbm() {
+    for (auto &frame : frames) {
+      frame.destroy();
+    }
+
+    if (gbm_device) {
+      gbm_device_destroy(gbm_device);
+      gbm_device = nullptr;
+    }
+
+    gbm_device_id = {};
+    gbm_device_id_valid = false;
+  }
+
+  void extcopy_t::destroy_capture_frame() {
+    if (capture_frame_object) {
+      ext_image_copy_capture_frame_v1_destroy(capture_frame_object);
+      capture_frame_object = nullptr;
+    }
+  }
+
+  void extcopy_t::reset_constraints() {
+    constraints_ready = false;
+    buffer_size_valid = false;
+    device_valid = false;
+    chosen_format_valid = false;
+    frame_width = 0;
+    frame_height = 0;
+    device_id = {};
+    chosen_format = {};
+    dmabuf_formats.clear();
+  }
+
+  void extcopy_t::destroy_session() {
+    destroy_capture_frame();
+
+    if (capture_session) {
+      ext_image_copy_capture_session_v1_destroy(capture_session);
+      capture_session = nullptr;
+    }
+
+    if (capture_source) {
+      ext_image_capture_source_v1_destroy(capture_source);
+      capture_source = nullptr;
+    }
+
+    reset_constraints();
+  }
+
+  bool extcopy_t::wait_for_status(display_t &display, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (status == WAITING && std::chrono::steady_clock::now() < deadline) {
+      auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+      if (remaining <= 0ms) {
+        break;
+      }
+
+      display.dispatch(remaining > 50ms ? 50ms : remaining);
+    }
+
+    return status == READY;
+  }
+
+  bool extcopy_t::choose_format() {
+    if (dmabuf_formats.empty()) {
+      BOOST_LOG(info) << "Extcopy DMA-BUF capture: compositor did not advertise any DMA-BUF formats"sv;
+      return false;
+    }
+
+    const format_constraints_t *best = nullptr;
+    for (const auto &candidate : dmabuf_formats) {
+      if (!best) {
+        best = &candidate;
+        continue;
+      }
+
+      auto candidate_rank = extcopy_format_rank(candidate.format);
+      auto best_rank = extcopy_format_rank(best->format);
+      if (candidate_rank < best_rank) {
+        best = &candidate;
+        continue;
+      }
+
+      if (candidate_rank == best_rank &&
+          candidate.modifiers.size() > best->modifiers.size()) {
+        best = &candidate;
+      }
+    }
+
+    if (!best) {
+      return false;
+    }
+
+    chosen_format = *best;
+    chosen_format_valid = true;
+
+    BOOST_LOG(info) << "Extcopy DMA-BUF capture selected format="sv
+                    << chosen_format.format
+                    << " explicit_modifiers=["sv << modifier_list_string(chosen_format.modifiers)
+                    << "] implicit_modifier="sv << chosen_format.implicit_modifier;
+    return true;
+  }
+
+  bool extcopy_t::populate_capture_descriptor(frame_t &target) {
+    target.reset_capture_descriptor();
+
+    auto fd = gbm_bo_get_fd(target.bo);
+    if (fd < 0) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to get buffer FD"sv;
+      return false;
+    }
+
+    target.sd.fds[0] = fd;
+    target.sd.pitches[0] = gbm_bo_get_stride(target.bo);
+    target.sd.offsets[0] = 0;
+    target.sd.modifier = gbm_bo_get_modifier(target.bo);
+    target.sd.fourcc = target.buffer_format;
+    target.sd.width = target.buffer_width;
+    target.sd.height = target.buffer_height;
+    target.buffer_modifier = target.sd.modifier;
+    return true;
+  }
+
+  void extcopy_t::buffer_params_created(
+    void *data,
+    struct zwp_linux_buffer_params_v1 *params,
+    struct wl_buffer *buffer
+  ) {
+    auto pending = std::unique_ptr<pending_extcopy_buffer_create_t>(static_cast<pending_extcopy_buffer_create_t *>(data));
+    zwp_linux_buffer_params_v1_destroy(params);
+
+    pending->target->buffer = buffer;
+    if (pending->wl_buffer_fd >= 0) {
+      close(pending->wl_buffer_fd);
+      pending->wl_buffer_fd = -1;
+    }
+
+    pending->self->buffer_create_done = true;
+    pending->self->buffer_create_success = true;
+  }
+
+  void extcopy_t::buffer_params_failed(
+    void *data,
+    struct zwp_linux_buffer_params_v1 *params
+  ) {
+    auto pending = std::unique_ptr<pending_extcopy_buffer_create_t>(static_cast<pending_extcopy_buffer_create_t *>(data));
+    zwp_linux_buffer_params_v1_destroy(params);
+
+    if (pending->wl_buffer_fd >= 0) {
+      close(pending->wl_buffer_fd);
+      pending->wl_buffer_fd = -1;
+    }
+
+    pending->target->destroy();
+    pending->self->buffer_create_done = true;
+    pending->self->buffer_create_success = false;
+  }
+
+  bool extcopy_t::allocate_buffer(display_t &display, frame_t &target) {
+    if (!device_valid || !chosen_format_valid || !dmabuf_interface) {
+      return false;
+    }
+
+    if (!init_gbm_for_device(device_id)) {
+      return false;
+    }
+
+    target.destroy();
+
+    bool used_implicit_modifier = false;
+    if (!chosen_format.modifiers.empty()) {
+      target.bo = gbm_bo_create_with_modifiers2(
+        gbm_device,
+        frame_width,
+        frame_height,
+        chosen_format.format,
+        chosen_format.modifiers.data(),
+        chosen_format.modifiers.size(),
+        GBM_BO_USE_RENDERING
+      );
+    }
+
+    if (!target.bo && chosen_format.implicit_modifier) {
+      used_implicit_modifier = true;
+      target.bo = gbm_bo_create(
+        gbm_device,
+        frame_width,
+        frame_height,
+        chosen_format.format,
+        GBM_BO_USE_RENDERING
+      );
+    }
+
+    if (!target.bo) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to allocate GBM buffer"
+                       << " format="sv << chosen_format.format
+                       << " modifiers=["sv << modifier_list_string(chosen_format.modifiers)
+                       << "] implicit_modifier="sv << chosen_format.implicit_modifier;
+      return false;
+    }
+
+    target.buffer_width = frame_width;
+    target.buffer_height = frame_height;
+    target.buffer_format = chosen_format.format;
+    target.buffer_key = next_buffer_key++;
+
+    if (!populate_capture_descriptor(target)) {
+      target.destroy();
+      return false;
+    }
+
+    auto wl_buffer_fd = gbm_bo_get_fd(target.bo);
+    if (wl_buffer_fd < 0) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to get wl_buffer FD"sv;
+      target.destroy();
+      return false;
+    }
+
+    const auto modifier = target.sd.modifier;
+    const auto protocol_modifier = used_implicit_modifier ? DRM_FORMAT_MOD_INVALID : modifier;
+    auto params = zwp_linux_dmabuf_v1_create_params(dmabuf_interface);
+    zwp_linux_buffer_params_v1_add(
+      params,
+      wl_buffer_fd,
+      0,
+      0,
+      target.sd.pitches[0],
+      protocol_modifier >> 32,
+      protocol_modifier & 0xffffffff
+    );
+
+    BOOST_LOG(info) << "Extcopy DMA-BUF capture target: size="sv
+                    << frame_width << 'x' << frame_height
+                    << " format="sv << chosen_format.format
+                    << " stride="sv << target.sd.pitches[0]
+                    << " modifier="sv << modifier
+                    << " protocol_modifier="sv << protocol_modifier;
+
+    buffer_create_done = false;
+    buffer_create_success = false;
+
+    auto *pending = new pending_extcopy_buffer_create_t {
+      .self = this,
+      .target = &target,
+      .wl_buffer_fd = wl_buffer_fd,
+    };
+    zwp_linux_buffer_params_v1_add_listener(params, &extcopy_params_listener, pending);
+    zwp_linux_buffer_params_v1_create(params, frame_width, frame_height, chosen_format.format, 0);
+
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!buffer_create_done && std::chrono::steady_clock::now() < deadline) {
+      display.dispatch(50ms);
+    }
+
+    if (!buffer_create_done || !buffer_create_success || !target.buffer) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to create wl_buffer"sv;
+      target.destroy();
+      return false;
+    }
+
+    return true;
+  }
+
+  int extcopy_t::init(
+    display_t &display,
+    ext_image_copy_capture_manager_v1 *copy_capture_manager,
+    ext_output_image_capture_source_manager_v1 *output_capture_source_manager,
+    zwp_linux_dmabuf_v1 *dmabuf_interface,
+    wl_output *output,
+    bool blend_cursor
+  ) {
+    this->copy_capture_manager = copy_capture_manager;
+    this->output_capture_source_manager = output_capture_source_manager;
+    this->dmabuf_interface = dmabuf_interface;
+    this->output = output;
+    this->blend_cursor = blend_cursor;
+
+    if (!this->copy_capture_manager || !this->output_capture_source_manager || !this->dmabuf_interface || !this->output) {
+      BOOST_LOG(info) << "Extcopy DMA-BUF capture is unavailable on this compositor/runtime"sv;
+      return -1;
+    }
+
+    if (!ensure_session(display)) {
+      return -1;
+    }
+
+    capture(display);
+    return status == READY ? 0 : -1;
+  }
+
+  bool extcopy_t::ensure_session(display_t &display) {
+    if (capture_session && constraints_ready && chosen_format_valid) {
+      return true;
+    }
+
+    destroy_session();
+    status = WAITING;
+
+    capture_source = ext_output_image_capture_source_manager_v1_create_source(output_capture_source_manager, output);
+    if (!capture_source) {
+      BOOST_LOG(info) << "Extcopy DMA-BUF capture could not create an output capture source"sv;
+      status = REINIT;
+      return false;
+    }
+
+    auto options = blend_cursor ? EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_OPTIONS_PAINT_CURSORS : 0;
+    capture_session = ext_image_copy_capture_manager_v1_create_session(copy_capture_manager, capture_source, options);
+    if (!capture_session) {
+      BOOST_LOG(info) << "Extcopy DMA-BUF capture could not create a capture session"sv;
+      status = REINIT;
+      return false;
+    }
+
+    ext_image_copy_capture_session_v1_add_listener(capture_session, &session_listener, this);
+
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!constraints_ready && status != REINIT && std::chrono::steady_clock::now() < deadline) {
+      display.dispatch(50ms);
+    }
+
+    if (!constraints_ready || status == REINIT) {
+      BOOST_LOG(info) << "Extcopy DMA-BUF capture did not produce usable buffer constraints"sv;
+      status = REINIT;
+      return false;
+    }
+
+    if (!buffer_size_valid || !device_valid || !choose_format()) {
+      status = REINIT;
+      return false;
+    }
+
+    if (!get_next_frame()->buffer && !allocate_buffer(display, *get_next_frame())) {
+      status = REINIT;
+      return false;
+    }
+
+    status = READY;
+    return true;
+  }
+
+  void extcopy_t::capture(display_t &display) {
+    if (!ensure_session(display)) {
+      status = REINIT;
+      return;
+    }
+
+    auto next_frame = get_next_frame();
+    if (!next_frame->buffer && !allocate_buffer(display, *next_frame)) {
+      status = REINIT;
+      return;
+    }
+
+    if (!populate_capture_descriptor(*next_frame)) {
+      status = REINIT;
+      return;
+    }
+
+    destroy_capture_frame();
+    capture_frame_object = ext_image_copy_capture_session_v1_create_frame(capture_session);
+    if (!capture_frame_object) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to create a frame object"sv;
+      status = REINIT;
+      return;
+    }
+
+    ext_image_copy_capture_frame_v1_add_listener(capture_frame_object, &frame_listener, this);
+    ext_image_copy_capture_frame_v1_attach_buffer(capture_frame_object, next_frame->buffer);
+    ext_image_copy_capture_frame_v1_damage_buffer(capture_frame_object, 0, 0, frame_width, frame_height);
+    ext_image_copy_capture_frame_v1_capture(capture_frame_object);
+    status = WAITING;
+
+    if (!wait_for_status(display, 1000ms)) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture timed out waiting for a frame"sv;
+      destroy_capture_frame();
+      status = REINIT;
+    }
+  }
+
+  void extcopy_t::session_buffer_size(
+    ext_image_copy_capture_session_v1 *session,
+    std::uint32_t width,
+    std::uint32_t height
+  ) {
+    frame_width = width;
+    frame_height = height;
+    buffer_size_valid = true;
+    BOOST_LOG(debug) << "Extcopy buffer size: "sv << width << 'x' << height;
+  }
+
+  void extcopy_t::session_shm_format(
+    ext_image_copy_capture_session_v1 *session,
+    std::uint32_t format
+  ) {
+    BOOST_LOG(debug) << "Extcopy alternate SHM format: "sv << format;
+  }
+
+  void extcopy_t::session_dmabuf_format(
+    ext_image_copy_capture_session_v1 *session,
+    std::uint32_t format,
+    wl_array *modifiers
+  ) {
+    format_constraints_t constraints {
+      .format = format,
+    };
+
+    if (modifiers && modifiers->data && modifiers->size % sizeof(std::uint64_t) == 0) {
+      const auto *modifier_data = static_cast<const std::uint64_t *>(modifiers->data);
+      auto modifier_count = modifiers->size / sizeof(std::uint64_t);
+      for (std::size_t i = 0; i < modifier_count; ++i) {
+        auto modifier = modifier_data[i];
+        if (modifier == DRM_FORMAT_MOD_INVALID) {
+          constraints.implicit_modifier = true;
+        } else {
+          constraints.modifiers.emplace_back(modifier);
+        }
+      }
+    }
+
+    BOOST_LOG(debug) << "Extcopy DMA-BUF format: "sv << format
+                     << " explicit_modifiers=["sv << modifier_list_string(constraints.modifiers)
+                     << "] implicit_modifier="sv << constraints.implicit_modifier;
+    dmabuf_formats.emplace_back(std::move(constraints));
+  }
+
+  void extcopy_t::session_dmabuf_device(
+    ext_image_copy_capture_session_v1 *session,
+    wl_array *device
+  ) {
+    if (!decode_dev_id(device, device_id)) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF device event had an invalid payload"sv;
+      status = REINIT;
+      return;
+    }
+
+    device_valid = true;
+    BOOST_LOG(debug) << "Extcopy DMA-BUF device: "sv << device_id;
+  }
+
+  void extcopy_t::session_done(ext_image_copy_capture_session_v1 *session) {
+    if (constraints_ready) {
+      BOOST_LOG(info) << "Extcopy DMA-BUF capture constraints changed; reinitializing capture session"sv;
+      status = REINIT;
+      return;
+    }
+
+    constraints_ready = true;
+    BOOST_LOG(info) << "Extcopy DMA-BUF constraints ready: size="sv
+                    << frame_width << 'x' << frame_height
+                    << " device_valid="sv << device_valid
+                    << " dmabuf_formats="sv << dmabuf_formats.size();
+  }
+
+  void extcopy_t::session_stopped(ext_image_copy_capture_session_v1 *session) {
+    BOOST_LOG(error) << "Extcopy DMA-BUF capture session stopped"sv;
+    status = REINIT;
+  }
+
+  void extcopy_t::frame_transform(
+    ext_image_copy_capture_frame_v1 *frame,
+    std::uint32_t transform
+  ) {
+    BOOST_LOG(debug) << "Extcopy frame transform: "sv << transform;
+  }
+
+  void extcopy_t::frame_damage(
+    ext_image_copy_capture_frame_v1 *frame,
+    std::int32_t x,
+    std::int32_t y,
+    std::int32_t width,
+    std::int32_t height
+  ) {
+  }
+
+  void extcopy_t::frame_presentation_time(
+    ext_image_copy_capture_frame_v1 *frame,
+    std::uint32_t tv_sec_hi,
+    std::uint32_t tv_sec_lo,
+    std::uint32_t tv_nsec
+  ) {
+  }
+
+  void extcopy_t::frame_ready(ext_image_copy_capture_frame_v1 *frame) {
+    current_frame->reset_capture_descriptor();
+    current_frame = get_next_frame();
+    destroy_capture_frame();
+    status = READY;
+  }
+
+  void extcopy_t::frame_failed(ext_image_copy_capture_frame_v1 *frame, std::uint32_t reason) {
+    BOOST_LOG(error) << "Extcopy DMA-BUF frame capture failed: reason="sv << reason;
+    destroy_capture_frame();
+    status = REINIT;
+  }
 
   void frame_t::destroy() {
     reset_capture_descriptor();

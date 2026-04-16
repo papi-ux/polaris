@@ -540,6 +540,163 @@ namespace wl {
     std::uint64_t sequence {};
   };
 
+  class wlr_extcopy_vram_t: public wlr_t {
+  public:
+    platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+      auto next_frame = std::chrono::steady_clock::now();
+
+      sleep_overshoot_logger.reset();
+
+      while (true) {
+        auto now = std::chrono::steady_clock::now();
+
+        if (next_frame > now) {
+          std::this_thread::sleep_for(next_frame - now);
+          sleep_overshoot_logger.first_point(next_frame);
+          sleep_overshoot_logger.second_point_now_and_log();
+        }
+
+        next_frame += delay;
+        if (next_frame < now) {
+          next_frame = now + delay;
+        }
+
+        std::shared_ptr<platf::img_t> img_out;
+        auto status = snapshot(pull_free_image_cb, img_out, cursor);
+        switch (status) {
+          case platf::capture_e::reinit:
+          case platf::capture_e::error:
+          case platf::capture_e::interrupted:
+            return status;
+          case platf::capture_e::timeout:
+            if (!push_captured_image_cb(std::move(img_out), false)) {
+              return platf::capture_e::ok;
+            }
+            break;
+          case platf::capture_e::ok:
+            if (!push_captured_image_cb(std::move(img_out), true)) {
+              return platf::capture_e::ok;
+            }
+            break;
+          default:
+            BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
+            return status;
+        }
+      }
+
+      return platf::capture_e::ok;
+    }
+
+    platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, bool *cursor) {
+      auto capture_start = std::chrono::steady_clock::now();
+      auto cursor_enabled = cursor ? *cursor : false;
+
+      if (!capture_ready || cursor_enabled != blend_cursor) {
+        blend_cursor = cursor_enabled;
+        if (extcopy.init(display, interface.copy_capture_manager, interface.output_capture_source_manager, interface.dmabuf_interface, output, blend_cursor)) {
+          return platf::capture_e::reinit;
+        }
+        capture_ready = true;
+      } else {
+        extcopy.capture(display);
+        if (extcopy.status != wl::extcopy_t::READY) {
+          return platf::capture_e::reinit;
+        }
+      }
+
+      if (!pull_free_image_cb(img_out)) {
+        return platf::capture_e::interrupted;
+      }
+
+      auto *img = static_cast<egl::img_descriptor_t *>(img_out.get());
+      img->reset();
+
+      auto current_frame = extcopy.current_frame;
+
+      ++sequence;
+      img->sequence = sequence;
+      img->sd = current_frame->sd;
+      img->dmabuf_buffer_key = current_frame->buffer_key;
+      img->frame_timestamp = std::chrono::steady_clock::now();
+      img->frame_metadata = {
+        .transport = platf::frame_transport_e::dmabuf,
+        .residency = platf::frame_residency_e::gpu,
+        .format = platf::frame_format_e::bgra8,
+      };
+      stream_stats::update_capture_metadata(img->frame_metadata);
+      log_capture_metadata(img->frame_metadata);
+      if (capture_profile_enabled()) {
+        auto total_time = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - capture_start
+        );
+        stream_stats::update_capture_profile({
+          .transport = img->frame_metadata.transport,
+          .dispatch_time = total_time,
+          .ingest_time = 0us,
+          .total_time = total_time,
+        });
+      }
+
+      std::fill_n(current_frame->sd.fds, 4, -1);
+      return platf::capture_e::ok;
+    }
+
+    std::shared_ptr<platf::img_t> alloc_img() override {
+      auto img = std::make_shared<egl::img_descriptor_t>();
+
+      img->width = width;
+      img->height = height;
+      img->sequence = 0;
+      img->serial = std::numeric_limits<decltype(img->serial)>::max();
+      img->dmabuf_buffer_key = 0;
+      img->data = nullptr;
+      std::fill_n(img->sd.fds, 4, -1);
+
+      return img;
+    }
+
+    std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(platf::pix_fmt_e pix_fmt) override {
+#ifdef POLARIS_BUILD_VAAPI
+      if (mem_type == platf::mem_type_e::vaapi) {
+        return va::make_avcodec_encode_device(width, height, false);
+      }
+#endif
+
+#ifdef POLARIS_BUILD_CUDA
+      if (mem_type == platf::mem_type_e::cuda) {
+        if (pix_fmt == platf::pix_fmt_e::nv12) {
+          return cuda::make_avcodec_encode_device(width, height, false);
+        }
+
+        return std::make_unique<platf::avcodec_encode_device_t>();
+      }
+#endif
+
+      return std::make_unique<platf::avcodec_encode_device_t>();
+    }
+
+    int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
+      if (wlr_t::init(hwdevice_type, display_name, config)) {
+        return -1;
+      }
+
+      BOOST_LOG(info) << "wlr: Attempting experimental headless DMA-BUF capture via ext-image-copy-capture"sv;
+      blend_cursor = false;
+      if (extcopy.init(display, interface.copy_capture_manager, interface.output_capture_source_manager, interface.dmabuf_interface, output, blend_cursor)) {
+        BOOST_LOG(info) << "wlr: ext-image-copy-capture DMA-BUF initialization failed on this headless runtime"sv;
+        return -1;
+      }
+
+      capture_ready = true;
+      return 0;
+    }
+
+    wl::extcopy_t extcopy;
+    bool capture_ready {false};
+    bool blend_cursor {false};
+    std::uint64_t sequence {};
+  };
+
 }  // namespace wl
 
 namespace platf {
@@ -551,6 +708,7 @@ namespace platf {
 
     bool prefer_ram_capture = (hwdevice_type == platf::mem_type_e::system);
     bool prefer_linear_dmabuf = false;
+    bool attempt_headless_extcopy = false;
 #ifdef __linux__
     if (!prefer_ram_capture &&
         config::video.linux_display.use_cage_compositor &&
@@ -564,22 +722,29 @@ namespace platf {
           logged_windowed_gpu_native_attempt = true;
         }
         prefer_linear_dmabuf = true;
+      } else if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
+        attempt_headless_extcopy = true;
       } else {
         prefer_ram_capture = true;
 
-        if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
-          if (cage_display_router::should_log_headless_ram_capture_warning()) {
-            BOOST_LOG(info)
-              << "wlr: Using RAM capture path for headless labwc because cage sessions do not expose a stable zero-copy encoder upload path on this stack"sv;
-          }
-        } else if (cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state) &&
-                   cage_display_router::should_log_windowed_ram_capture_warning()) {
+        if (cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state) &&
+            cage_display_router::should_log_windowed_ram_capture_warning()) {
           BOOST_LOG(warning)
             << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
         }
       }
     }
 #endif
+
+    if (attempt_headless_extcopy && (hwdevice_type == platf::mem_type_e::vaapi || hwdevice_type == platf::mem_type_e::cuda)) {
+      auto wlr = std::make_shared<wl::wlr_extcopy_vram_t>();
+      if (!wlr->init(hwdevice_type, display_name, config)) {
+        return wlr;
+      }
+
+      BOOST_LOG(info) << "wlr: Headless ext-image-copy-capture DMA-BUF path unavailable; falling back to RAM capture"sv;
+      prefer_ram_capture = true;
+    }
 
     if (!prefer_ram_capture && (hwdevice_type == platf::mem_type_e::vaapi || hwdevice_type == platf::mem_type_e::cuda)) {
       auto wlr = std::make_shared<wl::wlr_vram_t>();
@@ -593,6 +758,10 @@ namespace platf {
 
     auto wlr = std::make_shared<wl::wlr_ram_t>();
     wlr->prefer_shm_screencopy = prefer_ram_capture;
+    if (attempt_headless_extcopy && cage_display_router::should_log_headless_ram_capture_warning()) {
+      BOOST_LOG(info)
+        << "wlr: Using RAM capture path for headless labwc because the experimental ext-image-copy-capture DMA-BUF path was unavailable on this stack"sv;
+    }
     if (wlr->init(hwdevice_type, display_name, config)) {
       return nullptr;
     }
