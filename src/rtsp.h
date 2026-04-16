@@ -38,6 +38,7 @@ namespace rtsp_stream {
     std::string unique_id;
     std::string session_token;
     crypto::PERM perm;
+    bool watch_only;
 
     bool input_only;
     bool host_audio;
@@ -88,6 +89,7 @@ namespace rtsp_stream {
    * @return Count of active sessions.
    */
   int session_count();
+  int viewer_count();
 
   std::shared_ptr<stream::session_t>
   find_session(const std::string_view& uuid);

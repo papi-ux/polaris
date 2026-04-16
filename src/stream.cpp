@@ -418,6 +418,7 @@ namespace stream {
     std::uint32_t launch_session_id;
     std::string device_name;
     std::string device_uuid;
+    bool watch_only;
     int requested_fps = 0;
     int session_target_fps = 0;
     std::string pacing_policy;
@@ -2033,6 +2034,10 @@ namespace stream {
       return session.device_uuid == uuid;
     }
 
+    bool is_watch_only(const session_t &session) {
+      return session.watch_only;
+    }
+
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm) {
       session.permission = newPerm;
       if (!(newPerm & crypto::PERM::_allow_view)) {
@@ -2299,6 +2304,7 @@ namespace stream {
       session->pacing_policy = launch_session.pacing_policy;
       session->optimization_source = launch_session.optimization_source;
       session->permission = launch_session.perm;
+      session->watch_only = launch_session.watch_only;
 
       session->do_cmds = std::move(launch_session.client_do_cmds);
       session->undo_cmds = std::move(launch_session.client_undo_cmds);
