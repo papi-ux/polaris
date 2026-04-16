@@ -54,6 +54,7 @@
 #ifdef __linux__
   #include "platform/linux/cage_display_router.h"
   #include "platform/linux/session_manager.h"
+  #include "platform/linux/virtual_display.h"
 #endif
 #include "uuid.h"
 #include "video.h"
@@ -318,6 +319,65 @@ namespace nvhttp {
                       << format_watch_profile(*owner_profile);
 
       return std::nullopt;
+    }
+
+    nlohmann::json launch_mode_contract_for_app(const proc::ctx_t &app) {
+      bool host_virtual_display_available = false;
+      bool host_prefers_headless = false;
+
+#ifdef __linux__
+      host_virtual_display_available = virtual_display::is_available();
+      host_prefers_headless =
+        config::video.linux_display.use_cage_compositor &&
+        config::video.linux_display.headless_mode;
+#elif defined(_WIN32)
+      host_virtual_display_available =
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::UNKNOWN;
+#endif
+
+      const bool app_prefers_virtual_display = app.virtual_display;
+      const std::string preferred_mode = app_prefers_virtual_display ? "virtual_display" : "headless";
+      std::string recommended_mode = preferred_mode;
+      std::string mode_reason;
+
+      auto allowed_modes = nlohmann::json::array();
+      allowed_modes.push_back("headless");
+      if (host_virtual_display_available) {
+        allowed_modes.push_back("virtual_display");
+      }
+
+      const bool steam_big_picture = boost::iequals(boost::trim_copy(app.name), "Steam Big Picture");
+
+      if (app_prefers_virtual_display && host_virtual_display_available) {
+        recommended_mode = "virtual_display";
+        mode_reason = steam_big_picture ?
+          "Steam Big Picture is configured to prefer a dedicated virtual display on this host." :
+          "This app is configured to prefer a dedicated virtual display on the host.";
+      } else if (app_prefers_virtual_display && !host_virtual_display_available) {
+        recommended_mode = "headless";
+        mode_reason =
+          "This app prefers Virtual Display, but Polaris does not currently have a virtual display backend available, so the non-virtual path is recommended.";
+      } else if (host_prefers_headless) {
+        recommended_mode = "headless";
+        mode_reason =
+          "Headless is recommended because this Polaris host is already configured for headless streaming.";
+      } else if (host_virtual_display_available) {
+        recommended_mode = "headless";
+        mode_reason =
+          "This app defaults to the non-virtual path. Virtual Display is available when you want a dedicated display for the session.";
+      } else {
+        recommended_mode = "headless";
+        mode_reason =
+          "This app defaults to the non-virtual path on this host.";
+      }
+
+      nlohmann::json launch_mode;
+      launch_mode["preferred_mode"] = preferred_mode;
+      launch_mode["recommended_mode"] = recommended_mode;
+      launch_mode["allowed_modes"] = std::move(allowed_modes);
+      launch_mode["mode_reason"] = mode_reason;
+      return launch_mode;
     }
   }  // namespace
 
@@ -2322,16 +2382,22 @@ namespace nvhttp {
 
       // Session state from the state machine
       auto stats = stream_stats::get_current();
-      output["state"] = confighttp::get_session_state();
+      const auto session_state = confighttp::get_session_state();
+      const auto session_token = proc::proc.get_session_token();
+      const bool owned_by_client =
+        !session_token.empty() && proc::proc.is_session_owner(named_cert_p->uuid);
+      const bool shutdown_requested = proc::proc.session_shutdown_requested();
+      output["state"] = session_state;
+      output["streaming_active"] = stats.streaming;
+      output["shutdown_requested"] = shutdown_requested;
 #ifdef __linux__
       output["cage_pid"] = cage_display_router::get_pid();
       output["screen_locked"] = session_manager::is_screen_locked();
 #endif
-      output["session_token"] = proc::proc.get_session_token();
+      output["session_token"] = session_token;
       output["owner_unique_id"] = proc::proc.get_session_owner_unique_id();
       output["owner_device_name"] = proc::proc.get_session_owner_device_name();
-      output["owned_by_client"] =
-        !proc::proc.get_session_token().empty() && proc::proc.is_session_owner(named_cert_p->uuid);
+      output["owned_by_client"] = owned_by_client;
       output["viewer_count"] = rtsp_stream::viewer_count();
 
       std::string client_role = "none";
@@ -2339,6 +2405,16 @@ namespace nvhttp {
         client_role = stream::session::is_watch_only(*session) ? "viewer" : "owner";
       }
       output["client_role"] = client_role;
+      const bool host_tuning_allowed =
+        owned_by_client &&
+        client_role != "viewer" &&
+        !shutdown_requested &&
+        stats.streaming;
+      const bool quit_allowed =
+        host_tuning_allowed &&
+        proc::proc.allow_client_commands &&
+        named_cert_p->allow_client_commands &&
+        proc::proc.running() > 0;
 
       // Game info
       output["game_id"] = proc::proc.running();
@@ -2349,12 +2425,37 @@ namespace nvhttp {
       output["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
       output["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
       output["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+      output["mangohud_configured"] = proc::proc.current_app_has_mangohud();
+
+      auto &controls = output["controls"];
+      controls["host_tuning_allowed"] = host_tuning_allowed;
+      controls["quit_allowed"] = quit_allowed;
+      controls["shutdown_in_progress"] = shutdown_requested;
+      controls["client_commands_enabled"] = proc::proc.allow_client_commands;
+      controls["device_commands_enabled"] = named_cert_p->allow_client_commands;
+
+      auto &tuning = output["tuning"];
+      tuning["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
+      tuning["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
+      tuning["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+      tuning["mangohud_configured"] = proc::proc.current_app_has_mangohud();
 
       auto &display_mode = output["display_mode"];
+      const std::string display_mode_selection =
+        stats.runtime_effective_headless ? "headless" :
+        proc::proc.virtual_display ? "virtual_display" :
+        "host_display";
       display_mode["virtual_display"] = proc::proc.virtual_display;
       display_mode["requested_headless"] = stats.runtime_requested_headless;
       display_mode["effective_headless"] = stats.runtime_effective_headless;
       display_mode["gpu_native_override_active"] = stats.runtime_gpu_native_override_active;
+      display_mode["selection"] = display_mode_selection;
+      display_mode["explicit_choice"] = proc::proc.session_display_mode_is_explicit();
+      display_mode["requested"] =
+        session_token.empty() ? "" :
+        proc::proc.session_display_mode_is_explicit() ?
+          (proc::proc.virtual_display ? "virtual_display" : "headless") :
+          "auto";
       display_mode["label"] =
         stats.runtime_effective_headless ? "Headless" :
         proc::proc.virtual_display ? "Virtual Display" :
@@ -2379,6 +2480,8 @@ namespace nvhttp {
       encoder["target_device"] = stats.encode_target_device;
       encoder["target_residency"] = platf::from_frame_residency(stats.encode_target_residency);
       encoder["target_format"] = platf::from_frame_format(stats.encode_target_format);
+      encoder["pacing_policy"] = stats.pacing_policy;
+      encoder["optimization_source"] = stats.optimization_source;
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
@@ -2446,6 +2549,7 @@ namespace nvhttp {
         game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
         game["last_launched"] = app.last_launched;
+        game["launch_mode"] = launch_mode_contract_for_app(app);
 
         nlohmann::json genre_arr = nlohmann::json::array();
         for (const auto &g : app.genres) genre_arr.push_back(g);
@@ -2674,6 +2778,7 @@ namespace nvhttp {
           }
           if (found) {
             file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+            proc::proc.set_app_mangohud_configured(game_id, enabled);
             // Do NOT call proc::refresh() here — it would terminate the running stream.
             // The env change takes effect on the next game launch.
           }

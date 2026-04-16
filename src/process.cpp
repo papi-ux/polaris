@@ -2233,6 +2233,38 @@ namespace proc {
     return !_launch_session || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id;
   }
 
+  bool proc_t::session_display_mode_is_explicit() const {
+    return _launch_session && _launch_session->user_locked_virtual_display;
+  }
+
+  bool proc_t::current_app_has_mangohud() const {
+    if (_app.uuid.empty()) {
+      return false;
+    }
+
+    return env_flag_enabled(_app, _env, "MANGOHUD");
+  }
+
+  void proc_t::set_app_mangohud_configured(const std::string &uuid, bool enabled) {
+    auto apply = [enabled](ctx_t &app) {
+      if (enabled) {
+        app.env_vars["MANGOHUD"] = "1";
+      } else {
+        app.env_vars.erase("MANGOHUD");
+      }
+    };
+
+    for (auto &app : _apps) {
+      if (app.uuid == uuid) {
+        apply(app);
+      }
+    }
+
+    if (_app.uuid == uuid) {
+      apply(_app);
+    }
+  }
+
   void proc_t::set_session_shutdown_requested(bool requested) {
     _session_shutdown_requested = requested;
   }

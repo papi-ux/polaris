@@ -151,6 +151,9 @@ namespace proc {
     std::string get_session_owner_unique_id();
     std::string get_session_owner_device_name();
     bool is_session_owner(const std::string &unique_id);
+    bool session_display_mode_is_explicit() const;
+    bool current_app_has_mangohud() const;
+    void set_app_mangohud_configured(const std::string &uuid, bool enabled);
     void set_session_shutdown_requested(bool requested);
     bool session_shutdown_requested() const;
     boost::process::v1::environment get_env();
