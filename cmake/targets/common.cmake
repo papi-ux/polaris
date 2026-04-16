@@ -27,6 +27,13 @@ endif()
 
 target_link_libraries(polaris ${POLARIS_EXTERNAL_LIBRARIES} ${EXTRA_LIBS})
 target_compile_definitions(polaris PUBLIC ${POLARIS_DEFINITIONS})
+if(BUILD_TESTS)
+    if(WIN32)
+        target_compile_definitions(polaris PUBLIC POLARIS_SHADERS_DIR="${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx")
+    elseif(UNIX AND NOT APPLE)
+        target_compile_definitions(polaris PUBLIC POLARIS_SHADERS_DIR="${CMAKE_SOURCE_DIR}/src_assets/linux/assets/shaders/opengl")
+    endif()
+endif()
 set_target_properties(polaris PROPERTIES CXX_STANDARD 23
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR})
