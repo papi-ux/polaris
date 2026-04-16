@@ -225,9 +225,23 @@ namespace proc {
       return steam_big_picture_command_prefix(reference_cmd) + "steam steam://" + std::string(action);
     }
 
+    std::string canonical_steam_shutdown_command(const std::string &reference_cmd) {
+      return steam_big_picture_command_prefix(reference_cmd) + "steam -shutdown";
+    }
+
     bool prep_cmd_closes_steam_big_picture(const proc::cmd_t &cmd) {
       return command_contains_steam_big_picture_close(cmd.do_cmd) ||
              command_contains_steam_big_picture_close(cmd.undo_cmd);
+    }
+
+    bool command_requests_steam_shutdown(const std::string &cmd) {
+      return boost::icontains(cmd, "steam -shutdown");
+    }
+
+    bool prep_cmd_stops_steam(const proc::cmd_t &cmd) {
+      return prep_cmd_closes_steam_big_picture(cmd) ||
+             command_requests_steam_shutdown(cmd.do_cmd) ||
+             command_requests_steam_shutdown(cmd.undo_cmd);
     }
 
     void normalize_steam_big_picture_app(proc::ctx_t &ctx) {
@@ -276,7 +290,16 @@ namespace proc {
         BOOST_LOG(info) << "process: removed MangoHud environment from Steam Big Picture to avoid Steam helper crashes";
       }
 
-      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_closes_steam_big_picture)) {
+      for (auto &cmd : ctx.prep_cmds) {
+        if (command_contains_steam_big_picture_close(cmd.undo_cmd)) {
+          const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
+          BOOST_LOG(info) << "process: upgraded Steam Big Picture cleanup command from ["
+                          << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
+          cmd.undo_cmd = shutdown_cmd;
+        }
+      }
+
+      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_stops_steam)) {
         return;
       }
 
@@ -289,9 +312,9 @@ namespace proc {
         reference_cmd = "steam";
       }
 
-      auto close_cmd = canonical_steam_big_picture_command(reference_cmd, "close/bigpicture");
-      BOOST_LOG(info) << "process: added Steam Big Picture cleanup undo command [" << close_cmd << ']';
-      ctx.prep_cmds.emplace_back(""s, std::move(close_cmd), false);
+      auto shutdown_cmd = canonical_steam_shutdown_command(reference_cmd);
+      BOOST_LOG(info) << "process: added Steam Big Picture cleanup undo command [" << shutdown_cmd << ']';
+      ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
     }
 
     std::optional<int> coerce_json_int(const nlohmann::json &value) {
@@ -1104,7 +1127,7 @@ namespace proc {
     if (
       config::video.linux_display.headless_mode        // Headless mode
       || launch_session->virtual_display // User requested virtual display
-      || _app.virtual_display            // App is configured to use virtual display
+      || (!launch_session->user_locked_virtual_display && _app.virtual_display) // App default when client didn't explicitly choose
       || !video::allow_encoder_probing() // No active display presents
     ) {
       if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
@@ -1220,9 +1243,9 @@ namespace proc {
     if (
       !using_headless_cage &&
       !config::video.linux_display.auto_manage_displays && (
-        config::video.linux_display.headless_mode        // Headless mode
+        config::video.linux_display.headless_mode // Headless mode
         || launch_session->virtual_display // User requested virtual display
-        || _app.virtual_display            // App is configured to use virtual display
+        || (!launch_session->user_locked_virtual_display && _app.virtual_display) // App default when client didn't explicitly choose
       )
     ) {
       if (isLinuxVDisplayAvailable()) {
@@ -2150,6 +2173,7 @@ namespace proc {
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;
+    _session_shutdown_requested = false;
     allow_client_commands = false;
 
     if (_saved_input_config) {
@@ -2207,6 +2231,14 @@ namespace proc {
 
   bool proc_t::is_session_owner(const std::string &unique_id) {
     return !_launch_session || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id;
+  }
+
+  void proc_t::set_session_shutdown_requested(bool requested) {
+    _session_shutdown_requested = requested;
+  }
+
+  bool proc_t::session_shutdown_requested() const {
+    return _session_shutdown_requested;
   }
 
   boost::process::environment proc_t::get_env() {
@@ -2307,8 +2339,11 @@ namespace proc {
     auto image_extension = std::filesystem::path(app_image_path).extension().string();
     boost::to_lower(image_extension);
 
-    // return the default box image if extension is not "png"
-    if (image_extension != ".png") {
+    // return the default box image if extension is not one we can safely serve
+    if (image_extension != ".png" &&
+        image_extension != ".jpg" &&
+        image_extension != ".jpeg" &&
+        image_extension != ".webp") {
       return resolve_bundled_asset("box.png");
     }
 

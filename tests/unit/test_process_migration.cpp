@@ -116,7 +116,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamBigPictureLaunchAndAddsCleanupUn
   EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://open/bigpicture");
   EXPECT_TRUE(steam_ctx->cmd.empty());
   ASSERT_FALSE(steam_ctx->prep_cmds.empty());
-  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, "setsid steam steam://close/bigpicture");
+  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, "setsid steam -shutdown");
   EXPECT_TRUE(steam_ctx->env_vars.empty());
 
   std::filesystem::remove(file_path);
@@ -158,7 +158,7 @@ TEST(ProcessMigrationTests, ParseStripsSteamBigPictureMangoHudEvenWithExistingCl
 
   ASSERT_NE(steam_ctx, parsed_apps.end());
   ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
-  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam steam://close/bigpicture");
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
   EXPECT_TRUE(steam_ctx->env_vars.empty());
 
   std::filesystem::remove(file_path);

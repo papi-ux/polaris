@@ -163,6 +163,7 @@ namespace adaptive_bitrate {
   }
 
   void set_enabled(bool enable) {
+    config::video.adaptive_bitrate.enabled = enable;
     enabled.store(enable, std::memory_order_relaxed);
   }
 

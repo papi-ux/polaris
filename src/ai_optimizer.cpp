@@ -4,6 +4,7 @@
  */
 
 #include "ai_optimizer.h"
+#include "config.h"
 #include "game_classifier.h"
 #include "logging.h"
 #include "platform/common.h"
@@ -795,6 +796,12 @@ namespace ai_optimizer {
 
   bool is_enabled() {
     return is_config_enabled(cfg);
+  }
+
+  void set_enabled(bool enabled) {
+    cfg.enabled = enabled;
+    config::video.ai_optimizer.enabled = enabled;
+    BOOST_LOG(info) << "ai_optimizer: "sv << (enabled ? "enabled" : "disabled") << " at runtime"sv;
   }
 
   std::optional<device_db::optimization_t> get_cached(

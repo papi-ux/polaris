@@ -45,6 +45,11 @@ namespace ai_optimizer {
   bool is_enabled();
 
   /**
+   * @brief Enable or disable the AI optimizer at runtime.
+   */
+  void set_enabled(bool enabled);
+
+  /**
    * @brief Get a cached optimization for a device+game pair.
    * Returns nullopt if no cached result exists.
    */

@@ -151,6 +151,8 @@ namespace proc {
     std::string get_session_owner_unique_id();
     std::string get_session_owner_device_name();
     bool is_session_owner(const std::string &unique_id);
+    void set_session_shutdown_requested(bool requested);
+    bool session_shutdown_requested() const;
     boost::process::v1::environment get_env();
     void resume();
     void pause();
@@ -179,6 +181,7 @@ namespace proc {
     std::unordered_set<std::string> _session_env_keys;
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
+    bool _session_shutdown_requested = false;
   };
 
   boost::filesystem::path
