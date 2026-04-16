@@ -599,6 +599,9 @@ namespace wl {
         capture_ready = true;
       } else {
         extcopy.capture(display);
+        if (extcopy.status == wl::extcopy_t::WAITING) {
+          return platf::capture_e::timeout;
+        }
         if (extcopy.status != wl::extcopy_t::READY) {
           return platf::capture_e::reinit;
         }
