@@ -343,6 +343,27 @@ namespace nvhttp {
   using resp_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response>;
   using req_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request>;
 
+  namespace {
+    bool session_token_matches_request(const args_t &args) {
+      const auto expected_token = get_arg(args, "sessiontoken", "");
+      const auto active_token = proc::proc.get_session_token();
+      return expected_token.empty() || active_token.empty() || expected_token == active_token;
+    }
+
+    void append_current_game_session_fields(pt::ptree &tree, const crypto::named_cert_t *named_cert_p) {
+      const auto current_session_token = proc::proc.get_session_token();
+      const auto current_session_owner = proc::proc.get_session_owner_unique_id();
+      const bool has_current_owner = !current_session_token.empty() && !current_session_owner.empty();
+
+      tree.put("root.currentgamesessiontoken", current_session_token);
+      tree.put("root.currentgameowner", current_session_owner);
+      tree.put(
+        "root.currentgameowned",
+        has_current_owner && named_cert_p && proc::proc.is_session_owner(named_cert_p->uuid) ? 1 : 0
+      );
+    }
+  }  // namespace
+
   /**
    * @brief Check if an IP address falls within any configured trusted subnet.
    * Used for TOFU (Trust-on-First-Use) LAN pairing.
@@ -1181,6 +1202,10 @@ namespace nvhttp {
     }
 
     auto local_endpoint = request->local_endpoint();
+    const crypto::named_cert_t *named_cert_p = nullptr;
+    if constexpr (std::is_same_v<PolarisHTTPS, T>) {
+      named_cert_p = get_verified_cert(request);
+    }
     const auto advertised_codec_support = advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
 
     pt::ptree tree;
@@ -1199,8 +1224,6 @@ namespace nvhttp {
     // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       tree.put("root.mac", platf::get_mac_address(net::addr_to_normalized_string(local_endpoint.address())));
-
-      auto named_cert_p = get_verified_cert(request);
       if (!!(named_cert_p->perm & PERM::server_cmd)) {
         pt::ptree& root_node = tree.get_child("root");
 
@@ -1293,10 +1316,14 @@ namespace nvhttp {
       tree.put("root.currentgame", current_appid);
       tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
       tree.put("root.state", current_appid > 0 ? "POLARIS_SERVER_BUSY" : "POLARIS_SERVER_FREE");
+      append_current_game_session_fields(tree, named_cert_p);
     } else {
       tree.put("root.currentgame", 0);
       tree.put("root.currentgameuuid", "");
       tree.put("root.state", "POLARIS_SERVER_FREE");
+      tree.put("root.currentgamesessiontoken", "");
+      tree.put("root.currentgameowner", "");
+      tree.put("root.currentgameowned", 0);
     }
 
     std::ostringstream data;
@@ -1554,6 +1581,25 @@ namespace nvhttp {
       launch_session->client_do_cmds.clear();
       launch_session->client_undo_cmds.clear();
 
+      if (current_appid != 0) {
+        if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
+
+          return;
+        }
+        if (!session_token_matches_request(args)) {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
+
+          return;
+        }
+
+        launch_session->session_token = proc::proc.get_session_token();
+      }
+
       // Still probe encoders once, if input only session is launched first
       // But we're ignoring if it's successful or not
       if (no_active_sessions && !proc::proc.virtual_display) {
@@ -1566,7 +1612,7 @@ namespace nvhttp {
           video::probe_encoders();
         }
         if (current_appid == 0) {
-          proc::proc.launch_input_only();
+          proc::proc.launch_input_only(launch_session);
         }
       }
     } else if (appid > 0 || !appuuid_str.empty()) {
@@ -1574,6 +1620,23 @@ namespace nvhttp {
         // We're basically resuming the same app
 
         BOOST_LOG(debug) << "Resuming app [" << proc::proc.get_last_run_app_name() << "] from launch app path...";
+
+        if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
+
+          return;
+        }
+        if (!session_token_matches_request(args)) {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
+
+          return;
+        }
+
+        launch_session->session_token = proc::proc.get_session_token();
 
         if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
           launch_session->client_do_cmds.clear();
@@ -1663,6 +1726,7 @@ namespace nvhttp {
         static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))
       )
     );
+    tree.put("root.sessionToken", launch_session->session_token);
     tree.put("root.gamesession", 1);
 
     rtsp_stream::launch_session_raise(launch_session);
@@ -1721,6 +1785,22 @@ namespace nvhttp {
     }
     auto launch_session = make_launch_session(host_audio, false, args, named_cert_p);
 
+    if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 470);
+      tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
+
+      return;
+    }
+    if (!session_token_matches_request(args)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 470);
+      tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
+
+      return;
+    }
+    launch_session->session_token = proc::proc.get_session_token();
+
     if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
       launch_session->client_do_cmds.clear();
       launch_session->client_undo_cmds.clear();
@@ -1775,6 +1855,7 @@ namespace nvhttp {
         static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))
       )
     );
+    tree.put("root.sessionToken", launch_session->session_token);
     tree.put("root.resume", 1);
 
     rtsp_stream::launch_session_raise(launch_session);
@@ -1796,6 +1877,7 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+    auto args = request->parse_query_string();
     auto named_cert_p = get_verified_cert(request);
     if (!(named_cert_p->perm & PERM::launch)) {
       BOOST_LOG(debug) << "Permission CancelApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
@@ -1803,6 +1885,21 @@ namespace nvhttp {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 403);
       tree.put("root.<xmlattr>.status_message", "Permission denied");
+
+      return;
+    }
+
+    if (proc::proc.running() > 0 && !proc::proc.is_session_owner(named_cert_p->uuid)) {
+      tree.put("root.cancel", 0);
+      tree.put("root.<xmlattr>.status_code", 470);
+      tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
+
+      return;
+    }
+    if (proc::proc.running() > 0 && !session_token_matches_request(args)) {
+      tree.put("root.cancel", 0);
+      tree.put("root.<xmlattr>.status_code", 470);
+      tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
 
       return;
     }
@@ -2036,7 +2133,8 @@ namespace nvhttp {
     auto polarisCapabilities = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
 
-      if (!get_verified_cert(request)) {
+      auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
@@ -2082,7 +2180,8 @@ namespace nvhttp {
     auto polarisSessionStatus = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
 
-      if (!get_verified_cert(request)) {
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
@@ -2096,21 +2195,38 @@ namespace nvhttp {
       output["cage_pid"] = cage_display_router::get_pid();
       output["screen_locked"] = session_manager::is_screen_locked();
 #endif
+      output["session_token"] = proc::proc.get_session_token();
+      output["owner_unique_id"] = proc::proc.get_session_owner_unique_id();
+      output["owner_device_name"] = proc::proc.get_session_owner_device_name();
+      output["owned_by_client"] =
+        !proc::proc.get_session_token().empty() && proc::proc.is_session_owner(named_cert_p->uuid);
 
       // Game info
+      output["game_id"] = proc::proc.running();
       output["game"] = proc::proc.get_last_run_app_name();
+      output["game_uuid"] = proc::proc.get_running_app_uuid();
       output["cursor_visible"] = cursor::visible();
+      output["dynamic_range"] = stats.dynamic_range;
 
       // Capture info
       auto &capture_info = output["capture"];
-      capture_info["backend"] = "screencopy";
+      capture_info["backend"] = stats.runtime_backend.empty() ? "screencopy" : stats.runtime_backend;
       capture_info["resolution"] = std::to_string(stats.width) + "x" + std::to_string(stats.height);
+      capture_info["transport"] = platf::from_frame_transport(stats.capture_transport);
+      capture_info["residency"] = platf::from_frame_residency(stats.capture_residency);
+      capture_info["format"] = platf::from_frame_format(stats.capture_format);
 
       // Encoder info
       auto &encoder = output["encoder"];
       encoder["codec"] = stats.codec;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;
+      encoder["requested_client_fps"] = stats.requested_client_fps;
+      encoder["session_target_fps"] = stats.session_target_fps;
+      encoder["encode_target_fps"] = stats.encode_target_fps;
+      encoder["target_device"] = stats.encode_target_device;
+      encoder["target_residency"] = platf::from_frame_residency(stats.encode_target_residency);
+      encoder["target_format"] = platf::from_frame_format(stats.encode_target_format);
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");

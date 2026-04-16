@@ -36,6 +36,7 @@ namespace rtsp_stream {
 
     std::string device_name;
     std::string unique_id;
+    std::string session_token;
     crypto::PERM perm;
 
     bool input_only;

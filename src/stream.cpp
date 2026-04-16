@@ -2229,6 +2229,7 @@ namespace stream {
         session.pacing_policy,
         session.optimization_source
       );
+      stream_stats::update_dynamic_range(session.config.monitor.dynamicRange);
       stream_stats::update_video_stats(addr_string,
         0,  // fps starts at 0
         session.config.monitor.bitrate,

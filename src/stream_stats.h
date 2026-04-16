@@ -62,6 +62,10 @@ namespace stream_stats {
     platf::frame_transport_e capture_transport = platf::frame_transport_e::unknown;
     platf::frame_residency_e capture_residency = platf::frame_residency_e::unknown;
     platf::frame_format_e capture_format = platf::frame_format_e::unknown;
+    std::string encode_target_device;
+    platf::frame_residency_e encode_target_residency = platf::frame_residency_e::unknown;
+    platf::frame_format_e encode_target_format = platf::frame_format_e::unknown;
+    int dynamic_range = 0;
 
     // Video (primary/first client for backward compatibility)
     double fps = 0;
@@ -199,6 +203,22 @@ namespace stream_stats {
    * @param metadata Current frame transport/residency/format metadata.
    */
   void update_capture_metadata(const platf::frame_metadata_t &metadata);
+
+  /**
+   * @brief Update the encode conversion path metadata exposed to the dashboard.
+   * @param target_device Human-readable target device label for the converter.
+   * @param target_residency Residency of the converter output.
+   * @param target_format Pixel format of the converter output.
+   */
+  void update_encode_path_metadata(const std::string &target_device,
+                                   platf::frame_residency_e target_residency,
+                                   platf::frame_format_e target_format);
+
+  /**
+   * @brief Update the currently negotiated dynamic range mode.
+   * @param dynamic_range Dynamic range mode from the active RTSP session.
+   */
+  void update_dynamic_range(int dynamic_range);
 
   /**
    * @brief Record a single capture timing sample into the shared telemetry sink.

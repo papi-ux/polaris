@@ -1000,6 +1000,8 @@ namespace portal {
 
       this->env_width = cfg_width;
       this->env_height = cfg_height;
+      this->width = cfg_width;
+      this->height = cfg_height;
 
       BOOST_LOG(info) << "portal: Capture ready — "sv << cfg_width << "x"sv << cfg_height
                       << " env="sv << this->env_width << "x"sv << this->env_height;
@@ -1031,6 +1033,8 @@ namespace portal {
             if (cfg_width > 0 && cfg_height > 0) {
               this->env_width = cfg_width;
               this->env_height = cfg_height;
+              this->width = cfg_width;
+              this->height = cfg_height;
             }
             return result;
           }
@@ -1057,6 +1061,8 @@ namespace portal {
         cfg_height = cap->frame_height;
         this->env_width = cfg_width;
         this->env_height = cfg_height;
+        this->width = cfg_width;
+        this->height = cfg_height;
       }
 
       while (cap && cap->running) {
