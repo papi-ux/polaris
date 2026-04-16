@@ -458,7 +458,6 @@ namespace video {
     std::string current_encoder_topology_key() {
       std::ostringstream topology;
       const auto output_name = display_device::map_output_name(config::video.output_name);
-      const auto display_names = platf::display_names(platf::mem_type_e::unknown);
 
       topology << "capture=" << config::video.capture
                << ";encoder=" << config::video.encoder
@@ -470,6 +469,15 @@ namespace video {
                << ";auto_manage=" << (config::video.linux_display.auto_manage_displays ? 1 : 0);
 #endif
       topology << ";displays=";
+
+#ifdef __linux__
+      if (config::video.linux_display.use_cage_compositor && config::video.linux_display.headless_mode) {
+        topology << "deferred-cage";
+        return topology.str();
+      }
+#endif
+
+      const auto display_names = platf::display_names(platf::mem_type_e::unknown);
       for (std::size_t index = 0; index < display_names.size(); ++index) {
         if (index > 0) {
           topology << ',';
@@ -1669,9 +1677,9 @@ namespace video {
   int active_av1_mode;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
   std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {
-    true,
-    true,
-    true
+    false,
+    false,
+    false
   };
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
@@ -3591,8 +3599,53 @@ namespace video {
   /**
    * @brief Get the path for the encoder probe cache file.
    */
+  struct encoder_cache_entry_t {
+    std::string encoder_name;
+    codec_capability_state_t capability_state {};
+    bool has_capability_data = false;
+  };
+
   static std::filesystem::path get_encoder_cache_path() {
     return platf::appdata() / "encoder_cache.txt";
+  }
+
+  static std::optional<std::array<bool, 3>> parse_cached_yuv444_flags(std::string value) {
+    std::array<bool, 3> flags {false, false, false};
+    std::istringstream stream {std::move(value)};
+
+    for (std::size_t index = 0; index < flags.size(); ++index) {
+      std::string token;
+      if (!std::getline(stream, token, ',')) {
+        return std::nullopt;
+      }
+
+      token = trim_trailing_ascii_whitespace(std::move(token));
+      if (token == "1") {
+        flags[index] = true;
+      } else if (token == "0") {
+        flags[index] = false;
+      } else {
+        return std::nullopt;
+      }
+    }
+
+    std::string extra_token;
+    if (std::getline(stream, extra_token, ',')) {
+      return std::nullopt;
+    }
+
+    return flags;
+  }
+
+  static std::string serialize_cached_yuv444_flags(const std::array<bool, 3> &flags) {
+    std::ostringstream out;
+    for (std::size_t index = 0; index < flags.size(); ++index) {
+      if (index > 0) {
+        out << ',';
+      }
+      out << (flags[index] ? '1' : '0');
+    }
+    return out.str();
   }
 
   /**
@@ -3600,9 +3653,13 @@ namespace video {
    * Returns the encoder name, or empty string if no valid cache exists.
    * Cache is invalidated if the GPU driver version changes.
    */
-  static std::string load_encoder_cache() {
-    auto path = get_encoder_cache_path();
-    if (!std::filesystem::exists(path)) return "";
+  static encoder_cache_entry_t load_encoder_cache(
+    const std::filesystem::path &path,
+    std::string_view current_driver,
+    std::string_view current_topology
+  ) {
+    encoder_cache_entry_t entry;
+    if (!std::filesystem::exists(path)) return entry;
 
     std::ifstream f(path);
     std::string cached_driver, cached_topology, cached_encoder;
@@ -3619,46 +3676,91 @@ namespace video {
     cached_driver = trim_trailing_ascii_whitespace(std::move(cached_driver));
     cached_topology = trim_trailing_ascii_whitespace(std::move(cached_topology));
     cached_encoder = trim_trailing_ascii_whitespace(std::move(cached_encoder));
-    if (cached_encoder.empty()) return "";
-
-    // Verify GPU driver hasn't changed (would invalidate encoder capabilities)
-    std::string current_driver = current_nvidia_driver_version();
+    if (cached_encoder.empty()) return entry;
 
     if (!current_driver.empty() && cached_driver != current_driver) {
       BOOST_LOG(info) << "Encoder cache invalidated: driver changed from " << cached_driver << " to " << current_driver;
       std::filesystem::remove(path);
-      return "";
+      return entry;
     }
 
     if (!cached_topology.empty()) {
-      const auto current_topology = current_encoder_topology_key();
       if (cached_topology != current_topology) {
         BOOST_LOG(info) << "Encoder cache invalidated: topology changed from ["sv
                         << cached_topology << "] to ["sv << current_topology << ']';
         std::filesystem::remove(path);
-        return "";
+        return entry;
       }
     }
 
-    return cached_encoder;
+    entry.encoder_name = cached_encoder;
+
+    std::string cached_hevc_mode, cached_av1_mode, cached_yuv444;
+    std::getline(f, cached_hevc_mode);
+    std::getline(f, cached_av1_mode);
+    std::getline(f, cached_yuv444);
+
+    cached_hevc_mode = trim_trailing_ascii_whitespace(std::move(cached_hevc_mode));
+    cached_av1_mode = trim_trailing_ascii_whitespace(std::move(cached_av1_mode));
+    cached_yuv444 = trim_trailing_ascii_whitespace(std::move(cached_yuv444));
+
+    if (!cached_hevc_mode.empty() && !cached_av1_mode.empty() && !cached_yuv444.empty()) {
+      try {
+        entry.capability_state.hevc_mode = std::stoi(cached_hevc_mode);
+        entry.capability_state.av1_mode = std::stoi(cached_av1_mode);
+        auto cached_flags = parse_cached_yuv444_flags(cached_yuv444);
+        if (cached_flags) {
+          entry.capability_state.yuv444_for_codec = *cached_flags;
+          entry.has_capability_data = true;
+        }
+      } catch (const std::exception &) {
+        entry.has_capability_data = false;
+      }
+    }
+
+    return entry;
+  }
+
+  static encoder_cache_entry_t load_encoder_cache() {
+    const auto current_driver = current_nvidia_driver_version();
+    const auto current_topology = current_encoder_topology_key();
+    return load_encoder_cache(get_encoder_cache_path(), current_driver, current_topology);
   }
 
   /**
    * @brief Save the successfully probed encoder name to cache.
    */
-  static void save_encoder_cache(const std::string &encoder_name) {
-    auto path = get_encoder_cache_path();
+  static bool save_encoder_cache(
+    const std::filesystem::path &path,
+    std::string_view driver,
+    std::string_view topology,
+    std::string_view encoder_name,
+    const codec_capability_state_t &capability_state
+  ) {
     std::error_code ec;
     if (!path.parent_path().empty()) {
       std::filesystem::create_directories(path.parent_path(), ec);
     }
     std::ofstream f(path);
+    if (!f.is_open()) {
+      return false;
+    }
 
-    // Save driver version as cache key
+    f << driver << "\n"
+      << topology << "\n"
+      << encoder_name << "\n"
+      << capability_state.hevc_mode << "\n"
+      << capability_state.av1_mode << "\n"
+      << serialize_cached_yuv444_flags(capability_state.yuv444_for_codec) << "\n";
+    return true;
+  }
+
+  static void save_encoder_cache(const std::string &encoder_name, const codec_capability_state_t &capability_state) {
+    auto path = get_encoder_cache_path();
     auto driver = current_nvidia_driver_version();
     auto topology = current_encoder_topology_key();
 
-    f << driver << "\n" << topology << "\n" << encoder_name << "\n";
+    (void) save_encoder_cache(path, driver, topology, encoder_name, capability_state);
     BOOST_LOG(info) << "Encoder cache saved: " << encoder_name << " (driver " << driver
                     << ", topology " << topology << ")";
   }
@@ -3677,15 +3779,15 @@ namespace video {
     }
 
     // Try to use cached encoder from previous successful probe (skip straight to it)
-    auto cached_name = load_encoder_cache();
-    if (!cached_name.empty()) {
+    auto cached_entry = load_encoder_cache();
+    if (!cached_entry.encoder_name.empty()) {
       // Reorder encoder_list to try the cached encoder first
       for (auto it = encoder_list.begin(); it != encoder_list.end(); ++it) {
-        if (std::string((*it)->name) == cached_name && it != encoder_list.begin()) {
+        if (std::string((*it)->name) == cached_entry.encoder_name && it != encoder_list.begin()) {
           auto encoder = *it;
           encoder_list.erase(it);
           encoder_list.insert(encoder_list.begin(), encoder);
-          BOOST_LOG(info) << "Encoder cache hit: trying " << cached_name << " first";
+          BOOST_LOG(info) << "Encoder cache hit: trying " << cached_entry.encoder_name << " first";
           break;
         }
       }
@@ -3693,10 +3795,7 @@ namespace video {
 
     // Restart encoder selection
     auto previous_encoder = chosen_encoder;
-    chosen_encoder = nullptr;
-    active_hevc_mode = config::video.hevc_mode;
-    active_av1_mode = config::video.av1_mode;
-    last_encoder_probe_supported_ref_frames_invalidation = false;
+    reset_encoder_probe_state();
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
@@ -3819,9 +3918,6 @@ namespace video {
 
     auto &encoder = *chosen_encoder;
 
-    // Cache the successful encoder for faster startup next time
-    save_encoder_cache(std::string(encoder.name));
-
     last_encoder_probe_supported_ref_frames_invalidation = (encoder.flags & REF_FRAMES_INVALIDATION);
     last_encoder_probe_supported_yuv444_for_codec[0] = encoder.h264[encoder_t::PASSED] &&
                                                        encoder.h264[encoder_t::YUV444];
@@ -3867,6 +3963,16 @@ namespace video {
     if (active_av1_mode == 0) {
       active_av1_mode = encoder.av1[encoder_t::PASSED] ? (encoder.av1[encoder_t::DYNAMIC_RANGE] ? 3 : 2) : 1;
     }
+
+    // Cache the successful encoder and its effective codec capabilities for accurate prelaunch advertising.
+    save_encoder_cache(
+      std::string(encoder.name),
+      codec_capability_state_t {
+        active_hevc_mode,
+        active_av1_mode,
+        last_encoder_probe_supported_yuv444_for_codec
+      }
+    );
 
     return 0;
   }
@@ -4006,6 +4112,47 @@ namespace video {
     }
 
     return platf::mem_type_e::unknown;
+  }
+
+  codec_capability_state_t advertised_codec_capability_state() {
+    codec_capability_state_t capability_state {
+      active_hevc_mode,
+      active_av1_mode,
+      last_encoder_probe_supported_yuv444_for_codec
+    };
+
+#ifdef __linux__
+    if (config::video.linux_display.use_cage_compositor && !chosen_encoder) {
+      auto cached_entry = load_encoder_cache();
+      if (cached_entry.has_capability_data) {
+        return cached_entry.capability_state;
+      }
+    }
+#endif
+
+    return capability_state;
+  }
+
+  bool advertised_codec_capability_state_ready() {
+    if (chosen_encoder) {
+      return true;
+    }
+
+#ifdef __linux__
+    if (config::video.linux_display.use_cage_compositor) {
+      return load_encoder_cache().has_capability_data;
+    }
+#endif
+
+    return false;
+  }
+
+  void reset_encoder_probe_state() {
+    chosen_encoder = nullptr;
+    active_hevc_mode = config::video.hevc_mode;
+    active_av1_mode = config::video.av1_mode;
+    last_encoder_probe_supported_ref_frames_invalidation = false;
+    last_encoder_probe_supported_yuv444_for_codec = {false, false, false};
   }
 
   std::string active_encoder_name() {
@@ -4151,6 +4298,29 @@ namespace video {
     std::string_view binary_mtime
   ) {
     return read_driver_version_cache(cache_path, binary_path, binary_mtime);
+  }
+
+  bool write_encoder_probe_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    std::string_view driver_version,
+    std::string_view topology,
+    std::string_view encoder_name,
+    const codec_capability_state_t &capability_state
+  ) {
+    return save_encoder_cache(cache_path, driver_version, topology, encoder_name, capability_state);
+  }
+
+  encoder_probe_cache_snapshot_t read_encoder_probe_cache_for_tests(
+    const std::filesystem::path &cache_path,
+    std::string_view current_driver,
+    std::string_view current_topology
+  ) {
+    auto cached_entry = load_encoder_cache(cache_path, current_driver, current_topology);
+    return {
+      std::move(cached_entry.encoder_name),
+      cached_entry.capability_state,
+      cached_entry.has_capability_data
+    };
   }
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {

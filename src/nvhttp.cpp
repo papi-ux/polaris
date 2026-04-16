@@ -7,8 +7,11 @@
 
 // standard includes
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <string>
@@ -67,11 +70,97 @@ namespace nvhttp {
 
 #ifdef __linux__
   namespace {
+    std::mutex deferred_cage_capability_probe_mutex;
+
+    std::optional<std::string> copy_env_var(const char *key) {
+      if (const char *value = getenv(key)) {
+        return std::string {value};
+      }
+
+      return std::nullopt;
+    }
+
+    void restore_env_var(const char *key, const std::optional<std::string> &value) {
+      if (value) {
+        platf::set_env(key, *value);
+      } else {
+        unsetenv(key);
+      }
+    }
+
     bool should_defer_encoder_probe_until_cage() {
       return config::video.linux_display.use_cage_compositor;
     }
+
+    bool prime_deferred_headless_codec_capabilities() {
+      if (!config::video.linux_display.use_cage_compositor ||
+          !config::video.linux_display.headless_mode ||
+          video::advertised_codec_capability_state_ready()) {
+        return true;
+      }
+
+      if (rtsp_stream::session_count() != 0 || cage_display_router::is_running()) {
+        return false;
+      }
+
+      std::scoped_lock lock {deferred_cage_capability_probe_mutex};
+      if (video::advertised_codec_capability_state_ready()) {
+        return true;
+      }
+
+      if (rtsp_stream::session_count() != 0 || cage_display_router::is_running()) {
+        return false;
+      }
+
+      BOOST_LOG(info) << "nvhttp: Priming deferred headless encoder capabilities using a temporary cage runtime"sv;
+      if (!cage_display_router::start()) {
+        BOOST_LOG(warning) << "nvhttp: Temporary cage runtime failed to start for deferred capability probe"sv;
+        return false;
+      }
+
+      auto stop_guard = util::fail_guard([]() {
+        cage_display_router::stop();
+        video::reset_encoder_probe_state();
+      });
+
+      const auto cage_socket = cage_display_router::get_wayland_socket();
+      if (cage_socket.empty()) {
+        BOOST_LOG(warning) << "nvhttp: Temporary cage runtime did not expose a WAYLAND_DISPLAY for deferred capability probe"sv;
+        return false;
+      }
+
+      const auto original_wayland_display = copy_env_var("WAYLAND_DISPLAY");
+      const auto original_at_spi_bus_address = copy_env_var("AT_SPI_BUS_ADDRESS");
+
+      platf::set_env("WAYLAND_DISPLAY", cage_socket);
+      platf::set_env("AT_SPI_BUS_ADDRESS", "");
+
+      const int probe_status = video::probe_encoders();
+
+      restore_env_var("AT_SPI_BUS_ADDRESS", original_at_spi_bus_address);
+      restore_env_var("WAYLAND_DISPLAY", original_wayland_display);
+
+      if (probe_status != 0) {
+        BOOST_LOG(warning) << "nvhttp: Deferred headless capability probe failed"sv;
+        return false;
+      }
+
+      BOOST_LOG(info) << "nvhttp: Deferred headless capability probe primed encoder cache"sv;
+      return true;
+    }
   }  // namespace
 #endif
+
+  namespace {
+    video::codec_capability_state_t advertised_codec_support_for_http(bool allow_deferred_headless_prime = false) {
+#ifdef __linux__
+      if (allow_deferred_headless_prime) {
+        (void) prime_deferred_headless_codec_capabilities();
+      }
+#endif
+      return video::advertised_codec_capability_state();
+    }
+  }  // namespace
 
   using p_named_cert_t = crypto::p_named_cert_t;
   using PERM = crypto::PERM;
@@ -1017,6 +1106,7 @@ namespace nvhttp {
     }
 
     auto local_endpoint = request->local_endpoint();
+    const auto advertised_codec_support = advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
 
     pt::ptree tree;
 
@@ -1028,7 +1118,7 @@ namespace nvhttp {
     tree.put("root.uniqueid", http::unique_id);
     tree.put("root.HttpsPort", net::map_port(PORT_HTTPS));
     tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
-    tree.put("root.MaxLumaPixelsHEVC", video::active_hevc_mode > 1 ? "1869449984" : "0");
+    tree.put("root.MaxLumaPixelsHEVC", advertised_codec_support.hevc_mode > 1 ? "1869449984" : "0");
 
     // Only include the MAC address for requests sent from paired clients over HTTPS.
     // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
@@ -1087,30 +1177,30 @@ namespace nvhttp {
     }
 
     uint32_t codec_mode_flags = SCM_H264;
-    if (video::last_encoder_probe_supported_yuv444_for_codec[0]) {
+    if (advertised_codec_support.yuv444_for_codec[0]) {
       codec_mode_flags |= SCM_H264_HIGH8_444;
     }
-    if (video::active_hevc_mode >= 2) {
+    if (advertised_codec_support.hevc_mode >= 2) {
       codec_mode_flags |= SCM_HEVC;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[1]) {
+      if (advertised_codec_support.yuv444_for_codec[1]) {
         codec_mode_flags |= SCM_HEVC_REXT8_444;
       }
     }
-    if (video::active_hevc_mode >= 3) {
+    if (advertised_codec_support.hevc_mode >= 3) {
       codec_mode_flags |= SCM_HEVC_MAIN10;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[1]) {
+      if (advertised_codec_support.yuv444_for_codec[1]) {
         codec_mode_flags |= SCM_HEVC_REXT10_444;
       }
     }
-    if (video::active_av1_mode >= 2) {
+    if (advertised_codec_support.av1_mode >= 2) {
       codec_mode_flags |= SCM_AV1_MAIN8;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[2]) {
+      if (advertised_codec_support.yuv444_for_codec[2]) {
         codec_mode_flags |= SCM_AV1_HIGH8_444;
       }
     }
-    if (video::active_av1_mode >= 3) {
+    if (advertised_codec_support.av1_mode >= 3) {
       codec_mode_flags |= SCM_AV1_MAIN10;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[2]) {
+      if (advertised_codec_support.yuv444_for_codec[2]) {
         codec_mode_flags |= SCM_AV1_HIGH10_444;
       }
     }
@@ -1196,6 +1286,7 @@ namespace nvhttp {
 
   void applist(resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
+    const auto advertised_codec_support = advertised_codec_support_for_http(true);
 
     pt::ptree tree;
 
@@ -1250,7 +1341,7 @@ namespace nvhttp {
 
         pt::ptree app_node;
 
-        app_node.put("IsHdrSupported"s, video::active_hevc_mode == 3 ? 1 : 0);
+        app_node.put("IsHdrSupported"s, advertised_codec_support.hevc_mode == 3 ? 1 : 0);
         app_node.put("AppTitle"s, app_name);
         app_node.put("UUID", app.uuid);
         app_node.put("IDX", app.idx);
@@ -1957,6 +2048,7 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+      const auto advertised_codec_support = advertised_codec_support_for_http(true);
 
       // Parse query params
       auto query = request->parse_query_string();
@@ -2007,7 +2099,7 @@ namespace nvhttp {
         game["category"] = app.game_category;
         game["source"] = app.source;
         game["installed"] = true;
-        game["hdr_supported"] = video::active_hevc_mode == 3;
+        game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
         game["last_launched"] = app.last_launched;
 

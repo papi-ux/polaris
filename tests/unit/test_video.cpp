@@ -73,4 +73,48 @@ TEST(VideoCacheTests, ResetDisplayRetryDelayBackoffCapsAtTwoHundredMilliseconds)
   EXPECT_EQ(video::reset_display_retry_delay_for_tests(2), std::chrono::milliseconds(200));
   EXPECT_EQ(video::reset_display_retry_delay_for_tests(3), std::chrono::milliseconds(200));
 }
+
+TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopologyMismatch) {
+  const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-encoder-cache-tests";
+  const auto cache_path = cache_dir / "encoder_cache.txt";
+
+  std::error_code ec;
+  std::filesystem::create_directories(cache_dir, ec);
+  ASSERT_FALSE(ec);
+
+  const video::codec_capability_state_t capability_state {
+    3,
+    3,
+    {true, false, true}
+  };
+
+  ASSERT_TRUE(video::write_encoder_probe_cache_for_tests(
+    cache_path,
+    "580.142",
+    "capture=;encoder=nvenc;adapter=;output=;cage=1;headless=1;auto_manage=0;displays=0",
+    "nvenc",
+    capability_state
+  ));
+
+  const auto cached = video::read_encoder_probe_cache_for_tests(
+    cache_path,
+    "580.142",
+    "capture=;encoder=nvenc;adapter=;output=;cage=1;headless=1;auto_manage=0;displays=0"
+  );
+  EXPECT_EQ(cached.encoder_name, "nvenc");
+  EXPECT_TRUE(cached.has_capability_data);
+  EXPECT_EQ(cached.capability_state.hevc_mode, 3);
+  EXPECT_EQ(cached.capability_state.av1_mode, 3);
+  EXPECT_EQ(cached.capability_state.yuv444_for_codec, (std::array<bool, 3> {true, false, true}));
+
+  const auto invalidated = video::read_encoder_probe_cache_for_tests(
+    cache_path,
+    "580.142",
+    "capture=;encoder=nvenc;adapter=;output=;cage=1;headless=1;auto_manage=0;displays=1"
+  );
+  EXPECT_TRUE(invalidated.encoder_name.empty());
+  EXPECT_FALSE(std::filesystem::exists(cache_path));
+
+  std::filesystem::remove_all(cache_dir, ec);
+}
 #endif
