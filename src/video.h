@@ -547,6 +547,8 @@ namespace video {
     std::string_view current_topology
   );
 
+  std::string current_encoder_topology_key_for_tests();
+
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
 #endif
 }  // namespace video

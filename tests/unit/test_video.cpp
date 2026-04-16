@@ -50,6 +50,26 @@ TEST_P(EncoderTest, ValidateEncoder) {
 }
 
 #ifdef POLARIS_TESTS
+namespace {
+  struct LinuxDisplayConfigGuard {
+    LinuxDisplayConfigGuard():
+        auto_manage_displays {config::video.linux_display.auto_manage_displays},
+        use_cage_compositor {config::video.linux_display.use_cage_compositor},
+        headless_mode {config::video.linux_display.headless_mode} {
+    }
+
+    ~LinuxDisplayConfigGuard() {
+      config::video.linux_display.auto_manage_displays = auto_manage_displays;
+      config::video.linux_display.use_cage_compositor = use_cage_compositor;
+      config::video.linux_display.headless_mode = headless_mode;
+    }
+
+    bool auto_manage_displays;
+    bool use_cage_compositor;
+    bool headless_mode;
+  };
+}  // namespace
+
 TEST(VideoCacheTests, DriverVersionCacheHitRequiresMatchingBinaryMetadata) {
   const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-video-cache-tests";
   const auto cache_path = cache_dir / "driver_version_cache.txt";
@@ -91,7 +111,7 @@ TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopolog
   ASSERT_TRUE(video::write_encoder_probe_cache_for_tests(
     cache_path,
     "580.142",
-    "capture=;encoder=nvenc;adapter=;output=;cage=1;headless=1;auto_manage=0;displays=0",
+    "capture=;encoder=nvenc;adapter=;output=;cage=1;headless=1;auto_manage=0;displays=deferred-cage",
     "nvenc",
     capability_state
   ));
@@ -99,7 +119,7 @@ TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopolog
   const auto cached = video::read_encoder_probe_cache_for_tests(
     cache_path,
     "580.142",
-    "capture=;encoder=nvenc;adapter=;output=;cage=1;headless=1;auto_manage=0;displays=0"
+    "capture=;encoder=nvenc;adapter=;output=;cage=1;headless=1;auto_manage=0;displays=deferred-cage"
   );
   EXPECT_EQ(cached.encoder_name, "nvenc");
   EXPECT_TRUE(cached.has_capability_data);
@@ -116,5 +136,18 @@ TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopolog
   EXPECT_FALSE(std::filesystem::exists(cache_path));
 
   std::filesystem::remove_all(cache_dir, ec);
+}
+
+TEST(VideoCacheTests, HeadlessCageUsesDeferredCageTopologyKeyForColdLaunchAdvertising) {
+  LinuxDisplayConfigGuard guard;
+  config::video.linux_display.auto_manage_displays = false;
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.headless_mode = true;
+  const auto topology = video::current_encoder_topology_key_for_tests();
+
+  EXPECT_NE(topology.find(";cage=1"), std::string::npos);
+  EXPECT_NE(topology.find(";headless=1"), std::string::npos);
+  EXPECT_NE(topology.find(";auto_manage=0"), std::string::npos);
+  EXPECT_NE(topology.find(";displays=deferred-cage"), std::string::npos);
 }
 #endif
