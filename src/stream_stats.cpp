@@ -78,6 +78,10 @@ namespace stream_stats {
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
+    j["encode_target_device"] = encode_target_device;
+    j["encode_target_residency"] = platf::from_frame_residency(encode_target_residency);
+    j["encode_target_format"] = platf::from_frame_format(encode_target_format);
+    j["dynamic_range"] = dynamic_range;
     j["fps"] = fps;
     j["requested_client_fps"] = requested_client_fps;
     j["session_target_fps"] = session_target_fps;
@@ -295,6 +299,20 @@ namespace stream_stats {
     current_stats.capture_transport = metadata.transport;
     current_stats.capture_residency = metadata.residency;
     current_stats.capture_format = metadata.format;
+  }
+
+  void update_encode_path_metadata(const std::string &target_device,
+                                   platf::frame_residency_e target_residency,
+                                   platf::frame_format_e target_format) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.encode_target_device = target_device;
+    current_stats.encode_target_residency = target_residency;
+    current_stats.encode_target_format = target_format;
+  }
+
+  void update_dynamic_range(int dynamic_range) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.dynamic_range = dynamic_range;
   }
 
   void update_capture_profile(const capture_profile_sample_t &sample) {

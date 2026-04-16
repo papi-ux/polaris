@@ -2572,6 +2572,11 @@ namespace video {
       << " target_device="sv << from_mem_type(conversion_request->target_device)
       << " target_residency="sv << platf::from_frame_residency(conversion_request->target_residency)
       << " target_format="sv << platf::from_frame_format(conversion_request->target_format);
+    stream_stats::update_encode_path_metadata(
+      std::string(from_mem_type(conversion_request->target_device)),
+      conversion_request->target_residency,
+      conversion_request->target_format
+    );
 
     auto session = std::make_unique<avcodec_encode_session_t>(
       std::move(ctx),
@@ -2612,6 +2617,11 @@ namespace video {
       << " target_device="sv << from_mem_type(conversion_request->target_device)
       << " target_residency="sv << platf::from_frame_residency(conversion_request->target_residency)
       << " target_format="sv << platf::from_frame_format(conversion_request->target_format);
+    stream_stats::update_encode_path_metadata(
+      std::string(from_mem_type(conversion_request->target_device)),
+      conversion_request->target_residency,
+      conversion_request->target_format
+    );
 
     return std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
   }

@@ -368,3 +368,13 @@ jobs:
           fi
 
           gh release upload "${GITHUB_REF_NAME}" release-assets/final/* --clobber
+
+      - name: Verify RPM assets on GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora42-src.rpm")] | length')
+          if [ "${asset_count}" -lt 1 ]; then
+            echo "Expected at least one Polaris RPM asset on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
+            exit 1
+          fi

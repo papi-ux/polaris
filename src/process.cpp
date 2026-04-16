@@ -27,6 +27,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include <openssl/sha.h>
 
 // local includes
@@ -82,6 +83,12 @@ namespace proc {
   std::string terminate_app_id_str;
 
   namespace {
+    std::string generate_session_token() {
+      std::array<unsigned char, 16> raw {};
+      RAND_bytes(raw.data(), raw.size());
+      return util::hex_vec(raw, true);
+    }
+
     std::optional<std::filesystem::path> executable_dir() {
 #ifdef _WIN32
       wchar_t path[MAX_PATH];
@@ -788,13 +795,17 @@ namespace proc {
     return cmd_path.parent_path();
   }
 
-  void proc_t::launch_input_only() {
+  void proc_t::launch_input_only(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     _app_id = input_only_app_id;
     _app_name = "Remote Input";
     _app.uuid = REMOTE_INPUT_UUID;
     _app.terminate_on_pause = true;
     allow_client_commands = false;
     placebo = true;
+    _launch_session = std::move(launch_session);
+    if (_launch_session && _launch_session->session_token.empty()) {
+      _launch_session->session_token = generate_session_token();
+    }
 
 #if defined POLARIS_TRAY && POLARIS_TRAY >= 1
     system_tray::update_tray_playing(_app_name);
@@ -814,6 +825,9 @@ namespace proc {
     _app_id = util::from_view(app.id);
     _app_name = app.name;
     _launch_session = launch_session;
+    if (_launch_session && _launch_session->session_token.empty()) {
+      _launch_session->session_token = generate_session_token();
+    }
     allow_client_commands = app.allow_client_commands;
 
     this->initial_display = config::video.output_name;
@@ -2177,6 +2191,22 @@ namespace proc {
 
   std::string proc_t::get_running_app_uuid() {
     return _app.uuid;
+  }
+
+  std::string proc_t::get_session_token() {
+    return _launch_session ? _launch_session->session_token : std::string {};
+  }
+
+  std::string proc_t::get_session_owner_unique_id() {
+    return _launch_session ? _launch_session->unique_id : std::string {};
+  }
+
+  std::string proc_t::get_session_owner_device_name() {
+    return _launch_session ? _launch_session->device_name : std::string {};
+  }
+
+  bool proc_t::is_session_owner(const std::string &unique_id) {
+    return !_launch_session || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id;
   }
 
   boost::process::environment proc_t::get_env() {
