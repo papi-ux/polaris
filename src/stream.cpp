@@ -2167,7 +2167,11 @@ namespace stream {
       if (remaining == 0) {
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
         if (proc::proc.running()) {
-          proc::proc.pause();
+          if (proc::proc.session_shutdown_requested()) {
+            BOOST_LOG(info) << "Skipping pause because host shutdown is already in progress"sv;
+          } else {
+            proc::proc.pause();
+          }
         } else {
           // We have no app running and also no clients anymore.
           revert_display_config = true;

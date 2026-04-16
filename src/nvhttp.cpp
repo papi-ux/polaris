@@ -820,10 +820,11 @@ namespace nvhttp {
     launch_session->surround_params = (get_arg(args, "surroundParams", ""));
     launch_session->gcmap = util::from_view(get_arg(args, "gcmap", "0"));
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
+    const bool client_display_mode_explicit = util::from_view(get_arg(args, "displayModeExplicit", "0"));
     const bool client_requested_virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0"));
     launch_session->virtual_display = client_requested_virtual_display || named_cert_p->always_use_virtual_display;
     launch_session->user_locked_display_mode = !named_cert_p->display_mode.empty();
-    launch_session->user_locked_virtual_display = client_requested_virtual_display || named_cert_p->always_use_virtual_display;
+    launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
 
     if (!launch_session->watch_only) {
@@ -2033,10 +2034,13 @@ namespace nvhttp {
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
+    proc::proc.set_session_shutdown_requested(true);
     rtsp_stream::terminate_sessions();
 
     if (proc::proc.running() > 0) {
       proc::proc.terminate();
+    } else {
+      proc::proc.set_session_shutdown_requested(false);
     }
 
     // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
@@ -2272,6 +2276,8 @@ namespace nvhttp {
       // Feature flags
       auto &features = output["features"];
       features["ai_optimizer"] = ai_optimizer::is_enabled();
+      features["ai_optimizer_control"] = true;
+      features["adaptive_bitrate_control"] = true;
       features["game_library"] = true;
       features["session_lifecycle"] = true;
       features["device_profiles"] = true;
@@ -2340,6 +2346,19 @@ namespace nvhttp {
       output["game_uuid"] = proc::proc.get_running_app_uuid();
       output["cursor_visible"] = cursor::visible();
       output["dynamic_range"] = stats.dynamic_range;
+      output["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
+      output["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
+      output["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+
+      auto &display_mode = output["display_mode"];
+      display_mode["virtual_display"] = proc::proc.virtual_display;
+      display_mode["requested_headless"] = stats.runtime_requested_headless;
+      display_mode["effective_headless"] = stats.runtime_effective_headless;
+      display_mode["gpu_native_override_active"] = stats.runtime_gpu_native_override_active;
+      display_mode["label"] =
+        stats.runtime_effective_headless ? "Headless" :
+        proc::proc.virtual_display ? "Virtual Display" :
+        "Host Display";
 
       // Capture info
       auto &capture_info = output["capture"];
@@ -2468,8 +2487,7 @@ namespace nvhttp {
       auto apps = proc::proc.get_apps();
       for (auto &app : apps) {
         if (app.uuid == uuid) {
-          std::string image_path = app.image_path;
-          if (image_path.empty()) break;
+          std::string image_path = proc::validate_app_image_path(app.image_path);
 
           // Check polaris covers directory first
           if (!app.steam_appid.empty()) {
@@ -2484,7 +2502,15 @@ namespace nvhttp {
           try {
             auto data = file_handler::read_file(image_path.c_str());
             SimpleWeb::CaseInsensitiveMultimap headers;
-            headers.emplace("Content-Type", "image/png");
+            std::string content_type = "image/png";
+            auto ext = fs::path(image_path).extension().string();
+            boost::algorithm::to_lower(ext);
+            if (ext == ".jpg" || ext == ".jpeg") {
+              content_type = "image/jpeg";
+            } else if (ext == ".webp") {
+              content_type = "image/webp";
+            }
+            headers.emplace("Content-Type", content_type);
             headers.emplace("Cache-Control", "max-age=86400");
             response->write(data, headers);
             return;
@@ -2705,6 +2731,83 @@ namespace nvhttp {
       }
     };
 
+    auto polarisSetAdaptiveBitrate = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      try {
+        std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+        auto body = nlohmann::json::parse(body_str);
+        if (!body.contains("enabled") || !body["enabled"].is_boolean()) {
+          nlohmann::json err;
+          err["error"] = "enabled must be a boolean";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+          return;
+        }
+
+        const bool enabled = body["enabled"].get<bool>();
+        adaptive_bitrate::set_enabled(enabled);
+        BOOST_LOG(info) << "Adaptive bitrate toggled via Polaris API: " << (enabled ? "enabled" : "disabled");
+
+        nlohmann::json output;
+        output["status"] = true;
+        output["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
+        output["adaptive_target_bitrate_kbps"] = stream_stats::get_current().adaptive_target_bitrate_kbps;
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+      } catch (std::exception &e) {
+        nlohmann::json err;
+        err["error"] = e.what();
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+      }
+    };
+
+    auto polarisSetAiOptimizer = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      try {
+        std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+        auto body = nlohmann::json::parse(body_str);
+        if (!body.contains("enabled") || !body["enabled"].is_boolean()) {
+          nlohmann::json err;
+          err["error"] = "enabled must be a boolean";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+          return;
+        }
+
+        const bool enabled = body["enabled"].get<bool>();
+        ai_optimizer::set_enabled(enabled);
+
+        nlohmann::json output;
+        output["status"] = true;
+        output["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+        output["effective"] = ai_optimizer::is_enabled();
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+      } catch (std::exception &e) {
+        nlohmann::json err;
+        err["error"] = e.what();
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+      }
+    };
+
     auto polarisSetCursorVisibility = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
       if (!get_verified_cert(request)) {
@@ -2876,6 +2979,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
     https_server.resource["^/polaris/v1/session/bitrate$"]["POST"] = polarisSetBitrate;
+    https_server.resource["^/polaris/v1/session/adaptive-bitrate$"]["POST"] = polarisSetAdaptiveBitrate;
+    https_server.resource["^/polaris/v1/session/ai-optimizer$"]["POST"] = polarisSetAiOptimizer;
     https_server.resource["^/polaris/v1/session/cursor$"]["POST"] = polarisSetCursorVisibility;
     https_server.resource["^/polaris/v1/games$"]["GET"] = polarisGames;
     https_server.resource["^/polaris/v1/games/.+/cover$"]["GET"] = polarisGameCover;
