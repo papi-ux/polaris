@@ -13,7 +13,7 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
-[Quick Start](#quick-start) · [Install](#install) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [FAQ](#faq)
+[Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Known Limitations](#known-limitations) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [FAQ](#faq)
 
 **Support**: [Issues](https://github.com/papi-ux/polaris/issues) · **Donate**: [Ko-fi](https://ko-fi.com/papiux) · [PayPal](https://www.paypal.com/donate/?hosted_button_id=KD9R5KLYF6GN4)
 
@@ -155,6 +155,27 @@ systemctl --user enable --now polaris
 
 > [!WARNING]
 > Only grant `cap_sys_admin` when you actually need DRM/KMS capture. Polaris works fine without it on the default compositor and portal paths.
+
+## Compatibility
+
+| Area | Status | Notes |
+|---|---|---|
+| Linux host OS | Supported | Polaris is Linux-first today |
+| Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
+| Arch Linux | Supported from source | Packaging flow is improving, but source build is the practical path today |
+| Debian-family distros | Supported from source | Less turnkey than Fedora right now |
+| NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
+| VAAPI / software encode | Supported | Works, but is less battle-tested than NVENC |
+| Nova for Android | Best experience | Full launch contract, watch mode, tuning, and richer live state |
+| Standard Moonlight clients | Compatible | Core streaming works without Nova-specific UX |
+
+## Known Limitations
+
+- Polaris is not a Windows host today. Linux is the supported platform.
+- The official prebuilt package path is currently Fedora-focused. Other distros are source-build oriented.
+- NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
+- Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova client.
+- MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.
 
 ## Why Polaris
 
@@ -307,16 +328,6 @@ flowchart TB
 - Deferred headless launches cache encoder capabilities so cold-launch negotiation stays accurate.
 
 </details>
-
-## Platform Status
-
-| Platform | Status | Notes |
-|---|---|---|
-| Linux | Primary target | Main development focus |
-| Fedora | Best install path today | Direct RPM release |
-| Arch Linux | Works from source | Packaging flow is improving |
-| Debian | Works from source | Packaging is less turnkey than Fedora |
-| Windows | Future port | Not a supported Polaris host today |
 
 ## Configuration
 
