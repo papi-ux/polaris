@@ -35,7 +35,8 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 ### Fastest install: Fedora RPM
 
 ```bash
-sudo dnf install https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
+sudo dnf install ./Polaris-fedora42-x86_64.rpm
 sudo polaris --setup-host
 polaris
 ```
@@ -78,7 +79,8 @@ polaris
 If you are on Fedora and just want Polaris running, use the GitHub release RPM. It is the shortest path and the one to start with before considering source builds.
 
 ```bash
-sudo dnf install https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
+sudo dnf install ./Polaris-fedora42-x86_64.rpm
 sudo polaris --setup-host
 ```
 
@@ -525,3 +527,9 @@ I build Polaris and Nova in my spare time because Linux game streaming deserves 
 Polaris is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text.
 
 Polaris is a fork of [Apollo](https://github.com/ClassicOldSong/Apollo) by ClassicOldSong, which is itself a fork of [Sunshine](https://github.com/LizardByte/Sunshine) by LizardByte. Both are GPLv3. The streaming protocol remains compatible with [Moonlight](https://moonlight-stream.org) clients.
+
+## AI Transparency
+
+Polaris is built with help from AI tools, including Anthropic Claude, OpenAI Codex, and local models.
+
+I use them as engineering assistants for brainstorming, debugging, refactoring, test scaffolding, packaging, and documentation. Final architecture, review, integration, and release decisions are still mine, and everything that ships here is manually reviewed and validated before release.
