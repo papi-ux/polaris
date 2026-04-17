@@ -3,6 +3,7 @@ import { ref, readonly } from 'vue'
 // Shared singleton state across all consumers
 const status = ref(null)
 const cache = ref([])
+const history = ref([])
 const devices = ref([])
 const loading = ref(false)
 const modelCatalog = ref(null)
@@ -55,6 +56,18 @@ export function useAiOptimizer() {
       console.error('AI cache clear failed:', e)
     }
     return false
+  }
+
+  async function fetchHistory() {
+    try {
+      const res = await fetch('./api/ai/history', { credentials: 'include' })
+      if (res.ok) {
+        history.value = await res.json()
+      }
+    } catch (e) {
+      console.error('AI history fetch failed:', e)
+    }
+    return history.value
   }
 
   async function optimize(deviceName, appName, gpuInfo) {
@@ -168,12 +181,14 @@ export function useAiOptimizer() {
   return {
     status: readonly(status),
     cache: readonly(cache),
+    history: readonly(history),
     devices: readonly(devices),
     loading: readonly(loading),
     modelCatalog: readonly(modelCatalog),
     modelsLoading: readonly(modelsLoading),
     fetchStatus,
     fetchCache,
+    fetchHistory,
     clearCache,
     optimize,
     testConnection,

@@ -96,7 +96,7 @@ const defValue = parsedDefaultPropValue ? "_common.enabled_def_cbox" : "_common.
 </script>
 
 <template>
-  <div :class="props.class" class="flex items-start gap-3">
+  <div :class="props.class" :data-setting-key="props.id" class="flex items-start gap-3">
     <input type="checkbox"
            class="w-4 h-4 mt-1 rounded border-storm bg-deep text-ice focus:ring-ice shrink-0"
            :id="props.id"

@@ -71,6 +71,42 @@ namespace nvhttp {
   namespace fs = std::filesystem;
   namespace pt = boost::property_tree;
 
+  namespace {
+    void append_optimization_json(nlohmann::json &output, const device_db::optimization_t &optimization) {
+      if (optimization.display_mode) {
+        output["display_mode"] = *optimization.display_mode;
+      }
+      if (optimization.color_range) {
+        output["color_range"] = *optimization.color_range;
+      }
+      if (optimization.hdr.has_value()) {
+        output["hdr"] = *optimization.hdr;
+      }
+      if (optimization.virtual_display.has_value()) {
+        output["virtual_display"] = *optimization.virtual_display;
+      }
+      if (optimization.target_bitrate_kbps) {
+        output["target_bitrate_kbps"] = *optimization.target_bitrate_kbps;
+      }
+      if (optimization.nvenc_tune) {
+        output["nvenc_tune"] = *optimization.nvenc_tune;
+      }
+      if (optimization.preferred_codec) {
+        output["preferred_codec"] = *optimization.preferred_codec;
+      }
+      output["reasoning"] = optimization.reasoning;
+      output["reasoning_summary"] = optimization.reasoning;
+      output["source"] = optimization.source;
+      output["cache_status"] = optimization.cache_status;
+      output["confidence"] = optimization.confidence;
+      output["signals_used"] = optimization.signals_used;
+      output["normalization_reason"] = optimization.normalization_reason;
+      output["recommendation_version"] = optimization.recommendation_version;
+      output["generated_at"] = optimization.generated_at;
+      output["expires_at"] = optimization.expires_at;
+    }
+  }  // namespace
+
 #ifdef __linux__
   namespace {
     std::mutex deferred_cage_capability_probe_mutex;
@@ -2482,6 +2518,11 @@ namespace nvhttp {
       encoder["target_format"] = platf::from_frame_format(stats.encode_target_format);
       encoder["pacing_policy"] = stats.pacing_policy;
       encoder["optimization_source"] = stats.optimization_source;
+      encoder["optimization_confidence"] = stats.optimization_confidence;
+      encoder["optimization_cache_status"] = stats.optimization_cache_status;
+      encoder["optimization_reasoning"] = stats.optimization_reasoning;
+      encoder["optimization_normalization_reason"] = stats.optimization_normalization_reason;
+      encoder["recommendation_version"] = stats.recommendation_version;
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
@@ -2964,34 +3005,76 @@ namespace nvhttp {
 
         std::string device = body.value("device", "");
         std::string game = body.value("game", "");
+        std::string unique_id = body.value("unique_id", "");
         double avg_fps = body.value("avg_fps", 0.0);
         double avg_latency = body.value("avg_latency_ms", 0.0);
         int avg_bitrate = body.value("avg_bitrate_kbps", 0);
         double packet_loss = body.value("packet_loss_pct", 0.0);
         std::string codec = body.value("codec", "");
+        double target_fps = body.value("target_fps", 0.0);
         int duration_s = body.value("duration_s", 0);
         std::string end_reason = body.value("end_reason", "disconnect");
+        std::string optimization_source = body.value("optimization_source", "");
+        std::string optimization_confidence = body.value("optimization_confidence", "");
+        int recommendation_version = body.value("recommendation_version", 0);
 
         if (!device.empty() && !game.empty() && ai_optimizer::is_enabled()) {
+          const auto canonical_device = device_db::canonicalize_name(device);
+          const auto owner_device_name = proc::proc.get_session_owner_device_name();
+          const auto canonical_owner_device = device_db::canonicalize_name(owner_device_name);
+          const bool device_matches_owner =
+            !canonical_device.empty() &&
+            !canonical_owner_device.empty() &&
+            canonical_device == canonical_owner_device;
+          const bool app_matches_active_session = proc::proc.get_last_run_app_name() == game;
+          const bool matches_active_owner =
+            app_matches_active_session &&
+            ((!unique_id.empty() && proc::proc.is_session_owner(unique_id)) || device_matches_owner);
+          if (matches_active_owner) {
+            if (!owner_device_name.empty()) {
+              device = owner_device_name;
+            }
+            proc::proc.mark_client_session_report_recorded(unique_id);
+            BOOST_LOG(info) << "Client session report matched active session owner; host-side duplicate recording disabled for ["
+                            << device_db::canonicalize_name(device) << ":" << game << "]";
+          } else {
+            device = canonical_device;
+          }
+
           ai_optimizer::session_history_t session;
           session.avg_fps = avg_fps;
           session.avg_latency_ms = avg_latency;
           session.avg_bitrate_kbps = avg_bitrate;
           session.packet_loss_pct = packet_loss;
-          session.codec = codec;
+          session.last_fps = avg_fps;
+          session.last_target_fps = target_fps > 0.0 ? target_fps : avg_fps;
+          session.last_latency_ms = avg_latency;
+          session.last_bitrate_kbps = avg_bitrate;
+          session.last_packet_loss_pct = packet_loss;
+          session.last_codec = codec;
           session.session_count = 1;
 
-          // Quality grade from client-reported metrics
-          if (avg_fps >= 55 && packet_loss < 0.5 && avg_latency < 20)
-            session.quality_grade = "A";
-          else if (avg_fps >= 45 && packet_loss < 2 && avg_latency < 40)
-            session.quality_grade = "B";
-          else if (avg_fps >= 30 && packet_loss < 5)
-            session.quality_grade = "C";
-          else if (avg_fps >= 20)
-            session.quality_grade = "D";
+          const double effective_target_fps = session.last_target_fps > 0.0 ? session.last_target_fps : avg_fps;
+          const double fps_ratio =
+            (effective_target_fps > 0.0 && avg_fps > 0.0) ? std::clamp(avg_fps / effective_target_fps, 0.0, 1.5) : 0.0;
+          if (avg_fps <= 0.0)
+            session.last_quality_grade = "F";
+          else if (fps_ratio >= 0.95 && packet_loss < 0.5 && avg_latency < 20.0)
+            session.last_quality_grade = "A";
+          else if (fps_ratio >= 0.85 && packet_loss < 2.0 && avg_latency < 40.0)
+            session.last_quality_grade = "B";
+          else if (fps_ratio >= 0.70 && packet_loss < 5.0)
+            session.last_quality_grade = "C";
+          else if (fps_ratio >= 0.50)
+            session.last_quality_grade = "D";
           else
-            session.quality_grade = "F";
+            session.last_quality_grade = "F";
+          session.quality_grade = session.last_quality_grade;
+          session.codec = session.last_codec;
+
+          session.last_optimization_source = optimization_source;
+          session.last_optimization_confidence = optimization_confidence;
+          session.last_recommendation_version = recommendation_version;
 
           ai_optimizer::record_session(device, game, session);
           BOOST_LOG(info) << "Client session report: " << device << " + " << game
@@ -3029,37 +3112,36 @@ namespace nvhttp {
       std::optional<std::string> suggested_codec;
       std::optional<int> target_bitrate_kbps;
       bool hdr_requested = false;
+      const auto session_history = ai_optimizer::get_session_history(device, game);
 
       // Try AI cache first, then device_db
       auto ai_opt = ai_optimizer::get_cached(device, game);
       if (ai_opt) {
-        output["source"] = ai_opt->source;
-        if (ai_opt->display_mode) output["display_mode"] = *ai_opt->display_mode;
+        append_optimization_json(output, *ai_opt);
         if (ai_opt->target_bitrate_kbps) {
           target_bitrate_kbps = *ai_opt->target_bitrate_kbps;
-          output["target_bitrate_kbps"] = *ai_opt->target_bitrate_kbps;
         }
         suggested_codec = ai_opt->preferred_codec;
         hdr_requested = ai_opt->hdr.value_or(false);
-        if (ai_opt->nvenc_tune) output["nvenc_tune"] = *ai_opt->nvenc_tune;
-        output["reasoning"] = ai_opt->reasoning;
       } else {
-        auto dev = device_db::get_device(device);
-        if (dev) {
-          output["source"] = "device_db";
-          output["display_mode"] = dev->display_mode;
-          target_bitrate_kbps = dev->ideal_bitrate_kbps;
-          output["target_bitrate_kbps"] = dev->ideal_bitrate_kbps;
-          suggested_codec = dev->preferred_codec;
-          hdr_requested = dev->hdr_capable;
-          output["reasoning"] = dev->notes;
+        if (device_db::get_device(device)) {
+          auto opt = device_db::get_optimization(device, game);
+          if (session_history && session_history->last_invalidated_at > 0) {
+            opt.cache_status = "invalidated";
+          }
+          append_optimization_json(output, opt);
+          target_bitrate_kbps = opt.target_bitrate_kbps;
+          suggested_codec = opt.preferred_codec;
+          hdr_requested = opt.hdr.value_or(false);
         } else {
-          output["source"] = "defaults";
-          output["display_mode"] = "1280x720x60";
-          target_bitrate_kbps = 15000;
-          output["target_bitrate_kbps"] = 15000;
-          suggested_codec = "hevc";
-          output["reasoning"] = "Unknown device — using safe defaults";
+          auto opt = device_db::get_optimization(device, game);
+          if (session_history && session_history->last_invalidated_at > 0) {
+            opt.cache_status = "invalidated";
+          }
+          append_optimization_json(output, opt);
+          target_bitrate_kbps = opt.target_bitrate_kbps;
+          suggested_codec = opt.preferred_codec;
+          hdr_requested = opt.hdr.value_or(false);
         }
       }
 
@@ -3072,6 +3154,12 @@ namespace nvhttp {
       );
       if (suggested_codec) {
         output["preferred_codec"] = *suggested_codec;
+      }
+      if (session_history) {
+        output["last_quality_grade"] = session_history->quality_grade;
+        output["poor_outcome_count"] = session_history->poor_outcome_count;
+        output["consecutive_poor_outcomes"] = session_history->consecutive_poor_outcomes;
+        output["last_invalidated_at"] = session_history->last_invalidated_at;
       }
 
       SimpleWeb::CaseInsensitiveMultimap headers;

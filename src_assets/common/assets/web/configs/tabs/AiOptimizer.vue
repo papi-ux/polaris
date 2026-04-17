@@ -8,9 +8,9 @@ const config = ref(props.config)
 
 const { toast } = useToast()
 const {
-  status: aiStatus, cache: aiCache, devices: aiDevices, loading: aiLoading,
+  status: aiStatus, cache: aiCache, history: aiHistory, devices: aiDevices, loading: aiLoading,
   modelCatalog, modelsLoading,
-  fetchStatus, fetchCache, fetchDevices, fetchModels, clearCache, testConnection
+  fetchStatus, fetchCache, fetchHistory, fetchDevices, fetchModels, clearCache, testConnection
 } = useAiOptimizer()
 
 const showApiKey = ref(false)
@@ -20,6 +20,7 @@ const testDeviceName = ref('')
 const testAppName = ref('')
 const deviceSearch = ref('')
 const cacheExpanded = ref(false)
+const knowledgeExpanded = ref(false)
 const filteredDevices = ref([])
 let modelRefreshTimer = null
 
@@ -282,6 +283,90 @@ const modelDiscoverySummary = computed(() => {
   }
 })
 
+const selectedHistoryEntry = computed(() => {
+  if (!Array.isArray(aiHistory.value)) return null
+  const device = (testDeviceName.value || '').trim()
+  const app = (testAppName.value || '').trim()
+  if (!device || !app) return null
+  const exactKey = `${device}:${app}`
+  return aiHistory.value.find(entry => entry.key === exactKey) || null
+})
+
+function optimizationSourceLabel(source) {
+  switch (source) {
+    case 'ai_live':
+      return 'Live AI'
+    case 'ai_cached':
+      return 'Cached AI'
+    case 'device_db':
+      return 'Device tune'
+    default:
+      return source || 'Fallback'
+  }
+}
+
+function confidenceTone(confidence) {
+  switch ((confidence || '').toLowerCase()) {
+    case 'high':
+      return 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200'
+    case 'medium':
+      return 'border-amber-300/20 bg-amber-300/8 text-amber-200'
+    case 'low':
+      return 'border-red-400/20 bg-red-400/8 text-red-300'
+    default:
+      return 'border-storm/40 bg-void/30 text-storm'
+  }
+}
+
+function cacheStatusTone(status) {
+  switch ((status || '').toLowerCase()) {
+    case 'hit':
+      return 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200'
+    case 'miss':
+      return 'border-sky-300/20 bg-sky-300/8 text-sky-200'
+    case 'invalidated':
+      return 'border-red-400/20 bg-red-400/8 text-red-300'
+    case 'stale':
+      return 'border-amber-300/20 bg-amber-300/8 text-amber-200'
+    default:
+      return 'border-storm/40 bg-void/30 text-storm'
+  }
+}
+
+function formatRelativeTime(timestamp) {
+  if (!timestamp) return '—'
+  const deltaSeconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(timestamp))
+  if (deltaSeconds < 60) return 'just now'
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`
+  return `${Math.floor(deltaSeconds / 86400)}d ago`
+}
+
+const providerHealthSummary = computed(() => {
+  if (!aiStatus.value) {
+    return { tone: 'text-storm', label: 'Unknown', detail: 'Runtime state not loaded yet.' }
+  }
+  if (aiStatus.value.last_failure_at && (!aiStatus.value.last_success_at || aiStatus.value.last_failure_at >= aiStatus.value.last_success_at)) {
+    return {
+      tone: 'text-red-300',
+      label: 'Attention',
+      detail: aiStatus.value.last_error || 'The most recent provider request failed.'
+    }
+  }
+  if (Number(aiStatus.value.in_flight_requests || 0) > 0) {
+    return {
+      tone: 'text-sky-200',
+      label: 'Busy',
+      detail: `${aiStatus.value.in_flight_requests} request${aiStatus.value.in_flight_requests === 1 ? '' : 's'} in flight.`
+    }
+  }
+  return {
+    tone: 'text-emerald-200',
+    label: 'Healthy',
+    detail: aiStatus.value.last_success_at ? `Last success ${formatRelativeTime(aiStatus.value.last_success_at)}.` : 'No provider calls have completed yet.'
+  }
+})
+
 function providerPill(providerId) {
   const provider = providerOptions.find(item => item.id === providerId)
   return provider?.pill || 'text-silver border-storm/40'
@@ -458,7 +543,7 @@ function filterDevices() {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchStatus(), fetchCache(), fetchDevices()])
+  await Promise.all([fetchStatus(), fetchCache(), fetchHistory(), fetchDevices()])
   if (!testDeviceName.value) {
     const preferredDevice = aiDevices.value.find(device => /steam deck/i.test(device.name)) || aiDevices.value[0]
     testDeviceName.value = preferredDevice?.name || 'Test Device'
@@ -478,12 +563,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="config-page space-y-6">
-    <div class="glass rounded-2xl border border-storm/40 p-5 space-y-4">
+    <section class="settings-section space-y-4">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="max-w-3xl">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-[0.28em]">Optimization Studio</div>
-          <h2 class="text-xl font-semibold text-silver mt-2">Choose the model provider Polaris should use for device tuning.</h2>
-          <p class="text-sm text-storm mt-2">
+          <div class="section-kicker">Optimization Studio</div>
+          <h2 class="settings-section-title mt-2">Choose the model provider Polaris should use for device tuning.</h2>
+          <p class="settings-section-copy mt-2">
             The optimizer can now target Claude, OpenAI, Gemini, or a local OpenAI-compatible endpoint. Draft connection tests use the unsaved settings below; save and apply when you want live sessions to use them.
           </p>
         </div>
@@ -527,16 +612,16 @@ onBeforeUnmount(() => {
           </p>
         </button>
       </div>
-    </div>
+    </section>
 
     <div class="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
       <div class="space-y-6">
-        <div class="rounded-2xl border border-storm/40 bg-deep p-5 space-y-5">
+        <section class="settings-section space-y-5">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <div class="text-[10px] font-semibold text-storm uppercase tracking-[0.24em]">Draft Connection</div>
-              <h3 class="text-lg font-semibold text-silver mt-2">{{ currentProvider.name }} setup</h3>
-              <p class="text-sm text-storm mt-1">
+              <div class="section-kicker">Draft Connection</div>
+              <h3 class="settings-section-title mt-2">{{ currentProvider.name }} setup</h3>
+              <p class="settings-section-copy mt-1">
                 Model choice, authentication, and endpoint are all provider-specific. Polaris will resolve sensible defaults if you keep the standard values.
               </p>
             </div>
@@ -667,16 +752,16 @@ onBeforeUnmount(() => {
                 </button>
               </div>
             </div>
-            <div class="text-xs text-storm mt-1">{{ currentProvider.keyHint }}</div>
-          </div>
-        </div>
+              <div class="text-xs text-storm mt-1">{{ currentProvider.keyHint }}</div>
+            </div>
+        </section>
 
-        <div class="rounded-2xl border border-storm/40 bg-deep p-5 space-y-4">
+        <section class="settings-section settings-section-compact space-y-4">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <div class="text-[10px] font-semibold text-storm uppercase tracking-[0.24em]">Response Policy</div>
-              <div class="text-base font-semibold text-silver mt-2">Cache and timeout</div>
-              <div class="text-sm text-storm mt-1">These settings apply to all providers, including local endpoints.</div>
+              <div class="section-kicker">Response Policy</div>
+              <div class="settings-section-title mt-2 text-base">Cache and timeout</div>
+              <div class="settings-section-copy mt-1">These settings apply to all providers, including local endpoints.</div>
             </div>
             <button
               @click="testProviderConfig"
@@ -748,6 +833,24 @@ onBeforeUnmount(() => {
             <div class="text-sm font-medium" :class="testResult.success ? 'text-green-300' : 'text-red-300'">{{ testResult.message }}</div>
             <div v-if="testResult.detail" class="text-xs text-silver/70 mt-2">{{ testResult.detail }}</div>
             <div v-if="testResult.success && testResult.payload" class="grid gap-2 mt-3 sm:grid-cols-2">
+              <div class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wider text-storm">Source</div>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="cacheStatusTone(testResult.payload.cache_status)">
+                    {{ optimizationSourceLabel(testResult.payload.source) }}
+                  </span>
+                  <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="confidenceTone(testResult.payload.confidence)">
+                    {{ (testResult.payload.confidence || 'unknown').toUpperCase() }}
+                  </span>
+                </div>
+              </div>
+              <div class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
+                <div class="text-[10px] uppercase tracking-wider text-storm">Freshness</div>
+                <div class="text-sm text-silver mt-1">
+                  {{ formatRelativeTime(testResult.payload.generated_at) }}
+                  <span class="text-storm"> · expires {{ formatRelativeTime(testResult.payload.expires_at) }}</span>
+                </div>
+              </div>
               <div v-if="testResult.payload.display_mode" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
                 <div class="text-[10px] uppercase tracking-wider text-storm">Display</div>
                 <div class="text-sm font-mono text-silver mt-1">{{ testResult.payload.display_mode }}</div>
@@ -767,17 +870,56 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </div>
+            <div v-if="testResult.success && testResult.payload?.signals_used?.length" class="mt-3 rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
+              <div class="text-[10px] uppercase tracking-wider text-storm">Signals used</div>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <span v-for="signal in testResult.payload.signals_used" :key="signal" class="inline-flex items-center rounded-full border border-storm/40 bg-void/30 px-2 py-0.5 text-[11px] font-medium text-silver">
+                  {{ signal }}
+                </span>
+              </div>
+            </div>
+            <div v-if="testResult.success && testResult.payload?.normalization_reason" class="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/6 px-3 py-2">
+              <div class="text-[10px] uppercase tracking-wider text-storm">Normalization</div>
+              <div class="text-xs text-silver mt-2">{{ testResult.payload.normalization_reason }}</div>
+            </div>
+            <div v-if="selectedHistoryEntry" class="mt-3 rounded-lg border px-3 py-2" :class="selectedHistoryEntry.consecutive_poor_outcomes > 0 ? 'border-red-400/20 bg-red-400/8' : 'border-storm/20 bg-void/40'">
+              <div class="text-[10px] uppercase tracking-wider text-storm">Recent outcome for this device + app</div>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="confidenceTone(selectedHistoryEntry.last_optimization_confidence)">
+                  {{ optimizationSourceLabel(selectedHistoryEntry.last_optimization_source) }}
+                </span>
+                <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="(selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'A' || (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'B' ? 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200' : (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'C' ? 'border-amber-300/20 bg-amber-300/8 text-amber-200' : 'border-red-400/20 bg-red-400/8 text-red-300'">
+                  Grade {{ selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade || '—' }}
+                </span>
+                <span class="text-xs text-storm">Updated {{ formatRelativeTime(selectedHistoryEntry.last_updated_at) }}</span>
+              </div>
+              <div class="text-xs text-silver mt-2">
+                Latest session: {{ Math.round(selectedHistoryEntry.last_fps || selectedHistoryEntry.avg_fps || 0) }}/{{ Math.round(selectedHistoryEntry.last_target_fps || selectedHistoryEntry.last_fps || selectedHistoryEntry.avg_fps || 0) }} FPS,
+                {{ Math.round(selectedHistoryEntry.last_latency_ms || selectedHistoryEntry.avg_latency_ms || 0) }}ms,
+                {{ selectedHistoryEntry.last_bitrate_kbps || selectedHistoryEntry.avg_bitrate_kbps || 0 }}kbps,
+                {{ Number(selectedHistoryEntry.last_packet_loss_pct ?? selectedHistoryEntry.packet_loss_pct ?? 0).toFixed(1) }}% loss.
+              </div>
+              <div class="text-xs text-silver mt-2">
+                {{ selectedHistoryEntry.session_count }} session{{ selectedHistoryEntry.session_count === 1 ? '' : 's' }} tracked,
+                avg {{ Math.round(selectedHistoryEntry.avg_fps || 0) }} FPS,
+                {{ selectedHistoryEntry.poor_outcome_count }} poor outcome{{ selectedHistoryEntry.poor_outcome_count === 1 ? '' : 's' }} total,
+                {{ selectedHistoryEntry.consecutive_poor_outcomes }} consecutive poor sessions.
+              </div>
+              <div v-if="selectedHistoryEntry.last_invalidated_at" class="text-xs text-amber-200 mt-2">
+                Cache invalidated {{ formatRelativeTime(selectedHistoryEntry.last_invalidated_at) }} after the last poor run.
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
       </div>
 
       <div class="space-y-6">
-        <div class="rounded-2xl border border-storm/40 bg-deep p-5 space-y-4">
+        <section class="settings-section settings-section-compact space-y-4">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <div class="text-[10px] font-semibold text-storm uppercase tracking-[0.24em]">Live Runtime</div>
-              <div class="text-base font-semibold text-silver mt-2">Saved optimizer status</div>
-              <div class="text-sm text-storm mt-1">This reflects the currently loaded runtime config, not the unsaved draft on the left.</div>
+              <div class="section-kicker">Live Runtime</div>
+              <div class="settings-section-title mt-2 text-base">Saved optimizer status</div>
+              <div class="settings-section-copy mt-1">This reflects the currently loaded runtime config, not the unsaved draft on the left.</div>
             </div>
             <span
               class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
@@ -819,6 +961,36 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
+                <div class="text-xs uppercase tracking-wider text-storm">Provider Health</div>
+                <div class="text-sm font-medium mt-2" :class="providerHealthSummary.tone">{{ providerHealthSummary.label }}</div>
+                <div class="text-xs text-storm mt-2">{{ providerHealthSummary.detail }}</div>
+              </div>
+
+              <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
+                <div class="text-xs uppercase tracking-wider text-storm">Runtime Telemetry</div>
+                <div class="mt-2 grid gap-2 text-xs text-silver">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-storm">Last latency</span>
+                    <span class="font-mono">{{ aiStatus?.last_latency_ms ?? '—' }}<span v-if="aiStatus?.last_latency_ms != null"> ms</span></span>
+                  </div>
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-storm">Last success</span>
+                    <span>{{ formatRelativeTime(aiStatus?.last_success_at) }}</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-storm">Last failure</span>
+                    <span>{{ formatRelativeTime(aiStatus?.last_failure_at) }}</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-storm">In flight</span>
+                    <span class="font-mono">{{ aiStatus?.in_flight_requests ?? 0 }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div v-if="aiStatus?.auth_mode === 'subscription'" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-3">
               <div class="text-xs uppercase tracking-wider text-storm">Claude CLI</div>
               <div class="text-sm mt-2" :class="aiStatus?.cli_available ? 'text-green-300' : 'text-red-300'">
@@ -830,13 +1002,18 @@ onBeforeUnmount(() => {
               <div class="text-xs uppercase tracking-wider text-storm">Pending Change</div>
               <div class="text-sm text-silver mt-2">The draft on the left differs from the loaded runtime. Save and apply before expecting live sessions to switch providers or models.</div>
             </div>
-          </div>
-        </div>
 
-        <div class="p-4 bg-deep rounded-2xl border border-storm/40">
-          <div class="flex items-center justify-between mb-3 cursor-pointer" @click="cacheExpanded = !cacheExpanded">
+            <div v-if="aiStatus?.last_error" class="rounded-xl border border-red-400/20 bg-red-400/8 p-3">
+              <div class="text-xs uppercase tracking-wider text-storm">Recent Error</div>
+              <div class="text-sm text-red-300 mt-2">{{ aiStatus.last_error }}</div>
+            </div>
+          </div>
+        </section>
+
+        <details class="settings-section settings-section-compact" :open="cacheExpanded" @toggle="cacheExpanded = $event.target.open">
+          <summary class="flex cursor-pointer list-none items-center justify-between gap-3">
             <div class="flex items-center gap-2">
-              <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">Optimization Cache</div>
+              <div class="section-kicker">Optimization Cache</div>
               <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ Array.isArray(aiCache) ? aiCache.length : 0 }}</span>
             </div>
             <div class="flex items-center gap-2">
@@ -848,7 +1025,8 @@ onBeforeUnmount(() => {
               </button>
               <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': cacheExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
             </div>
-          </div>
+          </summary>
+          <div class="mt-3 text-sm text-storm">Stored optimizer recommendations for known device and app combinations.</div>
 
           <div v-if="cacheExpanded && Array.isArray(aiCache) && aiCache.length > 0" class="space-y-2 max-h-96 overflow-y-auto scrollbar-hidden">
             <div v-for="(entry, i) in aiCache" :key="i" class="py-2" :class="i > 0 ? 'border-t border-storm/20' : ''">
@@ -869,6 +1047,15 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div v-if="entry._expanded" class="mt-2 p-3 bg-void/50 rounded-lg text-xs space-y-1.5">
+                <div class="flex flex-wrap items-center gap-2 pb-1.5 border-b border-storm/20">
+                  <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="cacheStatusTone(entry.cache_status)">
+                    {{ entry.cache_status || 'stored' }}
+                  </span>
+                  <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="confidenceTone(entry.confidence)">
+                    {{ (entry.confidence || 'unknown').toUpperCase() }}
+                  </span>
+                  <span class="text-storm">updated {{ formatRelativeTime(entry.generated_at || entry.cached_at) }}</span>
+                </div>
                 <div class="flex justify-between" v-if="entry.display_mode">
                   <span class="text-storm">Display Mode</span>
                   <span class="text-ice font-mono">{{ entry.display_mode }}</span>
@@ -893,6 +1080,22 @@ onBeforeUnmount(() => {
                   <span class="text-storm">HDR</span>
                   <span class="font-mono" :class="entry.hdr ? 'text-green-400' : 'text-storm'">{{ entry.hdr ? 'Yes' : 'No' }}</span>
                 </div>
+                <div class="flex justify-between" v-if="entry.expires_at">
+                  <span class="text-storm">Expires</span>
+                  <span class="text-silver">{{ formatRelativeTime(entry.expires_at) }}</span>
+                </div>
+                <div v-if="entry.signals_used?.length" class="pt-1.5 border-t border-storm/20">
+                  <div class="text-storm mb-2">Signals used</div>
+                  <div class="flex flex-wrap gap-1.5">
+                    <span v-for="signal in entry.signals_used" :key="signal" class="inline-flex items-center rounded-full border border-storm/40 bg-void/30 px-2 py-0.5 text-[11px] font-medium text-silver">
+                      {{ signal }}
+                    </span>
+                  </div>
+                </div>
+                <div v-if="entry.normalization_reason" class="pt-1.5 border-t border-storm/20">
+                  <span class="text-storm">Normalization: </span>
+                  <span class="text-silver/80">{{ entry.normalization_reason }}</span>
+                </div>
                 <div v-if="entry.reasoning" class="pt-1.5 border-t border-storm/20">
                   <span class="text-storm">AI Reasoning: </span>
                   <span class="text-silver/80 italic">{{ entry.reasoning }}</span>
@@ -901,46 +1104,52 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-else-if="cacheExpanded" class="text-sm text-storm text-center py-3">No cached optimizations yet</div>
-        </div>
+        </details>
       </div>
     </div>
 
-    <div class="p-4 bg-deep rounded-2xl border border-storm/40">
-      <div class="flex items-center justify-between mb-3">
-        <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">Device Knowledge Base</div>
-        <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ filteredDevices.length }} devices</span>
-      </div>
-      <input
-        v-model="deviceSearch"
-        @input="filterDevices"
-        type="text"
-        placeholder="Search devices..."
-        class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-sm text-silver focus:border-ice focus:outline-none mb-3" />
-      <div class="space-y-1 max-h-72 overflow-y-auto scrollbar-hidden">
-        <div v-for="device in filteredDevices" :key="device.name" class="flex items-center justify-between py-2 px-2 rounded-lg hover:bg-twilight/30 transition-colors">
-          <div class="min-w-0 flex-1">
-            <div class="text-sm text-silver font-medium">{{ device.name }}</div>
-            <div class="text-xs text-silver/60">
-              <span class="capitalize">{{ device.type }}</span>
-              <span v-if="device.display_mode"> · {{ device.display_mode }}</span>
-              <span v-if="device.preferred_codec"> · {{ device.preferred_codec.toUpperCase() }}</span>
-              <span v-if="device.ideal_bitrate_kbps"> · {{ (device.ideal_bitrate_kbps / 1000).toFixed(0) }} Mbps</span>
-              <span v-if="device.hdr_capable" class="text-ice"> HDR</span>
+    <details class="settings-section settings-section-compact" :open="knowledgeExpanded" @toggle="knowledgeExpanded = $event.target.open">
+      <summary class="flex cursor-pointer list-none items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <div class="section-kicker">Device Knowledge Base</div>
+          <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ filteredDevices.length }} devices</span>
+        </div>
+        <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': knowledgeExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+      </summary>
+      <div class="mt-3 text-sm text-storm">Reference devices and capability hints Polaris already knows about for optimization seeding.</div>
+      <div v-if="knowledgeExpanded" class="mt-4">
+        <input
+          v-model="deviceSearch"
+          @input="filterDevices"
+          type="text"
+          placeholder="Search devices..."
+          class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-sm text-silver focus:border-ice focus:outline-none mb-3" />
+        <div class="space-y-1 max-h-72 overflow-y-auto scrollbar-hidden">
+          <div v-for="device in filteredDevices" :key="device.name" class="flex items-center justify-between py-2 px-2 rounded-lg hover:bg-twilight/30 transition-colors">
+            <div class="min-w-0 flex-1">
+              <div class="text-sm text-silver font-medium">{{ device.name }}</div>
+              <div class="text-xs text-silver/60">
+                <span class="capitalize">{{ device.type }}</span>
+                <span v-if="device.display_mode"> · {{ device.display_mode }}</span>
+                <span v-if="device.preferred_codec"> · {{ device.preferred_codec.toUpperCase() }}</span>
+                <span v-if="device.ideal_bitrate_kbps"> · {{ (device.ideal_bitrate_kbps / 1000).toFixed(0) }} Mbps</span>
+                <span v-if="device.hdr_capable" class="text-ice"> HDR</span>
+              </div>
+            </div>
+            <div class="flex items-center gap-1 shrink-0">
+              <span class="px-1.5 py-0.5 rounded text-xs" :class="{
+                'bg-green-500/10 text-green-400': device.type === 'handheld',
+                'bg-blue-500/10 text-blue-400': device.type === 'phone',
+                'bg-yellow-500/10 text-yellow-400': device.type === 'desktop',
+                'bg-orange-500/10 text-orange-400': device.type === 'tablet'
+              }">{{ device.type }}</span>
             </div>
           </div>
-          <div class="flex items-center gap-1 shrink-0">
-            <span class="px-1.5 py-0.5 rounded text-xs" :class="{
-              'bg-green-500/10 text-green-400': device.type === 'handheld',
-              'bg-blue-500/10 text-blue-400': device.type === 'phone',
-              'bg-yellow-500/10 text-yellow-400': device.type === 'desktop',
-              'bg-orange-500/10 text-orange-400': device.type === 'tablet'
-            }">{{ device.type }}</span>
+          <div v-if="filteredDevices.length === 0" class="text-sm text-storm text-center py-3">
+            {{ deviceSearch ? 'No matching devices' : 'Loading devices...' }}
           </div>
         </div>
-        <div v-if="filteredDevices.length === 0" class="text-sm text-storm text-center py-3">
-          {{ deviceSearch ? 'No matching devices' : 'Loading devices...' }}
-        </div>
       </div>
-    </div>
+    </details>
   </div>
 </template>

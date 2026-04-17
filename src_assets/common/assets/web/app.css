@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+:root {
+  color-scheme: dark;
+}
+
 @theme {
   /* ── Space Whale Palette ── */
   --color-ice: #c8d6e5;
@@ -62,31 +66,57 @@
 [data-theme="oled"] {
   --color-ice: #e8edf3;
   --color-silver: #c0c8d0;
-  --color-storm: #6e7880;
-  --color-twilight: #181820;
+  --color-storm: #6f7882;
+  --color-twilight: #111319;
   --color-deep: #000000;
   --color-void: #000000;
-  --color-accent: #8b80ff;
-  --color-surface: #0c0c12;
+  --color-accent: #a8c8ff;
+  --color-surface: #090b10;
   --color-background: #000000;
   --color-foreground: #c0c8d0;
   --color-muted: #6e7880;
-  --color-border: #222230;
+  --color-border: #1d2028;
 }
 [data-theme="oled"] .glass {
-  background: rgba(12, 12, 18, 0.85);
+  background: rgba(8, 9, 12, 0.88);
   border-color: rgba(255, 255, 255, 0.06);
 }
 [data-theme="oled"] .card {
-  background: rgba(12, 12, 18, 0.9);
+  background: rgba(8, 9, 12, 0.92);
   border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme="oled"] .section-card {
+  background: rgba(8, 9, 12, 0.92);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme="oled"] .config-page .settings-section {
+  background: rgba(8, 9, 12, 0.92);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme="oled"] .surface-subtle {
+  background: rgba(7, 8, 11, 0.78);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme="oled"] .action-tile {
+  background: rgba(6, 7, 10, 0.72);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+[data-theme="oled"] .action-tile:hover {
+  background: rgba(15, 18, 24, 0.78);
+  border-color: rgba(232, 237, 243, 0.12);
+}
+[data-theme="oled"] .meta-pill,
+[data-theme="oled"] .control-chip {
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 [data-theme="oled"] .sidebar-link {
   color: #c0c8d0;
 }
 [data-theme="oled"] .sidebar-link.active {
   color: #e8edf3;
-  background: rgba(139, 128, 255, 0.12);
+  background: rgba(232, 237, 243, 0.06);
+  box-shadow: inset 2px 0 0 rgba(232, 237, 243, 0.9), inset 0 1px 0 rgba(255,255,255,0.04);
 }
 [data-theme="oled"] aside {
   border-color: transparent !important;
@@ -111,6 +141,34 @@
   display: none;
 }
 
+html {
+  background: var(--color-background);
+  scroll-padding-top: 1.5rem;
+}
+
+body {
+  min-height: 100vh;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+  overflow-x: hidden;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+a,
+button,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
 /* ── Glass Surface ── */
 .glass {
   background: rgba(76, 82, 101, 0.5);
@@ -126,7 +184,7 @@
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(200, 214, 229, 0.06);
   border-radius: 0.75rem;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
 }
 .card-interactive:hover {
   transform: translateY(-2px);
@@ -190,4 +248,300 @@
 /* ── Page Enter Animation ── */
 .page-enter {
   animation: slide-up 0.2s ease-out both;
+}
+
+/* ── Shared Layout Vocabulary ── */
+.page-shell {
+  @apply my-6 space-y-5;
+}
+
+.page-header {
+  @apply flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between;
+}
+
+.page-heading {
+  @apply min-w-0;
+}
+
+.page-title {
+  @apply text-[clamp(1.65rem,2vw,2.15rem)] font-bold text-silver text-balance;
+}
+
+.page-subtitle {
+  @apply mt-2 max-w-3xl text-sm leading-relaxed text-storm;
+}
+
+.page-meta {
+  @apply flex flex-wrap items-center gap-2 text-xs;
+}
+
+.meta-pill {
+  @apply rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-storm;
+}
+
+.section-card {
+  @apply p-5;
+  background: rgba(76, 82, 101, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(200, 214, 229, 0.06);
+  border-radius: 0.75rem;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.section-kicker {
+  @apply text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/80;
+}
+
+.section-title {
+  @apply mt-2 text-xl font-semibold text-silver text-balance;
+}
+
+.section-copy {
+  @apply mt-2 text-sm leading-relaxed text-storm;
+}
+
+.section-grid {
+  @apply grid gap-4;
+}
+
+.surface-subtle {
+  @apply rounded-2xl border border-storm/20 bg-deep/40;
+}
+
+.surface-muted {
+  @apply rounded-xl border border-storm/15 bg-void/40;
+}
+
+.action-tile {
+  @apply rounded-2xl border border-storm/20 bg-deep/40 p-4 no-underline;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.action-tile:hover {
+  border-color: rgba(151, 159, 158, 0.35);
+  background: rgba(76, 82, 101, 0.3);
+}
+
+.eyebrow-label {
+  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+}
+
+.data-pill {
+  @apply rounded-full border border-storm/20 bg-void/40 px-2.5 py-1 text-[11px] text-silver;
+}
+
+.control-chip {
+  @apply rounded-full border border-storm/25 bg-void/50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-storm;
+}
+
+.focus-ring {
+  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ice/50 focus-visible:ring-offset-2 focus-visible:ring-offset-deep;
+}
+
+.settings-command-bar {
+  @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,460px)];
+}
+
+.settings-command-copy {
+  @apply min-w-0;
+}
+
+.settings-command-title {
+  @apply mt-2 text-lg font-semibold text-silver;
+}
+
+.settings-command-note {
+  @apply mt-2 max-w-2xl text-sm leading-relaxed text-storm;
+}
+
+.settings-command-tools {
+  @apply flex min-w-0 flex-col gap-3;
+}
+
+.settings-command-meta {
+  @apply flex flex-wrap items-center gap-2 xl:justify-end;
+}
+
+.settings-search-input {
+  @apply w-full rounded-xl border border-storm/30 bg-deep/70 px-4 py-3 text-sm text-silver;
+}
+
+.settings-command-actions {
+  @apply flex flex-wrap items-center gap-2 xl:justify-end;
+}
+
+.settings-action-button {
+  @apply inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.settings-action-button-secondary {
+  @apply border border-storm/30 bg-transparent text-silver hover:border-ice/40 hover:text-ice;
+}
+
+.settings-action-button-primary {
+  @apply bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.18)];
+}
+
+.settings-action-button-accent {
+  @apply bg-ice/15 text-ice hover:bg-ice/25;
+}
+
+.settings-workspace {
+  @apply grid gap-5 xl:grid-cols-[240px_minmax(0,1fr)];
+}
+
+.settings-sidebar {
+  @apply hidden xl:block xl:sticky xl:top-28 xl:h-fit;
+}
+
+.settings-nav-groups {
+  @apply mt-5 space-y-5;
+}
+
+.settings-nav-group {
+  @apply space-y-2;
+}
+
+.settings-nav-group-title {
+  @apply text-[10px] font-semibold uppercase tracking-[0.22em] text-storm/85;
+}
+
+.settings-nav-list {
+  @apply space-y-2;
+}
+
+.settings-nav-button {
+  @apply flex w-full items-center rounded-2xl border border-storm/15 bg-deep/20 px-4 py-3 text-left transition-[border-color,background-color,color,transform,box-shadow] duration-200 hover:border-storm/35 hover:bg-deep/35;
+}
+
+.settings-nav-button.is-active {
+  @apply border-ice/40 bg-twilight/35 shadow-[0_10px_30px_rgba(0,0,0,0.18)];
+}
+
+.settings-nav-name {
+  @apply text-sm font-semibold text-silver;
+}
+
+.settings-main {
+  @apply min-w-0 space-y-4;
+}
+
+.settings-mobile-tabs {
+  @apply flex gap-2 overflow-x-auto pb-1 xl:hidden;
+}
+
+.settings-mobile-tab {
+  @apply whitespace-nowrap rounded-full border border-storm/25 bg-deep/35 px-3 py-1.5 text-sm text-storm transition-[border-color,background-color,color] duration-200 hover:border-storm/45 hover:text-silver;
+}
+
+.settings-mobile-tab.is-active {
+  @apply border-ice/40 bg-twilight/35 text-ice;
+}
+
+.settings-tab-hero {
+  @apply flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between;
+}
+
+.settings-tab-hero-copy {
+  @apply min-w-0;
+}
+
+.settings-tab-title {
+  @apply mt-2 text-2xl font-semibold text-silver;
+}
+
+.settings-tab-copy {
+  @apply mt-2 max-w-3xl text-sm leading-relaxed text-storm;
+}
+
+.settings-tab-meta {
+  @apply flex flex-wrap items-center gap-2 lg:justify-end;
+}
+
+.settings-tab-content {
+  @apply space-y-5;
+}
+
+.settings-search-hit {
+  border-color: rgba(200, 214, 229, 0.4) !important;
+  background: rgba(200, 214, 229, 0.08) !important;
+  box-shadow: 0 0 0 1px rgba(200, 214, 229, 0.12), 0 0 0 10px rgba(200, 214, 229, 0.04);
+}
+
+.settings-subnav-card {
+  @apply p-4;
+}
+
+.settings-subnav-row {
+  @apply mt-3 flex flex-wrap gap-2;
+}
+
+.settings-subnav-button {
+  @apply rounded-full border border-storm/20 bg-deep/35 px-3 py-1.5 text-sm text-storm transition-[border-color,background-color,color] duration-200 hover:border-storm/40 hover:text-silver;
+}
+
+.settings-subnav-button.is-active {
+  @apply border-ice/40 bg-twilight/35 text-ice;
+}
+
+.config-page {
+  @apply space-y-5;
+}
+
+.config-page .settings-section {
+  @apply p-5;
+  background: rgba(76, 82, 101, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(200, 214, 229, 0.06);
+  border-radius: 0.75rem;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.config-page .settings-section-compact {
+  @apply p-4;
+}
+
+.config-page .settings-section-header {
+  @apply mb-4;
+}
+
+.config-page .settings-section-title {
+  @apply text-lg font-semibold text-silver;
+}
+
+.config-page .settings-section-copy {
+  @apply mt-1 text-sm leading-relaxed text-storm;
+}
+
+.config-page .settings-form-grid {
+  @apply grid gap-4 xl:grid-cols-2;
+}
+
+.config-page .settings-inline-stack {
+  @apply space-y-3;
+}
+
+.config-page .settings-subtle-surface {
+  @apply rounded-2xl border border-storm/15 bg-deep/35 p-4;
+}
+
+.config-page .settings-warning-surface {
+  @apply rounded-2xl border border-amber-300/25 bg-amber-300/5 p-4 text-sm text-amber-100;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .page-enter {
+    animation: none;
+  }
 }

@@ -1,6 +1,6 @@
 <template>
   <SpaceParticles v-if="!showNav" :dense="true" />
-  <div v-if="showNav" class="flex h-screen bg-background text-foreground relative z-[1]">
+  <div v-if="showNav" class="relative z-[1] flex h-screen bg-background text-foreground">
     <!-- Mobile overlay -->
     <div v-if="sidebarOpen" class="fixed inset-0 bg-void/70 backdrop-blur-sm z-30 md:hidden transition-opacity" @click="sidebarOpen = false"></div>
 
@@ -13,23 +13,47 @@
         'fixed inset-y-0 left-0 md:static'
       ]"
     >
-      <div class="p-4 border-b border-storm">
-        <h1 class="text-xl font-bold text-ice flex items-center gap-2" :class="{ 'justify-center': sidebarCollapsed }">
+      <div class="border-b border-storm/20 px-4 py-4">
+        <h1 class="flex items-center gap-2 text-xl font-bold text-ice" :class="{ 'justify-center': sidebarCollapsed }">
           <img src="/images/logo-polaris.svg" class="h-8" alt="Polaris">
           <span v-if="!sidebarCollapsed">Polaris</span>
         </h1>
       </div>
-      <nav class="flex-1 p-3 space-y-1">
-        <router-link v-for="(item, idx) in navItems" :key="item.to" :to="item.to" class="sidebar-link" active-class="active" :title="sidebarCollapsed ? item.label : ''" @click="sidebarOpen = false">
-          <div v-html="item.icon" class="w-5 h-5 shrink-0"></div>
-          <span v-if="!sidebarCollapsed">{{ item.label }}</span>
-          <kbd v-if="!sidebarCollapsed" class="ml-auto text-xs text-storm/50 hidden lg:inline">{{ idx + 1 }}</kbd>
-        </router-link>
+      <nav class="flex-1 overflow-y-auto p-3 scrollbar-hidden">
+        <div
+          v-for="(section, sectionIndex) in navSections"
+          :key="section.key"
+          class="space-y-1"
+          :class="sectionIndex > 0 ? 'mt-3 border-t border-storm/15 pt-3' : ''"
+        >
+          <div
+            v-if="!sidebarCollapsed"
+            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/70"
+          >
+            {{ section.label }}
+          </div>
+          <router-link
+            v-for="item in section.items"
+            :key="item.to"
+            :to="item.to"
+            class="sidebar-link group"
+            active-class="active"
+            :title="sidebarCollapsed ? item.label : ''"
+            @click="sidebarOpen = false"
+          >
+            <div v-html="item.icon" class="w-5 h-5 shrink-0"></div>
+            <span v-if="!sidebarCollapsed">{{ item.label }}</span>
+            <kbd v-if="!sidebarCollapsed" class="ml-auto hidden text-[11px] text-storm/40 transition-opacity duration-150 lg:inline group-hover:opacity-70 group-focus-within:opacity-70" :class="$route.path === item.to ? 'opacity-70' : 'opacity-0'">
+              {{ item.shortcut }}
+            </kbd>
+          </router-link>
+        </div>
       </nav>
       <div class="px-3 mb-1">
         <button
+          type="button"
           @click="currentTheme = currentTheme === 'oled' ? 'polaris' : 'oled'; setTheme(currentTheme)"
-          class="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm transition-colors"
+          class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-[background-color,color,border-color] duration-200"
           :class="currentTheme === 'oled' ? 'text-ice bg-ice/10' : 'text-storm hover:text-silver hover:bg-twilight/50'"
           :title="currentTheme === 'oled' ? t('navbar.theme_switch_polaris') : t('navbar.theme_switch_oled')"
         >
@@ -39,16 +63,17 @@
         </button>
       </div>
       <button
-        class="flex items-center justify-center p-2 mx-3 mb-2 rounded-lg text-storm hover:text-silver hover:bg-twilight/50 transition-colors"
+        type="button"
+        class="focus-ring mx-3 mb-2 flex items-center justify-center rounded-lg p-2 text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
         @click="toggleCollapse"
         :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
       >
         <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-180': sidebarCollapsed }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
       </button>
-      <div class="p-3 border-t border-storm text-sm text-storm" :class="{ 'text-center': sidebarCollapsed }">
+      <div class="border-t border-storm/20 p-3 text-sm text-storm" :class="{ 'text-center': sidebarCollapsed }">
         <template v-if="!sidebarCollapsed">
-          v{{ appVersion }} &middot; Polaris
-          <div class="text-xs text-storm/50 mt-1">{{ paletteShortcut }}</div>
+          <div>v{{ appVersion }} &middot; Polaris</div>
+          <div class="mt-1 text-xs text-storm/50">{{ paletteShortcut }}</div>
         </template>
         <template v-else>
           <div class="text-xs">v{{ compactVersion }}</div>
@@ -57,11 +82,11 @@
     </aside>
 
     <!-- Main content -->
-    <main class="flex-1 overflow-auto bg-background relative">
+    <main class="relative flex-1 overflow-auto overflow-x-hidden bg-background">
       <SpaceParticles :dense="false" :absolute="true" />
       <!-- Mobile header -->
-      <div class="flex items-center gap-3 p-4 border-b border-storm md:hidden">
-        <button @click="sidebarOpen = !sidebarOpen" class="text-silver hover:text-ice transition-colors">
+      <div class="flex items-center gap-3 border-b border-storm/20 px-4 py-4 md:hidden">
+        <button type="button" @click="sidebarOpen = !sidebarOpen" class="focus-ring text-silver transition-colors duration-200 hover:text-ice">
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
         <div class="min-w-0">
@@ -71,12 +96,12 @@
           </h1>
           <div class="text-xs text-storm truncate">{{ currentPageLabel }}</div>
         </div>
-        <div class="ml-auto px-2 py-1 rounded-full text-[10px] font-medium border border-storm/40 text-storm">
-          {{ route.meta?.section || 'Core' }}
+        <div class="ml-auto rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-[10px] font-medium text-storm">
+          {{ currentPageSection }}
         </div>
       </div>
 
-      <div class="max-w-7xl mx-auto p-6 relative z-[1]">
+      <div class="relative z-[1] mx-auto max-w-[1360px] px-5 py-5 md:px-6 md:py-6">
         <div :key="pageKey" class="page-enter">
           <router-view :key="$route.path" />
         </div>
@@ -120,16 +145,77 @@ try {
   // i18n not yet ready
 }
 
-const navItems = computed(() => [
-  { to: '/', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 14a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1v-2zm10 0a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1h-4a1 1 0 01-1-1v-5z"/></svg>', label: i18nReady ? t('navbar.dashboard') : 'Dashboard', section: 'Status' },
-  { to: '/info', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>', label: i18nReady ? t('navbar.home') : 'Home', section: 'Info' },
-  { to: '/apps', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>', label: i18nReady ? t('navbar.applications') : 'Applications', section: 'Library' },
-  { to: '/pin', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>', label: i18nReady ? t('navbar.pin') : 'Clients & Pairing', section: 'Devices' },
-  { to: '/config', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>', label: i18nReady ? t('navbar.configuration') : 'Configuration', section: 'Settings' },
-  { to: '/password', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>', label: i18nReady ? t('navbar.password') : 'Password', section: 'Security' },
-  { to: '/troubleshooting', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>', label: i18nReady ? t('navbar.troubleshoot') : 'Troubleshooting', section: 'Support' },
-])
-const currentPageLabel = computed(() => navItems.value.find((item) => item.to === route.path)?.label || 'Polaris')
+const navSections = computed(() => {
+  const sections = [
+    {
+      key: 'streaming',
+      label: i18nReady ? t('navbar.group_streaming') : 'Streaming',
+      items: [
+        {
+          to: '/',
+          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 14a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1v-2zm10 0a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1h-4a1 1 0 01-1-1v-5z"/></svg>',
+          label: i18nReady ? t('navbar.dashboard') : 'Dashboard',
+        },
+        {
+          to: '/apps',
+          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>',
+          label: i18nReady ? t('navbar.library') : 'Library',
+        },
+        {
+          to: '/pin',
+          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>',
+          label: i18nReady ? t('navbar.pairing') : 'Pairing',
+        },
+      ],
+    },
+    {
+      key: 'host',
+      label: i18nReady ? t('navbar.group_host') : 'Host',
+      items: [
+        {
+          to: '/config',
+          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>',
+          label: i18nReady ? t('navbar.settings') : 'Settings',
+        },
+        {
+          to: '/password',
+          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>',
+          label: i18nReady ? t('navbar.security') : 'Security',
+        },
+      ],
+    },
+    {
+      key: 'support',
+      label: i18nReady ? t('navbar.group_support') : 'Support',
+      items: [
+        {
+          to: '/info',
+          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+          label: i18nReady ? t('navbar.system') : 'System',
+        },
+        {
+          to: '/troubleshooting',
+          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>',
+          label: i18nReady ? t('navbar.troubleshoot') : 'Troubleshooting',
+        },
+      ],
+    },
+  ]
+
+  let shortcut = 1
+  return sections.map((section) => ({
+    ...section,
+    items: section.items.map((item) => ({
+      ...item,
+      shortcut: shortcut++,
+      sectionLabel: section.label,
+    })),
+  }))
+})
+const navItems = computed(() => navSections.value.flatMap((section) => section.items))
+const currentNavItem = computed(() => navItems.value.find((item) => item.to === route.path) || null)
+const currentPageLabel = computed(() => currentNavItem.value?.label || 'Polaris')
+const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 'Core')
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
 const compactVersion = computed(() => appVersion.value.split('.')[0] || '1')
 const authRoutes = new Set(['/login', '/welcome', '/recover'])
@@ -202,12 +288,12 @@ onUnmounted(() => {
 
 .sidebar-link {
   @apply flex items-center gap-3 px-3 py-2 rounded-lg text-storm no-underline
-         transition-all duration-200 relative
+         transition-[background-color,color,box-shadow] duration-200 relative
          hover:bg-twilight/60 hover:text-silver;
 }
 .sidebar-link.active,
 .sidebar-link.router-link-exact-active {
   @apply bg-twilight/80 text-ice;
-  box-shadow: inset 3px 0 0 var(--color-ice), var(--shadow-inset-glow);
+  box-shadow: inset 2px 0 0 rgba(200, 214, 229, 0.85), var(--shadow-inset-glow);
 }
 </style>

@@ -1,76 +1,293 @@
 <template>
-  <h1 class="text-2xl font-bold text-silver my-6">{{ $t('index.welcome') }}</h1>
-  <p class="text-silver">{{ $t('index.description') }}</p>
-
-  <!-- Fatal errors -->
-  <div class="bg-twilight/50 border-l-4 border-red-500 text-silver p-4 rounded-lg my-4" v-if="fancyLogs.find(x => x.level === 'Fatal')">
-    <div class="flex items-center gap-2 mb-2">
-      <svg class="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-      <p v-html="$t('index.startup_errors')"></p>
-    </div>
-    <ul class="list-disc list-inside ml-4 mb-3">
-      <li v-for="v in fancyLogs.filter(x => x.level === 'Fatal')">{{v.value}}</li>
-    </ul>
-    <router-link class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition no-underline inline-block" to="/troubleshooting#logs">View Logs</router-link>
-  </div>
-
-  <!-- Version -->
-  <div class="card p-4 my-6" v-if="version">
-    <h2 class="text-xl font-semibold text-silver">Version {{version.version}}</h2>
-
-    <div v-if="loading" class="mt-3 text-storm">
-      {{ $t('index.loading_latest') }}
-    </div>
-
-    <div class="bg-twilight/50 border-l-4 border-ice text-silver p-3 rounded-lg mt-3" v-if="buildVersionIsDirty">
-      {{ $t('index.version_dirty') }}
-    </div>
-
-    <div class="bg-twilight/50 border-l-4 border-blue-400 text-silver p-3 rounded-lg mt-3" v-if="installedVersionNotStable">
-      {{ $t('index.installed_version_not_stable') }}
-    </div>
-
-    <div v-else-if="(!preReleaseBuildAvailable || !notifyPreReleases) && !stableBuildAvailable && !buildVersionIsDirty">
-      <div class="bg-twilight/50 border-l-4 border-green-500 text-silver p-3 rounded-lg mt-3">
-        {{ $t('index.version_latest') }}
+  <div class="page-shell">
+    <section class="page-header">
+      <div class="page-heading">
+        <h1 class="page-title">{{ $t('navbar.system') }}</h1>
+        <p class="page-subtitle">{{ $t('index.system_desc') }}</p>
       </div>
-    </div>
+      <div class="page-meta">
+        <span class="meta-pill font-medium" :class="healthBadgeClass">
+          {{ healthLabel }}
+        </span>
+        <span v-if="version" class="meta-pill">
+          {{ version.version }}
+        </span>
+        <span v-if="sessionType" class="meta-pill">
+          {{ sessionType }}
+        </span>
+        <span class="meta-pill">
+          {{ displays.length }} {{ $t('index.display_count') }}
+        </span>
+      </div>
+    </section>
 
-    <div v-if="notifyPreReleases && preReleaseBuildAvailable">
-      <div class="bg-twilight/50 border-l-4 border-yellow-500 text-silver p-3 rounded-lg mt-3">
-        <div class="flex justify-between items-center">
-          <p class="my-2">{{ $t('index.new_pre_release') }}</p>
-          <a class="bg-ice/20 text-ice px-4 py-2 rounded-lg hover:bg-ice/30 transition no-underline" :href="preReleaseVersion.release.html_url" target="_blank">{{ $t('index.download') }}</a>
+    <div class="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.85fr)]">
+      <section class="section-card">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0">
+            <div class="section-kicker">{{ $t('index.host_health') }}</div>
+            <h2 class="section-title">{{ healthHeading }}</h2>
+            <p class="section-copy max-w-2xl">{{ healthDescription }}</p>
+          </div>
+          <div v-if="hasIssueCounts" class="grid grid-cols-3 gap-2 text-center tabular-nums">
+            <div v-for="counter in issueCounters" :key="counter.label" class="rounded-xl px-3 py-3" :class="counter.cardClass">
+              <div class="text-lg font-semibold" :class="counter.valueClass">{{ counter.count }}</div>
+              <div class="text-[10px] uppercase tracking-[0.18em]" :class="counter.labelClass">{{ $t(counter.label) }}</div>
+            </div>
+          </div>
+          <div v-else class="flex flex-wrap items-center justify-end gap-2 text-xs">
+            <span class="meta-pill border-green-500/20 bg-green-500/10 text-green-200">
+              {{ $t('index.no_active_issues') }}
+            </span>
+            <span v-for="counter in issueCounters" :key="counter.label" class="meta-pill">
+              <span class="font-medium text-silver">{{ counter.count }}</span>
+              <span class="ml-1">{{ $t(counter.label) }}</span>
+            </span>
+          </div>
         </div>
-        <pre class="font-bold mt-2 text-silver whitespace-pre-wrap">{{preReleaseVersion.release.name}}</pre>
-        <pre class="text-storm whitespace-pre-wrap">{{preReleaseVersion.release.body}}</pre>
-      </div>
-    </div>
 
-    <div v-if="stableBuildAvailable">
-      <div class="bg-twilight/50 border-l-4 border-yellow-500 text-silver p-3 rounded-lg mt-3">
-        <div class="flex justify-between items-center">
-          <p class="my-2">{{ $t('index.new_stable') }}</p>
-          <a class="bg-ice/20 text-ice px-4 py-2 rounded-lg hover:bg-ice/30 transition no-underline" :href="githubVersion.release.html_url" target="_blank">{{ $t('index.download') }}</a>
+        <div v-if="recentIssues.length > 0" class="surface-subtle mt-5 p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-medium text-silver">{{ $t('index.recent_issues') }}</div>
+            <div class="text-xs text-storm">{{ recentIssues.length }} {{ $t('index.visible_now') }}</div>
+          </div>
+          <ul class="mt-3 space-y-2">
+            <li v-for="(entry, idx) in recentIssues" :key="`${entry.level}-${entry.message}-${idx}`" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2 text-sm text-silver">
+              <div class="flex items-start gap-3">
+                <span class="mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]" :class="issueBadgeClass(entry.level)">
+                  {{ entry.level }}
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="break-words">{{ entry.message }}</div>
+                  <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-storm">
+                    <span>{{ entry.timestamp }}</span>
+                    <span v-if="entry.count > 1" class="meta-pill">{{ entry.count }}×</span>
+                  </div>
+                </div>
+              </div>
+            </li>
+          </ul>
         </div>
-        <h3 class="text-lg font-semibold text-silver mt-2">{{githubVersion.release.name}}</h3>
-        <pre class="text-storm whitespace-pre-wrap">{{githubVersion.release.body}}</pre>
-      </div>
-    </div>
-  </div>
+        <div v-else class="mt-5 rounded-2xl border border-green-500/15 bg-green-500/10 px-4 py-4 text-sm leading-relaxed text-green-200">
+          {{ $t('index.no_recent_issues') }}
+        </div>
+      </section>
 
-  <!-- Resources -->
-  <div class="my-6">
-    <ClientCard />
-    <ResourceCard />
+      <section class="section-card">
+        <div class="section-kicker">{{ $t('index.version_updates') }}</div>
+        <div v-if="version" class="mt-2 flex items-start justify-between gap-3">
+          <div>
+            <h2 class="text-xl font-semibold text-silver">{{ version.version }}</h2>
+            <p class="mt-2 text-sm leading-relaxed text-storm">{{ versionSummary }}</p>
+          </div>
+          <button
+            type="button"
+            class="focus-ring inline-flex h-8 items-center justify-center rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice"
+            @click="copyVersion"
+          >
+            {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
+          </button>
+        </div>
+
+        <div v-if="loading" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 px-4 py-4 text-sm text-storm">
+          {{ $t('index.loading_latest') }}
+        </div>
+        <div v-else class="mt-4 space-y-3">
+          <div v-if="buildVersionIsDirty" class="rounded-xl border border-amber-300/20 bg-amber-300/10 px-4 py-4 text-sm text-amber-100">
+            {{ $t('index.version_dirty') }}
+          </div>
+          <div v-else-if="installedVersionNotStable" class="rounded-xl border border-blue-400/20 bg-blue-400/10 px-4 py-4 text-sm text-blue-100">
+            {{ $t('index.installed_version_not_stable') }}
+          </div>
+          <div v-else-if="stableBuildAvailable" class="rounded-2xl border border-ice/20 bg-ice/10 p-4">
+            <div class="text-sm font-medium text-silver">{{ $t('index.new_stable') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ githubVersion?.release?.name }}</div>
+            <a
+              class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] no-underline"
+              :href="githubVersion.release.html_url"
+              target="_blank"
+            >
+              {{ $t('index.view_release') }}
+            </a>
+          </div>
+          <div v-else-if="notifyPreReleases && preReleaseBuildAvailable" class="rounded-2xl border border-purple-500/20 bg-purple-500/10 p-4">
+            <div class="text-sm font-medium text-silver">{{ $t('index.new_pre_release') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ preReleaseVersion?.release?.name }}</div>
+            <a
+              class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg border border-purple-400/30 px-4 text-sm font-medium text-purple-200 transition-[background-color,border-color,color] duration-200 hover:bg-purple-500/10 no-underline"
+              :href="preReleaseVersion.release.html_url"
+              target="_blank"
+            >
+              {{ $t('index.view_release') }}
+            </a>
+          </div>
+          <div v-else class="rounded-xl border border-green-500/20 bg-green-500/10 px-4 py-4 text-sm text-green-200">
+            {{ $t('index.version_latest') }}
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="section-card">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <div class="section-kicker">{{ $t('index.system_snapshot') }}</div>
+          <h2 class="section-title">{{ $t('index.system_snapshot_title') }}</h2>
+          <p class="section-copy max-w-3xl">{{ $t('index.system_snapshot_desc') }}</p>
+        </div>
+        <div class="text-xs text-storm">{{ systemLoading ? $t('index.system_snapshot_loading') : $t('index.system_snapshot_live') }}</div>
+      </div>
+
+      <div class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.gpu_health') }}</div>
+          <div v-if="gpu" class="mt-3">
+            <div class="min-w-0 text-sm font-medium text-silver">{{ gpu.name || $t('index.gpu_active') }}</div>
+            <div class="mt-3 flex items-end gap-2 tabular-nums">
+              <div class="text-3xl font-semibold text-purple-300">{{ gpu.utilization_pct ?? '--' }}<span class="text-base">%</span></div>
+              <div class="pb-1 text-xs text-storm">{{ $t('index.gpu_utilization') }}</div>
+            </div>
+            <div class="mt-3 flex flex-wrap gap-2 text-xs text-storm tabular-nums">
+              <span>{{ gpu.temperature_c ?? '--' }}°C</span>
+              <span>{{ gpu.encoder_pct ?? '--' }}% {{ $t('index.encoder_short') }}</span>
+              <span>{{ gpu.power_draw_w?.toFixed?.(0) ?? '--' }}W</span>
+            </div>
+          </div>
+          <div v-else class="mt-3 text-sm text-storm">{{ $t('index.gpu_unavailable') }}</div>
+        </article>
+
+        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.display_state') }}</div>
+          <div class="mt-3 flex items-end gap-2 tabular-nums">
+            <div class="text-3xl font-semibold text-silver">{{ displays.length }}</div>
+            <div class="pb-1 text-xs text-storm">{{ $t('index.active_displays') }}</div>
+          </div>
+          <div class="mt-3 space-y-1 text-sm text-storm">
+            <div v-if="displays.length === 0">{{ $t('index.no_display_data') }}</div>
+            <div v-for="display in displays.slice(0, 3)" :key="display.name || display.id || display.label" class="truncate text-silver" :title="formatDisplayName(display)">
+              {{ formatDisplayName(display) }}
+            </div>
+          </div>
+        </article>
+
+        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.audio_state') }}</div>
+          <div class="mt-3 text-sm font-medium text-silver">
+            {{ audio?.sink ? formatAudioName(audio.sink) : $t('index.audio_unavailable') }}
+          </div>
+          <div class="mt-3 text-xs text-storm">
+            {{ audio?.sink ? formatAudioDetail(audio.sink) : $t('index.audio_unavailable_desc') }}
+          </div>
+        </article>
+
+        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.session_mode') }}</div>
+          <div class="mt-3 text-sm font-medium capitalize text-silver">{{ sessionType || $t('index.session_mode_idle') }}</div>
+          <div class="mt-3 text-xs text-storm">
+            {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)]">
+      <section class="section-card">
+        <div class="section-kicker">{{ $t('index.quick_actions') }}</div>
+        <h2 class="section-title">{{ $t('index.quick_actions_title') }}</h2>
+        <p class="section-copy">{{ $t('index.quick_actions_desc') }}</p>
+        <div class="mt-5 grid gap-3 md:grid-cols-2">
+          <router-link
+            v-for="action in quickActions"
+            :key="action.to"
+            class="action-tile"
+            :to="action.to"
+          >
+            <div class="text-sm font-medium text-silver">{{ $t(action.titleKey) }}</div>
+            <div class="mt-2 text-sm text-storm">{{ $t(action.descKey) }}</div>
+          </router-link>
+        </div>
+      </section>
+
+      <section class="section-card">
+        <div class="section-kicker">{{ $t('index.compatibility') }}</div>
+        <h2 class="section-title">{{ $t('index.compatibility_title') }}</h2>
+        <p class="section-copy">{{ $t('index.compatibility_desc') }}</p>
+        <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+          <div
+            v-for="client in compatibilityClients"
+            :key="client.platform"
+            class="surface-subtle p-4"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <div class="text-sm font-medium text-silver">{{ client.platform }}</div>
+              <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.18em]" :class="client.link ? 'border-ice/30 bg-ice/10 text-ice' : 'border-storm/30 bg-deep/60 text-storm'">
+                {{ client.status }}
+              </span>
+            </div>
+            <div class="mt-2 text-sm text-storm">{{ client.name }}</div>
+            <a
+              v-if="client.link"
+              class="mt-3 inline-flex text-sm font-medium text-ice no-underline hover:text-ice/80"
+              :href="client.link"
+              target="_blank"
+            >
+              {{ $t('index.view_client') }}
+            </a>
+          </div>
+        </div>
+        <div class="mt-4 text-sm italic text-storm">{{ $t('client_card.generic_moonlight_clients_desc') }}</div>
+      </section>
+    </div>
+
+    <section class="section-card">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div class="section-kicker">{{ $t('resource_card.resources') }}</div>
+          <h2 class="section-title">{{ $t('index.resources_title') }}</h2>
+          <p class="section-copy">{{ $t('index.resources_desc') }}</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <a
+            v-for="resource in resources"
+            :key="resource.href"
+            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-[border-color,color,box-shadow,background-color] duration-200 hover:border-ice hover:text-ice hover:shadow-[0_0_16px_rgba(200,214,229,0.08)] no-underline"
+            :href="resource.href"
+            target="_blank"
+          >
+            {{ $t(resource.labelKey) }}
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <section class="rounded-2xl border border-storm/20 bg-deep/30 p-4">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div class="section-kicker">{{ $t('resource_card.legal') }}</div>
+          <p class="mt-2 text-sm text-storm">{{ $t('resource_card.legal_desc') }}</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <a
+            v-for="document in legalDocs"
+            :key="document.href"
+            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-red-500/20 px-4 text-sm font-medium text-red-300 transition-[background-color,color] duration-200 hover:bg-red-500/30 no-underline"
+            :href="document.href"
+            target="_blank"
+          >
+            {{ $t(document.labelKey) }}
+          </a>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
-import ClientCard from '../ClientCard.vue'
-import ResourceCard from '../ResourceCard.vue'
+import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
+
+const { gpu, displays, audio, sessionType, loading: systemLoading } = useSystemStats(3000)
 
 const version = ref(null)
 const githubVersion = ref(null)
@@ -78,6 +295,31 @@ const notifyPreReleases = ref(false)
 const preReleaseVersion = ref(null)
 const loading = ref(true)
 const logs = ref(null)
+const copiedVersion = ref(false)
+
+const compatibilityClients = [
+  { platform: 'Android', name: 'Nova', status: 'Supported', link: 'https://github.com/papi-ux/nova' },
+  { platform: 'iOS', name: 'Coming Soon', status: 'Planned', link: '' },
+  { platform: 'Desktop', name: 'Coming Soon', status: 'Planned', link: '' }
+]
+
+const resources = [
+  { href: 'https://github.com/papi-ux/polaris/discussions', labelKey: 'resource_card.github_discussions' },
+  { href: 'https://github.com/papi-ux/polaris/wiki', labelKey: 'resource_card.github_wiki' },
+  { href: 'https://github.com/papi-ux/polaris/wiki/Stuttering-Clinic', labelKey: 'resource_card.github_stuttering_clinic' }
+]
+
+const legalDocs = [
+  { href: 'https://github.com/papi-ux/polaris/blob/master/LICENSE', labelKey: 'resource_card.license' },
+  { href: 'https://github.com/papi-ux/polaris/blob/master/NOTICE', labelKey: 'resource_card.third_party_notice' }
+]
+
+const quickActions = [
+  { to: '/', titleKey: 'index.quick_mission_title', descKey: 'index.quick_mission_desc' },
+  { to: '/troubleshooting#logs', titleKey: 'index.quick_logs_title', descKey: 'index.quick_logs_desc' },
+  { to: '/troubleshooting', titleKey: 'index.quick_troubleshoot_title', descKey: 'index.quick_troubleshoot_desc' },
+  { to: '/config', titleKey: 'index.quick_settings_title', descKey: 'index.quick_settings_desc' }
+]
 
 const installedVersionNotStable = computed(() => {
   if (!githubVersion.value || !version.value) return false
@@ -95,39 +337,232 @@ const preReleaseBuildAvailable = computed(() => {
 })
 
 const buildVersionIsDirty = computed(() => {
-  return version.value?.version?.split(".").length === 5 &&
-    version.value.version.indexOf("dirty") !== -1
+  return version.value?.version?.split('.').length === 5 &&
+    version.value.version.includes('dirty')
 })
 
-/** Parse the text errors, calculating the text, the timestamp and the level */
 const fancyLogs = computed(() => {
   if (!logs.value) return []
-  let regex = /(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}]):\s/g
-  let rawLogLines = (logs.value.split(regex)).splice(1)
-  let logLines = []
+  const regex = /(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}]):\s/g
+  const rawLogLines = logs.value.split(regex).splice(1)
+  const logLines = []
   for (let i = 0; i < rawLogLines.length; i += 2) {
-    logLines.push({ timestamp: rawLogLines[i], level: rawLogLines[i + 1].split(":")[0], value: rawLogLines[i + 1] })
+    logLines.push({ timestamp: rawLogLines[i], level: rawLogLines[i + 1].split(':')[0], value: rawLogLines[i + 1] })
   }
   return logLines
 })
 
-// created() logic
+const issueLogs = computed(() => {
+  return fancyLogs.value.filter((entry) => ['Fatal', 'Warning', 'Error'].includes(entry.level))
+})
+
+function normalizeIssueMessage(value) {
+  return value.trim().replace(/^\w+:\s*/, '').replace(/\s+/g, ' ')
+}
+
+const groupedIssueLogs = computed(() => {
+  const grouped = new Map()
+
+  issueLogs.value
+    .slice(-200)
+    .reverse()
+    .forEach((entry) => {
+      const message = normalizeIssueMessage(entry.value)
+      const key = `${entry.level}:${message}`
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          ...entry,
+          message,
+          count: 1
+        })
+        return
+      }
+
+      grouped.get(key).count += 1
+    })
+
+  return Array.from(grouped.values())
+})
+
+const fatalCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Fatal').length)
+const warningCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Warning').length)
+const errorCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Error').length)
+const recentIssues = computed(() => groupedIssueLogs.value.slice(0, 4))
+const issueCounters = computed(() => [
+  buildIssueCounter(fatalCount.value, 'index.fatal_issues', 'fatal'),
+  buildIssueCounter(warningCount.value, 'index.warning_issues', 'warning'),
+  buildIssueCounter(errorCount.value, 'index.error_issues', 'error')
+])
+const hasIssueCounts = computed(() => fatalCount.value > 0 || warningCount.value > 0 || errorCount.value > 0)
+
+const healthState = computed(() => {
+  if (fatalCount.value > 0) return 'critical'
+  if (warningCount.value > 0 || errorCount.value > 0) return 'warning'
+  return 'healthy'
+})
+
+const healthLabel = computed(() => {
+  switch (healthState.value) {
+    case 'critical':
+      return 'Critical'
+    case 'warning':
+      return 'Warning'
+    default:
+      return 'Healthy'
+  }
+})
+
+const healthHeading = computed(() => {
+  switch (healthState.value) {
+    case 'critical':
+      return 'Startup issues need attention'
+    case 'warning':
+      return 'Host health looks mixed'
+    default:
+      return 'Polaris looks healthy'
+  }
+})
+
+const healthDescription = computed(() => {
+  switch (healthState.value) {
+    case 'critical':
+      return 'Polaris detected fatal startup problems. Resolve these before trusting the host for real sessions.'
+    case 'warning':
+      return 'Polaris is running, but recent warnings or errors still need attention.'
+    default:
+      return 'No recent fatal, warning, or error lines are present in the active Polaris log.'
+  }
+})
+
+const healthBadgeClass = computed(() => {
+  switch (healthState.value) {
+    case 'critical':
+      return 'border-red-500/30 bg-red-500/10 text-red-200'
+    case 'warning':
+      return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+    default:
+      return 'border-green-500/30 bg-green-500/10 text-green-200'
+  }
+})
+
+const versionSummary = computed(() => {
+  if (!version.value) return ''
+  if (buildVersionIsDirty.value) return 'Local dirty build'
+  if (installedVersionNotStable.value) return 'Running a newer prerelease or local build than the latest stable tag'
+  if (stableBuildAvailable.value) return 'A newer stable release is available on GitHub'
+  if (notifyPreReleases.value && preReleaseBuildAvailable.value) return 'A newer prerelease is available on GitHub'
+  return 'Current with the latest public release'
+})
+
+function issueBadgeClass(level) {
+  switch (level) {
+    case 'Fatal':
+      return 'border border-red-500/30 bg-red-500/10 text-red-200'
+    case 'Warning':
+      return 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
+    default:
+      return 'border border-storm/30 bg-deep/60 text-storm'
+  }
+}
+
+function buildIssueCounter(count, label, tone) {
+  if (count === 0) {
+    return {
+      count,
+      label,
+      cardClass: 'border border-storm/20 bg-deep/60',
+      valueClass: 'text-silver',
+      labelClass: 'text-storm'
+    }
+  }
+
+  if (tone === 'fatal') {
+    return {
+      count,
+      label,
+      cardClass: 'border border-red-500/20 bg-red-500/10',
+      valueClass: 'text-red-300',
+      labelClass: 'text-red-200/70'
+    }
+  }
+
+  if (tone === 'warning') {
+    return {
+      count,
+      label,
+      cardClass: 'border border-amber-300/20 bg-amber-300/10',
+      valueClass: 'text-amber-200',
+      labelClass: 'text-amber-200/70'
+    }
+  }
+
+  return {
+    count,
+    label,
+    cardClass: 'border border-blue-400/20 bg-blue-400/10',
+    valueClass: 'text-blue-200',
+    labelClass: 'text-blue-200/70'
+  }
+}
+
+function formatAudioName(sink) {
+  const matchUsb = sink.match(/usb-(.+?)-\d+\./)
+  if (matchUsb) return matchUsb[1].replace(/_/g, ' ')
+  const matchTail = sink.match(/\.([^.]+)$/)
+  if (matchTail) return matchTail[1].replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  return sink.length > 30 ? `${sink.substring(0, 30)}…` : sink
+}
+
+function formatAudioDetail(sink) {
+  if (!sink) return ''
+  if (sink.includes('usb-')) return 'USB output sink active.'
+  if (sink.includes('hdmi')) return 'HDMI output sink active.'
+  if (sink.includes('analog')) return 'Analog output sink active.'
+  return 'Host output sink active.'
+}
+
+function formatDisplayName(display) {
+  const base = display.friendly_name || display.name || display.id || 'Display'
+  if (display.width && display.height) {
+    return `${base} · ${display.width}×${display.height}`
+  }
+  return base
+}
+
+const sessionModeDescription = computed(() => {
+  const mode = String(sessionType.value || '').toLowerCase()
+  if (!mode) return ''
+  if (mode.includes('wayland')) return 'Wayland compositor active.'
+  if (mode.includes('x11')) return 'X11 desktop session active.'
+  if (mode.includes('headless')) return 'Headless compositor active.'
+  return 'Live compositor mode reported by the host.'
+})
+
+async function copyVersion() {
+  if (!version.value?.version || !navigator.clipboard) return
+  await navigator.clipboard.writeText(version.value.version)
+  copiedVersion.value = true
+  window.setTimeout(() => {
+    copiedVersion.value = false
+  }, 1800)
+}
+
 ;(async () => {
   try {
-    let config = await fetch("./api/config").then((r) => r.json())
+    const config = await fetch('./api/config', { credentials: 'include' }).then((r) => r.json())
     notifyPreReleases.value = config.notify_pre_releases
     version.value = new PolarisVersion(null, config.version)
-    githubVersion.value = new PolarisVersion(await fetch("https://api.github.com/repos/papi/Polaris/releases/latest").then((r) => r.json()), null)
+    githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((r) => r.json()), null)
     if (githubVersion.value) {
-      preReleaseVersion.value = new PolarisVersion((await fetch("https://api.github.com/repos/papi/Polaris/releases").then((r) => r.json())).find(release => release.prerelease), null)
+      preReleaseVersion.value = new PolarisVersion((await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.json())).find((release) => release.prerelease), null)
     }
-  } catch (e) {
+  } catch {
     // GitHub API may be blocked by CSP — version check is non-critical
   }
   try {
-    logs.value = (await fetch("./api/logs").then(r => r.text()))
-  } catch (e) {
-    console.error(e)
+    logs.value = await fetch('./api/logs', { credentials: 'include' }).then((r) => r.text())
+  } catch (error) {
+    console.error(error)
   }
   loading.value = false
 })()

@@ -1,12 +1,6 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import Checkbox from '../../Checkbox.vue'
-
-const sections = ref({
-  basics: true,
-  commands: false,
-  features: true
-})
 
 const props = defineProps({
   platform: String,
@@ -52,24 +46,17 @@ function addCmd(cmdArr, template, idx) {
 function removeCmd(cmdArr, index) {
   cmdArr.splice(index,1)
 }
-
-onMounted(() => {
-  // Set default value for enable_pairing if not present
-  if (config.value.enable_pairing === undefined) {
-    config.value.enable_pairing = "enabled"
-  }
-})
 </script>
 
 <template>
   <div id="general" class="config-page space-y-4">
-    <!-- Basics Section -->
-    <div class="card p-4">
-      <button class="flex items-center justify-between w-full text-left" @click="sections.basics = !sections.basics">
-        <span class="text-sm font-semibold text-ice uppercase tracking-wider">Basics</span>
-        <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': sections.basics }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-      </button>
-      <div v-show="sections.basics" class="mt-4 space-y-3">
+    <section class="settings-section">
+      <div class="settings-section-header">
+        <div class="section-kicker">Identity</div>
+        <h3 class="settings-section-title">Host basics</h3>
+        <p class="settings-section-copy">Set the visible Polaris identity, UI language, and log verbosity that shape day-to-day host administration.</p>
+      </div>
+      <div class="settings-inline-stack">
 
     <!-- Locale -->
     <div>
@@ -124,16 +111,16 @@ onMounted(() => {
       <div class="text-sm text-storm mt-1">{{ $t('config.min_log_level_desc') }}</div>
     </div>
 
-      </div><!-- end basics content -->
-    </div><!-- end basics card -->
+      </div>
+    </section>
 
-    <!-- Commands Section -->
-    <div class="card p-4">
-      <button class="flex items-center justify-between w-full text-left" @click="sections.commands = !sections.commands">
-        <span class="text-sm font-semibold text-ice uppercase tracking-wider">Commands</span>
-        <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': sections.commands }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-      </button>
-      <div v-show="sections.commands" class="mt-4 space-y-3">
+    <section class="settings-section">
+      <div class="settings-section-header">
+        <div class="section-kicker">Automation</div>
+        <h3 class="settings-section-title">Preparation and lifecycle commands</h3>
+        <p class="settings-section-copy">Run host-side commands before apps launch, when sessions resume, and when server shortcuts are triggered from clients.</p>
+      </div>
+      <div class="settings-inline-stack">
 
     <!-- Global Prep/State Commands -->
     <div v-for="type in ['prep', 'state']" :id="`global_${type}_cmd`" class="d-flex flex-column">
@@ -230,32 +217,16 @@ onMounted(() => {
       </button>
     </div>
 
-      </div><!-- end commands content -->
-    </div><!-- end commands card -->
+      </div>
+    </section>
 
-    <!-- Features Section -->
-    <div class="card p-4">
-      <button class="flex items-center justify-between w-full text-left" @click="sections.features = !sections.features">
-        <span class="text-sm font-semibold text-ice uppercase tracking-wider">Features</span>
-        <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': sections.features }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-      </button>
-      <div v-show="sections.features" class="mt-4 space-y-3">
-
-    <!-- Enable Pairing -->
-    <Checkbox class="mb-3"
-              id="enable_pairing"
-              locale-prefix="config"
-              v-model="config.enable_pairing"
-              default="true"
-    ></Checkbox>
-
-    <!-- Enable Discovery -->
-    <Checkbox class="mb-3"
-              id="enable_discovery"
-              locale-prefix="config"
-              v-model="config.enable_discovery"
-              default="true"
-    ></Checkbox>
+    <section class="settings-section">
+      <div class="settings-section-header">
+        <div class="section-kicker">Desktop & updates</div>
+        <h3 class="settings-section-title">Host UI behavior</h3>
+        <p class="settings-section-copy">Keep the desktop-side Polaris experience predictable, from update notifications to tray visibility and admin controls.</p>
+      </div>
+      <div class="settings-inline-stack">
 
     <!-- Notify Pre-Releases -->
     <Checkbox class="mb-3"
@@ -281,18 +252,24 @@ onMounted(() => {
               default="false"
     ></Checkbox>
 
-    <!-- SteamGridDB API Key -->
-    <div class="mt-3">
-      <label for="steamgriddb_api_key" class="block text-sm font-medium text-storm mb-1">SteamGridDB API Key</label>
-      <input type="password" id="steamgriddb_api_key"
-             class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
-             v-model="config.steamgriddb_api_key"
-             placeholder="Enter your SteamGridDB API key" />
-      <div class="text-xs text-storm mt-1">Enables cover art search for non-Steam games (Lutris, Heroic, manual). Get a free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" class="text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
-    </div>
+      </div>
+    </section>
 
-      </div><!-- end features content -->
-    </div><!-- end features card -->
+    <section class="settings-section settings-section-compact">
+      <div class="settings-section-header">
+        <div class="section-kicker">Metadata</div>
+        <h3 class="settings-section-title">Artwork integration</h3>
+        <p class="settings-section-copy">Connect SteamGridDB so Polaris can fetch artwork for non-Steam entries in your library.</p>
+      </div>
+      <div class="mt-1">
+        <label for="steamgriddb_api_key" class="block text-sm font-medium text-storm mb-1">SteamGridDB API Key</label>
+        <input type="password" id="steamgriddb_api_key"
+               class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+               v-model="config.steamgriddb_api_key"
+               placeholder="Enter your SteamGridDB API key" />
+        <div class="text-xs text-storm mt-1">Enables cover art search for non-Steam games. Get a free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" class="text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
+      </div>
+    </section>
   </div>
 </template>
 

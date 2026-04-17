@@ -21,7 +21,23 @@ using namespace std::literals;
 namespace device_db {
 
   static std::unordered_map<std::string, device_t> devices;
+  static std::unordered_map<std::string, std::string> canonical_aliases;
   static std::once_flag load_flag;
+
+  static std::string normalize_name_token(const std::string &name) {
+    std::string normalized;
+    normalized.reserve(name.size());
+    for (const unsigned char ch : name) {
+      if (std::isalnum(ch)) {
+        normalized.push_back(static_cast<char>(std::tolower(ch)));
+      }
+    }
+    return normalized;
+  }
+
+  static void register_canonical_alias(const std::string &alias, const std::string &canonical) {
+    canonical_aliases[normalize_name_token(alias)] = canonical;
+  }
 
   /**
    * @brief Embedded default device database.
@@ -29,18 +45,23 @@ namespace device_db {
    */
   static void load_defaults() {
     // --- Handhelds ---
-    devices["RP6"] = {
+    devices["RetroidPocket6"] = {
       "handheld", "1920x1080x60", "hevc", 15000, 2, false, true, 3,
       "Retroid Pocket 6 — Android handheld, 1080p landscape, WiFi 6"
     };
-    devices["Retroid Pocket 6"] = devices["RP6"];
-    devices["RetroidPocket6"] = devices["RP6"];
+    devices["RP6"] = devices["RetroidPocket6"];
+    devices["Retroid Pocket 6"] = devices["RetroidPocket6"];
+    register_canonical_alias("RetroidPocket6", "RetroidPocket6");
+    register_canonical_alias("RP6", "RetroidPocket6");
+    register_canonical_alias("Retroid Pocket 6", "RetroidPocket6");
 
-    devices["Retroid Pocket Flip 2"] = {
+    devices["RetroidPocketFlip2"] = {
       "handheld", "1920x1080x60", "hevc", 15000, 2, false, true, 3,
       "Retroid Pocket Flip 2 — Android clamshell handheld, 5.5-inch 1080p, WiFi 6"
     };
-    devices["RetroidPocketFlip2"] = devices["Retroid Pocket Flip 2"];
+    devices["Retroid Pocket Flip 2"] = devices["RetroidPocketFlip2"];
+    register_canonical_alias("RetroidPocketFlip2", "RetroidPocketFlip2");
+    register_canonical_alias("Retroid Pocket Flip 2", "RetroidPocketFlip2");
 
     devices["RP5"] = {
       "handheld", "1280x720x60", "hevc", 10000, 2, false, true, 3,
@@ -73,11 +94,15 @@ namespace device_db {
       "Google Pixel 10 — 1080x2340, 120Hz, AV1/HEVC, WiFi 6E"
     };
     devices["pxl-10-papi"] = devices["Pixel 10"]; // Michael's specific device
+    register_canonical_alias("Pixel 10", "Pixel 10");
+    register_canonical_alias("pxl-10-papi", "Pixel 10");
     devices["Pixel10Pro"] = {
       "phone", "2992x1344x120", "av1", 30000, 2, true, true, 3,
       "Google Pixel 10 Pro — 1344x2992, 120Hz LTPO OLED, AV1/HEVC, WiFi 7"
     };
     devices["Pixel 10 Pro"] = devices["Pixel10Pro"];
+    register_canonical_alias("Pixel10Pro", "Pixel10Pro");
+    register_canonical_alias("Pixel 10 Pro", "Pixel10Pro");
 
     devices["Pixel 9"] = {
       "phone", "2424x1080x120", "hevc", 20000, 2, true, true, 3,
@@ -182,40 +207,64 @@ namespace device_db {
    */
   std::optional<device_t> get_device(const std::string &name) {
     load();
-
-    // Exact match
-    auto it = devices.find(name);
+    const auto canonical = canonicalize_name(name);
+    auto it = devices.find(canonical);
     if (it != devices.end()) return it->second;
+    return std::nullopt;
+  }
 
-    // Case-insensitive exact match
-    std::string lower_name = name;
-    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
-    for (const auto &[key, val] : devices) {
-      std::string lower_key = key;
-      std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
-      if (lower_key == lower_name) return val;
+  std::string canonicalize_name(const std::string &name) {
+    load();
+
+    if (name.empty()) {
+      return name;
     }
 
-    // Case-insensitive substring match (e.g., "pxl-10-papi" contains "pixel 10")
+    if (devices.find(name) != devices.end()) {
+      const auto alias = canonical_aliases.find(normalize_name_token(name));
+      return alias != canonical_aliases.end() ? alias->second : name;
+    }
+
+    const auto normalized_name = normalize_name_token(name);
+    const auto alias = canonical_aliases.find(normalized_name);
+    if (alias != canonical_aliases.end()) {
+      return alias->second;
+    }
+
     for (const auto &[key, val] : devices) {
-      std::string lower_key = key;
-      std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
-      if (lower_name.find(lower_key) != std::string::npos ||
-          lower_key.find(lower_name) != std::string::npos) {
-        return val;
+      (void) val;
+      const auto normalized_key = normalize_name_token(key);
+      if (normalized_key == normalized_name) {
+        const auto exact_alias = canonical_aliases.find(normalized_key);
+        return exact_alias != canonical_aliases.end() ? exact_alias->second : key;
       }
     }
 
-    return std::nullopt;
+    for (const auto &[key, val] : devices) {
+      (void) val;
+      const auto normalized_key = normalize_name_token(key);
+      if (normalized_name.find(normalized_key) != std::string::npos ||
+          normalized_key.find(normalized_name) != std::string::npos) {
+        const auto fuzzy_alias = canonical_aliases.find(normalized_key);
+        return fuzzy_alias != canonical_aliases.end() ? fuzzy_alias->second : key;
+      }
+    }
+
+    return name;
   }
 
   optimization_t get_optimization(const std::string &device_name, const std::string &app_name) {
     optimization_t opt;
     opt.source = "device_db";
+    opt.cache_status = "fallback";
+    opt.confidence = "high";
+    opt.signals_used = {"device_profile"};
 
     auto dev = get_device(device_name);
     if (!dev) {
       opt.reasoning = "Unknown device '" + device_name + "' — using client defaults";
+      opt.confidence = "low";
+      opt.signals_used = {"safe_defaults"};
       return opt;
     }
 

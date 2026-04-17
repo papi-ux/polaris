@@ -1,20 +1,16 @@
 <template>
-  <div class="space-y-6 pb-2">
-    <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-      <div>
-        <h1 class="text-2xl font-bold text-silver">{{ $t('troubleshooting.troubleshooting') }}</h1>
-        <p class="mt-2 max-w-3xl text-sm text-storm">{{ $t('troubleshooting.overview') }}</p>
+  <div class="page-shell pb-2">
+    <section class="page-header">
+      <div class="page-heading">
+        <h1 class="page-title">{{ $t('troubleshooting.troubleshooting') }}</h1>
+        <p class="page-subtitle">{{ $t('troubleshooting.overview') }}</p>
       </div>
-      <div class="flex flex-wrap items-center gap-2 text-xs">
-        <span class="rounded-full border px-2.5 py-1"
-              :class="streamStatsConnected ? 'border-green-500/40 bg-green-500/10 text-green-300' : 'border-storm/40 bg-deep/60 text-storm'">
-          {{ streamStatsConnected ? $t('troubleshooting.session_snapshot_connected') : $t('troubleshooting.session_snapshot_disconnected') }}
-        </span>
-        <span v-if="platform" class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-storm">
+      <div class="page-meta">
+        <span v-if="platform" class="meta-pill">
           {{ platform }}
         </span>
       </div>
-    </div>
+    </section>
 
     <section class="space-y-3">
       <div>
@@ -22,8 +18,12 @@
         <p class="mt-1 text-sm text-storm">{{ $t('troubleshooting.quick_recovery_desc') }}</p>
       </div>
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <div class="card flex h-full flex-col p-4">
-          <h3 id="close_apps" class="text-lg font-semibold text-silver">{{ $t('troubleshooting.force_close') }}</h3>
+        <div class="surface-subtle flex h-full flex-col border-green-500/15 p-4">
+          <div class="flex items-center justify-between gap-3">
+            <span class="rounded-full bg-green-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-green-300">{{ $t('troubleshooting.recovery_rank_1') }}</span>
+            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_1_label') }}</span>
+          </div>
+          <h3 id="close_apps" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.force_close') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.force_close_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="closeAppStatus === true">
             {{ $t('troubleshooting.force_close_success') }}
@@ -32,27 +32,35 @@
             {{ $t('troubleshooting.force_close_error') }}
           </div>
           <div class="mt-4">
-            <button class="inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="closeAppPressed" @click="closeApp">
+            <button class="focus-ring inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="closeAppPressed" @click="closeApp">
               {{ $t('troubleshooting.force_close') }}
             </button>
           </div>
         </div>
 
-        <div class="card flex h-full flex-col p-4">
-          <h3 id="restart" class="text-lg font-semibold text-silver">{{ $t('troubleshooting.restart_polaris') }}</h3>
+        <div class="surface-subtle flex h-full flex-col border-amber-300/15 p-4">
+          <div class="flex items-center justify-between gap-3">
+            <span class="rounded-full bg-amber-300/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-200">{{ $t('troubleshooting.recovery_rank_2') }}</span>
+            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_2_label') }}</span>
+          </div>
+          <h3 id="restart" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.restart_polaris') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.restart_polaris_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="serverRestarting">
             {{ $t('troubleshooting.restart_polaris_success') }}
           </div>
           <div class="mt-4">
-            <button class="inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="serverQuitting || serverRestarting" @click="restart">
+            <button class="focus-ring inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="serverQuitting || serverRestarting" @click="restart">
               {{ $t('troubleshooting.restart_polaris') }}
             </button>
           </div>
         </div>
 
-        <div class="card flex h-full flex-col p-4">
-          <h3 id="quit" class="text-lg font-semibold text-silver">{{ $t('troubleshooting.quit_polaris') }}</h3>
+        <div class="surface-subtle flex h-full flex-col border-red-500/15 p-4">
+          <div class="flex items-center justify-between gap-3">
+            <span class="rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-red-300">{{ $t('troubleshooting.recovery_rank_3') }}</span>
+            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_3_label') }}</span>
+          </div>
+          <h3 id="quit" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.quit_polaris') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.quit_polaris_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="serverQuit">
             {{ $t('troubleshooting.quit_polaris_success') }}
@@ -61,14 +69,18 @@
             {{ $t('troubleshooting.quit_polaris_success_ongoing') }}
           </div>
           <div class="mt-4">
-            <button class="inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="serverQuitting || serverRestarting" @click="quit">
+            <button class="focus-ring inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="serverQuitting || serverRestarting" @click="quit">
               {{ $t('troubleshooting.quit_polaris') }}
             </button>
           </div>
         </div>
 
-        <div class="card flex h-full flex-col p-4" v-if="platform === 'windows'">
-          <h3 id="dd_reset" class="text-lg font-semibold text-silver">{{ $t('troubleshooting.dd_reset') }}</h3>
+        <div class="surface-subtle flex h-full flex-col border-sky-400/15 p-4" v-if="platform === 'windows'">
+          <div class="flex items-center justify-between gap-3">
+            <span class="rounded-full bg-sky-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-200">Optional</span>
+            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">Display reset</span>
+          </div>
+          <h3 id="dd_reset" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.dd_reset') }}</h3>
           <p class="mt-2 flex-1 whitespace-pre-line text-sm text-storm">{{ $t('troubleshooting.dd_reset_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="ddResetStatus === true">
             {{ $t('troubleshooting.dd_reset_success') }}
@@ -77,7 +89,7 @@
             {{ $t('troubleshooting.dd_reset_error') }}
           </div>
           <div class="mt-4">
-            <button class="inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="ddResetPressed" @click="ddResetPersistence">
+            <button class="focus-ring inline-flex h-9 items-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="ddResetPressed" @click="ddResetPersistence">
               {{ $t('troubleshooting.dd_reset') }}
             </button>
           </div>
@@ -86,7 +98,7 @@
     </section>
 
     <section class="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.9fr)]">
-      <div class="card p-4">
+      <div class="section-card">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h2 id="session_snapshot" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.session_snapshot') }}</h2>
@@ -120,23 +132,50 @@
         </template>
       </div>
 
-      <div class="card p-4">
+      <div class="section-card">
         <h2 id="diagnostics" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.diagnostics') }}</h2>
         <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.diagnostics_desc') }}</p>
+        <div v-if="groupedRecentIssues.length" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.recent_incidents') }}</div>
+            <div class="text-xs text-storm">{{ groupedRecentIssues.length }} {{ $t('troubleshooting.visible_now') }}</div>
+          </div>
+          <div class="mt-3 space-y-2">
+            <div v-for="(entry, index) in groupedRecentIssues" :key="`${entry.level}-${entry.message}-${index}`" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
+              <div class="flex items-start gap-3">
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]"
+                      :class="entry.level === 'Fatal'
+                        ? 'border border-red-500/30 bg-red-500/10 text-red-200'
+                        : entry.level === 'Warning'
+                          ? 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
+                          : 'border border-storm/30 bg-deep/60 text-storm'">
+                  {{ entry.level }}
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm text-silver break-words">{{ entry.message }}</div>
+                  <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-storm">
+                    <span>{{ entry.timestamp }}</span>
+                    <span v-if="entry.count > 1" class="rounded-full border border-storm/20 bg-void/50 px-2 py-0.5">{{ entry.count }}×</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="mt-4 grid gap-2 sm:grid-cols-2">
-          <button class="rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-all duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" @click="copyRecentIssues">
+          <button class="focus-ring rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" @click="copyRecentIssues">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.copy_recent_issues') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.copy_recent_issues_desc') }}</div>
           </button>
-          <button class="rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-all duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" :disabled="downloadingSupportBundle" @click="downloadSupportBundle">
+          <button class="focus-ring rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" :disabled="downloadingSupportBundle" @click="downloadSupportBundle">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.download_support_bundle') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.download_support_bundle_desc') }}</div>
           </button>
-          <button class="rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-all duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" :disabled="clearingAiCache" @click="clearAiCache">
+          <button class="focus-ring rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" :disabled="clearingAiCache" @click="clearAiCache">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.clear_ai_cache') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.clear_ai_cache_desc') }}</div>
           </button>
-          <button v-if="platform === 'linux'" class="rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-all duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" :disabled="cleaningStaleVirtualDisplay" @click="cleanupStaleVirtualDisplay">
+          <button v-if="platform === 'linux'" class="focus-ring rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50" :disabled="cleaningStaleVirtualDisplay" @click="cleanupStaleVirtualDisplay">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.cleanup_stale_virtual_display') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.cleanup_stale_virtual_display_desc') }}</div>
           </button>
@@ -144,7 +183,7 @@
       </div>
     </section>
 
-    <section class="card p-4">
+    <section class="section-card">
       <div class="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <h2 id="logs" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.logs') }}</h2>
@@ -162,7 +201,15 @@
             </button>
           </div>
           <div class="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
-            <input type="text" class="w-full rounded-lg border border-storm/50 bg-deep px-3 py-1.5 text-sm text-silver focus:border-ice focus:outline-none sm:w-72" v-model="logFilter" :placeholder="$t('troubleshooting.logs_find')">
+            <input
+              type="text"
+              name="logs-filter"
+              autocomplete="off"
+              :aria-label="$t('troubleshooting.logs_find')"
+              class="w-full rounded-lg border border-storm/50 bg-deep px-3 py-1.5 text-sm text-silver focus:border-ice focus:outline-none sm:w-72"
+              v-model="logFilter"
+              :placeholder="$t('troubleshooting.logs_find')"
+            >
             <button
               class="h-8 rounded-md border border-storm/30 px-3 text-xs font-medium text-storm transition-all duration-150 hover:border-storm hover:text-silver disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="clearingLogs"
@@ -174,15 +221,21 @@
         </div>
       </div>
 
-      <div v-if="hasFilteredLogs" class="mt-4">
-        <VirtualLogViewer :logs="actualLogs" :containerHeight="400" @copy="copyLogs" />
-      </div>
-      <div v-else class="mt-4 flex h-[400px] items-center justify-center rounded-xl border border-dashed border-storm/30 bg-deep/40 px-6 text-center">
-        <div>
-          <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.logs_empty') }}</div>
-          <div class="mt-2 text-sm text-storm">{{ $t('troubleshooting.logs_empty_hint') }}</div>
+        <div v-if="logsLoading" class="mt-4 flex h-[320px] items-center justify-center rounded-xl border border-dashed border-storm/30 bg-deep/40 px-6 text-center">
+          <div>
+            <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.logs_loading') }}</div>
+            <div class="mt-2 text-sm text-storm">{{ $t('troubleshooting.logs_empty_hint') }}</div>
+          </div>
         </div>
-      </div>
+        <div v-else-if="hasFilteredLogs" class="mt-4">
+          <VirtualLogViewer :logs="actualLogs" :containerHeight="320" @copy="copyLogs" />
+        </div>
+        <div v-else class="mt-4 flex h-[320px] items-center justify-center rounded-xl border border-dashed border-storm/30 bg-deep/40 px-6 text-center">
+          <div>
+            <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.logs_empty') }}</div>
+            <div class="mt-2 text-sm text-storm">{{ $t('troubleshooting.logs_empty_hint') }}</div>
+          </div>
+        </div>
     </section>
   </div>
 </template>
@@ -235,13 +288,53 @@ function formatResolution(width, height) {
   return `${width}x${height}`
 }
 
-const recentIssueLines = computed(() => (
-  (logs.value || '')
+function normalizeIssueLine(line) {
+  return line.replace(/^\[[^\]]+\]:\s*/, '').replace(/^\w+:\s*/, '').replace(/\s+/g, ' ').trim()
+}
+
+function lineLevel(line) {
+  if (line.includes('Fatal:')) return 'Fatal'
+  if (line.includes('Warning:')) return 'Warning'
+  return 'Error'
+}
+
+function lineTimestamp(line) {
+  const match = line.match(/^\[([^\]]+)\]/)
+  return match ? `[${match[1]}]` : ''
+}
+
+const groupedRecentIssues = computed(() => {
+  const grouped = new Map()
+
+  ;(logs.value || '')
     .split('\n')
     .filter(line => /(Error|Warning|Fatal):/.test(line))
-    .slice(-200)
-    .join('\n')
-))
+    .slice(-300)
+    .reverse()
+    .forEach((line) => {
+      const level = lineLevel(line)
+      const message = normalizeIssueLine(line)
+      const key = `${level}:${message}`
+
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          level,
+          message,
+          timestamp: lineTimestamp(line),
+          count: 1
+        })
+        return
+      }
+
+      grouped.get(key).count += 1
+    })
+
+  return Array.from(grouped.values()).slice(0, 8)
+})
+
+const recentIssueSummaryText = computed(() => groupedRecentIssues.value
+  .map((entry) => `${entry.timestamp} ${entry.level}: ${entry.message}${entry.count > 1 ? ` (${entry.count}x)` : ''}`.trim())
+  .join('\n'))
 
 const sessionSnapshotItems = computed(() => {
   if (!streamStats.value || !streamStats.value.streaming) return []
@@ -291,6 +384,7 @@ const actualLogs = computed(() => {
   return lines.join("\n")
 })
 
+const logsLoading = computed(() => logs.value === 'Loading...')
 const hasFilteredLogs = computed(() => actualLogs.value.trim().length > 0)
 
 function refreshLogs() {
@@ -330,12 +424,12 @@ function copyLogs() {
 }
 
 function copyRecentIssues() {
-  if (!recentIssueLines.value.trim()) {
+  if (!recentIssueSummaryText.value.trim()) {
     showToast(i18n.t('troubleshooting.copy_recent_issues_empty') || 'No recent warnings or errors to copy.', 'info')
     return
   }
 
-  navigator.clipboard.writeText(recentIssueLines.value)
+  navigator.clipboard.writeText(recentIssueSummaryText.value)
   showToast(i18n.t('troubleshooting.copy_recent_issues_success') || 'Recent warnings and errors copied.', 'success')
 }
 
@@ -476,7 +570,7 @@ async function downloadSupportBundle() {
       ai_status: aiStatus,
       ai_cache: aiCache,
       ai_history: aiHistory,
-      recent_issues: recentIssueLines.value ? recentIssueLines.value.split('\n') : [],
+      recent_issues: groupedRecentIssues.value,
       logs: latestLogs || logs.value
     }
 

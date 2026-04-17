@@ -1,11 +1,12 @@
 <script setup>
-import { ref, onMounted, inject } from 'vue'
+import { ref, onMounted, onUnmounted, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 
 const config = ref({})
 const pendingKey = ref(null)
 const i18n = inject('i18n')
 const { toast } = useToast()
+const emit = defineEmits(['change'])
 
 // Defaults for settings not explicitly in the config file
 const defaults = {
@@ -20,6 +21,17 @@ const defaults = {
 function isEnabled(key) {
   const val = config.value[key] ?? defaults[key] ?? 'disabled'
   return val === 'enabled' || val === 'true' || val === true
+}
+
+function syncKey(key, value) {
+  config.value[key] = value
+}
+
+function notifyChange(key, value) {
+  emit('change', { key, value, enabled: value === 'enabled' || value === 'true' || value === true })
+  window.dispatchEvent(new CustomEvent('polaris:quick-control-updated', {
+    detail: { key, value, enabled: value === 'enabled' || value === 'true' || value === true }
+  }))
 }
 
 async function loadConfig() {
@@ -60,7 +72,8 @@ async function toggle(key) {
       body: JSON.stringify(existing)
     })
     if (!response.ok) throw new Error('save-failed')
-    config.value[key] = newVal
+    syncKey(key, newVal)
+    notifyChange(key, newVal)
     toast(
       `${labelFor(key)} ${newVal === 'enabled' ? i18n.t('quick_controls.enabled_now') : i18n.t('quick_controls.disabled_now')}`,
       'success',
@@ -77,7 +90,20 @@ function labelFor(key) {
   return i18n.t(`quick_controls.items.${key}.label`)
 }
 
-onMounted(loadConfig)
+function handleExternalQuickControlUpdate(event) {
+  const detail = event?.detail
+  if (!detail?.key) return
+  syncKey(detail.key, detail.value)
+}
+
+onMounted(() => {
+  loadConfig()
+  window.addEventListener('polaris:quick-control-updated', handleExternalQuickControlUpdate)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('polaris:quick-control-updated', handleExternalQuickControlUpdate)
+})
 
 const toggles = [
   { key: 'headless_mode', requiresRestart: true },
@@ -90,30 +116,38 @@ const toggles = [
 </script>
 
 <template>
-  <div class="space-y-1">
-    <div class="flex items-center justify-between mb-2">
-      <div class="text-[10px] font-semibold text-storm uppercase tracking-wider">{{ $t('quick_controls.title') }}</div>
-      <div class="text-[10px] text-storm">{{ $t('quick_controls.helper') }}</div>
+  <div class="space-y-2">
+    <div class="flex items-start justify-between gap-3">
+      <div>
+        <div class="section-kicker">{{ $t('quick_controls.title') }}</div>
+        <div class="mt-1 text-[11px] text-storm">{{ $t('quick_controls.helper') }}</div>
+      </div>
+      <div class="control-chip whitespace-nowrap">{{ $t('quick_controls.live_default_badge') }}</div>
     </div>
-    <div v-for="t in toggles" :key="t.key"
-         class="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-ice/5 transition-colors cursor-pointer"
-         :class="{ 'opacity-60': pendingKey && pendingKey !== t.key }"
-         @click="toggle(t.key)">
-      <div class="min-w-0">
+    <button
+      v-for="t in toggles"
+      :key="t.key"
+      type="button"
+      class="focus-ring flex w-full items-center justify-between rounded-xl border border-storm/15 bg-deep/35 px-3 py-2.5 text-left transition-[background-color,border-color,color,opacity] duration-200 hover:border-storm/30 hover:bg-ice/5"
+      :class="{ 'opacity-60': pendingKey && pendingKey !== t.key }"
+      :aria-pressed="isEnabled(t.key)"
+      @click="toggle(t.key)"
+    >
+      <div class="min-w-0 pr-3">
         <div class="flex items-center gap-2">
-          <div class="text-xs text-silver font-medium truncate">{{ $t(`quick_controls.items.${t.key}.label`) }}</div>
-          <span class="px-1.5 py-0.5 rounded text-[9px] border border-storm/30 text-storm">
-            {{ t.requiresRestart ? $t('quick_controls.restart_badge') : $t('quick_controls.live_badge') }}
+          <div class="truncate text-sm font-medium text-silver">{{ $t(`quick_controls.items.${t.key}.label`) }}</div>
+          <span v-if="t.requiresRestart" class="control-chip">
+            {{ $t('quick_controls.restart_badge') }}
           </span>
         </div>
-        <div class="text-[9px] text-storm truncate">{{ $t(`quick_controls.items.${t.key}.desc`) }}</div>
+        <div class="mt-1 text-[11px] leading-relaxed text-storm">{{ $t(`quick_controls.items.${t.key}.desc`) }}</div>
       </div>
-      <div class="w-7 h-4 rounded-full transition-colors shrink-0 ml-2 relative"
+      <div class="relative ml-2 h-5 w-9 shrink-0 rounded-full transition-[background-color] duration-200"
            :class="isEnabled(t.key) ? 'bg-accent' : 'bg-storm/40'">
-        <div class="absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform"
-             :class="isEnabled(t.key) ? 'translate-x-3.5' : 'translate-x-0.5'"></div>
+        <div class="absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-200"
+             :class="isEnabled(t.key) ? 'translate-x-4.5' : 'translate-x-0.5'"></div>
       </div>
-    </div>
-    <div v-if="pendingKey" class="text-[9px] text-storm text-center mt-1">{{ $t('quick_controls.saving') }}</div>
+    </button>
+    <div v-if="pendingKey" class="pt-1 text-center text-[11px] text-storm">{{ $t('quick_controls.saving') }}</div>
   </div>
 </template>

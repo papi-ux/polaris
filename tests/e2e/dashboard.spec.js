@@ -3,7 +3,7 @@ import { test, expect } from './fixtures/auth.js'
 test.describe('dashboard', () => {
   test('sidebar navigation renders', async ({ loggedInPage }) => {
     const sidebar = loggedInPage.locator('nav').first()
-    await expect(sidebar.getByRole('link', { name: /dashboard/i })).toBeVisible()
+    await expect(sidebar.getByRole('link', { name: /mission control/i })).toBeVisible()
     await expect(sidebar.getByRole('link', { name: /applications/i })).toBeVisible()
     await expect(sidebar.getByRole('link', { name: /configuration/i })).toBeVisible()
     await expect(sidebar.getByRole('link', { name: /pin/i })).toBeVisible()

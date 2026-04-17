@@ -18,10 +18,13 @@ const outputNamePlaceholder = (props.platform === 'windows') ? '{de9bb7e2-186e-5
     <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="output_name" :placeholder="outputNamePlaceholder"
            v-model="config.output_name"/>
     <div class="text-sm text-storm mt-1">
-      {{ $tp('config.output_name_desc') }}<br>
+      {{ $tp('config.output_name_desc') }}
+    </div>
+    <div class="settings-subtle-surface mt-3 text-sm text-storm">
+      <div class="section-kicker">Example output</div>
       <PlatformLayout :platform="platform">
         <template #windows>
-          <pre style="white-space: pre-line;">
+          <pre class="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-xs text-silver">
             <b>&nbsp;&nbsp;{</b>
             <b>&nbsp;&nbsp;&nbsp;&nbsp;"device_id": "{de9bb7e2-186e-505b-9e93-f48793333810}"</b>
             <b>&nbsp;&nbsp;&nbsp;&nbsp;"display_name": "\\\\.\\DISPLAY1"</b>
@@ -31,7 +34,7 @@ const outputNamePlaceholder = (props.platform === 'windows') ? '{de9bb7e2-186e-5
           </pre>
         </template>
         <template #linux>
-          <pre style="white-space: pre-line;">
+          <pre class="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-xs text-silver">
             Info: Detecting displays
             Info: Detected display: DVI-D-0 (id: 0) connected: false
             Info: Detected display: HDMI-0 (id: 1) connected: true
@@ -41,7 +44,7 @@ const outputNamePlaceholder = (props.platform === 'windows') ? '{de9bb7e2-186e-5
           </pre>
         </template>
         <template #macos>
-          <pre style="white-space: pre-line;">
+          <pre class="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-xs text-silver">
             Info: Detecting displays
             Info: Detected display: Monitor-0 (id: 3) connected: true
             Info: Detected display: Monitor-1 (id: 2) connected: true

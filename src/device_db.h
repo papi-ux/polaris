@@ -9,8 +9,10 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace device_db {
 
@@ -42,6 +44,13 @@ namespace device_db {
     std::optional<std::string> preferred_codec;  ///< "h264", "hevc", or "av1"
     std::string reasoning;         ///< Human-readable explanation
     std::string source;            ///< "device_db", "ai_cached", "ai_live"
+    std::string cache_status;      ///< "hit", "miss", "fallback", "invalidated"
+    std::string confidence;        ///< "high", "medium", "low"
+    std::string normalization_reason;  ///< Explanation for any server-side normalization
+    std::vector<std::string> signals_used;  ///< Main inputs that shaped the recommendation
+    int recommendation_version = 0;
+    int64_t generated_at = 0;
+    int64_t expires_at = 0;
   };
 
   /**
@@ -54,6 +63,11 @@ namespace device_db {
    * Tries exact match first, then case-insensitive substring match.
    */
   std::optional<device_t> get_device(const std::string &name);
+
+  /**
+   * @brief Resolve a device name or alias to the preferred canonical device key.
+   */
+  std::string canonicalize_name(const std::string &name);
 
   /**
    * @brief Get optimization settings for a device + app combination.

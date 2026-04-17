@@ -1,6 +1,6 @@
 <template>
   <div class="my-6" v-if="!showEditForm">
-      <h1 class="text-2xl font-bold text-silver">{{ $t('apps.applications_title') }}</h1>
+      <h1 class="text-2xl font-bold text-silver">{{ $t('navbar.library') }}</h1>
       <div class="text-storm mt-2">{{ $t('apps.applications_desc') }}</div>
       <div class="text-storm">{{ $t('apps.applications_reorder_desc') }}</div>
       <div class="text-storm whitespace-pre-wrap">{{ $t('apps.applications_tips') }}</div>
