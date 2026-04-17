@@ -1,35 +1,34 @@
 <template>
-  <div class="space-y-4 relative">
+  <div class="page-shell relative">
 
-    <!-- Header row -->
-    <div class="flex items-center justify-between">
-      <div>
-        <h1 class="text-2xl font-bold text-silver">{{ $t('dashboard.title') }}</h1>
-        <div class="text-sm text-storm mt-1">{{ actionSummary }}</div>
+    <section class="page-header">
+      <div class="page-heading">
+        <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
+        <div class="page-subtitle">{{ actionSummary }}</div>
       </div>
-      <div class="flex items-center gap-2 text-xs text-storm">
+      <div class="page-meta">
         <span v-if="stats?.streaming" class="pulse-dot"></span>
-        <span :class="stats?.streaming ? 'text-green-400 font-medium' : 'text-storm'">
+        <span class="meta-pill" :class="stats?.streaming ? 'border-green-500/30 bg-green-500/10 text-green-300' : ''">
           {{ stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
         </span>
       </div>
-    </div>
+    </section>
 
-    <div v-if="statsLoaded" class="grid grid-cols-1 lg:grid-cols-3 gap-3">
-      <div class="card p-3">
-        <div class="text-[10px] font-semibold text-storm uppercase tracking-wider">{{ $t('dashboard.primary_focus') }}</div>
-        <div class="text-sm text-silver font-medium mt-1">{{ primaryFocus.title }}</div>
-        <div class="text-[10px] text-storm mt-1">{{ primaryFocus.desc }}</div>
+    <div v-if="statsLoaded" class="grid grid-cols-1 gap-3 lg:grid-cols-3">
+      <div class="surface-subtle p-4">
+        <div class="eyebrow-label">{{ $t('dashboard.primary_focus') }}</div>
+        <div class="mt-2 text-base font-semibold text-silver">{{ primaryFocus.title }}</div>
+        <div class="mt-2 text-sm leading-relaxed text-storm">{{ primaryFocus.desc }}</div>
       </div>
-      <div class="card p-3">
-        <div class="text-[10px] font-semibold text-storm uppercase tracking-wider">{{ $t('dashboard.stream_readiness') }}</div>
-        <div class="text-sm font-medium mt-1" :class="readinessTone">{{ readinessLabel }}</div>
-        <div class="text-[10px] text-storm mt-1">{{ readinessDetail }}</div>
+      <div class="surface-subtle p-4">
+        <div class="eyebrow-label">{{ $t('dashboard.stream_readiness') }}</div>
+        <div class="mt-2 text-base font-semibold" :class="readinessTone">{{ readinessLabel }}</div>
+        <div class="mt-2 text-sm leading-relaxed text-storm">{{ readinessDetail }}</div>
       </div>
-      <div class="card p-3">
-        <div class="text-[10px] font-semibold text-storm uppercase tracking-wider">{{ $t('dashboard.next_step') }}</div>
-        <div class="text-sm text-silver font-medium mt-1">{{ nextStep.title }}</div>
-        <div class="text-[10px] text-storm mt-1">{{ nextStep.desc }}</div>
+      <div class="surface-subtle p-4">
+        <div class="eyebrow-label">{{ $t('dashboard.next_step') }}</div>
+        <div class="mt-2 text-base font-semibold text-silver">{{ nextStep.title }}</div>
+        <div class="mt-2 text-sm leading-relaxed text-storm">{{ nextStep.desc }}</div>
       </div>
     </div>
 
@@ -183,8 +182,8 @@
 
         <!-- RIGHT COLUMN: Controls -->
         <div class="space-y-3">
-          <div class="card p-3">
-            <QuickControls />
+        <div class="card p-3">
+          <QuickControls @change="handleQuickControlChange" />
           </div>
 
           <!-- AI Optimization -->
@@ -222,55 +221,107 @@
     <!-- ═══ IDLE LAYOUT ═══ -->
     <template v-else>
       <!-- At-a-glance status cards -->
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div class="card p-3">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-wider mb-1">{{ $t('dashboard.status') }}</div>
+      <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div class="surface-subtle p-4">
+          <div class="eyebrow-label mb-1">{{ $t('dashboard.status') }}</div>
           <div class="text-lg font-bold text-green-400">{{ $t('dashboard.ready') }}</div>
-          <div class="text-[10px] text-storm mt-0.5">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</div>
+          <div class="mt-1 text-xs text-storm">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</div>
         </div>
-        <div class="card p-3">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-wider mb-1">{{ $t('dashboard.mode') }}</div>
+        <div class="surface-subtle p-4">
+          <div class="eyebrow-label mb-1">{{ $t('dashboard.mode') }}</div>
           <div class="text-lg font-bold" :class="headlessEnabled ? 'text-accent' : 'text-silver'">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</div>
-          <div class="text-[10px] text-storm mt-0.5">{{ headlessEnabled ? $t('dashboard.headless_desc') : $t('dashboard.windowed_desc') }}</div>
+          <div class="mt-1 text-xs text-storm">{{ headlessEnabled ? $t('dashboard.headless_desc') : $t('dashboard.windowed_desc') }}</div>
         </div>
-        <div class="card p-3">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-wider mb-1">GPU</div>
+        <div class="surface-subtle p-4">
+          <div class="eyebrow-label mb-1">GPU</div>
           <div class="text-lg font-bold" :class="gpu?.temperature_c > 65 ? 'text-yellow-400' : 'text-green-400'">{{ gpu?.temperature_c || '--' }}°C</div>
-          <div class="text-[10px] text-storm mt-0.5">{{ gpu?.utilization_pct || 0 }}% load · {{ gpu?.power_draw_w?.toFixed(0) || '--' }}W</div>
+          <div class="mt-1 text-xs text-storm">{{ gpu?.utilization_pct || 0 }}% load · {{ gpu?.power_draw_w?.toFixed(0) || '--' }}W</div>
         </div>
-        <div class="card p-3">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-wider mb-1">AI</div>
+        <div class="surface-subtle p-4">
+          <div class="eyebrow-label mb-1">AI</div>
           <div class="text-lg font-bold" :class="aiStatus?.enabled ? 'text-accent' : 'text-storm'">{{ aiStatus?.enabled ? $t('dashboard.active') : $t('dashboard.off') }}</div>
-          <div class="text-[10px] text-storm mt-0.5">{{ aiStatus?.cache_count || 0 }} {{ $t('dashboard.cached') }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</div>
+          <div class="mt-1 text-xs text-storm">{{ aiStatus?.cache_count || 0 }} {{ $t('dashboard.cached') }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</div>
         </div>
       </div>
 
       <!-- GPU Gauges + Quick Controls -->
-      <div class="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-4">
-        <div class="card p-4" v-if="gpu">
-          <div class="flex items-center justify-between mb-3">
-            <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">{{ gpu.name }}</div>
-            <div class="text-[10px] text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W · {{ gpu.clock_gpu_mhz || gpu.clock_mhz || '--' }} MHz</div>
+      <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div class="section-card space-y-5">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
+              <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
+              <p class="section-copy">{{ headlessEnabled ? $t('dashboard.primary_ready_desc') : $t('dashboard.windowed_desc') }}</p>
+            </div>
+            <span class="meta-pill">
+              {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
+            </span>
           </div>
-          <div class="flex justify-around">
-            <GaugeArc :value="gpu.temperature_c" :max="100" unit="°C" label="Temp"
-                      :thresholds="[{ at: 0, color: '#22c55e' }, { at: 70, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
-            <GaugeArc :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" />
-            <GaugeArc :value="gpu.encoder_pct" :max="100" unit="%" label="NVENC"
-                      :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 60, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
-            <GaugeArc :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM"
-                      :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 70, color: '#eab308' }, { at: 90, color: '#ef4444' }]" />
+
+          <div class="surface-subtle p-4" v-if="gpu">
+            <div class="mb-3 flex items-center justify-between">
+              <div class="eyebrow-label text-silver/80">{{ gpu.name }}</div>
+              <div class="text-[11px] text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W · {{ gpu.clock_gpu_mhz || gpu.clock_mhz || '--' }} MHz</div>
+            </div>
+            <div class="grid grid-cols-2 gap-4 place-items-center xl:grid-cols-4">
+              <GaugeArc :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
+                        :thresholds="[{ at: 0, color: '#22c55e' }, { at: 70, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
+              <GaugeArc :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
+              <GaugeArc :value="gpu.encoder_pct" :max="100" unit="%" label="NVENC" :size="112"
+                        :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 60, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
+              <GaugeArc :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
+                        :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 70, color: '#eab308' }, { at: 90, color: '#ef4444' }]" />
+            </div>
+          </div>
+
+          <div>
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <div class="section-kicker">{{ $t('dashboard.ready_checks') }}</div>
+                <div class="mt-2 text-sm text-storm">{{ $t('dashboard.ready_checks_desc') }}</div>
+              </div>
+              <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                    :class="readyChecksPassing === readyChecks.length ? 'border-green-500/30 bg-green-500/10 text-green-300' : 'border-amber-300/30 bg-amber-300/10 text-amber-200'">
+                {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
+              </span>
+            </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <router-link
+                v-for="check in readyChecks"
+                :key="check.key"
+                :to="check.to"
+                class="focus-ring rounded-xl border px-3 py-3 no-underline transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5"
+                :class="check.cardClass"
+              >
+                <div class="flex items-center justify-between gap-3">
+                  <div class="text-sm font-medium text-silver">{{ check.label }}</div>
+                  <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="check.badgeClass">
+                    {{ check.state }}
+                  </span>
+                </div>
+                <div class="mt-2 text-[11px] text-storm">{{ check.detail }}</div>
+                <div class="mt-3 text-[11px] font-medium text-ice/80">{{ $t('dashboard.open_fix') }}</div>
+              </router-link>
+            </div>
           </div>
         </div>
-        <div class="card p-4">
-          <QuickControls />
+        <div class="section-card">
+          <QuickControls @change="handleQuickControlChange" />
         </div>
       </div>
 
-      <!-- Recent Games + System Info -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div class="card p-4">
-          <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider mb-3">{{ $t('dashboard.recent_games') }}</div>
+      <!-- Recent Games + Launch Deck -->
+      <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div class="section-card">
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
+              <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
+            </div>
+            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
+              {{ $t('navbar.library') }}
+            </router-link>
+          </div>
           <div v-if="recentApps.length" class="space-y-1.5">
             <div v-for="app in recentApps" :key="app.uuid" class="flex items-center gap-3 p-1.5 rounded-lg hover:bg-ice/5 transition-colors">
               <div class="w-8 h-11 rounded bg-void/60 shrink-0 overflow-hidden">
@@ -282,52 +333,50 @@
               </div>
             </div>
           </div>
-          <div v-else class="text-sm text-storm py-4 text-center">{{ $t('dashboard.no_games') }}</div>
+          <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
         </div>
-        <div class="card p-4">
-          <div class="flex items-center gap-2 mb-3">
-            <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">{{ $t('dashboard.system') }}</div>
-            <span class="px-1.5 py-0.5 rounded text-[9px] font-medium bg-accent/15 text-accent" v-if="headlessEnabled">{{ $t('dashboard.headless') }}</span>
-            <span class="px-1.5 py-0.5 rounded text-[9px] font-medium bg-storm/20 text-storm" v-else>{{ $t('dashboard.windowed') }}</span>
-          </div>
-          <div class="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
-            <div v-if="sessionType">
-              <div class="text-[10px] text-storm uppercase">Session</div>
-              <div class="text-silver font-medium capitalize">{{ sessionType }}</div>
-            </div>
-            <div v-if="displays.length">
-              <div class="text-[10px] text-storm uppercase">Display</div>
-              <div class="text-silver font-medium" v-for="d in displays" :key="d.name">
-                {{ d.name }} <span class="text-storm" v-if="d.width">{{ d.width }}x{{ d.height }}</span>
-              </div>
-            </div>
-            <div v-if="audio?.sink">
-              <div class="text-[10px] text-storm uppercase">Audio</div>
-              <div class="text-silver font-medium truncate" :title="audio.sink">{{ formatAudioName(audio.sink) }}</div>
-            </div>
+        <div class="section-card">
+          <div class="flex items-start justify-between gap-3 mb-4">
             <div>
-              <div class="text-[10px] text-storm uppercase">Clients</div>
-              <div class="text-silver font-medium">{{ pairedClients }} paired</div>
+              <div class="section-kicker">{{ $t('dashboard.launch_deck') }}</div>
+              <div class="mt-2 text-sm text-storm max-w-md">{{ $t('dashboard.launch_deck_desc') }}</div>
             </div>
-            <div v-if="aiStatus">
-              <div class="text-[10px] text-storm uppercase">AI Mode</div>
-              <div class="text-silver font-medium">{{ aiStatus.enabled ? (aiStatus.use_subscription ? 'Subscription' : 'API Key') : 'Off' }}</div>
-            </div>
-            <div>
-              <div class="text-[10px] text-storm uppercase">Version</div>
-              <div class="text-silver font-medium">v{{ version }}</div>
-            </div>
+            <span class="px-2 py-1 rounded-full text-[10px] font-medium whitespace-nowrap" :class="headlessEnabled ? 'bg-accent/15 text-accent' : 'bg-storm/20 text-storm'">
+              {{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}
+            </span>
           </div>
-          <div class="flex gap-2 mt-4 pt-3 border-t border-storm/20">
-            <router-link to="/pin" class="inline-flex items-center gap-1.5 h-8 px-3 text-xs bg-ice text-void rounded-lg font-medium hover:bg-ice/90 transition-all no-underline">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
-              {{ $t('dashboard.pair') }}
+          <div class="grid gap-2 sm:grid-cols-3">
+            <router-link to="/apps" class="action-tile">
+              <div class="text-sm font-medium text-silver">{{ $t('navbar.library') }}</div>
+              <div class="mt-1 text-[11px] text-storm">{{ $t('dashboard.launch_deck_library_desc') }}</div>
             </router-link>
-            <router-link to="/config" class="inline-flex items-center gap-1.5 h-8 px-3 text-xs border border-storm text-silver rounded-lg font-medium hover:border-ice hover:text-ice transition-all no-underline">
-              {{ $t('dashboard.configure') }}
+            <router-link to="/pin" class="action-tile">
+              <div class="text-sm font-medium text-silver">{{ $t('navbar.pairing') }}</div>
+              <div class="mt-1 text-[11px] text-storm">{{ $t('dashboard.launch_deck_pairing_desc') }}</div>
             </router-link>
-            <router-link to="/apps" class="inline-flex items-center gap-1.5 h-8 px-3 text-xs border border-storm text-silver rounded-lg font-medium hover:border-ice hover:text-ice transition-all no-underline">
-              {{ $t('dashboard.apps') }}
+            <router-link to="/config" class="action-tile">
+              <div class="text-sm font-medium text-silver">{{ $t('navbar.settings') }}</div>
+              <div class="mt-1 text-[11px] text-storm">{{ $t('dashboard.launch_deck_settings_desc') }}</div>
+            </router-link>
+          </div>
+          <div class="surface-subtle mt-4 px-3 py-3">
+            <div class="eyebrow-label">{{ $t('dashboard.host_context') }}</div>
+            <div class="mt-3 flex flex-wrap gap-2 text-[11px] text-silver">
+              <span class="data-pill">
+                {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
+              </span>
+              <span class="data-pill">
+                {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
+              </span>
+              <span class="data-pill" v-if="audio?.sink">
+                {{ formatAudioName(audio.sink) }}
+              </span>
+              <span class="data-pill">
+                v{{ version }}
+              </span>
+            </div>
+            <router-link to="/info" class="mt-3 inline-flex text-[11px] font-medium text-ice no-underline hover:text-ice/80">
+              {{ $t('dashboard.host_context_desc') }}
             </router-link>
           </div>
         </div>
@@ -374,18 +423,18 @@
         <span v-else class="text-sm text-silver/60">Idle</span>
       </div>
       <div class="flex items-center gap-2">
-        <button v-if="!recording.active" @click="startRecording"
-                class="inline-flex items-center gap-1.5 h-7 px-2.5 text-xs font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200">
+              <button v-if="!recording.active" @click="startRecording"
+                class="focus-ring inline-flex h-7 items-center gap-1.5 rounded-lg bg-red-500 px-2.5 text-xs font-medium text-white transition-[background-color,box-shadow] duration-200 hover:bg-red-600">
           <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></svg>
           Record
         </button>
         <button v-if="recording.active" @click="stopRecording"
-                class="inline-flex items-center gap-1.5 h-7 px-2.5 text-xs font-medium rounded-lg border border-storm text-silver hover:border-ice hover:text-ice transition-all duration-200">
+                class="focus-ring inline-flex h-7 items-center gap-1.5 rounded-lg border border-storm px-2.5 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice">
           <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
           Stop
         </button>
         <button @click="saveReplay"
-                class="inline-flex items-center gap-1.5 h-7 px-2.5 text-xs font-medium rounded-lg border border-storm text-silver hover:border-ice hover:text-ice transition-all duration-200">
+                class="focus-ring inline-flex h-7 items-center gap-1.5 rounded-lg border border-storm px-2.5 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice">
           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
           Save Replay
         </button>
@@ -471,8 +520,11 @@ const aiCacheKeys = ref([])
 const sessionHistory = ref([])
 const recentApps = ref([])
 const pairedClients = ref(0)
+const appCatalogCount = ref(0)
 const version = ref('')
 const headlessEnabled = ref(false)
+const discoveryEnabled = ref(false)
+const pairingEnabled = ref(false)
 const { t } = useI18n()
 
 const actionSummary = computed(() => {
@@ -513,6 +565,92 @@ const nextStep = computed(() => {
   if (!pairedClients.value) return { title: t('dashboard.next_step_pair'), desc: t('dashboard.next_step_pair_desc') }
   return { title: t('dashboard.next_step_launch'), desc: t('dashboard.next_step_launch_desc') }
 })
+
+const readyChecks = computed(() => {
+  const items = [
+    {
+      key: 'clients',
+      to: '/pin',
+      ok: pairedClients.value > 0,
+      label: t('dashboard.check_clients'),
+      detail: pairedClients.value > 0
+        ? t('dashboard.check_clients_ok', { count: pairedClients.value })
+        : t('dashboard.check_clients_missing')
+    },
+    {
+      key: 'library',
+      to: '/apps',
+      ok: appCatalogCount.value > 0,
+      label: t('dashboard.check_library'),
+      detail: appCatalogCount.value > 0
+        ? t('dashboard.check_library_ok', { count: appCatalogCount.value })
+        : t('dashboard.check_library_missing')
+    },
+    {
+      key: 'discovery',
+      to: '/config#enable_discovery',
+      ok: discoveryEnabled.value,
+      label: t('dashboard.check_discovery'),
+      detail: discoveryEnabled.value
+        ? t('dashboard.check_discovery_ok')
+        : t('dashboard.check_discovery_missing')
+    },
+    {
+      key: 'pairing',
+      to: '/config#enable_pairing',
+      ok: pairingEnabled.value,
+      label: t('dashboard.check_pairing'),
+      detail: pairingEnabled.value
+        ? t('dashboard.check_pairing_ok')
+        : t('dashboard.check_pairing_missing')
+    },
+    {
+      key: 'display',
+      to: '/config#output_name',
+      ok: displays.value.length > 0,
+      label: t('dashboard.check_display'),
+      detail: displays.value.length > 0
+        ? t('dashboard.check_display_ok', { count: displays.value.length })
+        : t('dashboard.check_display_missing')
+    },
+    {
+      key: 'audio',
+      to: '/config#audio_sink',
+      ok: Boolean(audio.value?.sink),
+      label: t('dashboard.check_audio'),
+      detail: audio.value?.sink
+        ? t('dashboard.check_audio_ok')
+        : t('dashboard.check_audio_missing')
+    }
+  ]
+
+  return items.map((item) => ({
+    ...item,
+    state: item.ok ? t('dashboard.check_state_ready') : t('dashboard.check_state_attention'),
+    cardClass: item.ok
+      ? 'border-green-500/15 bg-green-500/5 hover:border-green-500/30 hover:bg-green-500/8'
+      : 'border-amber-300/15 bg-amber-300/5 hover:border-amber-300/30 hover:bg-amber-300/8',
+    badgeClass: item.ok ? 'bg-green-500/10 text-green-300' : 'bg-amber-300/10 text-amber-200'
+  }))
+})
+
+const readyChecksPassing = computed(() => readyChecks.value.filter((item) => item.ok).length)
+
+function handleQuickControlChange({ key, enabled }) {
+  switch (key) {
+    case 'enable_discovery':
+      discoveryEnabled.value = enabled
+      break
+    case 'enable_pairing':
+      pairingEnabled.value = enabled
+      break
+    case 'headless_mode':
+      headlessEnabled.value = enabled
+      break
+    default:
+      break
+  }
+}
 
 // Check if current streaming client has AI-optimized settings
 const aiOptimizedClient = computed(() => {
@@ -874,6 +1012,8 @@ async function fetchSystemInfo() {
       systemInfo.gpuDriver = config.gpu_driver || ''
       systemInfo.version = config.version || ''
       streamingOutput.value = config.linux_streaming_output || config.output_name || ''
+      discoveryEnabled.value = config.enable_discovery !== 'disabled'
+      pairingEnabled.value = config.enable_pairing !== 'disabled'
     }
     if (clientsRes.ok) {
       const clients = await clientsRes.json()
@@ -1114,6 +1254,7 @@ onMounted(async () => {
       const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
       // Sort by last-launched (most recent first), take top 5
       apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
+      appCatalogCount.value = apps.length
       recentApps.value = apps.slice(0, 5)
     }
   } catch {}
@@ -1132,6 +1273,8 @@ onMounted(async () => {
       const data = await res.json()
       version.value = data.version || '0.0.0'
       headlessEnabled.value = data.headless_mode === 'enabled'
+      discoveryEnabled.value = data.enable_discovery !== 'disabled'
+      pairingEnabled.value = data.enable_pairing !== 'disabled'
     }
   } catch {}
 

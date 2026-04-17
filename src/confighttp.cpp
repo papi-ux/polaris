@@ -212,6 +212,17 @@ namespace confighttp {
       }
     }
 
+    std::vector<std::string> steam_library_launch_commands(const std::string &appid) {
+#ifdef __linux__
+      return {
+        "setsid steam -gamepadui",
+        "setsid bash -lc \"sleep 6; steam steam://rungameid/" + appid + " >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch " + appid + " >/dev/null 2>&1 || true\""
+      };
+#else
+      return { "setsid steam steam://rungameid/" + appid };
+#endif
+    }
+
     std::optional<fs::path> executable_dir() {
 #ifdef _WIN32
       wchar_t path[MAX_PATH];
@@ -1195,14 +1206,16 @@ namespace confighttp {
         if (fields["name"].find("Steam Linux Runtime") != std::string::npos) continue;
         if (fields["name"].find("Steamworks") != std::string::npos) continue;
 
-        std::string launch_cmd = "setsid steam steam://rungameid/" + fields["appid"];
-        bool already = existing_cmds.count(launch_cmd) > 0;
+        auto launch_cmds = steam_library_launch_commands(fields["appid"]);
+        bool already = std::all_of(launch_cmds.begin(), launch_cmds.end(), [&](const auto &cmd) {
+          return existing_cmds.count(cmd) > 0;
+        });
 
         nlohmann::json game;
         game["appid"] = fields["appid"];
         game["name"] = fields["name"];
         game["cover_url"] = "https://steamcdn-a.akamaihd.net/steam/apps/" + fields["appid"] + "/library_600x900_2x.jpg";
-        game["cmd"] = launch_cmd;
+        game["cmd"] = launch_cmds.empty() ? "" : launch_cmds.front();
         game["source"] = "steam";
         game["already_imported"] = already;
         steam_games.push_back(game);
@@ -1436,7 +1449,12 @@ namespace confighttp {
         app["source"] = source;
 
         if (source == "steam" && !appid.empty()) {
-          app["detached"] = nlohmann::json::array({ "setsid steam steam://rungameid/" + appid });
+          app["detached"] = steam_library_launch_commands(appid);
+          app["prep-cmd"] = nlohmann::json::array({
+            {
+              {"undo", "setsid steam -shutdown"}
+            }
+          });
           app["steam-appid"] = appid;
 
           // Download cover art from Steam CDN to local covers directory
@@ -1631,6 +1649,26 @@ namespace confighttp {
     response->write(device_db::get_all_devices_json(), headers);
   }
 
+  void appendOptimizationJson(nlohmann::json &output, const device_db::optimization_t &opt) {
+    if (opt.display_mode) output["display_mode"] = *opt.display_mode;
+    if (opt.color_range) output["color_range"] = *opt.color_range;
+    if (opt.hdr.has_value()) output["hdr"] = *opt.hdr;
+    if (opt.virtual_display.has_value()) output["virtual_display"] = *opt.virtual_display;
+    if (opt.target_bitrate_kbps) output["target_bitrate_kbps"] = *opt.target_bitrate_kbps;
+    if (opt.nvenc_tune) output["nvenc_tune"] = *opt.nvenc_tune;
+    if (opt.preferred_codec) output["preferred_codec"] = *opt.preferred_codec;
+    output["reasoning"] = opt.reasoning;
+    output["reasoning_summary"] = opt.reasoning;
+    output["source"] = opt.source;
+    output["cache_status"] = opt.cache_status;
+    output["confidence"] = opt.confidence;
+    output["signals_used"] = opt.signals_used;
+    output["normalization_reason"] = opt.normalization_reason;
+    output["recommendation_version"] = opt.recommendation_version;
+    output["generated_at"] = opt.generated_at;
+    output["expires_at"] = opt.expires_at;
+  }
+
   void getDeviceSuggestion(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -1643,14 +1681,7 @@ namespace confighttp {
     nlohmann::json output;
     output["status"] = true;
     output["device_name"] = name;
-    if (opt.display_mode) output["display_mode"] = *opt.display_mode;
-    if (opt.color_range) output["color_range"] = *opt.color_range;
-    if (opt.hdr) output["hdr"] = *opt.hdr;
-    if (opt.virtual_display) output["virtual_display"] = *opt.virtual_display;
-    if (opt.target_bitrate_kbps) output["target_bitrate_kbps"] = *opt.target_bitrate_kbps;
-    if (opt.nvenc_tune) output["nvenc_tune"] = *opt.nvenc_tune;
-    output["reasoning"] = opt.reasoning;
-    output["source"] = opt.source;
+    appendOptimizationJson(output, opt);
     send_response(response, output);
   }
 
@@ -1766,15 +1797,7 @@ namespace confighttp {
         output["model"] = ai_cfg.model;
         output["auth_mode"] = ai_cfg.auth_mode;
         output["base_url"] = ai_cfg.base_url;
-        if (result->display_mode) output["display_mode"] = *result->display_mode;
-        if (result->color_range) output["color_range"] = *result->color_range;
-        if (result->hdr) output["hdr"] = *result->hdr;
-        if (result->virtual_display) output["virtual_display"] = *result->virtual_display;
-        if (result->target_bitrate_kbps) output["target_bitrate_kbps"] = *result->target_bitrate_kbps;
-        if (result->nvenc_tune) output["nvenc_tune"] = *result->nvenc_tune;
-        if (result->preferred_codec) output["preferred_codec"] = *result->preferred_codec;
-        output["reasoning"] = result->reasoning;
-        output["source"] = result->source;
+        appendOptimizationJson(output, *result);
       } else {
         output["status"] = false;
         output["error"] = "Connection test failed — check provider settings and logs";
@@ -1810,14 +1833,7 @@ namespace confighttp {
       auto result = ai_optimizer::request_sync(device, app, gpu);
       if (result) {
         output["status"] = true;
-        if (result->display_mode) output["display_mode"] = *result->display_mode;
-        if (result->color_range) output["color_range"] = *result->color_range;
-        if (result->hdr) output["hdr"] = *result->hdr;
-        if (result->virtual_display) output["virtual_display"] = *result->virtual_display;
-        if (result->target_bitrate_kbps) output["target_bitrate_kbps"] = *result->target_bitrate_kbps;
-        if (result->nvenc_tune) output["nvenc_tune"] = *result->nvenc_tune;
-        output["reasoning"] = result->reasoning;
-        output["source"] = result->source;
+        appendOptimizationJson(output, *result);
       } else {
         output["status"] = false;
         output["error"] = "AI optimization failed — check provider settings and logs";

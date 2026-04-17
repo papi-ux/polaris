@@ -196,10 +196,10 @@ Polaris takes a different route:
 | Runtime | Isolated `labwc` streaming compositor |
 | Capture | GPU-native capture when available, clear fallback visibility when not |
 | Dashboard | Preview, charts, runtime path, controls, and diagnostics |
-| Library | Steam, Lutris, Heroic imports and SteamGridDB art |
+| Library | Steam, Lutris, Heroic imports, SteamGridDB art, and Linux Steam launch handling that keeps Gamepad UI inside the isolated stream runtime |
 | Pairing | Trusted Pair (TOFU), QR, manual PIN |
-| Sessions | Ownership, viewers, watch mode, session state, quality feedback |
-| Optimization | Adaptive bitrate, AI optimizer, per-game tuning, live host controls |
+| Sessions | Ownership, viewers, watch mode, session state, target-relative quality grading, and client-report aware feedback |
+| Optimization | Adaptive bitrate, AI optimizer, confidence/cache state, recovery invalidation, per-game tuning, and live host controls |
 
 ## Use with Nova
 
@@ -211,6 +211,7 @@ Polaris takes a different route:
 | Headless vs Virtual Display | Nova can present both choices directly in the library instead of silently guessing |
 | 10-bit SDR | Nova can explicitly request a Main10 stream even on SDR handheld panels when the host supports it |
 | Watch Stream | A second device can join as a viewer without taking over the owner session |
+| AI recommendations | Nova can distinguish baseline device tuning, live AI, cached AI, recovery tuning, and host-adjusted runtime notes |
 | Live tuning | Adaptive Bitrate, AI Optimizer, and MangoHud can be surfaced directly in Nova’s quick menu |
 | Session truth | HUD and quick menu can show live server-backed mode, role, shutdown state, and tuning state |
 
@@ -314,6 +315,8 @@ flowchart TB
 - `linux_prefer_gpu_native_capture=enabled` keeps the intent to prefer DMA-BUF and GPU-native capture, but Polaris will surface SHM fallback explicitly when the current stack cannot hold the fast path.
 - Deferred headless encoder capabilities are primed before first launch negotiation so Main10 support is advertised correctly on the first real launch.
 - Runtime stats surface the requested mode, effective mode, capture transport, frame residency, and frame format.
+- AI recovery stores both latest-session results and rolling trend data, grades sessions against the actual target FPS, and invalidates poor cached recommendations automatically.
+- Steam library launches use an isolated Linux Gamepad UI bootstrap/cleanup path so Steam titles stay in-stream instead of bouncing back to the host desktop.
 - On Linux, Polaris uses RealtimeKit when available so thread-priority elevation can still succeed even when the user service inherits conservative limits.
 
 </details>

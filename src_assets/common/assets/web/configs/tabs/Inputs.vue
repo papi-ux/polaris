@@ -13,16 +13,21 @@ const config = ref(props.config)
 
 <template>
   <div id="input" class="config-page">
-    <!-- Enable Gamepad Input -->
-    <Checkbox class="mb-3"
-              id="controller"
-              locale-prefix="config"
-              v-model="config.controller"
-              default="true"
-    ></Checkbox>
+    <section class="settings-section">
+      <div class="settings-section-header">
+        <div class="section-kicker">Controllers</div>
+        <h3 class="settings-section-title">Gamepad handling</h3>
+        <p class="settings-section-copy">Choose how Polaris emulates controllers on the host and how automatic DS4 or DS5 mapping should behave.</p>
+      </div>
 
-    <!-- Emulated Gamepad Type -->
-    <div class="mb-3" v-if="config.controller === 'enabled' && platform !== 'macos'">
+      <Checkbox class="mb-3"
+                id="controller"
+                locale-prefix="config"
+                v-model="config.controller"
+                default="true"
+      ></Checkbox>
+
+      <div class="mb-3" v-if="config.controller === 'enabled' && platform !== 'macos'">
       <label for="gamepad" class="block text-sm font-medium text-storm mb-1">{{ $t('config.gamepad') }}</label>
       <select id="gamepad" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.gamepad">
         <option value="auto">{{ $t('_common.auto') }}</option>
@@ -41,10 +46,9 @@ const config = ref(props.config)
         </PlatformLayout>
       </select>
       <div class="text-sm text-storm mt-1">{{ $t('config.gamepad_desc') }}</div>
-    </div>
+      </div>
 
-    <!-- Additional options based on gamepad type -->
-    <template v-if="config.controller === 'enabled'">
+      <template v-if="config.controller === 'enabled'">
       <template v-if="config.gamepad === 'ds4' || config.gamepad === 'ds5' || (config.gamepad === 'auto' && platform !== 'macos')">
         <details class="mb-3 bg-deep rounded-xl border border-storm" open>
           <summary class="px-4 py-3 cursor-pointer text-silver font-medium hover:text-ice transition-colors">
@@ -89,69 +93,76 @@ const config = ref(props.config)
           </div>
         </details>
       </template>
-    </template>
+      </template>
 
-    <!-- Home/Guide Button Emulation Timeout -->
-    <div class="mb-3" v-if="config.controller === 'enabled'">
+      <div class="mb-3" v-if="config.controller === 'enabled'">
       <label for="back_button_timeout" class="block text-sm font-medium text-storm mb-1">{{ $t('config.back_button_timeout') }}</label>
       <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="back_button_timeout" placeholder="-1"
              v-model="config.back_button_timeout" />
       <div class="text-sm text-storm mt-1">{{ $t('config.back_button_timeout_desc') }}</div>
-    </div>
+      </div>
+    </section>
 
-    <!-- Enable Keyboard Input -->
-    <div class="border-t border-storm my-3"></div>
-    <Checkbox class="mb-3"
-              id="keyboard"
-              locale-prefix="config"
-              v-model="config.keyboard"
-              default="true"
-    ></Checkbox>
+    <section class="settings-section">
+      <div class="settings-section-header">
+        <div class="section-kicker">Keyboard</div>
+        <h3 class="settings-section-title">Keyboard passthrough</h3>
+        <p class="settings-section-copy">Tune repeat behavior and compatibility so host shortcuts, desktop navigation, and keyboard-heavy titles behave correctly.</p>
+      </div>
 
-    <!-- Key Repeat Delay-->
-    <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
+      <Checkbox class="mb-3"
+                id="keyboard"
+                locale-prefix="config"
+                v-model="config.keyboard"
+                default="true"
+      ></Checkbox>
+
+      <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
       <label for="key_repeat_delay" class="block text-sm font-medium text-storm mb-1">{{ $t('config.key_repeat_delay') }}</label>
       <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="key_repeat_delay" placeholder="500"
              v-model="config.key_repeat_delay" />
       <div class="text-sm text-storm mt-1">{{ $t('config.key_repeat_delay_desc') }}</div>
-    </div>
+      </div>
 
-    <!-- Key Repeat Frequency-->
-    <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
+      <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
       <label for="key_repeat_frequency" class="block text-sm font-medium text-storm mb-1">{{ $t('config.key_repeat_frequency') }}</label>
       <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="key_repeat_frequency" placeholder="24.9"
              v-model="config.key_repeat_frequency" />
       <div class="text-sm text-storm mt-1">{{ $t('config.key_repeat_frequency_desc') }}</div>
-    </div>
+      </div>
 
-    <!-- Always send scancodes -->
-    <Checkbox v-if="config.keyboard === 'enabled' && platform === 'windows'"
-              class="mb-3"
-              id="always_send_scancodes"
-              locale-prefix="config"
-              v-model="config.always_send_scancodes"
-              default="true"
-    ></Checkbox>
+      <Checkbox v-if="config.keyboard === 'enabled' && platform === 'windows'"
+                class="mb-3"
+                id="always_send_scancodes"
+                locale-prefix="config"
+                v-model="config.always_send_scancodes"
+                default="true"
+      ></Checkbox>
 
-    <!-- Mapping Key AltRight to Key Windows -->
-    <Checkbox v-if="config.keyboard === 'enabled'"
-              class="mb-3"
-              id="key_rightalt_to_key_win"
-              locale-prefix="config"
-              v-model="config.key_rightalt_to_key_win"
-              default="false"
-    ></Checkbox>
+      <Checkbox v-if="config.keyboard === 'enabled'"
+                class="mb-3"
+                id="key_rightalt_to_key_win"
+                locale-prefix="config"
+                v-model="config.key_rightalt_to_key_win"
+                default="false"
+      ></Checkbox>
+    </section>
 
-    <!-- Enable Mouse Input -->
-    <div class="border-t border-storm my-3"></div>
-    <Checkbox class="mb-3"
-              id="mouse"
-              locale-prefix="config"
-              v-model="config.mouse"
-              default="true"
-    ></Checkbox>
+    <section class="settings-section">
+      <div class="settings-section-header">
+        <div class="section-kicker">Mouse & Touch</div>
+        <h3 class="settings-section-title">Pointer and touch input</h3>
+        <p class="settings-section-copy">Control mouse capture, cursor visibility, scrolling fidelity, and native pen or touch passthrough.</p>
+      </div>
 
-    <div v-if="config.mouse === 'enabled'" class="border border-storm/30 rounded-lg p-4 mb-3 bg-deep/40">
+      <Checkbox class="mb-3"
+                id="mouse"
+                locale-prefix="config"
+                v-model="config.mouse"
+                default="true"
+      ></Checkbox>
+
+      <div v-if="config.mouse === 'enabled'" class="border border-storm/30 rounded-lg p-4 mb-3 bg-deep/40">
       <div class="flex items-center justify-between gap-4">
         <div>
           <div class="text-sm font-medium text-silver">Show Host Cursor in Stream</div>
@@ -170,44 +181,47 @@ const config = ref(props.config)
           <div class="w-9 h-5 bg-storm/40 peer-focus:outline-none rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
         </label>
       </div>
-    </div>
+      </div>
 
-    <!-- High resolution scrolling support -->
-    <Checkbox v-if="config.mouse === 'enabled'"
-              class="mb-3"
-              id="high_resolution_scrolling"
-              locale-prefix="config"
-              v-model="config.high_resolution_scrolling"
-              default="true"
-    ></Checkbox>
+      <Checkbox v-if="config.mouse === 'enabled'"
+                class="mb-3"
+                id="high_resolution_scrolling"
+                locale-prefix="config"
+                v-model="config.high_resolution_scrolling"
+                default="true"
+      ></Checkbox>
 
-    <!-- Native pen/touch support -->
-    <Checkbox v-if="config.mouse === 'enabled'"
-              class="mb-3"
-              id="native_pen_touch"
-              locale-prefix="config"
-              v-model="config.native_pen_touch"
-              default="true"
-    ></Checkbox>
+      <Checkbox v-if="config.mouse === 'enabled'"
+                class="mb-3"
+                id="native_pen_touch"
+                locale-prefix="config"
+                v-model="config.native_pen_touch"
+                default="true"
+      ></Checkbox>
+    </section>
 
-    <!-- Enable Input Only Mode -->
-    <div class="border-t border-storm my-3"></div>
-    <Checkbox class="mb-3"
-              id="enable_input_only_mode"
-              locale-prefix="config"
-              v-model="config.enable_input_only_mode"
-              default="false"
-    ></Checkbox>
+    <section class="settings-section settings-section-compact">
+      <div class="settings-section-header">
+        <div class="section-kicker">Accessories</div>
+        <h3 class="settings-section-title">Extended input options</h3>
+        <p class="settings-section-copy">Expose input-only mode for TV workflows and forward rumble where the host platform supports it.</p>
+      </div>
 
-    <!-- Enable Rumble Messages to Controllers -->
-    <div class="border-t border-storm my-3"></div>
-    <Checkbox v-if="platform === 'windows'"
-              class="mb-3"
-              id="forward_rumble"
-              locale-prefix="config"
-              v-model="config.forward_rumble"
-              default="true"
-    ></Checkbox>
+      <Checkbox class="mb-3"
+                id="enable_input_only_mode"
+                locale-prefix="config"
+                v-model="config.enable_input_only_mode"
+                default="false"
+      ></Checkbox>
+
+      <Checkbox v-if="platform === 'windows'"
+                class="mb-3"
+                id="forward_rumble"
+                locale-prefix="config"
+                v-model="config.forward_rumble"
+                default="true"
+      ></Checkbox>
+    </section>
 
   </div>
 </template>

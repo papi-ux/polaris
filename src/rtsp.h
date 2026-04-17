@@ -62,6 +62,10 @@ namespace rtsp_stream {
     std::optional<std::string> preferred_codec;
     std::string optimization_source;
     std::string optimization_reasoning;
+    std::string optimization_confidence;
+    std::string optimization_cache_status;
+    std::string optimization_normalization_reason;
+    int optimization_recommendation_version = 0;
     std::string pacing_policy;
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;

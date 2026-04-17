@@ -1,60 +1,59 @@
 <template>
-  <div class="flex flex-col gap-4 my-6">
-    <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-      <div>
-        <h1 class="text-2xl font-bold text-silver">{{ $t('config.configuration') }}</h1>
-        <p class="text-sm text-storm mt-2 max-w-2xl">{{ $t('config.configuration_desc') }}</p>
+  <div class="page-shell">
+    <section class="page-header">
+      <div class="page-heading">
+        <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
+        <p class="page-subtitle max-w-2xl">{{ $t('config.configuration_desc') }}</p>
       </div>
-      <div v-if="config" class="grid grid-cols-2 gap-2 w-full lg:w-auto lg:min-w-[360px]">
-        <div class="card p-3">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-wider">{{ $t('config.summary_active_tab') }}</div>
-          <div class="text-sm text-silver font-medium mt-1">{{ activeTabMeta?.name || 'General' }}</div>
-          <div class="text-[10px] text-storm mt-1">{{ activeTabSummary }}</div>
-        </div>
-        <div class="card p-3">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-wider">{{ $t('config.summary_state') }}</div>
-          <div class="text-sm font-medium mt-1" :class="hasUnsavedChanges ? 'text-amber-300' : 'text-green-400'">
-            {{ hasUnsavedChanges ? $t('config.unsaved_changes') : $t('config.all_changes_saved') }}
-          </div>
-          <div class="text-[10px] text-storm mt-1">
-            {{ searchQuery ? searchSummary : $t('config.summary_state_desc') }}
-          </div>
-        </div>
+      <div v-if="config" class="page-meta">
+        <span class="meta-pill">{{ activePanelTitle }}</span>
+        <span class="meta-pill">{{ activePanelGroupLabel }}</span>
+        <span class="meta-pill" :class="hasUnsavedChanges ? 'border-amber-300/40 bg-amber-300/10 text-amber-300' : 'border-green-400/30 bg-green-400/10 text-green-300'">
+          {{ hasUnsavedChanges ? $t('config.unsaved_changes') : $t('config.all_changes_saved') }}
+        </span>
+        <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
       </div>
-    </div>
+    </section>
 
-    <div class="sticky top-4 z-20 glass rounded-2xl border border-storm/40 p-4">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div class="min-w-0">
-          <div class="text-[10px] font-semibold text-storm uppercase tracking-wider">{{ $t('config.action_center') }}</div>
-          <div class="text-sm text-silver font-medium mt-1">
-            {{ hasUnsavedChanges ? $t('config.unsaved_banner') : $t('config.saved_banner') }}
-          </div>
-          <div class="text-[10px] text-storm mt-1">
-            {{ saved ? $t('config.apply_note') : $t('config.restart_note_hint') }}
-          </div>
+    <section class="section-card settings-command-bar sticky top-4 z-20">
+      <div class="settings-command-copy">
+        <div class="section-kicker">{{ $t('config.action_center') }}</div>
+        <div class="settings-command-title">
+          {{ hasUnsavedChanges ? $t('config.unsaved_banner') : $t('config.saved_banner') }}
         </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="px-2 py-1 rounded-full text-[10px] border border-storm/30 text-storm">{{ visibleTabCountLabel }}</span>
-          <span v-if="hasUnsavedChanges" class="px-2 py-1 rounded-full text-[10px] border border-amber-300/40 text-amber-300">{{ $t('config.pending_badge') }}</span>
-          <span v-else class="px-2 py-1 rounded-full text-[10px] border border-green-400/30 text-green-400">{{ $t('config.synced_badge') }}</span>
-          <button class="inline-flex items-center gap-2 h-9 px-4 text-sm font-medium rounded-lg border border-storm text-silver hover:border-ice hover:text-ice transition-all duration-200 disabled:opacity-50" @click="resetLocalChanges" :disabled="!hasUnsavedChanges || saving || restarting">
+        <div class="settings-command-note">
+          {{ saved ? $t('config.apply_note') : $t('config.restart_note_hint') }}
+        </div>
+      </div>
+
+      <div class="settings-command-tools">
+        <div class="settings-command-meta">
+          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
+          <span v-if="hasUnsavedChanges" class="meta-pill border-amber-300/40 bg-amber-300/10 text-amber-300">{{ $t('config.pending_badge') }}</span>
+          <span v-else class="meta-pill border-green-400/30 bg-green-400/10 text-green-300">{{ $t('config.synced_badge') }}</span>
+        </div>
+
+        <input
+          v-model="searchQuery"
+          type="text"
+          :placeholder="$t('config.search_placeholder')"
+          class="focus-ring settings-search-input"
+          @input="onSearch"
+        >
+
+        <div class="settings-command-actions">
+          <button class="focus-ring settings-action-button settings-action-button-secondary" @click="resetLocalChanges" :disabled="!hasUnsavedChanges || saving || restarting">
             {{ $t('config.reset_local') }}
           </button>
-          <button class="inline-flex items-center gap-2 h-9 px-4 text-sm font-medium rounded-lg bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] transition-all duration-200 disabled:opacity-50" @click="save" :disabled="!config || !hasUnsavedChanges || saving || restarting" tabindex="0">
+          <button class="focus-ring settings-action-button settings-action-button-primary" @click="save" :disabled="!config || !hasUnsavedChanges || saving || restarting" tabindex="0">
             {{ saving ? $t('config.saving') : $t('_common.save') }}
           </button>
-          <button class="inline-flex items-center gap-2 h-9 px-4 text-sm font-medium rounded-lg bg-ice/20 text-ice hover:bg-ice/30 hover:shadow-[0_0_24px_rgba(34,197,94,0.2)] transition-all duration-200 disabled:opacity-50" @click="apply" :disabled="!config || saving || restarting || (!saved && !hasUnsavedChanges)" tabindex="0">
+          <button class="focus-ring settings-action-button settings-action-button-accent" @click="apply" :disabled="!config || saving || restarting || (!saved && !hasUnsavedChanges)" tabindex="0">
             {{ restarting ? $t('config.restarting') : $t('_common.apply') }}
           </button>
         </div>
       </div>
-    </div>
-
-    <input v-model="searchQuery" type="text" :placeholder="$t('config.search_placeholder')"
-           class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
-           @input="onSearch">
-  </div>
+    </section>
 
   <!-- Skeleton while loading -->
   <div v-if="!config" class="space-y-4">
@@ -64,91 +63,137 @@
     <Skeleton type="card" />
   </div>
 
-  <div v-if="config">
-    <!-- Tab navigation (hidden during search) -->
-    <div v-if="!searchQuery" class="flex flex-wrap gap-1 border-b border-storm mb-4">
-      <button
-        v-for="tab in tabs"
-        :key="tab.id"
-        class="px-4 py-2 text-sm font-medium rounded-t-lg transition-colors"
-        :class="tab.id === currentTab ? 'bg-twilight text-ice border-b-2 border-ice' : 'text-storm hover:text-silver hover:bg-twilight/50'"
-        @click="currentTab = tab.id"
-        :tabindex="0"
-      >
-        {{tab.name}}
-      </button>
+  <div v-if="config" class="settings-workspace">
+    <aside class="section-card settings-sidebar">
+      <div class="section-kicker">Settings Map</div>
+      <h2 class="section-title">Tune Polaris by area</h2>
+      <p class="section-copy">Jump between core host setup and runtime tuning without fighting the old full-width tab strip.</p>
+
+      <div class="settings-nav-groups">
+        <div v-for="group in tabGroups" :key="group.id" class="settings-nav-group">
+          <div class="settings-nav-group-title">{{ group.label }}</div>
+          <div class="settings-nav-list">
+            <button
+              v-for="item in group.items"
+              :key="item.id"
+              class="focus-ring settings-nav-button"
+              :class="{ 'is-active': item.id === activeNavId }"
+              @click="selectNavTab(item.id)"
+              :tabindex="0"
+            >
+              <span class="settings-nav-name">{{ item.name }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="settings-main">
+      <div class="settings-mobile-tabs">
+        <button
+          v-for="item in mobileNavItems"
+          :key="item.id"
+          class="focus-ring settings-mobile-tab"
+          :class="{ 'is-active': item.id === activeNavId }"
+          @click="selectNavTab(item.id)"
+          :tabindex="0"
+        >
+          {{ item.name }}
+        </button>
+      </div>
+
+      <section class="section-card settings-tab-hero">
+        <div class="settings-tab-hero-copy">
+          <div class="section-kicker">{{ activePanelGroupLabel }}</div>
+          <h2 class="settings-tab-title">{{ activePanelTitle }}</h2>
+          <p class="settings-tab-copy">{{ activePanelSummary }}</p>
+        </div>
+        <div class="settings-tab-meta">
+          <span class="meta-pill">{{ activePanelGroupLabel }}</span>
+          <span v-if="currentTabIsEncoder" class="meta-pill">{{ activeTabMeta?.name }}</span>
+          <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
+          <span class="meta-pill">{{ hasUnsavedChanges ? $t('config.pending_badge') : $t('config.synced_badge') }}</span>
+        </div>
+      </section>
+
+      <section v-if="currentTabIsEncoder" class="section-card settings-subnav-card">
+        <div class="section-kicker">Encoder Switcher</div>
+        <div class="settings-subnav-row">
+          <button
+            v-for="tab in encoderTabs"
+            :key="tab.id"
+            class="focus-ring settings-subnav-button"
+            :class="{ 'is-active': tab.id === currentTab }"
+            @click="currentTab = tab.id"
+            :tabindex="0"
+          >
+            {{ tab.name }}
+          </button>
+        </div>
+      </section>
+
+      <div ref="settingsContentRef" class="settings-tab-content">
+        <general
+          v-if="shouldShowTab('general')"
+          :config="config"
+          :global-prep-cmd="global_prep_cmd"
+          :global-state-cmd="global_state_cmd"
+          :server-cmd="server_cmd"
+          :platform="platform">
+        </general>
+
+        <inputs
+          v-if="shouldShowTab('input')"
+          :config="config"
+          :platform="platform">
+        </inputs>
+
+        <audio-video
+          v-if="shouldShowTab('av')"
+          :config="config"
+          :platform="platform"
+          :vdisplay="vdisplayStatus"
+        >
+        </audio-video>
+
+        <network
+          v-if="shouldShowTab('network')"
+          :config="config"
+          :platform="platform">
+        </network>
+
+        <files
+          v-if="shouldShowTab('files')"
+          :config="config"
+          :platform="platform">
+        </files>
+
+        <advanced
+          v-if="shouldShowTab('advanced')"
+          :config="config"
+          :platform="platform">
+        </advanced>
+
+        <ai-optimizer
+          v-if="shouldShowTab('ai')"
+          :config="config">
+        </ai-optimizer>
+
+        <container-encoders
+          :current-tab="searchQuery ? currentTab : currentTab"
+          :config="config"
+          :platform="platform">
+        </container-encoders>
+      </div>
     </div>
-
-    <!-- Search results indicator -->
-    <div v-if="searchQuery" class="text-sm text-storm mb-4">
-      {{ searchSummary }}
-    </div>
-
-    <!-- General Tab -->
-    <general
-      v-if="shouldShowTab('general')"
-      :config="config"
-      :global-prep-cmd="global_prep_cmd"
-      :global-state-cmd="global_state_cmd"
-      :server-cmd="server_cmd"
-      :platform="platform">
-    </general>
-
-    <!-- Input Tab -->
-    <inputs
-      v-if="shouldShowTab('input')"
-      :config="config"
-      :platform="platform">
-    </inputs>
-
-    <!-- Audio/Video Tab -->
-    <audio-video
-      v-if="shouldShowTab('av')"
-      :config="config"
-      :platform="platform"
-      :vdisplay="vdisplayStatus"
-    >
-    </audio-video>
-
-    <!-- Network Tab -->
-    <network
-      v-if="shouldShowTab('network')"
-      :config="config"
-      :platform="platform">
-    </network>
-
-    <!-- Files Tab -->
-    <files
-      v-if="shouldShowTab('files')"
-      :config="config"
-      :platform="platform">
-    </files>
-
-    <!-- Advanced Tab -->
-    <advanced
-      v-if="shouldShowTab('advanced')"
-      :config="config"
-      :platform="platform">
-    </advanced>
-
-    <!-- AI Optimizer Tab -->
-    <ai-optimizer
-      v-if="shouldShowTab('ai')"
-      :config="config">
-    </ai-optimizer>
-
-    <container-encoders
-      :current-tab="searchQuery ? 'all' : currentTab"
-      :config="config"
-      :platform="platform">
-    </container-encoders>
   </div>
 
   <div class="h-4"></div>
+  </div>
 </template>
 
 <script setup>
-import { ref, computed, provide, onMounted, inject, watch, onUnmounted } from 'vue'
+import { ref, computed, provide, onMounted, inject, watch, onUnmounted, nextTick } from 'vue'
 import General from '../configs/tabs/General.vue'
 import Inputs from '../configs/tabs/Inputs.vue'
 import Network from '../configs/tabs/Network.vue'
@@ -178,10 +223,16 @@ const global_state_cmd = ref([])
 const server_cmd = ref([])
 const searchQuery = ref("")
 const initialSerialized = ref("")
+const settingsContentRef = ref(null)
+let searchHighlightTimeout = null
+let highlightedSearchTarget = null
 const tabs = ref([
   {
     id: "general",
     name: "General",
+    group: "core",
+    groupLabel: "Core Setup",
+    summary: "Identity, logging, desktop UI behavior, metadata integrations, and automation commands.",
     options: {
       "locale": "en",
       "sunshine_name": "",
@@ -200,6 +251,9 @@ const tabs = ref([
   {
     id: "input",
     name: "Input",
+    group: "core",
+    groupLabel: "Core Setup",
+    summary: "Controller, keyboard, mouse, cursor, and touch passthrough behavior.",
     options: {
       "controller": "enabled",
       "gamepad": "auto",
@@ -225,6 +279,9 @@ const tabs = ref([
   {
     id: "av",
     name: "Audio/Video",
+    group: "core",
+    groupLabel: "Core Setup",
+    summary: "Capture strategy, audio routing, display outputs, virtual display management, and stream delivery controls.",
     options: {
       "audio_sink": "",
       "virtual_sink": "",
@@ -261,6 +318,9 @@ const tabs = ref([
   {
     id: "network",
     name: "Network",
+    group: "core",
+    groupLabel: "Core Setup",
+    summary: "Discovery, pairing access, ports, encryption, web UI exposure, and trusted networks.",
     options: {
       "upnp": "disabled",
       "address_family": "ipv4",
@@ -276,6 +336,9 @@ const tabs = ref([
   {
     id: "files",
     name: "Config Files",
+    group: "host",
+    groupLabel: "Host & Runtime",
+    summary: "Paths for apps, logs, certificates, credentials, and runtime state.",
     options: {
       "file_apps": "",
       "credentials_file": "",
@@ -288,6 +351,9 @@ const tabs = ref([
   {
     id: "advanced",
     name: "Advanced",
+    group: "host",
+    groupLabel: "Host & Runtime",
+    summary: "Compatibility flags, codec advertising, capture path, and encoder selection.",
     options: {
       "fec_percentage": 20,
       "qp": 28,
@@ -305,6 +371,9 @@ const tabs = ref([
   {
     id: "ai",
     name: "AI",
+    group: "host",
+    groupLabel: "Host & Runtime",
+    summary: "Provider choice, runtime behavior, cache policy, and optimization defaults.",
     options: {
       "ai_enabled": "disabled",
       "ai_provider": "anthropic",
@@ -320,6 +389,9 @@ const tabs = ref([
   {
     id: "nv",
     name: "NVIDIA NVENC Encoder",
+    group: "encoders",
+    groupLabel: "Encoder Profiles",
+    summary: "Latency, bitrate shaping, AQ, and NVIDIA-specific hardware encode behavior.",
     options: {
       "nvenc_preset": 1,
       "nvenc_twopass": "quarter_res",
@@ -335,6 +407,9 @@ const tabs = ref([
   {
     id: "qsv",
     name: "Intel QuickSync Encoder",
+    group: "encoders",
+    groupLabel: "Encoder Profiles",
+    summary: "Intel preset, entropy coding, and HEVC fallback behavior.",
     options: {
       "qsv_preset": "medium",
       "qsv_coder": "auto",
@@ -344,6 +419,9 @@ const tabs = ref([
   {
     id: "amd",
     name: "AMD AMF Encoder",
+    group: "encoders",
+    groupLabel: "Encoder Profiles",
+    summary: "AMF rate control, quality, VBAQ, and AMD-specific encode tuning.",
     options: {
       "amd_usage": "ultralowlatency",
       "amd_rc": "vbr_latency",
@@ -357,6 +435,9 @@ const tabs = ref([
   {
     id: "vt",
     name: "VideoToolbox Encoder",
+    group: "encoders",
+    groupLabel: "Encoder Profiles",
+    summary: "Apple VideoToolbox entropy coding, realtime mode, and software fallback.",
     options: {
       "vt_coder": "auto",
       "vt_software": "auto",
@@ -366,6 +447,9 @@ const tabs = ref([
   {
     id: "vaapi",
     name: "VA-API Encoder",
+    group: "encoders",
+    groupLabel: "Encoder Profiles",
+    summary: "Linux VA-API strict rate-control behavior for AMD and Intel GPUs.",
     options: {
       "vaapi_strict_rc_buffer": "disabled",
     },
@@ -373,6 +457,9 @@ const tabs = ref([
   {
     id: "sw",
     name: "Software Encoder",
+    group: "encoders",
+    groupLabel: "Encoder Profiles",
+    summary: "CPU encoding preset and tune selection for fallback and low-GPU paths.",
     options: {
       "sw_preset": "superfast",
       "sw_tune": "zerolatency",
@@ -383,43 +470,183 @@ const tabs = ref([
 provide('platform', computed(() => platform.value))
 
 const activeTabMeta = computed(() => tabs.value.find(tab => tab.id === currentTab.value))
-const activeTabSummary = computed(() => {
-  const tab = activeTabMeta.value
-  if (!tab) return ''
-  const optionCount = Object.keys(tab.options).length
-  return i18n.t('config.summary_options', { count: optionCount })
+const encoderTabs = computed(() => tabs.value.filter(tab => tab.group === 'encoders'))
+const currentTabIsEncoder = computed(() => activeTabMeta.value?.group === 'encoders')
+const activeNavId = computed(() => currentTabIsEncoder.value ? 'encoders' : currentTab.value)
+function normalizeSearchValue(value) {
+  return String(value || '').toLowerCase().trim()
+}
+
+function translatedSearchText(key) {
+  const translated = i18n?.t?.(key)
+  if (typeof translated !== 'string') return ''
+  return normalizeSearchValue(translated === key ? '' : translated)
+}
+
+function optionSearchText(optionKey) {
+  return [
+    normalizeSearchValue(optionKey),
+    translatedSearchText(`config.${optionKey}`),
+    translatedSearchText(`config.${optionKey}_desc`)
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+const searchResults = computed(() => {
+  const query = normalizeSearchValue(searchQuery.value)
+  if (!query) {
+    return tabs.value.map(tab => ({ tab, firstOptionKey: null }))
+  }
+
+  return tabs.value
+    .map((tab) => {
+      const tabText = [
+        normalizeSearchValue(tab.name),
+        normalizeSearchValue(tab.summary),
+        normalizeSearchValue(tab.groupLabel)
+      ].join(' ')
+
+      const matchedOptionKeys = Object.keys(tab.options).filter((optionKey) =>
+        optionSearchText(optionKey).includes(query)
+      )
+
+      if (!tabText.includes(query) && matchedOptionKeys.length === 0) {
+        return null
+      }
+
+      return {
+        tab,
+        firstOptionKey: matchedOptionKeys[0] || Object.keys(tab.options)[0] || null
+      }
+    })
+    .filter(Boolean)
 })
-const matchingTabs = computed(() => {
-  if (!searchQuery.value) return tabs.value
-  const query = searchQuery.value.toLowerCase()
-  return tabs.value.filter(tab =>
-    tab.name.toLowerCase().includes(query) ||
-    Object.keys(tab.options).some(key => key.toLowerCase().includes(query))
-  )
+
+const matchingTabs = computed(() => searchResults.value.map((entry) => entry.tab))
+const matchedOptionByTab = computed(() => Object.fromEntries(
+  searchResults.value.map((entry) => [entry.tab.id, entry.firstOptionKey])
+))
+const tabGroups = computed(() => {
+  const order = [
+    { id: 'core', label: 'Core Setup' },
+    { id: 'host', label: 'Host & Runtime' },
+  ]
+
+  return order
+    .map(group => ({
+      ...group,
+      items: matchingTabs.value
+        .filter(tab => tab.group === group.id)
+        .map(tab => ({ id: tab.id, name: tab.name })),
+    }))
+    .filter(group => group.items.length > 0)
+    .concat(
+      encoderTabs.value.some(tab => matchingTabs.value.some(match => match.id === tab.id))
+        ? [{
+            id: 'encoders',
+            label: 'Encoder Profiles',
+            items: [{ id: 'encoders', name: 'Encoder Profiles' }],
+          }]
+        : []
+    )
 })
+const mobileNavItems = computed(() => tabGroups.value.flatMap(group => group.items))
 const visibleTabCountLabel = computed(() => i18n.t('config.visible_tabs', { count: matchingTabs.value.length, total: tabs.value.length }))
 const searchSummary = computed(() => i18n.t('config.search_results', { query: searchQuery.value, count: matchingTabs.value.length }))
 const hasUnsavedChanges = computed(() => {
   if (!config.value || !initialSerialized.value) return false
   return JSON.stringify(serialize()) !== initialSerialized.value
 })
+const activePanelTitle = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.name || 'General'))
+const activePanelGroupLabel = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.groupLabel || 'Core Setup'))
+const activePanelSummary = computed(() => {
+  if (currentTabIsEncoder.value) {
+    return 'Choose the hardware or software encode profile Polaris should use when that path is active. Each profile keeps its own tuning without cluttering the main host settings map.'
+  }
+  return activeTabMeta.value?.summary || 'Adjust the active Polaris section.'
+})
 
 function shouldShowTab(tabId) {
   if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase()
-    const tab = tabs.value.find(t => t.id === tabId)
-    if (!tab) return false
-    if (tab.name.toLowerCase().includes(query)) return true
-    return Object.keys(tab.options).some(key =>
-      key.toLowerCase().includes(query) ||
-      tab.name.toLowerCase().includes(query)
-    )
+    return matchingTabs.value.some(tab => tab.id === tabId)
   }
   return currentTab.value === tabId
 }
 
 function onSearch() {
-  // Search is reactive via v-model, shouldShowTab handles the logic
+  if (!searchQuery.value) {
+    clearSearchHighlight()
+  }
+}
+
+function escapeSelector(value) {
+  if (typeof window !== 'undefined' && window.CSS?.escape) {
+    return window.CSS.escape(value)
+  }
+  return String(value).replace(/["\\#.:()[\]]/g, '\\$&')
+}
+
+function clearSearchHighlight() {
+  if (highlightedSearchTarget) {
+    highlightedSearchTarget.classList.remove('settings-search-hit')
+    highlightedSearchTarget = null
+  }
+  if (searchHighlightTimeout) {
+    clearTimeout(searchHighlightTimeout)
+    searchHighlightTimeout = null
+  }
+}
+
+function resolveSearchTarget(optionKey) {
+  if (!settingsContentRef.value || !optionKey) return null
+  const escaped = escapeSelector(optionKey)
+  const root = settingsContentRef.value
+  const directMatch = root.querySelector(`[data-setting-key="${optionKey}"]`)
+  if (directMatch) return directMatch
+
+  const field = root.querySelector(`#${escaped}`)
+  if (field) {
+    return (
+      field.closest('[data-setting-key]') ||
+      field.closest('.settings-search-block') ||
+      field.parentElement ||
+      field
+    )
+  }
+
+  const label = root.querySelector(`label[for="${escaped}"]`)
+  if (label) {
+    return label.closest('[data-setting-key]') || label.parentElement || label
+  }
+
+  return null
+}
+
+async function focusSearchTarget(optionKey) {
+  if (!searchQuery.value || !optionKey) return
+  await nextTick()
+  const target = resolveSearchTarget(optionKey)
+  if (!target) return
+
+  clearSearchHighlight()
+  highlightedSearchTarget = target
+  target.classList.add('settings-search-hit')
+  target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+
+  searchHighlightTimeout = window.setTimeout(() => {
+    clearSearchHighlight()
+  }, 2200)
+}
+
+function selectNavTab(tabId) {
+  if (tabId === 'encoders') {
+    currentTab.value = currentTabIsEncoder.value
+      ? currentTab.value
+      : (encoderTabs.value[0]?.id || currentTab.value)
+    return
+  }
+  currentTab.value = tabId
 }
 
 function serialize() {
@@ -648,11 +875,8 @@ function handleHash() {
           }
           if (key === stripped_hash) {
             setTimeout(() => {
-              let element = document.getElementById(stripped_hash)
-              if (element) {
-                element.scrollIntoView()
-              }
-            }, 2000)
+              focusSearchTarget(stripped_hash)
+            }, 400)
           }
 
           if (currentTab.value === tab.id) {
@@ -668,19 +892,26 @@ onMounted(() => {
   window.addEventListener("hashchange", handleHash)
 })
 
-watch(searchQuery, (value) => {
-  if (value && matchingTabs.value.length > 0) {
-    currentTab.value = matchingTabs.value[0].id
+watch(searchQuery, async (value) => {
+  if (value && searchResults.value.length > 0) {
+    currentTab.value = searchResults.value[0].tab.id
+    await focusSearchTarget(searchResults.value[0].firstOptionKey)
+    return
   }
+
+  clearSearchHighlight()
+})
+
+watch(currentTab, async (value) => {
+  if (!searchQuery.value) return
+  await focusSearchTarget(matchedOptionByTab.value[value])
 })
 
 onUnmounted(() => {
+  clearSearchHighlight()
   window.removeEventListener("hashchange", handleHash)
 })
 </script>
 
 <style scoped>
-.config-page {
-  padding: 1em 0;
-}
 </style>

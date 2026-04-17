@@ -81,6 +81,11 @@ namespace stream_stats {
     std::string codec;
     std::string pacing_policy;
     std::string optimization_source;
+    std::string optimization_confidence;
+    std::string optimization_cache_status;
+    std::string optimization_reasoning;
+    std::string optimization_normalization_reason;
+    int recommendation_version = 0;
     int width = 0;
     int height = 0;
 
@@ -156,12 +161,22 @@ namespace stream_stats {
    * @param encode_target_fps FPS the encoder loop is targeting.
    * @param pacing_policy Human-readable pacing policy label.
    * @param optimization_source Optimization layer(s) that influenced the session.
+   * @param optimization_confidence Confidence attached to the chosen recommendation.
+   * @param optimization_cache_status Whether the recommendation came from cache or a fresh request.
+   * @param optimization_reasoning Human-readable summary for the chosen recommendation.
+   * @param optimization_normalization_reason Explanation for any server-side correction.
+   * @param recommendation_version Optimization schema version used to produce the result.
    */
   void update_session_targets(double requested_client_fps,
                               double session_target_fps,
                               double encode_target_fps,
                               const std::string &pacing_policy,
-                              const std::string &optimization_source);
+                              const std::string &optimization_source,
+                              const std::string &optimization_confidence,
+                              const std::string &optimization_cache_status,
+                              const std::string &optimization_reasoning,
+                              const std::string &optimization_normalization_reason,
+                              int recommendation_version);
 
   /**
    * @brief Update frame delivery telemetry derived from the encode loop.

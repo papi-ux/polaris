@@ -95,6 +95,11 @@ namespace stream_stats {
     j["codec"] = codec;
     j["pacing_policy"] = pacing_policy;
     j["optimization_source"] = optimization_source;
+    j["optimization_confidence"] = optimization_confidence;
+    j["optimization_cache_status"] = optimization_cache_status;
+    j["optimization_reasoning"] = optimization_reasoning;
+    j["optimization_normalization_reason"] = optimization_normalization_reason;
+    j["recommendation_version"] = recommendation_version;
     j["width"] = width;
     j["height"] = height;
     j["latency_ms"] = latency_ms;
@@ -236,7 +241,12 @@ namespace stream_stats {
                               double session_target_fps,
                               double encode_target_fps,
                               const std::string &pacing_policy,
-                              const std::string &optimization_source) {
+                              const std::string &optimization_source,
+                              const std::string &optimization_confidence,
+                              const std::string &optimization_cache_status,
+                              const std::string &optimization_reasoning,
+                              const std::string &optimization_normalization_reason,
+                              int recommendation_version) {
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.requested_client_fps = requested_client_fps;
@@ -244,6 +254,11 @@ namespace stream_stats {
     current_stats.encode_target_fps = encode_target_fps;
     current_stats.pacing_policy = pacing_policy;
     current_stats.optimization_source = optimization_source;
+    current_stats.optimization_confidence = optimization_confidence;
+    current_stats.optimization_cache_status = optimization_cache_status;
+    current_stats.optimization_reasoning = optimization_reasoning;
+    current_stats.optimization_normalization_reason = optimization_normalization_reason;
+    current_stats.recommendation_version = recommendation_version;
   }
 
   void update_frame_delivery(double duplicate_frame_ratio,

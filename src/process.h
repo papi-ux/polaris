@@ -151,6 +151,8 @@ namespace proc {
     std::string get_session_owner_unique_id();
     std::string get_session_owner_device_name();
     bool is_session_owner(const std::string &unique_id);
+    void mark_client_session_report_recorded(const std::string &unique_id);
+    bool client_session_report_recorded() const;
     bool session_display_mode_is_explicit() const;
     bool current_app_has_mangohud() const;
     void set_app_mangohud_configured(const std::string &uuid, bool enabled);
@@ -185,6 +187,7 @@ namespace proc {
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
     bool _session_shutdown_requested = false;
+    bool _client_session_report_recorded = false;
   };
 
   boost::filesystem::path

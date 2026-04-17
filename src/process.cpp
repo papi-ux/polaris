@@ -10,6 +10,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -179,8 +180,22 @@ namespace proc {
       return boost::icontains(cmd, "steam://close/bigpicture");
     }
 
-    bool command_uses_steam_gamepadui_flag(const std::string &cmd) {
+    bool command_contains_steam_game_launch_uri(const std::string &cmd) {
+      return boost::icontains(cmd, "steam://rungameid/");
+    }
+
+    bool command_contains_steam_applaunch(const std::string &cmd) {
+      return boost::icontains(cmd, "-applaunch");
+    }
+
+    bool command_contains_steam_gamepadui_flag(const std::string &cmd) {
       return boost::icontains(cmd, "steam -gamepadui");
+    }
+
+    bool command_uses_steam_gamepadui_flag(const std::string &cmd) {
+      return command_contains_steam_gamepadui_flag(cmd) &&
+             !command_contains_steam_applaunch(cmd) &&
+             !command_contains_steam_game_launch_uri(cmd);
     }
 
     bool command_targets_steam_big_picture(const std::string &cmd) {
@@ -201,6 +216,11 @@ namespace proc {
     bool is_steam_big_picture_app(const proc::ctx_t &ctx) {
       if (is_steam_big_picture_name(ctx.name)) {
         return true;
+      }
+
+      if ((!ctx.steam_appid.empty() || boost::iequals(ctx.source, "steam")) &&
+          !is_steam_big_picture_name(ctx.name)) {
+        return false;
       }
 
       if (command_targets_steam_big_picture(ctx.cmd)) {
@@ -229,6 +249,69 @@ namespace proc {
       return steam_big_picture_command_prefix(reference_cmd) + "steam -shutdown";
     }
 
+    std::string canonical_steam_library_bootstrap_command(const std::string &reference_cmd) {
+      return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) + "steam -gamepadui";
+    }
+
+    std::string canonical_steam_library_followup_command(const std::string &reference_cmd, const std::string &appid) {
+      return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
+             "bash -lc \"sleep 6; "
+             "steam steam://rungameid/" + appid + " >/dev/null 2>&1 || true; "
+             "sleep 4; "
+             "exec steam -applaunch " + appid + " >/dev/null 2>&1 || true\"";
+    }
+
+    std::optional<std::string> extract_steam_appid_from_command(const std::string &cmd) {
+      auto extract_digits = [&](size_t pos) -> std::optional<std::string> {
+        while (pos < cmd.size() && std::isspace(static_cast<unsigned char>(cmd[pos]))) {
+          ++pos;
+        }
+
+        size_t start = pos;
+        while (pos < cmd.size() && std::isdigit(static_cast<unsigned char>(cmd[pos]))) {
+          ++pos;
+        }
+
+        if (start == pos) {
+          return std::nullopt;
+        }
+
+        return cmd.substr(start, pos - start);
+      };
+
+      std::string lower = boost::to_lower_copy(cmd);
+
+      if (auto pos = lower.find("steam://rungameid/"); pos != std::string::npos) {
+        return extract_digits(pos + std::string("steam://rungameid/").size());
+      }
+
+      if (auto pos = lower.find("-applaunch"); pos != std::string::npos) {
+        return extract_digits(pos + std::string("-applaunch").size());
+      }
+
+      return std::nullopt;
+    }
+
+    std::vector<std::string> canonical_steam_library_launch_commands(const std::string &reference_cmd, const std::string &appid) {
+#ifdef __linux__
+      return {
+        canonical_steam_library_bootstrap_command(reference_cmd),
+        canonical_steam_library_followup_command(reference_cmd, appid),
+      };
+#else
+      return {
+        steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
+          "steam steam://rungameid/" + appid
+      };
+#endif
+    }
+
+    bool command_is_steam_library_launch_component(const std::string &cmd) {
+      return command_contains_steam_game_launch_uri(cmd) ||
+             command_contains_steam_applaunch(cmd) ||
+             command_contains_steam_gamepadui_flag(cmd);
+    }
+
     bool prep_cmd_closes_steam_big_picture(const proc::cmd_t &cmd) {
       return command_contains_steam_big_picture_close(cmd.do_cmd) ||
              command_contains_steam_big_picture_close(cmd.undo_cmd);
@@ -242,6 +325,24 @@ namespace proc {
       return prep_cmd_closes_steam_big_picture(cmd) ||
              command_requests_steam_shutdown(cmd.do_cmd) ||
              command_requests_steam_shutdown(cmd.undo_cmd);
+    }
+
+    bool is_steam_library_app(const proc::ctx_t &ctx) {
+      if (is_steam_big_picture_app(ctx)) {
+        return false;
+      }
+
+      if (!ctx.steam_appid.empty() || boost::iequals(ctx.source, "steam")) {
+        return true;
+      }
+
+      if (command_contains_steam_game_launch_uri(ctx.cmd) || command_contains_steam_applaunch(ctx.cmd)) {
+        return true;
+      }
+
+      return std::any_of(ctx.detached.begin(), ctx.detached.end(), [](const std::string &cmd) {
+        return command_contains_steam_game_launch_uri(cmd) || command_contains_steam_applaunch(cmd);
+      });
     }
 
     void normalize_steam_big_picture_app(proc::ctx_t &ctx) {
@@ -314,6 +415,88 @@ namespace proc {
 
       auto shutdown_cmd = canonical_steam_shutdown_command(reference_cmd);
       BOOST_LOG(info) << "process: added Steam Big Picture cleanup undo command [" << shutdown_cmd << ']';
+      ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
+    }
+
+    void normalize_steam_library_app(proc::ctx_t &ctx) {
+      if (!is_steam_library_app(ctx)) {
+        return;
+      }
+
+      std::string appid = ctx.steam_appid;
+      if (appid.empty()) {
+        if (const auto detected = extract_steam_appid_from_command(ctx.cmd); detected) {
+          appid = *detected;
+        } else {
+          for (const auto &cmd : ctx.detached) {
+            if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
+              appid = *detected;
+              break;
+            }
+          }
+        }
+      }
+
+      if (appid.empty()) {
+        return;
+      }
+
+      ctx.steam_appid = appid;
+      ctx.source = "steam";
+
+      std::string reference_cmd = ctx.cmd;
+      std::vector<nlohmann::json> preserved_detached;
+      preserved_detached.reserve(ctx.detached.size());
+
+      for (const auto &cmd : ctx.detached) {
+        if (command_is_steam_library_launch_component(cmd)) {
+          if (reference_cmd.empty()) {
+            reference_cmd = cmd;
+          }
+          continue;
+        }
+        preserved_detached.emplace_back(cmd);
+      }
+
+      if (!ctx.cmd.empty() && command_is_steam_library_launch_component(ctx.cmd)) {
+        BOOST_LOG(info) << "process: converted Steam library primary command into detached launch components"sv;
+        ctx.cmd.clear();
+      }
+
+      const auto canonical_commands = canonical_steam_library_launch_commands(reference_cmd, appid);
+      ctx.detached.clear();
+      ctx.detached.reserve(canonical_commands.size() + preserved_detached.size());
+      for (const auto &cmd : canonical_commands) {
+        ctx.detached.emplace_back(cmd);
+      }
+      for (auto &cmd : preserved_detached) {
+        ctx.detached.emplace_back(std::move(cmd));
+      }
+
+      for (auto &cmd : ctx.prep_cmds) {
+        if (command_contains_steam_big_picture_close(cmd.undo_cmd)) {
+          const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
+          BOOST_LOG(info) << "process: upgraded Steam cleanup command from ["
+                          << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
+          cmd.undo_cmd = shutdown_cmd;
+        }
+      }
+
+      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_stops_steam)) {
+        return;
+      }
+
+      std::string shutdown_reference_cmd;
+      if (!ctx.detached.empty()) {
+        shutdown_reference_cmd = ctx.detached.front();
+      } else if (!ctx.cmd.empty()) {
+        shutdown_reference_cmd = ctx.cmd;
+      } else {
+        shutdown_reference_cmd = "steam";
+      }
+
+      auto shutdown_cmd = canonical_steam_shutdown_command(shutdown_reference_cmd);
+      BOOST_LOG(info) << "process: added Steam library cleanup undo command [" << shutdown_cmd << ']';
       ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
     }
 
@@ -427,6 +610,10 @@ namespace proc {
       std::string preferred_codec_source;
       std::vector<std::string> reasoning;
       std::vector<std::string> layers;
+      std::string confidence;
+      std::string cache_status;
+      std::string normalization_reason;
+      int recommendation_version = 0;
     };
 
     struct optimization_locks_t {
@@ -488,6 +675,17 @@ namespace proc {
       resolved.reasoning.push_back(reasoning);
     }
 
+    void append_normalization_reason(resolved_session_optimization_t &resolved, const std::string &reason) {
+      if (reason.empty()) {
+        return;
+      }
+
+      if (!resolved.normalization_reason.empty()) {
+        resolved.normalization_reason += ' ';
+      }
+      resolved.normalization_reason += reason;
+    }
+
     void apply_optimization_layer(resolved_session_optimization_t &resolved,
                                   const optimization_locks_t &locks,
                                   const device_db::optimization_t &optimization,
@@ -545,6 +743,18 @@ namespace proc {
       if (touched) {
         note_layer(resolved, layer);
         note_reasoning(resolved, optimization.reasoning);
+        if (!optimization.confidence.empty()) {
+          resolved.confidence = optimization.confidence;
+        }
+        if (!optimization.cache_status.empty()) {
+          resolved.cache_status = optimization.cache_status;
+        }
+        if (!optimization.normalization_reason.empty()) {
+          resolved.normalization_reason = optimization.normalization_reason;
+        }
+        if (optimization.recommendation_version > 0) {
+          resolved.recommendation_version = optimization.recommendation_version;
+        }
       }
     }
 
@@ -568,6 +778,43 @@ namespace proc {
         stream << reasons[index];
       }
       return stream.str();
+    }
+
+    double session_grading_target_fps(const stream_stats::stats_t &stats) {
+      if (stats.session_target_fps > 0.0) {
+        return stats.session_target_fps;
+      }
+      if (stats.encode_target_fps > 0.0) {
+        return stats.encode_target_fps;
+      }
+      if (stats.requested_client_fps > 0.0) {
+        return stats.requested_client_fps;
+      }
+      return stats.fps > 0.0 ? stats.fps : 0.0;
+    }
+
+    std::string grade_session_quality(const stream_stats::stats_t &stats, double target_fps) {
+      if (stats.fps <= 0.0) {
+        return "F";
+      }
+
+      const double effective_target = target_fps > 0.0 ? target_fps : session_grading_target_fps(stats);
+      const double fps_ratio =
+        (effective_target > 0.0 && stats.fps > 0.0) ? std::clamp(stats.fps / effective_target, 0.0, 1.5) : 1.0;
+
+      if (fps_ratio >= 0.95 && stats.packet_loss < 0.5 && stats.latency_ms < 20) {
+        return "A";
+      }
+      if (fps_ratio >= 0.85 && stats.packet_loss < 2.0 && stats.latency_ms < 40) {
+        return "B";
+      }
+      if (fps_ratio >= 0.70 && stats.packet_loss < 5.0) {
+        return "C";
+      }
+      if (fps_ratio >= 0.50) {
+        return "D";
+      }
+      return "F";
     }
 
     void set_session_env_var(boost::process::v1::environment &env,
@@ -826,6 +1073,7 @@ namespace proc {
     allow_client_commands = false;
     placebo = true;
     _launch_session = std::move(launch_session);
+    _client_session_report_recorded = false;
     if (_launch_session && _launch_session->session_token.empty()) {
       _launch_session->session_token = generate_session_token();
     }
@@ -848,6 +1096,7 @@ namespace proc {
     _app_id = util::from_view(app.id);
     _app_name = app.name;
     _launch_session = launch_session;
+    _client_session_report_recorded = false;
     if (_launch_session && _launch_session->session_token.empty()) {
       _launch_session->session_token = generate_session_token();
     }
@@ -874,13 +1123,9 @@ namespace proc {
     if (game_category.empty()) {
       std::string detected_appid = _app.steam_appid;
       if (detected_appid.empty()) {
-        static const std::string steam_prefix = "steam://rungameid/";
         auto detect_from = [&](const std::string &s) {
-          auto pos = s.find(steam_prefix);
-          if (pos != std::string::npos) {
-            detected_appid = s.substr(pos + steam_prefix.size());
-            auto space = detected_appid.find_first_of(" \t\n");
-            if (space != std::string::npos) detected_appid = detected_appid.substr(0, space);
+          if (const auto detected = extract_steam_appid_from_command(s); detected) {
+            detected_appid = *detected;
           }
         };
         detect_from(_app.cmd);
@@ -1017,17 +1262,46 @@ namespace proc {
         resolved_optimization,
         "Headless labwc handheld UI sessions at modest bitrates prefer H.264 over forced HEVC"
       );
+      append_normalization_reason(
+        resolved_optimization,
+        "Runtime policy adjusted codec selection for headless handheld UI streaming."
+      );
     }
 
     if (resolved_optimization.preferred_codec.has_value()) {
       launch_session->preferred_codec = *resolved_optimization.preferred_codec;
     }
 
+#ifdef __linux__
+    const bool using_headless_cage_runtime =
+      config::video.linux_display.headless_mode &&
+      config::video.linux_display.use_cage_compositor;
+    if (using_headless_cage_runtime && launch_session->virtual_display) {
+      BOOST_LOG(info) << "session_optimization: normalized virtual_display from true to false for headless cage runtime"sv;
+      launch_session->virtual_display = false;
+      resolved_optimization.virtual_display = false;
+      resolved_optimization.virtual_display_source = "runtime_policy";
+      note_layer(resolved_optimization, "runtime_policy");
+      note_reasoning(
+        resolved_optimization,
+        "Headless labwc already provides the effective stream output; extra virtual display disabled."
+      );
+      append_normalization_reason(
+        resolved_optimization,
+        "Headless cage runtime owns the stream output; virtual display disabled."
+      );
+    }
+#endif
+
     launch_session->optimization_source = join_layers(resolved_optimization.layers);
     if (launch_session->optimization_source.empty()) {
       launch_session->optimization_source = "default";
     }
     launch_session->optimization_reasoning = join_reasons(resolved_optimization.reasoning);
+    launch_session->optimization_confidence = resolved_optimization.confidence;
+    launch_session->optimization_cache_status = resolved_optimization.cache_status;
+    launch_session->optimization_normalization_reason = resolved_optimization.normalization_reason;
+    launch_session->optimization_recommendation_version = resolved_optimization.recommendation_version;
     const auto preferred_codec = launch_session->preferred_codec.value_or("client"s);
 
     BOOST_LOG(info) << "session_optimization: requested="sv
@@ -1891,6 +2165,7 @@ namespace proc {
 
   void proc_t::resume() {
     BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
+    _client_session_report_recorded = false;
 
     if (!_app.state_cmds.empty()) {
       auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
@@ -1950,26 +2225,28 @@ namespace proc {
     // Record session quality for AI feedback loop
     if (ai_optimizer::is_enabled() && _launch_session) {
       auto stats = stream_stats::get_current();
-      if (stats.streaming || stats.fps > 0) {
+      if (_client_session_report_recorded) {
+        BOOST_LOG(info) << "AI session feedback already recorded from the client report; skipping host-side duplicate for ["
+                        << _launch_session->device_name << ":" << _app.name << "]";
+      } else if (stats.streaming || stats.fps > 0) {
         ai_optimizer::session_history_t session;
         session.avg_fps = stats.fps;
         session.avg_latency_ms = stats.latency_ms;
         session.avg_bitrate_kbps = stats.bitrate_kbps;
         session.packet_loss_pct = stats.packet_loss;
-        session.codec = stats.codec;
+        session.last_fps = stats.fps;
+        session.last_target_fps = session_grading_target_fps(stats);
+        session.last_latency_ms = stats.latency_ms;
+        session.last_bitrate_kbps = stats.bitrate_kbps;
+        session.last_packet_loss_pct = stats.packet_loss;
+        session.last_codec = stats.codec;
         session.session_count = 1;
-
-        // Quality grade: A (great) → F (terrible)
-        if (stats.fps >= 55 && stats.packet_loss < 0.5 && stats.latency_ms < 20)
-          session.quality_grade = "A";
-        else if (stats.fps >= 45 && stats.packet_loss < 2 && stats.latency_ms < 40)
-          session.quality_grade = "B";
-        else if (stats.fps >= 30 && stats.packet_loss < 5)
-          session.quality_grade = "C";
-        else if (stats.fps >= 20)
-          session.quality_grade = "D";
-        else
-          session.quality_grade = "F";
+        session.last_optimization_source = _launch_session->optimization_source;
+        session.last_optimization_confidence = _launch_session->optimization_confidence;
+        session.last_recommendation_version = _launch_session->optimization_recommendation_version;
+        session.last_quality_grade = grade_session_quality(stats, session.last_target_fps);
+        session.quality_grade = session.last_quality_grade;
+        session.codec = session.last_codec;
 
         ai_optimizer::record_session(_launch_session->device_name, _app.name, session);
       }
@@ -2231,6 +2508,20 @@ namespace proc {
 
   bool proc_t::is_session_owner(const std::string &unique_id) {
     return !_launch_session || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id;
+  }
+
+  void proc_t::mark_client_session_report_recorded(const std::string &unique_id) {
+    if (!_launch_session) {
+      return;
+    }
+
+    if (unique_id.empty() || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id) {
+      _client_session_report_recorded = true;
+    }
+  }
+
+  bool proc_t::client_session_report_recorded() const {
+    return _client_session_report_recorded;
   }
 
   bool proc_t::session_display_mode_is_explicit() const {
@@ -2630,8 +2921,150 @@ namespace proc {
     }
   }
 
+  void migration_v3(nlohmann::json &fileTree) {
+    static const int this_version = 7;
+    int file_version = json_int_member_or(fileTree, "version", 0);
+    if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
+      BOOST_LOG(info) << "Cannot parse apps.json version while checking Steam launch migration, treating as v0.";
+    }
+
+    if (file_version >= this_version) {
+      return;
+    }
+
+    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+      fileTree["version"] = this_version;
+      return;
+    }
+
+    for (auto &app : fileTree["apps"]) {
+      const auto app_name = json_string_member_or(app, "name");
+      if (is_steam_big_picture_name(app_name)) {
+        continue;
+      }
+
+      auto steam_appid = json_string_member_or(app, "steam-appid");
+      const auto source = json_string_member_or(app, "source", steam_appid.empty() ? "manual" : "steam");
+
+      if (steam_appid.empty()) {
+        if (const auto detected = extract_steam_appid_from_command(json_string_member_or(app, "cmd")); detected) {
+          steam_appid = *detected;
+        } else if (app.contains("detached") && app["detached"].is_array()) {
+          for (const auto &detached_val : app["detached"]) {
+            if (!detached_val.is_string()) {
+              continue;
+            }
+            if (const auto detected = extract_steam_appid_from_command(detached_val.get<std::string>()); detected) {
+              steam_appid = *detected;
+              break;
+            }
+          }
+        }
+      }
+
+      if (steam_appid.empty() && !boost::iequals(source, "steam")) {
+        continue;
+      }
+
+      if (steam_appid.empty()) {
+        continue;
+      }
+
+      app["source"] = "steam";
+      app["steam-appid"] = steam_appid;
+
+      std::string reference_cmd = json_string_member_or(app, "cmd");
+      std::vector<nlohmann::json> preserved_detached;
+
+      if (app.contains("detached") && app["detached"].is_array()) {
+        for (const auto &detached_val : app["detached"]) {
+          if (!detached_val.is_string()) {
+            preserved_detached.emplace_back(detached_val);
+            continue;
+          }
+
+          auto cmd = detached_val.get<std::string>();
+          if (command_is_steam_library_launch_component(cmd)) {
+            if (reference_cmd.empty()) {
+              reference_cmd = cmd;
+            }
+            continue;
+          }
+
+          preserved_detached.emplace_back(std::move(cmd));
+        }
+      }
+
+      if (app.contains("cmd")) {
+        auto cmd = json_string_member_or(app, "cmd");
+        if (!cmd.empty() && command_is_steam_library_launch_component(cmd)) {
+          if (reference_cmd.empty()) {
+            reference_cmd = cmd;
+          }
+          BOOST_LOG(info) << "Migrating Steam library primary command into detached launch components for ["
+                          << json_app_label(app) << ']';
+          app["cmd"] = "";
+        }
+      }
+
+      const auto canonical_commands = canonical_steam_library_launch_commands(reference_cmd, steam_appid);
+      nlohmann::json detached_commands = nlohmann::json::array();
+      for (const auto &cmd : canonical_commands) {
+        BOOST_LOG(info) << "Migrating Steam library launch command for [" << json_app_label(app)
+                        << "] to [" << cmd << ']';
+        detached_commands.push_back(cmd);
+      }
+      for (const auto &cmd : preserved_detached) {
+        detached_commands.push_back(cmd);
+      }
+      app["detached"] = std::move(detached_commands);
+
+      bool has_shutdown = false;
+      if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
+        for (auto &prep : app["prep-cmd"]) {
+          if (!prep.is_object()) {
+            continue;
+          }
+
+          auto undo_cmd = json_string_member_or(prep, "undo");
+          if (command_contains_steam_big_picture_close(undo_cmd)) {
+            const auto shutdown_cmd = canonical_steam_shutdown_command(undo_cmd);
+            BOOST_LOG(info) << "Migrating Steam cleanup command for [" << json_app_label(app)
+                            << "] from [" << undo_cmd << "] to [" << shutdown_cmd << ']';
+            prep["undo"] = shutdown_cmd;
+            undo_cmd = shutdown_cmd;
+          }
+
+          if (command_requests_steam_shutdown(json_string_member_or(prep, "do")) ||
+              command_requests_steam_shutdown(undo_cmd)) {
+            has_shutdown = true;
+          }
+        }
+      }
+
+      if (!has_shutdown) {
+        std::string reference_cmd = "steam";
+        if (app.contains("detached") && app["detached"].is_array() && !app["detached"].empty() && app["detached"][0].is_string()) {
+          reference_cmd = app["detached"][0].get<std::string>();
+        }
+        const auto shutdown_cmd = canonical_steam_shutdown_command(reference_cmd);
+        if (!app.contains("prep-cmd") || !app["prep-cmd"].is_array()) {
+          app["prep-cmd"] = nlohmann::json::array();
+        }
+        app["prep-cmd"].push_back({
+          {"undo", shutdown_cmd}
+        });
+        BOOST_LOG(info) << "Migrating Steam library cleanup undo command for [" << json_app_label(app)
+                        << "] [" << shutdown_cmd << ']';
+      }
+    }
+
+    fileTree["version"] = this_version;
+    BOOST_LOG(info) << "Migrated Steam library launch handling to v7.";
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 2;
+    int last_version = 7;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -2640,6 +3073,7 @@ namespace proc {
 
     if (file_version < last_version) {
       migration_v2(fileTree);
+      migration_v3(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
@@ -2807,6 +3241,7 @@ namespace proc {
           ctx.state_cmds = std::move(state_cmds);
           ctx.detached = std::move(detached);
           normalize_steam_big_picture_app(ctx);
+          normalize_steam_library_app(ctx);
 
           apps.emplace_back(std::move(ctx));
         }

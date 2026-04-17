@@ -31,8 +31,8 @@ function createParticle(dense) {
     speedX: (Math.random() - 0.5) * (dense ? 0.08 : 0.12),
     speedY: (Math.random() - 0.5) * 0.1 - (dense ? 0.02 : 0.03),
     opacity: dense
-      ? (isBright ? Math.random() * 0.7 + 0.3 : Math.random() * 0.4 + 0.05)
-      : (isBright ? Math.random() * 0.6 + 0.3 : Math.random() * 0.4 + 0.15),
+      ? (isBright ? Math.random() * 0.45 + 0.18 : Math.random() * 0.24 + 0.03)
+      : (isBright ? Math.random() * 0.42 + 0.18 : Math.random() * 0.22 + 0.06),
     twinkleSpeed: Math.random() * (dense ? 0.008 : 0.005) + 0.002,
     twinklePhase: Math.random() * Math.PI * 2,
     isBright,
@@ -62,17 +62,17 @@ function createNebula() {
     color: Math.random() < 0.5
       ? [100, 120, 180]   // blue nebula
       : [140, 100, 160],  // purple nebula
-    opacity: Math.random() * 0.03 + 0.01,
+    opacity: Math.random() * 0.015 + 0.005,
     drift: (Math.random() - 0.5) * 0.02,
   }
 }
 
 function rebuild() {
   const dense = currentDense
-  const count = dense ? 300 : 120
+  const count = dense ? 220 : 90
   particles = Array.from({ length: count }, () => createParticle(dense))
   if (dense) {
-    nebulae = Array.from({ length: 6 }, createNebula)
+    nebulae = Array.from({ length: 4 }, createNebula)
     shootingStars = []
   } else {
     nebulae = []

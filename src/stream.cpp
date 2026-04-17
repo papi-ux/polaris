@@ -423,6 +423,11 @@ namespace stream {
     int session_target_fps = 0;
     std::string pacing_policy;
     std::string optimization_source;
+    std::string optimization_confidence;
+    std::string optimization_cache_status;
+    std::string optimization_reasoning;
+    std::string optimization_normalization_reason;
+    int optimization_recommendation_version = 0;
     crypto::PERM permission;
 
     std::list<crypto::command_entry_t> do_cmds;
@@ -2249,7 +2254,12 @@ namespace stream {
           static_cast<double>(session.config.monitor.encodingFramerate) / 1000.0 :
           static_cast<double>(session.config.monitor.encodingFramerate),
         session.pacing_policy,
-        session.optimization_source
+        session.optimization_source,
+        session.optimization_confidence,
+        session.optimization_cache_status,
+        session.optimization_reasoning,
+        session.optimization_normalization_reason,
+        session.optimization_recommendation_version
       );
       stream_stats::update_dynamic_range(session.config.monitor.dynamicRange);
       stream_stats::update_video_stats(addr_string,
@@ -2320,6 +2330,11 @@ namespace stream {
       session->session_target_fps = launch_session.fps;
       session->pacing_policy = launch_session.pacing_policy;
       session->optimization_source = launch_session.optimization_source;
+      session->optimization_confidence = launch_session.optimization_confidence;
+      session->optimization_cache_status = launch_session.optimization_cache_status;
+      session->optimization_reasoning = launch_session.optimization_reasoning;
+      session->optimization_normalization_reason = launch_session.optimization_normalization_reason;
+      session->optimization_recommendation_version = launch_session.optimization_recommendation_version;
       session->permission = launch_session.perm;
       session->watch_only = launch_session.watch_only;
 

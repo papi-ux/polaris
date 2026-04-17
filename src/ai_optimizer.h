@@ -14,6 +14,7 @@
 
 #include "device_db.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -64,10 +65,24 @@ namespace ai_optimizer {
     double avg_fps = 0;
     double avg_latency_ms = 0;
     int avg_bitrate_kbps = 0;
-    int packet_loss_pct = 0;
-    std::string quality_grade;  // A/B/C/D/F
-    std::string codec;          // h264/hevc/av1
+    double packet_loss_pct = 0;
+    std::string quality_grade;  // Latest A/B/C/D/F grade kept for compatibility
+    std::string codec;          // Latest h264/hevc/av1 codec kept for compatibility
     int session_count = 0;
+    double last_fps = 0;
+    double last_target_fps = 0;
+    double last_latency_ms = 0;
+    int last_bitrate_kbps = 0;
+    double last_packet_loss_pct = 0;
+    std::string last_quality_grade;
+    std::string last_codec;
+    int poor_outcome_count = 0;
+    int consecutive_poor_outcomes = 0;
+    std::string last_optimization_source;
+    std::string last_optimization_confidence;
+    int last_recommendation_version = 0;
+    std::int64_t last_updated_at = 0;
+    std::int64_t last_invalidated_at = 0;
   };
 
   /**

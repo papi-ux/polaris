@@ -41,7 +41,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 2);
+  EXPECT_EQ(migrated_tree["version"], 7);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -160,6 +160,55 @@ TEST(ProcessMigrationTests, ParseStripsSteamBigPictureMangoHudEvenWithExistingCl
   ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
   EXPECT_TRUE(steam_ctx->env_vars.empty());
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo) {
+  const auto file_path = test_paths::root() / "steam_library_launch_normalization.json";
+
+  const nlohmann::json apps = {
+    {"version", 2},
+    {"apps", {
+      {
+        {"name", "Indiana Jones and the Great Circle"},
+        {"uuid", "steam-library-normalization-test"},
+        {"cmd", ""},
+        {"detached", {"setsid steam steam://rungameid/2677660"}},
+        {"prep-cmd", nlohmann::json::array()},
+        {"source", "steam"},
+        {"steam-appid", "2677660"},
+        {"image-path", "./assets/indiana.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Indiana Jones and the Great Circle";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+#ifdef __linux__
+  ASSERT_EQ(steam_ctx->detached.size(), 2);
+  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam -gamepadui");
+  EXPECT_EQ(steam_ctx->detached[1], "setsid bash -lc \"sleep 6; steam steam://rungameid/2677660 >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch 2677660 >/dev/null 2>&1 || true\"");
+#else
+  ASSERT_EQ(steam_ctx->detached.size(), 1);
+  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://rungameid/2677660");
+#endif
+  ASSERT_FALSE(steam_ctx->prep_cmds.empty());
+  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, "setsid steam -shutdown");
+  EXPECT_EQ(steam_ctx->steam_appid, "2677660");
+  EXPECT_EQ(steam_ctx->source, "steam");
+
+  const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  EXPECT_EQ(migrated_tree["version"], 7);
 
   std::filesystem::remove(file_path);
 }
