@@ -513,6 +513,12 @@ The AI optimizer is optional and disabled by default. When enabled, it sends dev
 
 </details>
 
+## AI Transparency
+
+Polaris is built with help from AI tools, including Anthropic Claude, OpenAI Codex, and local models.
+
+I use them as engineering assistants for brainstorming, debugging, refactoring, test scaffolding, packaging, and documentation. Final architecture, review, integration, and release decisions are still mine, and everything that ships here is manually reviewed and validated before release.
+
 ## Contributing
 
 Contributions are welcome: bug fixes, features, documentation, translations, and packaging work.
@@ -538,9 +544,3 @@ I build Polaris and Nova in my spare time because Linux game streaming deserves 
 Polaris is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text.
 
 Polaris is a fork of [Apollo](https://github.com/ClassicOldSong/Apollo) by ClassicOldSong, which is itself a fork of [Sunshine](https://github.com/LizardByte/Sunshine) by LizardByte. Both are GPLv3. The streaming protocol remains compatible with [Moonlight](https://moonlight-stream.org) clients.
-
-## AI Transparency
-
-Polaris is built with help from AI tools, including Anthropic Claude, OpenAI Codex, and local models.
-
-I use them as engineering assistants for brainstorming, debugging, refactoring, test scaffolding, packaging, and documentation. Final architecture, review, integration, and release decisions are still mine, and everything that ships here is manually reviewed and validated before release.
