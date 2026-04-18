@@ -233,6 +233,7 @@
                 <div>
                   <div class="section-kicker">{{ $t('dashboard.telemetry') }}</div>
                   <h3 class="section-title">{{ $t('dashboard.telemetry_title') }}</h3>
+                  <p class="section-copy">{{ $t('dashboard.telemetry_desc') }}</p>
                 </div>
                 <div class="flex flex-wrap gap-2 text-[11px] text-silver">
                   <span class="data-pill">{{ stats.fps?.toFixed(1) || '--' }} fps</span>
@@ -252,8 +253,16 @@
                   <div ref="bitrateChartEl" class="h-24 w-full"></div>
                 </div>
                 <div class="card p-3">
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-silver/60">Encode</div>
+                  <div ref="encodeChartEl" class="h-24 w-full"></div>
+                </div>
+                <div class="card p-3">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">Latency</div>
                   <div ref="latencyChartEl" class="h-24 w-full"></div>
+                </div>
+                <div class="card p-3">
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300/80">GPU Load</div>
+                  <div ref="gpuChartEl" class="h-24 w-full"></div>
                 </div>
                 <div class="card p-3">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-red-400/80">Packet Loss</div>
@@ -774,6 +783,11 @@ const runtimeModeTone = computed(() => {
   return stats.value?.runtime_effective_headless ? 'bg-accent/15 text-accent' : 'bg-amber-500/15 text-amber-300'
 })
 
+const runtimeEffectiveTone = computed(() => {
+  if (!stats.value?.streaming) return 'text-storm'
+  return stats.value?.runtime_effective_headless ? 'text-accent' : 'text-amber-300'
+})
+
 const runtimeOverrideLabel = computed(() => {
   if (!stats.value?.streaming) return '--'
   return stats.value?.runtime_gpu_native_override_active ? 'Active' : 'Inactive'
@@ -1017,6 +1031,7 @@ const runtimeSummaryRows = computed(() => ([
   { label: 'Format', value: captureFormatLabel.value, tone: 'text-silver' },
   { label: 'Residency', value: captureResidencyLabel.value, tone: 'text-silver' },
   { label: 'Requested', value: runtimeRequestedMode.value, tone: 'text-silver' },
+  { label: 'Effective', value: runtimeEffectiveMode.value, tone: runtimeEffectiveTone.value },
   { label: 'Override', value: runtimeOverrideLabel.value, tone: runtimeOverrideTone.value },
 ]))
 
