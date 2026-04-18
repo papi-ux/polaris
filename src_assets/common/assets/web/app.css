@@ -767,7 +767,7 @@ textarea {
 }
 
 .dashboard-telemetry-grid {
-  @apply grid gap-3 md:grid-cols-2;
+  @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
 }
 
 .troubleshooting-action-button {
