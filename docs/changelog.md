@@ -10,6 +10,8 @@
 - Normalized impossible runtime recommendations earlier, including disabling `virtual_display` automatically when headless `labwc` owns the stream output.
 - Improved the web UI around AI status, settings search/jump/highlight, incident deduplication, pairing flow density, and Mission Control quick-fix links.
 - Updated Linux Steam library launching so Gamepad UI stays in the isolated stream runtime and Steam titles stop bouncing back onto the host desktop during Polaris-driven launches.
+- Refreshed the public Nova companion-app handoff so Obtainium points cleanly at Nova's public Android release asset.
+- Polished the public AI Transparency copy and release-facing docs for the coordinated April 17 checkpoint.
 
 @htmlonly
 <script type="module" src="https://md-block.verou.me/md-block.js"></script>
