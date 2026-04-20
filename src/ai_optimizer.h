@@ -81,6 +81,18 @@ namespace ai_optimizer {
     std::string last_optimization_source;
     std::string last_optimization_confidence;
     int last_recommendation_version = 0;
+    std::string last_health_grade;
+    std::string last_primary_issue;
+    std::vector<std::string> last_issues;
+    std::string last_decoder_risk;
+    std::string last_hdr_risk;
+    std::string last_network_risk;
+    std::string last_capture_path;
+    int last_safe_bitrate_kbps = 0;
+    std::string last_safe_codec;
+    std::string last_safe_display_mode;
+    std::optional<bool> last_safe_hdr;
+    bool last_relaunch_recommended = false;
     std::int64_t last_updated_at = 0;
     std::int64_t last_invalidated_at = 0;
   };

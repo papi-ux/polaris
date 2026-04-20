@@ -9,6 +9,7 @@
 
 // lib includes
 #include <list>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
@@ -27,6 +28,7 @@ namespace crypto {
   void md_ctx_destroy(EVP_MD_CTX *);
 
   using sha256_t = std::array<std::uint8_t, SHA256_DIGEST_LENGTH>;
+  using password_kdf_t = std::array<std::uint8_t, 32>;
 
   using aes_t = std::vector<std::uint8_t>;
   using x509_t = util::safe_ptr<X509, X509_free>;
@@ -117,6 +119,8 @@ namespace crypto {
    * @return The SHA-256 hash of the plaintext.
    */
   sha256_t hash(const std::string_view &plaintext);
+  bool hash_password_scrypt(const std::string_view &password, const std::string_view &salt, password_kdf_t &derived_key);
+  bool constant_time_equals(const std::string_view &lhs, const std::string_view &rhs);
 
   aes_t gen_aes_key(const std::array<uint8_t, 16> &salt, const std::string_view &pin);
   x509_t x509(const std::string_view &x);

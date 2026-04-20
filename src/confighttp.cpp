@@ -18,6 +18,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <numeric>
 #include <algorithm>
 #include <vector>
@@ -157,10 +158,6 @@ namespace confighttp {
     REMOVE  ///< Remove client
   };
 
-  // SESSION COOKIE
-  std::string sessionCookie;
-  static std::chrono::time_point<std::chrono::steady_clock> cookie_creation_time;
-
   // CSRF TOKEN - generated at server startup
   static std::string csrfToken;
 
@@ -172,6 +169,14 @@ namespace confighttp {
   constexpr auto LOGIN_BLOCK_DURATION = std::chrono::seconds(60);
 
   namespace {
+    struct web_session_t {
+      std::chrono::steady_clock::time_point created_at;
+      std::chrono::steady_clock::time_point last_seen_at;
+    };
+
+    constexpr auto SESSION_IDLE_TIMEOUT = 12h;
+    std::unordered_map<std::string, web_session_t> s_web_sessions;
+    std::mutex s_web_sessions_mutex;
     std::mutex s_background_tasks_mutex;
     std::vector<std::future<void>> s_background_tasks;
 
@@ -268,6 +273,106 @@ namespace confighttp {
 
       return installed_path;
     }
+
+    constexpr std::array<std::string_view, 3> write_only_secret_config_keys {
+      "ai_api_key"sv,
+      "api_key"sv,
+      "steamgriddb_api_key"sv,
+    };
+
+    bool is_write_only_secret_config_key(const std::string_view key) {
+      return std::find(write_only_secret_config_keys.begin(), write_only_secret_config_keys.end(), key) != write_only_secret_config_keys.end();
+    }
+
+    void append_common_security_headers(SimpleWeb::CaseInsensitiveMultimap &headers) {
+      headers.emplace("X-Frame-Options", "DENY");
+      headers.emplace("X-Content-Type-Options", "nosniff");
+      headers.emplace("Referrer-Policy", "no-referrer");
+      headers.emplace("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()");
+      headers.emplace("Strict-Transport-Security", "max-age=31536000");
+      headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    }
+
+    void append_json_security_headers(SimpleWeb::CaseInsensitiveMultimap &headers) {
+      headers.emplace("Content-Type", "application/json");
+      append_common_security_headers(headers);
+    }
+
+    std::string session_cookie_hash(const std::string_view raw_cookie) {
+      return util::hex(crypto::hash(std::string {raw_cookie} + config::sunshine.salt)).to_string();
+    }
+
+    bool session_expired(const web_session_t &session, const std::chrono::steady_clock::time_point now) {
+      return (now - session.created_at) > SESSION_EXPIRE_DURATION || (now - session.last_seen_at) > SESSION_IDLE_TIMEOUT;
+    }
+
+    std::string create_web_session() {
+      const auto raw_cookie = crypto::rand_alphabet(64);
+      const auto now = std::chrono::steady_clock::now();
+      {
+        std::lock_guard lock(s_web_sessions_mutex);
+        s_web_sessions[session_cookie_hash(raw_cookie)] = web_session_t {
+          .created_at = now,
+          .last_seen_at = now,
+        };
+      }
+      return raw_cookie;
+    }
+
+    bool authenticate_web_session_cookie(const std::string_view raw_cookie) {
+      if (raw_cookie.empty()) {
+        return false;
+      }
+
+      const auto session_id = session_cookie_hash(raw_cookie);
+      const auto now = std::chrono::steady_clock::now();
+      std::lock_guard lock(s_web_sessions_mutex);
+
+      for (auto it = s_web_sessions.begin(); it != s_web_sessions.end();) {
+        if (session_expired(it->second, now)) {
+          it = s_web_sessions.erase(it);
+        } else {
+          ++it;
+        }
+      }
+
+      const auto it = s_web_sessions.find(session_id);
+      if (it == s_web_sessions.end()) {
+        return false;
+      }
+
+      it->second.last_seen_at = now;
+      return true;
+    }
+
+    void invalidate_web_session_cookie(const std::string_view raw_cookie) {
+      if (raw_cookie.empty()) {
+        return;
+      }
+
+      std::lock_guard lock(s_web_sessions_mutex);
+      s_web_sessions.erase(session_cookie_hash(raw_cookie));
+    }
+
+    void invalidate_all_web_sessions() {
+      std::lock_guard lock(s_web_sessions_mutex);
+      s_web_sessions.clear();
+    }
+
+    SimpleWeb::CaseInsensitiveMultimap make_auth_cookie_headers(std::string_view raw_cookie) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      auto cookie = std::string {"auth="} + std::string {raw_cookie} + "; Secure; HttpOnly; SameSite=Strict; Max-Age=2592000; Path=/";
+      headers.emplace("Set-Cookie", std::move(cookie));
+      append_common_security_headers(headers);
+      return headers;
+    }
+
+    SimpleWeb::CaseInsensitiveMultimap clear_auth_cookie_headers() {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Set-Cookie", "auth=; Secure; HttpOnly; SameSite=Strict; Max-Age=0; Path=/");
+      append_common_security_headers(headers);
+      return headers;
+    }
   }  // namespace
 
   /**
@@ -278,11 +383,13 @@ namespace confighttp {
     BOOST_LOG(debug) << "METHOD :: "sv << request->method;
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << (name == "Authorization" ? "CREDENTIALS REDACTED" : val);
+      const auto redact_header = boost::iequals(name, "Authorization") || boost::iequals(name, "Cookie");
+      BOOST_LOG(debug) << name << " -- " << (redact_header ? "CREDENTIALS REDACTED" : val);
     }
     BOOST_LOG(debug) << " [--] "sv;
     for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      const auto redact_query = boost::iequals(name, "sessiontoken");
+      BOOST_LOG(debug) << name << " -- " << (redact_query ? "CREDENTIALS REDACTED" : val);
     }
     BOOST_LOG(debug) << " [--] "sv;
   }
@@ -294,9 +401,7 @@ namespace confighttp {
    */
   void send_response(resp_https_t response, const nlohmann::json &output_tree) {
     SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "application/json");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_json_security_headers(headers);
     response->write(output_tree.dump(), headers);
   }
 
@@ -313,11 +418,8 @@ namespace confighttp {
     tree["status_code"] = code;
     tree["status"] = false;
     tree["error"] = "Unauthorized";
-    const SimpleWeb::CaseInsensitiveMultimap headers {
-      {"Content-Type", "application/json"},
-      {"X-Frame-Options", "DENY"},
-      {"Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';"}
-    };
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
     response->write(code, tree.dump(), headers);
   }
 
@@ -330,11 +432,9 @@ namespace confighttp {
   void send_redirect(resp_https_t response, req_https_t request, const char *path) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
     BOOST_LOG(info) << "Web UI: ["sv << address << "] -- redirecting"sv;
-    const SimpleWeb::CaseInsensitiveMultimap headers {
-      {"Location", path},
-      {"X-Frame-Options", "DENY"},
-      {"Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';"}
-    };
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Location", path);
+    append_common_security_headers(headers);
     response->write(SimpleWeb::StatusCode::redirection_temporary_redirect, headers);
   }
 
@@ -484,7 +584,7 @@ namespace confighttp {
       auto &auth_value = auth_header->second;
       if (auth_value.substr(0, 7) == "Bearer " && !config::sunshine.api_key.empty()) {
         auto provided_key = auth_value.substr(7);
-        if (provided_key == config::sunshine.api_key) {
+        if (crypto::constant_time_equals(provided_key, config::sunshine.api_key)) {
           fg.disable();
           return true;
         }
@@ -492,19 +592,11 @@ namespace confighttp {
     }
 
     // Session cookie authentication
-    if (sessionCookie.empty())
-      return false;
-    // Check for expiry
-    if (std::chrono::steady_clock::now() - cookie_creation_time > SESSION_EXPIRE_DURATION) {
-      sessionCookie.clear();
-      return false;
-    }
     auto cookies = request->header.find("cookie");
     if (cookies == request->header.end())
       return false;
     auto authCookie = getCookieValue(cookies->second, "auth");
-    if (authCookie.empty() ||
-        util::hex(crypto::hash(authCookie + config::sunshine.salt)).to_string() != sessionCookie)
+    if (!authenticate_web_session_cookie(authCookie))
       return false;
     fg.disable();
     return true;
@@ -528,9 +620,7 @@ namespace confighttp {
     tree["status_code"] = static_cast<int>(code);
     tree["error"] = "Not Found";
     SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "application/json");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_json_security_headers(headers);
 
     response->write(code, tree.dump(), headers);
   }
@@ -548,9 +638,7 @@ namespace confighttp {
     tree["status"] = false;
     tree["error"] = error_message;
     SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "application/json");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_json_security_headers(headers);
 
     response->write(code, tree.dump(), headers);
   }
@@ -617,8 +705,7 @@ namespace confighttp {
     }
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_common_security_headers(headers);
     response->write(content, headers);
   }
 
@@ -633,8 +720,7 @@ namespace confighttp {
     std::ifstream in(resolve_web_asset_path("images/polaris.ico"), std::ios::binary);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/x-icon");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_common_security_headers(headers);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
   }
 
@@ -652,8 +738,7 @@ namespace confighttp {
     std::ifstream in(resolve_web_asset_path("images/logo-polaris-45.png"), std::ios::binary);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/png");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_common_security_headers(headers);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
   }
 
@@ -703,8 +788,7 @@ namespace confighttp {
     }
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", mimeType->second);
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_common_security_headers(headers);
     std::ifstream in(filePath.string(), std::ios::binary);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
   }
@@ -1707,7 +1791,12 @@ namespace confighttp {
     ai_cfg.provider = get_string("ai_provider");
     ai_cfg.model = get_string("ai_model");
     ai_cfg.auth_mode = get_string("ai_auth_mode");
-    ai_cfg.api_key = get_string("ai_api_key");
+    const bool clear_ai_api_key = body.value("clear_ai_api_key", false);
+    ai_cfg.api_key = clear_ai_api_key
+      ? std::string {}
+      : body.contains("ai_api_key") && body["ai_api_key"].is_string() && !body["ai_api_key"].get<std::string>().empty()
+        ? body["ai_api_key"].get<std::string>()
+        : config::video.ai_optimizer.api_key;
     ai_cfg.base_url = get_string("ai_base_url");
     ai_cfg.use_subscription = get_enabled("ai_use_subscription", false);
     ai_cfg.timeout_ms = body.value("ai_timeout_ms", config::video.ai_optimizer.timeout_ms);
@@ -1950,8 +2039,22 @@ namespace confighttp {
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
     for (auto &[name, value] : vars) {
+      if (is_write_only_secret_config_key(name)) {
+        if (name == "ai_api_key") {
+          output_tree["has_ai_api_key"] = !value.empty();
+        } else if (name == "steamgriddb_api_key") {
+          output_tree["has_steamgriddb_api_key"] = !value.empty();
+        } else if (name == "api_key") {
+          output_tree["has_api_key"] = !value.empty();
+        }
+        output_tree[name] = "";
+        continue;
+      }
       output_tree[name] = value;
     }
+    output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
+    output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
+    output_tree["has_api_key"] = output_tree.value("has_api_key", false);
     send_response(response, output_tree);
   }
 
@@ -2003,6 +2106,9 @@ namespace confighttp {
         return key == "status"sv ||
                key == "platform"sv ||
                key == "version"sv ||
+               key == "has_ai_api_key"sv ||
+               key == "has_steamgriddb_api_key"sv ||
+               key == "has_api_key"sv ||
                key == "vdisplayStatus"sv ||
                key == "vdisplayAvailable"sv ||
                key == "vdisplayBackend"sv ||
@@ -2016,18 +2122,29 @@ namespace confighttp {
         bad_request(response, request, validation_error);
         return;
       }
+      const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
       for (const auto &[k, v] : input_tree.items()) {
         if (is_response_only_config_key(k)) {
           continue;
         }
 
-        if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
+        if (v.is_null()) {
+          continue;
+        }
+
+        if (v.is_string() && v.get<std::string>().empty() && !is_write_only_secret_config_key(k)) {
           continue;
         }
 
         // v.dump() will dump valid json, which we do not want for strings in the config right now
         // we should migrate the config file to straight json and get rid of all this nonsense
         config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
+      }
+      for (const auto &[key, value] : existing_vars) {
+        if (!is_write_only_secret_config_key(key) || input_tree.contains(key) || value.empty()) {
+          continue;
+        }
+        config_stream << key << " = " << value << std::endl;
       }
       file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
       output_tree["status"] = true;
@@ -2331,8 +2448,7 @@ namespace confighttp {
     contentType += currentCodePageToCharset();
   #endif
     headers.emplace("Content-Type", contentType);
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_common_security_headers(headers);
     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
   }
 
@@ -2395,16 +2511,17 @@ namespace confighttp {
       if (newUsername.empty()) {
         errors.push_back("Invalid Username");
       } else {
-        auto hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
-        if (config::sunshine.username.empty() ||
-            (boost::iequals(username, config::sunshine.username) && hash == config::sunshine.password)) {
+        if (config::sunshine.username.empty() || http::verify_user_password(username, password)) {
           if (newPassword.empty() || newPassword != confirmPassword)
             errors.push_back("Password Mismatch");
           else {
-            http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword);
-            http::reload_user_creds(config::sunshine.credentials_file);
-            sessionCookie.clear(); // force re-login
-            output_tree["status"] = true;
+            if (http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword) != 0 ||
+                http::reload_user_creds(config::sunshine.credentials_file) != 0) {
+              errors.push_back("Failed to persist new credentials");
+            } else {
+              invalidate_all_web_sessions();  // force re-login across browser sessions
+              output_tree["status"] = true;
+            }
           }
         } else {
           errors.push_back("Invalid Current Credentials");
@@ -2768,11 +2885,8 @@ namespace confighttp {
       tree["status_code"] = static_cast<int>(code);
       tree["status"] = false;
       tree["error"] = error_message;
-      const SimpleWeb::CaseInsensitiveMultimap headers {
-        {"Content-Type", "application/json"},
-        {"X-Frame-Options", "DENY"},
-        {"Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';"}
-      };
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
       response->write(code, tree.dump(), headers);
     };
 
@@ -2782,9 +2896,8 @@ namespace confighttp {
       nlohmann::json tree;
       tree["status"] = false;
       tree["error"] = "Too many failed attempts. Please try again later.";
-      const SimpleWeb::CaseInsensitiveMultimap headers {
-        {"Content-Type", "application/json"}
-      };
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
       response->write(SimpleWeb::StatusCode::client_error_too_many_requests, tree.dump(), headers);
       return;
     }
@@ -2804,8 +2917,8 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string username = input_tree.value("username", "");
       std::string password = input_tree.value("password", "");
-      std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
-      if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password) {
+      bool needs_upgrade = false;
+      if (!http::verify_user_password(username, password, &needs_upgrade)) {
         write_login_error(
           SimpleWeb::StatusCode::client_error_unauthorized,
           "Invalid username or password. If you forgot your credentials, reset them on the host with the --creds command.",
@@ -2813,13 +2926,13 @@ namespace confighttp {
         );
         return;
       }
+
+      if (needs_upgrade) {
+        http::upgrade_user_password_hash(config::sunshine.credentials_file, username, password);
+      }
+
       clearLoginFailures(address);
-      std::string sessionCookieRaw = crypto::rand_alphabet(64);
-      sessionCookie = util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string();
-      cookie_creation_time = std::chrono::steady_clock::now();
-      const SimpleWeb::CaseInsensitiveMultimap headers {
-        { "Set-Cookie", "auth=" + sessionCookieRaw + "; Secure; SameSite=Strict; Max-Age=2592000; Path=/" }
-      };
+      auto headers = make_auth_cookie_headers(create_web_session());
       response->write(headers);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Web UI Login failed: ["sv << address
@@ -2831,6 +2944,23 @@ namespace confighttp {
       );
       return;
     }
+  }
+
+  void logout(resp_https_t response, req_https_t request) {
+    if (!checkIPOrigin(response, request)) {
+      return;
+    }
+
+    auto cookies = request->header.find("cookie");
+    if (cookies != request->header.end()) {
+      invalidate_web_session_cookie(getCookieValue(cookies->second, "auth"));
+    }
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    auto headers = clear_auth_cookie_headers();
+    headers.emplace("Content-Type", "application/json");
+    response->write(output_tree.dump(), headers);
   }
 
   // -------------------------------------------------------------------------
@@ -3401,9 +3531,7 @@ namespace confighttp {
 
     auto stats = stream_stats::get_current();
     SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "application/json");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+    append_json_security_headers(headers);
     response->write(stats.to_json(), headers);
   }
 
@@ -3667,6 +3795,7 @@ namespace confighttp {
     server.resource["^/troubleshooting/?$"]["GET"] = getSpaPage;
     // Login is exempt from CSRF (it's the entry point; rate limiting protects it instead)
     server.resource["^/api/login"]["POST"] = login;
+    server.resource["^/api/logout$"]["POST"] = withCsrf(logout);
     server.resource["^/api/pin$"]["POST"] = withCsrf(savePin);
     server.resource["^/api/otp$"]["POST"] = withCsrf(getOTP);
     server.resource["^/api/apps$"]["GET"] = getApps;

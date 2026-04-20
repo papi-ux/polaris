@@ -10,6 +10,7 @@
 #include <utility>
 
 // lib includes
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -43,6 +44,52 @@ namespace http {
   std::string unique_id;
   uuid_util::uuid_t uuid;
   net::net_e origin_web_ui_allowed;
+
+  namespace {
+    constexpr std::string_view legacy_password_hash_scheme = "sha256"sv;
+    constexpr std::string_view modern_password_hash_scheme = "scrypt"sv;
+
+    bool restrict_credentials_file_permissions(const fs::path &path) {
+      std::error_code err_code {};
+      fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, err_code);
+      if (err_code) {
+        BOOST_LOG(error) << "Couldn't change permissions of ["sv << path << "] :"sv << err_code.message();
+        return false;
+      }
+      return true;
+    }
+
+    bool hash_password_for_scheme(
+      const std::string_view password,
+      const std::string_view salt,
+      const std::string_view scheme,
+      std::string &encoded_hash
+    ) {
+      if (scheme == modern_password_hash_scheme) {
+        crypto::password_kdf_t derived_key {};
+        if (!crypto::hash_password_scrypt(password, salt, derived_key)) {
+          return false;
+        }
+        encoded_hash = util::hex(derived_key).to_string();
+        return true;
+      }
+
+      encoded_hash = util::hex(crypto::hash(std::string {password} + std::string {salt})).to_string();
+      return true;
+    }
+
+    int persist_credentials_json(const fs::path &path, const nlohmann::json &payload) {
+      try {
+        std::ofstream out(path);
+        out << payload.dump(4);
+      } catch (std::exception &e) {
+        BOOST_LOG(error) << "error writing to the credentials file, perhaps try this again as an administrator? Details: "sv << e.what();
+        return -1;
+      }
+
+      return restrict_credentials_file_permissions(path) ? 0 : -1;
+    }
+  }  // namespace
 
   int init() {
     bool clean_slate = config::sunshine.flags[config::flag::FRESH_STATE];
@@ -82,14 +129,16 @@ namespace http {
     }
 
     auto salt = crypto::rand_alphabet(16);
+    std::string password_hash;
+    if (!hash_password_for_scheme(password, salt, modern_password_hash_scheme, password_hash)) {
+      BOOST_LOG(error) << "Couldn't derive password hash with the configured KDF";
+      return -1;
+    }
     outputTree["username"] = username;
     outputTree["salt"] = salt;
-    outputTree["password"] = util::hex(crypto::hash(password + salt)).to_string();
-    try {
-      std::ofstream out(file);
-      out << outputTree.dump(4);  // Pretty-print with an indent of 4 spaces.
-    } catch (std::exception &e) {
-      BOOST_LOG(error) << "error writing to the credentials file, perhaps try this again as an administrator? Details: "sv << e.what();
+    outputTree["password_scheme"] = modern_password_hash_scheme;
+    outputTree["password"] = password_hash;
+    if (persist_credentials_json(file, outputTree) != 0) {
       return -1;
     }
 
@@ -122,6 +171,7 @@ namespace http {
       config::sunshine.username = inputTree.get<std::string>("username");
       config::sunshine.password = inputTree.get<std::string>("password");
       config::sunshine.salt = inputTree.get<std::string>("salt");
+      config::sunshine.password_hash_scheme = inputTree.get<std::string>("password_scheme", std::string {legacy_password_hash_scheme});
       config::sunshine.api_key = inputTree.get<std::string>("api_key", "");
     } catch (std::exception &e) {
       BOOST_LOG(error) << "loading user credentials: "sv << e.what();
@@ -141,13 +191,52 @@ namespace http {
           in >> outputTree;
         }
         outputTree["api_key"] = config::sunshine.api_key;
-        std::ofstream out(file);
-        out << outputTree.dump(4);
+        if (persist_credentials_json(file, outputTree) != 0) {
+          return -1;
+        }
       } catch (std::exception &e) {
         BOOST_LOG(error) << "Failed to save auto-generated API key: "sv << e.what();
       }
     }
     return 0;
+  }
+
+  bool verify_user_password(const std::string &username, const std::string &password, bool *needs_upgrade) {
+    if (needs_upgrade) {
+      *needs_upgrade = false;
+    }
+
+    if (!boost::iequals(username, config::sunshine.username)) {
+      return false;
+    }
+
+    std::string expected_hash;
+    if (!hash_password_for_scheme(password, config::sunshine.salt, config::sunshine.password_hash_scheme, expected_hash)) {
+      BOOST_LOG(error) << "Failed to derive password hash while verifying credentials";
+      return false;
+    }
+
+    const bool verified = crypto::constant_time_equals(expected_hash, config::sunshine.password);
+    if (verified && needs_upgrade && config::sunshine.password_hash_scheme != modern_password_hash_scheme) {
+      *needs_upgrade = true;
+    }
+
+    return verified;
+  }
+
+  int upgrade_user_password_hash(const std::string &file, const std::string &username, const std::string &password) {
+    if (!boost::iequals(username, config::sunshine.username)) {
+      return -1;
+    }
+    if (config::sunshine.password_hash_scheme == modern_password_hash_scheme) {
+      return 0;
+    }
+
+    BOOST_LOG(info) << "Upgrading stored web credentials to the stronger password KDF";
+    if (save_user_creds(file, config::sunshine.username, password) != 0) {
+      return -1;
+    }
+    return reload_user_creds(file);
   }
 
   int create_creds(const std::string &pkey, const std::string &cert) {

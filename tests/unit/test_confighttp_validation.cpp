@@ -27,6 +27,16 @@ TEST(ConfigValidationTests, RejectsConfigValuesWithEmbeddedLineBreaks) {
   EXPECT_NE(error.find("contains disallowed control characters"), std::string::npos);
 }
 
+TEST(ConfigValidationTests, RejectsUnsupportedConfigKeys) {
+  nlohmann::json payload = {
+    {"definitely_not_a_real_config_key", "value"}
+  };
+
+  std::string error;
+  EXPECT_FALSE(confighttp::validation::validate_config_payload(payload, error));
+  EXPECT_NE(error.find("Unsupported config key"), std::string::npos);
+}
+
 TEST(AppValidationTests, AcceptsAWellFormedAppPayload) {
   nlohmann::json payload = {
     {"name", "Nova"},

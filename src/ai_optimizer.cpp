@@ -9,6 +9,7 @@
 #include "logging.h"
 #include "platform/common.h"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -251,6 +252,203 @@ namespace ai_optimizer {
     return history.last_codec.empty() ? history.codec : history.last_codec;
   }
 
+  static bool is_poor_quality_grade(const std::string &grade) {
+    const auto normalized = to_lower_copy(grade);
+    return normalized == "d" || normalized == "f";
+  }
+
+  static std::string codec_family(const std::string &codec) {
+    const auto normalized = to_lower_copy(codec);
+    if (normalized.find("av1") != std::string::npos) {
+      return "av1";
+    }
+    if (normalized.find("hevc") != std::string::npos || normalized.find("h265") != std::string::npos) {
+      return "hevc";
+    }
+    if (normalized.find("avc") != std::string::npos || normalized.find("h264") != std::string::npos) {
+      return "h264";
+    }
+    return normalized;
+  }
+
+  static bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile) {
+    return device_profile &&
+      (device_profile->type == "handheld" || device_profile->type == "phone");
+  }
+
+  static int derive_safe_bitrate_kbps(int baseline_kbps,
+                                      const std::optional<device_db::device_t> &device_profile,
+                                      bool degraded_history) {
+    int safe_kbps = baseline_kbps > 0 ? baseline_kbps : 15000;
+
+    if (device_profile) {
+      if (device_profile->type == "handheld") {
+        safe_kbps = std::min(safe_kbps, 16000);
+      } else if (device_profile->type == "phone") {
+        safe_kbps = std::min(safe_kbps, 18000);
+      } else if (device_profile->type == "tablet") {
+        safe_kbps = std::min(safe_kbps, 22000);
+      } else if (device_profile->type == "desktop") {
+        safe_kbps = std::min(safe_kbps, 30000);
+      }
+    }
+
+    if (degraded_history) {
+      safe_kbps = static_cast<int>(std::lround(static_cast<double>(safe_kbps) * 0.75));
+    }
+
+    return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
+  }
+
+  static void enrich_session_reliability_context(const std::string &device_name,
+                                                 const std::string &app_name,
+                                                 session_history_t &session) {
+    const auto device_profile = device_db::get_device(device_name);
+    const bool mobile_client = is_mobile_client_type(device_profile);
+    const std::string quality_grade = latest_quality_grade(session);
+    const bool degraded_history =
+      session.consecutive_poor_outcomes > 0 ||
+      session.poor_outcome_count > 0 ||
+      is_poor_quality_grade(quality_grade) ||
+      to_lower_copy(session.last_health_grade) == "degraded";
+
+    const double target_fps = session.last_target_fps > 0.0 ? session.last_target_fps : session.last_fps;
+    const double fps_gap = target_fps > 0.0 ? std::max(0.0, target_fps - session.last_fps) : 0.0;
+    const double fps_ratio =
+      (target_fps > 0.0 && session.last_fps > 0.0) ? std::clamp(session.last_fps / target_fps, 0.0, 1.5) : 0.0;
+    const bool network_risk = session.last_packet_loss_pct >= 0.35 || session.last_latency_ms >= 28.0;
+    const bool pacing_risk =
+      fps_gap >= 4.0 ||
+      (target_fps > 0.0 && fps_ratio < 0.88) ||
+      is_poor_quality_grade(quality_grade);
+
+    const auto active_codec_family = codec_family(latest_codec(session));
+    const bool decoder_risk =
+      ((active_codec_family == "av1") || (mobile_client && active_codec_family == "hevc" && fps_gap >= 8.0)) &&
+      (pacing_risk || fps_gap >= 4.0) &&
+      !network_risk;
+
+    bool capture_fallback = false;
+    if (!session.last_capture_path.empty()) {
+      const auto capture_path = to_lower_copy(session.last_capture_path);
+      capture_fallback =
+        capture_path.find("cpu") != std::string::npos ||
+        capture_path.find("shm") != std::string::npos ||
+        capture_path.find("fallback") != std::string::npos;
+    }
+
+    const bool virtual_display_risk =
+      session.last_capture_path == "virtual_display" &&
+      (pacing_risk || degraded_history);
+
+    const bool hdr_risk =
+      session.last_hdr_risk == "elevated" ||
+      (session.last_safe_hdr.has_value() && !session.last_safe_hdr.value() && degraded_history);
+
+    if (session.last_network_risk.empty()) {
+      session.last_network_risk = network_risk ? "elevated" : "normal";
+    }
+    if (session.last_decoder_risk.empty()) {
+      session.last_decoder_risk = decoder_risk ? "elevated" : "normal";
+    }
+    if (session.last_hdr_risk.empty()) {
+      session.last_hdr_risk = hdr_risk ? "elevated" : "normal";
+    }
+    if (session.last_capture_path.empty()) {
+      session.last_capture_path = "unknown";
+    }
+
+    if (session.last_primary_issue.empty()) {
+      if (network_risk) session.last_primary_issue = "network_jitter";
+      else if (hdr_risk) session.last_primary_issue = "hdr_path";
+      else if (virtual_display_risk) session.last_primary_issue = "virtual_display_path";
+      else if (decoder_risk) session.last_primary_issue = "decoder_path";
+      else if (capture_fallback) session.last_primary_issue = "capture_fallback";
+      else if (pacing_risk) session.last_primary_issue = "frame_pacing";
+      else session.last_primary_issue = "steady";
+    }
+
+    if (session.last_issues.empty()) {
+      if (network_risk) session.last_issues.push_back("network_jitter");
+      if (pacing_risk) session.last_issues.push_back("frame_pacing");
+      if (capture_fallback) session.last_issues.push_back("capture_fallback");
+      if (hdr_risk) session.last_issues.push_back("hdr_path");
+      if (decoder_risk) session.last_issues.push_back("decoder_path");
+      if (virtual_display_risk) session.last_issues.push_back("virtual_display_path");
+    }
+
+    if (session.last_health_grade.empty()) {
+      const int concern_count =
+        static_cast<int>(network_risk) +
+        static_cast<int>(pacing_risk) +
+        static_cast<int>(capture_fallback) +
+        static_cast<int>(hdr_risk) +
+        static_cast<int>(decoder_risk) +
+        static_cast<int>(virtual_display_risk);
+      session.last_health_grade =
+        concern_count >= 2 || hdr_risk || decoder_risk ? "degraded" :
+        concern_count == 1 ? "watch" :
+        "good";
+    }
+
+    const int baseline_bitrate_kbps =
+      session.last_bitrate_kbps > 0 ? session.last_bitrate_kbps :
+      device_profile ? device_profile->ideal_bitrate_kbps :
+      15000;
+    if (session.last_safe_bitrate_kbps <= 0) {
+      session.last_safe_bitrate_kbps = derive_safe_bitrate_kbps(
+        baseline_bitrate_kbps,
+        device_profile,
+        degraded_history || session.last_health_grade == "degraded"
+      );
+    }
+
+    if (session.last_safe_codec.empty()) {
+      auto safe_codec = active_codec_family.empty() ? std::optional<std::string> {} : std::optional<std::string> {active_codec_family};
+      if (decoder_risk || (mobile_client && active_codec_family == "av1")) {
+        safe_codec = device_db::normalize_preferred_codec(
+          device_name,
+          app_name,
+          std::optional<std::string> {std::string {"hevc"}},
+          session.last_safe_bitrate_kbps,
+          false
+        );
+        if (!safe_codec) {
+          safe_codec = "hevc";
+        }
+      }
+      if (safe_codec) {
+        session.last_safe_codec = *safe_codec;
+      }
+    }
+
+    if (session.last_safe_display_mode.empty()) {
+      if (virtual_display_risk || config::video.linux_display.headless_mode) {
+        session.last_safe_display_mode = "headless";
+      } else if (session.last_capture_path == "virtual_display") {
+        session.last_safe_display_mode = degraded_history ? "headless" : "virtual_display";
+      } else if (device_profile && device_profile->virtual_display && !degraded_history && !mobile_client) {
+        session.last_safe_display_mode = "virtual_display";
+      } else {
+        session.last_safe_display_mode = "headless";
+      }
+    }
+
+    if (!session.last_safe_hdr.has_value()) {
+      if (hdr_risk) {
+        session.last_safe_hdr = false;
+      } else if (device_profile && device_profile->hdr_capable && !degraded_history) {
+        session.last_safe_hdr = true;
+      }
+    }
+
+    session.last_relaunch_recommended =
+      session.last_relaunch_recommended ||
+      decoder_risk ||
+      hdr_risk ||
+      virtual_display_risk;
+  }
+
   static config_t resolved_config(config_t config) {
     config.provider = normalize_provider(config.provider);
     config.model = normalize_model(config.provider, config.model);
@@ -314,6 +512,18 @@ namespace ai_optimizer {
     merged.last_optimization_source = latest.last_optimization_source;
     merged.last_optimization_confidence = latest.last_optimization_confidence;
     merged.last_recommendation_version = latest.last_recommendation_version;
+    merged.last_health_grade = latest.last_health_grade.empty() ? merged.last_health_grade : latest.last_health_grade;
+    merged.last_primary_issue = latest.last_primary_issue.empty() ? merged.last_primary_issue : latest.last_primary_issue;
+    merged.last_issues = latest.last_issues.empty() ? merged.last_issues : latest.last_issues;
+    merged.last_decoder_risk = latest.last_decoder_risk.empty() ? merged.last_decoder_risk : latest.last_decoder_risk;
+    merged.last_hdr_risk = latest.last_hdr_risk.empty() ? merged.last_hdr_risk : latest.last_hdr_risk;
+    merged.last_network_risk = latest.last_network_risk.empty() ? merged.last_network_risk : latest.last_network_risk;
+    merged.last_capture_path = latest.last_capture_path.empty() ? merged.last_capture_path : latest.last_capture_path;
+    merged.last_safe_bitrate_kbps = latest.last_safe_bitrate_kbps > 0 ? latest.last_safe_bitrate_kbps : merged.last_safe_bitrate_kbps;
+    merged.last_safe_codec = latest.last_safe_codec.empty() ? merged.last_safe_codec : latest.last_safe_codec;
+    merged.last_safe_display_mode = latest.last_safe_display_mode.empty() ? merged.last_safe_display_mode : latest.last_safe_display_mode;
+    merged.last_safe_hdr = latest.last_safe_hdr.has_value() ? latest.last_safe_hdr : merged.last_safe_hdr;
+    merged.last_relaunch_recommended = latest.last_relaunch_recommended || merged.last_relaunch_recommended;
     merged.last_updated_at = latest.last_updated_at;
     return merged;
   }
@@ -486,8 +696,14 @@ namespace ai_optimizer {
       confidence = confidence == "low" ? "medium" : confidence;
     }
     if (history) {
-      if (history->poor_outcome_count > 0 || history->consecutive_poor_outcomes > 0) {
+      const auto health_grade = to_lower_copy(history->last_health_grade);
+      if (history->poor_outcome_count > 0 ||
+          history->consecutive_poor_outcomes > 0 ||
+          health_grade == "degraded" ||
+          history->last_relaunch_recommended) {
         confidence = "low";
+      } else if (health_grade == "watch" && confidence == "high") {
+        confidence = "medium";
       } else {
         const auto grade = latest_quality_grade(*history);
         if (grade == "A" || grade == "B") {
@@ -613,6 +829,9 @@ namespace ai_optimizer {
     }
     if (history && history->session_count > 0) {
       push_signal(optimization.signals_used, "session_history");
+      if (!history->last_primary_issue.empty() || !history->last_health_grade.empty()) {
+        push_signal(optimization.signals_used, "reliability_feedback");
+      }
     }
     if (config::video.linux_display.headless_mode) {
       push_signal(optimization.signals_used, "headless_mode");
@@ -780,6 +999,61 @@ namespace ai_optimizer {
                      << "kbps, Avg Packet Loss " << history->packet_loss_pct
                      << "%, Poor Outcomes " << history->poor_outcome_count
                      << ", Last Confidence " << history->last_optimization_confidence << "\n";
+
+      const bool has_reliability_context =
+        !history->last_health_grade.empty() ||
+        !history->last_primary_issue.empty() ||
+        !history->last_issues.empty() ||
+        !history->last_safe_codec.empty() ||
+        history->last_safe_bitrate_kbps > 0 ||
+        !history->last_safe_display_mode.empty() ||
+        history->last_safe_hdr.has_value();
+
+      if (has_reliability_context) {
+        history_stream << "  Reliability diagnosis: health="
+                       << (history->last_health_grade.empty() ? "unknown" : history->last_health_grade)
+                       << ", primary issue="
+                       << (history->last_primary_issue.empty() ? "steady" : history->last_primary_issue);
+        if (!history->last_issues.empty()) {
+          history_stream << ", issue tags=";
+          for (std::size_t i = 0; i < history->last_issues.size(); ++i) {
+            if (i > 0) {
+              history_stream << "/";
+            }
+            history_stream << history->last_issues[i];
+          }
+        }
+        history_stream << "\n";
+
+        history_stream << "  Risk levels: network="
+                       << (history->last_network_risk.empty() ? "unknown" : history->last_network_risk)
+                       << ", decoder="
+                       << (history->last_decoder_risk.empty() ? "unknown" : history->last_decoder_risk)
+                       << ", hdr="
+                       << (history->last_hdr_risk.empty() ? "unknown" : history->last_hdr_risk)
+                       << ", capture="
+                       << (history->last_capture_path.empty() ? "unknown" : history->last_capture_path)
+                       << "\n";
+
+        history_stream << "  Safe fallback bias: bitrate="
+                       << (history->last_safe_bitrate_kbps > 0 ?
+                             std::to_string(history->last_safe_bitrate_kbps) + "kbps" :
+                             std::string {"unchanged"})
+                       << ", codec="
+                       << (history->last_safe_codec.empty() ? "unchanged" : history->last_safe_codec)
+                       << ", display="
+                       << (history->last_safe_display_mode.empty() ? "unchanged" : history->last_safe_display_mode)
+                       << ", hdr=";
+        if (history->last_safe_hdr.has_value()) {
+          history_stream << (*history->last_safe_hdr ? "keep" : "off");
+        } else {
+          history_stream << "unchanged";
+        }
+        history_stream << ", relaunch="
+                       << (history->last_relaunch_recommended ? "yes" : "no")
+                       << "\n";
+      }
+
       history_line = history_stream.str();
     }
 
@@ -814,6 +1088,7 @@ namespace ai_optimizer {
       "Game: " + (app_name.empty() ? "Desktop/General" : app_name) + "\n"
       + category_line + baseline_line.str() + history_line + headless_line + adaptive_line +
       "GPU: " + gpu_info + "\n\n"
+      "If the last session degraded, bias the recommendation toward the safe fallback path and only keep a higher-end codec, HDR, or virtual display when the evidence strongly supports it.\n"
       "Respond with ONLY this JSON (fill in values, no other text):\n"
       "{\"display_mode\":\"WIDTHxHEIGHTxFPS\",\"color_range\":0,\"hdr\":false,"
       "\"virtual_display\":" + example_virtual_display + ",\"target_bitrate_kbps\":15000,\"nvenc_tune\":2,"
@@ -1570,11 +1845,26 @@ namespace ai_optimizer {
         h.last_optimization_source = val.value("last_optimization_source", "");
         h.last_optimization_confidence = val.value("last_optimization_confidence", "");
         h.last_recommendation_version = val.value("last_recommendation_version", 0);
+        h.last_health_grade = val.value("last_health_grade", "");
+        h.last_primary_issue = val.value("last_primary_issue", "");
+        h.last_issues = val.value("last_issues", std::vector<std::string> {});
+        h.last_decoder_risk = val.value("last_decoder_risk", "");
+        h.last_hdr_risk = val.value("last_hdr_risk", "");
+        h.last_network_risk = val.value("last_network_risk", "");
+        h.last_capture_path = val.value("last_capture_path", "");
+        h.last_safe_bitrate_kbps = val.value("last_safe_bitrate_kbps", 0);
+        h.last_safe_codec = val.value("last_safe_codec", "");
+        h.last_safe_display_mode = val.value("last_safe_display_mode", "");
+        if (val.contains("last_safe_hdr") && val["last_safe_hdr"].is_boolean()) {
+          h.last_safe_hdr = val["last_safe_hdr"].get<bool>();
+        }
+        h.last_relaunch_recommended = val.value("last_relaunch_recommended", false);
         h.last_updated_at = val.value("last_updated_at", 0);
         h.last_invalidated_at = val.value("last_invalidated_at", 0);
         auto pos = key.find(':');
         const auto device_name = pos == std::string::npos ? key : key.substr(0, pos);
         const auto app_name = pos == std::string::npos ? std::string {} : key.substr(pos + 1);
+        enrich_session_reliability_context(device_name, app_name, h);
         const auto normalized_key = history_key(device_name, app_name);
         auto existing = session_history.find(normalized_key);
         if (existing == session_history.end()) {
@@ -1590,7 +1880,7 @@ namespace ai_optimizer {
     std::lock_guard<std::mutex> lock(history_mutex);
     nlohmann::json root;
     for (const auto &[key, h] : session_history) {
-      root[key] = {
+      nlohmann::json entry = {
         {"avg_fps", h.avg_fps},
         {"avg_latency_ms", h.avg_latency_ms},
         {"avg_bitrate_kbps", h.avg_bitrate_kbps},
@@ -1610,9 +1900,24 @@ namespace ai_optimizer {
         {"last_optimization_source", h.last_optimization_source},
         {"last_optimization_confidence", h.last_optimization_confidence},
         {"last_recommendation_version", h.last_recommendation_version},
+        {"last_health_grade", h.last_health_grade},
+        {"last_primary_issue", h.last_primary_issue},
+        {"last_issues", h.last_issues},
+        {"last_decoder_risk", h.last_decoder_risk},
+        {"last_hdr_risk", h.last_hdr_risk},
+        {"last_network_risk", h.last_network_risk},
+        {"last_capture_path", h.last_capture_path},
+        {"last_safe_bitrate_kbps", h.last_safe_bitrate_kbps},
+        {"last_safe_codec", h.last_safe_codec},
+        {"last_safe_display_mode", h.last_safe_display_mode},
+        {"last_relaunch_recommended", h.last_relaunch_recommended},
         {"last_updated_at", h.last_updated_at},
         {"last_invalidated_at", h.last_invalidated_at}
       };
+      if (h.last_safe_hdr.has_value()) {
+        entry["last_safe_hdr"] = h.last_safe_hdr.value();
+      }
+      root[key] = std::move(entry);
     }
     std::ofstream file(history_path());
     if (file.is_open()) file << root.dump(2);
@@ -1653,6 +1958,18 @@ namespace ai_optimizer {
       existing.last_optimization_source = session.last_optimization_source;
       existing.last_optimization_confidence = session.last_optimization_confidence;
       existing.last_recommendation_version = session.last_recommendation_version;
+      existing.last_health_grade = session.last_health_grade;
+      existing.last_primary_issue = session.last_primary_issue;
+      existing.last_issues = session.last_issues;
+      existing.last_decoder_risk = session.last_decoder_risk;
+      existing.last_hdr_risk = session.last_hdr_risk;
+      existing.last_network_risk = session.last_network_risk;
+      existing.last_capture_path = session.last_capture_path;
+      existing.last_safe_bitrate_kbps = session.last_safe_bitrate_kbps;
+      existing.last_safe_codec = session.last_safe_codec;
+      existing.last_safe_display_mode = session.last_safe_display_mode;
+      existing.last_safe_hdr = session.last_safe_hdr;
+      existing.last_relaunch_recommended = session.last_relaunch_recommended;
 
       if (session.quality_grade == "D" || session.quality_grade == "F") {
         existing.poor_outcome_count++;
@@ -1661,6 +1978,8 @@ namespace ai_optimizer {
       } else {
         existing.consecutive_poor_outcomes = 0;
       }
+
+      enrich_session_reliability_context(canonical_device, app_name, existing);
       session_count_total = existing.session_count;
     }
 
@@ -1719,6 +2038,20 @@ namespace ai_optimizer {
       entry["last_optimization_source"] = h.last_optimization_source;
       entry["last_optimization_confidence"] = h.last_optimization_confidence;
       entry["last_recommendation_version"] = h.last_recommendation_version;
+      entry["last_health_grade"] = h.last_health_grade;
+      entry["last_primary_issue"] = h.last_primary_issue;
+      entry["last_issues"] = h.last_issues;
+      entry["last_decoder_risk"] = h.last_decoder_risk;
+      entry["last_hdr_risk"] = h.last_hdr_risk;
+      entry["last_network_risk"] = h.last_network_risk;
+      entry["last_capture_path"] = h.last_capture_path;
+      entry["last_safe_bitrate_kbps"] = h.last_safe_bitrate_kbps;
+      entry["last_safe_codec"] = h.last_safe_codec;
+      entry["last_safe_display_mode"] = h.last_safe_display_mode;
+      if (h.last_safe_hdr.has_value()) {
+        entry["last_safe_hdr"] = h.last_safe_hdr.value();
+      }
+      entry["last_relaunch_recommended"] = h.last_relaunch_recommended;
       entry["last_updated_at"] = h.last_updated_at;
       entry["last_invalidated_at"] = h.last_invalidated_at;
       arr.push_back(entry);

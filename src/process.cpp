@@ -2248,6 +2248,78 @@ namespace proc {
         session.quality_grade = session.last_quality_grade;
         session.codec = session.last_codec;
 
+        const double fps_gap =
+          session.last_target_fps > 0.0 ? std::max(0.0, session.last_target_fps - session.last_fps) : 0.0;
+        const bool network_risk = stats.packet_loss >= 0.35 || stats.latency_ms >= 28.0;
+        const bool pacing_risk =
+          stats.frame_jitter_ms >= 2.2 ||
+          stats.duplicate_frame_ratio >= 0.10 ||
+          stats.dropped_frame_ratio >= 0.04 ||
+          fps_gap >= 4.0;
+        const bool capture_fallback =
+          stats.capture_residency == platf::frame_residency_e::cpu ||
+          stats.encode_target_residency == platf::frame_residency_e::cpu ||
+          stats.capture_transport == platf::frame_transport_e::shm;
+        const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
+        const bool hdr_risk = stats.dynamic_range > 0 && (pacing_risk || encoder_risk);
+        const std::string codec_lower = boost::algorithm::to_lower_copy(session.last_codec);
+        const bool av1_codec = codec_lower.find("av1") != std::string::npos;
+        const bool decoder_risk = av1_codec && (pacing_risk || fps_gap >= 4.0) && !network_risk;
+        const bool virtual_display_risk = _launch_session->virtual_display && (pacing_risk || capture_fallback || hdr_risk);
+
+        session.last_network_risk = network_risk ? "elevated" : "normal";
+        session.last_decoder_risk = decoder_risk ? "elevated" : "normal";
+        session.last_hdr_risk = hdr_risk ? "elevated" : "normal";
+        session.last_capture_path =
+          _launch_session->virtual_display ? "virtual_display" :
+          capture_fallback ? "cpu_fallback" :
+          stats.runtime_effective_headless ? "headless" :
+          "desktop";
+        if (network_risk) session.last_primary_issue = "network_jitter";
+        else if (hdr_risk) session.last_primary_issue = "hdr_path";
+        else if (virtual_display_risk) session.last_primary_issue = "virtual_display_path";
+        else if (decoder_risk) session.last_primary_issue = "decoder_path";
+        else if (capture_fallback) session.last_primary_issue = "capture_fallback";
+        else if (pacing_risk) session.last_primary_issue = "frame_pacing";
+        else if (encoder_risk) session.last_primary_issue = "encoder_load";
+        else session.last_primary_issue = "steady";
+        if (network_risk) session.last_issues.push_back("network_jitter");
+        if (pacing_risk) session.last_issues.push_back("frame_pacing");
+        if (capture_fallback) session.last_issues.push_back("capture_fallback");
+        if (encoder_risk) session.last_issues.push_back("encoder_load");
+        if (hdr_risk) session.last_issues.push_back("hdr_path");
+        if (decoder_risk) session.last_issues.push_back("decoder_path");
+        if (virtual_display_risk) session.last_issues.push_back("virtual_display_path");
+        const int concern_count =
+          static_cast<int>(network_risk) +
+          static_cast<int>(pacing_risk) +
+          static_cast<int>(capture_fallback) +
+          static_cast<int>(encoder_risk) +
+          static_cast<int>(hdr_risk) +
+          static_cast<int>(decoder_risk) +
+          static_cast<int>(virtual_display_risk);
+        session.last_health_grade =
+          concern_count >= 2 || hdr_risk || decoder_risk ? "degraded" :
+          concern_count == 1 ? "watch" :
+          "good";
+        session.last_safe_bitrate_kbps =
+          stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps :
+          stats.bitrate_kbps > 0 ? static_cast<int>(std::lround(static_cast<double>(stats.bitrate_kbps) * (session.last_health_grade == "good" ? 1.0 : 0.75))) :
+          0;
+        session.last_safe_codec =
+          decoder_risk ? "hevc" :
+          av1_codec ? "av1" :
+          (codec_lower.find("hevc") != std::string::npos || codec_lower.find("h265") != std::string::npos) ? "hevc" :
+          (codec_lower.find("h264") != std::string::npos || codec_lower.find("avc") != std::string::npos) ? "h264" :
+          "";
+        session.last_safe_display_mode =
+          (virtual_display_risk || config::video.linux_display.headless_mode) ? "headless" :
+          (_launch_session->virtual_display ? "virtual_display" : "headless");
+        if (stats.dynamic_range > 0) {
+          session.last_safe_hdr = !hdr_risk;
+        }
+        session.last_relaunch_recommended = hdr_risk || decoder_risk || virtual_display_risk;
+
         ai_optimizer::record_session(_launch_session->device_name, _app.name, session);
       }
     }
