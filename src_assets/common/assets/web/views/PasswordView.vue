@@ -1,32 +1,57 @@
 <template>
-  <div class="my-6 space-y-6">
-    <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-      <div>
-        <h1 class="text-2xl font-bold text-silver">{{ $t('navbar.security') }}</h1>
-        <p class="mt-2 max-w-3xl text-sm text-storm">{{ $t('password.overview') }}</p>
+  <div class="page-shell pb-2">
+    <section class="page-hero">
+      <div class="page-hero-content">
+        <div class="page-hero-copy">
+          <div class="page-hero-kicker">{{ $t('navbar.security') }}</div>
+          <h1 class="page-hero-title">{{ $t('password.action_title') }}</h1>
+          <div class="page-hero-copy-inline">
+            <p class="page-hero-copy-text">Rotate web UI credentials without leaving the host console.</p>
+            <InfoHint size="sm" label="Security overview">
+              {{ $t('password.overview') }}
+            </InfoHint>
+          </div>
+          <div class="page-hero-actions">
+            <span class="meta-pill">{{ $t('password.web_ui_only') }}</span>
+            <span class="meta-pill border-amber-300/30 bg-amber-300/10 text-amber-200">{{ $t('password.reload_note') }}</span>
+          </div>
+        </div>
+
+        <div class="page-hero-aside">
+          <article class="page-hero-note">
+            <div class="page-hero-note-title-row">
+              <div class="flex items-center gap-2">
+                <div class="page-hero-note-title">{{ $t('password.commit_changes') }}</div>
+                <span class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-200">
+                  {{ $t('password.sensitive_action') }}
+                </span>
+              </div>
+              <InfoHint size="sm" align="right" label="Reload guidance">
+                {{ $t('password.action_desc') }}
+              </InfoHint>
+            </div>
+            <div class="page-hero-note-copy">Verify the current credentials, set the replacement pair, then save once.</div>
+            <div class="mt-2 text-sm text-storm">Polaris reloads the web credential gate after the save completes.</div>
+          </article>
+        </div>
       </div>
-      <div class="flex flex-wrap items-center gap-2 text-xs">
-        <span class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-storm">
-          {{ $t('password.web_ui_only') }}
-        </span>
-        <span class="rounded-full border border-amber-300/30 bg-amber-300/10 px-2.5 py-1 text-amber-200">
-          {{ $t('password.reload_note') }}
-        </span>
-      </div>
-    </div>
+    </section>
 
     <form class="space-y-4" @submit.prevent="save">
-      <div class="grid gap-4 xl:grid-cols-[minmax(320px,0.9fr)_minmax(0,1.35fr)]">
-        <section class="card border border-storm/15 p-5">
-          <div class="flex items-start justify-between gap-4">
-            <div>
-              <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('password.step_one') }}</div>
-              <h2 class="mt-2 text-lg font-semibold text-silver">{{ $t('password.verify_access') }}</h2>
-              <p class="mt-2 text-sm text-storm">{{ $t('password.current_creds_desc') }}</p>
+      <div class="grid gap-4 xl:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.08fr)]">
+        <section class="section-card">
+          <div>
+            <div class="section-kicker">{{ $t('password.step_one') }}</div>
+            <div class="section-title-row">
+              <h2 class="section-title">{{ $t('password.verify_access') }}</h2>
+              <InfoHint size="sm" label="Current credentials guidance">
+                {{ $t('password.current_creds_desc') }}
+              </InfoHint>
+              <span class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-200">
+                {{ $t('password.sensitive_action') }}
+              </span>
             </div>
-            <span class="rounded-full border border-amber-300/25 bg-amber-300/10 px-2 py-1 text-[10px] font-medium text-amber-200">
-              {{ $t('password.sensitive_action') }}
-            </span>
+            <p class="section-copy">Use the current web credentials to authorize the rotation.</p>
           </div>
 
           <div class="mt-5 space-y-4">
@@ -42,9 +67,11 @@
             </div>
 
             <div>
-              <div class="mb-1 flex items-center justify-between gap-3">
+              <div class="mb-1 flex items-center gap-2">
                 <label for="currentPassword" class="block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                <span class="text-[11px] text-storm">{{ $t('password.current_password_desc') }}</span>
+                <InfoHint size="sm" label="Current password guidance">
+                  {{ $t('password.current_password_desc') }}
+                </InfoHint>
               </div>
               <div class="relative">
                 <input
@@ -67,29 +94,40 @@
           </div>
         </section>
 
-        <section class="card border border-storm/15 p-5">
+        <section class="section-card">
           <div>
-            <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('password.step_two') }}</div>
-            <h2 class="mt-2 text-lg font-semibold text-silver">{{ $t('password.rotate_access') }}</h2>
-            <p class="mt-2 text-sm text-storm">{{ $t('password.new_creds_desc') }}</p>
+            <div class="section-kicker">{{ $t('password.step_two') }}</div>
+            <div class="section-title-row">
+              <h2 class="section-title">{{ $t('password.rotate_access') }}</h2>
+              <InfoHint size="sm" label="New credentials guidance">
+                {{ $t('password.new_creds_desc') }}
+              </InfoHint>
+            </div>
+            <p class="section-copy">Set the replacement operator identity and confirm it before reload.</p>
           </div>
 
           <div class="mt-5 grid gap-4 lg:grid-cols-2">
             <div class="lg:col-span-2">
-              <label for="newUsername" class="mb-1 block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
+              <div class="mb-1 flex items-center gap-2">
+                <label for="newUsername" class="block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
+                <InfoHint size="sm" label="Username guidance">
+                  {{ $t('password.new_username_desc') }}
+                </InfoHint>
+              </div>
               <input
                 id="newUsername"
                 v-model="passwordData.newUsername"
                 type="text"
                 class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
               />
-              <div class="mt-1 text-sm text-storm">{{ $t('password.new_username_desc') }}</div>
             </div>
 
             <div>
-              <div class="mb-1 flex items-center justify-between gap-3">
+              <div class="mb-1 flex items-center gap-2">
                 <label for="newPassword" class="block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                <span class="text-[11px] text-storm">{{ $t('password.new_password_desc') }}</span>
+                <InfoHint size="sm" label="New password guidance">
+                  {{ $t('password.new_password_desc') }}
+                </InfoHint>
               </div>
               <div class="relative">
                 <input
@@ -136,17 +174,17 @@
         </section>
       </div>
 
-      <section class="card border border-amber-300/20 bg-amber-300/5 p-4">
+      <section class="section-card border border-amber-300/20 bg-amber-300/5">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div class="min-w-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('password.commit_changes') }}</div>
-              <span class="rounded-full border border-amber-300/25 bg-amber-300/10 px-2 py-1 text-[10px] font-medium text-amber-200">
-                {{ $t('password.sensitive_action') }}
-              </span>
+            <div class="section-kicker">{{ $t('password.commit_changes') }}</div>
+            <div class="section-title-row">
+              <div class="text-sm font-medium text-silver">{{ $t('password.save_and_reload') }}</div>
+              <InfoHint size="sm" label="Commit changes guidance">
+                {{ $t('password.action_desc') }}
+              </InfoHint>
             </div>
-            <div class="mt-1 text-sm font-medium text-silver">{{ $t('password.action_title') }}</div>
-            <div class="mt-1 text-sm text-storm">{{ $t('password.action_desc') }}</div>
+            <div class="mt-1 text-sm text-storm">Apply the new credentials and let Polaris reload the web gate.</div>
           </div>
           <button
             class="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50"
@@ -169,6 +207,7 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
+import InfoHint from '../components/InfoHint.vue'
 
 const error = ref(null)
 const success = ref(false)

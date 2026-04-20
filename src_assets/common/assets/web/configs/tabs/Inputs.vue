@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import PlatformLayout from '../../PlatformLayout.vue'
 import Checkbox from "../../Checkbox.vue";
+import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps([
   'platform',
@@ -16,8 +17,13 @@ const config = ref(props.config)
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Controllers</div>
-        <h3 class="settings-section-title">Gamepad handling</h3>
-        <p class="settings-section-copy">Choose how Polaris emulates controllers on the host and how automatic DS4 or DS5 mapping should behave.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Gamepad handling</h3>
+          <InfoHint size="sm" label="Gamepad handling guidance">
+            Choose how Polaris emulates controllers on the host and how automatic DS4 or DS5 mapping should behave.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Host controller emulation plus DS4 and DS5 mapping behavior.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -106,8 +112,13 @@ const config = ref(props.config)
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Keyboard</div>
-        <h3 class="settings-section-title">Keyboard passthrough</h3>
-        <p class="settings-section-copy">Tune repeat behavior and compatibility so host shortcuts, desktop navigation, and keyboard-heavy titles behave correctly.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Keyboard passthrough</h3>
+          <InfoHint size="sm" label="Keyboard passthrough guidance">
+            Tune repeat behavior and compatibility so host shortcuts, desktop navigation, and keyboard-heavy titles behave correctly.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Repeat timing, scancode behavior, and desktop shortcut compatibility.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -151,8 +162,13 @@ const config = ref(props.config)
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Mouse & Touch</div>
-        <h3 class="settings-section-title">Pointer and touch input</h3>
-        <p class="settings-section-copy">Control mouse capture, cursor visibility, scrolling fidelity, and native pen or touch passthrough.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Pointer and touch input</h3>
+          <InfoHint size="sm" label="Pointer and touch guidance">
+            Control mouse capture, cursor visibility, scrolling fidelity, and native pen or touch passthrough.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Mouse capture, visible cursor behavior, and touch or pen passthrough.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -203,8 +219,13 @@ const config = ref(props.config)
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
         <div class="section-kicker">Accessories</div>
-        <h3 class="settings-section-title">Extended input options</h3>
-        <p class="settings-section-copy">Expose input-only mode for TV workflows and forward rumble where the host platform supports it.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Extended input options</h3>
+          <InfoHint size="sm" label="Extended input guidance">
+            Expose input-only mode for TV workflows and forward rumble where the host platform supports it.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">TV-style input-only workflows and platform-specific rumble forwarding.</p>
       </div>
 
       <Checkbox class="mb-3"

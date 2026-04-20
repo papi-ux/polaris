@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import Checkbox from '../../Checkbox.vue'
+import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps({
   platform: String,
@@ -53,8 +54,13 @@ function removeCmd(cmdArr, index) {
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Identity</div>
-        <h3 class="settings-section-title">Host basics</h3>
-        <p class="settings-section-copy">Set the visible Polaris identity, UI language, and log verbosity that shape day-to-day host administration.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Host basics</h3>
+          <InfoHint size="sm" label="Host basics guidance">
+            Set the visible Polaris identity, UI language, and log verbosity that shape day-to-day host administration.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Identity, language, and operator-facing log detail.</p>
       </div>
       <div class="settings-inline-stack">
 
@@ -117,8 +123,13 @@ function removeCmd(cmdArr, index) {
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Automation</div>
-        <h3 class="settings-section-title">Preparation and lifecycle commands</h3>
-        <p class="settings-section-copy">Run host-side commands before apps launch, when sessions resume, and when server shortcuts are triggered from clients.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Preparation and lifecycle commands</h3>
+          <InfoHint size="sm" label="Lifecycle commands guidance">
+            Run host-side commands before apps launch, when sessions resume, and when server shortcuts are triggered from clients.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Host-side automation before launch, after exit, and from client shortcuts.</p>
       </div>
       <div class="settings-inline-stack">
 
@@ -223,8 +234,13 @@ function removeCmd(cmdArr, index) {
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Desktop & updates</div>
-        <h3 class="settings-section-title">Host UI behavior</h3>
-        <p class="settings-section-copy">Keep the desktop-side Polaris experience predictable, from update notifications to tray visibility and admin controls.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Host UI behavior</h3>
+          <InfoHint size="sm" label="Desktop UI behavior guidance">
+            Keep the desktop-side Polaris experience predictable, from update notifications to tray visibility and admin controls.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Tray presence, update notices, and desktop-side control visibility.</p>
       </div>
       <div class="settings-inline-stack">
 
@@ -263,9 +279,28 @@ function removeCmd(cmdArr, index) {
       </div>
       <div class="mt-1">
         <label for="steamgriddb_api_key" class="block text-sm font-medium text-storm mb-1">SteamGridDB API Key</label>
+        <div v-if="config.has_steamgriddb_api_key && !config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-emerald-300/20 bg-emerald-300/8 px-3 py-2 text-xs text-emerald-100">
+          <span>A SteamGridDB key is already stored on the host. Leave this blank to keep it, or type a new key to replace it.</span>
+          <button
+            type="button"
+            class="rounded-full border border-emerald-300/25 px-2.5 py-1 text-[11px] font-medium text-emerald-100 transition-colors hover:border-rose-300/40 hover:text-rose-200"
+            @click="config.clear_steamgriddb_api_key = true; config.steamgriddb_api_key = ''">
+            Clear Stored Key
+          </button>
+        </div>
+        <div v-else-if="config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-rose-300/20 bg-rose-300/8 px-3 py-2 text-xs text-rose-100">
+          <span>The stored SteamGridDB key will be removed when you save.</span>
+          <button
+            type="button"
+            class="rounded-full border border-rose-300/30 px-2.5 py-1 text-[11px] font-medium text-rose-100 transition-colors hover:border-ice/40 hover:text-ice"
+            @click="config.clear_steamgriddb_api_key = false">
+            Keep Existing Key
+          </button>
+        </div>
         <input type="password" id="steamgriddb_api_key"
                class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
                v-model="config.steamgriddb_api_key"
+               @input="config.steamgriddb_api_key && (config.clear_steamgriddb_api_key = false)"
                placeholder="Enter your SteamGridDB API key" />
         <div class="text-xs text-storm mt-1">Enables cover art search for non-Steam games. Get a free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" class="text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
       </div>

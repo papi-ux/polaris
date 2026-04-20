@@ -4,9 +4,9 @@ test.describe('dashboard', () => {
   test('sidebar navigation renders', async ({ loggedInPage }) => {
     const sidebar = loggedInPage.locator('nav').first()
     await expect(sidebar.getByRole('link', { name: /mission control/i })).toBeVisible()
-    await expect(sidebar.getByRole('link', { name: /applications/i })).toBeVisible()
-    await expect(sidebar.getByRole('link', { name: /configuration/i })).toBeVisible()
-    await expect(sidebar.getByRole('link', { name: /pin/i })).toBeVisible()
+    await expect(sidebar.getByRole('link', { name: /library/i })).toBeVisible()
+    await expect(sidebar.getByRole('link', { name: /settings/i })).toBeVisible()
+    await expect(sidebar.getByRole('link', { name: /pairing/i })).toBeVisible()
   })
 
   test('metric chart cards are present when streaming', async ({ loggedInPage }) => {

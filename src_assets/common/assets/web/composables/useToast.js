@@ -8,9 +8,13 @@ export function useToast() {
     const id = nextId++
     toasts.value.push({ id, message, type, duration, action })
     setTimeout(() => {
-      toasts.value = toasts.value.filter(t => t.id !== id)
+      dismiss(id)
     }, duration)
   }
 
-  return { toasts, toast }
+  function dismiss(id) {
+    toasts.value = toasts.value.filter(t => t.id !== id)
+  }
+
+  return { toasts, toast, dismiss }
 }

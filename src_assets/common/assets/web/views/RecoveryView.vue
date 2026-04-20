@@ -1,6 +1,6 @@
 <template>
-  <div class="min-h-screen bg-void flex items-center justify-center p-4">
-    <div class="flex flex-col lg:flex-row gap-6 max-w-5xl w-full">
+  <div class="mx-auto flex min-h-screen max-w-6xl items-center justify-center px-4 py-8 sm:px-6">
+    <div class="flex w-full max-w-5xl flex-col gap-6 lg:flex-row">
       <div class="glass rounded-2xl p-8 w-full shadow-2xl animate-[scale-in_0.3s_ease-out]">
         <header class="flex items-center gap-3 mb-6">
           <img src="/images/logo-polaris.svg" class="h-10" alt="Polaris">

@@ -1,139 +1,180 @@
 <template>
   <div class="page-shell">
-    <section class="page-header">
-      <div class="page-heading">
-        <h1 class="page-title">{{ $t('navbar.system') }}</h1>
-        <p class="page-subtitle">{{ $t('index.system_desc') }}</p>
-      </div>
-      <div class="page-meta">
-        <span class="meta-pill font-medium" :class="healthBadgeClass">
-          {{ healthLabel }}
-        </span>
-        <span v-if="version" class="meta-pill">
-          {{ version.version }}
-        </span>
-        <span v-if="sessionType" class="meta-pill">
-          {{ sessionType }}
-        </span>
-        <span class="meta-pill">
-          {{ displays.length }} {{ $t('index.display_count') }}
-        </span>
-      </div>
-    </section>
-
-    <div class="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.85fr)]">
-      <section class="section-card">
-        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div class="min-w-0">
-            <div class="section-kicker">{{ $t('index.host_health') }}</div>
-            <h2 class="section-title">{{ healthHeading }}</h2>
-            <p class="section-copy max-w-2xl">{{ healthDescription }}</p>
+    <section class="page-hero">
+      <div class="page-hero-content">
+        <div class="page-hero-copy">
+          <div class="page-hero-kicker">{{ $t('index.host_health') }}</div>
+          <h1 class="page-hero-title">{{ healthHeading }}</h1>
+          <div class="page-hero-copy-inline">
+            <p class="page-hero-copy-text">Health, version, and issue signals.</p>
+            <InfoHint size="sm" label="Host health details">
+              {{ healthDescription }}
+            </InfoHint>
           </div>
-          <div v-if="hasIssueCounts" class="grid grid-cols-3 gap-2 text-center tabular-nums">
-            <div v-for="counter in issueCounters" :key="counter.label" class="rounded-xl px-3 py-3" :class="counter.cardClass">
-              <div class="text-lg font-semibold" :class="counter.valueClass">{{ counter.count }}</div>
-              <div class="text-[10px] uppercase tracking-[0.18em]" :class="counter.labelClass">{{ $t(counter.label) }}</div>
-            </div>
-          </div>
-          <div v-else class="flex flex-wrap items-center justify-end gap-2 text-xs">
-            <span class="meta-pill border-green-500/20 bg-green-500/10 text-green-200">
+          <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
+            <span class="meta-pill font-medium" :class="healthBadgeClass">
+              {{ healthLabel }}
+            </span>
+            <template v-if="hasIssueCounts">
+              <span v-for="counter in issueCounters" :key="counter.label" class="meta-pill">
+                <span class="font-medium text-silver">{{ counter.count }}</span>
+                <span class="ml-1">{{ $t(counter.label) }}</span>
+              </span>
+            </template>
+            <span v-else class="meta-pill border-green-500/20 bg-green-500/10 text-green-200">
               {{ $t('index.no_active_issues') }}
             </span>
-            <span v-for="counter in issueCounters" :key="counter.label" class="meta-pill">
-              <span class="font-medium text-silver">{{ counter.count }}</span>
-              <span class="ml-1">{{ $t(counter.label) }}</span>
-            </span>
+          </div>
+
+          <div class="page-hero-actions">
+            <router-link
+              v-for="action in quickActions.slice(0, 3)"
+              :key="action.to"
+              :to="action.to"
+              class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm/25 bg-deep/35 px-3.5 text-sm font-medium text-silver transition-[border-color,background-color,color,transform] duration-200 hover:-translate-y-0.5 hover:border-ice/35 hover:bg-twilight/35 hover:text-ice no-underline"
+            >
+              {{ $t(action.titleKey) }}
+            </router-link>
+          </div>
+
+          <div class="mt-6 page-hero-stat-grid">
+            <article class="page-hero-stat">
+              <div class="page-hero-stat-label-row">
+                <div class="page-hero-stat-label">{{ $t('dashboard.status') }}</div>
+                <InfoHint size="sm" label="Health status details">
+                  {{ $t('index.system_desc') }}
+                </InfoHint>
+              </div>
+              <div class="page-hero-stat-value" :class="healthState === 'critical' ? 'text-red-200' : healthState === 'warning' ? 'text-amber-200' : 'text-green-200'">{{ healthLabel }}</div>
+            </article>
+            <article class="page-hero-stat">
+              <div class="page-hero-stat-label-row">
+                <div class="page-hero-stat-label">{{ $t('index.version_updates') }}</div>
+                <InfoHint size="sm" label="Version status details">
+                  {{ versionSummary }}
+                </InfoHint>
+              </div>
+              <div class="page-hero-stat-value">{{ version?.version || '—' }}</div>
+            </article>
+            <article class="page-hero-stat">
+              <div class="page-hero-stat-label-row">
+                <div class="page-hero-stat-label">{{ $t('index.session_mode') }}</div>
+                <InfoHint size="sm" label="Session mode details">
+                  {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
+                </InfoHint>
+              </div>
+              <div class="page-hero-stat-value capitalize">{{ sessionType || $t('index.session_mode_idle') }}</div>
+            </article>
+            <article class="page-hero-stat">
+              <div class="page-hero-stat-label-row">
+                <div class="page-hero-stat-label">{{ $t('index.display_state') }}</div>
+                <InfoHint size="sm" label="Display state details">
+                  {{ $t('index.display_count') }}
+                </InfoHint>
+              </div>
+              <div class="page-hero-stat-value">{{ displays.length }}</div>
+            </article>
           </div>
         </div>
 
-        <div v-if="recentIssues.length > 0" class="surface-subtle mt-5 p-4">
-          <div class="flex items-center justify-between gap-3">
-            <div class="text-sm font-medium text-silver">{{ $t('index.recent_issues') }}</div>
-            <div class="text-xs text-storm">{{ recentIssues.length }} {{ $t('index.visible_now') }}</div>
-          </div>
-          <ul class="mt-3 space-y-2">
-            <li v-for="(entry, idx) in recentIssues" :key="`${entry.level}-${entry.message}-${idx}`" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2 text-sm text-silver">
-              <div class="flex items-start gap-3">
-                <span class="mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]" :class="issueBadgeClass(entry.level)">
-                  {{ entry.level }}
-                </span>
-                <div class="min-w-0 flex-1">
-                  <div class="break-words">{{ entry.message }}</div>
-                  <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-storm">
-                    <span>{{ entry.timestamp }}</span>
-                    <span v-if="entry.count > 1" class="meta-pill">{{ entry.count }}×</span>
+        <div class="page-hero-aside">
+          <article class="page-hero-note">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <div class="section-title-row">
+                  <div class="section-kicker">{{ $t('index.version_updates') }}</div>
+                  <InfoHint size="sm" label="Version update details">
+                    {{ versionSummary }}
+                  </InfoHint>
+                </div>
+                <div v-if="version" class="mt-2 text-lg font-semibold text-silver">{{ version.version }}</div>
+              </div>
+              <button
+                type="button"
+                class="focus-ring inline-flex h-7 items-center justify-center rounded-lg border border-storm px-2.5 text-[11px] font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice"
+                @click="copyVersion"
+              >
+                {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
+              </button>
+            </div>
+
+            <div v-if="loading" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 px-4 py-4 text-sm text-storm">
+              {{ $t('index.loading_latest') }}
+            </div>
+            <div v-else class="mt-4 space-y-3">
+              <div v-if="buildVersionIsDirty" class="rounded-xl border border-amber-300/20 bg-amber-300/10 px-3.5 py-3 text-sm text-amber-100">
+                {{ $t('index.version_dirty') }}
+              </div>
+              <div v-else-if="installedVersionNotStable" class="rounded-xl border border-blue-400/20 bg-blue-400/10 px-3.5 py-3 text-sm text-blue-100">
+                {{ $t('index.installed_version_not_stable') }}
+              </div>
+              <div v-else-if="stableBuildAvailable" class="rounded-2xl border border-ice/20 bg-ice/10 p-3.5">
+                <div class="text-sm font-medium text-silver">{{ $t('index.new_stable') }}</div>
+                <div class="mt-1 text-xs text-storm">{{ githubVersion?.release?.name }}</div>
+                <a
+                  class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] no-underline"
+                  :href="githubVersion.release.html_url"
+                  target="_blank"
+                >
+                  {{ $t('index.view_release') }}
+                </a>
+              </div>
+              <div v-else-if="notifyPreReleases && preReleaseBuildAvailable" class="rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3.5">
+                <div class="text-sm font-medium text-silver">{{ $t('index.new_pre_release') }}</div>
+                <div class="mt-1 text-xs text-storm">{{ preReleaseVersion?.release?.name }}</div>
+                <a
+                  class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg border border-purple-400/30 px-4 text-sm font-medium text-purple-200 transition-[background-color,border-color,color] duration-200 hover:bg-purple-500/10 no-underline"
+                  :href="preReleaseVersion.release.html_url"
+                  target="_blank"
+                >
+                  {{ $t('index.view_release') }}
+                </a>
+              </div>
+              <div v-else class="rounded-xl border border-green-500/20 bg-green-500/10 px-3.5 py-3 text-sm text-green-200">
+                {{ $t('index.version_latest') }}
+              </div>
+            </div>
+          </article>
+
+          <article class="page-hero-note">
+            <div class="flex items-center justify-between gap-3">
+              <div class="page-hero-note-title">{{ $t('index.recent_issues') }}</div>
+              <div class="text-xs text-storm">{{ recentIssues.length }} {{ $t('index.visible_now') }}</div>
+            </div>
+            <div v-if="recentIssues.length > 0" class="mt-4 space-y-1.5">
+              <div v-for="(entry, idx) in recentIssues" :key="`${entry.level}-${entry.message}-${idx}`" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2 text-sm text-silver">
+                <div class="flex items-start gap-3">
+                  <span class="mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]" :class="issueBadgeClass(entry.level)">
+                    {{ entry.level }}
+                  </span>
+                  <div class="min-w-0 flex-1">
+                    <div class="break-words">{{ entry.message }}</div>
+                    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-storm">
+                      <span>{{ entry.timestamp }}</span>
+                      <span v-if="entry.count > 1" class="meta-pill">{{ entry.count }}×</span>
+                    </div>
                   </div>
                 </div>
               </div>
-            </li>
-          </ul>
+            </div>
+            <div v-else class="mt-4 rounded-2xl border border-green-500/15 bg-green-500/10 px-3.5 py-3 text-sm text-green-200">
+              {{ $t('index.no_recent_issues') }}
+            </div>
+          </article>
         </div>
-        <div v-else class="mt-5 rounded-2xl border border-green-500/15 bg-green-500/10 px-4 py-4 text-sm leading-relaxed text-green-200">
-          {{ $t('index.no_recent_issues') }}
-        </div>
-      </section>
-
-      <section class="section-card">
-        <div class="section-kicker">{{ $t('index.version_updates') }}</div>
-        <div v-if="version" class="mt-2 flex items-start justify-between gap-3">
-          <div>
-            <h2 class="text-xl font-semibold text-silver">{{ version.version }}</h2>
-            <p class="mt-2 text-sm leading-relaxed text-storm">{{ versionSummary }}</p>
-          </div>
-          <button
-            type="button"
-            class="focus-ring inline-flex h-8 items-center justify-center rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice"
-            @click="copyVersion"
-          >
-            {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
-          </button>
-        </div>
-
-        <div v-if="loading" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 px-4 py-4 text-sm text-storm">
-          {{ $t('index.loading_latest') }}
-        </div>
-        <div v-else class="mt-4 space-y-3">
-          <div v-if="buildVersionIsDirty" class="rounded-xl border border-amber-300/20 bg-amber-300/10 px-4 py-4 text-sm text-amber-100">
-            {{ $t('index.version_dirty') }}
-          </div>
-          <div v-else-if="installedVersionNotStable" class="rounded-xl border border-blue-400/20 bg-blue-400/10 px-4 py-4 text-sm text-blue-100">
-            {{ $t('index.installed_version_not_stable') }}
-          </div>
-          <div v-else-if="stableBuildAvailable" class="rounded-2xl border border-ice/20 bg-ice/10 p-4">
-            <div class="text-sm font-medium text-silver">{{ $t('index.new_stable') }}</div>
-            <div class="mt-1 text-xs text-storm">{{ githubVersion?.release?.name }}</div>
-            <a
-              class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] no-underline"
-              :href="githubVersion.release.html_url"
-              target="_blank"
-            >
-              {{ $t('index.view_release') }}
-            </a>
-          </div>
-          <div v-else-if="notifyPreReleases && preReleaseBuildAvailable" class="rounded-2xl border border-purple-500/20 bg-purple-500/10 p-4">
-            <div class="text-sm font-medium text-silver">{{ $t('index.new_pre_release') }}</div>
-            <div class="mt-1 text-xs text-storm">{{ preReleaseVersion?.release?.name }}</div>
-            <a
-              class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg border border-purple-400/30 px-4 text-sm font-medium text-purple-200 transition-[background-color,border-color,color] duration-200 hover:bg-purple-500/10 no-underline"
-              :href="preReleaseVersion.release.html_url"
-              target="_blank"
-            >
-              {{ $t('index.view_release') }}
-            </a>
-          </div>
-          <div v-else class="rounded-xl border border-green-500/20 bg-green-500/10 px-4 py-4 text-sm text-green-200">
-            {{ $t('index.version_latest') }}
-          </div>
-        </div>
-      </section>
-    </div>
+      </div>
+    </section>
 
     <section class="section-card">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('index.system_snapshot') }}</div>
-          <h2 class="section-title">{{ $t('index.system_snapshot_title') }}</h2>
-          <p class="section-copy max-w-3xl">{{ $t('index.system_snapshot_desc') }}</p>
+          <div class="section-title-row">
+            <h2 class="section-title">{{ $t('index.system_snapshot_title') }}</h2>
+            <InfoHint size="sm" label="System snapshot details">
+              {{ $t('index.system_snapshot_desc') }}
+            </InfoHint>
+          </div>
         </div>
         <div class="text-xs text-storm">{{ systemLoading ? $t('index.system_snapshot_loading') : $t('index.system_snapshot_live') }}</div>
       </div>
@@ -193,8 +234,12 @@
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)]">
       <section class="section-card">
         <div class="section-kicker">{{ $t('index.quick_actions') }}</div>
-        <h2 class="section-title">{{ $t('index.quick_actions_title') }}</h2>
-        <p class="section-copy">{{ $t('index.quick_actions_desc') }}</p>
+        <div class="section-title-row">
+          <h2 class="section-title">{{ $t('index.quick_actions_title') }}</h2>
+          <InfoHint size="sm" label="Quick action details">
+            {{ $t('index.quick_actions_desc') }}
+          </InfoHint>
+        </div>
         <div class="mt-5 grid gap-3 md:grid-cols-2">
           <router-link
             v-for="action in quickActions"
@@ -202,16 +247,24 @@
             class="action-tile"
             :to="action.to"
           >
-            <div class="text-sm font-medium text-silver">{{ $t(action.titleKey) }}</div>
-            <div class="mt-2 text-sm text-storm">{{ $t(action.descKey) }}</div>
+            <div class="section-title-row">
+              <div class="text-sm font-medium text-silver">{{ $t(action.titleKey) }}</div>
+              <InfoHint size="sm" align="right" :label="`${$t(action.titleKey)} details`">
+                {{ $t(action.descKey) }}
+              </InfoHint>
+            </div>
           </router-link>
         </div>
       </section>
 
       <section class="section-card">
         <div class="section-kicker">{{ $t('index.compatibility') }}</div>
-        <h2 class="section-title">{{ $t('index.compatibility_title') }}</h2>
-        <p class="section-copy">{{ $t('index.compatibility_desc') }}</p>
+        <div class="section-title-row">
+          <h2 class="section-title">{{ $t('index.compatibility_title') }}</h2>
+          <InfoHint size="sm" label="Compatibility details">
+            {{ $t('index.compatibility_desc') }}
+          </InfoHint>
+        </div>
         <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
           <div
             v-for="client in compatibilityClients"
@@ -243,8 +296,12 @@
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('resource_card.resources') }}</div>
-          <h2 class="section-title">{{ $t('index.resources_title') }}</h2>
-          <p class="section-copy">{{ $t('index.resources_desc') }}</p>
+          <div class="section-title-row">
+            <h2 class="section-title">{{ $t('index.resources_title') }}</h2>
+            <InfoHint size="sm" label="Resource details">
+              {{ $t('index.resources_desc') }}
+            </InfoHint>
+          </div>
         </div>
         <div class="flex flex-wrap gap-2">
           <a
@@ -286,6 +343,7 @@
 import { ref, computed } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
+import InfoHint from '../components/InfoHint.vue'
 
 const { gpu, displays, audio, sessionType, loading: systemLoading } = useSystemStats(3000)
 
@@ -387,7 +445,7 @@ const groupedIssueLogs = computed(() => {
 const fatalCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Fatal').length)
 const warningCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Warning').length)
 const errorCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Error').length)
-const recentIssues = computed(() => groupedIssueLogs.value.slice(0, 4))
+const recentIssues = computed(() => groupedIssueLogs.value.slice(0, 3))
 const issueCounters = computed(() => [
   buildIssueCounter(fatalCount.value, 'index.fatal_issues', 'fatal'),
   buildIssueCounter(warningCount.value, 'index.warning_issues', 'warning'),

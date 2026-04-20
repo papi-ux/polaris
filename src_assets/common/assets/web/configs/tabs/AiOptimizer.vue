@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import InfoHint from '../../components/InfoHint.vue'
 import { useAiOptimizer } from '../../composables/useAiOptimizer'
 import { useToast } from '../../composables/useToast'
 
@@ -29,7 +30,7 @@ const providerOptions = [
     id: 'anthropic',
     name: 'Claude',
     eyebrow: 'Anthropic',
-    summary: 'Keep the existing Claude path, with direct API access or a local Claude subscription session.',
+    summary: 'Claude via CLI subscription or direct API access.',
     defaultModel: 'claude-haiku-4-5-20251001',
     defaultBaseUrl: 'https://api.anthropic.com',
     defaultAuth: 'subscription',
@@ -42,7 +43,7 @@ const providerOptions = [
       {
         id: 'claude-cli',
         name: 'Claude CLI',
-        description: 'Use the local Claude subscription session through the CLI.',
+        description: 'Use the local Claude subscription session.',
         model: 'claude-haiku-4-5-20251001',
         baseUrl: 'https://api.anthropic.com',
         authMode: 'subscription'
@@ -50,7 +51,7 @@ const providerOptions = [
       {
         id: 'anthropic-api',
         name: 'Anthropic API',
-        description: 'Use direct Anthropic API access with a bearer key.',
+        description: 'Use the hosted Anthropic API.',
         model: 'claude-haiku-4-5-20251001',
         baseUrl: 'https://api.anthropic.com',
         authMode: 'api_key'
@@ -61,7 +62,7 @@ const providerOptions = [
     id: 'openai',
     name: 'OpenAI',
     eyebrow: 'Responses via compatibility',
-    summary: 'Use an OpenAI-compatible chat completion flow with structured JSON output for optimization results.',
+    summary: 'Hosted OpenAI-compatible responses for device tuning.',
     defaultModel: 'gpt-5.4-mini',
     defaultBaseUrl: 'https://api.openai.com/v1',
     defaultAuth: 'api_key',
@@ -74,7 +75,7 @@ const providerOptions = [
       {
         id: 'openai-default',
         name: 'Hosted API',
-        description: 'Use the default OpenAI endpoint with the documented starter model.',
+        description: 'Use the standard OpenAI endpoint.',
         model: 'gpt-5.4-mini',
         baseUrl: 'https://api.openai.com/v1',
         authMode: 'api_key'
@@ -85,7 +86,7 @@ const providerOptions = [
     id: 'gemini',
     name: 'Gemini',
     eyebrow: 'Google AI',
-    summary: 'Route through Gemini\'s OpenAI-compatible endpoint so provider behavior stays aligned with the shared backend.',
+    summary: 'Gemini through the OpenAI-compatible endpoint.',
     defaultModel: 'gemini-2.5-flash',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     defaultAuth: 'api_key',
@@ -98,7 +99,7 @@ const providerOptions = [
       {
         id: 'gemini-default',
         name: 'Gemini API',
-        description: 'Use Google AI Studio through the OpenAI-compatible endpoint.',
+        description: 'Use Google AI Studio.',
         model: 'gemini-2.5-flash',
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         authMode: 'api_key'
@@ -109,7 +110,7 @@ const providerOptions = [
     id: 'local',
     name: 'Local',
     eyebrow: 'Ollama / LM Studio',
-    summary: 'Point Polaris at a local OpenAI-compatible server so users can keep optimization fully on-box.',
+    summary: 'Local OpenAI-compatible inference on the host.',
     defaultModel: 'gpt-oss',
     defaultBaseUrl: 'http://127.0.0.1:11434/v1',
     defaultAuth: 'none',
@@ -122,7 +123,7 @@ const providerOptions = [
       {
         id: 'ollama',
         name: 'Ollama',
-        description: 'Target the default Ollama OpenAI-compatible endpoint on localhost.',
+        description: 'Target Ollama on localhost.',
         model: 'gpt-oss',
         baseUrl: 'http://127.0.0.1:11434/v1',
         authMode: 'none'
@@ -130,7 +131,7 @@ const providerOptions = [
       {
         id: 'lm-studio',
         name: 'LM Studio',
-        description: 'Use LM Studio\'s local server endpoint with the documented starter model.',
+        description: 'Use LM Studio\'s local server endpoint.',
         model: 'qwen3-8b',
         baseUrl: 'http://127.0.0.1:1234/v1',
         authMode: 'none'
@@ -140,9 +141,9 @@ const providerOptions = [
 ]
 
 const authModeLabels = {
-  subscription: { name: 'Subscription', description: 'Use a local Claude CLI session' },
-  api_key: { name: 'API Key', description: 'Authenticate directly to the provider endpoint' },
-  none: { name: 'No Auth', description: 'Use an unauthenticated local endpoint' }
+  subscription: { name: 'Subscription', description: 'Use the local Claude CLI session' },
+  api_key: { name: 'API Key', description: 'Send a bearer key to the provider' },
+  none: { name: 'No Auth', description: 'Call the endpoint without auth' }
 }
 
 const currentProvider = computed(() =>
@@ -156,6 +157,7 @@ const liveProvider = computed(() =>
 const availableAuthModes = computed(() => currentProvider.value.authModes)
 const currentProfiles = computed(() => currentProvider.value.profiles || [])
 const modelOptionsId = computed(() => `ai-model-options-${config.value.ai_provider || 'default'}`)
+const hasStoredApiKey = computed(() => !!config.value.has_ai_api_key && !config.value.clear_ai_api_key)
 
 const providerModelCatalog = computed(() => {
   if (!modelCatalog.value) return null
@@ -169,14 +171,14 @@ const canRefreshModels = computed(() => {
   if (!config.value.ai_base_url) return false
   if (config.value.ai_auth_mode === 'subscription') return false
   if (config.value.ai_auth_mode === 'none') return true
-  return !!config.value.ai_api_key
+  return !!config.value.ai_api_key || hasStoredApiKey.value
 })
 
 const canTestDraft = computed(() => {
   if (!config.value.ai_model || !config.value.ai_base_url) return false
   if (config.value.ai_auth_mode === 'subscription') return true
   if (config.value.ai_auth_mode === 'none') return true
-  return !!config.value.ai_api_key
+  return !!config.value.ai_api_key || hasStoredApiKey.value
 })
 
 const draftMatchesRuntime = computed(() => {
@@ -477,7 +479,8 @@ function buildDraftPayload() {
     ai_provider: config.value.ai_provider,
     ai_model: config.value.ai_model,
     ai_auth_mode: config.value.ai_auth_mode,
-    ai_api_key: config.value.ai_api_key,
+    ai_api_key: config.value.ai_api_key || '',
+    clear_ai_api_key: !!config.value.clear_ai_api_key,
     ai_base_url: config.value.ai_base_url,
     ai_use_subscription: config.value.ai_use_subscription,
     ai_timeout_ms: Number(config.value.ai_timeout_ms) || 5000,
@@ -567,10 +570,13 @@ onBeforeUnmount(() => {
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="max-w-3xl">
           <div class="section-kicker">Optimization Studio</div>
-          <h2 class="settings-section-title mt-2">Choose the model provider Polaris should use for device tuning.</h2>
-          <p class="settings-section-copy mt-2">
-            The optimizer can now target Claude, OpenAI, Gemini, or a local OpenAI-compatible endpoint. Draft connection tests use the unsaved settings below; save and apply when you want live sessions to use them.
-          </p>
+          <div class="section-title-row mt-2">
+            <h2 class="settings-section-title">Choose the model provider Polaris should use for device tuning.</h2>
+            <InfoHint size="sm" label="Optimization Studio guidance">
+              The optimizer can target Claude, OpenAI, Gemini, or a local OpenAI-compatible endpoint. Draft connection tests use the unsaved settings below; save and apply when you want live sessions to use them.
+            </InfoHint>
+          </div>
+          <p class="settings-section-copy mt-2">Provider choice, draft testing, and the live optimizer runtime.</p>
         </div>
 
         <div class="flex items-center gap-3 rounded-2xl border border-storm/40 bg-void/30 px-4 py-3">
@@ -620,10 +626,13 @@ onBeforeUnmount(() => {
           <div class="flex items-start justify-between gap-4">
             <div>
               <div class="section-kicker">Draft Connection</div>
-              <h3 class="settings-section-title mt-2">{{ currentProvider.name }} setup</h3>
-              <p class="settings-section-copy mt-1">
-                Model choice, authentication, and endpoint are all provider-specific. Polaris will resolve sensible defaults if you keep the standard values.
-              </p>
+              <div class="section-title-row mt-2">
+                <h3 class="settings-section-title">{{ currentProvider.name }} setup</h3>
+                <InfoHint size="sm" label="Draft connection guidance">
+                  Model choice, authentication, and endpoint are provider-specific. Polaris resolves sensible defaults if you keep the standard values.
+                </InfoHint>
+              </div>
+              <p class="settings-section-copy mt-1">Draft provider, auth, model, and endpoint before you save and apply.</p>
             </div>
             <div class="flex items-center gap-2">
               <button
@@ -640,7 +649,7 @@ onBeforeUnmount(() => {
           <div class="space-y-3">
             <div class="flex items-center justify-between gap-4">
               <div class="text-xs font-semibold uppercase tracking-[0.2em] text-storm">Quick Profiles</div>
-              <div class="text-[11px] text-storm">Apply model, endpoint, and auth together.</div>
+              <div class="text-[11px] text-storm">Model + endpoint + auth</div>
             </div>
             <div class="grid gap-2 sm:grid-cols-2">
               <button
@@ -739,11 +748,30 @@ onBeforeUnmount(() => {
 
           <div v-else>
             <label class="block text-sm font-medium text-silver mb-1">API Key</label>
+            <div v-if="hasStoredApiKey" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-emerald-300/20 bg-emerald-300/8 px-3 py-2 text-xs text-emerald-100">
+              <span>An API key is already stored on the host. Leave this blank to keep it, or type a new key to replace it.</span>
+              <button
+                type="button"
+                class="rounded-full border border-emerald-300/25 px-2.5 py-1 text-[11px] font-medium text-emerald-100 transition-colors hover:border-rose-300/40 hover:text-rose-200"
+                @click="config.clear_ai_api_key = true; config.ai_api_key = ''">
+                Clear Stored Key
+              </button>
+            </div>
+            <div v-else-if="config.clear_ai_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-rose-300/20 bg-rose-300/8 px-3 py-2 text-xs text-rose-100">
+              <span>The stored API key will be removed when you save.</span>
+              <button
+                type="button"
+                class="rounded-full border border-rose-300/30 px-2.5 py-1 text-[11px] font-medium text-rose-100 transition-colors hover:border-ice/40 hover:text-ice"
+                @click="config.clear_ai_api_key = false">
+                Keep Existing Key
+              </button>
+            </div>
             <div class="flex gap-2">
               <div class="relative flex-1">
                 <input
                   :type="showApiKey ? 'text' : 'password'"
                   v-model="config.ai_api_key"
+                  @input="config.ai_api_key && (config.clear_ai_api_key = false)"
                   class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 pr-10 text-silver focus:border-ice focus:outline-none font-mono text-sm"
                   :placeholder="currentProvider.keyPlaceholder" />
                 <button @click="showApiKey = !showApiKey" class="absolute right-2 top-1/2 -translate-y-1/2 text-storm hover:text-silver transition-colors">
@@ -760,8 +788,13 @@ onBeforeUnmount(() => {
           <div class="flex items-center justify-between gap-3">
             <div>
               <div class="section-kicker">Response Policy</div>
-              <div class="settings-section-title mt-2 text-base">Cache and timeout</div>
-              <div class="settings-section-copy mt-1">These settings apply to all providers, including local endpoints.</div>
+              <div class="section-title-row mt-2">
+                <div class="settings-section-title text-base">Cache and timeout</div>
+                <InfoHint size="sm" label="Response policy guidance">
+                  These settings apply to all providers, including local endpoints.
+                </InfoHint>
+              </div>
+              <div class="settings-section-copy mt-1">Shared cache and connection timing for every provider.</div>
             </div>
             <button
               @click="testProviderConfig"
@@ -812,7 +845,7 @@ onBeforeUnmount(() => {
                 type="text"
                 class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
                 placeholder="Steam Deck OLED" />
-              <div class="text-xs text-storm mt-1">Use a real device name so the returned optimization is meaningful.</div>
+              <div class="text-xs text-storm mt-1">Use a real or close-match device name.</div>
               <datalist id="ai-device-options">
                 <option v-for="device in aiDevices" :key="device.name" :value="device.name" />
               </datalist>
@@ -825,7 +858,7 @@ onBeforeUnmount(() => {
                 type="text"
                 class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
                 placeholder="Rocket League" />
-              <div class="text-xs text-storm mt-1">Optional title or genre cue for the provider to tune against.</div>
+              <div class="text-xs text-storm mt-1">Optional title or genre cue.</div>
             </div>
           </div>
 
@@ -918,8 +951,13 @@ onBeforeUnmount(() => {
           <div class="flex items-start justify-between gap-4">
             <div>
               <div class="section-kicker">Live Runtime</div>
-              <div class="settings-section-title mt-2 text-base">Saved optimizer status</div>
-              <div class="settings-section-copy mt-1">This reflects the currently loaded runtime config, not the unsaved draft on the left.</div>
+              <div class="section-title-row mt-2">
+                <div class="settings-section-title text-base">Saved optimizer status</div>
+                <InfoHint size="sm" label="Live runtime guidance">
+                  This reflects the currently loaded runtime config, not the unsaved draft on the left.
+                </InfoHint>
+              </div>
+              <div class="settings-section-copy mt-1">Loaded runtime status after the last save and apply.</div>
             </div>
             <span
               class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
@@ -1026,7 +1064,7 @@ onBeforeUnmount(() => {
               <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': cacheExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
             </div>
           </summary>
-          <div class="mt-3 text-sm text-storm">Stored optimizer recommendations for known device and app combinations.</div>
+          <div class="mt-3 text-sm text-storm">Stored recommendations for known device and app pairs.</div>
 
           <div v-if="cacheExpanded && Array.isArray(aiCache) && aiCache.length > 0" class="space-y-2 max-h-96 overflow-y-auto scrollbar-hidden">
             <div v-for="(entry, i) in aiCache" :key="i" class="py-2" :class="i > 0 ? 'border-t border-storm/20' : ''">
@@ -1116,7 +1154,7 @@ onBeforeUnmount(() => {
         </div>
         <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': knowledgeExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
       </summary>
-      <div class="mt-3 text-sm text-storm">Reference devices and capability hints Polaris already knows about for optimization seeding.</div>
+      <div class="mt-3 text-sm text-storm">Known devices and capability hints used to seed recommendations.</div>
       <div v-if="knowledgeExpanded" class="mt-4">
         <input
           v-model="deviceSearch"
