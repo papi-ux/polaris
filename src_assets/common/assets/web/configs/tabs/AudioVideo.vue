@@ -7,6 +7,7 @@ import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
+import InfoHint from '../../components/InfoHint.vue'
 
 const $t = inject('i18n').t;
 
@@ -47,8 +48,13 @@ const validateFallbackMode = (event) => {
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Capture strategy</div>
-        <h3 class="settings-section-title">Launch mode and capture path</h3>
-        <p class="settings-section-copy">Choose whether Polaris streams from an invisible compositor or a visible desktop, then point capture at the GPU path that should handle encoding.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Launch mode and capture path</h3>
+          <InfoHint size="sm" label="Capture strategy guidance">
+            Choose whether Polaris streams from an invisible compositor or a visible desktop, then point capture at the GPU path that should handle encoding.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Headless versus visible sessions, plus capture path selection.</p>
       </div>
 
       <div class="settings-inline-stack">
@@ -145,8 +151,13 @@ const validateFallbackMode = (event) => {
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Audio routing</div>
-        <h3 class="settings-section-title">Host audio capture</h3>
-        <p class="settings-section-copy">Pick the sink Polaris should capture from, decide whether audio stays enabled for sessions, and keep the host audio path predictable for desktop or Steam launches.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Host audio capture</h3>
+          <InfoHint size="sm" label="Audio routing guidance">
+            Pick the sink Polaris should capture from, decide whether audio stays enabled for sessions, and keep the host audio path predictable for desktop or Steam launches.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Captured sink, session audio behavior, and Windows sink management.</p>
       </div>
 
       <div class="settings-inline-stack">
@@ -235,8 +246,13 @@ pactl info | grep Source</pre>
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Display routing</div>
-        <h3 class="settings-section-title">Outputs and fallback modes</h3>
-        <p class="settings-section-copy">Point Polaris at the right physical or virtual display, define how it should react when the client asks for an unsupported mode, and review live virtual display backend status on Linux.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Outputs and fallback modes</h3>
+          <InfoHint size="sm" label="Display routing guidance">
+            Point Polaris at the right physical or virtual display, define how it should react when the client asks for an unsupported mode, and review live virtual display backend status on Linux.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Output selection, fallback display modes, and virtual display status.</p>
       </div>
 
       <div class="settings-inline-stack">
@@ -286,8 +302,13 @@ pactl info | grep Source</pre>
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Stream delivery</div>
-        <h3 class="settings-section-title">Bitrate and pacing</h3>
-        <p class="settings-section-copy">Set your hard bitrate ceiling, the minimum pacing target Polaris should keep encoding against, and whether the host can react to changing network conditions automatically.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Bitrate and pacing</h3>
+          <InfoHint size="sm" label="Stream delivery guidance">
+            Set your hard bitrate ceiling, the minimum pacing target Polaris should keep encoding against, and whether the host can react to changing network conditions automatically.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Hard bitrate limits, pacing floor, and adaptive bitrate behavior.</p>
       </div>
 
       <div class="settings-inline-stack">

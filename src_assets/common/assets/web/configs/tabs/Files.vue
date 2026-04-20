@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps([
   'platform',
@@ -14,8 +15,13 @@ const config = ref(props.config)
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Catalog & state</div>
-        <h3 class="settings-section-title">App and runtime files</h3>
-        <p class="settings-section-copy">Point Polaris at the files it uses for app discovery, log capture, and saved runtime state.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">App and runtime files</h3>
+          <InfoHint size="sm" label="Catalog and state guidance">
+            Point Polaris at the files it uses for app discovery, log capture, and saved runtime state.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Discovery, logs, and saved runtime state paths.</p>
       </div>
 
       <div class="mb-3">
@@ -41,8 +47,13 @@ const config = ref(props.config)
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
         <div class="section-kicker">Credentials</div>
-        <h3 class="settings-section-title">Security material</h3>
-        <p class="settings-section-copy">Keep login credentials and TLS material on known paths so pairing and the web UI remain stable across restarts.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Security material</h3>
+          <InfoHint size="sm" label="Security material guidance">
+            Keep login credentials and TLS material on known paths so pairing and the web UI remain stable across restarts.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Credential storage plus certificate and private-key locations.</p>
       </div>
 
       <div class="mb-3">

@@ -1,34 +1,30 @@
 <template>
   <div class="page-shell">
-    <section class="page-header">
-      <div class="page-heading">
-        <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
-        <p class="page-subtitle max-w-2xl">{{ $t('config.configuration_desc') }}</p>
-      </div>
-      <div v-if="config" class="page-meta">
-        <span class="meta-pill">{{ activePanelTitle }}</span>
-        <span class="meta-pill">{{ activePanelGroupLabel }}</span>
-        <span class="meta-pill" :class="hasUnsavedChanges ? 'border-amber-300/40 bg-amber-300/10 text-amber-300' : 'border-green-400/30 bg-green-400/10 text-green-300'">
-          {{ hasUnsavedChanges ? $t('config.unsaved_changes') : $t('config.all_changes_saved') }}
-        </span>
-        <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
-      </div>
-    </section>
-
     <section class="section-card settings-command-bar sticky top-4 z-20">
       <div class="settings-command-copy">
-        <div class="section-kicker">{{ $t('config.action_center') }}</div>
-        <div class="settings-command-title">
-          {{ hasUnsavedChanges ? $t('config.unsaved_banner') : $t('config.saved_banner') }}
+        <div class="section-kicker">{{ config ? activePanelGroupLabel : $t('config.action_center') }}</div>
+        <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
+        <div class="settings-command-title-row">
+          <div class="settings-command-title">
+            {{ commandCenterTitle }}
+          </div>
+          <InfoHint size="sm" label="Settings command guidance">
+            {{ commandCenterNote }}
+          </InfoHint>
         </div>
         <div class="settings-command-note">
-          {{ saved ? $t('config.apply_note') : $t('config.restart_note_hint') }}
+          {{ commandCenterSummary }}
+        </div>
+        <div v-if="config" class="settings-command-context">
+          <span class="meta-pill">{{ activePanelTitle }}</span>
+          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
+          <span class="meta-pill">{{ activePanelGroupLabel }}</span>
+          <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
         </div>
       </div>
 
       <div class="settings-command-tools">
         <div class="settings-command-meta">
-          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
           <span v-if="hasUnsavedChanges" class="meta-pill border-amber-300/40 bg-amber-300/10 text-amber-300">{{ $t('config.pending_badge') }}</span>
           <span v-else class="meta-pill border-green-400/30 bg-green-400/10 text-green-300">{{ $t('config.synced_badge') }}</span>
         </div>
@@ -36,6 +32,7 @@
         <input
           v-model="searchQuery"
           type="text"
+          autocomplete="off"
           :placeholder="$t('config.search_placeholder')"
           class="focus-ring settings-search-input"
           @input="onSearch"
@@ -63,11 +60,15 @@
     <Skeleton type="card" />
   </div>
 
-  <div v-if="config" class="settings-workspace">
+  <div v-if="config" class="settings-workspace" :class="{ 'is-searching': !!searchQuery }">
     <aside class="section-card settings-sidebar">
-      <div class="section-kicker">Settings Map</div>
-      <h2 class="section-title">Tune Polaris by area</h2>
-      <p class="section-copy">Jump between core host setup and runtime tuning without fighting the old full-width tab strip.</p>
+      <div class="section-kicker">{{ $t('config.settings_map_kicker') }}</div>
+      <div class="section-title-row">
+        <h2 class="section-title">{{ $t('config.settings_map_title') }}</h2>
+        <InfoHint size="sm" label="Settings map guidance">
+          {{ $t('config.settings_map_desc') }}
+        </InfoHint>
+      </div>
 
       <div class="settings-nav-groups">
         <div v-for="group in tabGroups" :key="group.id" class="settings-nav-group">
@@ -89,7 +90,7 @@
     </aside>
 
     <div class="settings-main">
-      <div class="settings-mobile-tabs">
+      <div v-if="mobileNavItems.length" class="settings-mobile-tabs">
         <button
           v-for="item in mobileNavItems"
           :key="item.id"
@@ -102,17 +103,24 @@
         </button>
       </div>
 
-      <section class="section-card settings-tab-hero">
-        <div class="settings-tab-hero-copy">
-          <div class="section-kicker">{{ activePanelGroupLabel }}</div>
-          <h2 class="settings-tab-title">{{ activePanelTitle }}</h2>
-          <p class="settings-tab-copy">{{ activePanelSummary }}</p>
-        </div>
-        <div class="settings-tab-meta">
-          <span class="meta-pill">{{ activePanelGroupLabel }}</span>
-          <span v-if="currentTabIsEncoder" class="meta-pill">{{ activeTabMeta?.name }}</span>
-          <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
-          <span class="meta-pill">{{ hasUnsavedChanges ? $t('config.pending_badge') : $t('config.synced_badge') }}</span>
+      <section v-if="searchQuery" class="surface-subtle p-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0">
+            <div class="section-title-row">
+              <div class="eyebrow-label">
+                {{ searchHasResults ? $t('config.search_focus_title') : $t('config.search_empty_title') }}
+              </div>
+              <InfoHint size="sm" label="Search guidance">
+                {{ searchHasResults ? searchFocusCopy : searchEmptyCopy }}
+              </InfoHint>
+            </div>
+            <div class="mt-2 text-sm leading-relaxed text-storm">
+              {{ searchHasResults ? searchSummary : $t('config.search_empty_heading') }}
+            </div>
+          </div>
+          <button class="focus-ring settings-action-button settings-action-button-secondary" @click="clearSearch">
+            {{ $t('config.clear_search') }}
+          </button>
         </div>
       </section>
 
@@ -132,7 +140,13 @@
         </div>
       </section>
 
-      <div ref="settingsContentRef" class="settings-tab-content">
+      <section v-if="searchQuery && !searchHasResults" class="section-card">
+        <div class="section-kicker">{{ $t('config.search_empty_title') }}</div>
+        <h3 class="section-title">{{ $t('config.search_empty_heading') }}</h3>
+        <p class="section-copy">{{ searchEmptyCopy }}</p>
+      </section>
+
+      <div v-else ref="settingsContentRef" class="settings-tab-content">
         <general
           v-if="shouldShowTab('general')"
           :config="config"
@@ -203,6 +217,7 @@ import AudioVideo from '../configs/tabs/AudioVideo.vue'
 import AiOptimizer from '../configs/tabs/AiOptimizer.vue'
 import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
 import Skeleton from '../components/Skeleton.vue'
+import InfoHint from '../components/InfoHint.vue'
 import { useToast } from '../composables/useToast'
 
 const { toast } = useToast()
@@ -226,6 +241,10 @@ const initialSerialized = ref("")
 const settingsContentRef = ref(null)
 let searchHighlightTimeout = null
 let highlightedSearchTarget = null
+const writeOnlySecrets = {
+  ai_api_key: { presentFlag: 'has_ai_api_key', clearFlag: 'clear_ai_api_key' },
+  steamgriddb_api_key: { presentFlag: 'has_steamgriddb_api_key', clearFlag: 'clear_steamgriddb_api_key' },
+}
 const tabs = ref([
   {
     id: "general",
@@ -554,18 +573,46 @@ const tabGroups = computed(() => {
 const mobileNavItems = computed(() => tabGroups.value.flatMap(group => group.items))
 const visibleTabCountLabel = computed(() => i18n.t('config.visible_tabs', { count: matchingTabs.value.length, total: tabs.value.length }))
 const searchSummary = computed(() => i18n.t('config.search_results', { query: searchQuery.value, count: matchingTabs.value.length }))
+const searchHasResults = computed(() => matchingTabs.value.length > 0)
 const hasUnsavedChanges = computed(() => {
   if (!config.value || !initialSerialized.value) return false
   return JSON.stringify(serialize()) !== initialSerialized.value
 })
 const activePanelTitle = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.name || 'General'))
 const activePanelGroupLabel = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.groupLabel || 'Core Setup'))
-const activePanelSummary = computed(() => {
-  if (currentTabIsEncoder.value) {
-    return 'Choose the hardware or software encode profile Polaris should use when that path is active. Each profile keeps its own tuning without cluttering the main host settings map.'
-  }
-  return activeTabMeta.value?.summary || 'Adjust the active Polaris section.'
+const commandCenterTitle = computed(() => {
+  if (searchQuery.value && !searchHasResults.value) return i18n.t('config.search_empty_heading')
+  if (searchQuery.value) return i18n.t('config.search_focus_heading')
+  if (hasUnsavedChanges.value) return i18n.t('config.unsaved_banner')
+  return i18n.t('config.saved_banner')
 })
+const commandCenterNote = computed(() => {
+  if (searchQuery.value && !searchHasResults.value) {
+    return i18n.t('config.search_empty_desc', { query: searchQuery.value })
+  }
+  if (searchQuery.value) {
+    return i18n.t('config.search_focus_desc', { query: searchQuery.value, count: matchingTabs.value.length })
+  }
+  if (hasUnsavedChanges.value) {
+    return i18n.t('config.command_unsaved_note')
+  }
+  if (saved.value) {
+    return i18n.t('config.apply_note')
+  }
+  return i18n.t('config.command_saved_note')
+})
+const commandCenterSummary = computed(() => {
+  if (searchQuery.value && !searchHasResults.value) return 'Try a broader keyword or switch to a nearby settings group.'
+  if (searchQuery.value) return `Showing ${matchingTabs.value.length} matching settings groups.`
+  if (hasUnsavedChanges.value) return 'Local edits are ready to save.'
+  if (saved.value) return 'Saved changes are ready to apply.'
+  return 'Search, save, and apply host changes from one surface.'
+})
+const searchFocusCopy = computed(() => i18n.t('config.search_focus_desc', {
+  query: searchQuery.value,
+  count: matchingTabs.value.length,
+}))
+const searchEmptyCopy = computed(() => i18n.t('config.search_empty_desc', { query: searchQuery.value }))
 
 function shouldShowTab(tabId) {
   if (searchQuery.value) {
@@ -578,6 +625,11 @@ function onSearch() {
   if (!searchQuery.value) {
     clearSearchHighlight()
   }
+}
+
+function clearSearch() {
+  searchQuery.value = ''
+  clearSearchHighlight()
 }
 
 function escapeSelector(value) {
@@ -670,6 +722,31 @@ function serialize() {
   return configCopy
 }
 
+function finalizeWriteOnlySecrets(configCopy) {
+  Object.entries(writeOnlySecrets).forEach(([secretKey, meta]) => {
+    const hasStoredSecret = !!config.value?.[meta.presentFlag]
+    const clearRequested = !!config.value?.[meta.clearFlag]
+    const nextValue = configCopy[secretKey]
+
+    if (clearRequested) {
+      configCopy[secretKey] = ''
+      return
+    }
+
+    if (hasStoredSecret && !nextValue) {
+      delete configCopy[secretKey]
+    }
+  })
+}
+
+function stripClientOnlyConfigFields(configCopy) {
+  Object.values(writeOnlySecrets).forEach((meta) => {
+    delete configCopy[meta.presentFlag]
+    delete configCopy[meta.clearFlag]
+  })
+  delete configCopy.has_api_key
+}
+
 function save() {
   if (!config.value || saving.value) return Promise.resolve(false)
   saving.value = true
@@ -689,6 +766,9 @@ function save() {
       }
     })
   })
+
+  finalizeWriteOnlySecrets(configCopy)
+  stripClientOnlyConfigFields(configCopy)
 
   return fetch("./api/config", {
     credentials: 'include',
@@ -824,6 +904,12 @@ fetch("./api/config", { credentials: 'include' })
       }
     }
     config.value.trusted_subnets ??= []
+    config.value.trusted_subnet_auto_pairing ??= "disabled"
+    config.value.has_ai_api_key = !!config.value.has_ai_api_key
+    config.value.has_steamgriddb_api_key = !!config.value.has_steamgriddb_api_key
+    config.value.has_api_key = !!config.value.has_api_key
+    config.value.clear_ai_api_key = false
+    config.value.clear_steamgriddb_api_key = false
 
     // Populate default values from tabs options
     tabs.value.forEach(tab => {

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import Checkbox from "../../Checkbox.vue";
+import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps([
   'platform',
@@ -18,8 +19,13 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Exposure</div>
-        <h3 class="settings-section-title">Addressing and access</h3>
-        <p class="settings-section-copy">Define how Polaris announces itself, which ports it serves, and whether the web UI stays local-only or can be reached remotely.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Addressing and access</h3>
+          <InfoHint size="sm" label="Exposure guidance">
+            Define how Polaris announces itself, which ports it serves, and whether the web UI stays local-only or can be reached remotely.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Discovery, ports, and whether the web UI stays local, LAN-only, or exposed wider.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -134,8 +140,13 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Transport security</div>
-        <h3 class="settings-section-title">Encryption and trust</h3>
-        <p class="settings-section-copy">Choose how aggressively Polaris encrypts LAN and WAN sessions, then define which subnets can use the trusted TOFU pairing path.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Encryption and trust</h3>
+          <InfoHint size="sm" label="Encryption and trust guidance">
+            Choose how aggressively Polaris encrypts LAN and WAN sessions, then define which subnets can use the trusted TOFU pairing path.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">LAN/WAN encryption posture plus trusted-subnet pairing rules.</p>
       </div>
 
       <div class="mb-3">
@@ -165,6 +176,20 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       </div>
 
       <div class="mb-3">
+        <label class="block text-sm font-medium text-storm mb-1">Trusted Subnet Auto-Pairing</label>
+        <label class="flex items-center gap-3 rounded-xl border border-storm/40 bg-deep/60 px-3 py-3 text-sm text-silver">
+          <input
+            type="checkbox"
+            class="h-4 w-4 rounded border-storm bg-void text-ice focus:ring-ice"
+            :checked="config.trusted_subnet_auto_pairing === 'enabled'"
+            @change="config.trusted_subnet_auto_pairing = $event.target.checked ? 'enabled' : 'disabled'"
+          />
+          <span>Allow clients on trusted subnets to pair automatically without a PIN.</span>
+        </label>
+        <div class="text-sm text-storm mt-2">Disabled by default. Enable this only on networks you fully control.</div>
+      </div>
+
+      <div class="mb-3">
         <label class="block text-sm font-medium text-storm mb-1">Trusted Subnets (TOFU)</label>
         <div class="text-sm text-storm mb-2">
           Clients on these subnets can pair automatically without a PIN. Use CIDR notation (e.g. <code class="bg-deep px-1 rounded">10.0.0.0/24</code>).
@@ -191,7 +216,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
         >
           + Add Subnet
         </button>
-        <div class="settings-warning-surface mt-3" v-if="config.trusted_subnets && config.trusted_subnets.length > 0">
+        <div class="settings-warning-surface mt-3" v-if="config.trusted_subnets && config.trusted_subnets.length > 0 && config.trusted_subnet_auto_pairing === 'enabled'">
           Any device on these networks can pair without approval. Only trust networks you control.
         </div>
       </div>

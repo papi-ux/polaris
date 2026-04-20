@@ -7,6 +7,12 @@ const pendingKey = ref(null)
 const i18n = inject('i18n')
 const { toast } = useToast()
 const emit = defineEmits(['change'])
+const props = defineProps({
+  compact: {
+    type: Boolean,
+    default: false,
+  },
+})
 
 // Defaults for settings not explicitly in the config file
 const defaults = {
@@ -113,41 +119,57 @@ const toggles = [
   { key: 'enable_discovery', requiresRestart: false },
   { key: 'enable_pairing', requiresRestart: false },
 ]
+
+const compactToggleKeys = ['headless_mode', 'adaptive_bitrate_enabled', 'ai_enabled', 'stream_audio']
+const visibleToggles = () => (
+  props.compact
+    ? toggles.filter((toggle) => compactToggleKeys.includes(toggle.key))
+    : toggles
+)
 </script>
 
 <template>
   <div class="space-y-2">
-    <div class="flex items-start justify-between gap-3">
+    <div class="flex items-start justify-between gap-3" :class="props.compact ? 'mb-1' : ''">
       <div>
         <div class="section-kicker">{{ $t('quick_controls.title') }}</div>
-        <div class="mt-1 text-[11px] text-storm">{{ $t('quick_controls.helper') }}</div>
+        <div v-if="!props.compact" class="mt-1 text-[11px] text-storm">{{ $t('quick_controls.helper') }}</div>
+        <div v-else class="mt-1 text-[11px] text-storm">Fast stream toggles.</div>
       </div>
       <div class="control-chip whitespace-nowrap">{{ $t('quick_controls.live_default_badge') }}</div>
     </div>
     <button
-      v-for="t in toggles"
+      v-for="t in visibleToggles()"
       :key="t.key"
       type="button"
-      class="focus-ring flex w-full items-center justify-between rounded-xl border border-storm/15 bg-deep/35 px-3 py-2.5 text-left transition-[background-color,border-color,color,opacity] duration-200 hover:border-storm/30 hover:bg-ice/5"
-      :class="{ 'opacity-60': pendingKey && pendingKey !== t.key }"
+      class="focus-ring flex w-full items-center justify-between rounded-xl border border-storm/15 bg-deep/35 text-left transition-[background-color,border-color,color,opacity] duration-200 hover:border-storm/30 hover:bg-ice/5"
+      :class="[props.compact ? 'px-3 py-2' : 'px-3 py-2.5', { 'opacity-60': pendingKey && pendingKey !== t.key }]"
       :aria-pressed="isEnabled(t.key)"
       @click="toggle(t.key)"
     >
       <div class="min-w-0 pr-3">
-        <div class="flex items-center gap-2">
-          <div class="truncate text-sm font-medium text-silver">{{ $t(`quick_controls.items.${t.key}.label`) }}</div>
-          <span v-if="t.requiresRestart" class="control-chip">
+        <div :class="props.compact ? 'flex flex-col items-start gap-1' : 'flex items-center gap-2'">
+          <div :class="props.compact ? 'text-[13px] font-medium leading-tight text-silver whitespace-normal break-words' : 'truncate text-sm font-medium text-silver'">
+            {{ $t(`quick_controls.items.${t.key}.label`) }}
+          </div>
+          <span v-if="t.requiresRestart" class="control-chip" :class="props.compact ? 'px-1.5 py-0.5 text-[9px] leading-none tracking-[0.14em]' : ''">
             {{ $t('quick_controls.restart_badge') }}
           </span>
         </div>
-        <div class="mt-1 text-[11px] leading-relaxed text-storm">{{ $t(`quick_controls.items.${t.key}.desc`) }}</div>
+        <div v-if="!props.compact" class="mt-1 text-[11px] leading-relaxed text-storm">{{ $t(`quick_controls.items.${t.key}.desc`) }}</div>
       </div>
-      <div class="relative ml-2 h-5 w-9 shrink-0 rounded-full transition-[background-color] duration-200"
-           :class="isEnabled(t.key) ? 'bg-accent' : 'bg-storm/40'">
-        <div class="absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-200"
-             :class="isEnabled(t.key) ? 'translate-x-4.5' : 'translate-x-0.5'"></div>
+      <div class="relative ml-2 shrink-0 rounded-full transition-[background-color] duration-200"
+           :class="[props.compact ? 'h-[18px] w-8' : 'h-5 w-9', isEnabled(t.key) ? 'bg-accent' : 'bg-storm/40']">
+        <div class="absolute rounded-full bg-white transition-transform duration-200"
+             :class="props.compact ? 'top-[2px] h-3.5 w-3.5' : 'top-0.5 h-4 w-4'"
+             :style="props.compact
+               ? { transform: isEnabled(t.key) ? 'translateX(14px)' : 'translateX(2px)' }
+               : { transform: isEnabled(t.key) ? 'translateX(18px)' : 'translateX(2px)' }"></div>
       </div>
     </button>
+    <div v-if="props.compact" class="pt-1 text-[11px] text-storm/90">
+      More host controls in <router-link to="/config" class="text-ice no-underline hover:text-ice/80">Settings</router-link>.
+    </div>
     <div v-if="pendingKey" class="pt-1 text-center text-[11px] text-storm">{{ $t('quick_controls.saving') }}</div>
   </div>
 </template>

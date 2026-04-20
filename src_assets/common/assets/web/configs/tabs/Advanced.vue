@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import PlatformLayout from '../../PlatformLayout.vue'
 import Checkbox from "../../Checkbox.vue";
+import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps([
   'platform',
@@ -16,8 +17,13 @@ const config = ref(props.config)
     <section class="settings-section">
       <div class="settings-section-header">
         <div class="section-kicker">Resilience</div>
-        <h3 class="settings-section-title">Stream behavior under load</h3>
-        <p class="settings-section-copy">Tune FEC, quantization, and CPU thread floors when you need to balance bandwidth, encode cost, and stability.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Stream behavior under load</h3>
+          <InfoHint size="sm" label="Resilience guidance">
+            Tune FEC, quantization, and CPU thread floors when you need to balance bandwidth, encode cost, and stability.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Recovery margin, quantization, and encoder thread floors.</p>
       </div>
 
       <div class="mb-3">
@@ -49,8 +55,13 @@ const config = ref(props.config)
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
         <div class="section-kicker">Compatibility</div>
-        <h3 class="settings-section-title">Client and environment behavior</h3>
-        <p class="settings-section-copy">Use these flags when you need legacy compatibility, encoder probe leniency, or broader codec advertising.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Client and environment behavior</h3>
+          <InfoHint size="sm" label="Compatibility guidance">
+            Use these flags when you need legacy compatibility, encoder probe leniency, or broader codec advertising.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Legacy compatibility flags and codec advertising behavior.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -100,8 +111,13 @@ const config = ref(props.config)
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
         <div class="section-kicker">Selection</div>
-        <h3 class="settings-section-title">Capture and encoder preference</h3>
-        <p class="settings-section-copy">Override automatic capture or encoder selection only when you need to force a specific host path.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Capture and encoder preference</h3>
+          <InfoHint size="sm" label="Capture selection guidance">
+            Override automatic capture or encoder selection only when you need to force a specific host path.
+          </InfoHint>
+        </div>
+        <p class="settings-section-copy">Only override autodetect when the host needs a forced path.</p>
       </div>
 
       <div class="mb-3" v-if="platform !== 'macos'">
