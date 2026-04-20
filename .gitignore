@@ -37,6 +37,7 @@
 # VSCode IDE
 .vscode/
 .codex
+.claude/
 CLAUDE.md
 AGENTS.md
 .private/
@@ -53,6 +54,8 @@ playwright-report/
 /playwright/.cache/
 .envrc
 .direnv/
+docs/.claude/
+docs/session-notes-*.md
 docs/doxyconfig*
 arch-pkgbuild/
 compile_commands.json

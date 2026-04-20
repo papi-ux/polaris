@@ -16,3 +16,6 @@ jobs:
 
       - name: Check public repo surface
         run: bash scripts/check-public-surface.sh
+
+      - name: Check public docs and release references
+        run: bash scripts/check-public-docs.sh

@@ -13,7 +13,7 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
-[Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Known Limitations](#known-limitations) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [Changelog](docs/changelog.md) · [FAQ](#faq)
+[Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Known Limitations](#known-limitations) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [FAQ](#faq)
 
 **Support**: [Issues](https://github.com/papi-ux/polaris/issues) · **Donate**: [Ko-fi](https://ko-fi.com/papiux) · [PayPal](https://www.paypal.com/donate/?hosted_button_id=KD9R5KLYF6GN4)
 
@@ -29,6 +29,9 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 
 > [!IMPORTANT]
 > Polaris is Linux-first today. Fedora has the easiest install path through a release RPM. Arch and Debian are currently source-build oriented. Windows is a future port, not a supported host target today.
+
+> [!NOTE]
+> `v1.0.0` is the first public Polaris release line. Older tags stay available for continuity, but the current README and release assets reflect the public Linux-first product surface.
 
 ## Quick Start
 

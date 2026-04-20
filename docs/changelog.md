@@ -2,6 +2,13 @@
 
 ## Polaris Notes
 
+### 1.0.0 - 2026-04-20
+
+- Prepared Polaris for the first public `v1.0.0` release line with refreshed public-facing docs, release metadata, and repo hygiene checks.
+- Tightened the public repo surface rules so maintainer-local files and session checkpoint notes are blocked from the tracked tree.
+- Landed the current Linux-first Polaris product surface:
+  security hardening, reliability diagnostics, AI-guided stability feedback, and the redesigned operator-focused web console.
+
 ### 2026-04-17
 
 - Reworked the AI optimizer feedback loop:
