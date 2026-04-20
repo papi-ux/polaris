@@ -187,11 +187,7 @@ int main(int argc, char *argv[]) {
 
   // Log modified_config_settings (mask sensitive values)
   for (auto &[name, val] : config::modified_config_settings) {
-    if (name.find("api_key") != std::string::npos || name.find("secret") != std::string::npos) {
-      BOOST_LOG(info) << "config: '"sv << name << "' = "sv << (val.size() > 8 ? val.substr(0, 8) + "..." : "***");
-    } else {
-      BOOST_LOG(info) << "config: '"sv << name << "' = "sv << val;
-    }
+    BOOST_LOG(info) << "config: '"sv << name << "' = "sv << config::redact_config_value(name, val);
   }
   config::modified_config_settings.clear();
 

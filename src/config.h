@@ -9,6 +9,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -225,6 +226,7 @@ namespace config {
     std::string external_ip;
 
     std::vector<std::string> trusted_subnets;
+    bool trusted_subnet_auto_pairing;
   };
 
   struct input_t {
@@ -306,6 +308,7 @@ namespace config {
     std::string username;
     std::string password;
     std::string salt;
+    std::string password_hash_scheme;
     std::string api_key;
     std::string steamgriddb_api_key;  // SteamGridDB API key for non-Steam cover art
 
@@ -343,6 +346,9 @@ namespace config {
   extern input_t input;
   extern sunshine_t sunshine;
   extern recording_t recording;
+
+  bool is_sensitive_config_key(std::string_view name);
+  std::string redact_config_value(std::string_view name, std::string_view value);
 
   int parse(int argc, char *argv[]);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);

@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -49,6 +50,30 @@ using namespace std::literals;
 #define APPS_JSON_PATH platf::appdata().string() + "/apps.json"
 
 namespace config {
+  bool is_sensitive_config_key(std::string_view name) {
+    static constexpr std::array sensitive_markers {
+      "api_key"sv,
+      "secret"sv,
+      "password"sv,
+      "token"sv,
+      "credential"sv,
+      "passphrase"sv,
+      "cookie"sv,
+    };
+
+    return std::ranges::any_of(sensitive_markers, [name](const auto marker) {
+      return name.find(marker) != std::string_view::npos;
+    });
+  }
+
+  std::string redact_config_value(std::string_view name, std::string_view value) {
+    if (!is_sensitive_config_key(name)) {
+      return std::string {value};
+    }
+
+    return value.empty() ? "(empty)"s : "[redacted]"s;
+  }
+
   namespace {
     bool is_response_only_config_key(const std::string_view key) {
       return key == "status"sv ||
@@ -595,6 +620,7 @@ namespace config {
     "polaris_state.json"s,  // file_state
     {},  // external_ip
     {},  // trusted_subnets
+    false,  // trusted_subnet_auto_pairing
   };
 
   input_t input {
@@ -639,6 +665,7 @@ namespace config {
     {},  // Username
     {},  // Password
     {},  // Password Salt
+    {},  // Password hash scheme
     {},  // API key
     {},  // SteamGridDB API key
     platf::appdata().string() + "/polaris.conf",  // config file
@@ -1162,9 +1189,7 @@ namespace config {
     }
 
     for (auto &[name, val] : vars) {
-      // Mask sensitive config values in logs
-      bool sensitive = (name.find("api_key") != std::string::npos || name.find("secret") != std::string::npos);
-      std::string log_val = sensitive ? (val.size() > 8 ? val.substr(0, 8) + "..." : "***") : val;
+      const auto log_val = redact_config_value(name, val);
     #ifdef _WIN32
       BOOST_LOG(info) << "config: ["sv << name << "] -- ["sv << utf8ToAcp(log_val) << ']';
     #else
@@ -1316,6 +1341,7 @@ namespace config {
 
     string_f(vars, "external_ip", nvhttp.external_ip);
     list_string_f(vars, "trusted_subnets", nvhttp.trusted_subnets);
+    bool_f(vars, "trusted_subnet_auto_pairing", nvhttp.trusted_subnet_auto_pairing);
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
     list_prep_cmd_f(vars, "global_state_cmd", config::sunshine.state_cmds);
     list_server_cmd_f(vars, "server_cmd", config::sunshine.server_cmds);

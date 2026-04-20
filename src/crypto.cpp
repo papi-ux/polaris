@@ -11,6 +11,12 @@
 
 namespace crypto {
   using asn1_string_t = util::safe_ptr<ASN1_STRING, ASN1_STRING_free>;
+  namespace {
+    constexpr std::uint64_t password_scrypt_n = 1ULL << 15;
+    constexpr std::uint64_t password_scrypt_r = 8;
+    constexpr std::uint64_t password_scrypt_p = 1;
+    constexpr std::size_t password_scrypt_max_mem = 64ULL * 1024ULL * 1024ULL;
+  }  // namespace
 
   cert_chain_t::cert_chain_t():
       _certs {}, _cert_ctx { X509_STORE_CTX_new() } {
@@ -337,6 +343,29 @@ namespace crypto {
     sha256_t hsh;
     EVP_Digest(plaintext.data(), plaintext.size(), hsh.data(), nullptr, EVP_sha256(), nullptr);
     return hsh;
+  }
+
+  bool hash_password_scrypt(const std::string_view &password, const std::string_view &salt, password_kdf_t &derived_key) {
+    return EVP_PBE_scrypt(
+      password.data(),
+      static_cast<size_t>(password.size()),
+      reinterpret_cast<const unsigned char *>(salt.data()),
+      salt.size(),
+      password_scrypt_n,
+      password_scrypt_r,
+      password_scrypt_p,
+      password_scrypt_max_mem,
+      derived_key.data(),
+      derived_key.size()
+    ) == 1;
+  }
+
+  bool constant_time_equals(const std::string_view &lhs, const std::string_view &rhs) {
+    if (lhs.size() != rhs.size()) {
+      return false;
+    }
+
+    return CRYPTO_memcmp(lhs.data(), rhs.data(), lhs.size()) == 0;
   }
 
   x509_t x509(const std::string_view &x) {

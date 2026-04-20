@@ -7,6 +7,7 @@
 
 // standard includes
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
@@ -104,6 +105,362 @@ namespace nvhttp {
       output["recommendation_version"] = optimization.recommendation_version;
       output["generated_at"] = optimization.generated_at;
       output["expires_at"] = optimization.expires_at;
+    }
+
+    std::string lower_copy(std::string value) {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+      return value;
+    }
+
+    bool is_poor_quality_grade(const std::string &grade) {
+      const auto normalized = lower_copy(grade);
+      return normalized == "d" || normalized == "f";
+    }
+
+    std::string latest_quality_grade(const std::optional<ai_optimizer::session_history_t> &history) {
+      if (!history) {
+        return {};
+      }
+      if (!history->last_quality_grade.empty()) {
+        return history->last_quality_grade;
+      }
+      return history->quality_grade;
+    }
+
+    bool host_virtual_display_available() {
+#ifdef __linux__
+      return virtual_display::is_available();
+#elif defined(_WIN32)
+      return
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::UNKNOWN;
+#else
+      return false;
+#endif
+    }
+
+    bool host_prefers_headless() {
+#ifdef __linux__
+      return
+        config::video.linux_display.use_cage_compositor &&
+        config::video.linux_display.headless_mode;
+#else
+      return false;
+#endif
+    }
+
+    bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile) {
+      if (!device_profile) {
+        return false;
+      }
+
+      return device_profile->type == "handheld" || device_profile->type == "phone";
+    }
+
+    std::string codec_family(const std::string &codec) {
+      const auto normalized = lower_copy(codec);
+      if (normalized.find("av1") != std::string::npos) {
+        return "av1";
+      }
+      if (normalized.find("hevc") != std::string::npos || normalized.find("h265") != std::string::npos) {
+        return "hevc";
+      }
+      if (normalized.find("avc") != std::string::npos || normalized.find("h264") != std::string::npos) {
+        return "h264";
+      }
+      return normalized;
+    }
+
+    int derive_safe_bitrate_kbps(int baseline_kbps,
+                                 const std::optional<device_db::device_t> &device_profile,
+                                 bool degraded_history) {
+      int safe_kbps = baseline_kbps > 0 ? baseline_kbps : 15000;
+
+      if (device_profile) {
+        if (device_profile->type == "handheld") {
+          safe_kbps = std::min(safe_kbps, 16000);
+        } else if (device_profile->type == "phone") {
+          safe_kbps = std::min(safe_kbps, 18000);
+        } else if (device_profile->type == "tablet") {
+          safe_kbps = std::min(safe_kbps, 22000);
+        } else if (device_profile->type == "desktop") {
+          safe_kbps = std::min(safe_kbps, 30000);
+        }
+      }
+
+      if (degraded_history) {
+        safe_kbps = static_cast<int>(std::lround(static_cast<double>(safe_kbps) * 0.75));
+      }
+
+      return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
+    }
+
+    nlohmann::json build_stability_plan_json(const std::string &device_name,
+                                             const std::string &app_name,
+                                             const std::optional<device_db::device_t> &device_profile,
+                                             const device_db::optimization_t &effective_optimization,
+                                             const std::optional<ai_optimizer::session_history_t> &history,
+                                             const std::optional<std::string> &normalized_codec,
+                                             const std::optional<int> &target_bitrate_kbps,
+                                             bool hdr_requested) {
+      const bool virtual_display_available = host_virtual_display_available();
+      const bool prefers_headless = host_prefers_headless();
+      const bool mobile_client = is_mobile_client_type(device_profile);
+      const std::string quality_grade = latest_quality_grade(history);
+      const bool degraded_history =
+        (history && (history->consecutive_poor_outcomes > 0 || history->poor_outcome_count > 0)) ||
+        is_poor_quality_grade(quality_grade);
+
+      const int baseline_bitrate_kbps =
+        target_bitrate_kbps.value_or(device_profile ? device_profile->ideal_bitrate_kbps : 15000);
+      const int safe_bitrate_kbps = derive_safe_bitrate_kbps(
+        baseline_bitrate_kbps,
+        device_profile,
+        degraded_history
+      );
+
+      std::optional<std::string> safe_codec = normalized_codec;
+      if (degraded_history || (mobile_client && normalized_codec && *normalized_codec == "av1")) {
+        safe_codec = device_db::normalize_preferred_codec(
+          device_name,
+          app_name,
+          std::optional<std::string> {std::string {"hevc"}},
+          safe_bitrate_kbps,
+          false
+        );
+        if (!safe_codec) {
+          safe_codec = "hevc";
+        }
+      }
+
+      const bool current_virtual_display =
+        effective_optimization.virtual_display.value_or(device_profile ? device_profile->virtual_display : false);
+      const bool safe_virtual_display =
+        virtual_display_available &&
+        current_virtual_display &&
+        !degraded_history &&
+        !prefers_headless &&
+        !mobile_client;
+      const bool safe_hdr =
+        hdr_requested &&
+        device_profile &&
+        device_profile->hdr_capable &&
+        !degraded_history;
+
+      auto discouraged_features = nlohmann::json::array();
+      auto reasons = nlohmann::json::array();
+      auto relaunch_notes = nlohmann::json::array();
+
+      if (degraded_history) {
+        reasons.push_back(
+          history && history->consecutive_poor_outcomes > 1 ?
+            "Recent sessions degraded repeatedly on this device, so Polaris is staging a safer fallback profile." :
+            "This device saw a rough recent session, so Polaris is keeping a safer next-launch path ready."
+        );
+      } else if (mobile_client) {
+        reasons.push_back("Handheld and phone clients usually stay steadier when the host path stays simple.");
+      } else {
+        reasons.push_back("Balanced mode keeps the current optimization, with a safer fallback ready if the session turns rough.");
+      }
+
+      if (hdr_requested && !safe_hdr) {
+        discouraged_features.push_back({
+          {"feature", "hdr"},
+          {"reason", "Keep HDR off until this device logs a clean session again."}
+        });
+        relaunch_notes.push_back("HDR changes apply on the next launch.");
+      }
+
+      if (normalized_codec && *normalized_codec == "av1" && safe_codec && *safe_codec != *normalized_codec) {
+        discouraged_features.push_back({
+          {"feature", "av1"},
+          {"reason", "AV1 can amplify decoder or pacing instability on handheld-style clients when sessions already degrade."}
+        });
+        relaunch_notes.push_back("Codec changes apply on the next launch.");
+      }
+
+      if (current_virtual_display && !safe_virtual_display) {
+        discouraged_features.push_back({
+          {"feature", "virtual_display"},
+          {"reason", prefers_headless ?
+            "This Polaris host already prefers a headless compositor path for the steadiest sessions." :
+            "Headless is the safer fallback when virtual display starts introducing frame pacing trouble."}
+        });
+        relaunch_notes.push_back("Display-mode changes apply on the next launch.");
+      }
+
+      nlohmann::json stability;
+      stability["mode"] = degraded_history ? "stability_first" : "balanced";
+      stability["summary"] = degraded_history ?
+        "Safer next launch available for this device." :
+        "Balanced profile ready with a safer fallback if you hit hitching.";
+      stability["relaunch_required"] =
+        !relaunch_notes.empty() &&
+        (
+          !safe_hdr ||
+          (safe_codec && normalized_codec && *safe_codec != *normalized_codec) ||
+          safe_virtual_display != current_virtual_display
+        );
+      stability["reasons"] = std::move(reasons);
+      stability["discouraged_features"] = std::move(discouraged_features);
+      stability["relaunch_notes"] = std::move(relaunch_notes);
+
+      auto &safe_profile = stability["safe_profile"];
+      safe_profile["display_mode"] = safe_virtual_display ? "virtual_display" : "headless";
+      safe_profile["target_bitrate_kbps"] = safe_bitrate_kbps;
+      safe_profile["hdr"] = safe_hdr;
+      if (safe_codec) {
+        safe_profile["preferred_codec"] = *safe_codec;
+      }
+
+      if (history) {
+        stability["last_quality_grade"] = quality_grade;
+        stability["poor_outcome_count"] = history->poor_outcome_count;
+        stability["consecutive_poor_outcomes"] = history->consecutive_poor_outcomes;
+      }
+
+      return stability;
+    }
+
+    nlohmann::json build_session_health_json(const stream_stats::stats_t &stats,
+                                             bool current_virtual_display,
+                                             const std::string &device_name,
+                                             const std::string &app_name) {
+      const auto device_profile = device_db::get_device(device_name);
+      const bool mobile_client = is_mobile_client_type(device_profile);
+      const std::string active_codec_family = codec_family(stats.codec);
+      const double target_fps =
+        stats.encode_target_fps > 0 ? stats.encode_target_fps :
+        stats.session_target_fps > 0 ? stats.session_target_fps :
+        stats.requested_client_fps > 0 ? stats.requested_client_fps :
+        stats.fps;
+      const double fps_gap = target_fps > 0 ? std::max(0.0, target_fps - stats.fps) : 0.0;
+
+      const bool network_risk = stats.packet_loss >= 0.35 || stats.latency_ms >= 28.0;
+      const bool pacing_risk =
+        stats.frame_jitter_ms >= 2.2 ||
+        stats.duplicate_frame_ratio >= 0.10 ||
+        stats.dropped_frame_ratio >= 0.04 ||
+        fps_gap >= 4.0;
+      const bool capture_fallback =
+        stats.capture_residency == platf::frame_residency_e::cpu ||
+        stats.encode_target_residency == platf::frame_residency_e::cpu ||
+        stats.capture_transport == platf::frame_transport_e::shm;
+      const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
+      const bool hdr_risk = stats.dynamic_range > 0 && (pacing_risk || encoder_risk);
+      const bool decoder_risk =
+        (active_codec_family == "av1" || stats.encode_target_format == platf::frame_format_e::p010) &&
+        (pacing_risk || fps_gap >= 4.0) &&
+        !network_risk;
+      const bool virtual_display_risk =
+        current_virtual_display &&
+        (pacing_risk || capture_fallback || hdr_risk);
+
+      auto issues = nlohmann::json::array();
+      auto recommendations = nlohmann::json::array();
+
+      if (network_risk) {
+        issues.push_back("network_jitter");
+        recommendations.push_back("Lower bitrate or keep Adaptive Bitrate enabled.");
+      }
+      if (pacing_risk) {
+        issues.push_back("frame_pacing");
+        recommendations.push_back("Match the game frame cap to the stream FPS and avoid VRR-style sync on the streaming display.");
+      }
+      if (capture_fallback) {
+        issues.push_back("capture_fallback");
+        recommendations.push_back("Prefer the GPU-native capture path or the headless compositor path on this host.");
+      }
+      if (encoder_risk) {
+        issues.push_back("encoder_load");
+        recommendations.push_back("Trim bitrate a bit to give the encoder more margin.");
+      }
+      if (hdr_risk) {
+        issues.push_back("hdr_path");
+        recommendations.push_back("Disable HDR on the next launch if the hitching keeps returning.");
+      }
+      if (decoder_risk) {
+        issues.push_back("decoder_path");
+        recommendations.push_back("Use HEVC for the next launch if AV1 keeps hitching on this client.");
+      }
+      if (virtual_display_risk) {
+        issues.push_back("virtual_display_path");
+        recommendations.push_back("Relaunch in headless mode if this title does not need a dedicated display.");
+      }
+
+      std::string primary_issue = "steady";
+      if (network_risk) primary_issue = "network_jitter";
+      else if (hdr_risk) primary_issue = "hdr_path";
+      else if (virtual_display_risk) primary_issue = "virtual_display_path";
+      else if (decoder_risk) primary_issue = "decoder_path";
+      else if (capture_fallback) primary_issue = "capture_fallback";
+      else if (pacing_risk) primary_issue = "frame_pacing";
+      else if (encoder_risk) primary_issue = "encoder_load";
+
+      const int concern_count =
+        static_cast<int>(network_risk) +
+        static_cast<int>(pacing_risk) +
+        static_cast<int>(capture_fallback) +
+        static_cast<int>(encoder_risk) +
+        static_cast<int>(hdr_risk) +
+        static_cast<int>(decoder_risk) +
+        static_cast<int>(virtual_display_risk);
+
+      std::string grade = "good";
+      if (concern_count >= 2 || (network_risk && pacing_risk) || hdr_risk || decoder_risk) {
+        grade = "degraded";
+      } else if (concern_count == 1) {
+        grade = "watch";
+      }
+
+      const int current_bitrate_kbps =
+        stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+      const int safe_bitrate_kbps = derive_safe_bitrate_kbps(
+        current_bitrate_kbps > 0 ? current_bitrate_kbps :
+          (device_profile ? device_profile->ideal_bitrate_kbps : 15000),
+        device_profile,
+        grade != "good"
+      );
+
+      auto safe_codec = active_codec_family.empty() ? std::optional<std::string> {} : std::optional<std::string> {active_codec_family};
+      if (decoder_risk || (mobile_client && active_codec_family == "av1")) {
+        safe_codec = device_db::normalize_preferred_codec(
+          device_name,
+          app_name,
+          std::optional<std::string> {std::string {"hevc"}},
+          safe_bitrate_kbps,
+          false
+        );
+        if (!safe_codec) {
+          safe_codec = "hevc";
+        }
+      }
+
+      nlohmann::json health;
+      health["grade"] = grade;
+      health["primary_issue"] = primary_issue;
+      health["summary"] =
+        grade == "good" ? "Session looks steady." :
+        network_risk ? "Network jitter is the most likely source of the hitching." :
+        hdr_risk ? "The current HDR path looks unstable." :
+        virtual_display_risk ? "The virtual display path is likely adding pacing overhead." :
+        decoder_risk ? "The current codec path looks harder on this client than expected." :
+        "The stream needs a safer pacing or encode path.";
+      health["issues"] = std::move(issues);
+      health["recommendations"] = std::move(recommendations);
+      health["safe_bitrate_kbps"] = safe_bitrate_kbps;
+      health["safe_display_mode"] = (virtual_display_risk || host_prefers_headless()) ? "headless" : (current_virtual_display ? "virtual_display" : "headless");
+      health["safe_hdr"] = stats.dynamic_range > 0 && !hdr_risk;
+      health["decoder_risk"] = decoder_risk ? "elevated" : "normal";
+      health["hdr_risk"] = hdr_risk ? "elevated" : "normal";
+      health["network_risk"] = network_risk ? "elevated" : "normal";
+      health["relaunch_recommended"] = hdr_risk || decoder_risk || virtual_display_risk;
+      if (safe_codec) {
+        health["safe_codec"] = *safe_codec;
+      }
+      return health;
     }
   }  // namespace
 
@@ -358,20 +715,6 @@ namespace nvhttp {
     }
 
     nlohmann::json launch_mode_contract_for_app(const proc::ctx_t &app) {
-      bool host_virtual_display_available = false;
-      bool host_prefers_headless = false;
-
-#ifdef __linux__
-      host_virtual_display_available = virtual_display::is_available();
-      host_prefers_headless =
-        config::video.linux_display.use_cage_compositor &&
-        config::video.linux_display.headless_mode;
-#elif defined(_WIN32)
-      host_virtual_display_available =
-        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
-        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::UNKNOWN;
-#endif
-
       const bool app_prefers_virtual_display = app.virtual_display;
       const std::string preferred_mode = app_prefers_virtual_display ? "virtual_display" : "headless";
       std::string recommended_mode = preferred_mode;
@@ -379,26 +722,26 @@ namespace nvhttp {
 
       auto allowed_modes = nlohmann::json::array();
       allowed_modes.push_back("headless");
-      if (host_virtual_display_available) {
+      if (host_virtual_display_available()) {
         allowed_modes.push_back("virtual_display");
       }
 
       const bool steam_big_picture = boost::iequals(boost::trim_copy(app.name), "Steam Big Picture");
 
-      if (app_prefers_virtual_display && host_virtual_display_available) {
+      if (app_prefers_virtual_display && host_virtual_display_available()) {
         recommended_mode = "virtual_display";
         mode_reason = steam_big_picture ?
           "Steam Big Picture is configured to prefer a dedicated virtual display on this host." :
           "This app is configured to prefer a dedicated virtual display on the host.";
-      } else if (app_prefers_virtual_display && !host_virtual_display_available) {
+      } else if (app_prefers_virtual_display && !host_virtual_display_available()) {
         recommended_mode = "headless";
         mode_reason =
           "This app prefers Virtual Display, but Polaris does not currently have a virtual display backend available, so the non-virtual path is recommended.";
-      } else if (host_prefers_headless) {
+      } else if (host_prefers_headless()) {
         recommended_mode = "headless";
         mode_reason =
           "Headless is recommended because this Polaris host is already configured for headless streaming.";
-      } else if (host_virtual_display_available) {
+      } else if (host_virtual_display_available()) {
         recommended_mode = "headless";
         mode_reason =
           "This app defaults to the non-virtual path. Virtual Display is available when you want a dedicated display for the session.";
@@ -531,7 +874,7 @@ namespace nvhttp {
     bool session_token_matches_request(const args_t &args) {
       const auto expected_token = get_arg(args, "sessiontoken", "");
       const auto active_token = proc::proc.get_session_token();
-      return expected_token.empty() || active_token.empty() || expected_token == active_token;
+      return expected_token.empty() || active_token.empty() || crypto::constant_time_equals(expected_token, active_token);
     }
 
     void append_current_game_session_fields(pt::ptree &tree, const crypto::named_cert_t *named_cert_p) {
@@ -1280,7 +1623,7 @@ namespace nvhttp {
 
           getservercert(ptr->second, tree, pin);
           return;
-        } else if (is_in_trusted_subnet(request->remote_endpoint().address())) {
+        } else if (config::nvhttp.trusted_subnet_auto_pairing && is_in_trusted_subnet(request->remote_endpoint().address())) {
           // TOFU: Auto-approve pairing from trusted subnet with well-known PIN
           BOOST_LOG(info) << "TOFU: Auto-approving pairing from trusted subnet: "
                           << net::addr_to_normalized_string(request->remote_endpoint().address());
@@ -2430,9 +2773,6 @@ namespace nvhttp {
       output["cage_pid"] = cage_display_router::get_pid();
       output["screen_locked"] = session_manager::is_screen_locked();
 #endif
-      output["session_token"] = session_token;
-      output["owner_unique_id"] = proc::proc.get_session_owner_unique_id();
-      output["owner_device_name"] = proc::proc.get_session_owner_device_name();
       output["owned_by_client"] = owned_by_client;
       output["viewer_count"] = rtsp_stream::viewer_count();
 
@@ -2523,6 +2863,12 @@ namespace nvhttp {
       encoder["optimization_reasoning"] = stats.optimization_reasoning;
       encoder["optimization_normalization_reason"] = stats.optimization_normalization_reason;
       encoder["recommendation_version"] = stats.recommendation_version;
+      output["health"] = build_session_health_json(
+        stats,
+        proc::proc.virtual_display,
+        named_cert_p->name,
+        proc::proc.get_last_run_app_name()
+      );
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
@@ -3017,6 +3363,28 @@ namespace nvhttp {
         std::string optimization_source = body.value("optimization_source", "");
         std::string optimization_confidence = body.value("optimization_confidence", "");
         int recommendation_version = body.value("recommendation_version", 0);
+        std::string health_grade = body.value("health_grade", "");
+        std::string primary_issue = body.value("primary_issue", "");
+        std::vector<std::string> issues;
+        if (body.contains("issues") && body["issues"].is_array()) {
+          for (const auto &item : body["issues"]) {
+            if (item.is_string()) {
+              issues.push_back(item.get<std::string>());
+            }
+          }
+        }
+        std::string decoder_risk = body.value("decoder_risk", "");
+        std::string hdr_risk = body.value("hdr_risk", "");
+        std::string network_risk = body.value("network_risk", "");
+        std::string capture_path = body.value("capture_path", "");
+        int safe_bitrate_kbps = body.value("safe_bitrate_kbps", 0);
+        std::string safe_codec = body.value("safe_codec", "");
+        std::string safe_display_mode = body.value("safe_display_mode", "");
+        std::optional<bool> safe_hdr;
+        if (body.contains("safe_hdr") && body["safe_hdr"].is_boolean()) {
+          safe_hdr = body["safe_hdr"].get<bool>();
+        }
+        bool relaunch_recommended = body.value("relaunch_recommended", false);
 
         if (!device.empty() && !game.empty() && ai_optimizer::is_enabled()) {
           const auto canonical_device = device_db::canonicalize_name(device);
@@ -3075,6 +3443,18 @@ namespace nvhttp {
           session.last_optimization_source = optimization_source;
           session.last_optimization_confidence = optimization_confidence;
           session.last_recommendation_version = recommendation_version;
+          session.last_health_grade = health_grade;
+          session.last_primary_issue = primary_issue;
+          session.last_issues = std::move(issues);
+          session.last_decoder_risk = decoder_risk;
+          session.last_hdr_risk = hdr_risk;
+          session.last_network_risk = network_risk;
+          session.last_capture_path = capture_path;
+          session.last_safe_bitrate_kbps = safe_bitrate_kbps;
+          session.last_safe_codec = safe_codec;
+          session.last_safe_display_mode = safe_display_mode;
+          session.last_safe_hdr = safe_hdr;
+          session.last_relaunch_recommended = relaunch_recommended;
 
           ai_optimizer::record_session(device, game, session);
           BOOST_LOG(info) << "Client session report: " << device << " + " << game
@@ -3109,14 +3489,17 @@ namespace nvhttp {
       std::string game = args.count("game") ? args.find("game")->second : "";
 
       nlohmann::json output;
+      device_db::optimization_t effective_optimization;
       std::optional<std::string> suggested_codec;
       std::optional<int> target_bitrate_kbps;
       bool hdr_requested = false;
       const auto session_history = ai_optimizer::get_session_history(device, game);
+      const auto device_profile = device_db::get_device(device);
 
       // Try AI cache first, then device_db
       auto ai_opt = ai_optimizer::get_cached(device, game);
       if (ai_opt) {
+        effective_optimization = *ai_opt;
         append_optimization_json(output, *ai_opt);
         if (ai_opt->target_bitrate_kbps) {
           target_bitrate_kbps = *ai_opt->target_bitrate_kbps;
@@ -3124,25 +3507,15 @@ namespace nvhttp {
         suggested_codec = ai_opt->preferred_codec;
         hdr_requested = ai_opt->hdr.value_or(false);
       } else {
-        if (device_db::get_device(device)) {
-          auto opt = device_db::get_optimization(device, game);
-          if (session_history && session_history->last_invalidated_at > 0) {
-            opt.cache_status = "invalidated";
-          }
-          append_optimization_json(output, opt);
-          target_bitrate_kbps = opt.target_bitrate_kbps;
-          suggested_codec = opt.preferred_codec;
-          hdr_requested = opt.hdr.value_or(false);
-        } else {
-          auto opt = device_db::get_optimization(device, game);
-          if (session_history && session_history->last_invalidated_at > 0) {
-            opt.cache_status = "invalidated";
-          }
-          append_optimization_json(output, opt);
-          target_bitrate_kbps = opt.target_bitrate_kbps;
-          suggested_codec = opt.preferred_codec;
-          hdr_requested = opt.hdr.value_or(false);
+        auto opt = device_db::get_optimization(device, game);
+        if (session_history && session_history->last_invalidated_at > 0) {
+          opt.cache_status = "invalidated";
         }
+        effective_optimization = opt;
+        append_optimization_json(output, opt);
+        target_bitrate_kbps = opt.target_bitrate_kbps;
+        suggested_codec = opt.preferred_codec;
+        hdr_requested = opt.hdr.value_or(false);
       }
 
       suggested_codec = device_db::normalize_preferred_codec(
@@ -3155,6 +3528,16 @@ namespace nvhttp {
       if (suggested_codec) {
         output["preferred_codec"] = *suggested_codec;
       }
+      output["stability"] = build_stability_plan_json(
+        device,
+        game,
+        device_profile,
+        effective_optimization,
+        session_history,
+        suggested_codec,
+        target_bitrate_kbps,
+        hdr_requested
+      );
       if (session_history) {
         output["last_quality_grade"] = session_history->quality_grade;
         output["poor_outcome_count"] = session_history->poor_outcome_count;

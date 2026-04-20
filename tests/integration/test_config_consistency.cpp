@@ -458,7 +458,8 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
     "recording_enabled",  // Recording pipeline is not exposed in the current config UI/docs
     "recording_output_dir",
     "recording_replay_buffer",
-    "recording_replay_buffer_minutes"
+    "recording_replay_buffer_minutes",
+    "trusted_subnet_auto_pairing",  // Security opt-in is currently surfaced as inline copy rather than localized config docs
   };
 
   std::vector<std::string> missingFromFiles;
