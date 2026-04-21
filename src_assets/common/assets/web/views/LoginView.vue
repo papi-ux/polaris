@@ -150,6 +150,33 @@ if (savedPasswordStr) {
   }
 }
 
+function getPostLoginUrl() {
+  if (window.location.hostname === 'localhost') {
+    return `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}#/`
+  }
+
+  return `${window.location.origin}${window.location.pathname}#/`
+}
+
+async function tryResumeAuthenticatedSession() {
+  try {
+    const probe = await fetch('./api/config', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    })
+
+    if (!probe.ok) {
+      return false
+    }
+
+    success.value = true
+    window.location.replace(getPostLoginUrl())
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function login() {
   error.value = null
   success.value = false
@@ -172,9 +199,9 @@ async function login() {
       if (savePassword.value) {
         localStorage.setItem('login', JSON.stringify(passwordData.value))
       }
+      const targetUrl = getPostLoginUrl()
       if (window.location.hostname === 'localhost') {
-        const ipv4Url = `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}#/`
-        window.location.replace(ipv4Url)
+        window.location.replace(targetUrl)
         return
       }
       await router.push('/')
@@ -220,6 +247,10 @@ async function login() {
     }
 
     if (e instanceof TypeError && e.message === 'Failed to fetch') {
+      if (await tryResumeAuthenticatedSession()) {
+        return
+      }
+
       if (window.location.hostname === 'localhost') {
         const fallbackUrl = `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}#/login`
         error.value = `Login failed: Polaris could not be reached on localhost. This instance may be listening on IPv4 only. Open ${fallbackUrl} instead.`
