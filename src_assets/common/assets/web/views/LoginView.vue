@@ -16,36 +16,9 @@
               Sign in to manage the host from one local control surface.
             </p>
           </div>
-
-          <div class="page-hero-aside auth-login-aside hidden lg:block">
-            <div class="auth-login-panel">
-              <div class="auth-panel-kicker">After Sign-In</div>
-              <div class="auth-panel-copy">
-                Mission Control, pairing, Library, and Settings stay one click away.
-              </div>
-              <div class="auth-orbit-field auth-orbit-field--compact" aria-hidden="true">
-                <div class="auth-orbit-ring auth-orbit-ring--outer"></div>
-                <div class="auth-orbit-ring auth-orbit-ring--mid"></div>
-                <div class="auth-orbit-core"></div>
-                <span class="auth-orbit-node auth-orbit-node--primary">Mission Control</span>
-                <span class="auth-orbit-node auth-orbit-node--right">Library</span>
-                <span class="auth-orbit-node auth-orbit-node--lower-left">Pairing</span>
-                <span class="auth-orbit-node auth-orbit-node--lower-right">Settings</span>
-              </div>
-              <div class="auth-login-panel-footer">
-                <div class="auth-login-panel-title-row">
-                  Secure session
-                  <InfoHint align="right" label="Session security">
-                    Treat Polaris like a local system console. Sign out or close the browser on shared devices when you are done.
-                  </InfoHint>
-                </div>
-                <div class="auth-note-copy">Remember credentials only on a device you control.</div>
-              </div>
-            </div>
-          </div>
         </div>
 
-        <div class="relative z-[1] border-t border-storm/15 px-6 py-6 md:px-7 md:py-7">
+        <div class="relative z-[1] auth-login-body px-6 pb-6 pt-4 md:px-7 md:pb-7 md:pt-3">
           <form @submit.prevent="login" class="auth-login-form">
             <div class="space-y-4">
               <div>
@@ -116,6 +89,32 @@
               </div>
             </div>
           </form>
+
+          <aside class="auth-login-aside hidden lg:block" aria-label="After sign-in overview">
+            <div class="auth-login-summary">
+              <div class="auth-panel-kicker">After Sign-In</div>
+              <div class="auth-panel-copy auth-login-summary-copy">
+                Mission Control, pairing, Library, and Settings stay one click away.
+              </div>
+
+              <div class="auth-orbit-field auth-orbit-field--compact auth-login-summary-visual" aria-hidden="true">
+                <div class="auth-orbit-ring auth-orbit-ring--outer"></div>
+                <div class="auth-orbit-ring auth-orbit-ring--mid"></div>
+                <div class="auth-orbit-core"></div>
+                <span class="auth-orbit-node auth-orbit-node--primary">Mission Control</span>
+                <span class="auth-orbit-node auth-orbit-node--right">Library</span>
+                <span class="auth-orbit-node auth-orbit-node--lower-left">Pairing</span>
+                <span class="auth-orbit-node auth-orbit-node--lower-right">Settings</span>
+              </div>
+
+              <div class="auth-login-summary-note">
+                <span>Secure session on trusted devices only.</span>
+                <InfoHint align="right" label="Session security">
+                  Treat Polaris like a local system console. Sign out or close the browser on shared devices when you are done.
+                </InfoHint>
+              </div>
+            </div>
+          </aside>
         </div>
       </section>
     </div>
@@ -240,50 +239,56 @@ async function login() {
 <style scoped>
 .auth-login-form {
   display: block;
+  max-width: 44rem;
 }
 
 .auth-login-header {
-  gap: 1.1rem;
-  padding: 1.4rem 1.45rem 1.2rem;
-  grid-template-columns: minmax(0, 1.08fr) minmax(290px, 0.74fr);
+  display: block;
+  padding: 1.2rem 1.45rem 0.25rem;
+  align-items: start;
 }
 
 .auth-login-copy {
-  max-width: 32rem;
+  max-width: 36rem;
 }
 
 .auth-login-copy-text {
-  max-width: 24rem;
+  max-width: 23rem;
 }
 
 .auth-login-aside {
-  max-width: 22rem;
-  justify-self: end;
+  width: min(100%, 18rem);
 }
 
-.auth-login-panel {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid rgba(200, 214, 229, 0.1);
-  border-radius: 1.35rem;
-  background: linear-gradient(180deg, rgba(9, 14, 22, 0.72), rgba(8, 12, 18, 0.86));
-  padding: 1rem 1rem 0.95rem;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+.auth-login-summary-copy {
+  margin-top: 0.35rem;
+  max-width: 18rem;
 }
 
-.auth-login-panel-footer {
-  margin-top: 0.8rem;
-  border-top: 1px solid rgba(200, 214, 229, 0.08);
-  padding-top: 0.75rem;
+.auth-login-body {
+  display: grid;
+  gap: 1.6rem;
+  align-items: start;
 }
 
-.auth-login-panel-title-row {
+.auth-login-summary {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.auth-login-summary-visual {
+  min-height: 116px;
+  margin-top: 0;
+}
+
+.auth-login-summary-note {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  font-size: 0.84rem;
-  font-weight: 600;
-  color: rgb(232 237 243 / 0.9);
+  color: var(--theme-text-soft);
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 .auth-orbit-field--compact {
@@ -330,9 +335,20 @@ async function login() {
   bottom: 0;
 }
 
+.auth-login-summary-visual.auth-orbit-field--compact {
+  min-height: 116px;
+  margin-top: 0;
+}
+
 @media (max-width: 1279px) {
-  .auth-login-header {
-    grid-template-columns: 1fr;
+  .auth-login-aside {
+    width: 100%;
+  }
+}
+
+@media (min-width: 1024px) {
+  .auth-login-body {
+    grid-template-columns: minmax(0, 1fr) 18rem;
   }
 }
 </style>
