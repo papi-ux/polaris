@@ -18,6 +18,19 @@ const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
 // Wrap global fetch to include CSRF token on mutating requests
 window.fetch = wrapFetchWithCsrfToken(window.fetch, csrfToken)
 
+function normalizeLegacyPairingRoute() {
+  const legacyPairing = window.location.hash.match(/^#\/pin#(PIN|OTP|TOFU)$/i)
+  if (!legacyPairing) {
+    return
+  }
+
+  const method = legacyPairing[1].toUpperCase()
+  const nextUrl = `${window.location.pathname}${window.location.search}#/pin?method=${method}`
+  window.history.replaceState(null, '', nextUrl)
+}
+
+normalizeLegacyPairingRoute()
+
 const routes = [
   { path: '/', component: DashboardView },
   { path: '/info', component: () => import(/* webpackChunkName: "home" */ './views/HomeView.vue') },
@@ -41,6 +54,16 @@ const router = createRouter({
 // which exhausts server connections when response bodies aren't consumed.
 let authed = false
 window.__POLARIS_AUTHENTICATED__ = false
+
+function redirectToLoginWithReturnTarget(to) {
+  return {
+    path: '/login',
+    query: {
+      redirect: to.fullPath || to.path || '/',
+    },
+  }
+}
+
 router.beforeEach(async (to, _from) => {
   if (!isPublicRoute(to.path)) {
     if (authed) return
@@ -55,17 +78,17 @@ router.beforeEach(async (to, _from) => {
       if (finalPath.endsWith('/login')) {
         window.__POLARIS_AUTHENTICATED__ = false
         clearCachedConfig()
-        return '/login'
+        return redirectToLoginWithReturnTarget(to)
       }
       if (res.status === 401) {
         window.__POLARIS_AUTHENTICATED__ = false
         clearCachedConfig()
-        return '/login'
+        return redirectToLoginWithReturnTarget(to)
       }
       if (!res.ok) {
         window.__POLARIS_AUTHENTICATED__ = false
         clearCachedConfig()
-        return '/login'
+        return redirectToLoginWithReturnTarget(to)
       }
       const contentType = res.headers.get('content-type') || ''
       if (contentType.includes('application/json')) {
@@ -78,7 +101,7 @@ router.beforeEach(async (to, _from) => {
     } catch (e) {
       window.__POLARIS_AUTHENTICATED__ = false
       clearCachedConfig()
-      return '/login'
+      return redirectToLoginWithReturnTarget(to)
     }
   }
 })

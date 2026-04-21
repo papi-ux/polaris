@@ -359,7 +359,7 @@ namespace system_tray {
     tray.notification_icon = TRAY_ICON_LOCKED;
     tray.tooltip = PROJECT_NAME;
     tray.notification_cb = []() {
-      launch_ui("/pin#PIN");
+      launch_ui("/#/pin?method=PIN");
     };
     tray_update(&tray);
   }

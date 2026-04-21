@@ -35,6 +35,7 @@
 #include <boost/process/v1/group.hpp>
 #include <boost/process/v1/handles.hpp>
 #include <boost/process/v1/io.hpp>
+#include <boost/process/v1/search_path.hpp>
 #include <boost/process/v1/start_dir.hpp>
 #include <fcntl.h>
 #include <unistd.h>
@@ -516,11 +517,25 @@ std::string get_local_ip_for_gateway() {
   void open_url(const std::string &url) {
     // set working dir to user home directory
     auto working_dir = boost::filesystem::path(std::getenv("HOME"));
-    std::string cmd = R"(xdg-open ")" + url + R"(")";
-
     boost::process::v1::environment _env = boost::this_process::environment();
     std::error_code ec;
-    auto child = run_command(false, false, cmd, working_dir, _env, nullptr, ec, nullptr);
+    const auto opener = bp::search_path("xdg-open");
+    if (opener.empty()) {
+      BOOST_LOG(warning) << "Couldn't open url ["sv << url << "]: xdg-open was not found in PATH"sv;
+      return;
+    }
+
+    auto child = bp::child(
+      opener,
+      url,
+      _env,
+      bp::start_dir(working_dir),
+      bp::std_in < bp::null,
+      bp::std_out > bp::null,
+      bp::std_err > bp::null,
+      bp::limit_handles,
+      ec
+    );
     if (ec) {
       BOOST_LOG(warning) << "Couldn't open url ["sv << url << "]: System: "sv << ec.message();
     } else {

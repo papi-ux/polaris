@@ -1039,6 +1039,7 @@ namespace nvhttp {
         named_cert_node["name"] = final_name;
         named_cert_node["cert"] = named_cert_p->cert;
         named_cert_node["uuid"] = named_cert_p->uuid;
+        named_cert_node["client_family"] = named_cert_p->client_family;
         named_cert_node["display_mode"] = named_cert_p->display_mode;
         named_cert_node["perm"] = static_cast<uint32_t>(named_cert_p->perm);
         named_cert_node["enable_legacy_ordering"] = named_cert_p->enable_legacy_ordering;
@@ -1119,6 +1120,7 @@ namespace nvhttp {
             named_cert_p->name = "";
             named_cert_p->cert = el.get<std::string>();
             named_cert_p->uuid = uuid_util::uuid_t::generate().string();
+            named_cert_p->client_family = "";
             named_cert_p->display_mode = "";
             named_cert_p->perm = PERM::_all;
             named_cert_p->enable_legacy_ordering = true;
@@ -1137,6 +1139,7 @@ namespace nvhttp {
         named_cert_p->name = el.value("name", "");
         named_cert_p->cert = el.value("cert", "");
         named_cert_p->uuid = el.value("uuid", "");
+        named_cert_p->client_family = el.value("client_family", "");
         named_cert_p->display_mode = el.value("display_mode", "");
         named_cert_p->perm = (PERM)(util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t)PERM::_all)) & PERM::_all;
         named_cert_p->enable_legacy_ordering = el.value("enable_legacy_ordering", true);
@@ -1431,6 +1434,7 @@ namespace nvhttp {
       }
       named_cert_p->cert = std::move(client.cert);
       named_cert_p->uuid = uuid_util::uuid_t::generate().string();
+      named_cert_p->client_family = client.family_hint;
       // If the device is the first one paired with the server, assign full permission.
       if (client_root.named_devices.empty()) {
         named_cert_p->perm = PERM::_all;
@@ -1472,7 +1476,16 @@ namespace nvhttp {
     return (crypto::named_cert_t*)request->userp.get();
   }
 
-  crypto::p_named_cert_t verify_client_cert(SSL *ssl) {
+  void remember_client_family(crypto::named_cert_t *named_cert_p, std::string_view family) {
+    if (!named_cert_p || family.empty() || named_cert_p->client_family == family) {
+      return;
+    }
+
+    named_cert_p->client_family = std::string(family);
+    save_state();
+  }
+
+  crypto::p_named_cert_t verify_client_cert(SSL *ssl, bool log_errors) {
     if (!ssl) {
       return {};
     }
@@ -1492,7 +1505,9 @@ namespace nvhttp {
     p_named_cert_t named_cert_p;
     auto err_str = cert_chain.verify(x509.get(), named_cert_p);
     if (err_str) {
-      BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
+      if (log_errors) {
+        BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
+      }
       return {};
     }
 
@@ -1523,6 +1538,21 @@ namespace nvhttp {
   void not_found(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
 
+    std::ostringstream query_string;
+    bool first = true;
+    for (const auto &[name, val] : request->parse_query_string()) {
+      if (!first) {
+        query_string << '&';
+      }
+      query_string << name << '=' << val;
+      first = false;
+    }
+
+    BOOST_LOG(warning) << "nvhttp: 404 "sv
+                       << request->method << ' ' << request->path
+                       << (query_string.str().empty() ? "" : "?")
+                       << query_string.str();
+
     pt::ptree tree;
     tree.put("root.<xmlattr>.status_code", 404);
 
@@ -1531,6 +1561,47 @@ namespace nvhttp {
     pt::write_xml(data, tree);
     response->write(SimpleWeb::StatusCode::client_error_not_found, data.str());
     response->close_connection_after_response = true;
+  }
+
+  template<class T>
+  void unpair(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    print_req<T>(request);
+
+    pt::ptree tree;
+    auto fg = util::fail_guard([&]() {
+      std::ostringstream data;
+
+      pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+    });
+
+    auto args = request->parse_query_string();
+    const auto unique_id_it = args.find("uniqueid"s);
+    if (unique_id_it == std::end(args)) {
+      tree.put("root.paired", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Missing uniqueid parameter");
+      return;
+    }
+
+    const auto unique_id = unique_id_it->second;
+    const bool removed_session = map_id_sess.erase(unique_id) > 0;
+
+    bool removed_paired_client = false;
+    if constexpr (std::is_same_v<PolarisHTTPS, T>) {
+      if (auto named_cert_p = get_verified_cert(request)) {
+        removed_paired_client = unpair_client(named_cert_p->uuid);
+      }
+    }
+
+    BOOST_LOG(info) << "pair: unpair cleanup for uniqueid "sv << unique_id
+                    << " session_removed="sv << removed_session
+                    << " paired_client_removed="sv << removed_paired_client;
+
+    tree.put("root.paired", 0);
+    tree.put("root.<xmlattr>.status_code", 200);
+    tree.put("root.<xmlattr>.status_message", "Unpaired");
   }
 
   template <class T>
@@ -1567,6 +1638,12 @@ namespace nvhttp {
     args_t::const_iterator it;
     if (it = args.find("phrase"); it != std::end(args)) {
       if (it->second == "getservercert"sv) {
+        auto existing_session = map_id_sess.find(uniqID);
+        if (existing_session != std::end(map_id_sess)) {
+          BOOST_LOG(info) << "pair: restarting in-flight session for uniqueid "sv << uniqID;
+          map_id_sess.erase(existing_session);
+        }
+
         pair_session_t sess;
 
         auto deviceName { get_arg(args, "devicename") };
@@ -1577,6 +1654,7 @@ namespace nvhttp {
 
         sess.client.uniqueID = std::move(uniqID);
         sess.client.name = std::move(deviceName);
+        sess.client.family_hint.clear();
         sess.client.cert = util::from_hex_vec(get_arg(args, "clientcert"), true);
 
         BOOST_LOG(debug) << sess.client.cert;
@@ -1623,13 +1701,30 @@ namespace nvhttp {
 
           getservercert(ptr->second, tree, pin);
           return;
-        } else if (config::nvhttp.trusted_subnet_auto_pairing && is_in_trusted_subnet(request->remote_endpoint().address())) {
-          // TOFU: Auto-approve pairing from trusted subnet with well-known PIN
-          BOOST_LOG(info) << "TOFU: Auto-approving pairing from trusted subnet: "
-                          << net::addr_to_normalized_string(request->remote_endpoint().address());
-          getservercert(ptr->second, tree, "0000");
-          return;
         } else {
+          const bool trusted_pair_requested = util::from_view(get_arg(args, "trustedpair", "0"));
+          if (trusted_pair_requested) {
+            ptr->second.client.family_hint = "nova";
+          }
+          if (trusted_pair_requested &&
+              config::nvhttp.trusted_subnet_auto_pairing &&
+              is_in_trusted_subnet(request->remote_endpoint().address()))
+          {
+            // TOFU: Auto-approve pairing from trusted subnet with well-known PIN,
+            // but only when the client explicitly opts into the trusted flow.
+            BOOST_LOG(info) << "TOFU: Auto-approving pairing from trusted subnet: "
+                            << net::addr_to_normalized_string(request->remote_endpoint().address());
+            getservercert(ptr->second, tree, "0000");
+            return;
+          }
+
+          if (trusted_pair_requested && !config::nvhttp.trusted_subnet_auto_pairing) {
+            BOOST_LOG(info) << "TOFU: Trusted Pair requested but disabled in host config"sv;
+          } else if (trusted_pair_requested && !is_in_trusted_subnet(request->remote_endpoint().address())) {
+            BOOST_LOG(info) << "TOFU: Trusted Pair requested from untrusted subnet: "
+                            << net::addr_to_normalized_string(request->remote_endpoint().address());
+          }
+
 #if defined POLARIS_TRAY && POLARIS_TRAY >= 1
           system_tray::update_tray_require_pin();
 #endif
@@ -1723,21 +1818,12 @@ namespace nvhttp {
   void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
 
-    int pair_status = 0;
-    if constexpr (std::is_same_v<PolarisHTTPS, T>) {
-      auto args = request->parse_query_string();
-      auto clientID = args.find("uniqueid"s);
-
-      if (clientID != std::end(args)) {
-        pair_status = 1;
-      }
-    }
-
     auto local_endpoint = request->local_endpoint();
     const crypto::named_cert_t *named_cert_p = nullptr;
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       named_cert_p = get_verified_cert(request);
     }
+    const int pair_status = named_cert_p ? 1 : 0;
     const auto advertised_codec_support = advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
 
     pt::ptree tree;
@@ -1756,7 +1842,7 @@ namespace nvhttp {
     // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       tree.put("root.mac", platf::get_mac_address(net::addr_to_normalized_string(local_endpoint.address())));
-      if (!!(named_cert_p->perm & PERM::server_cmd)) {
+      if (named_cert_p && !!(named_cert_p->perm & PERM::server_cmd)) {
         pt::ptree& root_node = tree.get_child("root");
 
         if (config::sunshine.server_cmds.size() > 0) {
@@ -1767,15 +1853,15 @@ namespace nvhttp {
             root_node.push_back(std::make_pair("ServerCommand", cmd_node));
           }
         }
-      } else {
+      } else if (named_cert_p) {
         BOOST_LOG(debug) << "Permission Get ServerCommand denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
       }
 
-      tree.put("root.Permission", std::to_string((uint32_t)named_cert_p->perm));
+      tree.put("root.Permission", std::to_string(named_cert_p ? (uint32_t) named_cert_p->perm : 0U));
 
     #ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
-      if (!!(named_cert_p->perm & PERM::_all_actions)) {
+      if (named_cert_p && !!(named_cert_p->perm & PERM::_all_actions)) {
         tree.put("root.VirtualDisplayDriverReady", proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK);
       } else {
         tree.put("root.VirtualDisplayDriverReady", true);
@@ -1801,8 +1887,8 @@ namespace nvhttp {
       tree.put("root.LocalIP", net::addr_to_normalized_string(local_endpoint.address()));
     }
 
-    // Advertise TOFU support for clients on trusted subnets
-    if (is_in_trusted_subnet(request->remote_endpoint().address())) {
+    // Only advertise trusted-subnet pairing when the host actually allows it.
+    if (config::nvhttp.trusted_subnet_auto_pairing && is_in_trusted_subnet(request->remote_endpoint().address())) {
       tree.put("root.TofuEnabled", 1);
     }
 
@@ -1874,7 +1960,9 @@ namespace nvhttp {
     for (auto &named_cert : client.named_devices) {
       nlohmann::json named_cert_node;
       named_cert_node["name"] = named_cert->name;
+      named_cert_node["friendly_name"] = device_db::friendly_name(named_cert->name);
       named_cert_node["uuid"] = named_cert->uuid;
+      named_cert_node["client_family"] = named_cert->client_family;
       named_cert_node["display_mode"] = named_cert->display_mode;
       named_cert_node["perm"] = static_cast<uint32_t>(named_cert->perm);
       named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
@@ -1936,9 +2024,15 @@ namespace nvhttp {
 
     auto &apps = tree.add_child("root", pt::ptree {});
 
+    auto named_cert_p = get_verified_cert(request);
+    if (!named_cert_p) {
+      apps.put("<xmlattr>.status_code", 401);
+      apps.put("<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
+      return;
+    }
+
     apps.put("<xmlattr>.status_code", 200);
 
-    auto named_cert_p = get_verified_cert(request);
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
       auto current_appid = proc::proc.running();
       auto should_hide_inactive_apps = config::input.enable_input_only_mode && current_appid > 0 && current_appid != proc::input_only_app_id;
@@ -2025,6 +2119,13 @@ namespace nvhttp {
     bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));
 
     auto named_cert_p = get_verified_cert(request);
+    if (!named_cert_p) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
+      return;
+    }
+
     auto perm = PERM::launch;
 
     BOOST_LOG(verbose) << "Launching app [" << appid_str << "] with UUID [" << appuuid_str << "]";
@@ -2294,6 +2395,13 @@ namespace nvhttp {
     });
 
     auto named_cert_p = get_verified_cert(request);
+    if (!named_cert_p) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
+      return;
+    }
+
     if (!(named_cert_p->perm & PERM::_allow_view)) {
       BOOST_LOG(debug) << "Permission ViewApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
 
@@ -2445,6 +2553,13 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
     auto named_cert_p = get_verified_cert(request);
+    if (!named_cert_p) {
+      tree.put("root.cancel", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
+      return;
+    }
+
     if (!(named_cert_p->perm & PERM::launch)) {
       BOOST_LOG(debug) << "Permission CancelApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
 
@@ -2495,6 +2610,12 @@ namespace nvhttp {
     });
 
     auto named_cert_p = get_verified_cert(request);
+    if (!named_cert_p) {
+      fg.disable();
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return;
+    }
 
     if (!(named_cert_p->perm & PERM::_all_actions)) {
       BOOST_LOG(debug) << "Permission Get AppAsset denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
@@ -2521,6 +2642,11 @@ namespace nvhttp {
     print_req<PolarisHTTPS>(request);
 
     auto named_cert_p = get_verified_cert(request);
+    if (!named_cert_p) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return;
+    }
 
     if (
       !(named_cert_p->perm & PERM::_allow_view)
@@ -2569,6 +2695,11 @@ namespace nvhttp {
     print_req<PolarisHTTPS>(request);
 
     auto named_cert_p = get_verified_cert(request);
+    if (!named_cert_p) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return;
+    }
 
     if (
       !(named_cert_p->perm & PERM::_allow_view)
@@ -2653,14 +2784,13 @@ namespace nvhttp {
 
     // Verify certificates after establishing connection
     https_server.verify = [](req_https_t req, SSL *ssl) {
-      auto named_cert_p = verify_client_cert(ssl);
-      if (!named_cert_p) {
-        BOOST_LOG(info) << "unknown -- denied"sv;
-        return false;
+      if (auto named_cert_p = verify_client_cert(ssl, false)) {
+        req->userp = named_cert_p;
+        if (req->path.rfind("/polaris/v1/", 0) == 0) {
+          remember_client_family(named_cert_p.get(), "nova");
+        }
+        BOOST_LOG(debug) << named_cert_p->name << " -- verified"sv;
       }
-
-      req->userp = named_cert_p;
-      BOOST_LOG(debug) << named_cert_p->name << " -- verified"sv;
 
       return true;
     };
@@ -2683,6 +2813,7 @@ namespace nvhttp {
     https_server.default_resource["GET"] = not_found<PolarisHTTPS>;
     https_server.resource["^/serverinfo$"]["GET"] = serverinfo<PolarisHTTPS>;
     https_server.resource["^/pair$"]["GET"] = pair<PolarisHTTPS>;
+    https_server.resource["^/unpair$"]["GET"] = unpair<PolarisHTTPS>;
     https_server.resource["^/applist$"]["GET"] = applist;
     https_server.resource["^/appasset$"]["GET"] = appasset;
     https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
@@ -3574,6 +3705,7 @@ namespace nvhttp {
     http_server.default_resource["GET"] = not_found<SimpleWeb::HTTP>;
     http_server.resource["^/serverinfo$"]["GET"] = serverinfo<SimpleWeb::HTTP>;
     http_server.resource["^/pair$"]["GET"] = pair<SimpleWeb::HTTP>;
+    http_server.resource["^/unpair$"]["GET"] = unpair<SimpleWeb::HTTP>;
 
     http_server.config.reuse_address = true;
     http_server.config.address = net::af_to_any_address_string(address_family);

@@ -111,8 +111,10 @@
                   name="pairing_pin"
                   autocomplete="one-time-code"
                   inputmode="numeric"
-                  pattern="\\d*"
+                  pattern="[0-9]{4}"
+                  maxlength="4"
                   required
+                  title="Enter the 4-digit pairing PIN"
                   class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
                   :placeholder="$t('pin.pin_code_placeholder')"
                 />
@@ -369,7 +371,12 @@
               <div class="pairing-client-toolbar flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
                   <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.edit_access') }}</div>
-                  <h3 :id="`client-edit-title-${client.uuid}`" class="mt-2 text-lg font-semibold text-silver">{{ client.name || $t('pin.unpair_single_unknown') }}</h3>
+                  <h3 :id="`client-edit-title-${client.uuid}`" class="mt-2 text-lg font-semibold text-silver">
+                    {{ clientDisplayName(client) || $t('pin.unpair_single_unknown') }}
+                  </h3>
+                  <p v-if="clientAliasName(client)" class="mt-1 text-xs text-storm">
+                    Saved as {{ client.name }}
+                  </p>
                   <p class="mt-2 text-sm text-storm">Update access, display behavior, and client actions.</p>
                 </div>
                 <div class="pairing-client-actions flex flex-wrap items-center gap-2">
@@ -386,6 +393,18 @@
                     :class="accessToneClass(client.editPerm)"
                   >
                     {{ accessPresetLabel(client.editPerm) }}
+                  </span>
+                  <span
+                    class="rounded-full border px-2.5 py-1 text-xs font-medium"
+                    :class="clientFamilyToneClass(client)"
+                  >
+                    {{ clientFamilyLabel(client) }}
+                  </span>
+                  <span
+                    class="rounded-full border px-2.5 py-1 text-xs font-medium"
+                    :class="recommendationToneClass(clientRecommendationState(client))"
+                  >
+                    {{ clientRecommendationState(client).label }}
                   </span>
                   <button
                     type="button"
@@ -696,7 +715,9 @@
               <div class="pairing-client-toolbar flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div class="min-w-0">
                   <div class="flex flex-wrap items-center gap-2">
-                    <h3 class="text-lg font-semibold text-silver">{{ client.name !== '' ? client.name : $t('pin.unpair_single_unknown') }}</h3>
+                    <h3 class="text-lg font-semibold text-silver">
+                      {{ clientDisplayName(client) || $t('pin.unpair_single_unknown') }}
+                    </h3>
                     <span
                       class="rounded-full border px-2.5 py-1 text-xs font-medium"
                       :class="client.connected
@@ -711,6 +732,21 @@
                     >
                       {{ accessPresetLabel(client.perm) }}
                     </span>
+                    <span
+                      class="rounded-full border px-2.5 py-1 text-xs font-medium"
+                      :class="clientFamilyToneClass(client)"
+                    >
+                      {{ clientFamilyLabel(client) }}
+                    </span>
+                    <span
+                      class="rounded-full border px-2.5 py-1 text-xs font-medium"
+                      :class="recommendationToneClass(clientRecommendationState(client))"
+                    >
+                      {{ clientRecommendationState(client).label }}
+                    </span>
+                  </div>
+                  <div v-if="clientAliasName(client)" class="mt-2 text-xs text-storm">
+                    Saved as {{ client.name }}
                   </div>
                   <div class="mt-3 font-mono text-xs text-storm">[ {{ permToStr(client.perm) }} ]</div>
                 </div>
@@ -784,11 +820,70 @@
         </div>
       </div>
     </section>
+
+    <section v-if="staleProfileEntries.length > 0" class="section-card overflow-hidden">
+      <div class="p-5">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0">
+            <div class="section-kicker">Profile Maintenance</div>
+            <h2 class="section-title">Stale profile aliases</h2>
+            <p class="mt-2 text-sm text-storm">
+              Remove leftover display-profile aliases from renamed, duplicate, or test clients without unpairing the
+              real device.
+            </p>
+          </div>
+          <div class="pairing-device-toolbar flex flex-wrap items-center gap-2">
+            <span class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-xs text-storm">
+              {{ staleProfileEntries.length }} stale
+            </span>
+            <button
+              type="button"
+              class="inline-flex h-9 items-center justify-center rounded-lg bg-red-500 px-4 text-sm font-medium text-white transition-all duration-200 hover:bg-red-600 hover:shadow-[0_0_24px_rgba(239,68,68,0.2)] disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="removingStaleProfiles || staleProfileEntries.length === 0"
+              @click="deleteStaleProfiles"
+            >
+              {{ removingStaleProfiles ? 'Removing…' : 'Remove stale' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="border-t border-storm/30 p-5">
+        <div class="space-y-3">
+          <article
+            v-for="entry in staleProfileEntries"
+            :key="entry.name"
+            class="rounded-2xl border border-storm/20 bg-deep/40 p-4"
+          >
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <h3 class="text-sm font-semibold text-silver">{{ entry.name }}</h3>
+                  <span class="rounded-full border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-xs font-medium text-amber-200">
+                    Stale alias
+                  </span>
+                </div>
+                <div class="mt-2 text-sm text-storm">{{ profileSummary(entry.profile) }}</div>
+              </div>
+
+              <button
+                type="button"
+                class="inline-flex h-9 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 px-4 text-sm font-medium text-red-200 transition-all duration-200 hover:bg-red-500/20"
+                @click="deleteClientProfileEntry(entry.name)"
+              >
+                Remove
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
 <script setup>
-import { computed, inject, nextTick, ref } from 'vue'
+import { computed, inject, nextTick, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import Checkbox from '../Checkbox.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
@@ -802,10 +897,12 @@ import {
 const { toast: showToast } = useToast()
 const { getSuggestion: getAiSuggestion, optimize: aiOptimize, loading: aiLoading } = useAiOptimizer()
 const i18n = inject('i18n')
+const route = useRoute()
+const router = useRouter()
 const {
   clients, clientsLoaded, platform, profiles,
   refreshClients, refreshProfiles, saveClient: saveClientAPI,
-  saveProfile, unpairSingle, unpairAll: unpairAllAPI,
+  saveProfile, deleteProfile, unpairSingle, unpairAll: unpairAllAPI,
   disconnectClient, sendWol: sendWolAPI
 } = useClients()
 
@@ -905,6 +1002,97 @@ const cmdTpl = { cmd: '', elevated: 'false' }
 
 const aiSuggestion = ref(null)
 const aiSuggestionFor = ref(null)
+const recommendationSuggestions = ref({})
+
+function clientDisplayName(client) {
+  return client?.friendly_name || client?.name || ''
+}
+
+function clientAliasName(client) {
+  if (!client?.friendly_name || !client?.name || client.friendly_name === client.name) {
+    return ''
+  }
+  return client.name
+}
+
+function clientFamilyLabel(client) {
+  return client?.client_family === 'nova' ? 'Nova' : 'Moonlight / Artemis'
+}
+
+function clientFamilyToneClass(client) {
+  return client?.client_family === 'nova'
+    ? 'border-indigo-400/30 bg-indigo-400/10 text-indigo-200'
+    : 'border-storm/30 bg-deep/60 text-storm'
+}
+
+function hasSuggestionField(suggestion, field) {
+  return Object.prototype.hasOwnProperty.call(suggestion || {}, field)
+}
+
+function suggestionForClient(client) {
+  return recommendationSuggestions.value[client.uuid] || null
+}
+
+function clientRecommendationState(client) {
+  const suggestion = suggestionForClient(client)
+  if (!suggestion || !suggestion.status) {
+    return { label: 'No recommendation', tone: 'neutral' }
+  }
+
+  const recognizedDevice = suggestion.confidence !== 'low' ||
+    !String(suggestion.reasoning || '').startsWith('Unknown device')
+
+  if (!recognizedDevice) {
+    return { label: 'No recommendation', tone: 'neutral' }
+  }
+
+  const profile = profiles.value[client.name] || {}
+  const expectedDisplayMode = hasSuggestionField(suggestion, 'display_mode') ? (suggestion.display_mode || '') : ''
+  const expectedHdr = hasSuggestionField(suggestion, 'hdr') ? Boolean(suggestion.hdr) : Boolean(profile.hdr)
+  const expectedColorRange = hasSuggestionField(suggestion, 'color_range') ? Number(suggestion.color_range) : 0
+
+  const matched =
+    (client.display_mode || '') === expectedDisplayMode &&
+    Boolean(profile.hdr) === expectedHdr &&
+    Number(profile.color_range || 0) === expectedColorRange
+  const aiSource = typeof suggestion.source === 'string' && suggestion.source.startsWith('ai')
+  if (matched) {
+    return { label: aiSource ? 'AI matched' : 'Recommended', tone: 'good' }
+  }
+
+  return { label: aiSource ? 'AI available' : 'Custom profile', tone: 'warn' }
+}
+
+function recommendationToneClass(state) {
+  switch (state?.tone) {
+    case 'good':
+      return 'border-green-500/30 bg-green-500/10 text-green-300'
+    case 'warn':
+      return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+    default:
+      return 'border-storm/30 bg-deep/60 text-storm'
+  }
+}
+
+async function refreshRecommendationSuggestions() {
+  if (!clients.value.length) {
+    recommendationSuggestions.value = {}
+    return
+  }
+
+  const nextSuggestions = {}
+  await Promise.all(clients.value.map(async (client) => {
+    try {
+      const suggestion = await getAiSuggestion(client.name)
+      if (suggestion?.status) {
+        nextSuggestions[client.uuid] = suggestion
+      }
+    } catch (e) {
+      console.error('Failed to load client recommendation:', e)
+    }
+  }))
+  recommendationSuggestions.value = nextSuggestions
+}
 
 async function fetchAiSuggestion(client) {
   const name = client.editName || client.name
@@ -993,6 +1181,18 @@ const canSaveHost = computed(() => {
 
 const pairedCount = computed(() => clients.value.length)
 const connectedCount = computed(() => clients.value.filter((client) => client.connected).length)
+const removingStaleProfiles = ref(false)
+const profileEntries = computed(() => {
+  const linkedClientNames = new Set(clients.value.map((client) => client.name).filter(Boolean))
+  return Object.entries(profiles.value || {})
+    .map(([name, profile]) => ({
+      name,
+      profile: profile || {},
+      linked: linkedClientNames.has(name),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+})
+const staleProfileEntries = computed(() => profileEntries.value.filter((entry) => !entry.linked))
 const activePairingMethod = computed(() =>
   pairingMethods.find((method) => method.key === currentTab.value) || pairingMethods[0]
 )
@@ -1007,11 +1207,27 @@ const activePairingSummary = computed(() => {
   return 'Best default for Nova: generate one passphrase, then scan the QR code or open the deep link.'
 })
 
+function resolvePairingMethod(value) {
+  const normalized = (value || '').replace(/^#/, '').trim().toUpperCase()
+  return pairingMethods.some((method) => method.key === normalized) ? normalized : 'OTP'
+}
+
+function resolveTabFromQuery(method) {
+  const normalized = Array.isArray(method) ? method[0] : method
+  return resolvePairingMethod(normalized)
+}
+
 function switchTab(tab) {
   resetState()
   currentTab.value = tab
   hostInfoCache = null
   clearTimeout(resetOTPTimeout)
+  if (route.query.method !== tab) {
+    router.replace({
+      path: route.path,
+      query: { ...route.query, method: tab },
+    })
+  }
 }
 
 function editHost() {
@@ -1201,6 +1417,15 @@ function clientCommandSummary(client) {
   return client.allow_client_commands ? i18n.t('pin.commands_enabled') : i18n.t('pin.commands_disabled')
 }
 
+function profileSummary(profile) {
+  const parts = []
+  if (profile.output_name) parts.push(profile.output_name)
+  if (profile.hdr) parts.push('HDR')
+  if (profile.color_range === 1 || profile.color_range === 2) parts.push(colorRangeLabel(profile.color_range))
+  if (profile.mac_address) parts.push('WoL')
+  return parts.length > 0 ? parts.join(' · ') : 'Default behavior'
+}
+
 function editClient(client) {
   if (currentEditingClient) {
     cancelEdit(currentEditingClient)
@@ -1303,9 +1528,57 @@ function handleUnpairSingle(uuid) {
     .catch(() => showToast(i18n.t('pin.unpair_all_error'), 'error'))
 }
 
+async function deleteClientProfileEntry(name) {
+  if (!window.confirm(`Remove the saved client profile for "${name}"?`)) return
+  try {
+    await deleteProfile(name)
+    showToast(`Removed client profile "${name}"`, 'success')
+  } catch {
+    showToast(`Failed to remove client profile "${name}"`, 'error')
+  }
+}
+
+async function deleteStaleProfiles() {
+  if (staleProfileEntries.value.length === 0) return
+  if (!window.confirm(`Remove ${staleProfileEntries.value.length} stale client profile aliases?`)) return
+
+  removingStaleProfiles.value = true
+  try {
+    for (const entry of staleProfileEntries.value) {
+      await deleteProfile(entry.name)
+    }
+    showToast('Removed stale client profile aliases', 'success')
+  } catch {
+    showToast('Failed to remove stale client profile aliases', 'error')
+  } finally {
+    removingStaleProfiles.value = false
+  }
+}
+
 hostInfoCache = JSON.parse(sessionStorage.getItem('hostInfo'))
 hostManuallySet = false
 if (hostInfoCache) hostManuallySet = true
+
+watch(
+  () => route.query.method,
+  (method) => {
+    const nextTab = resolveTabFromQuery(method)
+    if (nextTab !== currentTab.value) {
+      resetState()
+      currentTab.value = nextTab
+      hostInfoCache = null
+      clearTimeout(resetOTPTimeout)
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => clients.value.map((client) => `${client.uuid}:${client.name}`).join('|'),
+  () => { refreshRecommendationSuggestions() },
+  { immediate: true },
+)
+
 refreshClients()
 refreshProfiles()
 

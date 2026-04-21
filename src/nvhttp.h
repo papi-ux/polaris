@@ -68,7 +68,7 @@ namespace nvhttp {
    * @param ssl Active TLS session handle.
    * @return The paired client entry when the certificate is recognized, otherwise null.
    */
-  crypto::p_named_cert_t verify_client_cert(SSL *ssl);
+  crypto::p_named_cert_t verify_client_cert(SSL *ssl, bool log_errors = true);
 
   std::string
   get_arg(const args_t &args, const char *name, const char *default_value = nullptr);
@@ -113,6 +113,7 @@ namespace nvhttp {
       std::string uniqueID = {};
       std::string cert = {};
       std::string name = {};
+      std::string family_hint = {};
     } client;
 
     std::unique_ptr<crypto::aes_t> cipher_key = {};
