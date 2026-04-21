@@ -70,6 +70,13 @@ namespace device_db {
   std::string canonicalize_name(const std::string &name);
 
   /**
+   * @brief Resolve a known device alias to a friendlier UI label.
+   *
+   * Returns the original string when the device name is not a known exact alias.
+   */
+  std::string friendly_name(const std::string &name);
+
+  /**
    * @brief Get optimization settings for a device + app combination.
    */
   optimization_t get_optimization(const std::string &device_name,

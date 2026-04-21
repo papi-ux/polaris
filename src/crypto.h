@@ -102,6 +102,7 @@ namespace crypto {
     std::string name;
     std::string uuid;
     std::string cert;
+    std::string client_family;
     std::string display_mode;
     std::list<command_entry_t> do_cmds;
     std::list<command_entry_t> undo_cmds;

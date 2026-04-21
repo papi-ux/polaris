@@ -94,11 +94,11 @@ export function useClients() {
         if (data.status && data.named_certs && data.named_certs.length) {
           platform.value = data.platform
           clients.value = data.named_certs.map(({
-            name, uuid, display_mode, perm, connected,
+            name, friendly_name, client_family, uuid, display_mode, perm, connected,
             do: _do, undo, allow_client_commands,
             always_use_virtual_display, enable_legacy_ordering
           }) => ({
-            name, uuid, display_mode, perm: parseInt(perm, 10), connected,
+            name, friendly_name, client_family, uuid, display_mode, perm: parseInt(perm, 10), connected,
             editing: false, wolSending: false, do: _do, undo,
             allow_client_commands, enable_legacy_ordering, always_use_virtual_display
           }))

@@ -1931,11 +1931,15 @@ namespace confighttp {
     std::string name = query.count("name") ? query.find("name")->second : "";
     std::string app = query.count("app") ? query.find("app")->second : "";
 
-    auto opt = device_db::get_optimization(name, app);
     nlohmann::json output;
     output["status"] = true;
     output["device_name"] = name;
-    appendOptimizationJson(output, opt);
+    if (auto ai_opt = ai_optimizer::get_cached(name, app)) {
+      appendOptimizationJson(output, *ai_opt);
+    } else {
+      auto opt = device_db::get_optimization(name, app);
+      appendOptimizationJson(output, opt);
+    }
     send_response(response, output);
   }
 

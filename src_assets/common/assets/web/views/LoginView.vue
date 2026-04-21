@@ -123,11 +123,12 @@
 
 <script setup>
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import InfoHint from '../components/InfoHint.vue'
 import { isDynamicImportError } from '../router-helpers.js'
 
 const router = useRouter()
+const route = useRoute()
 
 const error = ref('')
 const success = ref(false)
@@ -150,12 +151,43 @@ if (savedPasswordStr) {
   }
 }
 
-function getPostLoginUrl() {
-  if (window.location.hostname === 'localhost') {
-    return `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}#/`
+function getRedirectTarget() {
+  const rawTarget = Array.isArray(route.query.redirect) ? route.query.redirect[0] : route.query.redirect
+  const decodedTarget = typeof rawTarget === 'string' ? decodeURIComponent(rawTarget) : ''
+  if (!decodedTarget.startsWith('/') || decodedTarget.startsWith('//')) {
+    return '/'
   }
 
-  return `${window.location.origin}${window.location.pathname}#/`
+  return decodedTarget
+}
+
+function getPostLoginUrl(target = getRedirectTarget()) {
+  const hashTarget = `#${target}`
+
+  if (window.location.hostname === 'localhost') {
+    return `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}${hashTarget}`
+  }
+
+  return `${window.location.origin}${window.location.pathname}${hashTarget}`
+}
+
+async function finishLoginRedirect() {
+  const target = getRedirectTarget()
+  if (window.location.hostname === 'localhost') {
+    window.location.replace(getPostLoginUrl(target))
+    return
+  }
+
+  try {
+    await router.replace(target)
+  } catch (e) {
+    if (isDynamicImportError(e)) {
+      window.location.replace(getPostLoginUrl(target))
+      return
+    }
+
+    throw e
+  }
 }
 
 async function tryResumeAuthenticatedSession() {
@@ -170,7 +202,7 @@ async function tryResumeAuthenticatedSession() {
     }
 
     success.value = true
-    window.location.replace(getPostLoginUrl())
+    await finishLoginRedirect()
     return true
   } catch {
     return false
@@ -199,12 +231,7 @@ async function login() {
       if (savePassword.value) {
         localStorage.setItem('login', JSON.stringify(passwordData.value))
       }
-      const targetUrl = getPostLoginUrl()
-      if (window.location.hostname === 'localhost') {
-        window.location.replace(targetUrl)
-        return
-      }
-      await router.push('/')
+      await finishLoginRedirect()
       return
     }
 

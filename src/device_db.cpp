@@ -22,6 +22,7 @@ namespace device_db {
 
   static std::unordered_map<std::string, device_t> devices;
   static std::unordered_map<std::string, std::string> canonical_aliases;
+  static std::unordered_map<std::string, std::string> friendly_aliases;
   static std::once_flag load_flag;
 
   static std::string normalize_name_token(const std::string &name) {
@@ -39,6 +40,10 @@ namespace device_db {
     canonical_aliases[normalize_name_token(alias)] = canonical;
   }
 
+  static void register_friendly_alias(const std::string &alias, const std::string &friendly) {
+    friendly_aliases[normalize_name_token(alias)] = friendly;
+  }
+
   /**
    * @brief Embedded default device database.
    * Curated profiles for known streaming client devices.
@@ -54,6 +59,9 @@ namespace device_db {
     register_canonical_alias("RetroidPocket6", "RetroidPocket6");
     register_canonical_alias("RP6", "RetroidPocket6");
     register_canonical_alias("Retroid Pocket 6", "RetroidPocket6");
+    register_friendly_alias("RetroidPocket6", "Retroid Pocket 6");
+    register_friendly_alias("RP6", "Retroid Pocket 6");
+    register_friendly_alias("Retroid Pocket 6", "Retroid Pocket 6");
 
     devices["RetroidPocketFlip2"] = {
       "handheld", "1920x1080x60", "hevc", 15000, 2, false, true, 3,
@@ -62,6 +70,8 @@ namespace device_db {
     devices["Retroid Pocket Flip 2"] = devices["RetroidPocketFlip2"];
     register_canonical_alias("RetroidPocketFlip2", "RetroidPocketFlip2");
     register_canonical_alias("Retroid Pocket Flip 2", "RetroidPocketFlip2");
+    register_friendly_alias("RetroidPocketFlip2", "Retroid Pocket Flip 2");
+    register_friendly_alias("Retroid Pocket Flip 2", "Retroid Pocket Flip 2");
 
     devices["RP5"] = {
       "handheld", "1280x720x60", "hevc", 10000, 2, false, true, 3,
@@ -72,10 +82,12 @@ namespace device_db {
       "handheld", "1280x800x60", "hevc", 20000, 2, false, true, 2,
       "Valve Steam Deck LCD — 1280x800, WiFi 5, HEVC decode"
     };
+    register_friendly_alias("Steam Deck", "Steam Deck");
     devices["Steam Deck OLED"] = {
       "handheld", "1280x800x90", "hevc", 25000, 2, true, true, 2,
       "Valve Steam Deck OLED — 1280x800@90Hz, WiFi 6E, HDR"
     };
+    register_friendly_alias("Steam Deck OLED", "Steam Deck OLED");
 
     devices["ROG Ally"] = {
       "handheld", "1920x1080x120", "hevc", 30000, 2, true, true, 2,
@@ -96,6 +108,8 @@ namespace device_db {
     devices["pxl-10-papi"] = devices["Pixel 10"]; // Michael's specific device
     register_canonical_alias("Pixel 10", "Pixel 10");
     register_canonical_alias("pxl-10-papi", "Pixel 10");
+    register_friendly_alias("Pixel 10", "Pixel 10");
+    register_friendly_alias("pxl-10-papi", "Pixel 10");
     devices["Pixel10Pro"] = {
       "phone", "2992x1344x120", "av1", 30000, 2, true, true, 3,
       "Google Pixel 10 Pro — 1344x2992, 120Hz LTPO OLED, AV1/HEVC, WiFi 7"
@@ -103,6 +117,8 @@ namespace device_db {
     devices["Pixel 10 Pro"] = devices["Pixel10Pro"];
     register_canonical_alias("Pixel10Pro", "Pixel10Pro");
     register_canonical_alias("Pixel 10 Pro", "Pixel10Pro");
+    register_friendly_alias("Pixel10Pro", "Pixel 10 Pro");
+    register_friendly_alias("Pixel 10 Pro", "Pixel 10 Pro");
 
     devices["Pixel 9"] = {
       "phone", "2424x1080x120", "hevc", 20000, 2, true, true, 3,
@@ -248,6 +264,29 @@ namespace device_db {
         const auto fuzzy_alias = canonical_aliases.find(normalized_key);
         return fuzzy_alias != canonical_aliases.end() ? fuzzy_alias->second : key;
       }
+    }
+
+    return name;
+  }
+
+  std::string friendly_name(const std::string &name) {
+    load();
+
+    if (name.empty()) {
+      return name;
+    }
+
+    std::string base_name = name;
+    std::string suffix;
+    const auto duplicate_suffix = name.find_last_of('(');
+    if (duplicate_suffix != std::string::npos && duplicate_suffix > 0 && name.back() == ')') {
+      base_name = name.substr(0, duplicate_suffix - 1);
+      suffix = name.substr(duplicate_suffix - 1);
+    }
+
+    const auto alias = friendly_aliases.find(normalize_name_token(base_name));
+    if (alias != friendly_aliases.end()) {
+      return alias->second + suffix;
     }
 
     return name;
