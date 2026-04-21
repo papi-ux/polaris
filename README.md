@@ -15,7 +15,7 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 
 [Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Known Limitations](#known-limitations) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [FAQ](#faq)
 
-**Support**: [Issues](https://github.com/papi-ux/polaris/issues) · **Donate**: [Ko-fi](https://ko-fi.com/papiux) · [PayPal](https://www.paypal.com/donate/?hosted_button_id=KD9R5KLYF6GN4)
+**Support**: [Issues](https://github.com/papi-ux/polaris/issues)
 
 <br/>
 
@@ -28,7 +28,7 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is Linux-first today. Fedora has the easiest install path through a release RPM. Arch and Debian are currently source-build oriented. Windows is a future port, not a supported host target today.
+> Polaris is Linux-first today. Fedora has the easiest install path through a release RPM. Arch and Debian are currently source-build oriented. Linux is the only supported host platform today.
 
 > [!NOTE]
 > `v1.0.0` is the first public Polaris release line. Older tags stay available for continuity, but the current README and release assets reflect the public Linux-first product surface.
@@ -80,6 +80,10 @@ polaris
 ### Recommended package path
 
 If you are on Fedora and just want Polaris running, use the GitHub release RPM. It is the shortest path and the one to start with before considering source builds.
+
+| Public release asset | Use it for |
+|---|---|
+| `Polaris-fedora42-x86_64.rpm` | Recommended Fedora install path |
 
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
@@ -551,4 +555,4 @@ I build Polaris and Nova in my spare time because Linux game streaming deserves 
 
 Polaris is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text.
 
-Polaris is a fork of [Apollo](https://github.com/ClassicOldSong/Apollo) by ClassicOldSong, which is itself a fork of [Sunshine](https://github.com/LizardByte/Sunshine) by LizardByte. Both are GPLv3. The streaming protocol remains compatible with [Moonlight](https://moonlight-stream.org) clients.
+Polaris builds on [Apollo](https://github.com/ClassicOldSong/Apollo) and [Sunshine](https://github.com/LizardByte/Sunshine) under GPLv3 lineage, and remains compatible with [Moonlight](https://moonlight-stream.org) clients.

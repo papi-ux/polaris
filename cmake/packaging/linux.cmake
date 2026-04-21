@@ -19,7 +19,7 @@ file(COPY "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.conf"
 file(CREATE_LINK "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/shaders"
         "${CMAKE_BINARY_DIR}/assets/shaders" COPY_ON_ERROR SYMBOLIC)
 
-if(${POLARIS_BUILD_APPIMAGE} OR ${POLARIS_BUILD_FLATPAK})
+if(${POLARIS_BUILD_APPIMAGE})
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/polaris.service"
             DESTINATION "${POLARIS_ASSETS_DIR}/systemd/user")
 else()
@@ -89,42 +89,20 @@ endif()
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
 
 # application icon
-if(NOT ${POLARIS_BUILD_FLATPAK})
-    install(FILES "${CMAKE_SOURCE_DIR}/polaris.svg"
-            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps")
-else()
-    install(FILES "${CMAKE_SOURCE_DIR}/polaris.svg"
-            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps"
-            RENAME "${PROJECT_FQDN}.svg")
-endif()
+install(FILES "${CMAKE_SOURCE_DIR}/polaris.svg"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps")
 
 # tray icon
 if(${POLARIS_TRAY} STREQUAL 1)
-    if(NOT ${POLARIS_BUILD_FLATPAK})
-        install(FILES "${CMAKE_SOURCE_DIR}/polaris.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status"
-                RENAME "polaris-tray.svg")
-        install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-playing.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status")
-        install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-pausing.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status")
-        install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-locked.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status")
-    else()
-        # flatpak icons must be prefixed with the app id or they will not be included in the flatpak
-        install(FILES "${CMAKE_SOURCE_DIR}/polaris.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status"
-                RENAME "${PROJECT_FQDN}-tray.svg")
-        install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-playing.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status"
-                RENAME "${PROJECT_FQDN}-playing.svg")
-        install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-pausing.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status"
-                RENAME "${PROJECT_FQDN}-pausing.svg")
-        install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-locked.svg"
-                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status"
-                RENAME "${PROJECT_FQDN}-locked.svg")
-    endif()
+    install(FILES "${CMAKE_SOURCE_DIR}/polaris.svg"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status"
+            RENAME "polaris-tray.svg")
+    install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-playing.svg"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status")
+    install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-pausing.svg"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status")
+    install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/common/assets/web/public/images/polaris-locked.svg"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/status")
 
     set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
                     ${CPACK_DEBIAN_PACKAGE_DEPENDS}, \
@@ -138,7 +116,7 @@ endif()
 # desktop file
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_FQDN}.desktop"
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
-if(NOT ${POLARIS_BUILD_APPIMAGE} AND NOT ${POLARIS_BUILD_FLATPAK})
+if(NOT ${POLARIS_BUILD_APPIMAGE})
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_FQDN}.terminal.desktop"
             DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
 endif()

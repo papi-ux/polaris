@@ -100,12 +100,6 @@ const commandVariants = computed(() => [
     description: t('recovery.commands.appimage_desc'),
     command: './polaris.AppImage --creds <new-username> <new-password>',
   },
-  {
-    id: 'flatpak',
-    title: t('recovery.commands.flatpak_title'),
-    description: t('recovery.commands.flatpak_desc'),
-    command: 'flatpak run --command=polaris dev.polaris-stream.app.Polaris --creds <new-username> <new-password>',
-  },
 ])
 
 async function copyCommand(id, command) {

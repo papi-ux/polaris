@@ -1,181 +1,88 @@
-# Building
-Sunshine binaries are built using [CMake](https://cmake.org) and requires `cmake` > 3.25.
+# Building Polaris
 
-## Building Locally
+Polaris is a Linux-first host today. The fastest install path is the Fedora RPM from the
+[latest release](https://github.com/papi-ux/polaris/releases/latest). Source builds are the
+right path for Arch, Debian-family distros, and local development.
 
-### Compiler
-It is recommended to use one of the following compilers:
-
-| Compiler    | Version |
-|:------------|:--------|
-| GCC         | 13+     |
-| Clang       | 17+     |
-| Apple Clang | 15+     |
-
-### Dependencies
-
-#### Linux
-Dependencies vary depending on the distribution. You can reference our
-[linux_build.sh](https://github.com/LizardByte/Sunshine/blob/master/scripts/linux_build.sh) script for a list of
-dependencies we use in Debian-based and Fedora-based distributions. Please submit a PR if you would like to extend the
-script to support other distributions.
-
-##### CUDA Toolkit
-Sunshine requires CUDA Toolkit for NVFBC capture. There are two caveats to CUDA:
-
-1. The version installed depends on the version of GCC.
-2. The version of CUDA you use will determine compatibility with various GPU generations.
-   At the time of writing, the recommended version to use is CUDA ~12.9.
-   See [CUDA compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/index.html) for more info.
-
-> [!NOTE]
-> To install older versions, select the appropriate run file based on your desired CUDA version and architecture
-> according to [CUDA Toolkit Archive](https://developer.nvidia.com/cuda-toolkit-archive)
-
-#### macOS
-You can either use [Homebrew](https://brew.sh) or [MacPorts](https://www.macports.org) to install dependencies.
-
-##### Homebrew
-```bash
-dependencies=(
-  "boost"  # Optional
-  "cmake"
-  "doxygen"  # Optional, for docs
-  "graphviz"  # Optional, for docs
-  "icu4c"  # Optional, if boost is not installed
-  "miniupnpc"
-  "ninja"
-  "node"
-  "openssl@3"
-  "opus"
-  "pkg-config"
-)
-brew install "${dependencies[@]}"
-```
-
-If there are issues with an SSL header that is not found:
-
-@tabs{
-  @tab{ Intel | ```bash
-    ln -s /usr/local/opt/openssl/include/openssl /usr/local/include/openssl
-    ```}
-  @tab{ Apple Silicon | ```bash
-    ln -s /opt/homebrew/opt/openssl/include/openssl /opt/homebrew/include/openssl
-    ```
-  }
-}
-
-##### MacPorts
-```bash
-dependencies=(
-  "cmake"
-  "curl"
-  "doxygen"  # Optional, for docs
-  "graphviz"  # Optional, for docs
-  "libopus"
-  "miniupnpc"
-  "ninja"
-  "npm9"
-  "pkgconfig"
-)
-sudo port install "${dependencies[@]}"
-```
-
-#### Windows
-First you need to install [MSYS2](https://www.msys2.org), then startup "MSYS2 UCRT64" and execute the following
-commands.
-
-##### Update all packages
-```bash
-pacman -Syu
-```
-
-##### Install dependencies
-```bash
-dependencies=(
-  "git"
-  "mingw-w64-ucrt-x86_64-boost"  # Optional
-  "mingw-w64-ucrt-x86_64-cmake"
-  "mingw-w64-ucrt-x86_64-cppwinrt"
-  "mingw-w64-ucrt-x86_64-curl-winssl"
-  "mingw-w64-ucrt-x86_64-doxygen"  # Optional, for docs... better to install official Doxygen
-  "mingw-w64-ucrt-x86_64-graphviz"  # Optional, for docs
-  "mingw-w64-ucrt-x86_64-MinHook"
-  "mingw-w64-ucrt-x86_64-miniupnpc"
-  "mingw-w64-ucrt-x86_64-nodejs"
-  "mingw-w64-ucrt-x86_64-nsis"
-  "mingw-w64-ucrt-x86_64-onevpl"
-  "mingw-w64-ucrt-x86_64-openssl"
-  "mingw-w64-ucrt-x86_64-opus"
-  "mingw-w64-ucrt-x86_64-toolchain"
-  "mingw-w64-ucrt-x86_64-nlohmann_json"
-)
-pacman -S "${dependencies[@]}"
-```
-
-### Clone
-Ensure [git](https://git-scm.com) is installed on your system, then clone the repository using the following command:
+## Release RPM
 
 ```bash
-git clone https://github.com/ClassicOldSong/Apollo.git --recurse-submodules
-cd Apollo
-mkdir build
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
+sudo dnf install ./Polaris-fedora42-x86_64.rpm
+sudo polaris --setup-host
+polaris
 ```
 
-### Build
+The web UI will be available at `https://localhost:47990`.
+
+## Source Build
+
+### Requirements
+
+| Tool | Notes |
+| --- | --- |
+| CMake 3.20+ | Build system |
+| C++20 compiler | GCC or Clang |
+| Boost | Core libraries |
+| OpenSSL | TLS and pairing |
+| libevdev | Virtual input |
+| PipeWire | Audio capture |
+| Wayland client libs | Linux compositor integration |
+| Node.js 18+ | Web UI build |
+| labwc | Isolated stream compositor |
+| CUDA toolkit | Needed for NVENC builds |
+
+### Example packages
+
+#### Fedora
 
 ```bash
-cmake -B build -G Ninja -S .
-ninja -C build
+sudo dnf install cmake gcc-c++ boost-devel openssl-devel libevdev-devel \
+  pipewire-devel wayland-devel libdrm-devel libcap-devel \
+  mesa-libEGL-devel mesa-libGL-devel cuda-toolkit nodejs npm labwc
 ```
 
-> [!TIP]
-> Available build options can be found in
-> [options.cmake](https://github.com/LizardByte/Sunshine/blob/master/cmake/prep/options.cmake).
+#### Arch
 
-### Package
+```bash
+sudo pacman -S cmake boost openssl libevdev pipewire wayland \
+  libdrm libcap mesa cuda nodejs npm labwc
+```
 
-@tabs{
-  @tab{Linux | @tabs{
-    @tab{deb | ```bash
-      cpack -G DEB --config ./build/CPackConfig.cmake
-      ```}
-    @tab{rpm | ```bash
-      cpack -G RPM --config ./build/CPackConfig.cmake
-      ```}
-  }}
-  @tab{macOS | @tabs{
-    @tab{DragNDrop | ```bash
-      cpack -G DragNDrop --config ./build/CPackConfig.cmake
-      ```}
-  }}
-  @tab{Windows | @tabs{
-    @tab{Installer | ```bash
-      cpack -G NSIS --config ./build/CPackConfig.cmake
-      ```}
-    @tab{Portable | ```bash
-      cpack -G ZIP --config ./build/CPackConfig.cmake
-      ```}
-  }}
-}
+### Build and install
 
-### Remote Build
-It may be beneficial to build remotely in some cases. This will enable easier building on different operating systems.
+```bash
+git clone --recursive https://github.com/papi-ux/polaris.git
+cd polaris
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=ON
+cmake --build build -j"$(nproc)"
+sudo cmake --install build
+sudo polaris --setup-host
+polaris
+```
 
-1. Fork the project
-2. Activate workflows
-3. Trigger the *CI* workflow manually
-4. Download the artifacts/binaries from the workflow run summary
+Optional DRM/KMS setup:
 
-<div class="section_buttons">
+```bash
+sudo polaris --setup-host --enable-kms
+```
 
-| Previous                              |                            Next |
-|:--------------------------------------|--------------------------------:|
-| [Troubleshooting](troubleshooting.md) | [Contributing](contributing.md) |
+Optional user-service autostart:
 
-</div>
+```bash
+systemctl --user enable --now polaris
+```
 
-<details style="display: none;">
-  <summary></summary>
-  [TOC]
-</details>
+## Development Notes
+
+- The main local web build commands are `npm run lint` and `npm run build`.
+- `build-tests/` is useful when you want to rebuild the served web bundle without touching your main local build.
+- Polaris stores runtime config in `~/.config/polaris`.
+
+## Packaging
+
+The public release asset is currently:
+
+- `Polaris-fedora42-x86_64.rpm`
+
+Other distro paths are source-build oriented for now.

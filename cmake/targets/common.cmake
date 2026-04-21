@@ -104,11 +104,6 @@ add_custom_target(web-ui ALL DEPENDS "${WEB_UI_BUILD_STAMP}")
 
 add_dependencies(polaris web-ui)
 
-# docs
-if(BUILD_DOCS)
-    add_subdirectory(third-party/doxyconfig docs)
-endif()
-
 # tests
 if(BUILD_TESTS)
     add_subdirectory(tests)
