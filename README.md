@@ -19,12 +19,11 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 
 <br/>
 
-<a href="docs/videos/polaris-main.webm" title="Watch the Polaris overview video">
-  <img src="docs/screenshots/polaris-main-poster.jpg" width="820" alt="Polaris overview with Mission Control, Library, Pairing, and live runtime surfaces" />
-</a>
-
-<br/>
-<sub><a href="docs/videos/polaris-main.webm">Watch the Polaris overview video (.webm)</a></sub>
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/polaris-showcase.gif" width="820" />
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/polaris-showcase-oled.gif" width="820" />
+  <img src="docs/screenshots/polaris-showcase-oled.gif" width="820" alt="Polaris dashboard, live session view, game library, and pairing flow" />
+</picture>
 
 </div>
 
@@ -226,11 +225,9 @@ Polaris takes a different route:
 Polaris is built around a dashboard that answers the questions stream hosts usually have to reverse-engineer from logs: what runtime is active, what capture path is in use, whether the GPU-native path survived, and how much headroom remains.
 
 <p align="center">
-  <a href="docs/videos/polaris-main.webm" title="Watch the Mission Control walkthrough">
-    <img src="docs/screenshots/polaris-main-poster.jpg" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
-  </a>
-  <br/>
-  <sub><a href="docs/videos/polaris-main.webm">Watch the Mission Control walkthrough (.webm)</a></sub>
+  <picture>
+    <img src="docs/screenshots/mission-control-tour.gif" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
+  </picture>
 </p>
 
 ### Live Session View
@@ -238,11 +235,9 @@ Polaris is built around a dashboard that answers the questions stream hosts usua
 When a stream is active, Polaris shifts from setup to operations: preview, charts, runtime-path telemetry, recording controls, and recommendations are visible in one place.
 
 <p align="center">
-  <a href="docs/videos/polaris-live-session.webm" title="Watch the live session walkthrough">
-    <img src="docs/screenshots/polaris-live-session-poster.jpg" width="900" alt="Polaris live streaming view with preview, charts, runtime path, and recording controls" />
-  </a>
-  <br/>
-  <sub><a href="docs/videos/polaris-live-session.webm">Watch the live session walkthrough (.webm)</a></sub>
+  <picture>
+    <img src="docs/screenshots/live-session-tour.gif" width="900" alt="Polaris live streaming view with preview, charts, runtime path, and recording controls" />
+  </picture>
 </p>
 
 ### Library and Pairing
@@ -250,17 +245,15 @@ When a stream is active, Polaris shifts from setup to operations: preview, chart
 <table>
   <tr>
     <td width="50%" valign="top">
-      <a href="docs/videos/polaris-library.webm" title="Watch the Library walkthrough">
-        <img src="docs/screenshots/polaris-library-poster.jpg" width="100%" alt="Polaris game library with imported games, cover art, and categories" />
-      </a>
-      <p><sub><a href="docs/videos/polaris-library.webm">Watch Library walkthrough (.webm)</a></sub></p>
+      <picture>
+        <img src="docs/screenshots/game-library-tour.gif" width="100%" alt="Polaris game library with imported games, cover art, and categories" />
+      </picture>
       <p><strong>Game library</strong><br/>Import from Steam, Lutris, and Heroic, attach art, organize categories, and tune launch behavior.</p>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/videos/polaris-pairing.webm" title="Watch the Pairing walkthrough">
-        <img src="docs/screenshots/polaris-pairing-poster.jpg" width="100%" alt="Polaris pairing interface with QR code, trusted pairing, and device management" />
-      </a>
-      <p><sub><a href="docs/videos/polaris-pairing.webm">Watch Pairing walkthrough (.webm)</a></sub></p>
+      <picture>
+        <img src="docs/screenshots/pairing-tour.gif" width="100%" alt="Polaris pairing interface with QR code, trusted pairing, and device management" />
+      </picture>
       <p><strong>Pairing</strong><br/>Use Trusted Pair (TOFU), QR for Nova, or manual PIN pairing for standard Moonlight clients.</p>
     </td>
   </tr>
