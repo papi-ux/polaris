@@ -16,31 +16,36 @@ const config = ref(props.config)
       <div class="settings-section-header">
         <div class="section-kicker">Catalog & state</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">App and runtime files</h3>
+          <h3 class="settings-section-title">Runtime paths</h3>
           <InfoHint size="sm" label="Catalog and state guidance">
             Point Polaris at the files it uses for app discovery, log capture, and saved runtime state.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Discovery, logs, and saved runtime state paths.</p>
       </div>
 
       <div class="mb-3">
-        <label for="file_apps" class="block text-sm font-medium text-storm mb-1">{{ $t('config.file_apps') }}</label>
+        <div class="settings-field-head">
+          <label for="file_apps" class="settings-field-label">{{ $t('config.file_apps') }}</label>
+          <InfoHint size="sm" :label="$t('config.file_apps')">{{ $t('config.file_apps_desc') }}</InfoHint>
+        </div>
         <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="file_apps" placeholder="apps.json" v-model="config.file_apps" />
-        <div class="text-sm text-storm mt-1">{{ $t('config.file_apps_desc') }}</div>
       </div>
 
       <div class="mb-3">
-        <label for="log_path" class="block text-sm font-medium text-storm mb-1">{{ $t('config.log_path') }}</label>
+        <div class="settings-field-head">
+          <label for="log_path" class="settings-field-label">{{ $t('config.log_path') }}</label>
+          <InfoHint size="sm" :label="$t('config.log_path')">{{ $t('config.log_path_desc') }}</InfoHint>
+        </div>
         <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="log_path" placeholder="polaris.log" v-model="config.log_path" />
-        <div class="text-sm text-storm mt-1">{{ $t('config.log_path_desc') }}</div>
       </div>
 
       <div class="mb-3">
-        <label for="file_state" class="block text-sm font-medium text-storm mb-1">{{ $t('config.file_state') }}</label>
+        <div class="settings-field-head">
+          <label for="file_state" class="settings-field-label">{{ $t('config.file_state') }}</label>
+          <InfoHint size="sm" :label="$t('config.file_state')">{{ $t('config.file_state_desc') }}</InfoHint>
+        </div>
         <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="file_state" placeholder="polaris_state.json"
                v-model="config.file_state" />
-        <div class="text-sm text-storm mt-1">{{ $t('config.file_state_desc') }}</div>
       </div>
     </section>
 
@@ -48,30 +53,35 @@ const config = ref(props.config)
       <div class="settings-section-header">
         <div class="section-kicker">Credentials</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Security material</h3>
+          <h3 class="settings-section-title">Credentials and TLS</h3>
           <InfoHint size="sm" label="Security material guidance">
             Keep login credentials and TLS material on known paths so pairing and the web UI remain stable across restarts.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Credential storage plus certificate and private-key locations.</p>
       </div>
 
       <div class="mb-3">
-        <label for="credentials_file" class="block text-sm font-medium text-storm mb-1">{{ $t('config.credentials_file') }}</label>
+        <div class="settings-field-head">
+          <label for="credentials_file" class="settings-field-label">{{ $t('config.credentials_file') }}</label>
+          <InfoHint size="sm" :label="$t('config.credentials_file')">{{ $t('config.credentials_file_desc') }}</InfoHint>
+        </div>
         <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="credentials_file" placeholder="polaris_state.json" v-model="config.credentials_file" />
-        <div class="text-sm text-storm mt-1">{{ $t('config.credentials_file_desc') }}</div>
       </div>
 
       <div class="mb-3">
-        <label for="pkey" class="block text-sm font-medium text-storm mb-1">{{ $t('config.pkey') }}</label>
+        <div class="settings-field-head">
+          <label for="pkey" class="settings-field-label">{{ $t('config.pkey') }}</label>
+          <InfoHint size="sm" :label="$t('config.pkey')">{{ $t('config.pkey_desc') }}</InfoHint>
+        </div>
         <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="pkey" placeholder="/dir/pkey.pem" v-model="config.pkey" />
-        <div class="text-sm text-storm mt-1">{{ $t('config.pkey_desc') }}</div>
       </div>
 
       <div class="mb-3">
-        <label for="cert" class="block text-sm font-medium text-storm mb-1">{{ $t('config.cert') }}</label>
+        <div class="settings-field-head">
+          <label for="cert" class="settings-field-label">{{ $t('config.cert') }}</label>
+          <InfoHint size="sm" :label="$t('config.cert')">{{ $t('config.cert_desc') }}</InfoHint>
+        </div>
         <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="cert" placeholder="/dir/cert.pem" v-model="config.cert" />
-        <div class="text-sm text-storm mt-1">{{ $t('config.cert_desc') }}</div>
       </div>
     </section>
   </div>

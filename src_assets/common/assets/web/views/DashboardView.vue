@@ -1,101 +1,58 @@
 <template>
   <div class="page-shell relative dashboard-page-shell">
-    <section class="page-hero dashboard-hero">
-      <div class="page-hero-content">
-        <div class="page-hero-copy">
-          <div class="page-hero-kicker">{{ stats?.streaming ? $t('dashboard.live_session') : $t('dashboard.title') }}</div>
-          <h1 class="page-hero-title">{{ stats?.streaming ? liveSessionTitle : $t('dashboard.title') }}</h1>
-          <div class="page-hero-copy-inline">
-            <p class="page-hero-copy-text">{{ heroLead }}</p>
-            <InfoHint size="sm" :label="stats?.streaming ? 'Live session guidance' : 'Mission Control guidance'">
-              {{ stats?.streaming ? liveSessionSummary : actionSummary }}
-            </InfoHint>
-          </div>
-          <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
-            <span v-if="stats?.streaming" class="pulse-dot"></span>
-            <span class="meta-pill" :class="stats?.streaming ? 'border-green-500/30 bg-green-500/10 text-green-300' : ''">
-              {{ stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
-            </span>
-            <template v-if="stats?.streaming">
-              <span class="meta-pill">{{ viewerCountLabel }}</span>
-              <span class="meta-pill">{{ qualitySummaryLabel }}</span>
-              <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
-            </template>
-            <template v-else>
-              <span class="meta-pill" :class="readinessTone">{{ readinessLabel }}</span>
-              <span class="meta-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
-              <span class="meta-pill">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
-            </template>
-          </div>
+    <section class="page-header dashboard-page-header">
+      <div class="page-heading">
+        <div class="section-kicker">{{ stats?.streaming ? $t('dashboard.live_session') : $t('dashboard.title') }}</div>
+        <div class="dashboard-hero-title-row">
+          <h1 class="page-title">{{ stats?.streaming ? liveSessionTitle : $t('dashboard.title') }}</h1>
         </div>
-
-        <div class="page-hero-aside">
-          <template v-if="!statsLoaded">
-            <div class="page-hero-stat-grid">
-              <Skeleton type="card" v-for="n in 4" :key="n" />
-            </div>
-          </template>
-          <template v-else-if="stats?.streaming">
-            <div class="page-hero-stat-grid">
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label">{{ $t('dashboard.connected_clients') }}</div>
-                <div class="page-hero-stat-value">{{ viewerCountLabel }}</div>
-                <div class="page-hero-stat-copy">{{ currentClientName }}</div>
-              </article>
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label">{{ $t('dashboard.telemetry') }}</div>
-                <div class="page-hero-stat-value">{{ stats.fps?.toFixed(1) || '--' }} fps</div>
-                <div class="page-hero-stat-copy">{{ stats.latency_ms?.toFixed(0) || '--' }} ms · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</div>
-              </article>
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label">{{ $t('dashboard.signal_snapshot') }}</div>
-                <div class="page-hero-stat-value">{{ qualityGrade }}</div>
-                <div class="page-hero-stat-copy">{{ qualitySummaryLabel }}</div>
-              </article>
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label">{{ $t('dashboard.runtime_path') }}</div>
-                <div class="page-hero-stat-value text-lg">{{ runtimeEffectiveMode }}</div>
-                <div class="page-hero-stat-copy">{{ captureTransportLabel }} · {{ runtimeBackendLabel }}</div>
-              </article>
-            </div>
+        <p class="page-subtitle">{{ heroLead }}</p>
+        <div class="page-meta">
+          <span v-if="stats?.streaming" class="pulse-dot"></span>
+          <span class="meta-pill" :class="stats?.streaming ? 'border-green-500/30 bg-green-500/10 text-green-300' : ''">
+            {{ stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
+          </span>
+          <template v-if="stats?.streaming">
+            <span class="meta-pill">{{ viewerCountLabel }}</span>
+            <span class="meta-pill">{{ qualitySummaryLabel }}</span>
+            <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
           </template>
           <template v-else>
-            <div class="page-hero-stat-grid">
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label-row">
-                  <div class="page-hero-stat-label">{{ $t('dashboard.primary_focus') }}</div>
-                  <InfoHint size="sm" align="right" label="Primary focus details">
-                    {{ primaryFocus.desc }}
-                  </InfoHint>
-                </div>
-                <div class="page-hero-stat-value text-lg">{{ primaryFocus.title }}</div>
-              </article>
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label-row">
-                  <div class="page-hero-stat-label">{{ $t('dashboard.stream_readiness') }}</div>
-                  <InfoHint size="sm" align="right" label="Readiness details">
-                    {{ readinessDetail }}
-                  </InfoHint>
-                </div>
-                <div class="page-hero-stat-value text-lg" :class="readinessTone">{{ readinessLabel }}</div>
-              </article>
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label-row">
-                  <div class="page-hero-stat-label">{{ $t('dashboard.next_step') }}</div>
-                  <InfoHint size="sm" align="right" label="Next step details">
-                    {{ nextStep.desc }}
-                  </InfoHint>
-                </div>
-                <div class="page-hero-stat-value text-lg">{{ nextStep.title }}</div>
-              </article>
-              <article class="page-hero-stat">
-                <div class="page-hero-stat-label">AI</div>
-                <div class="page-hero-stat-value text-lg" :class="aiStatus?.enabled ? 'text-accent' : 'text-storm'">{{ aiStatus?.enabled ? $t('dashboard.active') : $t('dashboard.off') }}</div>
-                <div class="page-hero-stat-copy">{{ aiStatus?.cache_count || 0 }} {{ $t('dashboard.cached') }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</div>
-              </article>
-            </div>
+            <span class="meta-pill" :class="readinessTone">{{ readinessLabel }}</span>
+            <span class="meta-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
+            <span class="meta-pill">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
           </template>
         </div>
+      </div>
+
+      <div class="dashboard-toolbar-stats">
+        <template v-if="!statsLoaded">
+          <Skeleton type="card" v-for="n in 2" :key="n" />
+        </template>
+        <template v-else-if="stats?.streaming">
+          <article class="header-support-card">
+            <div class="section-kicker">Client</div>
+            <div class="header-support-value">{{ currentClientName }}</div>
+            <div class="header-support-copy">{{ viewerCountLabel }}</div>
+          </article>
+          <article class="header-support-card">
+            <div class="section-kicker">Signal</div>
+            <div class="header-support-value">{{ qualitySummaryLabel }}</div>
+            <div class="header-support-copy">{{ stats.fps?.toFixed(1) || '--' }} fps · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps · {{ runtimeEffectiveMode }}</div>
+          </article>
+        </template>
+        <template v-else>
+          <article class="header-support-card">
+            <div class="section-kicker">{{ $t('dashboard.primary_focus') }}</div>
+            <div class="header-support-value">{{ primaryFocus.title }}</div>
+            <div class="header-support-copy">{{ primaryFocus.desc }}</div>
+          </article>
+          <article class="header-support-card">
+            <div class="section-kicker">{{ $t('dashboard.next_step') }}</div>
+            <div class="header-support-value">{{ nextStep.title }}</div>
+            <div class="header-support-copy">{{ nextStep.desc }}</div>
+          </article>
+        </template>
       </div>
     </section>
 
@@ -114,12 +71,8 @@
               <div class="dashboard-preview-header">
                 <div class="min-w-0">
                   <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
-                  <div class="section-title-row mt-2">
-                    <div class="text-base font-semibold text-silver">{{ previewHeadline }}</div>
-                    <InfoHint size="sm" label="Display preview guidance">
-                      {{ previewSupportCopy }}
-                    </InfoHint>
-                  </div>
+                  <div class="mt-2 text-base font-semibold text-silver">{{ previewHeadline }}</div>
+                  <div class="mt-2 text-sm text-storm">{{ previewSupportCopy }}</div>
                 </div>
                 <div class="dashboard-preview-side">
                   <div class="dashboard-preview-meta">
@@ -194,13 +147,8 @@
               <details class="dashboard-disclosure" open>
                 <summary class="dashboard-disclosure-summary">
                   <div>
-                    <div class="eyebrow-label">{{ $t('dashboard.recommendations') }}</div>
-                    <div class="section-title-row mt-2">
-                      <div class="text-base font-semibold text-silver">Priority guidance</div>
-                      <InfoHint size="sm" align="right" label="Live guidance details">
-                        Top live cues pulled from stream quality, runtime state, and network conditions.
-                      </InfoHint>
-                    </div>
+                    <div class="eyebrow-label">Guidance</div>
+                    <div class="mt-2 text-base font-semibold text-silver">Live cues</div>
                   </div>
                   <div class="flex items-center gap-2">
                     <span class="meta-pill">{{ primaryRecommendations.length || 0 }} live cues</span>
@@ -242,86 +190,13 @@
                   </div>
                 </div>
               </details>
-
-              <details class="dashboard-disclosure">
-                <summary class="dashboard-disclosure-summary">
-                  <div>
-                    <div class="eyebrow-label">Session tools</div>
-                    <div class="section-title-row mt-2">
-                      <div class="text-base font-semibold text-silver">Recording and history</div>
-                      <InfoHint size="sm" align="right" label="Session tools details">
-                        Capture clips, save replays, and keep recent sessions nearby.
-                      </InfoHint>
-                    </div>
-                  </div>
-                  <div class="flex items-center gap-2">
-                    <span class="meta-pill" :class="recording.active ? 'border-red-500/35 bg-red-500/10 text-red-300' : ''">
-                      {{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}
-                    </span>
-                    <svg class="dashboard-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
-                  </div>
-                </summary>
-                <div class="dashboard-disclosure-body">
-                  <div class="dashboard-support-subsection !mt-0 !border-t-0 !pt-0">
-                    <div class="dashboard-support-subtitle">{{ $t('dashboard.recording') }}</div>
-                  </div>
-                  <div class="mt-4 flex flex-wrap items-center gap-2">
-                    <button
-                      v-if="!recording.active"
-                      @click="startRecording"
-                      class="focus-ring dashboard-action-button dashboard-action-button-danger"
-                    >
-                      {{ $t('dashboard.record') }}
-                    </button>
-                    <button
-                      v-if="recording.active"
-                      @click="stopRecording"
-                      class="focus-ring dashboard-action-button dashboard-action-button-secondary"
-                    >
-                      {{ $t('dashboard.stop_recording') }}
-                    </button>
-                    <button
-                      @click="saveReplay"
-                      class="focus-ring dashboard-action-button dashboard-action-button-ghost"
-                    >
-                      {{ $t('dashboard.save_replay') }}
-                    </button>
-                  </div>
-                  <div v-if="recording.file" class="mt-3 text-xs break-all text-storm">{{ recording.file }}</div>
-                  <div class="dashboard-support-subsection">
-                    <div class="dashboard-support-subtitle">{{ $t('dashboard.session_history') }}</div>
-                    <div v-if="sessionHistory.length" class="mt-3 space-y-2">
-                      <div v-for="(s, i) in sessionHistory.slice(0, 4)" :key="i" class="dashboard-list-row">
-                        <span
-                          class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
-                          :class="{
-                            'bg-green-500/20 text-green-400': s.quality_grade === 'A',
-                            'bg-blue-500/20 text-blue-400': s.quality_grade === 'B',
-                            'bg-yellow-500/20 text-yellow-400': s.quality_grade === 'C',
-                            'bg-orange-500/20 text-orange-400': s.quality_grade === 'D',
-                            'bg-red-500/20 text-red-400': s.quality_grade === 'F'
-                          }"
-                        >
-                          {{ s.quality_grade }}
-                        </span>
-                        <div class="min-w-0 flex-1 text-[11px] text-storm">
-                          <div class="truncate text-sm text-silver">{{ s.key }}</div>
-                        </div>
-                      </div>
-                    </div>
-                    <div v-else class="dashboard-empty-state mt-3">
-                      {{ $t('dashboard.session_history_empty') }}
-                    </div>
-                  </div>
-                </div>
-              </details>
             </div>
 
             <section class="dashboard-telemetry-card">
               <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
                 <div>
-                  <div class="section-kicker">{{ $t('dashboard.telemetry') }}</div>
-                  <h3 class="section-title">{{ $t('dashboard.telemetry_title') }}</h3>
+                  <div class="section-kicker">Stream</div>
+                  <h3 class="section-title">Telemetry</h3>
                 </div>
                 <div class="flex flex-wrap gap-2 text-[11px] text-silver">
                   <span class="data-pill">{{ stats.fps?.toFixed(1) || '--' }} fps</span>
@@ -378,9 +253,9 @@
           </div>
 
           <div class="dashboard-live-side">
-            <section class="surface-subtle p-4">
+            <section class="surface-subtle p-4 dashboard-context-card">
               <div class="flex items-center justify-between gap-3">
-                <div class="eyebrow-label">{{ $t('dashboard.signal_snapshot') }}</div>
+                <div class="eyebrow-label">Signal</div>
                 <span class="inline-flex h-8 min-w-8 items-center justify-center rounded-full px-3 text-sm font-semibold" :class="qualityBadgeClass">
                   {{ qualityGrade }}
                 </span>
@@ -393,13 +268,6 @@
               </div>
               <div class="dashboard-rail-footnote">
                 {{ stats.codec?.toUpperCase() || '--' }} · {{ stats.width }}×{{ stats.height }}
-              </div>
-            </section>
-
-            <section class="surface-subtle p-4 dashboard-context-card">
-              <div class="flex items-center justify-between gap-3">
-                <div class="eyebrow-label">Session context</div>
-                <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
               </div>
               <div class="dashboard-context-section">
                 <div class="dashboard-context-header">
@@ -450,13 +318,8 @@
             <section class="surface-subtle p-4">
               <div class="flex items-center justify-between gap-3">
                 <div>
-                  <div class="section-title-row">
-                    <div class="eyebrow-label">{{ $t('dashboard.quick_controls') }}</div>
-                    <InfoHint size="sm" align="right" label="Quick controls guidance">
-                      Keep the active stream stable. Use Settings for host-wide toggles.
-                    </InfoHint>
-                  </div>
-                  <div class="mt-2 text-sm font-medium text-silver">Session toggles.</div>
+                  <div class="eyebrow-label">Controls</div>
+                  <div class="mt-2 text-sm font-medium text-silver">Quick toggles</div>
                 </div>
                 <router-link to="/config" class="text-[11px] font-medium text-ice no-underline hover:text-ice/80">
                   Settings
@@ -464,6 +327,35 @@
               </div>
               <div class="mt-4">
                 <QuickControls compact @change="handleQuickControlChange" />
+              </div>
+              <div class="dashboard-support-subsection">
+                <div class="dashboard-support-subtitle">{{ $t('dashboard.recording') }}</div>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    v-if="!recording.active"
+                    @click="startRecording"
+                    class="focus-ring dashboard-action-button dashboard-action-button-danger"
+                  >
+                    {{ $t('dashboard.record') }}
+                  </button>
+                  <button
+                    v-if="recording.active"
+                    @click="stopRecording"
+                    class="focus-ring dashboard-action-button dashboard-action-button-secondary"
+                  >
+                    {{ $t('dashboard.stop_recording') }}
+                  </button>
+                  <button
+                    @click="saveReplay"
+                    class="focus-ring dashboard-action-button dashboard-action-button-ghost"
+                  >
+                    {{ $t('dashboard.save_replay') }}
+                  </button>
+                </div>
+                <div class="dashboard-rail-footnote mt-3" :class="recording.active ? 'text-red-300' : ''">
+                  {{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}
+                </div>
+                <div v-if="recording.file" class="mt-2 text-xs break-all text-storm">{{ recording.file }}</div>
               </div>
             </section>
           </div>
@@ -478,9 +370,9 @@
         <div class="section-card dashboard-stack-card">
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
+              <div class="section-kicker">Host</div>
               <div class="section-title-row">
-                <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
+                <h2 class="section-title">Readiness</h2>
                 <InfoHint size="sm" label="Readiness guidance">
                   {{ headlessEnabled ? $t('dashboard.primary_ready_desc') : $t('dashboard.windowed_desc') }}
                 </InfoHint>
@@ -510,13 +402,8 @@
           <div>
             <div class="flex items-start justify-between gap-3">
               <div>
-                <div class="section-title-row">
-                  <div class="section-kicker">{{ $t('dashboard.ready_checks') }}</div>
-                  <InfoHint size="sm" label="Ready check guidance">
-                    {{ $t('dashboard.ready_checks_desc') }}
-                  </InfoHint>
-                </div>
-                <div class="mt-2 text-sm text-storm">Launch, pairing, library, and host checks.</div>
+                <div class="section-kicker">Checks</div>
+                <div class="mt-2 text-sm font-medium text-silver">Launch, pairing, and host.</div>
               </div>
               <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium"
                     :class="readyChecksPassing === readyChecks.length ? 'border-green-500/30 bg-green-500/10 text-green-300' : 'border-amber-300/30 bg-amber-300/10 text-amber-200'">
@@ -551,14 +438,9 @@
       <!-- Recent Games + Launch Deck -->
       <div class="dashboard-bottom-grid">
         <div class="section-card dashboard-bottom-card">
-          <div class="flex items-center justify-between gap-3 mb-3">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
-              <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
-            </div>
-            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
-              {{ $t('navbar.library') }}
-            </router-link>
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <h2 class="section-title">Recent</h2>
+            <span v-if="recentApps.length" class="meta-pill">{{ recentApps.length }} recent</span>
           </div>
           <div v-if="recentApps.length" class="space-y-1.5">
             <div v-for="app in recentApps" :key="app.uuid" class="dashboard-recent-app">
@@ -573,85 +455,59 @@
           </div>
           <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
         </div>
-        <div class="section-card dashboard-bottom-card">
-          <div class="flex items-start justify-between gap-3 mb-4">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.host_context') }}</div>
-              <div class="section-title-row mt-2">
-                <div class="text-sm text-storm max-w-md">Current launch assumptions, host posture, and operator context.</div>
-                <InfoHint size="sm" align="right" label="Host context guidance">
-                  Mission Control is status-first. Use the sidebar or the ready checks when you need to jump into another surface.
-                </InfoHint>
-              </div>
-            </div>
+        <div class="surface-subtle dashboard-bottom-card dashboard-context-card dashboard-context-card--minimal">
+          <div class="mb-3 flex items-start justify-between gap-3">
+            <h2 class="section-title">Host</h2>
             <span class="px-2 py-1 rounded-full text-[10px] font-medium whitespace-nowrap" :class="headlessEnabled ? 'bg-accent/15 text-accent' : 'bg-storm/20 text-storm'">
               {{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}
             </span>
           </div>
-          <div class="grid gap-3 sm:grid-cols-3">
-            <div class="surface-subtle px-3 py-3">
-              <div class="eyebrow-label">{{ $t('dashboard.connected_clients') }}</div>
-              <div class="mt-2 text-sm font-medium text-silver">{{ pairedClients }} {{ pairedClients === 1 ? 'paired client' : 'paired clients' }}</div>
+          <div class="grid gap-2">
+            <div class="dashboard-list-row">
+              <span class="dashboard-runtime-label">Mode</span>
+              <span class="text-sm font-medium text-silver">{{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}</span>
             </div>
-            <div class="surface-subtle px-3 py-3">
-              <div class="eyebrow-label">{{ $t('navbar.library') }}</div>
-              <div class="mt-2 text-sm font-medium text-silver">{{ appCatalogCount }} {{ appCatalogCount === 1 ? 'title imported' : 'titles imported' }}</div>
+            <div class="dashboard-list-row">
+              <span class="dashboard-runtime-label">Displays</span>
+              <div class="flex flex-wrap justify-end gap-2 text-[11px] text-silver">
+                <span class="data-pill">{{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}</span>
+                <span class="data-pill">{{ appCatalogCount }} {{ appCatalogCount === 1 ? 'title' : 'titles' }}</span>
+              </div>
             </div>
-            <div class="surface-subtle px-3 py-3">
-              <div class="eyebrow-label">{{ $t('dashboard.ready_checks') }}</div>
-              <div class="mt-2 text-sm font-medium text-silver">{{ readyChecksPassing }}/{{ readyChecks.length }} ready</div>
+            <div class="dashboard-list-row">
+              <span class="dashboard-runtime-label">Audio</span>
+              <span class="text-sm font-medium text-silver">{{ audio?.sink ? formatAudioName(audio.sink) : 'No active sink' }}</span>
             </div>
           </div>
-          <div class="surface-subtle mt-4 px-3 py-3">
-            <div class="eyebrow-label">{{ $t('dashboard.host_context') }}</div>
-            <div class="mt-3 flex flex-wrap gap-2 text-[11px] text-silver">
-              <span class="data-pill">
-                {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
-              </span>
-              <span class="data-pill">
-                {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
-              </span>
-              <span class="data-pill" v-if="audio?.sink">
-                {{ formatAudioName(audio.sink) }}
-              </span>
-              <span class="data-pill">
-                v{{ version }}
-              </span>
+        </div>
+      </div>
+
+      <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="section-card dashboard-bottom-card">
+        <div class="mb-3 flex items-center justify-between">
+          <div class="section-kicker">History</div>
+          <button @click="clearHistory" class="text-[10px] text-storm hover:text-ice transition-colors">Clear</button>
+        </div>
+        <div class="space-y-0">
+          <div v-for="(s, i) in sessions.slice(0, 6)" :key="i"
+               class="flex items-center gap-3 py-2 text-sm" :class="i > 0 ? 'border-t border-storm/15' : ''">
+            <div class="text-base font-bold w-6 text-center" :class="gradeColor(s.quality_grade)">{{ s.quality_grade }}</div>
+            <div class="flex-1 min-w-0">
+              <div class="text-silver font-medium text-sm">{{ s.client_name }}</div>
+              <div class="text-[10px] text-storm">{{ s.codec }} {{ s.width }}x{{ s.height }} · {{ formatDuration(s.duration_s) }}</div>
             </div>
-            <router-link to="/info" class="mt-3 inline-flex text-[11px] font-medium text-ice no-underline hover:text-ice/80">
-              {{ $t('dashboard.host_context_desc') }}
-            </router-link>
+            <div class="text-right text-[10px] text-storm shrink-0">
+              <div>{{ s.avg_fps }}fps · {{ (s.avg_bitrate_kbps / 1000).toFixed(1) }}Mbps</div>
+              <div>{{ formatSessionDate(s.started_at) }}</div>
+            </div>
           </div>
         </div>
       </div>
     </template>
-
-    <!-- Session History (idle) -->
-    <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="card p-4">
-      <div class="flex items-center justify-between mb-3">
-        <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">Session History</div>
-        <button @click="clearHistory" class="text-[10px] text-storm hover:text-ice transition-colors">Clear</button>
-      </div>
-      <div class="space-y-0">
-        <div v-for="(s, i) in sessions.slice(0, 8)" :key="i"
-             class="flex items-center gap-3 py-2 text-sm" :class="i > 0 ? 'border-t border-storm/15' : ''">
-          <div class="text-base font-bold w-6 text-center" :class="gradeColor(s.quality_grade)">{{ s.quality_grade }}</div>
-          <div class="flex-1 min-w-0">
-            <div class="text-silver font-medium text-sm">{{ s.client_name }}</div>
-            <div class="text-[10px] text-storm">{{ s.codec }} {{ s.width }}x{{ s.height }} · {{ formatDuration(s.duration_s) }}</div>
-          </div>
-          <div class="text-right text-[10px] text-storm shrink-0">
-            <div>{{ s.avg_fps }}fps · {{ (s.avg_bitrate_kbps / 1000).toFixed(1) }}Mbps</div>
-            <div>{{ formatSessionDate(s.started_at) }}</div>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick, reactive } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
 import { useSessionHistory, formatDuration } from '../composables/useSessionHistory'
@@ -666,7 +522,7 @@ import { useI18n } from 'vue-i18n'
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
 const { sessions, clearHistory } = useSessionHistory(stats)
-const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices, getSuggestion: getAiSuggestion } = useAiOptimizer()
+const { fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices, getSuggestion: getAiSuggestion } = useAiOptimizer()
 
 // AI optimization state for current stream
 const aiOptimization = ref(null)
@@ -675,23 +531,16 @@ const sessionHistory = ref([])
 const recentApps = ref([])
 const pairedClients = ref(0)
 const appCatalogCount = ref(0)
-const version = ref('')
 const headlessEnabled = ref(false)
 const discoveryEnabled = ref(false)
 const pairingEnabled = ref(false)
 const { t } = useI18n()
 
-const actionSummary = computed(() => {
-  if (!statsLoaded.value) return t('dashboard.loading_summary')
-  if (stats.value?.streaming) return t('dashboard.streaming_summary')
-  return t('dashboard.idle_summary', { count: pairedClients.value })
-})
-
 const heroLead = computed(() => {
   if (!statsLoaded.value) return t('dashboard.loading_summary')
-  if (stats.value?.streaming) return 'Live telemetry, routing, and session health at a glance.'
-  if (!pairedClients.value) return 'Host posture, readiness, and the first client path at a glance.'
-  return 'Host posture, readiness, and paired-client state at a glance.'
+  if (stats.value?.streaming) return 'Live session, quality, and recovery at a glance.'
+  if (!pairedClients.value) return 'Host state and the first client path.'
+  return 'Host state and launch path.'
 })
 
 const primaryFocus = computed(() => {
@@ -713,12 +562,6 @@ const readinessLabel = computed(() => {
 const readinessTone = computed(() => {
   if (stats.value?.streaming || pairedClients.value > 0) return 'text-green-400'
   return 'text-amber-300'
-})
-
-const readinessDetail = computed(() => {
-  if (stats.value?.streaming) return t('dashboard.readiness_live_desc')
-  if (pairedClients.value > 0) return t('dashboard.readiness_ready_desc')
-  return t('dashboard.readiness_setup_desc')
 })
 
 const nextStep = computed(() => {
@@ -929,15 +772,6 @@ const liveSessionTitle = computed(() => (
     ? `${connectedClients.value.length} viewers live`
     : `${currentClientName.value} live`
 ))
-
-const liveSessionSummary = computed(() => {
-  if (runtimePathNote.value) return runtimePathNote.value
-  return t('dashboard.live_session_summary', {
-    backend: runtimeBackendLabel.value,
-    mode: String(runtimeEffectiveMode.value || '').toLowerCase(),
-    transport: captureTransportLabel.value,
-  })
-})
 
 const qualitySummaryLabel = computed(() => t('dashboard.quality_summary', {
   grade: qualityGrade.value,
@@ -1249,33 +1083,15 @@ async function loadUPlot() {
 // Track whether we've gotten at least one stats response
 const statsLoaded = ref(false)
 
-// System info from config
-const systemInfo = reactive({
-  gpuName: '',
-  gpuDriver: '',
-  version: ''
-})
-const pairedClientCount = ref(0)
-
 // Fetch system info
 async function fetchSystemInfo() {
   try {
-    const [configRes, clientsRes] = await Promise.all([
-      fetch('./api/config', { credentials: 'include' }),
-      fetch('./api/clients/list', { credentials: 'include' })
-    ])
+    const configRes = await fetch('./api/config', { credentials: 'include' })
     if (configRes.ok) {
       const config = await configRes.json()
-      systemInfo.gpuName = config.adapter_name || ''
-      systemInfo.gpuDriver = config.gpu_driver || ''
-      systemInfo.version = config.version || ''
       streamingOutput.value = config.linux_streaming_output || config.output_name || ''
       discoveryEnabled.value = config.enable_discovery !== 'disabled'
       pairingEnabled.value = config.enable_pairing !== 'disabled'
-    }
-    if (clientsRes.ok) {
-      const clients = await clientsRes.json()
-      pairedClientCount.value = clients.named_certs?.length || 0
     }
   } catch (e) {
     // Non-critical, just leave defaults
@@ -1533,7 +1349,6 @@ onMounted(async () => {
     const res = await fetch('./api/config', { credentials: 'include' })
     if (res.ok) {
       const data = await res.json()
-      version.value = data.version || '0.0.0'
       headlessEnabled.value = data.headless_mode === 'enabled'
       discoveryEnabled.value = data.enable_discovery !== 'disabled'
       pairingEnabled.value = data.enable_pairing !== 'disabled'

@@ -2982,10 +2982,14 @@ namespace nvhttp {
 
           // Check polaris covers directory first
           if (!app.steam_appid.empty()) {
-            std::string cover_path = config::sunshine.config_file.substr(
-              0, config::sunshine.config_file.rfind('/')) + "/covers/steam_" + app.steam_appid + ".png";
-            if (access(cover_path.c_str(), F_OK) == 0) {
-              image_path = cover_path;
+            const std::string cover_stem = config::sunshine.config_file.substr(
+              0, config::sunshine.config_file.rfind('/')) + "/covers/steam_" + app.steam_appid;
+            for (const auto &ext : {".png", ".jpg", ".jpeg", ".webp"}) {
+              const std::string cover_path = cover_stem + ext;
+              if (access(cover_path.c_str(), F_OK) == 0) {
+                image_path = cover_path;
+                break;
+              }
             }
           }
 

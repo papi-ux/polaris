@@ -167,6 +167,7 @@ namespace confighttp {
   static std::mutex rate_limit_mutex;
   constexpr int MAX_LOGIN_ATTEMPTS = 5;
   constexpr auto LOGIN_BLOCK_DURATION = std::chrono::seconds(60);
+  static size_t append_string_curl_write_cb(void *contents, size_t size, size_t nmemb, std::string *out);
 
   namespace {
     struct web_session_t {
@@ -226,6 +227,177 @@ namespace confighttp {
 #else
       return { "setsid steam steam://rungameid/" + appid };
 #endif
+    }
+
+    std::string safe_cover_extension_from_url(const std::string &url) {
+      const auto query_pos = url.find_first_of("?#");
+      const auto path_only = url.substr(0, query_pos);
+      auto extension = fs::path(path_only).extension().string();
+      boost::to_lower(extension);
+
+      if (extension == ".jpg" || extension == ".jpeg" || extension == ".png" || extension == ".webp") {
+        return extension;
+      }
+
+      if (path_only.find("storepagebackground/") != std::string::npos) {
+        return ".webp";
+      }
+
+      return ".png";
+    }
+
+    std::string shell_escape(const std::string &value) {
+      std::string escaped;
+      escaped.reserve(value.size() + 2);
+      escaped.push_back('\'');
+      for (const char ch : value) {
+        if (ch == '\'') {
+          escaped += "'\\''";
+        } else {
+          escaped.push_back(ch);
+        }
+      }
+      escaped.push_back('\'');
+      return escaped;
+    }
+
+    struct steam_store_assets_t {
+      std::string header_image;
+      std::string capsule_image;
+      std::string capsule_imagev5;
+      std::string background;
+      std::string background_raw;
+    };
+
+    std::optional<steam_store_assets_t> fetch_steam_store_assets(const std::string &appid) {
+      const std::string url = "https://store.steampowered.com/api/appdetails?appids=" + appid;
+      CURL *curl = curl_easy_init();
+      if (!curl) {
+        return std::nullopt;
+      }
+
+      std::string response;
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+      curl_easy_setopt(curl, CURLOPT_USERAGENT, "Polaris/1.0");
+
+      const CURLcode res = curl_easy_perform(curl);
+      curl_easy_cleanup(curl);
+
+      if (res != CURLE_OK) {
+        return std::nullopt;
+      }
+
+      try {
+        const auto data = nlohmann::json::parse(response);
+        if (!data.contains(appid) ||
+            !data[appid].value("success", false) ||
+            !data[appid].contains("data") ||
+            !data[appid]["data"].is_object()) {
+          return std::nullopt;
+        }
+
+        const auto &app = data[appid]["data"];
+        steam_store_assets_t assets;
+        assets.header_image = app.value("header_image", "");
+        assets.capsule_image = app.value("capsule_image", "");
+        assets.capsule_imagev5 = app.value("capsule_imagev5", "");
+        assets.background = app.value("background", "");
+        assets.background_raw = app.value("background_raw", "");
+        return assets;
+      } catch (...) {
+        return std::nullopt;
+      }
+    }
+
+    bool synthesize_steam_cover_from_header(const fs::path &header_path, const fs::path &output_path) {
+      const auto magick_path = boost::process::v1::search_path("magick");
+      if (magick_path.empty()) {
+        return false;
+      }
+
+#ifdef _WIN32
+      constexpr const char *quiet_redirect = ">NUL 2>&1";
+#else
+      constexpr const char *quiet_redirect = ">/dev/null 2>&1";
+#endif
+
+      std::string command =
+        shell_escape(magick_path.string()) +
+        " \\( " + shell_escape(header_path.string()) + " -resize 600x900^ -gravity center -extent 600x900 -blur 0x22 -modulate 88,92,100 \\)" +
+        " \\( " + shell_escape(header_path.string()) + " -resize 540x252 \\)" +
+        " -gravity north -geometry +0+72 -compose over -composite " +
+        shell_escape(output_path.string()) + " " + quiet_redirect;
+
+      const int result = std::system(command.c_str());
+      if (result != 0) {
+        std::error_code ec;
+        fs::remove(output_path, ec);
+        return false;
+      }
+
+      std::error_code ec;
+      if (!fs::exists(output_path, ec) || ec) {
+        return false;
+      }
+      const auto output_size = fs::file_size(output_path, ec);
+      return !ec && output_size > 0;
+    }
+
+    std::optional<std::string> download_best_steam_cover(const std::string &appid, const fs::path &coverdir, const std::string &stem) {
+      fs::create_directories(coverdir);
+
+      const std::string portrait_url = "https://steamcdn-a.akamaihd.net/steam/apps/" + appid + "/library_600x900_2x.jpg";
+      const fs::path portrait_path = coverdir / (stem + safe_cover_extension_from_url(portrait_url));
+      if (http::download_file(portrait_url, portrait_path.string())) {
+        return portrait_path.string();
+      }
+
+      const auto assets = fetch_steam_store_assets(appid);
+      if (!assets) {
+        return std::nullopt;
+      }
+
+      if (!assets->header_image.empty()) {
+        const auto tmp_stem = "steam_header_" + appid + "_" + uuid_util::uuid_t::generate().string();
+        const fs::path header_tmp_path = fs::temp_directory_path() / (tmp_stem + safe_cover_extension_from_url(assets->header_image));
+        if (http::download_file(assets->header_image, header_tmp_path.string())) {
+          const fs::path generated_path = coverdir / (stem + ".jpg");
+          if (synthesize_steam_cover_from_header(header_tmp_path, generated_path)) {
+            std::error_code ec;
+            fs::remove(header_tmp_path, ec);
+            BOOST_LOG(info) << "Generated Steam cover fallback for [" << appid << "] from store header art";
+            return generated_path.string();
+          }
+
+          std::error_code copy_error;
+          fs::copy_file(header_tmp_path, generated_path, fs::copy_options::overwrite_existing, copy_error);
+          std::error_code remove_error;
+          fs::remove(header_tmp_path, remove_error);
+          if (!copy_error) {
+            BOOST_LOG(info) << "Fell back to Steam header art for [" << appid << "]";
+            return generated_path.string();
+          }
+        }
+      }
+
+      for (const auto &candidate_url : {assets->capsule_image, assets->capsule_imagev5}) {
+        if (candidate_url.empty()) {
+          continue;
+        }
+
+        const fs::path candidate_path = coverdir / (stem + safe_cover_extension_from_url(candidate_url));
+        if (http::download_file(candidate_url, candidate_path.string())) {
+          BOOST_LOG(info) << "Fell back to Steam capsule art for [" << appid << "]";
+          return candidate_path.string();
+        }
+      }
+
+      return std::nullopt;
     }
 
     std::optional<fs::path> executable_dir() {
@@ -1124,7 +1296,7 @@ namespace confighttp {
     if (file.is_open()) file << root.dump(2);
   }
 
-  static size_t curl_write_cb(void *contents, size_t size, size_t nmemb, std::string *out) {
+  static size_t append_string_curl_write_cb(void *contents, size_t size, size_t nmemb, std::string *out) {
     out->append(static_cast<char *>(contents), size * nmemb);
     return size * nmemb;
   }
@@ -1148,7 +1320,7 @@ namespace confighttp {
 
     std::string response;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -1542,14 +1714,12 @@ namespace confighttp {
           app["steam-appid"] = appid;
 
           // Download cover art from Steam CDN to local covers directory
-          std::string cover_url = "https://steamcdn-a.akamaihd.net/steam/apps/" + appid + "/library_600x900_2x.jpg";
           const std::string coverdir = platf::appdata().string() + "/covers/";
           file_handler::make_directory(coverdir);
-          std::string cover_path = coverdir + "steam_" + appid + ".png";
-          if (http::download_file(cover_url, cover_path)) {
-            app["image-path"] = cover_path;
+          if (const auto cover_path = download_best_steam_cover(appid, coverdir, "steam_" + appid); cover_path) {
+            app["image-path"] = *cover_path;
           } else {
-            app["image-path"] = cover_url;  // fallback to URL
+            app["image-path"] = "https://steamcdn-a.akamaihd.net/steam/apps/" + appid + "/library_600x900_2x.jpg";
           }
         } else if (source == "lutris" || source == "heroic") {
           // Use the launch command provided by the scanner
@@ -2235,6 +2405,8 @@ namespace confighttp {
     }
 
     std::string resolved = proc::validate_app_image_path(image_path);
+    std::string extension = fs::path(resolved).extension().string();
+    boost::to_lower(extension);
 
     std::ifstream in(resolved, std::ios::binary);
     if (!in) {
@@ -2246,7 +2418,11 @@ namespace confighttp {
 
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "image/png");
+    const auto content_type =
+      extension == ".jpg" || extension == ".jpeg" ? "image/jpeg" :
+      extension == ".webp" ? "image/webp" :
+      "image/png";
+    headers.emplace("Content-Type", content_type);
     headers.emplace("Cache-Control", "max-age=86400");
     response->write(content, headers);
   }
@@ -2301,7 +2477,7 @@ namespace confighttp {
     headers = curl_slist_append(headers, ("Authorization: Bearer " + api_key).c_str());
 
     curl_easy_setopt(curl, CURLOPT_URL, search_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &search_response);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
@@ -2396,7 +2572,7 @@ namespace confighttp {
 
       const std::string coverdir = platf::appdata().string() + "/covers/";
       file_handler::make_directory(coverdir);
-      std::string cover_path = coverdir + app_uuid + ".png";
+      std::string cover_path = coverdir + app_uuid + safe_cover_extension_from_url(url);
 
       if (!http::download_file(url, cover_path)) {
         output["status"] = false;

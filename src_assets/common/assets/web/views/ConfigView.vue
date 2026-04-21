@@ -1,34 +1,27 @@
 <template>
   <div class="page-shell">
-    <section class="section-card settings-command-bar sticky top-4 z-20">
-      <div class="settings-command-copy">
-        <div class="section-kicker">{{ config ? activePanelGroupLabel : $t('config.action_center') }}</div>
-        <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
-        <div class="settings-command-title-row">
-          <div class="settings-command-title">
-            {{ commandCenterTitle }}
-          </div>
-          <InfoHint size="sm" label="Settings command guidance">
-            {{ commandCenterNote }}
-          </InfoHint>
-        </div>
-        <div class="settings-command-note">
-          {{ commandCenterSummary }}
-        </div>
-        <div v-if="config" class="settings-command-context">
-          <span class="meta-pill">{{ activePanelTitle }}</span>
-          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
-          <span class="meta-pill">{{ activePanelGroupLabel }}</span>
-          <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
+    <section class="page-header settings-page-header sticky top-4 z-20">
+      <div class="settings-toolbar-copy">
+        <div class="settings-toolbar-title-row">
+          <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
+          <span class="meta-pill">{{ commandCenterTitle }}</span>
+          <span
+            v-if="hasUnsavedChanges"
+            class="meta-pill border-amber-300/40 bg-amber-300/10 text-amber-300"
+          >
+            {{ $t('config.pending_badge') }}
+          </span>
+          <span
+            v-else
+            class="meta-pill border-green-400/30 bg-green-400/10 text-green-300"
+          >
+            {{ $t('config.synced_badge') }}
+          </span>
+          <span v-if="config && searchQuery" class="meta-pill">{{ searchSummary }}</span>
         </div>
       </div>
 
-      <div class="settings-command-tools">
-        <div class="settings-command-meta">
-          <span v-if="hasUnsavedChanges" class="meta-pill border-amber-300/40 bg-amber-300/10 text-amber-300">{{ $t('config.pending_badge') }}</span>
-          <span v-else class="meta-pill border-green-400/30 bg-green-400/10 text-green-300">{{ $t('config.synced_badge') }}</span>
-        </div>
-
+      <div class="settings-toolbar-actions">
         <input
           v-model="searchQuery"
           type="text"
@@ -61,14 +54,8 @@
   </div>
 
   <div v-if="config" class="settings-workspace" :class="{ 'is-searching': !!searchQuery }">
-    <aside class="section-card settings-sidebar">
-      <div class="section-kicker">{{ $t('config.settings_map_kicker') }}</div>
-      <div class="section-title-row">
-        <h2 class="section-title">{{ $t('config.settings_map_title') }}</h2>
-        <InfoHint size="sm" label="Settings map guidance">
-          {{ $t('config.settings_map_desc') }}
-        </InfoHint>
-      </div>
+    <aside class="settings-sidebar">
+      <div class="section-kicker">{{ $t('config.settings_map_title') }}</div>
 
       <div class="settings-nav-groups">
         <div v-for="group in tabGroups" :key="group.id" class="settings-nav-group">
@@ -103,29 +90,23 @@
         </button>
       </div>
 
-      <section v-if="searchQuery" class="surface-subtle p-4">
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div class="min-w-0">
-            <div class="section-title-row">
-              <div class="eyebrow-label">
-                {{ searchHasResults ? $t('config.search_focus_title') : $t('config.search_empty_title') }}
-              </div>
-              <InfoHint size="sm" label="Search guidance">
-                {{ searchHasResults ? searchFocusCopy : searchEmptyCopy }}
-              </InfoHint>
-            </div>
-            <div class="mt-2 text-sm leading-relaxed text-storm">
-              {{ searchHasResults ? searchSummary : $t('config.search_empty_heading') }}
-            </div>
+      <section v-if="searchQuery" class="settings-search-strip">
+        <div class="settings-search-strip-copy">
+          <div class="settings-search-strip-title">
+            {{ searchHasResults ? $t('config.search_focus_title') : $t('config.search_empty_title') }}
           </div>
+          <div class="settings-search-strip-note">
+            {{ searchHasResults ? searchSummary : searchEmptyCopy }}
+          </div>
+        </div>
+        <div class="shrink-0">
           <button class="focus-ring settings-action-button settings-action-button-secondary" @click="clearSearch">
             {{ $t('config.clear_search') }}
           </button>
         </div>
       </section>
 
-      <section v-if="currentTabIsEncoder" class="section-card settings-subnav-card">
-        <div class="section-kicker">Encoder Switcher</div>
+      <section v-if="currentTabIsEncoder" class="settings-subnav-card">
         <div class="settings-subnav-row">
           <button
             v-for="tab in encoderTabs"
@@ -140,13 +121,7 @@
         </div>
       </section>
 
-      <section v-if="searchQuery && !searchHasResults" class="section-card">
-        <div class="section-kicker">{{ $t('config.search_empty_title') }}</div>
-        <h3 class="section-title">{{ $t('config.search_empty_heading') }}</h3>
-        <p class="section-copy">{{ searchEmptyCopy }}</p>
-      </section>
-
-      <div v-else ref="settingsContentRef" class="settings-tab-content">
+      <div v-if="!searchQuery || searchHasResults" ref="settingsContentRef" class="settings-tab-content">
         <general
           v-if="shouldShowTab('general')"
           :config="config"
@@ -217,7 +192,6 @@ import AudioVideo from '../configs/tabs/AudioVideo.vue'
 import AiOptimizer from '../configs/tabs/AiOptimizer.vue'
 import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
 import Skeleton from '../components/Skeleton.vue'
-import InfoHint from '../components/InfoHint.vue'
 import { useToast } from '../composables/useToast'
 
 const { toast } = useToast()
@@ -251,7 +225,7 @@ const tabs = ref([
     name: "General",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Identity, logging, desktop UI behavior, metadata integrations, and automation commands.",
+    summary: "Host identity, tray behavior, metadata, and automation.",
     options: {
       "locale": "en",
       "sunshine_name": "",
@@ -272,7 +246,7 @@ const tabs = ref([
     name: "Input",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Controller, keyboard, mouse, cursor, and touch passthrough behavior.",
+    summary: "Controller, keyboard, mouse, cursor, and touch behavior.",
     options: {
       "controller": "enabled",
       "gamepad": "auto",
@@ -300,7 +274,7 @@ const tabs = ref([
     name: "Audio/Video",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Capture strategy, audio routing, display outputs, virtual display management, and stream delivery controls.",
+    summary: "Audio routing, displays, capture path, and stream delivery.",
     options: {
       "audio_sink": "",
       "virtual_sink": "",
@@ -339,7 +313,7 @@ const tabs = ref([
     name: "Network",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Discovery, pairing access, ports, encryption, web UI exposure, and trusted networks.",
+    summary: "Discovery, pairing access, ports, encryption, and trusted networks.",
     options: {
       "upnp": "disabled",
       "address_family": "ipv4",
@@ -357,7 +331,7 @@ const tabs = ref([
     name: "Config Files",
     group: "host",
     groupLabel: "Host & Runtime",
-    summary: "Paths for apps, logs, certificates, credentials, and runtime state.",
+    summary: "Apps, logs, certificates, credentials, and runtime paths.",
     options: {
       "file_apps": "",
       "credentials_file": "",
@@ -372,7 +346,7 @@ const tabs = ref([
     name: "Advanced",
     group: "host",
     groupLabel: "Host & Runtime",
-    summary: "Compatibility flags, codec advertising, capture path, and encoder selection.",
+    summary: "Compatibility flags, codec advertising, capture path, and encoder choice.",
     options: {
       "fec_percentage": 20,
       "qp": 28,
@@ -392,7 +366,7 @@ const tabs = ref([
     name: "AI",
     group: "host",
     groupLabel: "Host & Runtime",
-    summary: "Provider choice, runtime behavior, cache policy, and optimization defaults.",
+    summary: "Provider, runtime, cache, and optimization defaults.",
     options: {
       "ai_enabled": "disabled",
       "ai_provider": "anthropic",
@@ -410,7 +384,7 @@ const tabs = ref([
     name: "NVIDIA NVENC Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Latency, bitrate shaping, AQ, and NVIDIA-specific hardware encode behavior.",
+    summary: "Latency, bitrate shaping, AQ, and NVIDIA tuning.",
     options: {
       "nvenc_preset": 1,
       "nvenc_twopass": "quarter_res",
@@ -428,7 +402,7 @@ const tabs = ref([
     name: "Intel QuickSync Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Intel preset, entropy coding, and HEVC fallback behavior.",
+    summary: "Preset, entropy coding, and HEVC fallback behavior.",
     options: {
       "qsv_preset": "medium",
       "qsv_coder": "auto",
@@ -440,7 +414,7 @@ const tabs = ref([
     name: "AMD AMF Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "AMF rate control, quality, VBAQ, and AMD-specific encode tuning.",
+    summary: "Rate control, quality, VBAQ, and AMD tuning.",
     options: {
       "amd_usage": "ultralowlatency",
       "amd_rc": "vbr_latency",
@@ -456,7 +430,7 @@ const tabs = ref([
     name: "VideoToolbox Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Apple VideoToolbox entropy coding, realtime mode, and software fallback.",
+    summary: "Entropy coding, realtime mode, and software fallback.",
     options: {
       "vt_coder": "auto",
       "vt_software": "auto",
@@ -468,7 +442,7 @@ const tabs = ref([
     name: "VA-API Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Linux VA-API strict rate-control behavior for AMD and Intel GPUs.",
+    summary: "Strict rate-control behavior for AMD and Intel GPUs.",
     options: {
       "vaapi_strict_rc_buffer": "disabled",
     },
@@ -478,7 +452,7 @@ const tabs = ref([
     name: "Software Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "CPU encoding preset and tune selection for fallback and low-GPU paths.",
+    summary: "CPU preset and tune selection for fallback paths.",
     options: {
       "sw_preset": "superfast",
       "sw_tune": "zerolatency",
@@ -571,7 +545,6 @@ const tabGroups = computed(() => {
     )
 })
 const mobileNavItems = computed(() => tabGroups.value.flatMap(group => group.items))
-const visibleTabCountLabel = computed(() => i18n.t('config.visible_tabs', { count: matchingTabs.value.length, total: tabs.value.length }))
 const searchSummary = computed(() => i18n.t('config.search_results', { query: searchQuery.value, count: matchingTabs.value.length }))
 const searchHasResults = computed(() => matchingTabs.value.length > 0)
 const hasUnsavedChanges = computed(() => {
@@ -579,39 +552,11 @@ const hasUnsavedChanges = computed(() => {
   return JSON.stringify(serialize()) !== initialSerialized.value
 })
 const activePanelTitle = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.name || 'General'))
-const activePanelGroupLabel = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.groupLabel || 'Core Setup'))
 const commandCenterTitle = computed(() => {
   if (searchQuery.value && !searchHasResults.value) return i18n.t('config.search_empty_heading')
   if (searchQuery.value) return i18n.t('config.search_focus_heading')
-  if (hasUnsavedChanges.value) return i18n.t('config.unsaved_banner')
-  return i18n.t('config.saved_banner')
+  return activePanelTitle.value
 })
-const commandCenterNote = computed(() => {
-  if (searchQuery.value && !searchHasResults.value) {
-    return i18n.t('config.search_empty_desc', { query: searchQuery.value })
-  }
-  if (searchQuery.value) {
-    return i18n.t('config.search_focus_desc', { query: searchQuery.value, count: matchingTabs.value.length })
-  }
-  if (hasUnsavedChanges.value) {
-    return i18n.t('config.command_unsaved_note')
-  }
-  if (saved.value) {
-    return i18n.t('config.apply_note')
-  }
-  return i18n.t('config.command_saved_note')
-})
-const commandCenterSummary = computed(() => {
-  if (searchQuery.value && !searchHasResults.value) return 'Try a broader keyword or switch to a nearby settings group.'
-  if (searchQuery.value) return `Showing ${matchingTabs.value.length} matching settings groups.`
-  if (hasUnsavedChanges.value) return 'Local edits are ready to save.'
-  if (saved.value) return 'Saved changes are ready to apply.'
-  return 'Search, save, and apply host changes from one surface.'
-})
-const searchFocusCopy = computed(() => i18n.t('config.search_focus_desc', {
-  query: searchQuery.value,
-  count: matchingTabs.value.length,
-}))
 const searchEmptyCopy = computed(() => i18n.t('config.search_empty_desc', { query: searchQuery.value }))
 
 function shouldShowTab(tabId) {

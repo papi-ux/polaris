@@ -14,7 +14,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -134,6 +136,48 @@ namespace proc {
       }
 
       return installed_path.string();
+    }
+
+    bool has_supported_image_signature(const std::filesystem::path &path, const std::string &extension) {
+      std::ifstream input(path, std::ios::binary);
+      if (!input) {
+        return false;
+      }
+
+      std::array<unsigned char, 16> header {};
+      input.read(reinterpret_cast<char *>(header.data()), static_cast<std::streamsize>(header.size()));
+      const auto bytes_read = static_cast<size_t>(input.gcount());
+
+      if (extension == ".png") {
+        static constexpr std::array<unsigned char, 8> png_signature {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+        return bytes_read >= png_signature.size() &&
+               std::equal(png_signature.begin(), png_signature.end(), header.begin());
+      }
+
+      if (extension == ".jpg" || extension == ".jpeg") {
+        return bytes_read >= 3 &&
+               header[0] == 0xFF &&
+               header[1] == 0xD8 &&
+               header[2] == 0xFF;
+      }
+
+      if (extension == ".webp") {
+        static constexpr std::array<unsigned char, 4> riff_signature {'R', 'I', 'F', 'F'};
+        static constexpr std::array<unsigned char, 4> webp_signature {'W', 'E', 'B', 'P'};
+        return bytes_read >= 12 &&
+               std::equal(riff_signature.begin(), riff_signature.end(), header.begin()) &&
+               std::equal(webp_signature.begin(), webp_signature.end(), header.begin() + 8);
+      }
+
+      return false;
+    }
+
+    bool should_log_invalid_app_image_once(const std::string &path) {
+      static std::mutex mutex;
+      static std::unordered_set<std::string> logged_paths;
+
+      std::lock_guard<std::mutex> lock(mutex);
+      return logged_paths.emplace(path).second;
     }
 
     std::string json_app_label(const nlohmann::json &app) {
@@ -1356,9 +1400,6 @@ namespace proc {
       session_state.lock_inhibited = true;
     }
 
-    // Start edit mode watchdog — KDE enters edit mode on labwc window state changes
-    session_manager::start_edit_mode_watchdog();
-
     // Cage start is deferred — it launches with the game command below
 #endif
 
@@ -1895,6 +1936,11 @@ namespace proc {
       }
 
       log_runtime_state();
+      const auto runtime_state = cage_display_router::runtime_state();
+      if (!runtime_state.effective_headless) {
+        // KDE edit mode only matters when labwc is a visible nested window on the desktop.
+        session_manager::start_edit_mode_watchdog();
+      }
       return true;
     };
 
@@ -2759,7 +2805,16 @@ namespace proc {
     std::error_code code;
     if (!std::filesystem::exists(app_image_path, code)) {
       // return default box image if image does not exist
-      BOOST_LOG(warning) << "Couldn't find app image at path ["sv << app_image_path << ']';
+      if (should_log_invalid_app_image_once(app_image_path)) {
+        BOOST_LOG(warning) << "Couldn't find app image at path ["sv << app_image_path << ']';
+      }
+      return resolve_bundled_asset("box.png");
+    }
+
+    if (!has_supported_image_signature(app_image_path, image_extension)) {
+      if (should_log_invalid_app_image_once(app_image_path)) {
+        BOOST_LOG(warning) << "App image at path ["sv << app_image_path << "] failed signature validation";
+      }
       return resolve_bundled_asset("box.png");
     }
 

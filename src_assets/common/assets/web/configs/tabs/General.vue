@@ -55,18 +55,22 @@ function removeCmd(cmdArr, index) {
       <div class="settings-section-header">
         <div class="section-kicker">Identity</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Host basics</h3>
+          <h3 class="settings-section-title">Host identity</h3>
           <InfoHint size="sm" label="Host basics guidance">
             Set the visible Polaris identity, UI language, and log verbosity that shape day-to-day host administration.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Identity, language, and operator-facing log detail.</p>
       </div>
       <div class="settings-inline-stack">
 
     <!-- Locale -->
     <div>
-      <label for="locale" class="block text-sm font-medium text-storm mb-1">{{ $t('config.locale') }}</label>
+      <div class="section-title-row mb-1">
+        <label for="locale" class="block text-sm font-medium text-storm">{{ $t('config.locale') }}</label>
+        <InfoHint size="sm" label="Locale guidance">
+          Controls the language used by the Polaris web console.
+        </InfoHint>
+      </div>
       <select id="locale" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.locale">
         <option value="bg">Български (Bulgarian)</option>
         <option value="cs">Čeština (Czech)</option>
@@ -91,20 +95,28 @@ function removeCmd(cmdArr, index) {
         <option value="zh">简体中文 (Chinese Simplified)</option>
         <option value="zh_TW">繁體中文 (Chinese Traditional)</option>
       </select>
-      <div class="text-sm text-storm mt-1">{{ $t('config.locale_desc') }}</div>
     </div>
 
     <!-- Polaris Name -->
     <div class="mb-3">
-      <label for="sunshine_name" class="block text-sm font-medium text-storm mb-1">{{ $t('config.sunshine_name') }}</label>
+      <div class="section-title-row mb-1">
+        <label for="sunshine_name" class="block text-sm font-medium text-storm">{{ $t('config.sunshine_name') }}</label>
+        <InfoHint size="sm" label="Visible name guidance">
+          Shown to clients and local discovery surfaces.
+        </InfoHint>
+      </div>
       <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="sunshine_name" placeholder="Polaris"
              v-model="config.sunshine_name" />
-      <div class="text-sm text-storm mt-1">{{ $t('config.sunshine_name_desc') }}</div>
     </div>
 
     <!-- Log Level -->
     <div class="mb-3">
-      <label for="min_log_level" class="block text-sm font-medium text-storm mb-1">{{ $t('config.min_log_level') }}</label>
+      <div class="section-title-row mb-1">
+        <label for="min_log_level" class="block text-sm font-medium text-storm">{{ $t('config.min_log_level') }}</label>
+        <InfoHint size="sm" label="Log level guidance">
+          Use quieter levels for routine operation and raise this only while debugging.
+        </InfoHint>
+      </div>
       <select id="min_log_level" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.min_log_level">
         <option value="0">{{ $t('config.min_log_level_0') }}</option>
         <option value="1">{{ $t('config.min_log_level_1') }}</option>
@@ -114,7 +126,6 @@ function removeCmd(cmdArr, index) {
         <option value="5">{{ $t('config.min_log_level_5') }}</option>
         <option value="6">{{ $t('config.min_log_level_6') }}</option>
       </select>
-      <div class="text-sm text-storm mt-1">{{ $t('config.min_log_level_desc') }}</div>
     </div>
 
       </div>
@@ -124,19 +135,23 @@ function removeCmd(cmdArr, index) {
       <div class="settings-section-header">
         <div class="section-kicker">Automation</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Preparation and lifecycle commands</h3>
+          <h3 class="settings-section-title">Automation</h3>
           <InfoHint size="sm" label="Lifecycle commands guidance">
             Run host-side commands before apps launch, when sessions resume, and when server shortcuts are triggered from clients.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Host-side automation before launch, after exit, and from client shortcuts.</p>
       </div>
       <div class="settings-inline-stack">
 
     <!-- Global Prep/State Commands -->
     <div v-for="type in ['prep', 'state']" :id="`global_${type}_cmd`" class="d-flex flex-column">
-      <label class="block text-sm font-medium text-storm mb-1">{{ $t(`config.global_${type}_cmd`) }}</label>
-      <div class="text-sm text-storm mt-1 whitespace-pre-wrap">{{ $t(`config.global_${type}_cmd_desc`) }}</div>
+      <div class="section-title-row mb-1">
+        <label class="block text-sm font-medium text-storm">{{ $t(`config.global_${type}_cmd`) }}</label>
+        <InfoHint size="sm" :label="`${type} command guidance`">
+          <span v-if="type === 'prep'">Run commands before launch, then undo them after the session ends.</span>
+          <span v-else>Run commands when Polaris changes session state on the host.</span>
+        </InfoHint>
+      </div>
       <table class="w-full text-left" v-if="cmds[type].length > 0">
         <thead>
         <tr>
@@ -182,10 +197,11 @@ function removeCmd(cmdArr, index) {
 
     <!-- Server Commands -->
     <div id="server_cmd" class="mb-3 d-flex flex-column">
-      <label class="block text-sm font-medium text-storm mb-1">{{ $t('config.server_cmd') }}</label>
-      <div class="text-sm text-storm mt-1">{{ $t('config.server_cmd_desc') }}</div>
-      <div class="text-sm text-storm mt-1">
-        <a href="https://github.com/ClassicOldSong/Polaris/wiki/Server-Commands" target="_blank">{{ $t('_common.learn_more') }}</a>
+      <div class="section-title-row mb-1">
+        <label class="block text-sm font-medium text-storm">{{ $t('config.server_cmd') }}</label>
+        <InfoHint size="sm" label="Server command guidance">
+          Expose trusted host-side shortcuts that clients can trigger when paired access allows it.
+        </InfoHint>
       </div>
       <table class="w-full text-left" v-if="serverCmd.length > 0">
         <thead>
@@ -235,12 +251,11 @@ function removeCmd(cmdArr, index) {
       <div class="settings-section-header">
         <div class="section-kicker">Desktop & updates</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Host UI behavior</h3>
+          <h3 class="settings-section-title">Desktop behavior</h3>
           <InfoHint size="sm" label="Desktop UI behavior guidance">
             Keep the desktop-side Polaris experience predictable, from update notifications to tray visibility and admin controls.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Tray presence, update notices, and desktop-side control visibility.</p>
       </div>
       <div class="settings-inline-stack">
 
@@ -274,8 +289,12 @@ function removeCmd(cmdArr, index) {
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
         <div class="section-kicker">Metadata</div>
-        <h3 class="settings-section-title">Artwork integration</h3>
-        <p class="settings-section-copy">Connect SteamGridDB so Polaris can fetch artwork for non-Steam entries in your library.</p>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Artwork integration</h3>
+          <InfoHint size="sm" label="Artwork integration guidance">
+            Connect SteamGridDB so Polaris can fetch artwork for non-Steam entries in your library.
+          </InfoHint>
+        </div>
       </div>
       <div class="mt-1">
         <label for="steamgriddb_api_key" class="block text-sm font-medium text-storm mb-1">SteamGridDB API Key</label>

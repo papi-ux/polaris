@@ -12,15 +12,15 @@
 
     <!-- Sidebar -->
     <aside
-      class="flex shrink-0 flex-col border-r border-storm/15 bg-void/85 backdrop-blur-xl transition-[width,transform] duration-200 ease-in-out z-40"
+      class="sidebar-shell flex shrink-0 flex-col backdrop-blur-xl transition-[width,transform] duration-200 ease-in-out z-40"
       :class="[
         sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
         sidebarCollapsed ? 'w-16' : 'w-64',
         'fixed inset-y-0 left-0 md:static'
       ]"
     >
-      <div class="border-b border-storm/15 px-4 py-4">
-        <div class="rounded-2xl border border-storm/15 bg-white/[0.02] px-3 py-3" :class="{ 'border-transparent bg-transparent px-0 py-0': sidebarCollapsed }">
+      <div class="sidebar-brand-wrap px-4 py-4">
+        <div class="sidebar-brand-card rounded-2xl px-3 py-3" :class="{ 'border-transparent bg-transparent px-0 py-0 shadow-none': sidebarCollapsed }">
           <h1 class="flex items-center gap-2 text-xl font-bold text-ice" :class="{ 'justify-center': sidebarCollapsed }">
             <img src="/images/logo-polaris.svg" class="h-8" alt="Polaris">
             <div v-if="!sidebarCollapsed" class="min-w-0">
@@ -28,9 +28,10 @@
               <div class="mt-0.5 text-[10px] font-medium uppercase tracking-[0.22em] text-storm/80">Host Console</div>
             </div>
           </h1>
-          <div v-if="!sidebarCollapsed" class="mt-3 flex items-center gap-2 text-[11px] text-storm">
-            <span class="meta-pill bg-void/50">{{ currentPageSection }}</span>
-            <span class="truncate">{{ currentPageLabel }}</span>
+          <div v-if="!sidebarCollapsed" class="mt-3 text-[11px] uppercase tracking-[0.18em] text-storm/72">
+            <span>{{ currentPageSection }}</span>
+            <span class="mx-1 text-storm/50">·</span>
+            <span class="truncate text-storm/86 normal-case tracking-normal">{{ currentPageLabel }}</span>
           </div>
         </div>
       </div>
@@ -38,12 +39,12 @@
         <div
           v-for="(section, sectionIndex) in navSections"
           :key="section.key"
-          class="space-y-1"
-          :class="sectionIndex > 0 ? 'mt-3 border-t border-storm/15 pt-3' : ''"
+          class="sidebar-nav-section space-y-1"
+          :class="sectionIndex > 0 ? 'mt-3 pt-3' : ''"
         >
           <div
             v-if="!sidebarCollapsed"
-            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/70"
+            class="sidebar-nav-label px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/70"
           >
             {{ section.label }}
           </div>
@@ -64,18 +65,17 @@
           </router-link>
         </div>
       </nav>
-      <div class="mb-2 space-y-2 px-3">
+      <div class="sidebar-utility-stack px-3">
         <button
           type="button"
-          class="focus-ring flex w-full items-center gap-2 rounded-xl border border-storm/20 bg-deep/30 px-3 py-2 text-left text-sm text-silver transition-[background-color,border-color,color] duration-200 hover:border-ice/25 hover:bg-twilight/35 hover:text-ice"
+          class="focus-ring sidebar-utility-card"
           :title="paletteShortcut"
           @click="commandPaletteOpen = true"
         >
           <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
           <template v-if="!sidebarCollapsed">
-            <div class="min-w-0 flex-1">
-              <div class="truncate font-medium">Command Palette</div>
-              <div class="mt-0.5 text-[11px] text-storm">Jump pages and host actions.</div>
+            <div class="sidebar-utility-copy">
+              <div class="sidebar-utility-title">Palette</div>
             </div>
             <kbd class="rounded-md border border-storm/20 bg-void/60 px-2 py-1 text-[11px] text-storm">
               {{ isMac ? '\u2318K' : 'Ctrl+K' }}
@@ -88,7 +88,7 @@
         <button
           type="button"
           @click="currentTheme = currentTheme === 'oled' ? 'polaris' : 'oled'; setTheme(currentTheme)"
-          class="focus-ring flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-[background-color,color,border-color] duration-200"
+          class="focus-ring sidebar-utility-card"
           :class="currentTheme === 'oled'
             ? 'border-ice/20 bg-ice/10 text-ice'
             : 'border-storm/20 bg-deep/20 text-silver hover:bg-twilight/35 hover:text-silver'"
@@ -97,36 +97,44 @@
           <svg v-if="currentTheme === 'oled'" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
           <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
           <template v-if="!sidebarCollapsed">
-            <div class="min-w-0 flex-1">
-              <div class="truncate font-medium">Theme</div>
-              <div class="mt-0.5 text-[11px]" :class="currentTheme === 'oled' ? 'text-ice/70' : 'text-storm'">
-                {{ currentTheme === 'oled' ? t('navbar.theme_oled') : t('navbar.theme_polaris') }}
-              </div>
+            <div class="sidebar-utility-copy">
+              <div class="sidebar-utility-title">Theme</div>
             </div>
             <span class="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]"
                   :class="currentTheme === 'oled'
                     ? 'border-ice/20 bg-void/40 text-ice'
-                    : 'border-storm/20 bg-void/50 text-storm'">
-              {{ currentTheme === 'oled' ? 'OLED' : 'Whale' }}
+                    : 'border-storm/20 bg-void/50 text-storm/90'">
+              {{ currentTheme === 'oled' ? 'OLED Galaxy' : 'Space Whale' }}
             </span>
           </template>
         </button>
       </div>
-      <button
-        type="button"
-        class="focus-ring mx-3 mb-2 flex items-center justify-center rounded-xl p-2 text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
-        @click="toggleCollapse"
-        :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-      >
-        <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-180': sidebarCollapsed }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
-      </button>
-      <div class="border-t border-storm/15 p-3 text-sm text-storm" :class="{ 'text-center': sidebarCollapsed }">
+      <div class="sidebar-footer p-3 text-sm text-storm" :class="{ 'text-center': sidebarCollapsed }">
         <template v-if="!sidebarCollapsed">
-          <div>v{{ appVersion }} &middot; Polaris</div>
-          <div class="mt-1 text-xs text-storm/50">{{ paletteShortcut }}</div>
+          <div class="sidebar-footer-row">
+            <div class="sidebar-footer-copy">
+              <div>v{{ appVersion }} &middot; Polaris</div>
+            </div>
+            <button
+              type="button"
+              class="focus-ring sidebar-collapse-button"
+              @click="toggleCollapse"
+              :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+            >
+              <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-180': sidebarCollapsed }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
+            </button>
+          </div>
         </template>
         <template v-else>
-          <div class="text-xs">v{{ compactVersion }}</div>
+          <button
+            type="button"
+            class="focus-ring sidebar-collapse-button mx-auto"
+            @click="toggleCollapse"
+            :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+          >
+            <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-180': sidebarCollapsed }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
+          </button>
+          <div class="mt-2 text-xs">v{{ compactVersion }}</div>
         </template>
       </div>
     </aside>
@@ -187,12 +195,13 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
+import { getCachedConfig } from './config-cache.js'
 import { initTheme, getTheme, setTheme as setThemeFn } from './theme.js'
 
 const route = useRoute()
@@ -203,6 +212,7 @@ const commandPaletteOpen = ref(false)
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(localStorage.getItem('sidebarCollapsed') === 'true')
 const appVersion = ref('1.0.0')
+const appVersionLoaded = ref(false)
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
 
 let i18nReady = false
@@ -289,6 +299,7 @@ const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
 const compactVersion = computed(() => appVersion.value.split('.')[0] || '1')
 const authRoutes = new Set(['/login', '/welcome', '/recover'])
+provide('appVersion', computed(() => appVersion.value))
 
 const routeAtmosphereClass = computed(() => {
   if (authRoutes.has(route.path)) return 'app-shell-atmosphere--auth'
@@ -358,22 +369,38 @@ function handleKeydown(e) {
   }
 }
 
+async function loadAppVersion() {
+  if (authRoutes.has(route.path) || appVersionLoaded.value || !window.__POLARIS_AUTHENTICATED__) return
+
+  try {
+    const data = await getCachedConfig()
+    if (data?.version) {
+      appVersion.value = data.version
+      appVersionLoaded.value = true
+    }
+  } catch (_) {
+    // Ignore footer version fetch failures.
+  }
+}
+
 // Page enter animation on route change
 const pageKey = ref(0)
 watch(() => route.path, () => { pageKey.value++ })
 watch(() => route.path, () => { sidebarOpen.value = false })
+watch(() => route.path, () => {
+  if (!authRoutes.has(route.path)) {
+    loadAppVersion()
+  }
+})
 
 onMounted(() => {
   initTheme()
   window.addEventListener('keydown', handleKeydown)
-  fetch('./api/config', { credentials: 'include' })
-    .then((response) => response.ok ? response.json() : null)
-    .then((data) => {
-      if (data?.version) {
-        appVersion.value = data.version
-      }
-    })
-    .catch(() => {})
+  window.setTimeout(() => {
+    if (!authRoutes.has(route.path)) {
+      loadAppVersion()
+    }
+  }, 0)
 })
 
 onUnmounted(() => {
@@ -383,6 +410,30 @@ onUnmounted(() => {
 
 <style>
 @reference "./app.css";
+
+.sidebar-shell {
+  background: var(--theme-sidebar-shell-bg);
+  border-right: 1px solid var(--theme-sidebar-shell-border);
+  box-shadow: var(--theme-sidebar-shell-shadow);
+}
+
+.sidebar-brand-wrap {
+  border-bottom: 1px solid var(--theme-sidebar-divider);
+}
+
+.sidebar-brand-card {
+  border: 1px solid var(--theme-sidebar-brand-border);
+  background: var(--theme-sidebar-brand-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.sidebar-nav-section + .sidebar-nav-section {
+  border-top: 1px solid var(--theme-sidebar-divider);
+}
+
+.sidebar-nav-label {
+  letter-spacing: 0.22em;
+}
 
 .sidebar-link {
   @apply relative flex items-center gap-3 rounded-xl px-3 py-2 no-underline
@@ -400,5 +451,54 @@ onUnmounted(() => {
   background: var(--theme-sidebar-active-bg);
   color: var(--theme-sidebar-active-text);
   box-shadow: var(--theme-sidebar-active-shadow);
+}
+
+.sidebar-utility-stack {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.45rem;
+}
+
+.sidebar-utility-card {
+  @apply flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm transition-[background-color,border-color,color] duration-200;
+  min-width: 0;
+  background: var(--theme-sidebar-utility-bg);
+  border-color: var(--theme-sidebar-utility-border);
+}
+
+.sidebar-utility-card:hover {
+  background: var(--theme-sidebar-hover-bg);
+  border-color: var(--theme-sidebar-hover-bg);
+}
+
+.sidebar-utility-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.sidebar-utility-title {
+  @apply truncate font-medium text-[13px];
+}
+
+.sidebar-footer {
+  min-width: 0;
+  border-top: 1px solid var(--theme-sidebar-footer-border);
+}
+
+.sidebar-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.sidebar-footer-copy {
+  min-width: 0;
+  font-size: 0.76rem;
+  color: var(--theme-text-soft);
+}
+
+.sidebar-collapse-button {
+  @apply flex items-center justify-center rounded-xl p-2 text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver;
 }
 </style>

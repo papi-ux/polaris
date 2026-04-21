@@ -1,6 +1,5 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import InfoHint from '../../components/InfoHint.vue'
 import { useAiOptimizer } from '../../composables/useAiOptimizer'
 import { useToast } from '../../composables/useToast'
 
@@ -569,19 +568,14 @@ onBeforeUnmount(() => {
     <section class="settings-section space-y-4">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="max-w-3xl">
-          <div class="section-kicker">Optimization Studio</div>
-          <div class="section-title-row mt-2">
-            <h2 class="settings-section-title">Choose the model provider Polaris should use for device tuning.</h2>
-            <InfoHint size="sm" label="Optimization Studio guidance">
-              The optimizer can target Claude, OpenAI, Gemini, or a local OpenAI-compatible endpoint. Draft connection tests use the unsaved settings below; save and apply when you want live sessions to use them.
-            </InfoHint>
-          </div>
-          <p class="settings-section-copy mt-2">Provider choice, draft testing, and the live optimizer runtime.</p>
+          <div class="section-kicker">Provider</div>
+          <h2 class="settings-section-title mt-2">Choose the optimizer.</h2>
+          <p class="settings-section-copy">Pick the AI provider and adjust the live draft below before you save and apply it.</p>
         </div>
 
         <div class="flex items-center gap-3 rounded-2xl border border-storm/40 bg-void/30 px-4 py-3">
           <div>
-            <div class="text-xs uppercase tracking-wider text-storm">Runtime AI</div>
+            <div class="text-xs uppercase tracking-wider text-storm">AI runtime</div>
             <div class="text-sm font-medium text-silver mt-1">
               {{ config.ai_enabled === 'enabled' ? 'Enabled' : 'Disabled' }}
             </div>
@@ -625,14 +619,8 @@ onBeforeUnmount(() => {
         <section class="settings-section space-y-5">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <div class="section-kicker">Draft Connection</div>
-              <div class="section-title-row mt-2">
-                <h3 class="settings-section-title">{{ currentProvider.name }} setup</h3>
-                <InfoHint size="sm" label="Draft connection guidance">
-                  Model choice, authentication, and endpoint are provider-specific. Polaris resolves sensible defaults if you keep the standard values.
-                </InfoHint>
-              </div>
-              <p class="settings-section-copy mt-1">Draft provider, auth, model, and endpoint before you save and apply.</p>
+              <div class="section-kicker">Setup</div>
+              <h3 class="settings-section-title mt-2">{{ currentProvider.name }} setup</h3>
             </div>
             <div class="flex items-center gap-2">
               <button
@@ -648,7 +636,7 @@ onBeforeUnmount(() => {
 
           <div class="space-y-3">
             <div class="flex items-center justify-between gap-4">
-              <div class="text-xs font-semibold uppercase tracking-[0.2em] text-storm">Quick Profiles</div>
+              <div class="text-xs font-semibold uppercase tracking-[0.2em] text-storm">Profiles</div>
               <div class="text-[11px] text-storm">Model + endpoint + auth</div>
             </div>
             <div class="grid gap-2 sm:grid-cols-2">
@@ -787,21 +775,15 @@ onBeforeUnmount(() => {
         <section class="settings-section settings-section-compact space-y-4">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <div class="section-kicker">Response Policy</div>
-              <div class="section-title-row mt-2">
-                <div class="settings-section-title text-base">Cache and timeout</div>
-                <InfoHint size="sm" label="Response policy guidance">
-                  These settings apply to all providers, including local endpoints.
-                </InfoHint>
-              </div>
-              <div class="settings-section-copy mt-1">Shared cache and connection timing for every provider.</div>
+              <div class="section-kicker">Testing</div>
+              <div class="settings-section-title mt-2 text-base">Cache, timeout, and draft checks</div>
             </div>
             <button
               @click="testProviderConfig"
               :disabled="testLoading || aiLoading || !canTestDraft"
               class="inline-flex items-center gap-2 h-10 px-4 text-sm font-medium rounded-lg bg-ice text-void hover:bg-ice/90 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
               <svg v-if="testLoading || aiLoading" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span>{{ testLoading || aiLoading ? 'Testing…' : 'Test Draft Connection' }}</span>
+              <span>{{ testLoading || aiLoading ? 'Testing…' : 'Test draft' }}</span>
             </button>
           </div>
 
@@ -947,26 +929,24 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="space-y-6">
-        <section class="settings-section settings-section-compact space-y-4">
-          <div class="flex items-start justify-between gap-4">
+        <details class="settings-section settings-section-compact settings-disclosure" :open="false">
+          <summary class="settings-disclosure-summary">
             <div>
-              <div class="section-kicker">Live Runtime</div>
-              <div class="section-title-row mt-2">
-                <div class="settings-section-title text-base">Saved optimizer status</div>
-                <InfoHint size="sm" label="Live runtime guidance">
-                  This reflects the currently loaded runtime config, not the unsaved draft on the left.
-                </InfoHint>
-              </div>
-              <div class="settings-section-copy mt-1">Loaded runtime status after the last save and apply.</div>
+              <div class="section-kicker">Runtime</div>
+              <div class="settings-section-title mt-2 text-base">Saved optimizer status</div>
+              <div class="settings-summary-copy">The loaded runtime can differ from the unsaved draft on the left.</div>
             </div>
-            <span
-              class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
-              :class="draftMatchesRuntime ? 'border-green-400/20 bg-green-400/8 text-green-300' : 'border-amber-300/20 bg-amber-300/8 text-amber-200'">
-              {{ draftMatchesRuntime ? 'In sync' : 'Unsaved draft' }}
-            </span>
-          </div>
+            <div class="flex items-center gap-2">
+              <span
+                class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
+                :class="draftMatchesRuntime ? 'border-green-400/20 bg-green-400/8 text-green-300' : 'border-amber-300/20 bg-amber-300/8 text-amber-200'">
+                {{ draftMatchesRuntime ? 'In sync' : 'Unsaved draft' }}
+              </span>
+              <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+            </div>
+          </summary>
 
-          <div class="grid gap-3">
+          <div class="settings-disclosure-body grid gap-3">
             <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
               <div class="text-xs uppercase tracking-wider text-storm">Provider</div>
               <div class="flex items-center gap-2 mt-2">
@@ -1046,12 +1026,12 @@ onBeforeUnmount(() => {
               <div class="text-sm text-red-300 mt-2">{{ aiStatus.last_error }}</div>
             </div>
           </div>
-        </section>
+        </details>
 
-        <details class="settings-section settings-section-compact" :open="cacheExpanded" @toggle="cacheExpanded = $event.target.open">
-          <summary class="flex cursor-pointer list-none items-center justify-between gap-3">
+        <details class="settings-section settings-section-compact settings-disclosure" :open="cacheExpanded" @toggle="cacheExpanded = $event.target.open">
+          <summary class="settings-disclosure-summary">
             <div class="flex items-center gap-2">
-              <div class="section-kicker">Optimization Cache</div>
+              <div class="section-kicker">Cache</div>
               <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ Array.isArray(aiCache) ? aiCache.length : 0 }}</span>
             </div>
             <div class="flex items-center gap-2">
@@ -1061,10 +1041,10 @@ onBeforeUnmount(() => {
                 :class="{ 'opacity-50 pointer-events-none': !Array.isArray(aiCache) || aiCache.length === 0 }">
                 Clear All
               </button>
-              <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': cacheExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+              <svg class="settings-disclosure-chevron h-4 w-4 text-storm" :class="{ 'rotate-180': cacheExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
             </div>
           </summary>
-          <div class="mt-3 text-sm text-storm">Stored recommendations for known device and app pairs.</div>
+          <div class="settings-disclosure-body text-sm text-storm">Stored recommendations for known device and app pairs.</div>
 
           <div v-if="cacheExpanded && Array.isArray(aiCache) && aiCache.length > 0" class="space-y-2 max-h-96 overflow-y-auto scrollbar-hidden">
             <div v-for="(entry, i) in aiCache" :key="i" class="py-2" :class="i > 0 ? 'border-t border-storm/20' : ''">
@@ -1146,15 +1126,15 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <details class="settings-section settings-section-compact" :open="knowledgeExpanded" @toggle="knowledgeExpanded = $event.target.open">
-      <summary class="flex cursor-pointer list-none items-center justify-between gap-3">
+    <details class="settings-section settings-section-compact settings-disclosure" :open="knowledgeExpanded" @toggle="knowledgeExpanded = $event.target.open">
+      <summary class="settings-disclosure-summary">
         <div class="flex items-center gap-2">
-          <div class="section-kicker">Device Knowledge Base</div>
+          <div class="section-kicker">Devices</div>
           <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ filteredDevices.length }} devices</span>
         </div>
-        <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': knowledgeExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        <svg class="settings-disclosure-chevron h-4 w-4 text-storm" :class="{ 'rotate-180': knowledgeExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
       </summary>
-      <div class="mt-3 text-sm text-storm">Known devices and capability hints used to seed recommendations.</div>
+      <div class="settings-disclosure-body text-sm text-storm">Known device hints used to seed recommendations.</div>
       <div v-if="knowledgeExpanded" class="mt-4">
         <input
           v-model="deviceSearch"

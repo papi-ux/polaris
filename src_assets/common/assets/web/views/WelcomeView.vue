@@ -2,7 +2,7 @@
   <div class="relative mx-auto flex min-h-screen max-w-7xl items-center justify-center px-4 py-8 sm:px-6">
     <div class="w-full max-w-5xl">
       <section class="page-hero auth-stage auth-stage--welcome overflow-visible">
-        <div class="page-hero-content gap-8 xl:grid-cols-[minmax(0,1.1fr)_260px]">
+        <div class="page-hero-content gap-6 xl:grid-cols-1">
           <div class="page-hero-copy">
             <div class="flex items-center gap-3">
               <img src="/images/logo-polaris-45.png" class="h-11" alt="Polaris">
@@ -13,16 +13,8 @@
             </div>
 
             <p class="page-hero-copy-text max-w-2xl">
-              Secure the host, sanity-check the runtime, then move straight into publishing apps and pairing a client.
+              Secure the host, check the runtime, then publish an app and pair a client.
             </p>
-          </div>
-
-          <div class="page-hero-aside">
-            <div class="auth-note auth-note--compact">
-              <div class="auth-note-title">Current Focus</div>
-              <div class="mt-2 text-sm font-medium text-silver">{{ steps[currentStep].title }}</div>
-              <div class="auth-note-copy">{{ steps[currentStep].summary }}</div>
-            </div>
           </div>
         </div>
 
@@ -53,9 +45,6 @@
                   </InfoHint>
                 </div>
                 <p class="mt-2 text-sm text-storm">{{ steps[currentStep].summary }}</p>
-              </div>
-              <div class="flex flex-wrap gap-2">
-                <span class="auth-data-pill" v-for="tag in steps[currentStep].tags" :key="tag">{{ tag }}</span>
               </div>
             </div>
 
@@ -142,8 +131,7 @@
               <div class="space-y-3">
                 <div class="rounded-2xl border border-storm/20 bg-void/45 p-5 text-center">
                   <div class="mb-3 text-4xl">&#x1F3AE;</div>
-                  <div class="text-base font-medium text-silver">Applications become the client-facing launch surface</div>
-                  <div class="mt-3 text-sm text-storm">Start with the few titles you actually want visible, then refine artwork and per-app tuning later.</div>
+                  <div class="text-base font-medium text-silver">Start with the titles you actually want visible.</div>
                 </div>
                 <a href="#/apps" target="_blank" class="inline-flex h-10 items-center justify-center rounded-xl border border-storm/25 bg-deep/50 px-4 text-sm font-medium text-ice transition-[background-color,border-color,color] duration-200 hover:border-ice/30 hover:bg-twilight/35 no-underline">
                   Open Applications Page

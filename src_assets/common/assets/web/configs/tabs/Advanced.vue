@@ -2,7 +2,6 @@
 import { ref } from 'vue'
 import PlatformLayout from '../../PlatformLayout.vue'
 import Checkbox from "../../Checkbox.vue";
-import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps([
   'platform',
@@ -16,14 +15,8 @@ const config = ref(props.config)
   <div class="config-page">
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Resilience</div>
-        <div class="section-title-row">
-          <h3 class="settings-section-title">Stream behavior under load</h3>
-          <InfoHint size="sm" label="Resilience guidance">
-            Tune FEC, quantization, and CPU thread floors when you need to balance bandwidth, encode cost, and stability.
-          </InfoHint>
-        </div>
-        <p class="settings-section-copy">Recovery margin, quantization, and encoder thread floors.</p>
+        <div class="section-kicker">Load handling</div>
+        <h3 class="settings-section-title">Stream behavior under load</h3>
       </div>
 
       <div class="mb-3">
@@ -52,17 +45,17 @@ const config = ref(props.config)
       ></Checkbox>
     </section>
 
-    <section class="settings-section settings-section-compact">
-      <div class="settings-section-header">
-        <div class="section-kicker">Compatibility</div>
-        <div class="section-title-row">
-          <h3 class="settings-section-title">Client and environment behavior</h3>
-          <InfoHint size="sm" label="Compatibility guidance">
-            Use these flags when you need legacy compatibility, encoder probe leniency, or broader codec advertising.
-          </InfoHint>
+    <details class="settings-section settings-section-compact settings-disclosure">
+      <summary class="settings-disclosure-summary">
+        <div>
+          <div class="section-kicker">Compatibility</div>
+          <h3 class="settings-section-title mt-2">Client and environment behavior</h3>
+          <div class="settings-summary-copy">Use these flags only when you need legacy behavior or broader codec advertising.</div>
         </div>
-        <p class="settings-section-copy">Legacy compatibility flags and codec advertising behavior.</p>
-      </div>
+        <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+      </summary>
+
+      <div class="settings-disclosure-body">
 
       <Checkbox class="mb-3"
                 id="envvar_compatibility_mode"
@@ -106,19 +99,20 @@ const config = ref(props.config)
         </select>
         <div class="text-sm text-storm mt-1">{{ $t('config.av1_mode_desc') }}</div>
       </div>
-    </section>
-
-    <section class="settings-section settings-section-compact">
-      <div class="settings-section-header">
-        <div class="section-kicker">Selection</div>
-        <div class="section-title-row">
-          <h3 class="settings-section-title">Capture and encoder preference</h3>
-          <InfoHint size="sm" label="Capture selection guidance">
-            Override automatic capture or encoder selection only when you need to force a specific host path.
-          </InfoHint>
-        </div>
-        <p class="settings-section-copy">Only override autodetect when the host needs a forced path.</p>
       </div>
+    </details>
+
+    <details class="settings-section settings-section-compact settings-disclosure">
+      <summary class="settings-disclosure-summary">
+        <div>
+          <div class="section-kicker">Override</div>
+          <h3 class="settings-section-title mt-2">Capture and encoder preference</h3>
+          <div class="settings-summary-copy">Force a specific capture or encoder path only when automatic selection is not working.</div>
+        </div>
+        <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+      </summary>
+
+      <div class="settings-disclosure-body">
 
       <div class="mb-3" v-if="platform !== 'macos'">
         <label for="capture" class="block text-sm font-medium text-storm mb-1">{{ $t('config.capture') }}</label>
@@ -162,7 +156,8 @@ const config = ref(props.config)
         </select>
         <div class="text-sm text-storm mt-1">{{ $t('config.encoder_desc') }}</div>
       </div>
-    </section>
+      </div>
+    </details>
   </div>
 </template>
 
