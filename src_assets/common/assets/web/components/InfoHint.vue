@@ -6,6 +6,7 @@
     @mouseleave="open = false"
   >
     <button
+      ref="trigger"
       type="button"
       class="info-hint-trigger focus-ring"
       :class="sizeClass"
@@ -22,23 +23,28 @@
       </svg>
     </button>
 
-    <transition name="info-hint-fade">
-      <span
-        v-if="open"
-        :id="tooltipId"
-        role="tooltip"
-        class="info-hint-panel"
-        :class="alignmentClass"
-        :data-align="props.align"
-      >
-        <slot />
-      </span>
-    </transition>
+    <Teleport to="body">
+      <transition name="info-hint-fade">
+        <span
+          v-if="open"
+          ref="panel"
+          :id="tooltipId"
+          role="tooltip"
+          class="info-hint-panel"
+          :class="alignmentClass"
+          :style="panelStyle"
+          :data-align="props.align"
+          :data-placement="placement"
+        >
+          <slot />
+        </span>
+      </transition>
+    </Teleport>
   </span>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
   align: {
@@ -56,7 +62,11 @@ const props = defineProps({
 })
 
 const root = ref(null)
+const trigger = ref(null)
+const panel = ref(null)
 const open = ref(false)
+const panelStyle = ref({})
+const placement = ref('bottom')
 
 const tooltipId = `info-hint-${Math.random().toString(36).slice(2, 10)}`
 
@@ -74,11 +84,69 @@ function handlePointerDown(event) {
   }
 }
 
+function updatePanelPosition() {
+  if (!open.value || !trigger.value || !panel.value) {
+    return
+  }
+
+  if (window.matchMedia('(max-width: 47.99rem)').matches) {
+    panelStyle.value = {}
+    placement.value = 'bottom'
+    return
+  }
+
+  const triggerRect = trigger.value.getBoundingClientRect()
+  const panelRect = panel.value.getBoundingClientRect()
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+  const gutter = 12
+  const gap = 10
+
+  let left = triggerRect.left
+  if (props.align === 'right') {
+    left = triggerRect.right - panelRect.width
+  } else if (props.align === 'center') {
+    left = triggerRect.left + (triggerRect.width / 2) - (panelRect.width / 2)
+  }
+  left = Math.min(Math.max(left, gutter), viewportWidth - panelRect.width - gutter)
+
+  let top = triggerRect.bottom + gap
+  let nextPlacement = 'bottom'
+  if (top + panelRect.height > viewportHeight - gutter) {
+    const aboveTop = triggerRect.top - panelRect.height - gap
+    if (aboveTop >= gutter) {
+      top = aboveTop
+      nextPlacement = 'top'
+    } else {
+      top = Math.max(gutter, viewportHeight - panelRect.height - gutter)
+    }
+  }
+
+  panelStyle.value = {
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
+  }
+  placement.value = nextPlacement
+}
+
 onMounted(() => {
   document.addEventListener('pointerdown', handlePointerDown)
+  window.addEventListener('resize', updatePanelPosition)
+  window.addEventListener('scroll', updatePanelPosition, true)
 })
 
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handlePointerDown)
+  window.removeEventListener('resize', updatePanelPosition)
+  window.removeEventListener('scroll', updatePanelPosition, true)
+})
+
+watch(open, async (isOpen) => {
+  if (!isOpen) {
+    return
+  }
+
+  await nextTick()
+  updatePanelPosition()
 })
 </script>

@@ -1140,9 +1140,8 @@ textarea {
 }
 
 .info-hint-panel {
-  position: absolute;
-  top: calc(100% + 0.6rem);
-  z-index: 60;
+  position: fixed;
+  z-index: 140;
   width: min(16rem, calc(100vw - 1.5rem));
   border-radius: 0.9rem;
   border: 1px solid var(--theme-hint-panel-border);
@@ -1264,6 +1263,15 @@ textarea {
 .info-hint-panel[data-align='center']::before {
   left: 50%;
   transform: translateX(-50%) rotate(45deg);
+}
+
+.info-hint-panel[data-placement='top']::before {
+  top: auto;
+  bottom: -0.35rem;
+  border-left: 0;
+  border-top: 0;
+  border-right: 1px solid var(--theme-hint-panel-border);
+  border-bottom: 1px solid var(--theme-hint-panel-border);
 }
 
 .info-hint-fade-enter-active,
