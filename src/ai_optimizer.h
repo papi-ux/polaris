@@ -151,6 +151,17 @@ namespace ai_optimizer {
     const std::string &device_name, const std::string &app_name);
 
   /**
+   * @brief Derive a stable fallback from recent session history.
+   *
+   * Used when the AI cache is unavailable so Polaris can bias toward the last
+   * known safe codec/bitrate instead of snapping back to raw device defaults.
+   */
+  std::optional<device_db::optimization_t> get_history_safe_fallback(
+    const std::string &device_name,
+    const std::string &app_name,
+    const std::optional<session_history_t> &history = std::nullopt);
+
+  /**
    * @brief Get AI status as JSON string.
    */
   std::string get_status_json();

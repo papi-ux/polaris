@@ -1581,6 +1581,103 @@ namespace ai_optimizer {
     return optimization;
   }
 
+  std::optional<device_db::optimization_t> get_history_safe_fallback(
+      const std::string &device_name,
+      const std::string &app_name,
+      const std::optional<session_history_t> &history) {
+    const auto effective_history = history ? history : get_session_history(device_name, app_name);
+    if (!effective_history || effective_history->session_count <= 0) {
+      return std::nullopt;
+    }
+
+    const auto &session = *effective_history;
+    const auto latest_grade = latest_quality_grade(session);
+    const auto last_health_grade = to_lower_copy(session.last_health_grade);
+    const bool has_safe_bias =
+      session.last_safe_bitrate_kbps > 0 ||
+      !session.last_safe_codec.empty() ||
+      session.last_safe_hdr.has_value() ||
+      !session.last_safe_display_mode.empty();
+
+    const bool reliability_pressure =
+      session.poor_outcome_count > 0 ||
+      session.consecutive_poor_outcomes > 0 ||
+      last_health_grade == "watch" ||
+      last_health_grade == "degraded" ||
+      !session.last_primary_issue.empty();
+
+    const bool reuse_recent_success =
+      (latest_grade == "A" || latest_grade == "B") &&
+      (session.last_bitrate_kbps > 0 || !session.last_codec.empty());
+
+    if (!has_safe_bias && !reuse_recent_success) {
+      return std::nullopt;
+    }
+
+    auto fallback = fallback_optimization_for_device(device_name, app_name);
+    device_db::optimization_t optimization;
+    optimization.source = "history_safe";
+    optimization.cache_status = "fallback";
+    optimization.generated_at = unix_time_now();
+    optimization.recommendation_version = OPTIMIZATION_SCHEMA_VERSION;
+    optimization.signals_used = {"session_history", "reliability_feedback"};
+
+    if (session.last_safe_bitrate_kbps > 0) {
+      optimization.target_bitrate_kbps = clamp_value(session.last_safe_bitrate_kbps, 2000, 100000);
+    } else if (reuse_recent_success && session.last_bitrate_kbps > 0) {
+      optimization.target_bitrate_kbps = clamp_value(session.last_bitrate_kbps, 2000, 100000);
+    }
+
+    if (!session.last_safe_codec.empty()) {
+      optimization.preferred_codec = to_lower_copy(session.last_safe_codec);
+    } else if (reuse_recent_success && !session.last_codec.empty()) {
+      optimization.preferred_codec = to_lower_copy(session.last_codec);
+    }
+
+    if (session.last_safe_hdr.has_value()) {
+      optimization.hdr = session.last_safe_hdr;
+    }
+
+    if (session.last_safe_display_mode == "headless") {
+      optimization.virtual_display = false;
+    } else if (session.last_safe_display_mode == "virtual_display") {
+      optimization.virtual_display = true;
+    }
+
+    optimization.confidence =
+      (latest_grade == "A" || latest_grade == "B") && !reliability_pressure ? "medium" : "low";
+
+    std::ostringstream reasoning;
+    reasoning << "Using recent session fallback";
+    if (!latest_grade.empty()) {
+      reasoning << " after grade " << latest_grade;
+    }
+    if (!session.last_primary_issue.empty()) {
+      reasoning << " (" << session.last_primary_issue << ")";
+    }
+    reasoning << " while waiting for a refreshed AI recommendation.";
+    if (optimization.preferred_codec) {
+      reasoning << " Keep codec " << *optimization.preferred_codec << '.';
+    }
+    if (optimization.target_bitrate_kbps) {
+      reasoning << " Hold bitrate near " << *optimization.target_bitrate_kbps << "kbps.";
+    }
+    optimization.reasoning = reasoning.str();
+
+    optimization = normalize_optimization(
+      cfg,
+      device_name,
+      app_name,
+      "",
+      effective_history,
+      optimization,
+      false
+    );
+    optimization.source = "history_safe";
+    optimization.cache_status = "fallback";
+    return optimization;
+  }
+
   void request_async(const std::string &device_name,
                      const std::string &app_name,
                      const std::string &gpu_info,

@@ -1249,6 +1249,13 @@ namespace proc {
           apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
         }
       } else {
+        if (auto history_opt = ai_optimizer::get_history_safe_fallback(
+              launch_session->device_name, _app.name, history)) {
+          BOOST_LOG(info) << "ai_optimizer: Applying history-safe fallback for \""sv
+                          << launch_session->device_name << "\" + \""sv << _app.name
+                          << "\" — "sv << history_opt->reasoning;
+          apply_optimization_layer(resolved_optimization, optimization_locks, *history_opt, history_opt->source);
+        }
         ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
         BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
                         << "\" — fired async request for next session"sv;

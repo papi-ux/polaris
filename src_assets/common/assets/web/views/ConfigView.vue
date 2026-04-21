@@ -215,10 +215,28 @@ const initialSerialized = ref("")
 const settingsContentRef = ref(null)
 let searchHighlightTimeout = null
 let highlightedSearchTarget = null
+let restartReloadTimeout = null
+let restartReloadInterval = null
+let restartReloadFallbackTimeout = null
 const writeOnlySecrets = {
   ai_api_key: { presentFlag: 'has_ai_api_key', clearFlag: 'clear_ai_api_key' },
   steamgriddb_api_key: { presentFlag: 'has_steamgriddb_api_key', clearFlag: 'clear_steamgriddb_api_key' },
 }
+const responseOnlyConfigKeys = [
+  'status',
+  'platform',
+  'version',
+  'has_ai_api_key',
+  'has_steamgriddb_api_key',
+  'has_api_key',
+  'vdisplayStatus',
+  'vdisplayAvailable',
+  'vdisplayBackend',
+  'runtime_backend',
+  'runtime_requested_headless',
+  'runtime_effective_headless',
+  'runtime_gpu_native_override_active',
+]
 const tabs = ref([
   {
     id: "general",
@@ -689,7 +707,9 @@ function stripClientOnlyConfigFields(configCopy) {
     delete configCopy[meta.presentFlag]
     delete configCopy[meta.clearFlag]
   })
-  delete configCopy.has_api_key
+  responseOnlyConfigKeys.forEach((key) => {
+    delete configCopy[key]
+  })
 }
 
 function save() {
@@ -720,7 +740,7 @@ function save() {
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
     body: JSON.stringify(configCopy),
-  }).then((r) => {
+  }).then(async (r) => {
     if (r.status === 200) {
       saved.value = true
       initialSerialized.value = JSON.stringify(serialize())
@@ -736,12 +756,69 @@ function save() {
       return saved.value
     }
     else {
-      toast('Failed to save configuration', 'error')
+      let errorMessage = 'Failed to save configuration'
+      try {
+        const text = (await r.text()).trim()
+        if (text) {
+          errorMessage = r.status === 403
+            ? `${text}. Refresh Polaris and try again.`
+            : text
+        }
+      } catch {
+        // Fall back to the generic message when the response body cannot be read.
+      }
+
+      toast(errorMessage, 'error')
       return false
     }
   }).finally(() => {
     saving.value = false
   })
+}
+
+function clearRestartReloadWatchers() {
+  if (restartReloadTimeout) {
+    window.clearTimeout(restartReloadTimeout)
+    restartReloadTimeout = null
+  }
+  if (restartReloadInterval) {
+    window.clearInterval(restartReloadInterval)
+    restartReloadInterval = null
+  }
+  if (restartReloadFallbackTimeout) {
+    window.clearTimeout(restartReloadFallbackTimeout)
+    restartReloadFallbackTimeout = null
+  }
+}
+
+function watchForRestartRecovery() {
+  clearRestartReloadWatchers()
+
+  const tryReload = async () => {
+    try {
+      const response = await fetch("./api/config", {
+        credentials: 'include',
+        cache: 'no-store',
+      })
+
+      if (response.ok || response.status === 401 || response.status === 403) {
+        clearRestartReloadWatchers()
+        window.location.reload()
+      }
+    } catch {
+      // Polaris is still restarting. Keep polling until it responds again.
+    }
+  }
+
+  restartReloadTimeout = window.setTimeout(() => {
+    void tryReload()
+    restartReloadInterval = window.setInterval(() => { void tryReload() }, 1200)
+  }, 1200)
+
+  restartReloadFallbackTimeout = window.setTimeout(() => {
+    clearRestartReloadWatchers()
+    window.location.reload()
+  }, 15000)
 }
 
 function apply() {
@@ -765,15 +842,19 @@ function apply() {
         headers: { 'Content-Type': 'application/json' }
       })
       .then((resp) => {
+        if (resp.status === 200) {
+          watchForRestartRecovery()
+          return
+        }
         if (resp.status !== 200) {
-          location.reload()
+          window.location.reload()
           return
         }
       })
       .catch((e) => {
         console.error(e)
         restarting.value = false
-        setTimeout(() => { location.reload() }, 1000)
+        watchForRestartRecovery()
       })
     }
   })
@@ -810,13 +891,10 @@ fetch("./api/config", { credentials: 'include' })
       tabs.value = tabs.value.filter((el) => el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi")
     }
 
-    // remove values we don't want in the config file
-    delete config.value.platform
-    delete config.value.status
-    delete config.value.version
-
     vdisplayStatus.value = config.value.vdisplayStatus
-    delete config.value.vdisplayStatus
+    responseOnlyConfigKeys.forEach((key) => {
+      delete config.value[key]
+    })
 
     fallbackDisplayModeCache = config.value.fallback_mode || ""
 
@@ -940,6 +1018,7 @@ watch(currentTab, async (value) => {
 
 onUnmounted(() => {
   clearSearchHighlight()
+  clearRestartReloadWatchers()
   window.removeEventListener("hashchange", handleHash)
 })
 </script>

@@ -67,7 +67,7 @@ describe('router helpers', () => {
     const calls = []
     const wrappedFetch = wrapFetchWithCsrfToken(function mockFetch(url, options) {
       calls.push({ url, options })
-      return Promise.resolve({ ok: true })
+      return Promise.resolve({ ok: true, status: 200 })
     }, 'csrf-123')
 
     await wrappedFetch('/api/config', { method: 'POST' })
@@ -75,5 +75,36 @@ describe('router helpers', () => {
 
     expect(calls[0].options.headers['X-CSRF-Token']).toBe('csrf-123')
     expect(calls[1].options.headers).toBeUndefined()
+  })
+
+  it('refreshes the CSRF token and retries mutating requests after a restart-style 403', async () => {
+    document.head.innerHTML = '<meta name="csrf-token" content="csrf-123">'
+
+    const calls = []
+    const wrappedFetch = wrapFetchWithCsrfToken(function mockFetch(url, options) {
+      calls.push({ url, options })
+
+      if (calls.length === 1) {
+        return Promise.resolve({ ok: false, status: 403 })
+      }
+
+      if (calls.length === 2) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: async () => '<html><head><meta name="csrf-token" content="csrf-456"></head></html>',
+        })
+      }
+
+      return Promise.resolve({ ok: true, status: 200 })
+    }, 'csrf-123', () => '/')
+
+    await wrappedFetch('/api/config', { method: 'POST' })
+
+    expect(calls).toHaveLength(3)
+    expect(calls[0].options.headers['X-CSRF-Token']).toBe('csrf-123')
+    expect(calls[1].url).toBe('/')
+    expect(calls[2].options.headers['X-CSRF-Token']).toBe('csrf-456')
+    expect(document.querySelector('meta[name="csrf-token"]').content).toBe('csrf-456')
   })
 })
