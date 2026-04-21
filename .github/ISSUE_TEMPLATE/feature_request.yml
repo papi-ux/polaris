@@ -1,0 +1,56 @@
+name: Feature request
+description: Suggest an idea for Polaris
+title: "[Feature]: "
+labels: enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea for Polaris.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+      description: Describe the gap, friction, or missing capability.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Polaris to do?
+      description: Describe the behavior, UI, or workflow you want.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or other approaches you considered.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Streaming runtime
+        - Web UI
+        - Pairing / security
+        - Library / app launching
+        - Packaging / install
+        - Documentation
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add screenshots, mockups, or example workflows if helpful.
+    validations:
+      required: false

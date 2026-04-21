@@ -255,12 +255,7 @@ if(${POLARIS_ENABLE_TRAY})
         list(APPEND POLARIS_EXTERNAL_LIBRARIES ${APPINDICATOR_LIBRARIES} ${LIBNOTIFY_LIBRARIES})
     endif()
 
-    # flatpak icons must be prefixed with the app id or they will not be included in the flatpak
-    if(${POLARIS_BUILD_FLATPAK})
-        set(POLARIS_TRAY_PREFIX "${PROJECT_FQDN}")
-    else()
-        set(POLARIS_TRAY_PREFIX "polaris")
-    endif()
+    set(POLARIS_TRAY_PREFIX "polaris")
     list(APPEND POLARIS_DEFINITIONS POLARIS_TRAY_PREFIX="${POLARIS_TRAY_PREFIX}")
 else()
     set(POLARIS_TRAY 0)
@@ -286,12 +281,9 @@ if(EXTERNAL_PROJECT_LIBEVDEV_USED)
     add_dependencies(libinputtino libevdev)
 endif()
 
-# AppImage and Flatpak
+# AppImage
 if (${POLARIS_BUILD_APPIMAGE})
     list(APPEND POLARIS_DEFINITIONS POLARIS_BUILD_APPIMAGE=1)
-endif ()
-if (${POLARIS_BUILD_FLATPAK})
-    list(APPEND POLARIS_DEFINITIONS POLARIS_BUILD_FLATPAK=1)
 endif ()
 
 list(APPEND PLATFORM_TARGET_FILES

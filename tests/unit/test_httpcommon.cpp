@@ -57,22 +57,12 @@ TEST_P(DownloadFileTest, Run) {
   const std::string test_dir = platf::appdata().string() + "/tests/";
   std::string path = test_dir + filename;
   if (!http::download_file(url, path, CURL_SSLVERSION_TLSv1_0)) {
-#ifdef POLARIS_BUILD_FLATPAK
-    FAIL() << "Expected local test download to succeed for " << url;
-#else
     GTEST_SKIP() << "External download dependency unavailable for " << url;
-#endif
   }
 }
 
-#ifdef POLARIS_BUILD_FLATPAK
-// requires running `npm run serve` prior to running the tests
-constexpr const char *URL_1 = "http://0.0.0.0:3000/hello.txt";
-constexpr const char *URL_2 = "http://0.0.0.0:3000/hello-redirect.txt";
-#else
 constexpr const char *URL_1 = "https://httpbin.org/base64/aGVsbG8h";
 constexpr const char *URL_2 = "https://httpbin.org/redirect-to?url=/base64/aGVsbG8h";
-#endif
 
 INSTANTIATE_TEST_SUITE_P(
   DownloadFileTests,

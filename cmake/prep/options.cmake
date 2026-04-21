@@ -50,12 +50,8 @@ if(APPLE)
 elseif(UNIX)  # Linux
     option(POLARIS_BUILD_APPIMAGE
             "Enable an AppImage build." OFF)
-    option(POLARIS_BUILD_FLATPAK
-            "Enable a Flatpak build." OFF)
     option(POLARIS_CONFIGURE_PKGBUILD
             "Configure files required for AUR. Recommended to use with POLARIS_CONFIGURE_ONLY" OFF)
-    option(POLARIS_CONFIGURE_FLATPAK_MAN
-            "Configure manifest file required for Flatpak build. Recommended to use with POLARIS_CONFIGURE_ONLY" OFF)
 
     # Linux capture methods
     option(POLARIS_ENABLE_CUDA

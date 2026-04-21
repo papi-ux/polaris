@@ -53,7 +53,7 @@ include(${CMAKE_MODULE_PATH}/prep/options.cmake)
 # initial prep
 include(${CMAKE_MODULE_PATH}/prep/init.cmake)
 
-# configure special package files, such as polaris.desktop, Flatpak manifest, Portfile , etc.
+# configure special package files, such as polaris.desktop and Portfile
 include(${CMAKE_MODULE_PATH}/prep/special_package_configuration.cmake)
 
 # Exit early if END_BUILD is ON, i.e. when only generating package manifests

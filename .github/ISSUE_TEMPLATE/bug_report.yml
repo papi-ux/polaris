@@ -1,0 +1,117 @@
+name: Bug report
+description: Share the details needed to reproduce a Polaris issue
+title: "[Bug]: "
+labels: bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a Polaris bug report.
+
+        Before filing:
+
+        - retry on the latest public Polaris release
+        - note how Polaris was installed
+        - include logs, screenshots, or both when possible
+
+  - type: textarea
+    id: describe-bug
+    attributes:
+      label: Describe the bug
+      description: A clear summary of what is wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps, including pairing and launch flow if relevant.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      description: How is Polaris installed on the host?
+      options:
+        - Fedora RPM
+        - Source build
+        - AppImage
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: host-os
+    attributes:
+      label: Host OS
+      description: Linux distribution and version running Polaris.
+      placeholder: e.g. Fedora 42, Arch Linux, Debian 13
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: Main GPU and driver stack on the host.
+      placeholder: e.g. NVIDIA RTX 4070, driver 580.xx
+    validations:
+      required: false
+
+  - type: input
+    id: client
+    attributes:
+      label: Client and device
+      description: Which client was used when the issue occurred?
+      placeholder: e.g. Nova on Pixel 10 Pro, Moonlight on Windows
+    validations:
+      required: false
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime path
+      description: If known, which launch or capture mode was active?
+      options:
+        - Headless
+        - Virtual Display
+        - Desktop / standard display
+        - Unknown
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Paste relevant Polaris logs or error output.
+      render: Shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or recordings
+      description: Add any screenshots, UI captures, or recordings that help explain the issue.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that may help reproduce or understand the problem.
+    validations:
+      required: false

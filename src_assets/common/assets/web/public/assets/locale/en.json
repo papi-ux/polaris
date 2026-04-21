@@ -557,9 +557,7 @@
       "source_title": "Source Build",
       "source_desc": "Use this when you built Polaris locally from source.",
       "appimage_title": "AppImage",
-      "appimage_desc": "Use this when you launch Polaris from an AppImage file.",
-      "flatpak_title": "Flatpak",
-      "flatpak_desc": "Use this when Polaris is installed from Flathub or another Flatpak remote."
+      "appimage_desc": "Use this when you launch Polaris from an AppImage file."
     },
     "steps": {
       "open_terminal": "Open a terminal on the host machine running Polaris.",
