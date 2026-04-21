@@ -1,40 +1,30 @@
 <template>
   <div class="page-shell pb-2">
-    <section class="page-hero">
-      <div class="page-hero-content">
-        <div class="page-hero-copy">
-          <div class="page-hero-kicker">{{ $t('navbar.security') }}</div>
-          <h1 class="page-hero-title">{{ $t('password.action_title') }}</h1>
-          <div class="page-hero-copy-inline">
-            <p class="page-hero-copy-text">Rotate web UI credentials without leaving the host console.</p>
-            <InfoHint size="sm" label="Security overview">
-              {{ $t('password.overview') }}
-            </InfoHint>
-          </div>
-          <div class="page-hero-actions">
-            <span class="meta-pill">{{ $t('password.web_ui_only') }}</span>
-            <span class="meta-pill border-amber-300/30 bg-amber-300/10 text-amber-200">{{ $t('password.reload_note') }}</span>
-          </div>
-        </div>
-
-        <div class="page-hero-aside">
-          <article class="page-hero-note">
-            <div class="page-hero-note-title-row">
-              <div class="flex items-center gap-2">
-                <div class="page-hero-note-title">{{ $t('password.commit_changes') }}</div>
-                <span class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-200">
-                  {{ $t('password.sensitive_action') }}
-                </span>
-              </div>
-              <InfoHint size="sm" align="right" label="Reload guidance">
-                {{ $t('password.action_desc') }}
-              </InfoHint>
-            </div>
-            <div class="page-hero-note-copy">Verify the current credentials, set the replacement pair, then save once.</div>
-            <div class="mt-2 text-sm text-storm">Polaris reloads the web credential gate after the save completes.</div>
-          </article>
+    <section class="page-header security-page-header">
+      <div class="page-heading">
+        <div class="section-kicker">{{ $t('navbar.security') }}</div>
+        <h1 class="page-title">Rotate web access</h1>
+        <p class="page-subtitle">Update the web sign-in without leaving the host.</p>
+        <div class="page-meta">
+          <span class="meta-pill">{{ $t('password.web_ui_only') }}</span>
+          <span class="meta-pill border-amber-300/30 bg-amber-300/10 text-amber-200">Reloads on save</span>
         </div>
       </div>
+
+      <article class="header-support-card security-header-card">
+        <div class="header-support-title-row">
+          <div class="flex items-center gap-2">
+            <div class="section-kicker !mb-0">Commit</div>
+            <span class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-200">
+              {{ $t('password.sensitive_action') }}
+            </span>
+          </div>
+          <InfoHint size="sm" align="right" label="Reload guidance">
+            {{ $t('password.action_desc') }}
+          </InfoHint>
+        </div>
+        <div class="header-support-copy">Verify the current pair, set the replacement pair, then save once.</div>
+      </article>
     </section>
 
     <form class="space-y-4" @submit.prevent="save">

@@ -29,6 +29,14 @@ const props = defineProps({
   default: {
     type: undefined,
     default: null,
+  },
+  compact: {
+    type: Boolean,
+    default: false,
+  },
+  showDefault: {
+    type: Boolean,
+    default: true,
   }
 });
 
@@ -91,29 +99,33 @@ const parsedDefaultPropValue = (() => {
 const labelField = props.label ?? `${props.localePrefix}.${props.id}`;
 const descField = props.desc ?? `${props.localePrefix}.${props.id}_desc`;
 const showDesc = props.desc !== "" || Object.entries(slots).length > 0;
-const showDefValue = parsedDefaultPropValue !== null;
+const showDefValue = props.showDefault && parsedDefaultPropValue !== null;
 const defValue = parsedDefaultPropValue ? "_common.enabled_def_cbox" : "_common.disabled_def_cbox";
 </script>
 
 <template>
-  <div :class="props.class" :data-setting-key="props.id" class="flex items-start gap-3">
-    <input type="checkbox"
-           class="w-4 h-4 mt-1 rounded border-storm bg-deep text-ice focus:ring-ice shrink-0"
-           :id="props.id"
-           v-model="model"
-           :true-value="checkboxValues.truthy"
-           :false-value="checkboxValues.falsy" />
-    <div>
-      <label :for="props.id" class="text-silver cursor-pointer">
-        {{ $t(labelField) }}
-      </label>
-      <div class="text-xs text-storm" v-if="showDefValue">
-        {{ $t(defValue) }}
-      </div>
-      <div class="text-sm text-storm" v-if="showDesc">
-        {{ $t(descField) }}
-        <slot></slot>
-      </div>
-    </div>
+  <div :class="[props.class, { 'checkbox-field--compact': props.compact }]" :data-setting-key="props.id" class="checkbox-field">
+    <label :for="props.id" class="checkbox-field-control">
+      <input type="checkbox"
+             class="checkbox-field-input"
+             :id="props.id"
+             v-model="model"
+             :true-value="checkboxValues.truthy"
+             :false-value="checkboxValues.falsy" />
+      <span class="checkbox-field-copy">
+        <span class="checkbox-field-title-row">
+          <span class="text-silver cursor-pointer checkbox-field-label">
+            {{ $t(labelField) }}
+          </span>
+          <span class="text-xs text-storm checkbox-field-default" v-if="showDefValue">
+            {{ $t(defValue) }}
+          </span>
+        </span>
+        <span class="text-sm text-storm checkbox-field-desc" v-if="showDesc">
+          {{ $t(descField) }}
+          <slot></slot>
+        </span>
+      </span>
+    </label>
   </div>
 </template>

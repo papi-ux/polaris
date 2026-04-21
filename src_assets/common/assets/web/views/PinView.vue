@@ -1,58 +1,13 @@
 <template>
   <div class="page-shell">
-    <section class="page-hero">
-      <div class="page-hero-content">
-        <div class="page-hero-copy">
-          <div class="page-hero-kicker">{{ $t('navbar.pairing') }}</div>
-          <h1 class="page-hero-title">{{ $t('pin.pair_device_title') }}</h1>
-          <div class="page-hero-copy-inline">
-            <p class="page-hero-copy-text">Pair clients and audit trust from one surface.</p>
-            <InfoHint size="sm" label="Pairing overview">
-              {{ $t('pin.overview') }}
-            </InfoHint>
-          </div>
-          <div class="page-hero-actions">
-            <a href="#pair_device" class="focus-ring inline-flex h-10 items-center justify-center rounded-xl border border-storm/25 bg-deep/35 px-4 text-sm font-medium text-silver transition-[border-color,background-color,color,transform] duration-200 hover:-translate-y-0.5 hover:border-ice/35 hover:bg-twilight/35 hover:text-ice no-underline">
-              Pair device
-            </a>
-            <a href="#device_management" class="focus-ring inline-flex h-10 items-center justify-center rounded-xl border border-storm/25 bg-deep/35 px-4 text-sm font-medium text-silver transition-[border-color,background-color,color,transform] duration-200 hover:-translate-y-0.5 hover:border-ice/35 hover:bg-twilight/35 hover:text-ice no-underline">
-              Manage access
-            </a>
-          </div>
-        </div>
-
-        <div class="page-hero-aside">
-          <article class="page-hero-note">
-            <div class="page-hero-note-title-row">
-              <div class="page-hero-note-title">Default route</div>
-              <InfoHint size="sm" align="right" label="Current pairing method">
-                {{ $t(activePairingMethod.descKey) }}
-              </InfoHint>
-            </div>
-            <div class="page-hero-note-copy">{{ activePairingSummary }}</div>
-          </article>
-          <div class="page-hero-stat-grid">
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label">{{ $t('pin.paired_devices') }}</div>
-              <div class="page-hero-stat-value">{{ pairedCount }}</div>
-              <div class="page-hero-stat-copy">saved profiles</div>
-            </article>
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label">{{ $t('pin.connected_now') }}</div>
-              <div class="page-hero-stat-value">{{ connectedCount }}</div>
-              <div class="page-hero-stat-copy">live links</div>
-            </article>
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label">{{ $t('pin.trusted_networks') }}</div>
-              <div class="page-hero-stat-value">{{ trustedSubnetCount }}</div>
-              <div class="page-hero-stat-copy">TOFU entries</div>
-            </article>
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label">Mode</div>
-              <div class="page-hero-stat-value text-lg">{{ activePairingMethodLabel }}</div>
-              <div class="page-hero-stat-copy">current route</div>
-            </article>
-          </div>
+    <section class="page-header">
+      <div class="page-heading">
+        <div class="section-kicker">{{ $t('navbar.pairing') }}</div>
+        <h1 class="page-title">Pair clients</h1>
+        <p class="page-subtitle">Start with one route, then review saved devices.</p>
+        <div class="page-meta">
+          <span class="meta-pill">{{ pairedCount }} saved</span>
+          <span class="meta-pill">{{ activePairingMethodLabel }}</span>
         </div>
       </div>
     </section>
@@ -61,31 +16,16 @@
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div class="min-w-0">
           <div class="section-kicker">{{ $t('pin.pair_device') }}</div>
-          <div class="section-title-row">
-            <h2 class="section-title">{{ $t('pin.pair_device_title') }}</h2>
-            <InfoHint size="sm" label="Pairing setup guidance">
-              {{ $t('pin.pair_device_desc') }}
-            </InfoHint>
-          </div>
-          <p class="section-copy max-w-3xl">Start with QR, then fall back to trusted LAN or manual PIN only when needed.</p>
-        </div>
-        <div class="max-w-md rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
-          <div class="flex items-center gap-2">
-            <span class="font-medium text-amber-200">{{ $t('_common.warning') }}</span>
-            <InfoHint size="sm" align="right" label="Pairing safety warning">
-              {{ $t('pin.warning_msg') }}
-            </InfoHint>
-          </div>
-          <div class="mt-1 text-sm text-amber-100">Pairing opens host access. Review the client profile before you leave.</div>
+          <h2 class="section-title">Pair a device</h2>
         </div>
       </div>
 
-      <div class="mt-5 grid gap-3 lg:grid-cols-3">
+      <div class="pairing-methods mt-5 grid gap-3 lg:grid-cols-3">
         <button
           v-for="method in pairingMethods"
           :key="method.key"
           type="button"
-          class="focus-ring rounded-xl border px-4 py-3 text-left transition-[border-color,background-color,box-shadow] duration-200"
+          class="focus-ring pairing-method-card rounded-xl border px-4 py-3 text-left transition-[border-color,background-color,box-shadow] duration-200"
           :class="currentTab === method.key
             ? 'border-ice/40 bg-twilight/70 shadow-[0_0_32px_rgba(124,110,255,0.12)]'
             : 'border-storm/20 bg-deep/40 hover:border-storm/40 hover:bg-twilight/30'"
@@ -108,19 +48,24 @@
         </button>
       </div>
 
-      <div class="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
-        <div class="space-y-4">
+      <div class="pairing-flow-strip mt-5">
+        <div class="pairing-flow-copy">
+          <span class="meta-pill">{{ activePairingMethodLabel }}</span>
+          <p class="pairing-flow-text">{{ activePairingSummary }}</p>
+        </div>
+        <div class="pairing-inline-note">
+          <span class="pairing-inline-note-label">{{ $t('_common.warning') }}</span>
+          <span>Review access before sharing the client.</span>
+        </div>
+      </div>
+
+      <div class="pairing-stage mt-5">
+        <div class="pairing-main space-y-4">
           <section v-if="currentTab === 'TOFU'" class="surface-subtle p-5">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.method_trusted_network') }}</div>
-                <div class="section-title-row mt-2">
-                  <h3 class="text-lg font-semibold text-silver">{{ $t('pin.method_trusted_network') }}</h3>
-                  <InfoHint size="sm" label="Trusted network guidance">
-                    {{ $t('pin.trusted_network_desc') }}
-                  </InfoHint>
-                </div>
-                <p class="mt-2 max-w-2xl text-sm text-storm">Only use this on networks you fully control.</p>
+              <div class="min-w-0">
+                <h3 class="section-title">{{ $t('pin.method_trusted_network') }}</h3>
+                <p class="mt-2 text-sm text-storm">{{ $t('pin.trusted_network_desc') }}</p>
               </div>
               <a
                 href="#/config"
@@ -152,15 +97,9 @@
             class="surface-subtle p-5"
             @submit.prevent="registerDevice"
           >
-            <div>
-              <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.method_manual_pin') }}</div>
-              <div class="section-title-row mt-2">
-                <h3 class="text-lg font-semibold text-silver">{{ $t('pin.manual_pin_title') }}</h3>
-                <InfoHint size="sm" label="Manual PIN guidance">
-                  {{ $t('pin.manual_pin_desc') }}
-                </InfoHint>
-              </div>
-              <p class="mt-2 text-sm text-storm">Use the PIN shown on the client when QR or trusted-network pairing is not available.</p>
+            <div class="min-w-0">
+              <h3 class="section-title">{{ $t('pin.manual_pin_title') }}</h3>
+              <p class="mt-2 text-sm text-storm">{{ $t('pin.manual_pin_desc') }}</p>
             </div>
 
             <div class="mt-5 grid gap-4">
@@ -198,9 +137,6 @@
                 >
                   {{ $t('pin.send') }}
                 </button>
-                <InfoHint size="sm" label="Manual PIN hint">
-                  {{ $t('pin.manual_pin_hint') }}
-                </InfoHint>
               </div>
             </div>
 
@@ -222,15 +158,9 @@
           >
             <div class="flex flex-col gap-5 lg:grid lg:grid-cols-[minmax(0,0.95fr)_minmax(220px,0.85fr)]">
               <div class="space-y-4">
-                <div>
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.method_nova_qr') }}</div>
-                  <div class="section-title-row mt-2">
-                    <h3 class="text-lg font-semibold text-silver">{{ otp ? $t('pin.qr_ready_title') : $t('pin.qr_title') }}</h3>
-                    <InfoHint size="sm" label="QR pairing guidance">
-                      {{ otp ? $t('pin.qr_ready_desc') : $t('pin.qr_desc') }}
-                    </InfoHint>
-                  </div>
-                  <p class="mt-2 text-sm text-storm">Generate a passphrase once, then scan or open the deep link from Nova.</p>
+                <div class="min-w-0">
+                  <h3 class="section-title">{{ otp ? $t('pin.qr_ready_title') : $t('pin.qr_title') }}</h3>
+                  <p class="mt-2 text-sm text-storm">{{ otp ? $t('pin.qr_ready_desc') : $t('pin.qr_desc') }}</p>
                 </div>
 
                 <div v-if="editingHost" class="grid gap-3">
@@ -316,9 +246,6 @@
                       </svg>
                       {{ otp ? $t('pin.regenerate_qr') : $t('pin.generate_qr') }}
                     </button>
-                    <InfoHint size="sm" label="QR generation hint">
-                      {{ $t('pin.qr_hint') }}
-                    </InfoHint>
                   </div>
                 </div>
               </div>
@@ -367,32 +294,6 @@
             </div>
           </form>
         </div>
-
-        <aside class="space-y-4">
-          <section class="surface-subtle p-4">
-            <div class="section-kicker">Current path</div>
-            <div class="section-title-row mt-2">
-              <div class="text-sm font-semibold text-silver">{{ activePairingMethodLabel }}</div>
-              <InfoHint size="sm" align="right" label="Current path details">
-                <span v-if="currentTab === 'TOFU'">{{ $t('pin.trusted_network_how') }}</span>
-                <span v-else-if="currentTab === 'PIN'">{{ $t('pin.manual_pin_how') }}</span>
-                <span v-else>{{ $t('pin.qr_how') }}</span>
-              </InfoHint>
-            </div>
-            <p class="mt-2 text-sm text-storm">{{ activePairingSummary }}</p>
-          </section>
-
-          <section class="surface-subtle p-4">
-            <div class="section-kicker">{{ $t('pin.security_note') }}</div>
-            <div class="section-title-row mt-2">
-              <div class="text-sm font-semibold text-silver">Review device access</div>
-              <InfoHint size="sm" align="right" label="Post-pairing guidance">
-                {{ $t('pin.warning_msg') }}
-              </InfoHint>
-            </div>
-            <p class="mt-2 text-sm text-storm">Confirm the access preset, wake settings, and display profile before handing the client off.</p>
-          </section>
-        </aside>
       </div>
     </section>
 
@@ -405,23 +306,15 @@
       <div class="p-5">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div class="min-w-0">
-            <div class="section-title-row">
-              <h2 id="unpair" class="text-xl font-semibold text-silver">{{ $t('pin.device_management') }}</h2>
-              <InfoHint size="sm" label="Device management overview">
-                {{ $t('pin.device_management_desc') }}
-              </InfoHint>
-              <InfoHint size="sm" label="Permission system warning">
-                {{ $t('pin.device_management_warning') }}
-              </InfoHint>
-            </div>
-            <p class="mt-2 max-w-3xl text-sm text-storm">Connected clients, access presets, wake tools, and display profiles.</p>
+            <div class="section-kicker">{{ $t('pin.paired_devices') }}</div>
+            <h2 id="unpair" class="section-title">Saved devices</h2>
           </div>
-          <div class="flex flex-wrap items-center gap-2">
+          <div class="pairing-device-toolbar flex flex-wrap items-center gap-2">
             <span class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-xs text-storm">
-              {{ pairedCount }} {{ $t('pin.paired_devices') }}
+              {{ pairedCount }} saved
             </span>
             <span class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-xs text-storm">
-              {{ connectedCount }} {{ $t('pin.connected_now') }}
+              {{ connectedCount }} connected
             </span>
             <button
               type="button"
@@ -473,13 +366,13 @@
           >
             <div v-if="client.editing" class="w-full max-w-[1120px] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-2xl border border-storm/20 bg-deep/95 shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
             <div class="p-5">
-              <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div class="pairing-client-toolbar flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
                   <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.edit_access') }}</div>
                   <h3 :id="`client-edit-title-${client.uuid}`" class="mt-2 text-lg font-semibold text-silver">{{ client.name || $t('pin.unpair_single_unknown') }}</h3>
-                  <p class="mt-2 text-sm text-storm">{{ $t('pin.edit_access_desc') }}</p>
+                  <p class="mt-2 text-sm text-storm">Update access, display behavior, and client actions.</p>
                 </div>
-                <div class="flex flex-wrap items-center gap-2">
+                <div class="pairing-client-actions flex flex-wrap items-center gap-2">
                   <span
                     class="rounded-full border px-2.5 py-1 text-xs font-medium"
                     :class="client.connected
@@ -800,7 +693,7 @@
             </div>
 
             <div v-else class="p-5">
-              <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div class="pairing-client-toolbar flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div class="min-w-0">
                   <div class="flex flex-wrap items-center gap-2">
                     <h3 class="text-lg font-semibold text-silver">{{ client.name !== '' ? client.name : $t('pin.unpair_single_unknown') }}</h3>
@@ -822,7 +715,7 @@
                   <div class="mt-3 font-mono text-xs text-storm">[ {{ permToStr(client.perm) }} ]</div>
                 </div>
 
-                <div class="flex flex-wrap items-center gap-2">
+                <div class="pairing-client-actions flex flex-wrap items-center gap-2">
                   <button
                     v-if="client.name"
                     type="button"
@@ -872,33 +765,18 @@
                 </div>
               </div>
 
-              <div class="mt-4 grid gap-3 md:grid-cols-3">
-                <div class="rounded-xl border border-storm/20 bg-void/40 p-3">
-                  <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">
-                    <span>{{ $t('pin.permissions_summary') }}</span>
-                    <InfoHint size="sm" label="Permissions summary details">
-                      {{ $t('pin.permissions_summary_desc') }}
-                    </InfoHint>
-                  </div>
-                  <div class="mt-2 text-sm font-medium text-silver">{{ accessPresetLabel(client.perm) }}</div>
+              <div class="mt-4 grid gap-2 md:grid-cols-3">
+                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
+                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.permissions_summary') }}</div>
+                  <div class="mt-1.5 text-sm font-medium text-silver">{{ accessPresetLabel(client.perm) }}</div>
                 </div>
-                <div class="rounded-xl border border-storm/20 bg-void/40 p-3">
-                  <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">
-                    <span>{{ $t('pin.display_summary') }}</span>
-                    <InfoHint size="sm" label="Display summary details">
-                      {{ $t('pin.display_summary_desc') }}
-                    </InfoHint>
-                  </div>
-                  <div class="mt-2 text-sm font-medium text-silver">{{ clientDisplaySummary(client) }}</div>
+                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
+                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.display_summary') }}</div>
+                  <div class="mt-1.5 text-sm font-medium text-silver">{{ clientDisplaySummary(client) }}</div>
                 </div>
-                <div class="rounded-xl border border-storm/20 bg-void/40 p-3">
-                  <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">
-                    <span>{{ $t('pin.client_commands_summary') }}</span>
-                    <InfoHint size="sm" label="Client commands summary details">
-                      {{ $t('pin.client_commands_summary_desc') }}
-                    </InfoHint>
-                  </div>
-                  <div class="mt-2 text-sm font-medium text-silver">{{ clientCommandSummary(client) }}</div>
+                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
+                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.client_commands_summary') }}</div>
+                  <div class="mt-1.5 text-sm font-medium text-silver">{{ clientCommandSummary(client) }}</div>
                 </div>
               </div>
             </div>
@@ -912,7 +790,6 @@
 <script setup>
 import { computed, inject, nextTick, ref } from 'vue'
 import Checkbox from '../Checkbox.vue'
-import InfoHint from '../components/InfoHint.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
@@ -1116,7 +993,6 @@ const canSaveHost = computed(() => {
 
 const pairedCount = computed(() => clients.value.length)
 const connectedCount = computed(() => clients.value.filter((client) => client.connected).length)
-const trustedSubnetCount = computed(() => tofuSubnets.value.length)
 const activePairingMethod = computed(() =>
   pairingMethods.find((method) => method.key === currentTab.value) || pairingMethods[0]
 )

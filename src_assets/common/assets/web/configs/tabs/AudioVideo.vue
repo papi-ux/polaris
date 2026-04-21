@@ -7,7 +7,6 @@ import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
-import InfoHint from '../../components/InfoHint.vue'
 
 const $t = inject('i18n').t;
 
@@ -47,14 +46,8 @@ const validateFallbackMode = (event) => {
   <div id="audio-video" class="config-page">
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Capture strategy</div>
-        <div class="section-title-row">
-          <h3 class="settings-section-title">Launch mode and capture path</h3>
-          <InfoHint size="sm" label="Capture strategy guidance">
-            Choose whether Polaris streams from an invisible compositor or a visible desktop, then point capture at the GPU path that should handle encoding.
-          </InfoHint>
-        </div>
-        <p class="settings-section-copy">Headless versus visible sessions, plus capture path selection.</p>
+        <div class="section-kicker">Capture</div>
+        <h3 class="settings-section-title">Launch mode and capture path</h3>
       </div>
 
       <div class="settings-inline-stack">
@@ -65,7 +58,7 @@ const validateFallbackMode = (event) => {
                 Headless Mode
                 <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-ice">Primary path</span>
               </div>
-              <div class="mt-1 text-sm text-storm">Run games inside the hidden labwc compositor instead of borrowing the visible desktop. This is the cleanest launch path when you want isolated sessions and predictable control ownership.</div>
+              <div class="mt-1 text-sm text-storm">Use the hidden labwc compositor instead of the visible desktop.</div>
             </div>
             <label class="relative inline-flex shrink-0 items-center cursor-pointer">
               <input
@@ -85,7 +78,7 @@ const validateFallbackMode = (event) => {
           <div class="grid gap-4 xl:grid-cols-2">
             <div class="surface-muted p-4">
               <div class="text-sm font-medium text-silver">Prefer GPU-Native Capture</div>
-              <div class="mt-1 text-sm text-storm">Keep DMA-BUF and other GPU-native capture paths first. If invisible capture would fall back to SHM, Polaris can temporarily choose a visible compositor path to preserve NVENC or VAAPI performance.</div>
+              <div class="mt-1 text-sm text-storm">Keep DMA-BUF and other GPU capture paths first.</div>
               <label class="mt-4 flex items-center justify-between gap-4">
                 <span class="text-xs uppercase tracking-[0.18em] text-storm">Performance first</span>
                 <input
@@ -100,7 +93,7 @@ const validateFallbackMode = (event) => {
 
             <div class="surface-muted p-4">
               <div class="text-sm font-medium text-silver">Capture Telemetry Profiling</div>
-              <div class="mt-1 text-sm text-storm">Emit Linux capture dispatch and ingest timing summaries every 600 frames. Use this only when comparing SHM fallback against DMA-BUF paths or validating a new backend.</div>
+              <div class="mt-1 text-sm text-storm">Emit timing summaries while validating capture backends.</div>
               <label class="mt-4 flex items-center justify-between gap-4">
                 <span class="text-xs uppercase tracking-[0.18em] text-storm">Diagnostics</span>
                 <input
@@ -148,19 +141,17 @@ const validateFallbackMode = (event) => {
       </div>
     </section>
 
-    <section class="settings-section">
-      <div class="settings-section-header">
-        <div class="section-kicker">Audio routing</div>
-        <div class="section-title-row">
-          <h3 class="settings-section-title">Host audio capture</h3>
-          <InfoHint size="sm" label="Audio routing guidance">
-            Pick the sink Polaris should capture from, decide whether audio stays enabled for sessions, and keep the host audio path predictable for desktop or Steam launches.
-          </InfoHint>
+    <details class="settings-section settings-disclosure" open>
+      <summary class="settings-disclosure-summary">
+        <div>
+          <div class="section-kicker">Audio</div>
+          <h3 class="settings-section-title mt-2">Host audio capture</h3>
+          <div class="settings-summary-copy">Choose the sink Polaris captures from and keep the host audio path predictable.</div>
         </div>
-        <p class="settings-section-copy">Captured sink, session audio behavior, and Windows sink management.</p>
-      </div>
+        <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+      </summary>
 
-      <div class="settings-inline-stack">
+      <div class="settings-disclosure-body settings-inline-stack">
         <Checkbox
           id="stream_audio"
           locale-prefix="config"
@@ -179,7 +170,7 @@ const validateFallbackMode = (event) => {
           />
           <div class="text-sm text-storm mt-1">{{ $tp('config.audio_sink_desc') }}</div>
           <div class="settings-subtle-surface mt-3 text-sm text-storm">
-            <div class="section-kicker">Discovery helpers</div>
+            <div class="section-kicker">Lookup commands</div>
             <PlatformLayout :platform="platform">
               <template #windows>
                 <pre class="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-xs text-silver">tools\audio-info.exe</pre>
@@ -241,21 +232,19 @@ pactl info | grep Source</pre>
           </template>
         </PlatformLayout>
       </div>
-    </section>
+    </details>
 
-    <section class="settings-section">
-      <div class="settings-section-header">
-        <div class="section-kicker">Display routing</div>
-        <div class="section-title-row">
-          <h3 class="settings-section-title">Outputs and fallback modes</h3>
-          <InfoHint size="sm" label="Display routing guidance">
-            Point Polaris at the right physical or virtual display, define how it should react when the client asks for an unsupported mode, and review live virtual display backend status on Linux.
-          </InfoHint>
+    <details class="settings-section settings-disclosure">
+      <summary class="settings-disclosure-summary">
+        <div>
+          <div class="section-kicker">Display</div>
+          <h3 class="settings-section-title mt-2">Outputs and fallback modes</h3>
+          <div class="settings-summary-copy">Point Polaris at the right display and define how unsupported modes should fall back.</div>
         </div>
-        <p class="settings-section-copy">Output selection, fallback display modes, and virtual display status.</p>
-      </div>
+        <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+      </summary>
 
-      <div class="settings-inline-stack">
+      <div class="settings-disclosure-body settings-inline-stack">
         <DisplayOutputSelector
           :platform="platform"
           :config="config"
@@ -297,21 +286,19 @@ pactl info | grep Source</pre>
           :config="config"
         />
       </div>
-    </section>
+    </details>
 
-    <section class="settings-section">
-      <div class="settings-section-header">
-        <div class="section-kicker">Stream delivery</div>
-        <div class="section-title-row">
-          <h3 class="settings-section-title">Bitrate and pacing</h3>
-          <InfoHint size="sm" label="Stream delivery guidance">
-            Set your hard bitrate ceiling, the minimum pacing target Polaris should keep encoding against, and whether the host can react to changing network conditions automatically.
-          </InfoHint>
+    <details class="settings-section settings-disclosure">
+      <summary class="settings-disclosure-summary">
+        <div>
+          <div class="section-kicker">Delivery</div>
+          <h3 class="settings-section-title mt-2">Bitrate and pacing</h3>
+          <div class="settings-summary-copy">Set the bitrate ceiling, pacing floor, and how the host reacts to network changes.</div>
         </div>
-        <p class="settings-section-copy">Hard bitrate limits, pacing floor, and adaptive bitrate behavior.</p>
-      </div>
+        <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+      </summary>
 
-      <div class="settings-inline-stack">
+      <div class="settings-disclosure-body settings-inline-stack">
         <div class="settings-form-grid">
           <div>
             <label for="max_bitrate" class="block text-sm font-medium text-storm mb-1">{{ $t("config.max_bitrate") }}</label>
@@ -330,7 +317,7 @@ pactl info | grep Source</pre>
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
               <div class="text-sm font-medium text-silver">Adaptive Bitrate</div>
-              <div class="mt-1 text-sm text-storm">Reduce bitrate on packet loss or RTT spikes, then recover gradually once the path stabilizes. This works best when you want Polaris to absorb network turbulence without a full stream restart.</div>
+              <div class="mt-1 text-sm text-storm">Reduce bitrate on loss or RTT spikes, then recover gradually.</div>
             </div>
             <label class="relative inline-flex shrink-0 items-center cursor-pointer">
               <input
@@ -373,7 +360,7 @@ pactl info | grep Source</pre>
           </div>
         </div>
       </div>
-    </section>
+    </details>
   </div>
 </template>
 

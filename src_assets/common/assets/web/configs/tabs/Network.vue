@@ -25,7 +25,6 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
             Define how Polaris announces itself, which ports it serves, and whether the web UI stays local-only or can be reached remotely.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Discovery, ports, and whether the web UI stays local, LAN-only, or exposed wider.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -73,6 +72,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
         </div>
 
         <div class="settings-subtle-surface mt-3">
+          <div class="mb-2 text-[11px] font-medium uppercase tracking-[0.18em] text-storm">Port map</div>
           <table class="w-full text-left">
             <thead>
             <tr>
@@ -146,7 +146,6 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
             Choose how aggressively Polaris encrypts LAN and WAN sessions, then define which subnets can use the trusted TOFU pairing path.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">LAN/WAN encryption posture plus trusted-subnet pairing rules.</p>
       </div>
 
       <div class="mb-3">
@@ -184,15 +183,15 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
             :checked="config.trusted_subnet_auto_pairing === 'enabled'"
             @change="config.trusted_subnet_auto_pairing = $event.target.checked ? 'enabled' : 'disabled'"
           />
-          <span>Allow clients on trusted subnets to pair automatically without a PIN.</span>
+          <span>Allow trusted subnets to pair without a PIN.</span>
         </label>
-        <div class="text-sm text-storm mt-2">Disabled by default. Enable this only on networks you fully control.</div>
+        <div class="text-sm text-storm mt-2">Disabled by default. Use only on networks you fully control.</div>
       </div>
 
       <div class="mb-3">
         <label class="block text-sm font-medium text-storm mb-1">Trusted Subnets (TOFU)</label>
         <div class="text-sm text-storm mb-2">
-          Clients on these subnets can pair automatically without a PIN. Use CIDR notation (e.g. <code class="bg-deep px-1 rounded">10.0.0.0/24</code>).
+          Use CIDR notation, for example <code class="bg-deep px-1 rounded">10.0.0.0/24</code>.
         </div>
         <div v-if="config.trusted_subnets && config.trusted_subnets.length > 0" class="space-y-2 mb-2">
           <div v-for="(subnet, index) in config.trusted_subnets" :key="index" class="flex items-center gap-2">

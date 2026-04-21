@@ -18,12 +18,11 @@ const config = ref(props.config)
       <div class="settings-section-header">
         <div class="section-kicker">Controllers</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Gamepad handling</h3>
+          <h3 class="settings-section-title">Gamepads</h3>
           <InfoHint size="sm" label="Gamepad handling guidance">
             Choose how Polaris emulates controllers on the host and how automatic DS4 or DS5 mapping should behave.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Host controller emulation plus DS4 and DS5 mapping behavior.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -34,7 +33,10 @@ const config = ref(props.config)
       ></Checkbox>
 
       <div class="mb-3" v-if="config.controller === 'enabled' && platform !== 'macos'">
-      <label for="gamepad" class="block text-sm font-medium text-storm mb-1">{{ $t('config.gamepad') }}</label>
+      <div class="settings-field-head">
+        <label for="gamepad" class="settings-field-label">{{ $t('config.gamepad') }}</label>
+        <InfoHint size="sm" :label="$t('config.gamepad')">{{ $t('config.gamepad_desc') }}</InfoHint>
+      </div>
       <select id="gamepad" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.gamepad">
         <option value="auto">{{ $t('_common.auto') }}</option>
 
@@ -51,7 +53,6 @@ const config = ref(props.config)
           </template>
         </PlatformLayout>
       </select>
-      <div class="text-sm text-storm mt-1">{{ $t('config.gamepad_desc') }}</div>
       </div>
 
       <template v-if="config.controller === 'enabled'">
@@ -102,10 +103,12 @@ const config = ref(props.config)
       </template>
 
       <div class="mb-3" v-if="config.controller === 'enabled'">
-      <label for="back_button_timeout" class="block text-sm font-medium text-storm mb-1">{{ $t('config.back_button_timeout') }}</label>
+      <div class="settings-field-head">
+        <label for="back_button_timeout" class="settings-field-label">{{ $t('config.back_button_timeout') }}</label>
+        <InfoHint size="sm" :label="$t('config.back_button_timeout')">{{ $t('config.back_button_timeout_desc') }}</InfoHint>
+      </div>
       <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="back_button_timeout" placeholder="-1"
              v-model="config.back_button_timeout" />
-      <div class="text-sm text-storm mt-1">{{ $t('config.back_button_timeout_desc') }}</div>
       </div>
     </section>
 
@@ -113,12 +116,11 @@ const config = ref(props.config)
       <div class="settings-section-header">
         <div class="section-kicker">Keyboard</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Keyboard passthrough</h3>
+          <h3 class="settings-section-title">Keyboard</h3>
           <InfoHint size="sm" label="Keyboard passthrough guidance">
             Tune repeat behavior and compatibility so host shortcuts, desktop navigation, and keyboard-heavy titles behave correctly.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Repeat timing, scancode behavior, and desktop shortcut compatibility.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -129,17 +131,21 @@ const config = ref(props.config)
       ></Checkbox>
 
       <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
-      <label for="key_repeat_delay" class="block text-sm font-medium text-storm mb-1">{{ $t('config.key_repeat_delay') }}</label>
+      <div class="settings-field-head">
+        <label for="key_repeat_delay" class="settings-field-label">{{ $t('config.key_repeat_delay') }}</label>
+        <InfoHint size="sm" :label="$t('config.key_repeat_delay')">{{ $t('config.key_repeat_delay_desc') }}</InfoHint>
+      </div>
       <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="key_repeat_delay" placeholder="500"
              v-model="config.key_repeat_delay" />
-      <div class="text-sm text-storm mt-1">{{ $t('config.key_repeat_delay_desc') }}</div>
       </div>
 
       <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
-      <label for="key_repeat_frequency" class="block text-sm font-medium text-storm mb-1">{{ $t('config.key_repeat_frequency') }}</label>
+      <div class="settings-field-head">
+        <label for="key_repeat_frequency" class="settings-field-label">{{ $t('config.key_repeat_frequency') }}</label>
+        <InfoHint size="sm" :label="$t('config.key_repeat_frequency')">{{ $t('config.key_repeat_frequency_desc') }}</InfoHint>
+      </div>
       <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="key_repeat_frequency" placeholder="24.9"
              v-model="config.key_repeat_frequency" />
-      <div class="text-sm text-storm mt-1">{{ $t('config.key_repeat_frequency_desc') }}</div>
       </div>
 
       <Checkbox v-if="config.keyboard === 'enabled' && platform === 'windows'"
@@ -163,12 +169,11 @@ const config = ref(props.config)
       <div class="settings-section-header">
         <div class="section-kicker">Mouse & Touch</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Pointer and touch input</h3>
+          <h3 class="settings-section-title">Pointer and touch</h3>
           <InfoHint size="sm" label="Pointer and touch guidance">
             Control mouse capture, cursor visibility, scrolling fidelity, and native pen or touch passthrough.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">Mouse capture, visible cursor behavior, and touch or pen passthrough.</p>
       </div>
 
       <Checkbox class="mb-3"
@@ -178,13 +183,14 @@ const config = ref(props.config)
                 default="true"
       ></Checkbox>
 
-      <div v-if="config.mouse === 'enabled'" class="border border-storm/30 rounded-lg p-4 mb-3 bg-deep/40">
-      <div class="flex items-center justify-between gap-4">
+      <div v-if="config.mouse === 'enabled'" class="settings-toggle-row mb-3">
+      <div class="min-w-0">
         <div>
-          <div class="text-sm font-medium text-silver">Show Host Cursor in Stream</div>
-          <div class="text-xs text-storm mt-1">
-            Controls whether Polaris draws the host cursor into the video stream. Disabled by default.
-            You can still toggle it at runtime with <code>Ctrl+Alt+Shift+N</code>.
+          <div class="settings-field-head !mb-0">
+            <div class="text-sm font-medium text-silver">Show host cursor</div>
+            <InfoHint size="sm" label="Show host cursor">
+              Controls whether Polaris draws the host cursor into the video stream. You can still toggle it at runtime with Ctrl+Alt+Shift+N.
+            </InfoHint>
           </div>
         </div>
         <label class="relative inline-flex items-center cursor-pointer shrink-0">
@@ -220,12 +226,11 @@ const config = ref(props.config)
       <div class="settings-section-header">
         <div class="section-kicker">Accessories</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Extended input options</h3>
+          <h3 class="settings-section-title">Extras</h3>
           <InfoHint size="sm" label="Extended input guidance">
             Expose input-only mode for TV workflows and forward rumble where the host platform supports it.
           </InfoHint>
         </div>
-        <p class="settings-section-copy">TV-style input-only workflows and platform-specific rumble forwarding.</p>
       </div>
 
       <Checkbox class="mb-3"

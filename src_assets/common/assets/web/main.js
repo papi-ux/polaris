@@ -10,6 +10,7 @@ import {
   redirectToIpv4Loopback,
   wrapFetchWithCsrfToken,
 } from './router-helpers.js'
+import { clearCachedConfig, primeCachedConfig } from './config-cache.js'
 
 // CSRF token from server-injected meta tag
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || ''
@@ -39,18 +40,44 @@ const router = createRouter({
 // Uses a cached auth flag to avoid making a fetch on every navigation,
 // which exhausts server connections when response bodies aren't consumed.
 let authed = false
+window.__POLARIS_AUTHENTICATED__ = false
 router.beforeEach(async (to, _from) => {
   if (!isPublicRoute(to.path)) {
     if (authed) return
     try {
-      const res = await fetch('./api/config')
+      const res = await fetch('./api/config', { credentials: 'include' })
       const finalPath = res.redirected ? new URL(res.url).pathname : ''
-      await res.text()
-      if (finalPath.endsWith('/welcome')) return '/welcome'
-      if (res.status === 401) return '/login'
-      if (!res.ok) return '/login'
+      if (finalPath.endsWith('/welcome')) {
+        window.__POLARIS_AUTHENTICATED__ = false
+        clearCachedConfig()
+        return '/welcome'
+      }
+      if (finalPath.endsWith('/login')) {
+        window.__POLARIS_AUTHENTICATED__ = false
+        clearCachedConfig()
+        return '/login'
+      }
+      if (res.status === 401) {
+        window.__POLARIS_AUTHENTICATED__ = false
+        clearCachedConfig()
+        return '/login'
+      }
+      if (!res.ok) {
+        window.__POLARIS_AUTHENTICATED__ = false
+        clearCachedConfig()
+        return '/login'
+      }
+      const contentType = res.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        primeCachedConfig(await res.json())
+      } else {
+        await res.text()
+      }
       authed = true
+      window.__POLARIS_AUTHENTICATED__ = true
     } catch (e) {
+      window.__POLARIS_AUTHENTICATED__ = false
+      clearCachedConfig()
       return '/login'
     }
   }

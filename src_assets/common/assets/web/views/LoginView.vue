@@ -2,8 +2,8 @@
   <div class="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center px-4 py-8 sm:px-6">
     <div class="w-full max-w-5xl">
       <section class="page-hero auth-stage auth-stage--login overflow-visible">
-        <div class="page-hero-content items-start">
-          <div class="page-hero-copy">
+        <div class="page-hero-content auth-login-header items-start">
+          <div class="page-hero-copy auth-login-copy">
             <div class="flex items-center gap-3">
               <img src="/images/logo-polaris.svg" class="h-12" alt="Polaris">
               <div>
@@ -12,24 +12,18 @@
               </div>
             </div>
 
-            <p class="page-hero-copy-text max-w-xl">
-              Sign in to manage the host, pairing, and published apps from one control surface.
+            <p class="page-hero-copy-text auth-login-copy-text">
+              Sign in to manage the host from one local control surface.
             </p>
-
-            <div class="page-hero-actions">
-              <span class="auth-chip">Mission Control</span>
-              <span class="auth-chip">Pairing</span>
-              <span class="auth-chip">Library</span>
-            </div>
           </div>
 
-          <div class="page-hero-aside hidden lg:block">
-            <div class="auth-orbit-panel">
+          <div class="page-hero-aside auth-login-aside hidden lg:block">
+            <div class="auth-login-panel">
               <div class="auth-panel-kicker">After Sign-In</div>
               <div class="auth-panel-copy">
-                Mission Control, pairing, library, and settings stay within one surface.
+                Mission Control, pairing, Library, and Settings stay one click away.
               </div>
-              <div class="auth-orbit-field" aria-hidden="true">
+              <div class="auth-orbit-field auth-orbit-field--compact" aria-hidden="true">
                 <div class="auth-orbit-ring auth-orbit-ring--outer"></div>
                 <div class="auth-orbit-ring auth-orbit-ring--mid"></div>
                 <div class="auth-orbit-core"></div>
@@ -38,12 +32,21 @@
                 <span class="auth-orbit-node auth-orbit-node--lower-left">Pairing</span>
                 <span class="auth-orbit-node auth-orbit-node--lower-right">Settings</span>
               </div>
+              <div class="auth-login-panel-footer">
+                <div class="auth-login-panel-title-row">
+                  Secure session
+                  <InfoHint align="right" label="Session security">
+                    Treat Polaris like a local system console. Sign out or close the browser on shared devices when you are done.
+                  </InfoHint>
+                </div>
+                <div class="auth-note-copy">Remember credentials only on a device you control.</div>
+              </div>
             </div>
           </div>
         </div>
 
         <div class="relative z-[1] border-t border-storm/15 px-6 py-6 md:px-7 md:py-7">
-          <form @submit.prevent="login" class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
+          <form @submit.prevent="login" class="auth-login-form">
             <div class="space-y-4">
               <div>
                 <label for="usernameInput" class="mb-1 block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
@@ -112,26 +115,6 @@
                 <b>{{ $t('_common.success') }}</b> {{ $t('welcome.login_success') }}
               </div>
             </div>
-
-            <aside class="space-y-3">
-              <div class="auth-note">
-                <div class="auth-note-title">Access Scope</div>
-                <div class="auth-note-copy">Pair clients, tune the host, and publish only the apps you want exposed.</div>
-              </div>
-              <div class="auth-note">
-                <div class="flex items-center gap-2 text-sm font-medium text-silver">
-                  Secure session
-                  <InfoHint align="right" label="Session security">
-                    Treat Polaris like a local system console. Sign out or close the browser on shared devices when you are done.
-                  </InfoHint>
-                </div>
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <span class="auth-data-pill">Host health</span>
-                  <span class="auth-data-pill">Client pairing</span>
-                  <span class="auth-data-pill">Runtime config</span>
-                </div>
-              </div>
-            </aside>
           </form>
         </div>
       </section>
@@ -253,3 +236,103 @@ async function login() {
   }
 }
 </script>
+
+<style scoped>
+.auth-login-form {
+  display: block;
+}
+
+.auth-login-header {
+  gap: 1.1rem;
+  padding: 1.4rem 1.45rem 1.2rem;
+  grid-template-columns: minmax(0, 1.08fr) minmax(290px, 0.74fr);
+}
+
+.auth-login-copy {
+  max-width: 32rem;
+}
+
+.auth-login-copy-text {
+  max-width: 24rem;
+}
+
+.auth-login-aside {
+  max-width: 22rem;
+  justify-self: end;
+}
+
+.auth-login-panel {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(200, 214, 229, 0.1);
+  border-radius: 1.35rem;
+  background: linear-gradient(180deg, rgba(9, 14, 22, 0.72), rgba(8, 12, 18, 0.86));
+  padding: 1rem 1rem 0.95rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.auth-login-panel-footer {
+  margin-top: 0.8rem;
+  border-top: 1px solid rgba(200, 214, 229, 0.08);
+  padding-top: 0.75rem;
+}
+
+.auth-login-panel-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: rgb(232 237 243 / 0.9);
+}
+
+.auth-orbit-field--compact {
+  min-height: 124px;
+  margin-top: 0.8rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-ring--outer) {
+  width: 8.6rem;
+  height: 8.6rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-ring--mid) {
+  width: 5.9rem;
+  height: 5.9rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-core) {
+  width: 3.35rem;
+  height: 3.35rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node) {
+  padding: 0.28rem 0.56rem;
+  font-size: 0.64rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--primary) {
+  top: 0.55rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--right) {
+  right: 0;
+  top: 2.45rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--lower-left) {
+  left: 0.55rem;
+  bottom: 0.55rem;
+}
+
+.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--lower-right) {
+  right: 0.2rem;
+  bottom: 0;
+}
+
+@media (max-width: 1279px) {
+  .auth-login-header {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

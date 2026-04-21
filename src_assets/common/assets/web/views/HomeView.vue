@@ -1,182 +1,80 @@
 <template>
   <div class="page-shell">
-    <section class="page-hero">
-      <div class="page-hero-content">
-        <div class="page-hero-copy">
-          <div class="page-hero-kicker">{{ $t('index.host_health') }}</div>
-          <h1 class="page-hero-title">{{ healthHeading }}</h1>
-          <div class="page-hero-copy-inline">
-            <p class="page-hero-copy-text">Health, version, and issue signals.</p>
-            <InfoHint size="sm" label="Host health details">
-              {{ healthDescription }}
-            </InfoHint>
-          </div>
-          <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
-            <span class="meta-pill font-medium" :class="healthBadgeClass">
-              {{ healthLabel }}
+    <section class="page-header system-page-header">
+      <div class="page-heading">
+        <div class="section-kicker">{{ $t('index.host_health') }}</div>
+        <h1 class="page-title">{{ systemHeaderTitle }}</h1>
+        <p class="page-subtitle">Version, health, and recent issues.</p>
+        <div class="page-meta">
+          <span class="meta-pill font-medium" :class="healthBadgeClass">
+            {{ healthLabel }}
+          </span>
+          <template v-if="hasIssueCounts">
+            <span v-for="counter in issueCounters" :key="counter.label" class="meta-pill">
+              <span class="font-medium text-silver">{{ counter.count }}</span>
+              <span class="ml-1">{{ $t(counter.label) }}</span>
             </span>
-            <template v-if="hasIssueCounts">
-              <span v-for="counter in issueCounters" :key="counter.label" class="meta-pill">
-                <span class="font-medium text-silver">{{ counter.count }}</span>
-                <span class="ml-1">{{ $t(counter.label) }}</span>
-              </span>
-            </template>
-            <span v-else class="meta-pill border-green-500/20 bg-green-500/10 text-green-200">
-              {{ $t('index.no_active_issues') }}
-            </span>
-          </div>
+          </template>
+          <span v-else class="meta-pill border-green-500/20 bg-green-500/10 text-green-200">
+            {{ $t('index.no_active_issues') }}
+          </span>
+        </div>
+      </div>
 
-          <div class="page-hero-actions">
-            <router-link
-              v-for="action in quickActions.slice(0, 3)"
-              :key="action.to"
-              :to="action.to"
-              class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm/25 bg-deep/35 px-3.5 text-sm font-medium text-silver transition-[border-color,background-color,color,transform] duration-200 hover:-translate-y-0.5 hover:border-ice/35 hover:bg-twilight/35 hover:text-ice no-underline"
+      <div class="system-toolbar-notes">
+        <article class="header-support-card">
+          <div class="header-support-title-row">
+            <div class="section-kicker !mb-0">Version</div>
+            <button
+              type="button"
+              class="focus-ring inline-flex h-7 items-center justify-center rounded-lg border border-storm px-2.5 text-[11px] font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice"
+              @click="copyVersion"
             >
-              {{ $t(action.titleKey) }}
-            </router-link>
+              {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
+            </button>
           </div>
+          <div class="header-support-value">{{ version?.version || '—' }}</div>
+          <div class="header-support-copy">{{ versionHeaderSummary }}</div>
+          <a
+            v-if="stableBuildAvailable"
+            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg bg-ice px-3 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] no-underline"
+            :href="githubVersion.release.html_url"
+            target="_blank"
+          >
+            {{ $t('index.view_release') }}
+          </a>
+          <a
+            v-else-if="notifyPreReleases && preReleaseBuildAvailable"
+            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg border border-purple-400/30 px-3 text-sm font-medium text-purple-200 transition-[background-color,border-color,color] duration-200 hover:bg-purple-500/10 no-underline"
+            :href="preReleaseVersion.release.html_url"
+            target="_blank"
+          >
+            {{ $t('index.view_release') }}
+          </a>
+        </article>
 
-          <div class="mt-6 page-hero-stat-grid">
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label-row">
-                <div class="page-hero-stat-label">{{ $t('dashboard.status') }}</div>
-                <InfoHint size="sm" label="Health status details">
-                  {{ $t('index.system_desc') }}
-                </InfoHint>
-              </div>
-              <div class="page-hero-stat-value" :class="healthState === 'critical' ? 'text-red-200' : healthState === 'warning' ? 'text-amber-200' : 'text-green-200'">{{ healthLabel }}</div>
-            </article>
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label-row">
-                <div class="page-hero-stat-label">{{ $t('index.version_updates') }}</div>
-                <InfoHint size="sm" label="Version status details">
-                  {{ versionSummary }}
-                </InfoHint>
-              </div>
-              <div class="page-hero-stat-value">{{ version?.version || '—' }}</div>
-            </article>
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label-row">
-                <div class="page-hero-stat-label">{{ $t('index.session_mode') }}</div>
-                <InfoHint size="sm" label="Session mode details">
-                  {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
-                </InfoHint>
-              </div>
-              <div class="page-hero-stat-value capitalize">{{ sessionType || $t('index.session_mode_idle') }}</div>
-            </article>
-            <article class="page-hero-stat">
-              <div class="page-hero-stat-label-row">
-                <div class="page-hero-stat-label">{{ $t('index.display_state') }}</div>
-                <InfoHint size="sm" label="Display state details">
-                  {{ $t('index.display_count') }}
-                </InfoHint>
-              </div>
-              <div class="page-hero-stat-value">{{ displays.length }}</div>
-            </article>
+        <article class="header-support-card">
+          <div class="section-kicker">Issues</div>
+          <div class="header-support-value">{{ recentIssues.length }}</div>
+          <div class="header-support-copy">
+            {{ recentIssues.length ? `${recentIssues.length} ${$t('index.visible_now')}` : 'No recent warnings or errors' }}
           </div>
-        </div>
-
-        <div class="page-hero-aside">
-          <article class="page-hero-note">
-            <div class="flex items-start justify-between gap-3">
-              <div>
-                <div class="section-title-row">
-                  <div class="section-kicker">{{ $t('index.version_updates') }}</div>
-                  <InfoHint size="sm" label="Version update details">
-                    {{ versionSummary }}
-                  </InfoHint>
-                </div>
-                <div v-if="version" class="mt-2 text-lg font-semibold text-silver">{{ version.version }}</div>
-              </div>
-              <button
-                type="button"
-                class="focus-ring inline-flex h-7 items-center justify-center rounded-lg border border-storm px-2.5 text-[11px] font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice"
-                @click="copyVersion"
-              >
-                {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
-              </button>
-            </div>
-
-            <div v-if="loading" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 px-4 py-4 text-sm text-storm">
-              {{ $t('index.loading_latest') }}
-            </div>
-            <div v-else class="mt-4 space-y-3">
-              <div v-if="buildVersionIsDirty" class="rounded-xl border border-amber-300/20 bg-amber-300/10 px-3.5 py-3 text-sm text-amber-100">
-                {{ $t('index.version_dirty') }}
-              </div>
-              <div v-else-if="installedVersionNotStable" class="rounded-xl border border-blue-400/20 bg-blue-400/10 px-3.5 py-3 text-sm text-blue-100">
-                {{ $t('index.installed_version_not_stable') }}
-              </div>
-              <div v-else-if="stableBuildAvailable" class="rounded-2xl border border-ice/20 bg-ice/10 p-3.5">
-                <div class="text-sm font-medium text-silver">{{ $t('index.new_stable') }}</div>
-                <div class="mt-1 text-xs text-storm">{{ githubVersion?.release?.name }}</div>
-                <a
-                  class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] no-underline"
-                  :href="githubVersion.release.html_url"
-                  target="_blank"
-                >
-                  {{ $t('index.view_release') }}
-                </a>
-              </div>
-              <div v-else-if="notifyPreReleases && preReleaseBuildAvailable" class="rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3.5">
-                <div class="text-sm font-medium text-silver">{{ $t('index.new_pre_release') }}</div>
-                <div class="mt-1 text-xs text-storm">{{ preReleaseVersion?.release?.name }}</div>
-                <a
-                  class="focus-ring mt-3 inline-flex h-9 items-center justify-center rounded-lg border border-purple-400/30 px-4 text-sm font-medium text-purple-200 transition-[background-color,border-color,color] duration-200 hover:bg-purple-500/10 no-underline"
-                  :href="preReleaseVersion.release.html_url"
-                  target="_blank"
-                >
-                  {{ $t('index.view_release') }}
-                </a>
-              </div>
-              <div v-else class="rounded-xl border border-green-500/20 bg-green-500/10 px-3.5 py-3 text-sm text-green-200">
-                {{ $t('index.version_latest') }}
-              </div>
-            </div>
-          </article>
-
-          <article class="page-hero-note">
-            <div class="flex items-center justify-between gap-3">
-              <div class="page-hero-note-title">{{ $t('index.recent_issues') }}</div>
-              <div class="text-xs text-storm">{{ recentIssues.length }} {{ $t('index.visible_now') }}</div>
-            </div>
-            <div v-if="recentIssues.length > 0" class="mt-4 space-y-1.5">
-              <div v-for="(entry, idx) in recentIssues" :key="`${entry.level}-${entry.message}-${idx}`" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2 text-sm text-silver">
-                <div class="flex items-start gap-3">
-                  <span class="mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]" :class="issueBadgeClass(entry.level)">
-                    {{ entry.level }}
-                  </span>
-                  <div class="min-w-0 flex-1">
-                    <div class="break-words">{{ entry.message }}</div>
-                    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-storm">
-                      <span>{{ entry.timestamp }}</span>
-                      <span v-if="entry.count > 1" class="meta-pill">{{ entry.count }}×</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div v-else class="mt-4 rounded-2xl border border-green-500/15 bg-green-500/10 px-3.5 py-3 text-sm text-green-200">
-              {{ $t('index.no_recent_issues') }}
-            </div>
-          </article>
-        </div>
+        </article>
       </div>
     </section>
 
     <section class="section-card">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <div class="section-kicker">{{ $t('index.system_snapshot') }}</div>
+          <div class="section-kicker">Host</div>
           <div class="section-title-row">
-            <h2 class="section-title">{{ $t('index.system_snapshot_title') }}</h2>
+            <h2 class="section-title">Telemetry</h2>
             <InfoHint size="sm" label="System snapshot details">
               {{ $t('index.system_snapshot_desc') }}
             </InfoHint>
           </div>
         </div>
-        <div class="text-xs text-storm">{{ systemLoading ? $t('index.system_snapshot_loading') : $t('index.system_snapshot_live') }}</div>
+        <div class="text-xs text-storm">{{ systemLoading ? 'Refreshing…' : 'Live' }}</div>
       </div>
 
       <div class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -233,9 +131,9 @@
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)]">
       <section class="section-card">
-        <div class="section-kicker">{{ $t('index.quick_actions') }}</div>
+        <div class="section-kicker">Actions</div>
         <div class="section-title-row">
-          <h2 class="section-title">{{ $t('index.quick_actions_title') }}</h2>
+          <h2 class="section-title">Shortcuts</h2>
           <InfoHint size="sm" label="Quick action details">
             {{ $t('index.quick_actions_desc') }}
           </InfoHint>
@@ -258,9 +156,9 @@
       </section>
 
       <section class="section-card">
-        <div class="section-kicker">{{ $t('index.compatibility') }}</div>
+        <div class="section-kicker">Clients</div>
         <div class="section-title-row">
-          <h2 class="section-title">{{ $t('index.compatibility_title') }}</h2>
+          <h2 class="section-title">Supported paths</h2>
           <InfoHint size="sm" label="Compatibility details">
             {{ $t('index.compatibility_desc') }}
           </InfoHint>
@@ -295,9 +193,9 @@
     <section class="section-card">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <div class="section-kicker">{{ $t('resource_card.resources') }}</div>
+          <div class="section-kicker">Resources</div>
           <div class="section-title-row">
-            <h2 class="section-title">{{ $t('index.resources_title') }}</h2>
+            <h2 class="section-title">Links</h2>
             <InfoHint size="sm" label="Resource details">
               {{ $t('index.resources_desc') }}
             </InfoHint>
@@ -320,7 +218,7 @@
     <section class="rounded-2xl border border-storm/20 bg-deep/30 p-4">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <div class="section-kicker">{{ $t('resource_card.legal') }}</div>
+          <div class="section-kicker">Legal</div>
           <p class="mt-2 text-sm text-storm">{{ $t('resource_card.legal_desc') }}</p>
         </div>
         <div class="flex flex-wrap gap-2">
@@ -470,25 +368,14 @@ const healthLabel = computed(() => {
   }
 })
 
-const healthHeading = computed(() => {
+const systemHeaderTitle = computed(() => {
   switch (healthState.value) {
     case 'critical':
-      return 'Startup issues need attention'
+      return 'Host needs attention'
     case 'warning':
-      return 'Host health looks mixed'
+      return 'Host status is mixed'
     default:
-      return 'Polaris looks healthy'
-  }
-})
-
-const healthDescription = computed(() => {
-  switch (healthState.value) {
-    case 'critical':
-      return 'Polaris detected fatal startup problems. Resolve these before trusting the host for real sessions.'
-    case 'warning':
-      return 'Polaris is running, but recent warnings or errors still need attention.'
-    default:
-      return 'No recent fatal, warning, or error lines are present in the active Polaris log.'
+      return 'Host is healthy'
   }
 })
 
@@ -503,25 +390,14 @@ const healthBadgeClass = computed(() => {
   }
 })
 
-const versionSummary = computed(() => {
-  if (!version.value) return ''
+const versionHeaderSummary = computed(() => {
+  if (!version.value) return 'Version unavailable'
   if (buildVersionIsDirty.value) return 'Local dirty build'
-  if (installedVersionNotStable.value) return 'Running a newer prerelease or local build than the latest stable tag'
-  if (stableBuildAvailable.value) return 'A newer stable release is available on GitHub'
-  if (notifyPreReleases.value && preReleaseBuildAvailable.value) return 'A newer prerelease is available on GitHub'
-  return 'Current with the latest public release'
+  if (installedVersionNotStable.value) return 'Running newer than the latest stable tag'
+  if (stableBuildAvailable.value) return 'New stable release available'
+  if (notifyPreReleases.value && preReleaseBuildAvailable.value) return 'New prerelease available'
+  return 'Current public release'
 })
-
-function issueBadgeClass(level) {
-  switch (level) {
-    case 'Fatal':
-      return 'border border-red-500/30 bg-red-500/10 text-red-200'
-    case 'Warning':
-      return 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
-    default:
-      return 'border border-storm/30 bg-deep/60 text-storm'
-  }
-}
 
 function buildIssueCounter(count, label, tone) {
   if (count === 0) {

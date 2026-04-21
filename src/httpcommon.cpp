@@ -316,16 +316,33 @@ namespace http {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 #ifdef _WIN32
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #endif
     CURLcode result = curl_easy_perform(curl);
+    long response_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
     if (result != CURLE_OK) {
       BOOST_LOG(error) << "Couldn't download ["sv << url << ", code:" << result << ']';
     }
     curl_easy_cleanup(curl);
     fclose(fp);
-    return result == CURLE_OK;
+
+    const bool http_ok = response_code >= 200 && response_code < 300;
+    if (result != CURLE_OK || !http_ok) {
+      if (!http_ok) {
+        BOOST_LOG(error) << "Download returned unexpected HTTP status for ["sv << url << "]: "sv << response_code;
+      }
+      std::error_code err_code;
+      fs::remove(file, err_code);
+      if (err_code) {
+        BOOST_LOG(warning) << "Couldn't remove failed download ["sv << file << "] :"sv << err_code.message();
+      }
+      return false;
+    }
+
+    return true;
   }
 
   std::string url_escape(const std::string &url) {
