@@ -211,7 +211,7 @@ const router = useRouter()
 const commandPaletteOpen = ref(false)
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(localStorage.getItem('sidebarCollapsed') === 'true')
-const appVersion = ref('1.0.0')
+const appVersion = ref('1.0.1')
 const appVersionLoaded = ref(false)
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
 

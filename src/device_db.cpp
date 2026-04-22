@@ -25,6 +25,32 @@ namespace device_db {
   static std::unordered_map<std::string, std::string> friendly_aliases;
   static std::once_flag load_flag;
 
+  static nlohmann::json build_devices_json() {
+    nlohmann::json root = nlohmann::json::object();
+    for (const auto &[name, dev] : devices) {
+      nlohmann::json entry;
+      entry["type"] = dev.type;
+      entry["display_mode"] = dev.display_mode;
+      entry["preferred_codec"] = dev.preferred_codec;
+      entry["ideal_bitrate_kbps"] = dev.ideal_bitrate_kbps;
+      entry["color_range"] = dev.color_range;
+      entry["hdr_capable"] = dev.hdr_capable;
+      entry["virtual_display"] = dev.virtual_display;
+      entry["nvenc_tune"] = dev.nvenc_tune;
+      entry["notes"] = dev.notes;
+      root[name] = entry;
+    }
+    return root;
+  }
+
+  static void write_defaults_to_disk(const std::filesystem::path &db_path) {
+    std::ofstream out(db_path, std::ios::trunc);
+    if (out.is_open()) {
+      out << build_devices_json().dump(2);
+      BOOST_LOG(info) << "device_db: Saved default database to "sv << db_path.string();
+    }
+  }
+
   static std::string normalize_name_token(const std::string &name) {
     std::string normalized;
     normalized.reserve(name.size());
@@ -181,11 +207,14 @@ namespace device_db {
     std::ifstream file(db_path);
     if (!file.is_open()) {
       // Save defaults to disk for user customization
-      std::ofstream out(db_path);
-      if (out.is_open()) {
-        out << get_all_devices_json();
-        BOOST_LOG(info) << "device_db: Saved default database to "sv << db_path.string();
-      }
+      write_defaults_to_disk(db_path);
+      return;
+    }
+
+    if (file.peek() == std::ifstream::traits_type::eof()) {
+      BOOST_LOG(warning) << "device_db: "sv << db_path.string() << " is empty; restoring defaults"sv;
+      file.close();
+      write_defaults_to_disk(db_path);
       return;
     }
 
@@ -375,21 +404,7 @@ namespace device_db {
 
   std::string get_all_devices_json() {
     load();
-    nlohmann::json root = nlohmann::json::object();
-    for (const auto &[name, dev] : devices) {
-      nlohmann::json entry;
-      entry["type"] = dev.type;
-      entry["display_mode"] = dev.display_mode;
-      entry["preferred_codec"] = dev.preferred_codec;
-      entry["ideal_bitrate_kbps"] = dev.ideal_bitrate_kbps;
-      entry["color_range"] = dev.color_range;
-      entry["hdr_capable"] = dev.hdr_capable;
-      entry["virtual_display"] = dev.virtual_display;
-      entry["nvenc_tune"] = dev.nvenc_tune;
-      entry["notes"] = dev.notes;
-      root[name] = entry;
-    }
-    return root.dump(2);
+    return build_devices_json().dump(2);
   }
 
   void save_device(const std::string &name, const device_t &device) {

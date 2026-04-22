@@ -313,29 +313,73 @@ jobs:
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.err
           if-no-files-found: warn
 
-  release-rpm-assets:
-    name: Release RPM assets
-    needs: fedora-rpm-build
+  release-assets:
+    name: Release assets
+    needs:
+      - arch-build
+      - fedora-rpm-build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
 
     steps:
+      - name: Download Arch package outputs
+        uses: actions/download-artifact@v8
+        with:
+          name: arch-package-outputs
+          path: release-assets/raw/arch
+
       - name: Download Fedora RPM artifacts
         uses: actions/download-artifact@v8
         with:
           name: fedora-rpm-artifacts
-          path: release-assets/raw
+          path: release-assets/raw/fedora
 
       - name: Prepare release asset names
         run: |
           shopt -s nullglob
           mkdir -p release-assets/final
 
+          arch_packages=()
+          arch_sources=()
+          arch_signatures=()
+          for arch_path in release-assets/raw/arch/*; do
+            case "$arch_path" in
+              *.pkg.tar.*.sig)
+                arch_signatures+=("$arch_path")
+                ;;
+              *.pkg.tar.*)
+                arch_packages+=("$arch_path")
+                ;;
+              *.src.tar.*)
+                arch_sources+=("$arch_path")
+                ;;
+            esac
+          done
+
+          if [ "${#arch_packages[@]}" -eq 0 ]; then
+            echo "No Arch package outputs were produced by the Arch packaging job" >&2
+            exit 1
+          fi
+
+          arch_package_name="$(basename "${arch_packages[0]}")"
+          arch_package_suffix="${arch_package_name#*.pkg.tar}"
+          cp "${arch_packages[0]}" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}"
+
+          if [ "${#arch_signatures[@]}" -gt 0 ]; then
+            cp "${arch_signatures[0]}" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}.sig"
+          fi
+
+          if [ "${#arch_sources[@]}" -gt 0 ]; then
+            arch_source_name="$(basename "${arch_sources[0]}")"
+            arch_source_suffix="${arch_source_name#*.src.tar}"
+            cp "${arch_sources[0]}" "release-assets/final/Polaris-arch-src.tar${arch_source_suffix}"
+          fi
+
           binary_rpms=()
           source_rpms=()
-          for rpm_path in release-assets/raw/*.rpm; do
+          for rpm_path in release-assets/raw/fedora/*.rpm; do
             if [[ "$rpm_path" == *.src.rpm ]]; then
               source_rpms+=("$rpm_path")
             else
@@ -356,7 +400,7 @@ jobs:
 
           ls -la release-assets/final
 
-      - name: Upload RPM assets to GitHub release
+      - name: Upload release assets to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -364,18 +408,18 @@ jobs:
           if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \
-              --notes "Automated release assets for ${GITHUB_REF_NAME}."
+              --notes "Automated Fedora and Arch release assets for ${GITHUB_REF_NAME}."
           fi
 
           gh release upload "${GITHUB_REF_NAME}" release-assets/final/* --clobber
 
-      - name: Verify RPM assets on GitHub release
+      - name: Verify release assets on GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora42-src.rpm")] | length')
-          if [ "${asset_count}" -lt 1 ]; then
-            echo "Expected at least one Polaris RPM asset on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
+          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
+          if [ "${asset_count}" -ne 2 ]; then
+            echo "Expected Fedora and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
             exit 1
           fi

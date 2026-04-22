@@ -44,6 +44,12 @@ function detect_nvcc_path() {
     return 0
   fi
 
+  # Arch's system CUDA package installs nvcc outside the default PATH
+  if [ -f "/opt/cuda/bin/nvcc" ]; then
+    echo "/opt/cuda/bin/nvcc"
+    return 0
+  fi
+
   # Then check for locally installed CUDA in build directory
   if [ -f "${build_dir}/cuda/bin/nvcc" ]; then
     echo "${build_dir}/cuda/bin/nvcc"
@@ -77,7 +83,7 @@ function _usage() {
 
   cat <<EOF
 This script installs the dependencies and builds the project.
-The script is intended to be run on a Debian-based or Fedora-based system.
+The script is intended to be run on Arch, Debian-based, or Fedora-based systems.
 
 Usage:
   $0 [options]
@@ -95,7 +101,7 @@ Options:
   --skip-cleanup           Do not restore the original gcc alternatives, or the math-vector.h file.
   --skip-cuda              Skip CUDA installation.
   --skip-libva             Skip libva installation. This will automatically be enabled if passing --appimage-build.
-  --skip-package           Skip creating DEB, or RPM package.
+  --skip-package           Skip creating distro packages (pkg.tar.zst, DEB, or RPM).
   --ubuntu-test-repo       Install ppa:ubuntu-toolchain-r/test repo on Ubuntu.
   --wayland-only           Disable X11 support for Wayland-only systems. Reduces dependencies and binary size.
   --step                   Which step(s) to run: deps, cmake, validation, build, package, cleanup, or all (default: all)
@@ -169,13 +175,16 @@ dependencies=()
 
 function add_arch_deps() {
   dependencies+=(
+    'appstream'
+    'appstream-glib'
     'avahi'
     'base-devel'
+    'boost'
     'cmake'
     'curl'
+    'desktop-file-utils'
     'doxygen'
-    "gcc${gcc_version}"
-    "gcc${gcc_version}-libs"
+    'gcc'
     'git'
     'graphviz'
     'libayatana-appindicator'
@@ -189,8 +198,10 @@ function add_arch_deps() {
     'libx11'
     'libxcb'
     'libxfixes'
+    'libxi'
     'libxrandr'
     'libxtst'
+    'mesa'
     'miniupnpc'
     'ninja'
     'nodejs'
@@ -198,8 +209,10 @@ function add_arch_deps() {
     'numactl'
     'openssl'
     'opus'
+    'pipewire'
     'udev'
     'wayland'
+    'which'
   )
 
   if [ "$skip_libva" == 0 ]; then
@@ -464,8 +477,8 @@ function run_step_deps() {
 
   #set gcc version based on distros
   if [ "$distro" == "arch" ]; then
-    export CC=gcc-14
-    export CXX=g++-14
+    export CC=gcc
+    export CXX=g++
   elif [ "$distro" == "fedora" ]; then
     export CC="gcc-${gcc_version}"
     export CXX="g++-${gcc_version}"
@@ -640,7 +653,58 @@ function run_step_package() {
 
   # Create the package
   if [ "$skip_package" == 0 ]; then
-    if [ "$distro" == "debian" ] || [ "$distro" == "ubuntu" ]; then
+    if [ "$distro" == "arch" ]; then
+      local arch_pkg_dir="${root_dir}/arch-pkgbuild"
+      local branch build_version commit clone_url snapshot_branch
+
+      snapshot_branch=""
+      trap 'if [ -n "$snapshot_branch" ]; then git -C "$root_dir" branch -D "$snapshot_branch" >/dev/null 2>&1 || true; fi' RETURN
+
+      branch="$(git -C "$root_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")"
+      if [ "$branch" = "HEAD" ]; then
+        branch="detached-head"
+      fi
+
+      build_version="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' "${root_dir}/CMakeLists.txt")"
+      commit="$(git -C "$root_dir" rev-parse HEAD)"
+      clone_url="file://${root_dir}"
+
+      if ! git -C "$root_dir" diff --quiet --ignore-submodules HEAD --; then
+        local snapshot_commit
+        snapshot_commit="$(git -C "$root_dir" stash create "polaris-arch-pkgbuild-snapshot" || true)"
+        if [ -n "$snapshot_commit" ]; then
+          snapshot_branch="polaris-arch-pkgbuild-snapshot-$$-$(date +%s)"
+          git -C "$root_dir" branch -f "$snapshot_branch" "$snapshot_commit" >/dev/null
+          commit="$snapshot_commit"
+          echo "info: Arch package generation will build a snapshot branch of the current worktree" >&2
+        else
+          echo "warning: Failed to snapshot the current worktree; falling back to HEAD for Arch package generation" >&2
+        fi
+      fi
+
+      env \
+        BRANCH="$branch" \
+        BUILD_VERSION="$build_version" \
+        CLONE_URL="$clone_url" \
+        COMMIT="$commit" \
+        cmake -S "$root_dir" -B "$arch_pkg_dir" \
+          -DPOLARIS_CONFIGURE_PKGBUILD=ON \
+          -DPOLARIS_CONFIGURE_ONLY=ON
+
+      (
+        cd "$arch_pkg_dir"
+        env \
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=protocol.file.allow \
+          GIT_CONFIG_VALUE_0=always \
+          makepkg --syncdeps --noconfirm --cleanbuild
+      )
+
+      trap - RETURN
+      if [ -n "$snapshot_branch" ]; then
+        git -C "$root_dir" branch -D "$snapshot_branch" >/dev/null 2>&1 || true
+      fi
+    elif [ "$distro" == "debian" ] || [ "$distro" == "ubuntu" ]; then
       cpack -G DEB --config ./build/CPackConfig.cmake
     elif [ "$distro" == "fedora" ]; then
       cpack -G RPM --config ./build/CPackConfig.cmake
@@ -715,7 +779,6 @@ if grep -q "Arch Linux" /etc/os-release; then
   package_update_command="${sudo_cmd} pacman -Syu --noconfirm"
   package_install_command="${sudo_cmd} pacman -Sy --needed"
   nvm_node=0
-  gcc_version="14"
 elif grep -q "Debian GNU/Linux 12 (bookworm)" /etc/os-release; then
   distro="debian"
   version="12"

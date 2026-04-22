@@ -47,6 +47,25 @@ endif()
 
 target_compile_options(polaris PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${POLARIS_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${POLARIS_COMPILE_OPTIONS_CUDA};-std=c++17>)  # cmake-lint: disable=C0301
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15 AND
+        (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
+    target_compile_options(polaris PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:
+            -O0
+            -U_FORTIFY_SOURCE
+            -D_FORTIFY_SOURCE=0
+            -fno-lto
+            -fno-unroll-loops
+            -fno-tree-vectorize
+            -fno-ipa-cp-clone
+            -fno-var-tracking
+            -fno-var-tracking-assignments
+            -fno-ipa-sra
+            -fno-inline-functions
+            -fno-inline-small-functions>)
+endif()
+
 # Homebrew build fails the vite build if we set these environment variables
 if(${POLARIS_BUILD_HOMEBREW})
     set(NPM_SOURCE_ASSETS_DIR "")
@@ -126,6 +145,29 @@ set_source_files_properties("${CMAKE_SOURCE_DIR}/src/upnp.cpp"
 set_source_files_properties("${CMAKE_SOURCE_DIR}/src/rswrapper.c"
         DIRECTORY "${CMAKE_SOURCE_DIR}" "${TEST_DIR}"
         PROPERTIES COMPILE_FLAGS "-ftree-vectorize -funroll-loops")
+
+# src/process / src/ai_optimizer
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
+    set(GCC_RELEASE_ICE_WORKAROUND_FLAGS "")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-O0 ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-U_FORTIFY_SOURCE ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-D_FORTIFY_SOURCE=0 ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-lto ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-unroll-loops ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-tree-vectorize ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-ipa-cp-clone ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-var-tracking ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-var-tracking-assignments ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-ipa-sra ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-inline-functions ")
+    string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-fno-inline-small-functions ")
+    set_source_files_properties(
+            "${CMAKE_SOURCE_DIR}/src/process.cpp"
+            "${CMAKE_SOURCE_DIR}/src/ai_optimizer.cpp"
+            DIRECTORY "${CMAKE_SOURCE_DIR}" "${TEST_DIR}"
+            PROPERTIES COMPILE_FLAGS "${GCC_RELEASE_ICE_WORKAROUND_FLAGS}")
+endif()
 
 # third-party/ViGEmClient
 set(VIGEM_COMPILE_FLAGS "")

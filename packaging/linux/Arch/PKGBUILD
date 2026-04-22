@@ -19,6 +19,7 @@ install=polaris.install
 
 depends=(
   'avahi'
+  'boost'
   'curl'
   'libayatana-appindicator'
   'libcap'
@@ -31,13 +32,17 @@ depends=(
   'libx11'
   'libxcb'
   'libxfixes'
+  'libxi'
   'libxrandr'
   'libxtst'
+  'mesa'
   'miniupnpc'
   'numactl'
   'openssl'
   'opus'
+  'pipewire'
   'udev'
+  'wayland'
   'which'
 )
 
@@ -54,6 +59,7 @@ makedepends=(
 )
 
 optdepends=(
+  'labwc: isolated stream compositor runtime'
   'libva-mesa-driver: AMD GPU encoding support'
 )
 
@@ -131,11 +137,14 @@ build() {
       # If cuda has just been installed, its variables will not be available in the environment
       # therefore, set them manually to the expected values on Arch Linux
       if [ -z "${CUDA_PATH:-}" ] && pacman -Qi cuda &> /dev/null; then
-        local _cuda_gcc_version
-        _cuda_gcc_version="$(LC_ALL=C pacman -Si cuda | grep -Pom1 '^Depends On\s*:.*\bgcc\K[0-9]+\b')"
-
         export CUDA_PATH=/opt/cuda
-        export NVCC_CCBIN="/usr/bin/g++-${_cuda_gcc_version}"
+      fi
+
+      if [ -n "${CUDA_PATH:-}" ] && [ -x "${CUDA_PATH}/bin/nvcc" ]; then
+        export PATH="${CUDA_PATH}/bin:${PATH}"
+        export CUDACXX="${CUDA_PATH}/bin/nvcc"
+        export NVCC_CCBIN="${NVCC_CCBIN:-/usr/bin/g++}"
+        _cmake_options+=(-DCMAKE_CUDA_COMPILER:FILEPATH="${CUDA_PATH}/bin/nvcc")
       fi
     fi
 

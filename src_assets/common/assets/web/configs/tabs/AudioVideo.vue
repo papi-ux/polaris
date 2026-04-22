@@ -58,7 +58,7 @@ const validateFallbackMode = (event) => {
                 Headless Mode
                 <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-ice">Primary path</span>
               </div>
-              <div class="mt-1 text-sm text-storm">Use the hidden labwc compositor instead of the visible desktop.</div>
+              <div class="mt-1 text-sm text-storm">Request hidden-runtime streaming instead of treating the visible desktop as the stream target.</div>
             </div>
             <label class="relative inline-flex shrink-0 items-center cursor-pointer">
               <input
@@ -71,14 +71,39 @@ const validateFallbackMode = (event) => {
             </label>
           </div>
 
-          <div v-if="config.headless_mode === 'enabled'" class="settings-warning-surface">
-            Requires restart. Eliminates KWin rules, edit-mode watchdog behavior, live desktop preview, and most focus-stealing edge cases.
+          <div
+            v-if="config.headless_mode === 'enabled' && config.linux_use_cage_compositor !== 'enabled'"
+            class="settings-warning-surface"
+          >
+            Requires restart. Headless is only requested right now. Enable <span class="font-semibold text-silver">Isolated labwc Compositor</span> below for the true hidden runtime instead of falling back to the live desktop.
+          </div>
+
+          <div
+            v-else-if="config.headless_mode === 'enabled'"
+            class="settings-warning-surface"
+          >
+            Requires restart. Polaris will move streams into a private labwc runtime instead of the visible desktop, which eliminates most KWin rules, live-desktop preview, and focus-stealing edge cases.
           </div>
 
           <div class="grid gap-4 xl:grid-cols-2">
             <div class="surface-muted p-4">
+              <div class="text-sm font-medium text-silver">Isolated labwc Compositor</div>
+              <div class="mt-1 text-sm text-storm">Run streams inside Polaris' private Wayland compositor instead of the current KDE session.</div>
+              <label class="mt-4 flex items-center justify-between gap-4">
+                <span class="text-xs uppercase tracking-[0.18em] text-storm">Required for true Linux headless</span>
+                <input
+                  type="checkbox"
+                  class="sr-only peer"
+                  :checked="config.linux_use_cage_compositor === 'enabled'"
+                  @change="config.linux_use_cage_compositor = $event.target.checked ? 'enabled' : 'disabled'"
+                >
+                <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+              </label>
+            </div>
+
+            <div class="surface-muted p-4">
               <div class="text-sm font-medium text-silver">Prefer GPU-Native Capture</div>
-              <div class="mt-1 text-sm text-storm">Keep DMA-BUF and other GPU capture paths first.</div>
+              <div class="mt-1 text-sm text-storm">Keep DMA-BUF and other GPU capture paths first, even if that can force the isolated compositor into a visible window.</div>
               <label class="mt-4 flex items-center justify-between gap-4">
                 <span class="text-xs uppercase tracking-[0.18em] text-storm">Performance first</span>
                 <input
@@ -89,6 +114,12 @@ const validateFallbackMode = (event) => {
                 >
                 <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
               </label>
+              <div
+                v-if="config.headless_mode === 'enabled' && config.linux_use_cage_compositor === 'enabled' && config.linux_prefer_gpu_native_capture === 'enabled'"
+                class="mt-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
+              >
+                This can override true headless mode and make labwc visible on the desktop when Polaris finds a faster GPU-native capture path.
+              </div>
             </div>
 
             <div class="surface-muted p-4">

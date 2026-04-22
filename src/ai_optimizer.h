@@ -7,8 +7,8 @@
  * (1 week TTL) so the API is only called once per device+game combination.
  *
  * Current provider families:
- * 1. Anthropic API / Claude CLI subscription proxy
- * 2. OpenAI-compatible chat completion endpoints
+ * 1. Anthropic API / Claude CLI subscription
+ * 2. OpenAI-compatible chat completion endpoints / Codex CLI subscription
  */
 #pragma once
 
@@ -44,6 +44,14 @@ namespace ai_optimizer {
    * @brief Check if the AI optimizer is enabled and has valid credentials.
    */
   bool is_enabled();
+
+  /**
+   * @brief Whether session launches should block for a live request on cache miss.
+   *
+   * Used for low-latency local subscription providers where a short synchronous
+   * prewarm is preferable to starting the first session on a stale fallback.
+   */
+  bool should_sync_on_cache_miss();
 
   /**
    * @brief Enable or disable the AI optimizer at runtime.
