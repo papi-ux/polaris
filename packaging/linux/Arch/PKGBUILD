@@ -115,6 +115,52 @@ build() {
     export CFLAGS="${CFLAGS/-Werror=format-security/}"
     export CXXFLAGS="${CXXFLAGS/-Werror=format-security/}"
 
+    # GCC 15 plus Polaris' current Release workaround can conflict with Arch's
+    # injected fortify defines during makepkg validation rebuilds.
+    if [[ "$(g++ -dumpfullversion | cut -d. -f1)" == "15" ]]; then
+      local _filtered_cppflags=()
+      local _filtered_cflags=()
+      local _filtered_cxxflags=()
+      local _flag
+
+      read -r -a _cppflags_array <<< "${CPPFLAGS}"
+      for _flag in "${_cppflags_array[@]}"; do
+        case "${_flag}" in
+          -D_FORTIFY_SOURCE=*|-Wp,-D_FORTIFY_SOURCE=*)
+            ;;
+          *)
+            _filtered_cppflags+=("${_flag}")
+            ;;
+        esac
+      done
+
+      read -r -a _cflags_array <<< "${CFLAGS}"
+      for _flag in "${_cflags_array[@]}"; do
+        case "${_flag}" in
+          -D_FORTIFY_SOURCE=*|-Wp,-D_FORTIFY_SOURCE=*)
+            ;;
+          *)
+            _filtered_cflags+=("${_flag}")
+            ;;
+        esac
+      done
+
+      read -r -a _cxxflags_array <<< "${CXXFLAGS}"
+      for _flag in "${_cxxflags_array[@]}"; do
+        case "${_flag}" in
+          -D_FORTIFY_SOURCE=*|-Wp,-D_FORTIFY_SOURCE=*)
+            ;;
+          *)
+            _filtered_cxxflags+=("${_flag}")
+            ;;
+        esac
+      done
+
+      export CPPFLAGS="${_filtered_cppflags[*]}"
+      export CFLAGS="${_filtered_cflags[*]}"
+      export CXXFLAGS="${_filtered_cxxflags[*]}"
+    fi
+
     export MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}"
 
     local _cmake_options=(
