@@ -28,10 +28,10 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is Linux-first today. Fedora has the easiest install path through a release RPM. Arch and Debian are currently source-build oriented. Linux is the only supported host platform today.
+> Polaris is Linux-first today. Fedora has the easiest install path through a release RPM. Arch and Debian are currently source-build oriented and more hands-on. Linux is the only supported host platform today.
 
 > [!NOTE]
-> `v1.0.0` is the first public Polaris release line. Older tags stay available for continuity, but the current README and release assets reflect the public Linux-first product surface.
+> `v1.0.0` is the first public Polaris release line. Polaris is already usable, but this is still an early public release and you should expect bugs, regressions, and rough edges while the packaging and compatibility surface settles. Older tags stay available for continuity, but the current README and release assets reflect the public Linux-first product surface.
 
 ## Quick Start
 
@@ -99,6 +99,8 @@ Use the source build when:
 - you want a local/custom build
 - you are developing Polaris
 - you need to regenerate packages yourself
+
+If you are on Arch today, treat Polaris as a source-build project first, not a turnkey package install. It works there, but it is still a more manual path than Fedora and more likely to surface distro-specific edges.
 
 #### Core dependencies
 
@@ -529,7 +531,7 @@ The AI optimizer is optional and disabled by default. When enabled, it sends dev
 
 Polaris is built with help from AI tools, including Anthropic Claude, OpenAI Codex, and local models.
 
-I use them like engineering assistants: to kick around approaches, debug ugly edge cases, clean up refactors, and help with tests, packaging, and docs. Architecture, code review, integration, and release decisions are still mine, and I manually verify what ships before it goes out.
+I use them like engineering assistants: for research, pressure-testing ideas, remediating pain points from older builds, debugging ugly edge cases, and helping with tests, packaging, and docs. I've spent years working in cybersecurity, so I'm careful about trust boundaries, validation, and what actually gets shipped. Architecture, code review, integration, and release decisions are still mine, and I manually verify what ships before it goes out.
 
 ## Contributing
 
@@ -545,7 +547,7 @@ Contributions are welcome: bug fixes, features, documentation, translations, and
 
 ## Donate
 
-I build Polaris and Nova in my spare time because Linux game streaming deserves better tooling. If Polaris is useful to you, donations help keep development moving.
+Polaris started as a passion project because I couldn't find a Linux game streaming host that met my standards for desktop safety, runtime clarity, and control. I build Polaris and Nova in my spare time because Linux game streaming deserves better tooling. If Polaris is useful to you, donations help keep development moving.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=for-the-badge&logo=ko-fi&labelColor=1a1a2e)](https://ko-fi.com/papiux)
 &nbsp;
