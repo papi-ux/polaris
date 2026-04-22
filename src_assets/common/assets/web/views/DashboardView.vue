@@ -123,9 +123,10 @@
 
                 <div class="dashboard-preview-footer">
                   <div class="dashboard-preview-meta">
+                    <span class="data-pill">{{ previewSourceLabel }}</span>
                     <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
                     <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
-                    <span class="data-pill">{{ runtimeBackendLabel }}</span>
+                    <span class="data-pill">{{ previewRuntimeLabel }}</span>
                     <span class="data-pill">{{ captureTransportLabel }}</span>
                   </div>
                   <div class="text-xs text-storm">{{ previewStatusText }}</div>
@@ -520,7 +521,9 @@ import InfoHint from '../components/InfoHint.vue'
 import { useI18n } from 'vue-i18n'
 
 const { stats } = useStreamStats(1000)
-const { gpu, displays, audio, sessionType } = useSystemStats(3000)
+const { gpu, displays, audio, sessionType } = useSystemStats(3000, {
+  shouldPoll: () => !stats.value?.streaming,
+})
 const { sessions, clearHistory } = useSessionHistory(stats)
 const { fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices, getSuggestion: getAiSuggestion } = useAiOptimizer()
 
@@ -735,6 +738,18 @@ const captureTransportLabel = computed(() => {
   return titleizeToken(stats.value?.capture_transport || 'unknown')
 })
 
+const activeOutputLabel = computed(() => {
+  if (streamingOutput.value) return streamingOutput.value
+  if (String(stats.value?.runtime_backend || '').toLowerCase() === 'labwc') {
+    return stats.value?.runtime_effective_headless ? 'HEADLESS-1' : 'WL-1'
+  }
+  return 'Auto'
+})
+
+const previewSourceLabel = computed(() => `Source ${activeOutputLabel.value}`)
+
+const previewRuntimeLabel = computed(() => `Runtime ${runtimeEffectiveMode.value} ${runtimeBackendLabel.value}`)
+
 const captureResidencyLabel = computed(() => {
   if (!stats.value?.streaming) return '--'
   return titleizeToken(stats.value?.capture_residency || 'unknown')
@@ -920,14 +935,14 @@ const previewHeadline = computed(() => (
 
 const previewSupportCopy = computed(() => (
   previewExpanded.value
-    ? 'Keep the stream large while monitoring session metrics beside it.'
-    : 'Keep the stream visible while monitoring session metrics and controls.'
+    ? `${t('dashboard.preview_support_expanded')} Source: ${activeOutputLabel.value} on the ${runtimeEffectiveMode.value.toLowerCase()} ${runtimeBackendLabel.value} runtime.`
+    : `${t('dashboard.preview_support')} Source: ${activeOutputLabel.value} on the ${runtimeEffectiveMode.value.toLowerCase()} ${runtimeBackendLabel.value} runtime.`
 ))
 
 const previewStatusText = computed(() => {
-  if (previewError.value) return t('dashboard.preview_error')
-  if (!previewLoaded.value) return t('dashboard.preview_capturing')
-  return t('dashboard.preview_status')
+  if (previewError.value) return `${t('dashboard.preview_error')} Source: ${activeOutputLabel.value} on ${runtimeBackendLabel.value}.`
+  if (!previewLoaded.value) return `${t('dashboard.preview_capturing')} ${activeOutputLabel.value}.`
+  return `${t('dashboard.preview_status')} Source: ${activeOutputLabel.value} on ${runtimeBackendLabel.value}.`
 })
 
 const aiOptimizationSummary = computed(() => {
@@ -1249,6 +1264,10 @@ watch(stats, (newStats, oldStats) => {
     connectedClientUuid.value = null
     aiOptimization.value = null
     return
+  }
+
+  if (String(newStats.runtime_backend || '').toLowerCase() === 'labwc') {
+    streamingOutput.value = newStats.runtime_effective_headless ? 'HEADLESS-1' : 'WL-1'
   }
 
   // Resolve client UUID, recording status, AI optimization, and auto-show preview when streaming starts

@@ -166,7 +166,7 @@
     "ai_timeout_ms": "AI Timeout",
     "ai_timeout_ms_desc": "Maximum time to wait for an AI response in milliseconds.",
     "ai_use_subscription": "Use CLI Subscription",
-    "ai_use_subscription_desc": "Legacy Anthropic toggle that uses the local Claude CLI session instead of a direct API key.",
+    "ai_use_subscription_desc": "Legacy toggle that uses a local provider CLI session instead of a direct API key.",
     "always_send_scancodes": "Always Send Scancodes",
     "always_send_scancodes_desc": "Sending scancodes enhances compatibility with games and apps but may result in incorrect keyboard input from certain clients that aren't using a US English keyboard layout. Enable if keyboard input is not working at all in certain applications. Disable if keys on the client are generating the wrong input on the host.",
     "amd_coder": "AMF Coder (H264)",
@@ -350,11 +350,13 @@
     "global_state_cmd": "Resume/Pause Commands",
     "global_state_cmd_desc": "Configure a list of commands to be executed when resuming(first client connects when no clients are connected) or pausing(all clients disconnect) any application.\nDo commands for resume and Undo command for pause.\nPlease make sure to clean up any side effects of the commands in the preparation undo commands.\nPlease note that pause command will not be executed when the session terminates.",
     "headless_mode": "Headless Mode",
-    "headless_mode_desc": "Request headless labwc streaming. On Linux, Polaris may still choose a visible window if GPU-native capture is preferred.",
+    "headless_mode_desc": "Request headless streaming. Enable the isolated labwc compositor as well if you want Polaris to stop using the visible desktop as the stream path.",
     "linux_capture_profile": "Capture Telemetry Profiling",
     "linux_capture_profile_desc": "Emit periodic Linux capture timing summaries to the Polaris log for transport-path analysis.",
+    "linux_use_cage_compositor": "Isolated labwc Compositor",
+    "linux_use_cage_compositor_desc": "Run Linux sessions inside Polaris' private labwc Wayland compositor instead of the current desktop session.",
     "linux_prefer_gpu_native_capture": "Prefer GPU-Native Capture",
-    "linux_prefer_gpu_native_capture_desc": "Prefer DMA-BUF and other GPU-native capture paths, even when that changes compositor behavior.",
+    "linux_prefer_gpu_native_capture_desc": "Prefer DMA-BUF and other GPU-native capture paths, even when that may force the isolated compositor into a visible window instead of true headless mode.",
     "hevc_mode": "HEVC Support",
     "hevc_mode_0": "Polaris will advertise support for HEVC based on encoder capabilities (recommended)",
     "hevc_mode_1": "Polaris will not advertise support for HEVC",
@@ -693,7 +695,7 @@
     "items": {
       "headless_mode": {
         "label": "Headless Mode",
-        "desc": "Run streams without a visible desktop window."
+        "desc": "Enable Polaris' Linux headless path and its isolated compositor."
       },
       "adaptive_bitrate_enabled": {
         "label": "Adaptive Bitrate",

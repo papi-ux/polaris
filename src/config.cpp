@@ -567,7 +567,7 @@ namespace config {
       false,  // linux_display.auto_manage_displays
       false,  // linux_display.use_cage_compositor
       false,  // linux_display.headless_mode
-      true,   // linux_display.prefer_gpu_native_capture
+      false,  // linux_display.prefer_gpu_native_capture
       false,  // linux_display.capture_profile
     },  // linux_display
 

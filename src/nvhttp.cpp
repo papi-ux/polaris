@@ -73,6 +73,30 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    bool ipv6_prefix_matches(const boost::asio::ip::address_v6 &client,
+                             const boost::asio::ip::address_v6 &network,
+                             unsigned short prefix) {
+      if (prefix > 128) {
+        return false;
+      }
+
+      const auto client_bytes = client.to_bytes();
+      const auto network_bytes = network.to_bytes();
+      const auto full_bytes = static_cast<std::size_t>(prefix / 8);
+      const auto remaining_bits = static_cast<unsigned short>(prefix % 8);
+
+      if (!std::equal(client_bytes.begin(), client_bytes.begin() + full_bytes, network_bytes.begin())) {
+        return false;
+      }
+
+      if (remaining_bits == 0) {
+        return true;
+      }
+
+      const auto mask = static_cast<unsigned char>(0xFFu << (8u - remaining_bits));
+      return (client_bytes[full_bytes] & mask) == (network_bytes[full_bytes] & mask);
+    }
+
     void append_optimization_json(nlohmann::json &output, const device_db::optimization_t &optimization) {
       if (optimization.display_mode) {
         output["display_mode"] = *optimization.display_mode;
@@ -910,10 +934,15 @@ namespace nvhttp {
       try {
         auto net_str = subnet_str.substr(0, slash);
         auto prefix = static_cast<unsigned short>(std::stoi(subnet_str.substr(slash + 1)));
+        auto network_addr = boost::asio::ip::make_address(net_str);
 
         if (addr.is_v4()) {
+          if (!network_addr.is_v4() || prefix > 32) {
+            continue;
+          }
+
           auto network = boost::asio::ip::make_network_v4(
-            boost::asio::ip::make_address_v4(net_str), prefix);
+            network_addr.to_v4(), prefix);
           auto client_v4 = addr.to_v4();
           auto net_addr = network.network().to_uint();
           auto client_uint = client_v4.to_uint();
@@ -926,15 +955,21 @@ namespace nvhttp {
           // Handle IPv4-mapped IPv6 addresses (e.g., ::ffff:10.0.0.1)
           auto v6 = addr.to_v6();
           if (v6.is_v4_mapped()) {
+            if (!network_addr.is_v4() || prefix > 32) {
+              continue;
+            }
+
             auto v4 = boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, v6);
             auto network = boost::asio::ip::make_network_v4(
-              boost::asio::ip::make_address_v4(net_str), prefix);
+              network_addr.to_v4(), prefix);
             auto net_addr = network.network().to_uint();
             auto client_uint = v4.to_uint();
             auto mask = network.netmask().to_uint();
             if ((client_uint & mask) == (net_addr & mask)) {
               return true;
             }
+          } else if (network_addr.is_v6() && ipv6_prefix_matches(v6, network_addr.to_v6(), prefix)) {
+            return true;
           }
         }
       }
@@ -1647,6 +1682,10 @@ namespace nvhttp {
         pair_session_t sess;
 
         auto deviceName { get_arg(args, "devicename") };
+        const bool trusted_pair_requested = util::from_view(get_arg(args, "trustedpair", "0"));
+        const auto remote_addr = request->remote_endpoint().address();
+        const auto remote_addr_str = net::addr_to_normalized_string(remote_addr);
+        const bool remote_in_trusted_subnet = is_in_trusted_subnet(remote_addr);
 
         if (deviceName == "roth"sv) {
           deviceName = "Legacy Moonlight Client";
@@ -1661,6 +1700,11 @@ namespace nvhttp {
         auto ptr = map_id_sess.emplace(sess.client.uniqueID, std::move(sess)).first;
 
         ptr->second.async_insert_pin.salt = std::move(get_arg(args, "salt"));
+        BOOST_LOG(info) << "pair: getservercert uniqueid="sv << uniqID
+                        << " device=\""sv << ptr->second.client.name << "\""
+                        << " remote="sv << remote_addr_str
+                        << " trustedpair="sv << trusted_pair_requested
+                        << " trusted_subnet_match="sv << remote_in_trusted_subnet;
 
         auto it = args.find("otpauth");
         if (it != std::end(args)) {
@@ -1702,27 +1746,26 @@ namespace nvhttp {
           getservercert(ptr->second, tree, pin);
           return;
         } else {
-          const bool trusted_pair_requested = util::from_view(get_arg(args, "trustedpair", "0"));
           if (trusted_pair_requested) {
             ptr->second.client.family_hint = "nova";
           }
           if (trusted_pair_requested &&
               config::nvhttp.trusted_subnet_auto_pairing &&
-              is_in_trusted_subnet(request->remote_endpoint().address()))
+              remote_in_trusted_subnet)
           {
             // TOFU: Auto-approve pairing from trusted subnet with well-known PIN,
             // but only when the client explicitly opts into the trusted flow.
-            BOOST_LOG(info) << "TOFU: Auto-approving pairing from trusted subnet: "
-                            << net::addr_to_normalized_string(request->remote_endpoint().address());
+            BOOST_LOG(info) << "TOFU: Auto-approving pairing from trusted subnet: "sv
+                            << remote_addr_str;
             getservercert(ptr->second, tree, "0000");
             return;
           }
 
           if (trusted_pair_requested && !config::nvhttp.trusted_subnet_auto_pairing) {
             BOOST_LOG(info) << "TOFU: Trusted Pair requested but disabled in host config"sv;
-          } else if (trusted_pair_requested && !is_in_trusted_subnet(request->remote_endpoint().address())) {
-            BOOST_LOG(info) << "TOFU: Trusted Pair requested from untrusted subnet: "
-                            << net::addr_to_normalized_string(request->remote_endpoint().address());
+          } else if (trusted_pair_requested && !remote_in_trusted_subnet) {
+            BOOST_LOG(info) << "TOFU: Trusted Pair requested from untrusted subnet: "sv
+                            << remote_addr_str;
           }
 
 #if defined POLARIS_TRAY && POLARIS_TRAY >= 1
@@ -3630,6 +3673,9 @@ namespace nvhttp {
       bool hdr_requested = false;
       const auto session_history = ai_optimizer::get_session_history(device, game);
       const auto device_profile = device_db::get_device(device);
+      const auto gpu_info = config::video.adapter_name.empty()
+        ? "NVIDIA GPU (NVENC)"s
+        : config::video.adapter_name;
 
       // Try AI cache first, then device_db
       auto ai_opt = ai_optimizer::get_cached(device, game);
@@ -3651,6 +3697,27 @@ namespace nvhttp {
         target_bitrate_kbps = opt.target_bitrate_kbps;
         suggested_codec = opt.preferred_codec;
         hdr_requested = opt.hdr.value_or(false);
+
+        if (ai_optimizer::is_enabled()) {
+          if (ai_optimizer::should_sync_on_cache_miss()) {
+            if (auto sync_opt = ai_optimizer::request_sync(device, game, gpu_info, "", session_history)) {
+              effective_optimization = *sync_opt;
+              output = nlohmann::json::object();
+              append_optimization_json(output, *sync_opt);
+              if (sync_opt->target_bitrate_kbps) {
+                target_bitrate_kbps = *sync_opt->target_bitrate_kbps;
+              }
+              suggested_codec = sync_opt->preferred_codec;
+              hdr_requested = sync_opt->hdr.value_or(false);
+              BOOST_LOG(info) << "ai_optimizer: Sync-prewarmed optimization for \""sv << device
+                              << "\" + \""sv << game << "\" before launch"sv;
+            } else {
+              ai_optimizer::request_async(device, game, gpu_info, "", session_history);
+            }
+          } else {
+            ai_optimizer::request_async(device, game, gpu_info, "", session_history);
+          }
+        }
       }
 
       suggested_codec = device_db::normalize_preferred_codec(

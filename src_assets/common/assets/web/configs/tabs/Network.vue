@@ -191,7 +191,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       <div class="mb-3">
         <label class="block text-sm font-medium text-storm mb-1">Trusted Subnets (TOFU)</label>
         <div class="text-sm text-storm mb-2">
-          Use CIDR notation, for example <code class="bg-deep px-1 rounded">10.0.0.0/24</code>.
+          Use IPv4 or IPv6 CIDR notation, for example <code class="bg-deep px-1 rounded">10.0.0.0/24</code> or <code class="bg-deep px-1 rounded">fdeb:c779:7c30:dedf::/64</code>.
         </div>
         <div v-if="config.trusted_subnets && config.trusted_subnets.length > 0" class="space-y-2 mb-2">
           <div v-for="(subnet, index) in config.trusted_subnets" :key="index" class="flex items-center gap-2">

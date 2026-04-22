@@ -24,11 +24,11 @@
       "prep-cmd": [
         {
           "do": "",
-          "undo": "setsid steam steam://close/bigpicture"
+          "undo": "setsid steam -shutdown"
         }
       ],
       "detached": [
-        "setsid steam steam://open/bigpicture"
+        "setsid steam -gamepadui"
       ],
       "image-path": "steam.png"
     }

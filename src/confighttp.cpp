@@ -48,6 +48,7 @@
 #include "stream_recorder.h"
 #include "stream_stats.h"
 #include "utility.h"
+#include "video.h"
 #include "uuid.h"
 #include "wol.h"
 #include "client_profiles.h"
@@ -70,6 +71,7 @@
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/wayland.h"
 #endif
 
 using namespace std::literals;
@@ -260,6 +262,51 @@ namespace confighttp {
       escaped.push_back('\'');
       return escaped;
     }
+
+#ifdef __linux__
+    std::string preview_xdg_runtime_dir() {
+      if (const char *xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && *xdg) {
+        return xdg;
+      }
+      return "/run/user/1000";
+    }
+
+    bool preview_output_is_safe(const std::string &value) {
+      return !value.empty() &&
+             std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+               return std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == ':';
+             });
+    }
+
+    std::string active_preview_output_name(const std::string &requested_output) {
+      if (preview_output_is_safe(requested_output)) {
+        return requested_output;
+      }
+
+      if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+        const auto runtime_state = cage_display_router::runtime_state();
+        if (runtime_state.backend_name == "labwc") {
+          return runtime_state.effective_headless ? "HEADLESS-1" : "WL-1";
+        }
+      }
+
+      return "";
+    }
+
+    std::string build_cage_preview_capture_command(const std::string &socket_name,
+                                                   const std::string &output_name,
+                                                   const std::string &outfile) {
+      std::ostringstream cmd;
+      cmd << "XDG_RUNTIME_DIR=" << shell_escape(preview_xdg_runtime_dir())
+          << " WAYLAND_DISPLAY=" << shell_escape(socket_name)
+          << " grim ";
+      if (!output_name.empty()) {
+        cmd << "-o " << output_name << ' ';
+      }
+      cmd << shell_escape(outfile) << " 2>/dev/null";
+      return cmd.str();
+    }
+#endif
 
     struct steam_store_assets_t {
       std::string header_image;
@@ -2701,6 +2748,10 @@ namespace confighttp {
             } else {
               invalidate_all_web_sessions();  // force re-login across browser sessions
               output_tree["status"] = true;
+              auto headers = make_auth_cookie_headers(create_web_session());
+              headers.emplace("Content-Type", "application/json");
+              response->write(output_tree.dump(), headers);
+              return;
             }
           }
         } else {
@@ -3168,21 +3219,33 @@ namespace confighttp {
     auto tid = std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
     std::string tmpfile = "/tmp/polaris_preview_" + tid + ".png";
     std::string outfile = tmpfile;
+    auto query = request->parse_query_string();
+    std::string requested_output;
+    if (const auto it = query.find("output"); it != query.end()) {
+      requested_output = it->second;
+    }
 
     // Prefer grim on labwc's socket (works in both headless and windowed mode)
     bool captured = false;
+    bool cage_capture_required = false;
     if (config::video.linux_display.use_cage_compositor) {
       auto cage_socket = cage_display_router::get_wayland_socket();
       if (!cage_socket.empty() && cage_display_router::is_running()) {
-        std::string cmd = "WAYLAND_DISPLAY=" + cage_socket + " grim " + tmpfile + " 2>/dev/null";
+        const auto preview_output = active_preview_output_name(requested_output);
+        const auto cmd = build_cage_preview_capture_command(cage_socket, preview_output, tmpfile);
+        cage_capture_required = true;
         if (std::system(cmd.c_str()) == 0) {
           captured = true;
+        } else {
+          BOOST_LOG(warning) << "display_preview: Failed to capture cage screenshot on socket "sv
+                             << cage_socket << " output="sv
+                             << (preview_output.empty() ? "(auto)"sv : preview_output);
         }
       }
     }
 
     // Fallback: spectacle on desktop (for non-cage setups)
-    if (!captured) {
+    if (!captured && !cage_capture_required) {
       std::string cmd = "spectacle -b -n -o " + tmpfile + " 2>/dev/null";
       captured = (std::system(cmd.c_str()) == 0);
     }
@@ -3229,15 +3292,19 @@ namespace confighttp {
     // Parse params
     int target_fps = 5;
     auto query = request->parse_query_string();
+    std::string requested_output;
     if (query.count("fps")) {
       try { target_fps = std::clamp(std::stoi(query.find("fps")->second), 1, 15); } catch (...) {}
+    }
+    if (const auto it = query.find("output"); it != query.end()) {
+      requested_output = it->second;
     }
 
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
     response->close_connection_after_response = true;
 
-    launch_background_task([response, target_fps, shutdown_event]() {
+    launch_background_task([response, target_fps, shutdown_event, requested_output]() {
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "multipart/x-mixed-replace; boundary=frame");
       headers.emplace("Cache-Control", "no-cache");
@@ -3258,10 +3325,37 @@ namespace confighttp {
         auto start = std::chrono::steady_clock::now();
 
         // Capture frame
-        std::string cmd = "spectacle -b -n -o " + tmpfile + " 2>/dev/null";
-        if (std::system(cmd.c_str()) != 0) {
-          cmd = "grim " + tmpfile + " 2>/dev/null";
-          if (std::system(cmd.c_str()) != 0) break;
+        bool captured = false;
+        bool cage_capture_required = false;
+        if (config::video.linux_display.use_cage_compositor) {
+          auto cage_socket = cage_display_router::get_wayland_socket();
+          if (!cage_socket.empty() && cage_display_router::is_running()) {
+            const auto preview_output = active_preview_output_name(requested_output);
+            const auto cmd = build_cage_preview_capture_command(cage_socket, preview_output, tmpfile);
+            cage_capture_required = true;
+            if (std::system(cmd.c_str()) == 0) {
+              captured = true;
+            } else {
+              BOOST_LOG(warning) << "display_preview: Failed to capture cage MJPEG frame on socket "sv
+                                 << cage_socket << " output="sv
+                                 << (preview_output.empty() ? "(auto)"sv : preview_output);
+              break;
+            }
+          }
+        }
+
+        if (!captured && !cage_capture_required) {
+          std::string cmd = "spectacle -b -n -o " + tmpfile + " 2>/dev/null";
+          if (std::system(cmd.c_str()) == 0) {
+            captured = true;
+          } else {
+            cmd = "grim " + shell_escape(tmpfile) + " 2>/dev/null";
+            captured = (std::system(cmd.c_str()) == 0);
+          }
+        }
+
+        if (!captured) {
+          break;
         }
 
         // Read frame
@@ -3571,6 +3665,16 @@ namespace confighttp {
 
     nlohmann::json output;
     output["gpu"] = nullptr;
+    output["video"]["active_encoder"] = video::active_encoder_name();
+#ifdef __linux__
+    {
+      auto runtime_state = cage_display_router::runtime_state();
+      output["runtime"]["backend"] = runtime_state.backend_name;
+      output["runtime"]["requested_headless"] = runtime_state.requested_headless;
+      output["runtime"]["effective_headless"] = runtime_state.effective_headless;
+      output["runtime"]["gpu_native_override_active"] = runtime_state.gpu_native_override_active;
+    }
+#endif
 
 #ifdef __linux__
     // Query nvidia-smi for GPU telemetry
@@ -3620,46 +3724,118 @@ namespace confighttp {
       pclose(pipe);
     }
 
-    // Query connected displays via xrandr
+    // Prefer live Wayland monitor telemetry from the active runtime.
     {
       nlohmann::json displays = nlohmann::json::array();
-      FILE *xpipe = popen("xrandr --query 2>/dev/null | grep ' connected'", "r");
-      if (xpipe) {
-        char buf[512];
-        while (fgets(buf, sizeof(buf), xpipe)) {
-          std::string line(buf);
-          if (!line.empty() && line.back() == '\n') line.pop_back();
+      auto push_display = [&displays](
+                            const std::string &name,
+                            const std::string &friendly_name,
+                            const std::string &device_id,
+                            bool primary,
+                            std::optional<int> width = std::nullopt,
+                            std::optional<int> height = std::nullopt) {
+        nlohmann::json display;
+        display["name"] = name;
+        display["friendly_name"] = friendly_name;
+        display["device_id"] = device_id;
 
-          nlohmann::json display;
-          // Format: "DP-3 connected primary 7680x2160+0+0 ..."
-          std::istringstream iss(line);
-          std::string name, status, extra;
-          iss >> name >> status;
-
-          display["name"] = name;
-          display["primary"] = false;
-
-          // Check for "primary" keyword and resolution
-          std::string token;
-          while (iss >> token) {
-            if (token == "primary") {
-              display["primary"] = true;
-            } else if (token.find('x') != std::string::npos && token.find('+') != std::string::npos) {
-              // Resolution like "7680x2160+0+0"
-              auto xpos = token.find('x');
-              auto plus = token.find('+');
-              if (xpos != std::string::npos && plus != std::string::npos) {
-                try {
-                  display["width"] = std::stoi(token.substr(0, xpos));
-                  display["height"] = std::stoi(token.substr(xpos + 1, plus - xpos - 1));
-                } catch (...) {}
-              }
-              break;
-            }
-          }
-          displays.push_back(display);
+        if (!name.empty() && !friendly_name.empty()) {
+          display["label"] = name + ": " + friendly_name;
+        } else if (!friendly_name.empty()) {
+          display["label"] = friendly_name;
+        } else if (!name.empty()) {
+          display["label"] = name;
+        } else {
+          display["label"] = device_id;
         }
-        pclose(xpipe);
+
+        display["primary"] = primary;
+        if (width) {
+          display["width"] = *width;
+        }
+        if (height) {
+          display["height"] = *height;
+        }
+        displays.push_back(display);
+      };
+
+      auto live_stats = stream_stats::get_current();
+      std::vector<std::unique_ptr<wl::monitor_t>> wayland_monitors;
+      if (live_stats.streaming &&
+          config::video.linux_display.use_cage_compositor &&
+          cage_display_router::is_running()) {
+        auto cage_socket = cage_display_router::get_wayland_socket();
+        if (!cage_socket.empty()) {
+          wayland_monitors = wl::monitors(cage_socket.c_str());
+        }
+      }
+
+      if (wayland_monitors.empty()) {
+        wayland_monitors = wl::monitors();
+      }
+
+      for (std::size_t index = 0; index < wayland_monitors.size(); ++index) {
+        const auto &monitor = wayland_monitors[index];
+        push_display(
+          monitor->name,
+          monitor->description,
+          monitor->name,
+          index == 0,
+          static_cast<int>(monitor->viewport.width),
+          static_cast<int>(monitor->viewport.height)
+        );
+      }
+
+      // Fallback to Polaris's configured display device registry.
+      if (displays.empty()) {
+        const auto enumerated_devices = display_device::enumerate_devices();
+        for (const auto &device : enumerated_devices) {
+          push_display(
+            device.m_display_name,
+            device.m_friendly_name,
+            device.m_device_id,
+            device.m_info ? device.m_info->m_primary : false
+          );
+        }
+      }
+
+      // Final fallback to xrandr when richer telemetry is unavailable.
+      if (displays.empty()) {
+        FILE *xpipe = popen("xrandr --query 2>/dev/null | grep ' connected'", "r");
+        if (xpipe) {
+          char buf[512];
+          while (fgets(buf, sizeof(buf), xpipe)) {
+            std::string line(buf);
+            if (!line.empty() && line.back() == '\n') line.pop_back();
+            // Format: "DP-3 connected primary 7680x2160+0+0 ..."
+            std::istringstream iss(line);
+            std::string name, status;
+            iss >> name >> status;
+            bool primary = false;
+            std::optional<int> width;
+            std::optional<int> height;
+
+            // Check for "primary" keyword and resolution
+            std::string token;
+            while (iss >> token) {
+              if (token == "primary") {
+                primary = true;
+              } else if (token.find('x') != std::string::npos && token.find('+') != std::string::npos) {
+                // Resolution like "7680x2160+0+0"
+                auto xpos = token.find('x');
+                auto plus = token.find('+');
+                if (xpos != std::string::npos && plus != std::string::npos) {
+                  try {
+                    width = std::stoi(token.substr(0, xpos));
+                    height = std::stoi(token.substr(xpos + 1, plus - xpos - 1));
+                  } catch (...) {}
+                }
+              }
+            }
+            push_display(name, "", name, primary, width, height);
+          }
+          pclose(xpipe);
+        }
       }
       output["displays"] = displays;
     }

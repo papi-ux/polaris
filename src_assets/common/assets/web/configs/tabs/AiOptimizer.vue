@@ -36,6 +36,8 @@ const providerOptions = [
     authModes: ['subscription', 'api_key'],
     accent: 'border-amber-300/30 bg-amber-300/8 text-amber-200',
     pill: 'text-amber-200 border-amber-300/30',
+    subscriptionLabel: 'Claude CLI',
+    subscriptionBinary: 'claude',
     keyPlaceholder: 'sk-ant-api03-...',
     keyHint: 'Anthropic API key from console.anthropic.com.',
     profiles: [
@@ -61,16 +63,27 @@ const providerOptions = [
     id: 'openai',
     name: 'OpenAI',
     eyebrow: 'Responses via compatibility',
-    summary: 'Hosted OpenAI-compatible responses for device tuning.',
+    summary: 'OpenAI via Codex CLI subscription or direct API access.',
     defaultModel: 'gpt-5.4-mini',
     defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultAuth: 'api_key',
-    authModes: ['api_key'],
+    defaultAuth: 'subscription',
+    authModes: ['subscription', 'api_key'],
     accent: 'border-emerald-300/30 bg-emerald-300/8 text-emerald-200',
     pill: 'text-emerald-200 border-emerald-300/30',
+    subscriptionLabel: 'Codex CLI',
+    subscriptionBinary: 'codex',
+    subscriptionLoginCommand: 'codex login',
     keyPlaceholder: 'sk-proj-...',
     keyHint: 'OpenAI API key from platform.openai.com.',
     profiles: [
+      {
+        id: 'codex-cli',
+        name: 'Codex CLI',
+        description: 'Use the local Codex subscription session.',
+        model: 'gpt-5.4-mini',
+        baseUrl: 'https://api.openai.com/v1',
+        authMode: 'subscription'
+      },
       {
         id: 'openai-default',
         name: 'Hosted API',
@@ -140,7 +153,7 @@ const providerOptions = [
 ]
 
 const authModeLabels = {
-  subscription: { name: 'Subscription', description: 'Use the local Claude CLI session' },
+  subscription: { name: 'Subscription', description: 'Use the local provider CLI session' },
   api_key: { name: 'API Key', description: 'Send a bearer key to the provider' },
   none: { name: 'No Auth', description: 'Call the endpoint without auth' }
 }
@@ -152,6 +165,11 @@ const currentProvider = computed(() =>
 const liveProvider = computed(() =>
   providerOptions.find(provider => provider.id === aiStatus.value?.provider) || null
 )
+
+const currentSubscriptionLabel = computed(() => currentProvider.value.subscriptionLabel || 'Provider CLI')
+const currentSubscriptionBinary = computed(() => currentProvider.value.subscriptionBinary || 'cli')
+const currentSubscriptionLoginCommand = computed(() => currentProvider.value.subscriptionLoginCommand || '')
+const liveSubscriptionLabel = computed(() => aiStatus.value?.subscription_cli || liveProvider.value?.subscriptionLabel || 'Provider CLI')
 
 const availableAuthModes = computed(() => currentProvider.value.authModes)
 const currentProfiles = computed(() => currentProvider.value.profiles || [])
@@ -371,6 +389,20 @@ const providerHealthSummary = computed(() => {
 function providerPill(providerId) {
   const provider = providerOptions.find(item => item.id === providerId)
   return provider?.pill || 'text-silver border-storm/40'
+}
+
+function subscriptionRuntimeTone(status) {
+  if (!status) return 'text-storm'
+  if (status.cli_authenticated === true) return 'text-green-300'
+  if (status.cli_authenticated === false) return 'text-amber-200'
+  return status.cli_available ? 'text-green-300' : 'text-red-300'
+}
+
+function subscriptionRuntimeSummary(status) {
+  if (!status) return 'Not loaded'
+  if (status.cli_authenticated === true) return 'Signed in and ready'
+  if (status.cli_authenticated === false && status.cli_login_command) return `Run ${status.cli_login_command}`
+  return status.cli_available ? 'Detected in PATH' : 'Not found in PATH'
 }
 
 function applyProviderProfile(profile) {
@@ -725,8 +757,12 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="config.ai_auth_mode === 'subscription'" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-4">
-            <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-amber-200">claude</code> CLI instead of a remote API key flow.</div>
-            <div class="text-xs text-storm mt-2">Use this only for Claude. The Web UI can test the draft config below, but live sessions still switch over only after save and apply.</div>
+            <div class="text-xs uppercase tracking-[0.2em] text-storm">{{ currentSubscriptionLabel }}</div>
+            <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
+            <div class="text-xs text-storm mt-2">The Web UI can test the draft config below, but live sessions still switch over only after save and apply.</div>
+            <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
+              If this host is not authorized yet, run <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionLoginCommand }}</code> in a terminal first.
+            </div>
           </div>
 
           <div v-else-if="config.ai_auth_mode === 'none'" class="rounded-xl border border-stone-300/20 bg-stone-300/6 p-4">
@@ -1010,9 +1046,12 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-if="aiStatus?.auth_mode === 'subscription'" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-3">
-              <div class="text-xs uppercase tracking-wider text-storm">Claude CLI</div>
-              <div class="text-sm mt-2" :class="aiStatus?.cli_available ? 'text-green-300' : 'text-red-300'">
-                {{ aiStatus?.cli_available ? 'Detected in PATH' : 'Not found in PATH' }}
+              <div class="text-xs uppercase tracking-wider text-storm">{{ liveSubscriptionLabel }}</div>
+              <div class="text-sm mt-2" :class="subscriptionRuntimeTone(aiStatus)">
+                {{ subscriptionRuntimeSummary(aiStatus) }}
+              </div>
+              <div v-if="aiStatus?.cli_authenticated === false && aiStatus?.cli_login_command" class="text-xs text-storm mt-2">
+                Authorize this host by running <code class="bg-void/40 px-1 rounded text-amber-200">{{ aiStatus.cli_login_command }}</code> in a terminal.
               </div>
             </div>
 

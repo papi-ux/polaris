@@ -39,9 +39,22 @@ if missing:
     sys.exit(1)
 PY
 
-expected_asset="Polaris-fedora42-x86_64.rpm"
+expected_assets=(
+  "Polaris-fedora42-x86_64.rpm"
+  "Polaris-arch-x86_64.pkg.tar.zst"
+)
 
-grep -Fq "$expected_asset" README.md
-grep -Fq "$expected_asset" .github/workflows/build.yml
+files_to_check=(
+  "README.md"
+  "docs/building.md"
+  "docs/changelog.md"
+  ".github/workflows/build.yml"
+)
+
+for expected_asset in "${expected_assets[@]}"; do
+  for file in "${files_to_check[@]}"; do
+    grep -Fq "$expected_asset" "$file"
+  done
+done
 
 echo "Public docs and release references look clean."

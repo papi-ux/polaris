@@ -285,7 +285,7 @@ namespace proc {
       return boost::istarts_with(boost::trim_copy(cmd), "setsid ") ? "setsid " : "";
     }
 
-    std::string canonical_steam_big_picture_command(const std::string &reference_cmd, std::string_view action) {
+    [[maybe_unused]] std::string canonical_steam_big_picture_command(const std::string &reference_cmd, std::string_view action) {
       return steam_big_picture_command_prefix(reference_cmd) + "steam steam://" + std::string(action);
     }
 
@@ -395,11 +395,15 @@ namespace proc {
       }
 
       auto normalize_open_command = [&](const std::string &cmd) {
+#ifdef __linux__
+        return canonical_steam_library_bootstrap_command(cmd.empty() ? "steam" : cmd);
+#else
         return canonical_steam_big_picture_command(cmd.empty() ? "steam" : cmd, "open/bigpicture");
+#endif
       };
 
       for (auto &cmd : ctx.detached) {
-        if (!command_uses_steam_gamepadui_flag(cmd)) {
+        if (!(command_uses_steam_gamepadui_flag(cmd) || command_contains_steam_big_picture_open(cmd))) {
           continue;
         }
 
@@ -701,6 +705,31 @@ namespace proc {
       std::ostringstream stream;
       stream << std::fixed << std::setprecision(fps % 1000 == 0 ? 0 : 3) << fps_value;
       return stream.str();
+    }
+
+    std::string format_display_mode(const parsed_display_mode_t &mode) {
+      return std::to_string(mode.width) + "x" + std::to_string(mode.height) + "x" + format_session_fps(mode.fps);
+    }
+
+    bool display_modes_equal(const parsed_display_mode_t &lhs, const parsed_display_mode_t &rhs) {
+      return lhs.width == rhs.width && lhs.height == rhs.height && lhs.fps == rhs.fps;
+    }
+
+    parsed_display_mode_t clamp_optimized_display_mode_to_client_request(const parsed_display_mode_t &candidate,
+                                                                         const parsed_display_mode_t &requested) {
+      auto clamped = candidate;
+
+      if (requested.fps > 0 && clamped.fps > requested.fps) {
+        clamped.fps = requested.fps;
+      }
+
+      if (requested.width > 0 && requested.height > 0 &&
+          (clamped.width > requested.width || clamped.height > requested.height)) {
+        clamped.width = requested.width;
+        clamped.height = requested.height;
+      }
+
+      return clamped;
     }
 
     void note_layer(resolved_session_optimization_t &resolved, const std::string &layer) {
@@ -1249,16 +1278,64 @@ namespace proc {
           apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
         }
       } else {
-        if (auto history_opt = ai_optimizer::get_history_safe_fallback(
-              launch_session->device_name, _app.name, history)) {
-          BOOST_LOG(info) << "ai_optimizer: Applying history-safe fallback for \""sv
-                          << launch_session->device_name << "\" + \""sv << _app.name
-                          << "\" — "sv << history_opt->reasoning;
-          apply_optimization_layer(resolved_optimization, optimization_locks, *history_opt, history_opt->source);
+        bool applied_sync_ai = false;
+        if (ai_optimizer::should_sync_on_cache_miss()) {
+          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
+                          << "\" — requesting sync AI optimization before first session"sv;
+          if (auto sync_opt = ai_optimizer::request_sync(
+                launch_session->device_name, _app.name, gpu_info, game_category, history)) {
+            BOOST_LOG(info) << "ai_optimizer: Applying fresh AI optimization for \""sv
+                            << launch_session->device_name << "\" + \""sv << _app.name
+                            << "\" — "sv << sync_opt->reasoning;
+            apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
+            applied_sync_ai = true;
+          }
+          if (!applied_sync_ai) {
+            BOOST_LOG(warning) << "ai_optimizer: Sync optimization failed for known device \""sv
+                               << launch_session->device_name << "\" — falling back to cached/device heuristics"sv;
+          }
         }
-        ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
-        BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
-                        << "\" — fired async request for next session"sv;
+
+        if (!applied_sync_ai) {
+          if (auto history_opt = ai_optimizer::get_history_safe_fallback(
+                launch_session->device_name, _app.name, history)) {
+            BOOST_LOG(info) << "ai_optimizer: Applying history-safe fallback for \""sv
+                            << launch_session->device_name << "\" + \""sv << _app.name
+                            << "\" — "sv << history_opt->reasoning;
+            apply_optimization_layer(resolved_optimization, optimization_locks, *history_opt, history_opt->source);
+          }
+          ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
+          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
+                          << "\" — fired async request for next session"sv;
+        }
+      }
+    }
+
+    if (!optimization_locks.display_mode && resolved_optimization.display_mode.has_value()) {
+      const parsed_display_mode_t requested_display_mode {
+        static_cast<int>(launch_session->requested_width),
+        static_cast<int>(launch_session->requested_height),
+        launch_session->requested_fps,
+      };
+      const auto normalized_display_mode =
+        clamp_optimized_display_mode_to_client_request(*resolved_optimization.display_mode, requested_display_mode);
+
+      if (!display_modes_equal(normalized_display_mode, *resolved_optimization.display_mode)) {
+        BOOST_LOG(info) << "session_optimization: normalized display_mode from "sv
+                        << format_display_mode(*resolved_optimization.display_mode)
+                        << " to "sv << format_display_mode(normalized_display_mode)
+                        << " to respect explicit client request "sv << format_display_mode(requested_display_mode);
+        resolved_optimization.display_mode = normalized_display_mode;
+        resolved_optimization.display_mode_source = "runtime_policy";
+        note_layer(resolved_optimization, "runtime_policy");
+        note_reasoning(
+          resolved_optimization,
+          "Explicit client display mode acts as a ceiling; optimization stayed within the requested resolution and frame rate."
+        );
+        append_normalization_reason(
+          resolved_optimization,
+          "Runtime policy capped optimized display mode to the explicit client request."
+        );
       }
     }
 

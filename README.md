@@ -28,10 +28,10 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is Linux-first today. Fedora has the easiest install path through a release RPM. Arch and Debian are currently source-build oriented and more hands-on. Linux is the only supported host platform today.
+> Polaris is Linux-first today. Fedora and Arch now have direct release package assets. Debian and other distros are still more hands-on through source builds. Linux is the only supported host platform today.
 
 > [!NOTE]
-> `v1.0.0` is the first public Polaris release line. Polaris is already usable, but this is still an early public release and you should expect bugs, regressions, and rough edges while the packaging and compatibility surface settles. Older tags stay available for continuity, but the current README and release assets reflect the public Linux-first product surface.
+> `v1.0.1` is the current public Polaris release line. Polaris is already usable, but this is still an early public release surface and you should expect bugs, regressions, and rough edges while packaging and compatibility continue to settle. Older tags stay available for continuity, but the current README and release assets reflect the live Linux-first product surface.
 
 ## Quick Start
 
@@ -46,7 +46,16 @@ polaris
 
 Open **https://localhost:47990**, create your web UI password, and pair a client.
 
-### Source build: Arch, Debian, dev machines, or custom setups
+### Fastest install: Arch package
+
+```bash
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
+sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
+sudo polaris --setup-host
+polaris
+```
+
+### Source build: Debian, dev machines, or custom setups
 
 ```bash
 git clone --recursive https://github.com/papi-ux/polaris.git
@@ -79,11 +88,12 @@ polaris
 
 ### Recommended package path
 
-If you are on Fedora and just want Polaris running, use the GitHub release RPM. It is the shortest path and the one to start with before considering source builds.
+If you are on Fedora or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds.
 
 | Public release asset | Use it for |
 |---|---|
 | `Polaris-fedora42-x86_64.rpm` | Recommended Fedora install path |
+| `Polaris-arch-x86_64.pkg.tar.zst` | Recommended Arch install path |
 
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
@@ -91,16 +101,22 @@ sudo dnf install ./Polaris-fedora42-x86_64.rpm
 sudo polaris --setup-host
 ```
 
+```bash
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
+sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
+sudo polaris --setup-host
+```
+
 ### Source build path
 
 Use the source build when:
 
-- you are on Arch, Debian, or another distro without a direct package
+- you are on Debian or another distro without a direct package
 - you want a local/custom build
 - you are developing Polaris
 - you need to regenerate packages yourself
 
-If you are on Arch today, treat Polaris as a source-build project first, not a turnkey package install. It works there, but it is still a more manual path than Fedora and more likely to surface distro-specific edges.
+If you are on Arch today, Polaris can be installed from the GitHub release asset, from source, or from a locally generated package built from the current commit.
 
 #### Core dependencies
 
@@ -133,11 +149,29 @@ sudo dnf install cmake gcc-c++ boost-devel openssl-devel libevdev-devel \
 <summary><b>Arch</b></summary>
 
 ```bash
-sudo pacman -S cmake boost openssl libevdev pipewire wayland \
-  libdrm libcap mesa cuda nodejs npm labwc
+sudo pacman -S --needed git cmake boost curl openssl libevdev pipewire wayland \
+  libdrm libcap libnotify libayatana-appindicator libpulse libva \
+  libx11 libxcb libxfixes libxi libxrandr libxtst miniupnpc \
+  numactl avahi opus libmfx mesa which nodejs npm labwc cuda
 ```
 
 </details>
+
+#### Local Arch package build
+
+If you prefer an installable Arch package over a raw `cmake --install`, Polaris can generate a local `PKGBUILD` and build a `pkg.tar.zst` from the current commit:
+
+```bash
+BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
+BRANCH="$(git branch --show-current)"
+COMMIT="$(git rev-parse HEAD)"
+env BRANCH="$BRANCH" BUILD_VERSION="$BUILD_VERSION" CLONE_URL="file://$PWD" COMMIT="$COMMIT" \
+  cmake -S . -B arch-pkgbuild -DPOLARIS_CONFIGURE_PKGBUILD=ON -DPOLARIS_CONFIGURE_ONLY=ON
+env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always \
+  bash -lc 'cd arch-pkgbuild && makepkg -si'
+```
+
+That local package path builds from the current committed state. The GitHub release asset is the easiest install path; the local package path is still useful when you want to package the exact current checkout.
 
 #### Build and install
 
@@ -171,7 +205,7 @@ systemctl --user enable --now polaris
 |---|---|---|
 | Linux host OS | Supported | Polaris is Linux-first today |
 | Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
-| Arch Linux | Supported from source | Packaging flow is improving, but source build is the practical path today |
+| Arch Linux | Recommended | Official release asset: `Polaris-arch-x86_64.pkg.tar.zst`; source and local PKGBUILD generation are also supported |
 | Debian-family distros | Supported from source | Less turnkey than Fedora right now |
 | NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
 | VAAPI / software encode | Supported | Works, but is less battle-tested than NVENC |
@@ -181,7 +215,7 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- The official prebuilt package path is currently Fedora-focused. Other distros are source-build oriented.
+- Debian-family distros are still source-build oriented. Fedora and Arch now have direct release package assets.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
 - Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova client.
 - MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.

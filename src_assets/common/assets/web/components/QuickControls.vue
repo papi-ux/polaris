@@ -17,12 +17,29 @@ const props = defineProps({
 // Defaults for settings not explicitly in the config file
 const defaults = {
   headless_mode: 'disabled',
+  linux_use_cage_compositor: 'disabled',
   adaptive_bitrate_enabled: 'disabled',
   ai_enabled: 'disabled',
   stream_audio: 'enabled',
   enable_discovery: 'enabled',
   enable_pairing: 'enabled',
 }
+
+const responseOnlyConfigKeys = [
+  'status',
+  'platform',
+  'version',
+  'has_ai_api_key',
+  'has_steamgriddb_api_key',
+  'has_api_key',
+  'vdisplayStatus',
+  'vdisplayAvailable',
+  'vdisplayBackend',
+  'runtime_backend',
+  'runtime_requested_headless',
+  'runtime_effective_headless',
+  'runtime_gpu_native_override_active',
+]
 
 function isEnabled(key) {
   const val = config.value[key] ?? defaults[key] ?? 'disabled'
@@ -63,13 +80,17 @@ async function toggle(key) {
     if (existingRes.ok) {
       existing = await existingRes.json()
     }
-    // Remove runtime-only keys injected by getConfig() that aren't real config settings.
+    const platform = existing.platform || config.value.platform
+
+    // Remove response-only keys injected by getConfig() that aren't real config settings.
     // These come from the server's status probing, not the config file.
-    const runtimeKeys = ['platform', 'status', 'version', 'vdisplayAvailable', 'vdisplayBackend', 'vdisplayStatus']
-    for (const k of runtimeKeys) delete existing[k]
+    for (const k of responseOnlyConfigKeys) delete existing[k]
 
     // Merge the toggle change
     existing[key] = newVal
+    if (key === 'headless_mode' && platform === 'linux') {
+      existing.linux_use_cage_compositor = newVal
+    }
 
     const response = await fetch('./api/config', {
       credentials: 'include',
@@ -79,7 +100,11 @@ async function toggle(key) {
     })
     if (!response.ok) throw new Error('save-failed')
     syncKey(key, newVal)
+    if (key === 'headless_mode' && platform === 'linux') {
+      syncKey('linux_use_cage_compositor', newVal)
+    }
     notifyChange(key, newVal)
+    await loadConfig()
     toast(
       `${labelFor(key)} ${newVal === 'enabled' ? i18n.t('quick_controls.enabled_now') : i18n.t('quick_controls.disabled_now')}`,
       'success',

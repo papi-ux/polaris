@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -96,6 +97,11 @@ namespace ai_optimizer {
     std::string body;
   };
 
+  struct shell_command_result_t {
+    int exit_code = -1;
+    std::string output;
+  };
+
   static std::unordered_map<std::string, cache_entry_t> cache;
   static std::unordered_map<std::string, session_history_t> session_history;
   static std::unordered_map<std::string, std::shared_future<std::optional<device_db::optimization_t>>> inflight_requests_by_key;
@@ -127,6 +133,22 @@ namespace ai_optimizer {
     return PROVIDER_ANTHROPIC;
   }
 
+  static bool provider_supports_subscription(const std::string &provider) {
+    return provider == PROVIDER_ANTHROPIC || provider == PROVIDER_OPENAI;
+  }
+
+  static std::string subscription_cli_binary(const std::string &provider) {
+    return provider == PROVIDER_OPENAI ? "codex" : "claude";
+  }
+
+  static std::string subscription_cli_label(const std::string &provider) {
+    return provider == PROVIDER_OPENAI ? "Codex CLI" : "Claude CLI";
+  }
+
+  static std::string subscription_login_command(const std::string &provider) {
+    return provider == PROVIDER_OPENAI ? "codex login" : "";
+  }
+
   static std::string default_model_for_provider(const std::string &provider) {
     if (provider == PROVIDER_OPENAI) return DEFAULT_OPENAI_MODEL;
     if (provider == PROVIDER_GEMINI) return DEFAULT_GEMINI_MODEL;
@@ -145,7 +167,7 @@ namespace ai_optimizer {
     auth_mode = to_lower_copy(auth_mode);
 
     if (auth_mode.empty()) {
-      if (legacy_subscription && provider == PROVIDER_ANTHROPIC) {
+      if (legacy_subscription && provider_supports_subscription(provider)) {
         return AUTH_SUBSCRIPTION;
       }
       if (provider == PROVIDER_LOCAL && api_key.empty()) {
@@ -154,8 +176,8 @@ namespace ai_optimizer {
       return AUTH_API_KEY;
     }
 
-    if (auth_mode == "subscription" || auth_mode == "cli" || auth_mode == "claude_cli") {
-      return provider == PROVIDER_ANTHROPIC ? AUTH_SUBSCRIPTION : (provider == PROVIDER_LOCAL && api_key.empty() ? AUTH_NONE : AUTH_API_KEY);
+    if (auth_mode == "subscription" || auth_mode == "cli" || auth_mode == "claude_cli" || auth_mode == "codex_cli" || auth_mode == "codex") {
+      return provider_supports_subscription(provider) ? AUTH_SUBSCRIPTION : (provider == PROVIDER_LOCAL && api_key.empty() ? AUTH_NONE : AUTH_API_KEY);
     }
     if (auth_mode == "none" || auth_mode == "disabled") {
       return AUTH_NONE;
@@ -226,6 +248,59 @@ namespace ai_optimizer {
       hashed_secret_fragment(active_cfg.api_key);
   }
 
+  static std::string shell_escape_single_quotes(const std::string &value) {
+    std::string escaped;
+    for (char ch : value) {
+      if (ch == '\'') {
+        escaped += "'\\''";
+      } else {
+        escaped += ch;
+      }
+    }
+    return escaped;
+  }
+
+  static std::string resolve_existing_binary(const std::vector<std::string> &candidates, const std::string &fallback) {
+    for (const auto &candidate : candidates) {
+      if (std::filesystem::exists(candidate)) {
+        return candidate;
+      }
+    }
+    return fallback;
+  }
+
+  static shell_command_result_t run_command_capture(const std::string &command) {
+    shell_command_result_t result;
+    FILE *pipe = popen(command.c_str(), "r");
+    if (!pipe) {
+      return result;
+    }
+
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+      result.output += buffer;
+    }
+
+    result.exit_code = pclose(pipe);
+    return result;
+  }
+
+  static std::optional<bool> codex_login_ready() {
+    auto status = run_command_capture("codex login status 2>/dev/null");
+    if (status.exit_code == -1) {
+      return std::nullopt;
+    }
+
+    const auto normalized = to_lower_copy(status.output);
+    if (normalized.find("logged in") != std::string::npos) {
+      return true;
+    }
+    if (normalized.find("not logged in") != std::string::npos || normalized.find("logged out") != std::string::npos) {
+      return false;
+    }
+    return status.exit_code == 0;
+  }
+
   static int effective_ttl_hours(const cache_entry_t &entry, int base_ttl_hours = 0) {
     auto ttl_hours = base_ttl_hours > 0 ? base_ttl_hours : cfg.cache_ttl_hours;
     const auto confidence = to_lower_copy(entry.optimization.confidence);
@@ -255,6 +330,22 @@ namespace ai_optimizer {
   static bool is_poor_quality_grade(const std::string &grade) {
     const auto normalized = to_lower_copy(grade);
     return normalized == "d" || normalized == "f";
+  }
+
+  static bool is_control_shell_app(const std::string &app_name) {
+    const auto normalized = to_lower_copy(app_name);
+    return normalized.empty() ||
+           normalized == "desktop" ||
+           normalized == "low res desktop" ||
+           normalized == "input only" ||
+           normalized.find("steam gamepad ui") != std::string::npos ||
+           normalized.find("steam big picture") != std::string::npos ||
+           normalized.find("big picture") != std::string::npos;
+  }
+
+  static bool should_invalidate_cache_for_poor_quality(const std::string &app_name,
+                                                       const session_history_t &session) {
+    return is_poor_quality_grade(session.quality_grade) && !is_control_shell_app(app_name);
   }
 
   static std::string codec_family(const std::string &codec) {
@@ -454,7 +545,7 @@ namespace ai_optimizer {
     config.model = normalize_model(config.provider, config.model);
     config.base_url = normalize_base_url(config.provider, config.base_url);
     config.auth_mode = normalize_auth_mode(config.auth_mode, config.provider, config.use_subscription, config.api_key);
-    if (config.provider != PROVIDER_ANTHROPIC) {
+    if (!provider_supports_subscription(config.provider)) {
       config.use_subscription = false;
     }
     return config;
@@ -462,7 +553,7 @@ namespace ai_optimizer {
 
   static bool is_config_enabled(const config_t &active_cfg) {
     if (!active_cfg.enabled || active_cfg.model.empty()) return false;
-    if (active_cfg.provider == PROVIDER_ANTHROPIC) {
+    if (provider_supports_subscription(active_cfg.provider)) {
       return active_cfg.auth_mode == AUTH_SUBSCRIPTION || (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty());
     }
     if (active_cfg.auth_mode == AUTH_NONE) {
@@ -1253,30 +1344,14 @@ namespace ai_optimizer {
 
     std::string prompt = build_user_prompt(device_name, app_name, gpu_info, game_category, history);
     std::string system = build_system_prompt();
-
-    auto escape_sh = [](const std::string &s) {
-      std::string out;
-      for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
-      }
-      return out;
-    };
-
-    std::string claude_bin;
-    for (const auto &path : {
-      std::string(getenv("HOME") ? getenv("HOME") : "/home") + "/.local/bin/claude",
-      std::string("/usr/local/bin/claude"),
-      std::string("/usr/bin/claude"),
-    }) {
-      if (std::filesystem::exists(path)) {
-        claude_bin = path;
-        break;
-      }
-    }
-    if (claude_bin.empty()) {
-      claude_bin = "claude";
-    }
+    const std::string home = getenv("HOME") ? getenv("HOME") : "/home";
+    const auto claude_bin = resolve_existing_binary(
+      {
+        home + "/.local/bin/claude",
+        "/usr/local/bin/claude",
+        "/usr/bin/claude",
+      },
+      "claude");
 
     auto prompt_file = std::filesystem::temp_directory_path() / "polaris_ai_prompt.txt";
     auto system_file = std::filesystem::temp_directory_path() / "polaris_ai_system.txt";
@@ -1289,7 +1364,7 @@ namespace ai_optimizer {
 
     std::string cmd =
       "'" + claude_bin + "' --print "
-      "--model '" + escape_sh(anthropic_cli_model(active_cfg)) + "' "
+      "--model '" + shell_escape_single_quotes(anthropic_cli_model(active_cfg)) + "' "
       "--system-prompt \"$(cat " + system_file.string() + ")\" "
       "< " + prompt_file.string() + " "
       "2>/dev/null";
@@ -1330,6 +1405,79 @@ namespace ai_optimizer {
       return parse_optimization_json(output, "Anthropic CLI");
     } catch (const std::exception &e) {
       BOOST_LOG(error) << "ai_optimizer: Failed to parse CLI response: "sv << e.what();
+      return std::nullopt;
+    }
+  }
+
+  // ---- OpenAI Codex CLI (subscription mode) ----
+
+  static std::optional<device_db::optimization_t> call_openai_codex_cli(
+      const config_t &active_cfg,
+      const std::string &device_name,
+      const std::string &app_name,
+      const std::string &gpu_info,
+      const std::string &game_category = "",
+      const std::optional<session_history_t> &history = std::nullopt) {
+
+    const std::string home = getenv("HOME") ? getenv("HOME") : "/home";
+    const auto codex_bin = resolve_existing_binary(
+      {
+        home + "/.local/bin/codex",
+        "/usr/local/bin/codex",
+        "/usr/bin/codex",
+      },
+      "codex");
+
+    auto prompt_file = std::filesystem::temp_directory_path() / "polaris_codex_prompt.txt";
+    auto output_file = std::filesystem::temp_directory_path() / "polaris_codex_output.txt";
+    {
+      std::ofstream pf(prompt_file);
+      pf << build_system_prompt() << "\n\n"
+         << build_user_prompt(device_name, app_name, gpu_info, game_category, history) << "\n\n"
+         << "Return only the JSON object in the requested schema.";
+    }
+
+    std::string cmd =
+      "'" + codex_bin + "' exec "
+      "--skip-git-repo-check "
+      "--ignore-user-config "
+      "--ignore-rules "
+      "--sandbox read-only "
+      "-C /tmp "
+      "-m '" + shell_escape_single_quotes(active_cfg.model) + "' "
+      "-o '" + shell_escape_single_quotes(output_file.string()) + "' "
+      "- < '" + shell_escape_single_quotes(prompt_file.string()) + "' "
+      "2>/dev/null";
+
+    BOOST_LOG(debug) << "ai_optimizer: Running Codex CLI for "sv << device_name;
+    const auto result = run_command_capture(cmd);
+
+    std::filesystem::remove(prompt_file);
+
+    std::string output;
+    if (std::filesystem::exists(output_file)) {
+      std::ifstream out_file(output_file);
+      output.assign(std::istreambuf_iterator<char>(out_file), std::istreambuf_iterator<char>());
+      std::filesystem::remove(output_file);
+    }
+
+    if (result.exit_code != 0) {
+      BOOST_LOG(error) << "ai_optimizer: codex CLI exited with code "sv << result.exit_code;
+      if (!result.output.empty()) {
+        BOOST_LOG(error) << "ai_optimizer: Codex CLI output: "sv << result.output.substr(0, 200);
+      }
+      return std::nullopt;
+    }
+
+    if (output.empty()) {
+      BOOST_LOG(error) << "ai_optimizer: codex CLI returned empty output"sv;
+      return std::nullopt;
+    }
+
+    try {
+      return parse_optimization_json(output, "Codex CLI");
+    } catch (const std::exception &e) {
+      BOOST_LOG(error) << "ai_optimizer: Failed to parse Codex CLI response: "sv << e.what();
       return std::nullopt;
     }
   }
@@ -1452,6 +1600,10 @@ namespace ai_optimizer {
       return call_anthropic_api(active_cfg, device_name, app_name, gpu_info, game_category, history);
     }
 
+    if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      return call_openai_codex_cli(active_cfg, device_name, app_name, gpu_info, game_category, history);
+    }
+
     return call_openai_compatible_api(active_cfg, device_name, app_name, gpu_info, game_category, history);
   }
 
@@ -1553,6 +1705,10 @@ namespace ai_optimizer {
 
   bool is_enabled() {
     return is_config_enabled(cfg);
+  }
+
+  bool should_sync_on_cache_miss() {
+    return is_config_enabled(cfg) && cfg.auth_mode == AUTH_SUBSCRIPTION;
   }
 
   void set_enabled(bool enabled) {
@@ -1748,8 +1904,8 @@ namespace ai_optimizer {
       }
     }
 
-    if (active_cfg.provider == PROVIDER_ANTHROPIC && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
-      output["error"] = "Live model discovery is unavailable for Claude CLI subscription mode.";
+    if (active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      output["error"] = "Live model discovery is unavailable for " + subscription_cli_label(active_cfg.provider) + " subscription mode.";
       return output.dump(2);
     }
 
@@ -1857,9 +2013,23 @@ namespace ai_optimizer {
     status["last_latency_ms"] = runtime_status_snapshot.last_latency_ms;
     status["last_error"] = runtime_status_snapshot.last_error;
 
-    if (cfg.provider == PROVIDER_ANTHROPIC && cfg.auth_mode == AUTH_SUBSCRIPTION) {
-      int rc = system("command -v claude >/dev/null 2>&1");
+    if (cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      const auto cli_binary = subscription_cli_binary(cfg.provider);
+      const auto cli_label = subscription_cli_label(cfg.provider);
+      const auto login_command = subscription_login_command(cfg.provider);
+      int rc = system(("command -v " + cli_binary + " >/dev/null 2>&1").c_str());
+      status["subscription_cli"] = cli_label;
+      status["cli_binary"] = cli_binary;
       status["cli_available"] = (rc == 0);
+      if (!login_command.empty()) {
+        status["cli_login_command"] = login_command;
+      }
+      if (cfg.provider == PROVIDER_OPENAI && status["cli_available"].get<bool>()) {
+        auto authenticated = codex_login_ready();
+        if (authenticated.has_value()) {
+          status["cli_authenticated"] = *authenticated;
+        }
+      }
     }
 
     return status.dump();
@@ -2025,6 +2195,8 @@ namespace ai_optimizer {
                       const session_history_t &session) {
     const auto canonical_device = canonical_device_name(device_name);
     auto key = history_key(canonical_device, app_name);
+    const bool poor_quality = is_poor_quality_grade(session.quality_grade);
+    const bool invalidate_cache = should_invalidate_cache_for_poor_quality(app_name, session);
     int session_count_total = 0;
     {
       std::lock_guard<std::mutex> lock(history_mutex);
@@ -2068,10 +2240,12 @@ namespace ai_optimizer {
       existing.last_safe_hdr = session.last_safe_hdr;
       existing.last_relaunch_recommended = session.last_relaunch_recommended;
 
-      if (session.quality_grade == "D" || session.quality_grade == "F") {
+      if (poor_quality) {
         existing.poor_outcome_count++;
         existing.consecutive_poor_outcomes++;
-        existing.last_invalidated_at = unix_time_now();
+        if (invalidate_cache) {
+          existing.last_invalidated_at = unix_time_now();
+        }
       } else {
         existing.consecutive_poor_outcomes = 0;
       }
@@ -2086,12 +2260,15 @@ namespace ai_optimizer {
                     << " against target "sv << session.last_target_fps
                     << "fps, "sv << session_count_total << " sessions total"sv;
 
-    // If quality is poor (D or F), invalidate cache to force re-optimization
-    if (session.quality_grade == "D" || session.quality_grade == "F") {
+    // Poor game sessions should force re-optimization, but low-signal control shells
+    // like Desktop or Steam Big Picture should keep their existing cache entry.
+    if (invalidate_cache) {
       std::lock_guard<std::mutex> lock(cache_mutex);
       cache.erase(current_cache_key(canonical_device, app_name));
       save_cache_locked();
       BOOST_LOG(info) << "ai_optimizer: Poor quality — invalidated cache for "sv << key;
+    } else if (poor_quality && is_control_shell_app(app_name)) {
+      BOOST_LOG(info) << "ai_optimizer: Poor quality on control-shell session — keeping cache for "sv << key;
     }
   }
 
