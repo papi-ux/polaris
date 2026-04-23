@@ -32,6 +32,19 @@ jobs:
       - name: Test web UI
         run: npm run test
 
+      - name: Build web UI bundle
+        run: npm run build-clean
+
+      - name: Pack web UI bundle
+        run: tar -czf web-ui-build.tar.gz -C build/assets web
+
+      - name: Upload web UI bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-ui-build
+          path: web-ui-build.tar.gz
+          if-no-files-found: error
+
   arch-build:
     name: Arch build
     needs: web-checks
@@ -47,6 +60,10 @@ jobs:
         run: pacman -Syu --noconfirm --needed archlinux-keyring git
 
       - uses: actions/checkout@v5
+        if: startsWith(github.ref, 'refs/tags/v')
+
+      - uses: actions/checkout@v5
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           submodules: recursive
 
@@ -73,9 +90,10 @@ jobs:
             desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
             gcc libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
             libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
-            npm numactl openssl opus pipewire wayland wayland-protocols which
+            nlohmann-json npm numactl openssl opus pipewire wayland wayland-protocols which
 
       - name: Configure
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: |
           cmake -B build -G Ninja \
             -DBUILD_TESTS=ON \
@@ -85,10 +103,26 @@ jobs:
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF
 
+      - name: Download prebuilt web UI bundle
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui-build
+          path: .
+
+      - name: Prepare prebuilt web UI bundle
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          mkdir -p build/assets build/CMakeFiles node_modules
+          tar -xzf web-ui-build.tar.gz -C build/assets
+          touch node_modules/.polaris-web-ui-npm.stamp build/CMakeFiles/web-ui-build.stamp
+
       - name: Build
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: cmake --build build -j"$(nproc)"
 
       - name: Run fast C++ tests
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
 
       - name: Generate Arch package files
@@ -106,6 +140,7 @@ jobs:
               -DPOLARIS_CONFIGURE_ONLY=ON
 
       - name: Validate Arch package
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           useradd -m builder
           install -d "$CCACHE_DIR"
@@ -163,6 +198,7 @@ jobs:
   ubuntu-build:
     name: Ubuntu build
     needs: web-checks
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-24.04
     env:
       CCACHE_DIR: ~/.cache/ccache
@@ -197,7 +233,7 @@ jobs:
             libdrm-dev libgbm-dev libcap-dev libwayland-dev \
             libpipewire-0.3-dev libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
-            libva-dev libminiupnpc-dev libnotify-dev \
+            libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
             libappindicator3-dev libgtk-3-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             wayland-protocols
@@ -211,6 +247,18 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF
+
+      - name: Download prebuilt web UI bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui-build
+          path: .
+
+      - name: Prepare prebuilt web UI bundle
+        run: |
+          mkdir -p build/assets build/CMakeFiles node_modules
+          tar -xzf web-ui-build.tar.gz -C build/assets
+          touch node_modules/.polaris-web-ui-npm.stamp build/CMakeFiles/web-ui-build.stamp
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
@@ -270,6 +318,18 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF
+
+      - name: Download prebuilt web UI bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui-build
+          path: .
+
+      - name: Prepare prebuilt web UI bundle
+        run: |
+          mkdir -p build/assets build/CMakeFiles node_modules
+          tar -xzf web-ui-build.tar.gz -C build/assets
+          touch node_modules/.polaris-web-ui-npm.stamp build/CMakeFiles/web-ui-build.stamp
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
