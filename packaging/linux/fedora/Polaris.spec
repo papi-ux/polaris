@@ -16,7 +16,7 @@ URL: https://github.com/papi-ux/polaris
 Source0: tarball.tar.gz
 
 BuildRequires: appstream
-# BuildRequires: boost-devel >= 1.86.0
+BuildRequires: boost-devel >= 1.86.0
 BuildRequires: cmake >= 3.25.0
 BuildRequires: desktop-file-utils
 BuildRequires: libappstream-glib
@@ -40,6 +40,8 @@ BuildRequires: git
 BuildRequires: mesa-libGL-devel
 BuildRequires: mesa-libgbm-devel
 BuildRequires: miniupnpc-devel
+BuildRequires: ninja-build
+BuildRequires: nlohmann-json-devel
 BuildRequires: npm
 BuildRequires: numactl-devel
 BuildRequires: openssl-devel
@@ -110,7 +112,7 @@ cuda_supported_architectures=("x86_64" "aarch64")
 # prepare CMAKE args
 cmake_args=(
   "-B=%{_builddir}/Polaris/build"
-  "-G=Unix Makefiles"
+  "-G=Ninja"
   "-S=."
   "-DBUILD_DOCS=OFF"
   "-DBUILD_WERROR=ON"
@@ -195,7 +197,7 @@ cd %{_builddir}/Polaris
 echo "cmake args:"
 echo "${cmake_args[@]}"
 cmake "${cmake_args[@]}"
-make -j$(nproc) -C "%{_builddir}/Polaris/build"
+cmake --build "%{_builddir}/Polaris/build" --parallel $(nproc)
 
 %check
 # validate the metainfo file
@@ -208,8 +210,7 @@ cd %{_builddir}/Polaris/build
 xvfb-run ./tests/test_polaris
 
 %install
-cd %{_builddir}/Polaris/build
-%make_install
+DESTDIR=%{buildroot} cmake --install %{_builddir}/Polaris/build
 
 %post
 echo "Polaris host integration is now explicit instead of automatic."

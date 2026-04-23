@@ -54,6 +54,8 @@ makedepends=(
   'gcc'
   'git'
   'make'
+  'ninja'
+  'nlohmann-json'
   'nodejs'
   'npm'
 )
@@ -166,6 +168,7 @@ build() {
     local _cmake_options=(
       -S "$pkgname"
       -B build
+      -G Ninja
       -Wno-dev
       -D BUILD_DOCS=OFF
       -D BUILD_WERROR=ON
@@ -205,7 +208,7 @@ build() {
     desktop-file-validate "build/dev.polaris-stream.app.Polaris.desktop"
     desktop-file-validate "build/dev.polaris-stream.app.Polaris.terminal.desktop"
 
-    make -C build
+    cmake --build build --parallel "$(nproc)"
 }
 
 check() {
@@ -222,6 +225,5 @@ check() {
 }
 
 package() {
-    export MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}"
-    make -C build install DESTDIR="$pkgdir"
+    DESTDIR="$pkgdir" cmake --install build
 }
