@@ -16,7 +16,7 @@ URL: https://github.com/papi-ux/polaris
 Source0: tarball.tar.gz
 
 BuildRequires: appstream
-BuildRequires: boost-devel >= 1.86.0
+BuildRequires: boost-devel
 BuildRequires: cmake >= 3.25.0
 BuildRequires: desktop-file-utils
 BuildRequires: libappstream-glib
