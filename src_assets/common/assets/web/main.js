@@ -64,6 +64,25 @@ function redirectToLoginWithReturnTarget(to) {
   }
 }
 
+function dynamicImportReloadKey(to) {
+  return `polaris:dynamic-import-reload:${to.fullPath || to.path || '/'}`
+}
+
+function reloadDynamicImportTarget(to) {
+  const target = to.fullPath || to.path || '/'
+  const key = dynamicImportReloadKey(to)
+  if (sessionStorage.getItem(key)) {
+    return false
+  }
+
+  sessionStorage.setItem(key, '1')
+  const url = new URL(window.location.href)
+  url.hash = target
+  url.searchParams.set('polarisReload', String(Date.now()))
+  window.location.replace(url.toString())
+  return true
+}
+
 router.beforeEach(async (to, _from) => {
   if (!isPublicRoute(to.path)) {
     if (authed) return
@@ -106,8 +125,16 @@ router.beforeEach(async (to, _from) => {
   }
 })
 
+router.afterEach((to) => {
+  sessionStorage.removeItem(dynamicImportReloadKey(to))
+})
+
 router.onError((error, to) => {
   if (isDynamicImportError(error) && redirectToIpv4Loopback(window.location, window.location.replace.bind(window.location), `#${to.fullPath}`)) {
+    return
+  }
+
+  if (isDynamicImportError(error) && reloadDynamicImportTarget(to)) {
     return
   }
 

@@ -1074,6 +1074,8 @@
     "download_support_bundle_success": "Support bundle downloaded.",
     "logs": "Logs",
     "logs_clear": "Clear",
+    "logs_clear_filters": "Clear log filters",
+    "logs_clear_output": "Clear log output",
     "logs_clear_error": "Failed to clear logs.",
     "logs_clear_success": "Logs cleared.",
     "logs_desc": "Filter the live Polaris log, clear noise, and copy exactly what is on screen when you need a support-ready excerpt.",

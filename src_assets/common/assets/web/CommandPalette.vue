@@ -193,7 +193,9 @@ const resultsLabel = computed(() => `${filteredActions.value.length} ${filteredA
 
 watch(() => props.modelValue, (val) => {
   if (val) {
-    lastFocusedElement.value = document.activeElement
+    if (!lastFocusedElement.value) {
+      lastFocusedElement.value = document.activeElement
+    }
     query.value = ''
     selectedIndex.value = 0
     nextTick(() => {
@@ -204,8 +206,9 @@ watch(() => props.modelValue, (val) => {
 
   nextTick(() => {
     lastFocusedElement.value?.focus?.()
+    lastFocusedElement.value = null
   })
-})
+}, { immediate: true })
 
 watch(query, () => {
   selectedIndex.value = 0

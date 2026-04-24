@@ -8,12 +8,20 @@ export const test = base.extend({
       test.skip(true, 'POLARIS_USER and POLARIS_PASS must be set')
     }
 
-    await page.goto('/#/login')
-    await page.locator('#usernameInput').fill(user)
-    await page.locator('#passwordInput').fill(pass)
-    await page.getByRole('button', { name: /sign in|login/i }).click()
+    await page.context().clearCookies()
+    const response = await page.request.post('/api/login', {
+      data: {
+        username: user,
+        password: pass,
+      },
+    })
+    if (!response.ok()) {
+      const body = await response.text().catch(() => '')
+      throw new Error(`Login setup failed with ${response.status()}: ${body}`)
+    }
 
-    await page.waitForURL((url) => !url.hash.includes('/login'), { timeout: 10000 })
+    await page.goto('/#/')
+    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 15000 })
     await use(page)
   },
 })

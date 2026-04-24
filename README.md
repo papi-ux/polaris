@@ -28,10 +28,10 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is Linux-first today. Fedora and Arch now have direct release package assets. Debian and other distros are still more hands-on through source builds. Linux is the only supported host platform today.
+> Polaris is a Linux host today. Fedora 42 and Arch Linux have direct `v1.0.1` release packages; Debian-family and other distro installs are still source-build oriented.
 
 > [!NOTE]
-> `v1.0.1` is the current public Polaris release line. Polaris is already usable, but this is still an early public release surface and you should expect bugs, regressions, and rough edges while packaging and compatibility continue to settle. Older tags stay available for continuity, but the current README and release assets reflect the live Linux-first product surface.
+> `v1.0.1` is the current public Polaris release line. The host, web console, Fedora RPM, and Arch package are ready for broader testing, but this is still an early public surface. Expect some distro, GPU, and client edge cases while compatibility keeps expanding.
 
 ## Quick Start
 
@@ -88,12 +88,12 @@ polaris
 
 ### Recommended package path
 
-If you are on Fedora or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds.
+If you are on Fedora or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds. Both package paths install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit so the installer does not silently change input or KMS permissions.
 
 | Public release asset | Use it for |
 |---|---|
-| `Polaris-fedora42-x86_64.rpm` | Recommended Fedora install path |
-| `Polaris-arch-x86_64.pkg.tar.zst` | Recommended Arch install path |
+| `Polaris-fedora42-x86_64.rpm` | Fedora 42 x86_64 hosts |
+| `Polaris-arch-x86_64.pkg.tar.zst` | Arch Linux x86_64 hosts |
 
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
@@ -159,7 +159,7 @@ sudo pacman -S --needed git cmake boost curl openssl libevdev pipewire wayland \
 
 #### Local Arch package build
 
-If you prefer an installable Arch package over a raw `cmake --install`, Polaris can generate a local `PKGBUILD` and build a `pkg.tar.zst` from the current commit:
+If you prefer an installable Arch package over a raw `cmake --install`, Polaris can generate a local `PKGBUILD` and build a `pkg.tar.zst` from the current commit. This is mainly for packagers and local release validation; most users should start with the GitHub release asset.
 
 ```bash
 BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
@@ -215,7 +215,7 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- Debian-family distros are still source-build oriented. Fedora and Arch now have direct release package assets.
+- Debian-family distros are still source-build oriented. Fedora 42 and Arch Linux have direct x86_64 release package assets.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
 - Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova client.
 - MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.
@@ -573,8 +573,9 @@ Contributions are welcome: bug fixes, features, documentation, translations, and
 
 1. Fork the repo and branch from `master`.
 2. Make your changes and test them locally.
-3. For web UI changes, run `npm run build` in the repo root.
-4. Open a pull request that clearly explains what changed and why.
+3. For web UI changes, run `npm run lint`, `npm test`, and `npm run build` in the repo root.
+4. For browser-facing changes, run `npm run test:e2e` against a local Polaris instance when possible.
+5. Open a pull request that clearly explains what changed and why.
 
 > [!NOTE]
 > The web UI lives in `src_assets/common/assets/web/` and uses Vue 3 with Tailwind CSS v4. The backend lives in `src/`. CMake builds both together.

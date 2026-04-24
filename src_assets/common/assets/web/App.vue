@@ -199,8 +199,8 @@ import { ref, computed, watch, onMounted, onUnmounted, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import CommandPalette from './CommandPalette.vue'
-import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
+import Toast from './components/Toast.vue'
 import { getCachedConfig } from './config-cache.js'
 import { initTheme, getTheme, setTheme as setThemeFn } from './theme.js'
 
@@ -392,7 +392,6 @@ watch(() => route.path, () => {
     loadAppVersion()
   }
 })
-
 onMounted(() => {
   initTheme()
   window.addEventListener('keydown', handleKeydown)

@@ -231,6 +231,7 @@
             <button
               v-if="logFilter || logLevelFilter"
               class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary"
+              :aria-label="$t('troubleshooting.logs_clear_filters')"
               @click="clearLogFilters"
             >
               Clear
@@ -238,6 +239,7 @@
             <button
               class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary"
               :disabled="clearingLogs"
+              :aria-label="$t('troubleshooting.logs_clear_output')"
               @click="clearLogs"
             >
               {{ $t('troubleshooting.logs_clear') }}
@@ -266,11 +268,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onBeforeUnmount, inject } from 'vue'
+import { ref, computed, onBeforeUnmount, inject, defineAsyncComponent } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
-import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import InfoHint from '../components/InfoHint.vue'
+
+const VirtualLogViewer = defineAsyncComponent(() => import('../components/VirtualLogViewer.vue'))
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
