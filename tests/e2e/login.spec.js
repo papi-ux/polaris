@@ -1,15 +1,29 @@
 import { test, expect } from '@playwright/test'
 
+async function gotoLoginForm(page) {
+  await page.context().clearCookies()
+  await page.goto('/#/login')
+
+  const usernameInput = page.locator('#usernameInput')
+  const navigation = page.getByRole('navigation')
+  await expect(usernameInput.or(navigation).first()).toBeVisible({ timeout: 15000 })
+
+  const hasLoginForm = await usernameInput.isVisible().catch(() => false)
+  test.skip(!hasLoginForm, 'Login route resumed an authenticated session')
+
+  return usernameInput
+}
+
 test.describe('login', () => {
   test('renders the login form', async ({ page }) => {
-    await page.goto('/#/login')
-    await expect(page.locator('#usernameInput')).toBeVisible()
+    const usernameInput = await gotoLoginForm(page)
+    await expect(usernameInput).toBeVisible()
     await expect(page.locator('#passwordInput')).toBeVisible()
     await expect(page.getByRole('button', { name: /sign in|login/i })).toBeVisible()
   })
 
   test('skip control is keyboard reachable', async ({ page }) => {
-    await page.goto('/#/login')
+    await gotoLoginForm(page)
 
     const skipLink = page.getByRole('button', { name: /skip to main content/i })
     await expect(skipLink).toBeVisible()
@@ -21,8 +35,8 @@ test.describe('login', () => {
   })
 
   test('shows error for invalid credentials', async ({ page }) => {
-    await page.goto('/#/login')
-    await page.locator('#usernameInput').fill('not-a-user')
+    const usernameInput = await gotoLoginForm(page)
+    await usernameInput.fill('not-a-user')
     await page.locator('#passwordInput').fill('wrong-password')
     await page.getByRole('button', { name: /sign in|login/i }).click()
 

@@ -6,7 +6,7 @@ import { ref, onMounted, onUnmounted, watch } from 'vue'
  * Fetches from /api/stats/system at a configurable interval.
  *
  * @param {number} intervalMs - Poll interval in ms (default: 3000)
- * @param {{ shouldPoll?: (() => boolean) | { value: boolean } }} options
+ * @param {{ shouldPoll?: (() => boolean) | { value: boolean }, pauseWhenHidden?: boolean }} options
  * @returns {{ gpu: Ref, loading: Ref<boolean> }}
  */
 export function useSystemStats(intervalMs = 3000, options = {}) {
@@ -19,7 +19,14 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
   let timer = null
   let stopPollingWatcher = null
 
+  function shouldPauseForVisibility() {
+    return options.pauseWhenHidden !== false && typeof document !== 'undefined' && document.hidden
+  }
+
   function resolveShouldPoll() {
+    if (shouldPauseForVisibility()) {
+      return false
+    }
     if (typeof options.shouldPoll === 'function') {
       return Boolean(options.shouldPoll())
     }
@@ -46,6 +53,8 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
   }
 
   async function fetchStats() {
+    if (!resolveShouldPoll()) return
+
     try {
       const res = await fetch('./api/stats/system', { credentials: 'include' })
       if (res.ok) {
@@ -61,10 +70,23 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
     loading.value = false
   }
 
+  function handleVisibilityChange() {
+    if (resolveShouldPoll()) {
+      fetchStats()
+      startTimer()
+    } else {
+      stopTimer()
+    }
+  }
+
   onMounted(() => {
     if (resolveShouldPoll()) {
       fetchStats()
       startTimer()
+    }
+
+    if (options.pauseWhenHidden !== false && typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
     }
 
     if (options.shouldPoll) {
@@ -81,6 +103,9 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
 
   onUnmounted(() => {
     stopTimer()
+    if (options.pauseWhenHidden !== false && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
     if (stopPollingWatcher) {
       stopPollingWatcher()
       stopPollingWatcher = null

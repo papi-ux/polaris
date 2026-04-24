@@ -28,6 +28,7 @@ let currentPalette = null
 let resizeObserver = null
 let motionMediaQuery = null
 let prefersReducedMotion = false
+let pageVisible = true
 
 function randomBetween(min, max) {
   return Math.random() * (max - min) + min
@@ -241,7 +242,7 @@ function resize() {
 }
 
 function animate(staticFrame = false) {
-  if (!ctx) return
+  if (!ctx || !pageVisible) return
   ctx.clearRect(0, 0, w, h)
 
   for (const n of nebulae) {
@@ -389,7 +390,20 @@ function restartAnimation() {
     cancelAnimationFrame(animId)
     animId = null
   }
+  if (!pageVisible) return
   animate(prefersReducedMotion)
+}
+
+function handleVisibilityChange() {
+  pageVisible = typeof document === 'undefined' || !document.hidden
+  if (!pageVisible) {
+    if (animId) {
+      cancelAnimationFrame(animId)
+      animId = null
+    }
+    return
+  }
+  restartAnimation()
 }
 
 watch(() => [props.dense, props.mode, props.theme], () => {
@@ -401,12 +415,14 @@ watch(() => [props.dense, props.mode, props.theme], () => {
 onMounted(() => {
   if (!canvas.value) return
   ctx = canvas.value.getContext('2d')
+  pageVisible = typeof document === 'undefined' || !document.hidden
   motionMediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
   syncReducedMotionPreference()
   syncVisualMode()
   resize()
   rebuild()
   window.addEventListener('resize', resize)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery.addEventListener('change', handleReducedMotionChange)
   if (props.absolute && canvas.value.parentElement && typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => resize())
@@ -418,6 +434,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (animId) cancelAnimationFrame(animId)
   window.removeEventListener('resize', resize)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery?.removeEventListener('change', handleReducedMotionChange)
   if (resizeObserver) resizeObserver.disconnect()
 })

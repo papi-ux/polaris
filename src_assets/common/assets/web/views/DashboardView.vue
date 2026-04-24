@@ -12,12 +12,7 @@
           <span class="meta-pill" :class="stats?.streaming ? 'border-green-500/30 bg-green-500/10 text-green-300' : ''">
             {{ stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
           </span>
-          <template v-if="stats?.streaming">
-            <span class="meta-pill">{{ viewerCountLabel }}</span>
-            <span class="meta-pill">{{ qualitySummaryLabel }}</span>
-            <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
-          </template>
-          <template v-else>
+          <template v-if="!stats?.streaming">
             <span class="meta-pill" :class="readinessTone">{{ readinessLabel }}</span>
             <span class="meta-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
             <span class="meta-pill">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
@@ -29,19 +24,7 @@
         <template v-if="!statsLoaded">
           <Skeleton type="card" v-for="n in 2" :key="n" />
         </template>
-        <template v-else-if="stats?.streaming">
-          <article class="header-support-card">
-            <div class="section-kicker">Client</div>
-            <div class="header-support-value">{{ currentClientName }}</div>
-            <div class="header-support-copy">{{ viewerCountLabel }}</div>
-          </article>
-          <article class="header-support-card">
-            <div class="section-kicker">Signal</div>
-            <div class="header-support-value">{{ qualitySummaryLabel }}</div>
-            <div class="header-support-copy">{{ stats.fps?.toFixed(1) || '--' }} fps · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps · {{ runtimeEffectiveMode }}</div>
-          </article>
-        </template>
-        <template v-else>
+        <template v-else-if="!stats?.streaming">
           <article class="header-support-card">
             <div class="section-kicker">{{ $t('dashboard.primary_focus') }}</div>
             <div class="header-support-value">{{ primaryFocus.title }}</div>
@@ -75,11 +58,6 @@
                   <div class="mt-2 text-sm text-storm">{{ previewSupportCopy }}</div>
                 </div>
                 <div class="dashboard-preview-side">
-                  <div class="dashboard-preview-meta">
-                    <span class="meta-pill">{{ viewerCountLabel }}</span>
-                    <span class="meta-pill">{{ qualitySummaryLabel }}</span>
-                    <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
-                  </div>
                   <div class="dashboard-preview-actions">
                     <button v-if="!showPreview" @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary">
                       {{ $t('dashboard.show_display') }}
@@ -124,10 +102,6 @@
                 <div class="dashboard-preview-footer">
                   <div class="dashboard-preview-meta">
                     <span class="data-pill">{{ previewSourceLabel }}</span>
-                    <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
-                    <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
-                    <span class="data-pill">{{ previewRuntimeLabel }}</span>
-                    <span class="data-pill">{{ captureTransportLabel }}</span>
                   </div>
                   <div class="text-xs text-storm">{{ previewStatusText }}</div>
                 </div>
@@ -136,10 +110,6 @@
                 <div>
                   <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_hidden_title') }}</div>
                   <div class="mt-2 text-sm leading-relaxed text-storm">{{ $t('dashboard.preview_hidden_desc') }}</div>
-                </div>
-                <div class="dashboard-preview-meta">
-                  <span class="data-pill">{{ viewerCountLabel }}</span>
-                  <span class="data-pill">{{ qualitySummaryLabel }}</span>
                 </div>
               </div>
             </section>
@@ -194,37 +164,12 @@
             </div>
 
             <section class="dashboard-telemetry-card">
-              <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                <div>
-                  <div class="section-kicker">Stream</div>
-                  <h3 class="section-title">Telemetry</h3>
-                </div>
-                <div class="flex flex-wrap gap-2 text-[11px] text-silver">
-                  <span class="data-pill">{{ stats.fps?.toFixed(1) || '--' }} fps</span>
-                  <span class="data-pill">{{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
-                  <span class="data-pill">{{ stats.latency_ms?.toFixed(0) || '--' }} ms</span>
-                  <span class="data-pill">{{ stats.packet_loss?.toFixed(1) || '--' }}% loss</span>
-                </div>
+              <div>
+                <div class="section-kicker">Stream</div>
+                <h3 class="section-title">Telemetry</h3>
               </div>
 
-              <div class="dashboard-telemetry-grid mt-4">
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-green-400/80">FPS</div>
-                  <div ref="fpsChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-sky-400/80">Bitrate</div>
-                  <div ref="bitrateChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">Latency</div>
-                  <div ref="latencyChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-red-400/80">Packet Loss</div>
-                  <div ref="lossChartEl" class="h-24 w-full"></div>
-                </div>
-              </div>
+              <DashboardStreamCharts :stats="stats" />
 
               <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div class="dashboard-metric-tile">
@@ -256,7 +201,11 @@
           <div class="dashboard-live-side">
             <section class="surface-subtle p-4 dashboard-context-card">
               <div class="flex items-center justify-between gap-3">
-                <div class="eyebrow-label">Signal</div>
+                <div>
+                  <div class="eyebrow-label">Session status</div>
+                  <div class="mt-2 text-sm font-medium text-silver">{{ currentClientName }}</div>
+                  <div class="mt-1 text-[11px] text-storm">{{ connectedClientsSummary }}</div>
+                </div>
                 <span class="inline-flex h-8 min-w-8 items-center justify-center rounded-full px-3 text-sm font-semibold" :class="qualityBadgeClass">
                   {{ qualityGrade }}
                 </span>
@@ -272,7 +221,7 @@
               </div>
               <div class="dashboard-context-section">
                 <div class="dashboard-context-header">
-                  <span>{{ $t('dashboard.connected_clients') }}</span>
+                  <span>{{ connectedClientsSectionTitle }}</span>
                   <button
                     v-if="connectedClientUuid"
                     @click="disconnectClient"
@@ -293,9 +242,6 @@
                         <span v-if="isClientAiOptimized(client.name)" class="ml-1 inline-flex items-center gap-0.5 rounded-full bg-accent/15 px-1.5 py-0.5 text-[9px] font-medium text-accent">AI</span>
                       </div>
                       <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}</div>
-                    </div>
-                    <div class="text-right text-[11px] text-storm">
-                      <div>{{ client.latency_ms?.toFixed(0) || '--' }} ms</div>
                     </div>
                   </div>
                 </div>
@@ -508,17 +454,20 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
 import { useSessionHistory, formatDuration } from '../composables/useSessionHistory'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { useFavicon } from '../composables/useFavicon'
+import { getCachedConfig } from '../config-cache'
 import Skeleton from '../components/Skeleton.vue'
 import GaugeArc from '../components/GaugeArc.vue'
 import QuickControls from '../components/QuickControls.vue'
 import InfoHint from '../components/InfoHint.vue'
 import { useI18n } from 'vue-i18n'
+
+const DashboardStreamCharts = defineAsyncComponent(() => import('../components/DashboardStreamCharts.vue'))
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000, {
@@ -530,7 +479,6 @@ const { fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices, getSuggestion:
 // AI optimization state for current stream
 const aiOptimization = ref(null)
 const aiCacheKeys = ref([])
-const sessionHistory = ref([])
 const recentApps = ref([])
 const pairedClients = ref(0)
 const appCatalogCount = ref(0)
@@ -674,11 +622,14 @@ const connectedClients = computed(() => {
   }]
 })
 
-const viewerCountLabel = computed(() => {
+const currentClientName = computed(() => connectedClients.value[0]?.name || t('dashboard.unknown_client'))
+const connectedClientsSummary = computed(() => {
   const count = connectedClients.value.length || 1
   return `${count} ${count === 1 ? 'viewer' : 'viewers'}`
 })
-const currentClientName = computed(() => connectedClients.value[0]?.name || t('dashboard.unknown_client'))
+const connectedClientsSectionTitle = computed(() => (
+  connectedClients.value.length > 1 ? t('dashboard.connected_clients') : 'Client'
+))
 
 function titleizeToken(value) {
   if (!value) return '--'
@@ -697,19 +648,9 @@ const runtimeBackendLabel = computed(() => {
   return titleizeToken(stats.value?.runtime_backend || 'unknown')
 })
 
-const runtimeRequestedMode = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return modeLabelFromBool(Boolean(stats.value?.runtime_requested_headless))
-})
-
 const runtimeEffectiveMode = computed(() => {
   if (!stats.value?.streaming) return '--'
   return modeLabelFromBool(Boolean(stats.value?.runtime_effective_headless))
-})
-
-const runtimeModeTone = computed(() => {
-  if (!stats.value?.streaming) return 'bg-storm/20 text-storm'
-  return stats.value?.runtime_effective_headless ? 'bg-accent/15 text-accent' : 'bg-amber-500/15 text-amber-300'
 })
 
 const runtimeOverrideLabel = computed(() => {
@@ -748,20 +689,6 @@ const activeOutputLabel = computed(() => {
 
 const previewSourceLabel = computed(() => `Source ${activeOutputLabel.value}`)
 
-const previewRuntimeLabel = computed(() => `Runtime ${runtimeEffectiveMode.value} ${runtimeBackendLabel.value}`)
-
-const captureResidencyLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return titleizeToken(stats.value?.capture_residency || 'unknown')
-})
-
-const captureFormatLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  const format = stats.value?.capture_format
-  if (!format) return '--'
-  return String(format).toUpperCase()
-})
-
 const runtimePathNote = computed(() => {
   if (!stats.value?.streaming) return ''
 
@@ -787,11 +714,6 @@ const liveSessionTitle = computed(() => (
     ? `${connectedClients.value.length} viewers live`
     : `${currentClientName.value} live`
 ))
-
-const qualitySummaryLabel = computed(() => t('dashboard.quality_summary', {
-  grade: qualityGrade.value,
-  score: qualityScore.value,
-}))
 
 // Check if a specific client name has AI-optimized settings (for multi-viewer list)
 function isClientAiOptimized(clientName) {
@@ -903,28 +825,18 @@ const qualityGrade = computed(() => {
   return 'F'
 })
 
-// Stream metrics for the left column (compact vertical list)
-const streamMetrics = computed(() => {
+const primaryStreamMetrics = computed(() => {
   if (!stats.value?.streaming) return []
   const s = stats.value
   const fpsColor = s.fps >= 55 ? 'text-green-400' : s.fps >= 30 ? 'text-yellow-400' : 'text-red-400'
   const latColor = s.latency_ms <= 20 ? 'text-green-400' : s.latency_ms <= 50 ? 'text-yellow-400' : 'text-red-400'
-  const lossColor = s.packet_loss < 0.5 ? 'text-green-400' : s.packet_loss < 2 ? 'text-yellow-400' : 'text-red-400'
+
   return [
     { label: 'FPS', value: s.fps.toFixed(1), color: fpsColor },
     { label: 'RTT', value: s.latency_ms.toFixed(0) + 'ms', color: latColor },
     { label: 'Bitrate', value: (s.bitrate_kbps / 1000).toFixed(1) + ' Mbps', color: 'text-silver' },
     { label: 'Encode', value: s.encode_time_ms.toFixed(1) + 'ms', color: 'text-silver' },
-    { label: 'Codec', value: s.codec?.toUpperCase(), color: 'text-accent' },
-    { label: 'Resolution', value: s.width + '×' + s.height, color: 'text-silver' },
-    { label: 'Pkt Loss', value: s.packet_loss.toFixed(1) + '%', color: lossColor },
-    { label: 'Sent', value: formatBytes(s.bytes_sent), color: 'text-storm' },
   ]
-})
-
-const primaryStreamMetrics = computed(() => {
-  const labels = new Set(['FPS', 'RTT', 'Bitrate', 'Encode'])
-  return streamMetrics.value.filter((metric) => labels.has(metric.label))
 })
 
 const previewHeadline = computed(() => (
@@ -955,9 +867,7 @@ const aiOptimizationSummary = computed(() => {
 const runtimeSummaryRows = computed(() => ([
   { label: 'Backend', value: runtimeBackendLabel.value, tone: 'text-silver' },
   { label: 'Capture', value: captureTransportLabel.value, tone: 'text-silver' },
-  { label: 'Format', value: captureFormatLabel.value, tone: 'text-silver' },
-  { label: 'Residency', value: captureResidencyLabel.value, tone: 'text-silver' },
-  { label: 'Requested', value: runtimeRequestedMode.value, tone: 'text-silver' },
+  { label: 'Mode', value: runtimeEffectiveMode.value, tone: 'text-silver' },
   { label: 'Override', value: runtimeOverrideLabel.value, tone: runtimeOverrideTone.value },
 ]))
 
@@ -1048,8 +958,11 @@ async function resolveConnectedClient() {
   try {
     const res = await fetch('./api/clients/list', { credentials: 'include' })
     if (res.ok) {
-      const clients = await res.json()
-      const connected = clients.find(c => c.name === stats.value.client_name)
+      const data = await res.json()
+      const clients = Array.isArray(data.named_certs) ? data.named_certs : []
+      const connected = clients.find(c => c.connected && (
+        c.name === stats.value.client_name || c.friendly_name === stats.value.client_name
+      ))
       if (connected) connectedClientUuid.value = connected.uuid
     }
   } catch {}
@@ -1081,176 +994,20 @@ function formatAudioName(sink) {
 // Dynamic favicon
 useFavicon(stats)
 
-// Lazy-load uPlot
-let uPlotLib = null
-const uPlotLoaded = ref(false)
-
-async function loadUPlot() {
-  if (!uPlotLib) {
-    const mod = await import('uplot')
-    await import('uplot/dist/uPlot.min.css')
-    uPlotLib = mod.default
-    uPlotLoaded.value = true
-  }
-  return uPlotLib
-}
-
 // Track whether we've gotten at least one stats response
 const statsLoaded = ref(false)
 
 // Fetch system info
 async function fetchSystemInfo() {
   try {
-    const configRes = await fetch('./api/config', { credentials: 'include' })
-    if (configRes.ok) {
-      const config = await configRes.json()
-      streamingOutput.value = config.linux_streaming_output || config.output_name || ''
-      discoveryEnabled.value = config.enable_discovery !== 'disabled'
-      pairingEnabled.value = config.enable_pairing !== 'disabled'
-    }
+    const config = await getCachedConfig()
+    streamingOutput.value = config.linux_streaming_output || config.output_name || ''
+    headlessEnabled.value = config.headless_mode === 'enabled'
+    discoveryEnabled.value = config.enable_discovery !== 'disabled'
+    pairingEnabled.value = config.enable_pairing !== 'disabled'
   } catch (e) {
     // Non-critical, just leave defaults
   }
-}
-
-// Chart refs
-const fpsChartEl = ref(null)
-const bitrateChartEl = ref(null)
-const encodeChartEl = ref(null)
-const latencyChartEl = ref(null)
-const gpuChartEl = ref(null)
-const lossChartEl = ref(null)
-
-// Chart instances
-let fpsChart = null
-let bitrateChart = null
-let encodeChart = null
-let latencyChart = null
-let gpuChart = null
-let lossChart = null
-
-// Rolling data (60 seconds)
-const MAX_POINTS = 60
-const timestamps = ref([])
-const fpsHistory = ref([])
-const bitrateHistory = ref([])
-const encodeHistory = ref([])
-const latencyHistory = ref([])
-const gpuHistory = ref([])
-const lossHistory = ref([])
-
-function formatBytes(bytes) {
-  if (!bytes || bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i]
-}
-
-function makeChartOpts(title, suffix, color = '#c8d6e5') {
-  const r = parseInt(color.slice(1,3), 16)
-  const g = parseInt(color.slice(3,5), 16)
-  const b = parseInt(color.slice(5,7), 16)
-  return {
-    width: 300,
-    height: 96,
-    cursor: { show: false },
-    legend: { show: false },
-    axes: [
-      {
-        stroke: '#4c5265',
-        grid: { stroke: '#4c526520', width: 1 },
-        ticks: { show: false },
-        font: '9px sans-serif',
-        values: () => [],
-      },
-      {
-        stroke: '#687b81',
-        grid: { stroke: '#4c526520', width: 1 },
-        ticks: { stroke: '#4c5265', width: 1 },
-        font: '9px sans-serif',
-        size: 35,
-      },
-    ],
-    series: [
-      {},
-      {
-        stroke: color,
-        width: 1.5,
-        fill: `rgba(${r}, ${g}, ${b}, 0.06)`,
-      },
-    ],
-  }
-}
-
-function initChart(el, opts) {
-  if (!el || !uPlotLib) return null
-  const actualWidth = el.clientWidth || 300
-  opts.width = actualWidth
-  const data = [[], []]
-  return new uPlotLib(opts, data, el)
-}
-
-function updateChartData(chart, ts, values) {
-  if (!chart) return
-  chart.setData([ts, values])
-}
-
-function resizeCharts() {
-  const charts = [
-    { chart: fpsChart, el: fpsChartEl.value },
-    { chart: bitrateChart, el: bitrateChartEl.value },
-    { chart: encodeChart, el: encodeChartEl.value },
-    { chart: latencyChart, el: latencyChartEl.value },
-    { chart: gpuChart, el: gpuChartEl.value },
-    { chart: lossChart, el: lossChartEl.value },
-  ]
-  for (const { chart, el } of charts) {
-    if (chart && el) {
-      chart.setSize({ width: el.clientWidth, height: 96 })
-    }
-  }
-}
-
-let resizeObserver = null
-
-async function setupCharts() {
-  await loadUPlot()
-  nextTick(() => {
-    if (fpsChartEl.value && !fpsChart) {
-      fpsChart = initChart(fpsChartEl.value, makeChartOpts('FPS', 'fps', '#4ade80'))
-    }
-    if (bitrateChartEl.value && !bitrateChart) {
-      bitrateChart = initChart(bitrateChartEl.value, makeChartOpts('Bitrate', 'Mbps', '#38bdf8'))
-    }
-    if (latencyChartEl.value && !latencyChart) {
-      latencyChart = initChart(latencyChartEl.value, makeChartOpts('Latency', 'ms', '#fbbf24'))
-    }
-    if (gpuChartEl.value && !gpuChart) {
-      gpuChart = initChart(gpuChartEl.value, makeChartOpts('GPU', '%', '#c084fc'))
-    }
-    if (lossChartEl.value && !lossChart) {
-      lossChart = initChart(lossChartEl.value, makeChartOpts('Loss', '%', '#f87171'))
-    }
-    if (encodeChartEl.value && !encodeChart) {
-      encodeChart = initChart(encodeChartEl.value, makeChartOpts('Encode', 'ms'))
-    }
-  })
-}
-
-function destroyCharts() {
-  if (fpsChart) { fpsChart.destroy(); fpsChart = null }
-  if (bitrateChart) { bitrateChart.destroy(); bitrateChart = null }
-  if (encodeChart) { encodeChart.destroy(); encodeChart = null }
-  if (latencyChart) { latencyChart.destroy(); latencyChart = null }
-  if (gpuChart) { gpuChart.destroy(); gpuChart = null }
-  if (lossChart) { lossChart.destroy(); lossChart = null }
-  timestamps.value = []
-  fpsHistory.value = []
-  bitrateHistory.value = []
-  encodeHistory.value = []
-  latencyHistory.value = []
-  gpuHistory.value = []
-  lossHistory.value = []
 }
 
 watch(stats, (newStats, oldStats) => {
@@ -1260,7 +1017,6 @@ watch(stats, (newStats, oldStats) => {
     if (oldStats?.streaming) {
       stopPreview()
     }
-    destroyCharts()
     connectedClientUuid.value = null
     aiOptimization.value = null
     return
@@ -1283,42 +1039,6 @@ watch(stats, (newStats, oldStats) => {
     }
   }
 
-  const now = Date.now() / 1000
-
-  timestamps.value.push(now)
-  fpsHistory.value.push(newStats.fps)
-  bitrateHistory.value.push(newStats.bitrate_kbps / 1000)
-  encodeHistory.value.push(newStats.encode_time_ms)
-  latencyHistory.value.push(newStats.latency_ms)
-  gpuHistory.value.push(gpu.value?.utilization_pct || 0)
-  lossHistory.value.push(newStats.packet_loss || 0)
-
-  // Keep rolling window
-  while (timestamps.value.length > MAX_POINTS) {
-    timestamps.value.shift()
-    fpsHistory.value.shift()
-    bitrateHistory.value.shift()
-    encodeHistory.value.shift()
-    latencyHistory.value.shift()
-    gpuHistory.value.shift()
-    lossHistory.value.shift()
-  }
-
-  // Initialize charts if needed
-  if (!fpsChart || !bitrateChart || !encodeChart || !latencyChart || !gpuChart || !lossChart) {
-    setupCharts()
-  }
-
-  // Update chart data
-  nextTick(() => {
-    const ts = [...timestamps.value]
-    updateChartData(fpsChart, ts, [...fpsHistory.value])
-    updateChartData(bitrateChart, ts, [...bitrateHistory.value])
-    updateChartData(encodeChart, ts, [...encodeHistory.value])
-    updateChartData(latencyChart, ts, [...latencyHistory.value])
-    updateChartData(gpuChart, ts, [...gpuHistory.value])
-    updateChartData(lossChart, ts, [...lossHistory.value])
-  })
 })
 
 onMounted(async () => {
@@ -1332,14 +1052,6 @@ onMounted(async () => {
     if (res.ok) {
       const data = await res.json()
       aiCacheKeys.value = Array.isArray(data) ? data.map(e => e.key || '') : Object.keys(data || {})
-    }
-  } catch {}
-
-  // Fetch session quality history
-  try {
-    const res = await fetch('./api/ai/history', { credentials: 'include' })
-    if (res.ok) {
-      sessionHistory.value = await res.json()
     }
   } catch {}
 
@@ -1364,31 +1076,9 @@ onMounted(async () => {
       pairedClients.value = (data.named_certs || []).length
     }
   } catch {}
-  try {
-    const res = await fetch('./api/config', { credentials: 'include' })
-    if (res.ok) {
-      const data = await res.json()
-      headlessEnabled.value = data.headless_mode === 'enabled'
-      discoveryEnabled.value = data.enable_discovery !== 'disabled'
-      pairingEnabled.value = data.enable_pairing !== 'disabled'
-    }
-  } catch {}
-
-  resizeObserver = new ResizeObserver(() => {
-    resizeCharts()
-  })
-  // Observe the parent container for resize
-  const parent = fpsChartEl.value?.parentElement?.parentElement
-  if (parent) {
-    resizeObserver.observe(parent)
-  }
 })
 
 onUnmounted(() => {
-  destroyCharts()
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-    resizeObserver = null
-  }
+  stopPreview()
 })
 </script>

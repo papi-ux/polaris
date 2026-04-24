@@ -4,9 +4,11 @@
   "scripts": {
     "build": "vite build --debug",
     "build-clean": "vite build --debug --emptyOutDir",
+    "deploy:web-assets": "bash scripts/deploy-web-assets.sh",
     "dev": "vite build --watch",
     "lint": "eslint \"src_assets/common/assets/web/**/*.{js,vue}\"",
     "serve": "serve ./tests/fixtures/http --no-port-switching",
+    "smoke:web": "node scripts/smoke-web-routes.mjs",
     "test": "vitest run --config vitest.config.js",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui"

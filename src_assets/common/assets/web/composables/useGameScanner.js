@@ -37,8 +37,9 @@ export function useGameScanner() {
       }
     } catch (e) {
       error.value = 'Scanner not available'
+    } finally {
+      scanning.value = false
     }
-    scanning.value = false
   }
 
   async function importSelected() {
@@ -67,14 +68,15 @@ export function useGameScanner() {
       const data = await res.json()
       if (data.status) {
         selected.forEach(g => { g.already_imported = true; g.selected = false })
-        return data.imported
+        return data.imported || 0
       } else {
         error.value = data.error || 'Import failed'
       }
     } catch (e) {
       error.value = 'Import request failed'
+    } finally {
+      importing.value = false
     }
-    importing.value = false
     return 0
   }
 

@@ -724,24 +724,26 @@
                 <div class="library-code-panel-body">
                   <div class="mb-3 text-sm text-storm">{{ $t('apps.env_vars_desc') }}</div>
                   <table class="env-table text-sm">
-                    <tr>
-                      <td class="font-bold text-storm pr-4 py-1">{{ $t('apps.env_var_name') }}</td>
-                      <td class="font-bold text-storm py-1"></td>
-                    </tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_ID</td><td class="text-storm py-1">{{ $t('apps.env_app_id') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_NAME</td><td class="text-storm py-1">{{ $t('apps.env_app_name') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_UUID</td><td class="text-storm py-1">{{ $t('apps.env_app_uuid') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_STATUS</td><td class="text-storm py-1">{{ $t('apps.env_app_status') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_UUID</td><td class="text-storm py-1">{{ $t('apps.env_client_uuid') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_NAME</td><td class="text-storm py-1">{{ $t('apps.env_client_name') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_WIDTH</td><td class="text-storm py-1">{{ $t('apps.env_client_width') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HEIGHT</td><td class="text-storm py-1">{{ $t('apps.env_client_height') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_FPS</td><td class="text-storm py-1">{{ $t('apps.env_client_fps') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HDR</td><td class="text-storm py-1">{{ $t('apps.env_client_hdr') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_GCMAP</td><td class="text-storm py-1">{{ $t('apps.env_client_gcmap') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HOST_AUDIO</td><td class="text-storm py-1">{{ $t('apps.env_client_host_audio') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_ENABLE_SOPS</td><td class="text-storm py-1">{{ $t('apps.env_client_enable_sops') }}</td></tr>
-                    <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_AUDIO_CONFIGURATION</td><td class="text-storm py-1">{{ $t('apps.env_client_audio_config') }}</td></tr>
+                    <tbody>
+                      <tr>
+                        <td class="font-bold text-storm pr-4 py-1">{{ $t('apps.env_var_name') }}</td>
+                        <td class="font-bold text-storm py-1"></td>
+                      </tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_ID</td><td class="text-storm py-1">{{ $t('apps.env_app_id') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_NAME</td><td class="text-storm py-1">{{ $t('apps.env_app_name') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_UUID</td><td class="text-storm py-1">{{ $t('apps.env_app_uuid') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_STATUS</td><td class="text-storm py-1">{{ $t('apps.env_app_status') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_UUID</td><td class="text-storm py-1">{{ $t('apps.env_client_uuid') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_NAME</td><td class="text-storm py-1">{{ $t('apps.env_client_name') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_WIDTH</td><td class="text-storm py-1">{{ $t('apps.env_client_width') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HEIGHT</td><td class="text-storm py-1">{{ $t('apps.env_client_height') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_FPS</td><td class="text-storm py-1">{{ $t('apps.env_client_fps') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HDR</td><td class="text-storm py-1">{{ $t('apps.env_client_hdr') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_GCMAP</td><td class="text-storm py-1">{{ $t('apps.env_client_gcmap') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HOST_AUDIO</td><td class="text-storm py-1">{{ $t('apps.env_client_host_audio') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_ENABLE_SOPS</td><td class="text-storm py-1">{{ $t('apps.env_client_enable_sops') }}</td></tr>
+                      <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_AUDIO_CONFIGURATION</td><td class="text-storm py-1">{{ $t('apps.env_client_audio_config') }}</td></tr>
+                    </tbody>
                   </table>
 
                   <template v-if="platform === 'windows'">
@@ -816,7 +818,8 @@
 </template>
 
 <script setup>
-import { computed, ref, inject } from 'vue'
+import { computed, ref, inject, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import Checkbox from '../Checkbox.vue'
 import Button from '../components/Button.vue'
 import InfoHint from '../components/InfoHint.vue'
@@ -870,6 +873,8 @@ const coverFinderWrapper = ref(null)
 const showTweaks = ref(false)
 const editEnvVars = ref([])
 const editMangoHud = ref(false)
+const route = useRoute()
+const router = useRouter()
 
 // Reactive state
 const apps = ref([])
@@ -923,6 +928,12 @@ const activeImportAvailableCount = computed(() => activeImportGames.value.filter
 const activeImportSelectedCount = computed(() => activeImportGames.value.filter((game) => game.selected && !game.already_imported).length)
 const canSaveEdit = computed(() => Boolean(editForm.value?.name?.trim()))
 const canExportEdit = computed(() => Boolean(editForm.value?.uuid))
+
+watch(importSources, (sources) => {
+  if (!sources.some((source) => source.key === importTab.value)) {
+    importTab.value = sources[0]?.key || 'steam'
+  }
+})
 
 function sourceBadgeClass(source) {
   return {
@@ -1022,13 +1033,12 @@ function onDrop(e, app, idx) {
 }
 
 function alphabetizeApps() {
-  let orderStat = 0
+  const beforeOrder = apps.value.map((app) => app.uuid || '').join('\u0000')
   apps.value.sort((a, b) => {
-    const result = a.name.localeCompare(b.name)
-    orderStat += result
-    return result
+    return (a.name || '').localeCompare(b.name || '')
   })
-  listReordered.value = orderStat !== apps.value.length - 1
+  const afterOrder = apps.value.map((app) => app.uuid || '').join('\u0000')
+  listReordered.value = beforeOrder !== afterOrder
   if (!listReordered.value) {
     showToast(i18n.t('apps.already_ordered'), 'info')
   }
@@ -1273,7 +1283,44 @@ function save() {
   })
 }
 
+let routeIntentInFlight = false
+
+async function applyRouteIntent(query) {
+  const wantsImport = query.import === '1'
+  const wantsNew = query.new === '1'
+  const wantsScan = query.scan === '1'
+
+  if ((!wantsImport && !wantsNew) || routeIntentInFlight) {
+    return
+  }
+
+  routeIntentInFlight = true
+  try {
+    if (wantsNew) {
+      showImport.value = false
+      newApp()
+    } else if (wantsImport) {
+      showEditForm.value = false
+      showImport.value = true
+      if (wantsScan && !gameScanning.value) {
+        await scanGames()
+      }
+    }
+  } finally {
+    routeIntentInFlight = false
+    router.replace({ path: '/apps' }).catch(() => {})
+  }
+}
+
 // created() logic
+watch(
+  () => route.query,
+  (query) => {
+    void applyRouteIntent(query)
+  },
+  { immediate: true }
+)
+
 loadApps()
 
 getCachedConfig()

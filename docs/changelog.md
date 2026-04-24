@@ -7,12 +7,15 @@ starts at `v1.0.0`.
 
 ## v1.0.1
 
-Patch release focused on dual-distro packaging and Linux runtime hardening.
+Patch release focused on dual-distro packaging, Linux runtime hardening, and public web-console polish.
 
 Highlights:
 
-- Arch joins Fedora as a first-class GitHub release package target
+- Arch joins Fedora as a first-class GitHub release package target, with refreshed `v1.0.1` assets for both distro paths
 - Headless `labwc` startup, preview routing, and Mission Control preview-source labeling are improved
+- Mission Control charting is split out and the web shell is hardened against local self-signed HTTPS chunk-load failures
+- The web console now pauses polling and live telemetry while hidden, reducing idle browser and host load
+- Browser smoke coverage now checks the key public routes against a live Polaris instance
 - Trusted Pair diagnostics and trusted-subnet matching are clearer, including IPv6 support
 - Client-requested display modes now cap AI/session optimization upshifts instead of being silently exceeded
 - Control-shell AI cache handling is less noisy for Steam UI and desktop-style sessions
