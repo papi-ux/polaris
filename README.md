@@ -565,19 +565,19 @@ The AI optimizer is optional and disabled by default. When enabled, it sends dev
 
 ## AI Transparency
 
-Polaris is built with help from AI tools, including Anthropic Claude, OpenAI Codex, and local models.
+Polaris is built by me, with help from AI tools including Anthropic Claude, OpenAI Codex, and local models.
 
-I use them like engineering assistants: for research, pressure-testing ideas, remediating pain points from older builds, debugging ugly edge cases, and helping with tests, packaging, and docs. I've spent years working in cybersecurity, so I'm careful about trust boundaries, validation, and what actually gets shipped. Architecture, code review, integration, and release decisions are still mine, and I manually verify what ships before it goes out.
+I use them as a sounding board: to compare approaches, draft tests and docs, chase down awkward bugs, and spot things I might have missed. They do not decide what Polaris is or what ships. I have been around engineering and IT for a while, and that has made me careful about validation, trust boundaries, and release quality. I review the work, test the pieces I can test, and own the final decisions.
 
 ## Contributing
 
-Contributions are welcome: bug fixes, features, documentation, translations, and packaging work.
+Contributions are welcome, especially focused fixes, docs, translations, packaging improvements, and careful feature work. Polaris is still a small maintainer-led project, so the easiest pull requests to review are the ones that explain the problem clearly and keep the change scoped.
 
 1. Fork the repo and branch from `master`.
 2. Make your changes and test them locally.
 3. For web UI changes, run `npm run lint`, `npm test`, and `npm run build` in the repo root.
 4. For browser-facing changes, run `npm run test:e2e` against a local Polaris instance when possible.
-5. Open a pull request that clearly explains what changed and why.
+5. Open a pull request that explains what changed, why it helps, and what you were able to test.
 
 > [!NOTE]
 > The web UI lives in `src_assets/common/assets/web/` and uses Vue 3 with Tailwind CSS v4. The backend lives in `src/`. CMake builds both together.

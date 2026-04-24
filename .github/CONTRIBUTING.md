@@ -1,5 +1,7 @@
 # Contributing
 
+Thanks for taking the time to improve Polaris. Small, well-explained pull requests are easiest for me to review and merge.
+
 ## Expectations
 
 - Keep pull requests focused and explain the user-facing impact.
@@ -8,8 +10,8 @@
 
 ## AI-Assisted Changes
 
-AI-assisted drafting and refactoring are allowed, but contributors are responsible for correctness, security, licensing, and maintainability. Do not submit generated code you cannot explain, review, and test.
+AI-assisted drafting and refactoring are allowed. Please treat generated code like code you wrote yourself: understand it, review it, test it, and make sure the licensing is clear.
 
 ## Security-Sensitive Changes
 
-Call out changes to authentication, pairing, trusted subnets, client commands, certificates, or privilege boundaries in the PR description so they get a higher-review pass.
+Call out changes to authentication, pairing, trusted subnets, client commands, certificates, or privilege boundaries in the PR description. Those areas deserve a slower review pass.
