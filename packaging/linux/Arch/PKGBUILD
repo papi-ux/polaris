@@ -19,7 +19,7 @@ install=polaris.install
 
 depends=(
   'avahi'
-  'boost'
+  'boost-libs'
   'curl'
   'libayatana-appindicator'
   'libcap'
@@ -172,6 +172,7 @@ build() {
       -Wno-dev
       -D BUILD_DOCS=OFF
       -D BUILD_WERROR=ON
+      -D BOOST_USE_STATIC=OFF
       -D CMAKE_INSTALL_PREFIX=/usr
       -D POLARIS_EXECUTABLE_PATH=/usr/bin/polaris
       -D POLARIS_ASSETS_DIR="share/polaris"
