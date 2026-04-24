@@ -42,6 +42,22 @@ if(Boost_FOUND)
     endforeach()
 endif()
 
+# Boost.System is header-only on modern Boost releases, and some distro
+# BoostConfig packages no longer export a Boost::system target. Simple-Web-Server
+# still links that target for compatibility with older Boost releases, so provide
+# a local interface target instead of falling back to a second Boost tree.
+if(Boost_FOUND AND "system" IN_LIST BOOST_MISSING_TARGETS)
+    add_library(Boost::system INTERFACE IMPORTED)
+    if(TARGET Boost::headers)
+        set_target_properties(Boost::system PROPERTIES INTERFACE_LINK_LIBRARIES Boost::headers)
+    elseif(TARGET Boost::boost)
+        set_target_properties(Boost::system PROPERTIES INTERFACE_LINK_LIBRARIES Boost::boost)
+    elseif(Boost_INCLUDE_DIRS)
+        set_target_properties(Boost::system PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
+    endif()
+    list(REMOVE_ITEM BOOST_MISSING_TARGETS system)
+endif()
+
 if(NOT Boost_FOUND OR BOOST_MISSING_TARGETS)
     if(BOOST_MISSING_TARGETS)
         message(STATUS "System Boost is missing required imported targets (${BOOST_MISSING_TARGETS}). Falling back to FetchContent.")
@@ -126,3 +142,5 @@ if(TARGET Boost::headers AND NOT TARGET Boost::boost)
     endif()
     add_library(Boost::boost ALIAS ${BOOST_HEADERS_TARGET})
 endif()
+
+set(POLARIS_BOOST_TARGETS_READY TRUE)
