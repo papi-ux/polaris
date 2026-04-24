@@ -86,7 +86,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -S --noconfirm --needed \
-            appstream appstream-glib avahi base-devel boost ccache cmake curl \
+            appstream appstream-glib avahi base-devel boost boost-libs ccache cmake curl \
             desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
             gcc libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
             libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
