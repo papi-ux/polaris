@@ -180,6 +180,7 @@ function add_arch_deps() {
     'avahi'
     'base-devel'
     'boost'
+    'boost-libs'
     'cmake'
     'curl'
     'desktop-file-utils'
