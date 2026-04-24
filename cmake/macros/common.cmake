@@ -18,10 +18,10 @@ endif()
 macro(find_package)  # cmake-lint: disable=C0103
     string(TOLOWER "${ARGV0}" ARGV0_LOWER)
     if(
-        (("${ARGV0_LOWER}" STREQUAL "boost") AND DEFINED FETCH_CONTENT_BOOST_USED) OR
+        (("${ARGV0_LOWER}" STREQUAL "boost") AND (DEFINED FETCH_CONTENT_BOOST_USED OR DEFINED POLARIS_BOOST_TARGETS_READY)) OR
         (("${ARGV0_LOWER}" STREQUAL "libevdev") AND DEFINED EXTERNAL_PROJECT_LIBEVDEV_USED)
     )
-        # Do nothing, as the package has already been fetched
+        # Do nothing, as the package targets have already been provided.
     else()
         # Call the original find_package function
         _find_package(${ARGV})
