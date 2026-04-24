@@ -44,6 +44,13 @@ expected_assets=(
   "Polaris-arch-x86_64.pkg.tar.zst"
 )
 
+expected_nova_links=(
+  "https://github.com/papi-ux/nova/releases/latest"
+  "https://github-store.org/app?repo=papi-ux/nova"
+  "versionExtractionRegEx%5C%22%3A%5C%22v%28.%2B%29"
+  "app-nonRoot_game-arm64-v8a-release.apk"
+)
+
 files_to_check=(
   "README.md"
   "docs/building.md"
@@ -55,6 +62,10 @@ for expected_asset in "${expected_assets[@]}"; do
   for file in "${files_to_check[@]}"; do
     grep -Fq "$expected_asset" "$file"
   done
+done
+
+for expected_link in "${expected_nova_links[@]}"; do
+  grep -Fq "$expected_link" README.md
 done
 
 echo "Public docs and release references look clean."
