@@ -584,7 +584,7 @@ Contributions are welcome, especially focused fixes, docs, translations, packagi
 
 ## Donate
 
-Polaris started as a passion project because I couldn't find a Linux game streaming host that met my standards for desktop safety, runtime clarity, and control. I build Polaris and Nova in my spare time because Linux game streaming deserves better tooling. If Polaris is useful to you, donations help keep development moving.
+Polaris is something I build in my spare time because I want Linux game streaming to feel safer, clearer, and easier to trust. If it becomes part of your setup, donations are appreciated but never expected. They help with testing hardware, packaging work, release time, and the unglamorous maintenance that keeps the project moving. Bug reports, testing notes, and thoughtful feedback help too.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=for-the-badge&logo=ko-fi&labelColor=1a1a2e)](https://ko-fi.com/papiux)
 &nbsp;
