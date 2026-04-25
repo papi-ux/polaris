@@ -37,8 +37,9 @@ body:
       description: How is Polaris installed on the host?
       options:
         - Fedora RPM
+        - Arch package
         - Source build
-        - AppImage
+        - Local package build
         - Other
     validations:
       required: true
