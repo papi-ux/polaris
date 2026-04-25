@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions and setup help
+    url: https://github.com/papi-ux/polaris/discussions
+    about: Use Discussions for open-ended setup questions, compatibility notes, and general support.
   - name: Security policy
     url: https://github.com/papi-ux/polaris/blob/master/SECURITY.md
     about: Please do not report security issues publicly.
