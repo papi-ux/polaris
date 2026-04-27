@@ -565,9 +565,9 @@ The AI optimizer is optional and disabled by default. When enabled, it sends dev
 
 ## AI Transparency
 
-Polaris is built by me, with help from AI tools including Anthropic Claude, OpenAI Codex, and local models.
+Polaris is built by me and only me, with help from tools like ClaudeCode 4.7, OpenAI Codex 5.5, and local models.
 
-I use them as a sounding board: to compare approaches, draft tests and docs, chase down awkward bugs, and spot things I might have missed. They do not decide what Polaris is or what ships. I have been around engineering and IT for a while, and that has made me careful about validation, trust boundaries, and release quality. I review the work, test the pieces I can test, and own the final decisions.
+I use them as a sounding board and look for ways to cut a lot of fat from the debugging process. I also use it to compare approaches, draft tests and docs, research the headless-first components, and spot things I might have missed. They do not decide what Polaris is or what ships. I have been around engineering and IT for a while, I'm not a vibe-coder, but as we all know in this industry, the capabilites of these tools definitely have solid pratical use cases for working with them. Regardless, I still am adament and always careful about validation, trust boundaries, and release quality. I review the work, test the pieces I can test, and own the final decisions.
 
 ## Contributing
 
@@ -584,7 +584,7 @@ Contributions are welcome, especially focused fixes, docs, translations, packagi
 
 ## Donate
 
-Polaris is something I build in my spare time because I want Linux game streaming to feel safer, clearer, and easier to trust. If it becomes part of your setup, donations are appreciated but never expected. They help with testing hardware, packaging work, release time, and the unglamorous maintenance that keeps the project moving. Bug reports, testing notes, and thoughtful feedback help too.
+Polaris is a fun project I build in my spare time simply because I want more people to make the switch to Linux gaming while making users safer, clearer, and easier to trust. If it becomes part of your setup, that alone makes my day, donations are appreciated but never expected. They help with my actual coffee budget, which coffee obviously keeps the project moving. Bug reports, testing notes, and thoughtful feedback help too.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=for-the-badge&logo=ko-fi&labelColor=1a1a2e)](https://ko-fi.com/papiux)
 &nbsp;
