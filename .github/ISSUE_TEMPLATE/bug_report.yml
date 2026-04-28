@@ -37,6 +37,8 @@ body:
       description: How is Polaris installed on the host?
       options:
         - Fedora RPM
+        - Bazzite rpm-ostree
+        - Ubuntu DEB
         - Arch package
         - Source build
         - Local package build
@@ -49,7 +51,7 @@ body:
     attributes:
       label: Host OS
       description: Linux distribution and version running Polaris.
-      placeholder: e.g. Fedora 42, Arch Linux, Debian 13
+      placeholder: e.g. Fedora 43, Bazzite stable, Ubuntu 24.04, Arch Linux, Debian 13
     validations:
       required: true
 
