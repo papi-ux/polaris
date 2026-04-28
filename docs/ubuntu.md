@@ -1,10 +1,8 @@
 # Ubuntu Install Guide
 
-Ubuntu 24.04 is the first Debian-family target for a direct Polaris DEB package. The CI path now
-builds and smoke-tests `Polaris-ubuntu24.04-x86_64.deb`, and the asset will be published with the
-next tagged Polaris release.
-
-Until that release exists, use the source build path below.
+Ubuntu 24.04 is the first Debian-family target for a direct Polaris DEB package. The CI path
+builds and smoke-tests `Polaris-ubuntu24.04-x86_64.deb`, and the asset is published with `v1.0.3`
+and later Polaris releases.
 
 ## Release Package
 
@@ -82,5 +80,5 @@ Please include these details when reporting Ubuntu issues:
 
 ## Current Status
 
-Ubuntu 24.04 builds and fast C++ tests run in CI. The DEB package is now built, installed, checked
-for unresolved shared-library dependencies, and staged for release upload on tagged builds.
+Ubuntu 24.04 builds and fast C++ tests run in CI. The DEB package is built, installed, checked for
+unresolved shared-library dependencies, and published on tagged builds.

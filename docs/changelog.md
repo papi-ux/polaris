@@ -7,11 +7,15 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## v1.0.3
+
 Highlights:
 
 - Added an experimental Bazzite install path using the Fedora RPM through `rpm-ostree`
 - Added a Bazzite validation checklist for desktop mode, gamemode, GPU, pairing, and headless behavior
-- Added Ubuntu 24.04 DEB packaging for the next tagged release: `Polaris-ubuntu24.04-x86_64.deb`
+- Added Ubuntu 24.04 DEB packaging: `Polaris-ubuntu24.04-x86_64.deb`
 - Added an Ubuntu install guide with package, source-build fallback, and validation notes
 - Polaris config saves now stay isolated from legacy Sunshine config paths
 

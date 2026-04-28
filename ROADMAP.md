@@ -28,7 +28,7 @@ Polaris is public and usable today, but it is still early. This roadmap is meant
 ## Known Limits
 
 - Polaris is Linux-host-only today.
-- Fedora 42, Fedora 43, and Arch have the most polished install paths; Bazzite is experimental; Ubuntu 24.04 packaging is staged; other distros are source-build oriented.
+- Fedora 42, Fedora 43, Ubuntu 24.04, and Arch have direct package paths; Bazzite is experimental; other distros are source-build oriented.
 - NVIDIA/NVENC is the most heavily validated encoder path.
 - Some richer live-session behavior depends on Nova.
 
