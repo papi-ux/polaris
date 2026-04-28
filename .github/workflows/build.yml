@@ -424,9 +424,9 @@ jobs:
           fi
 
           dnf install -y "$rpm_path"
-          binary="$(rpm -ql polaris | awk '/\/usr\/bin\/polaris-[^/]+$/ { print; exit }')"
+          binary="$(rpm -ql polaris | awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[^/]+$/ { print; exit }')"
           if [ -z "$binary" ]; then
-            echo "Installed Polaris versioned binary was not found" >&2
+            echo "Installed Polaris binary was not found" >&2
             exit 1
           fi
 
