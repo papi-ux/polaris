@@ -5,6 +5,18 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.0.2
+
+Patch release focused on validated Linux release packages.
+
+Highlights:
+
+- Fedora 42 and Fedora 43 RPMs now build with package-style install paths under `/usr`
+- Fedora RPM smoke tests install the generated RPM, verify the packaged binary, and check shared-library resolution
+- Fedora 43 is now part of the official release asset validation matrix
+- Arch package validation now checks the package against the current distro Boost runtime before release upload
+- Public install docs were refreshed for Fedora 43 and current Arch package dependency behavior
+
 ## v1.0.1
 
 Patch release focused on dual-distro packaging, Linux runtime hardening, and public web-console polish.
