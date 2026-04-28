@@ -277,15 +277,18 @@ namespace platf {
         config_path = fs::path(homedir) / ".config/polaris"sv;
       }
 
-      // Migration: if the new polaris config dir doesn't exist but old sunshine dir does,
-      // copy the contents and remove the old directory (no more symlink dance).
-      // If polaris dir IS a symlink to sunshine, resolve it to a real directory.
+      migrate_envvar = getenv("POLARIS_MIGRATE_CONFIG");
+      const bool explicit_migration = migrate_envvar && strcmp(migrate_envvar, "1") == 0;
+
+      // Migration: only copy a Sunshine config directory when explicitly requested.
+      // Polaris and Sunshine can be installed side by side, so the default startup
+      // path must not move or delete Sunshine's active configuration.
       {
         std::error_code ec;
         fs::path old_sunshine_path = config_path.parent_path() / "sunshine";
 
-        // Case 1: polaris dir is a symlink to sunshine — replace with real copy
-        if (fs::is_symlink(config_path, ec) && fs::exists(old_sunshine_path, ec)) {
+        // Case 1: polaris dir is a symlink to sunshine — replace with real copy.
+        if (explicit_migration && fs::is_symlink(config_path, ec) && fs::exists(old_sunshine_path, ec)) {
           std::cout << "Migrating config: replacing symlink with real directory" << std::endl;
           fs::remove(config_path, ec);  // remove the symlink itself
           if (!ec) {
@@ -295,34 +298,28 @@ namespace platf {
             fs::copy(old_sunshine_path, config_path,
                      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
           }
-          if (!ec) {
-            fs::remove_all(old_sunshine_path, ec);  // clean up old dir
-            if (ec) {
-              std::cout << "Note: could not remove old sunshine dir: " << ec.message() << std::endl;
-            }
-          }
         }
-        // Case 2: polaris dir doesn't exist at all, sunshine does — copy over
-        else if (!fs::exists(config_path, ec) && fs::exists(old_sunshine_path, ec)) {
+        // Case 2: polaris dir doesn't exist at all, sunshine does — copy over.
+        else if (explicit_migration && !fs::exists(config_path, ec) && fs::exists(old_sunshine_path, ec)) {
           std::cout << "Migrating config from " << old_sunshine_path << " to " << config_path << std::endl;
           fs::create_directories(config_path, ec);
           if (!ec) {
             fs::copy(old_sunshine_path, config_path,
                      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
           }
-          if (!ec) {
-            fs::remove_all(old_sunshine_path, ec);
-          }
           if (ec) {
             std::cout << "Migration warning: " << ec.message() << std::endl;
             config_path = old_sunshine_path;  // fallback
           }
+        } else if (!fs::exists(config_path, ec) && fs::exists(old_sunshine_path, ec)) {
+          std::cout << "Found Sunshine config at " << old_sunshine_path
+                    << "; Polaris will create a separate config at " << config_path
+                    << ". Set POLARIS_MIGRATE_CONFIG=1 to copy Sunshine settings." << std::endl;
         }
       }
 
       // migrate from the old config location if necessary
-      migrate_envvar = getenv("POLARIS_MIGRATE_CONFIG");
-      if (migrate_config && found && migrate_envvar && strcmp(migrate_envvar, "1") == 0) {
+      if (migrate_config && found && explicit_migration) {
         std::error_code ec;
         fs::path old_config_path = fs::path(homedir) / ".config/sunshine"sv;
         if (old_config_path != config_path && fs::exists(old_config_path, ec)) {
@@ -336,16 +333,6 @@ namespace platf {
               // Copy the old directory into the new location
               // NB: We use a copy instead of a move so that cross-volume migrations work
               fs::copy(old_config_path, config_path, fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
-            }
-            if (!ec) {
-              // If the copy was successful, delete the original directory
-              fs::remove_all(old_config_path, ec);
-              if (ec) {
-                std::cerr << "Failed to clean up old config directory: " << ec.message() << std::endl;
-
-                // This is not fatal. Next time we start, we'll warn the user to delete the old one.
-                ec.clear();
-              }
             }
             if (ec) {
               std::cerr << "Migration failed: " << ec.message() << std::endl;
