@@ -206,6 +206,25 @@ namespace video {
       }
     }
 
+    int software_frame_input_linesize(const platf::img_t &img, const AVFrame *frame) {
+      if (img.row_pitch > 0) {
+        return img.row_pitch;
+      }
+
+      if (img.pixel_pitch > 0 && img.width > 0) {
+        return img.pixel_pitch * img.width;
+      }
+
+      if (!frame) {
+        return 0;
+      }
+
+      const auto linesize = av_image_get_linesize((AVPixelFormat) frame->format, frame->width, 0);
+      return linesize > 0 ? linesize : 0;
+    }
+
+    std::atomic_bool warned_missing_software_input_stride {false};
+
     platf::frame_residency_e frame_residency_from_mem_type(platf::mem_type_e mem_type) {
       switch (mem_type) {
         case platf::mem_type_e::system:
@@ -592,9 +611,30 @@ namespace video {
       // If we need to add aspect ratio padding, we need to scale into an intermediate output buffer
       bool requires_padding = (sw_frame->width != sws_output_frame->width || sw_frame->height != sws_output_frame->height);
 
+      const auto input_linesize = software_frame_input_linesize(img, sws_input_frame.get());
+      if (!img.data || input_linesize <= 0) {
+        BOOST_LOG(error)
+          << "Software frame converter received invalid CPU frame"
+          << " data="sv << (img.data ? "present"sv : "missing"sv)
+          << " row_pitch="sv << img.row_pitch
+          << " pixel_pitch="sv << img.pixel_pitch
+          << " img="sv << img.width << 'x' << img.height
+          << " src_fmt="sv << av_get_pix_fmt_name((AVPixelFormat) sws_input_frame->format)
+          << " src="sv << sws_input_frame->width << 'x' << sws_input_frame->height;
+        return -1;
+      }
+
+      if (img.row_pitch <= 0 && !warned_missing_software_input_stride.exchange(true)) {
+        BOOST_LOG(warning)
+          << "Software frame converter received a CPU frame without row pitch; inferred stride ["
+          << input_linesize << "] for format ["
+          << av_get_pix_fmt_name((AVPixelFormat) sws_input_frame->format)
+          << "]";
+      }
+
       // Setup the input frame using the caller's img_t
       sws_input_frame->data[0] = img.data;
-      sws_input_frame->linesize[0] = img.row_pitch;
+      sws_input_frame->linesize[0] = input_linesize;
 
       // Perform color conversion and scaling to the final size
       auto status = sws_scale_frame(sws.get(), requires_padding ? sws_output_frame.get() : sw_frame.get(), sws_input_frame.get());
@@ -4339,6 +4379,25 @@ namespace video {
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {
     return reset_display_retry_delay(attempt);
+  }
+
+  int software_frame_input_linesize_for_tests(
+    int row_pitch,
+    int pixel_pitch,
+    int image_width,
+    int frame_width,
+    int av_pixel_format
+  ) {
+    platf::img_t img;
+    img.row_pitch = row_pitch;
+    img.pixel_pitch = pixel_pitch;
+    img.width = image_width;
+
+    AVFrame frame {};
+    frame.width = frame_width;
+    frame.format = av_pixel_format;
+
+    return software_frame_input_linesize(img, &frame);
   }
 #endif
 

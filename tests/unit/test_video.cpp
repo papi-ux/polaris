@@ -94,6 +94,14 @@ TEST(VideoCacheTests, ResetDisplayRetryDelayBackoffCapsAtTwoHundredMilliseconds)
   EXPECT_EQ(video::reset_display_retry_delay_for_tests(3), std::chrono::milliseconds(200));
 }
 
+TEST(VideoFrameConversionTests, InfersPackedBgr0InputStrideWhenRowPitchIsMissing) {
+  EXPECT_EQ(video::software_frame_input_linesize_for_tests(0, 0, 0, 2560, AV_PIX_FMT_BGR0), 10240);
+}
+
+TEST(VideoFrameConversionTests, PrefersCaptureProvidedRowPitch) {
+  EXPECT_EQ(video::software_frame_input_linesize_for_tests(8192, 4, 1920, 1920, AV_PIX_FMT_BGR0), 8192);
+}
+
 TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopologyMismatch) {
   const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-encoder-cache-tests";
   const auto cache_path = cache_dir / "encoder_cache.txt";
