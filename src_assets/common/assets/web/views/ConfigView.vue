@@ -219,6 +219,7 @@ let restartReloadTimeout = null
 let restartReloadInterval = null
 let restartReloadFallbackTimeout = null
 const writeOnlySecrets = {
+  api_key: { presentFlag: 'has_api_key' },
   ai_api_key: { presentFlag: 'has_ai_api_key', clearFlag: 'clear_ai_api_key' },
   steamgriddb_api_key: { presentFlag: 'has_steamgriddb_api_key', clearFlag: 'clear_steamgriddb_api_key' },
 }
@@ -688,7 +689,6 @@ function serialize() {
 
 function finalizeWriteOnlySecrets(configCopy) {
   Object.entries(writeOnlySecrets).forEach(([secretKey, meta]) => {
-    const hasStoredSecret = !!config.value?.[meta.presentFlag]
     const clearRequested = !!config.value?.[meta.clearFlag]
     const nextValue = configCopy[secretKey]
 
@@ -697,7 +697,7 @@ function finalizeWriteOnlySecrets(configCopy) {
       return
     }
 
-    if (hasStoredSecret && !nextValue) {
+    if (!nextValue) {
       delete configCopy[secretKey]
     }
   })
@@ -761,9 +761,15 @@ function save() {
       try {
         const text = (await r.text()).trim()
         if (text) {
-          errorMessage = r.status === 403
-            ? `${text}. Refresh Polaris and try again.`
-            : text
+          try {
+            const parsed = JSON.parse(text)
+            errorMessage = parsed?.error || text
+          } catch {
+            errorMessage = text
+          }
+          if (r.status === 403) {
+            errorMessage = `${errorMessage}. Refresh Polaris and try again.`
+          }
         }
       } catch {
         // Fall back to the generic message when the response body cannot be read.

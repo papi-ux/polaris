@@ -2367,7 +2367,12 @@ namespace confighttp {
         }
         config_stream << key << " = " << value << std::endl;
       }
-      file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
+      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+        const std::string message = "Failed to write config file: " + config::sunshine.config_file;
+        BOOST_LOG(error) << "SaveConfig: "sv << message;
+        bad_request(response, request, message);
+        return;
+      }
       output_tree["status"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {

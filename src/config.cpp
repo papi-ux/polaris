@@ -1518,6 +1518,7 @@ namespace config {
 
   int parse(int argc, char *argv[]) {
     std::unordered_map<std::string, std::string> cmd_vars;
+    bool config_file_from_cli = false;
 #ifdef _WIN32
     bool shortcut_launch = false;
     bool service_admin_launch = false;
@@ -1555,6 +1556,7 @@ namespace config {
         auto pos = std::find(line, line_end, '=');
         if (pos == line_end) {
           sunshine.config_file = line;
+          config_file_from_cli = true;
         } else {
           TUPLE_EL(var, 1, parse_option(line, line_end));
           if (!var) {
@@ -1577,14 +1579,22 @@ namespace config {
     bool config_loaded = false;
     try {
       // Create appdata folder if it does not exist
-      file_handler::make_directory(platf::appdata().string());
+      const auto appdata_dir = platf::appdata();
+      file_handler::make_directory(appdata_dir.string());
 
-      // Migration: if the new polaris.conf doesn't exist but the old sunshine.conf does, use the old path
-      if (!fs::exists(sunshine.config_file)) {
-        auto old_config = platf::appdata().string() + "/sunshine.conf";
+      // Migration: if an older Polaris build left a Sunshine-named config in
+      // Polaris's own config directory, copy it to polaris.conf once. Keep the
+      // active config path on polaris.conf so future saves are independent.
+      if (!config_file_from_cli && !fs::exists(sunshine.config_file)) {
+        const auto old_config = appdata_dir / "sunshine.conf";
         if (fs::exists(old_config)) {
-          BOOST_LOG(info) << "Migrating config: using existing " << old_config << " (rename to " << sunshine.config_file << " when convenient)";
-          sunshine.config_file = old_config;
+          std::error_code ec;
+          fs::copy_file(old_config, sunshine.config_file, fs::copy_options::none, ec);
+          if (ec) {
+            BOOST_LOG(warning) << "Could not migrate legacy config " << old_config << " to " << sunshine.config_file << ": " << ec.message();
+          } else {
+            BOOST_LOG(info) << "Migrated legacy config from " << old_config << " to " << sunshine.config_file;
+          }
         }
       }
 
