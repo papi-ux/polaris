@@ -410,7 +410,14 @@ jobs:
 
     steps:
       - name: Bootstrap Fedora container
-        run: dnf install -y dnf-plugins-core git
+        run: |
+          for attempt in 1 2 3; do
+            dnf install -y dnf-plugins-core git && exit 0
+            echo "dnf bootstrap failed on attempt ${attempt}" >&2
+            dnf clean expire-cache || true
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       - uses: actions/checkout@v5
         with:
@@ -433,10 +440,24 @@ jobs:
             polaris-fedora-${{ matrix.fedora }}-npm-
 
       - name: Install Fedora build dependencies
-        run: dnf builddep -y packaging/linux/fedora/Polaris.spec
+        run: |
+          for attempt in 1 2 3; do
+            dnf builddep -y packaging/linux/fedora/Polaris.spec && exit 0
+            echo "dnf builddep failed on attempt ${attempt}" >&2
+            dnf clean expire-cache || true
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       - name: Install CI helper packages
-        run: dnf install -y ccache ninja-build
+        run: |
+          for attempt in 1 2 3; do
+            dnf install -y ccache ninja-build && exit 0
+            echo "dnf helper package install failed on attempt ${attempt}" >&2
+            dnf clean expire-cache || true
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       - name: Configure
         run: |
