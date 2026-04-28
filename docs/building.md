@@ -1,11 +1,11 @@
 # Building Polaris
 
-Polaris is a Linux-first host today. The fastest install paths are the Fedora RPM, Ubuntu 24.04
-DEB, and Arch package from the [latest release](https://github.com/papi-ux/polaris/releases/latest).
-Source builds remain the right path for other Debian-family distros and local development, and
-Arch also supports a local package-build flow in addition to the published package asset. Bazzite
-can use the Fedora RPM through `rpm-ostree`, but that install path is experimental until
-real-hardware validation is complete.
+Polaris is a Linux-first host today. The most validated install paths are the Fedora RPM and Arch
+package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). Source builds
+remain the right path for other Debian-family distros and local development, and Arch also supports
+a local package-build flow in addition to the published package asset. Bazzite can use the Fedora
+RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both of those package paths are
+extremely experimental and more prone to breaking until real-hardware validation is broader.
 
 ## Release packages
 
@@ -45,7 +45,7 @@ polaris
 The web UI will be available at `https://localhost:47990`.
 
 See the [Bazzite install guide](bazzite.md) and [Ubuntu install guide](ubuntu.md) for caveats,
-fallback paths, and validation notes.
+fallback paths, and validation notes before using either experimental path.
 
 ## Source Build
 
@@ -145,4 +145,5 @@ The public release assets are currently:
 - `Polaris-arch-x86_64.pkg.tar.zst`
 
 Bazzite installs use the matching Fedora RPM through `rpm-ostree` for now. Ubuntu 24.04 has a
-direct DEB package; other Debian-family distro paths are still source-build oriented.
+direct DEB package. Both are extremely experimental tester paths; other Debian-family distro paths
+are still source-build oriented.

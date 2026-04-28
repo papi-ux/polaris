@@ -28,10 +28,10 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42, Fedora 43, Ubuntu 24.04, and Arch Linux have direct `v1.0.3` release packages. Bazzite can use the Fedora RPM through `rpm-ostree`, but that path is still experimental while real-hardware validation continues. Other Debian-family distros remain source-build oriented for now.
+> Polaris is a Linux host today. Fedora 42, Fedora 43, and Arch Linux are the most validated direct `v1.0.3` release package paths. Bazzite and Ubuntu 24.04 packages exist for testing, but they are extremely experimental, less validated on real hardware, and more prone to breaking across distro, compositor, driver, and GPU combinations. Other Debian-family distros remain source-build oriented for now.
 
 > [!NOTE]
-> `v1.0.3` is the current public Polaris release line. The host, web console, Fedora RPMs, Ubuntu DEB, and Arch package are ready for broader testing, but this is still an early public surface. Expect some distro, GPU, and client edge cases while compatibility keeps expanding.
+> `v1.0.3` is the current public Polaris release line. The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite rpm-ostree path and Ubuntu DEB are earlier validation paths and should be treated as much more fragile.
 
 ## Quick Start
 
@@ -56,12 +56,12 @@ sudo polaris --setup-host
 polaris
 ```
 
-### Experimental install: Bazzite
+### Extremely experimental install: Bazzite
 
 ```bash
 fedora_version="$(rpm -E %fedora)"
 wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm" labwc wlr-randr
 systemctl reboot
 
 # After reboot:
@@ -69,9 +69,9 @@ sudo polaris --setup-host
 polaris
 ```
 
-Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. See the [Bazzite install guide](docs/bazzite.md) for caveats, rollback, and validation notes.
+Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. This path is extremely experimental and more likely to break than Fedora or Arch because Game Mode, Desktop Mode, rpm-ostree layering, and GPU capture all need separate real-hardware validation. See the [Bazzite install guide](docs/bazzite.md) for caveats, rollback, and validation notes.
 
-### Fastest install: Ubuntu 24.04 DEB
+### Extremely experimental install: Ubuntu 24.04 DEB
 
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
@@ -80,7 +80,7 @@ sudo polaris --setup-host
 polaris
 ```
 
-The Ubuntu DEB asset is published with `v1.0.3` and later. See the [Ubuntu install guide](docs/ubuntu.md) for package status, source build fallback, and validation notes.
+The Ubuntu DEB asset is published with `v1.0.3` and later, but it is extremely experimental and more prone to breaking than the Fedora and Arch package paths. See the [Ubuntu install guide](docs/ubuntu.md) for package status, source build fallback, and validation notes.
 
 ### Source build: Debian, dev machines, or custom setups
 
@@ -115,14 +115,14 @@ polaris
 
 ### Recommended package path
 
-If you are on Fedora, Bazzite, Ubuntu, or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds. These package paths install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit so the installer does not silently change input or KMS permissions.
+If you are on Fedora or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds. Bazzite and Ubuntu packages are available for testers, but they are extremely experimental and more prone to breaking. These package paths install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit so the installer does not silently change input or KMS permissions.
 
 | Public release asset | Use it for |
 |---|---|
 | `Polaris-fedora42-x86_64.rpm` | Fedora 42 x86_64 hosts |
 | `Polaris-fedora43-x86_64.rpm` | Fedora 43 x86_64 hosts |
-| `Polaris-fedora42-x86_64.rpm` or `Polaris-fedora43-x86_64.rpm` via `rpm-ostree` | Bazzite x86_64 hosts, experimental |
-| `Polaris-ubuntu24.04-x86_64.deb` | Ubuntu 24.04 x86_64 hosts |
+| `Polaris-fedora42-x86_64.rpm` or `Polaris-fedora43-x86_64.rpm` via `rpm-ostree` | Bazzite x86_64 hosts, extremely experimental |
+| `Polaris-ubuntu24.04-x86_64.deb` | Ubuntu 24.04 x86_64 hosts, extremely experimental |
 | `Polaris-arch-x86_64.pkg.tar.zst` | Arch Linux x86_64 hosts |
 
 ```bash
@@ -147,7 +147,7 @@ sudo polaris --setup-host
 ```bash
 fedora_version="$(rpm -E %fedora)"
 wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm" labwc wlr-randr
 systemctl reboot
 
 # After reboot:
@@ -256,8 +256,8 @@ systemctl --user enable --now polaris
 | Linux host OS | Supported | Polaris is Linux-first today |
 | Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
 | Fedora 43 | Recommended | Official release asset: `Polaris-fedora43-x86_64.rpm` |
-| Bazzite | Experimental | Use the matching Fedora RPM through `rpm-ostree`; see [Bazzite install guide](docs/bazzite.md) |
-| Ubuntu 24.04 | Package path | Official release asset: `Polaris-ubuntu24.04-x86_64.deb`; source build also works |
+| Bazzite | Extremely experimental | Use the matching Fedora RPM through `rpm-ostree`; see [Bazzite install guide](docs/bazzite.md) |
+| Ubuntu 24.04 | Extremely experimental | Official release asset: `Polaris-ubuntu24.04-x86_64.deb`; source build also works, but this path needs more real-hardware validation |
 | Arch Linux | Recommended | Official release asset: `Polaris-arch-x86_64.pkg.tar.zst`; source and local PKGBUILD generation are also supported |
 | Debian-family distros | Supported from source | Less turnkey than Fedora right now |
 | NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
@@ -268,8 +268,8 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- Bazzite support is experimental until desktop/gamemode, AMD/NVIDIA, and Steam Deck client flows are validated on real hardware.
-- Ubuntu 24.04 DEB packaging is new and needs broader real-hardware validation; other Debian-family distros are still source-build oriented.
+- Bazzite support is extremely experimental until Desktop Mode, Game Mode, AMD/NVIDIA, and Steam Deck client flows are validated on real hardware.
+- Ubuntu 24.04 DEB packaging is extremely experimental and needs broader real-hardware validation; other Debian-family distros are still source-build oriented.
 - Fedora 42, Fedora 43, Ubuntu 24.04, and Arch Linux have direct x86_64 release package assets today.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
 - Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova client.
