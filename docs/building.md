@@ -8,8 +8,9 @@ supports a local package-build flow in addition to the published package asset.
 ## Release packages
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
-sudo dnf install ./Polaris-fedora42-x86_64.rpm
+fedora_version="$(rpm -E %fedora)"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
 sudo polaris --setup-host
 polaris
 ```
@@ -44,19 +45,22 @@ The web UI will be available at `https://localhost:47990`.
 
 #### Fedora
 
+Run this from the cloned Polaris checkout so `dnf builddep` can read the packaged build requirements.
+
 ```bash
-sudo dnf install cmake gcc-c++ boost-devel openssl-devel libevdev-devel \
-  pipewire-devel wayland-devel libdrm-devel libcap-devel \
-  mesa-libEGL-devel mesa-libGL-devel cuda-toolkit nodejs npm labwc
+sudo dnf install dnf-plugins-core git
+sudo dnf builddep -y packaging/linux/fedora/Polaris.spec
 ```
 
 #### Arch
 
 ```bash
-sudo pacman -S --needed git cmake boost curl openssl libevdev pipewire wayland \
-  libdrm libcap libnotify libayatana-appindicator libpulse libva \
-  libx11 libxcb libxfixes libxi libxrandr libxtst miniupnpc \
-  numactl avahi opus libmfx mesa which nodejs npm labwc cuda
+sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
+  desktop-file-utils boost boost-libs curl openssl libevdev pipewire wayland \
+  wayland-protocols libdrm libcap libnotify libayatana-appindicator \
+  libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst \
+  miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \
+  labwc cuda
 ```
 
 ### Build and install
@@ -113,6 +117,7 @@ checkout yourself.
 The public release assets are currently:
 
 - `Polaris-fedora42-x86_64.rpm`
+- `Polaris-fedora43-x86_64.rpm`
 - `Polaris-arch-x86_64.pkg.tar.zst`
 
 Debian-family and other distro paths are still source-build oriented for now.

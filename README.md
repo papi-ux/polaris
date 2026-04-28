@@ -28,18 +28,19 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42 and Arch Linux have direct `v1.0.1` release packages; Debian-family and other distro installs are still source-build oriented.
+> Polaris is a Linux host today. Fedora 42, Fedora 43, and Arch Linux have direct `v1.0.1` release packages; Debian-family and other distro installs are still source-build oriented.
 
 > [!NOTE]
 > `v1.0.1` is the current public Polaris release line. The host, web console, Fedora RPM, and Arch package are ready for broader testing, but this is still an early public surface. Expect some distro, GPU, and client edge cases while compatibility keeps expanding.
 
 ## Quick Start
 
-### Fastest install: Fedora RPM
+### Fastest install: Fedora 42/43 RPM
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
-sudo dnf install ./Polaris-fedora42-x86_64.rpm
+fedora_version="$(rpm -E %fedora)"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
 sudo polaris --setup-host
 polaris
 ```
@@ -93,11 +94,13 @@ If you are on Fedora or Arch and just want Polaris running, use the GitHub relea
 | Public release asset | Use it for |
 |---|---|
 | `Polaris-fedora42-x86_64.rpm` | Fedora 42 x86_64 hosts |
+| `Polaris-fedora43-x86_64.rpm` | Fedora 43 x86_64 hosts |
 | `Polaris-arch-x86_64.pkg.tar.zst` | Arch Linux x86_64 hosts |
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora42-x86_64.rpm
-sudo dnf install ./Polaris-fedora42-x86_64.rpm
+fedora_version="$(rpm -E %fedora)"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
 sudo polaris --setup-host
 ```
 
@@ -137,10 +140,11 @@ If you are on Arch today, Polaris can be installed from the GitHub release asset
 <details>
 <summary><b>Fedora</b></summary>
 
+Run this from the cloned Polaris checkout so `dnf builddep` can read the packaged build requirements.
+
 ```bash
-sudo dnf install cmake gcc-c++ boost-devel openssl-devel libevdev-devel \
-  pipewire-devel wayland-devel libdrm-devel libcap-devel \
-  mesa-libEGL-devel mesa-libGL-devel cuda-toolkit nodejs npm labwc
+sudo dnf install dnf-plugins-core git
+sudo dnf builddep -y packaging/linux/fedora/Polaris.spec
 ```
 
 </details>
@@ -149,10 +153,12 @@ sudo dnf install cmake gcc-c++ boost-devel openssl-devel libevdev-devel \
 <summary><b>Arch</b></summary>
 
 ```bash
-sudo pacman -S --needed git cmake boost curl openssl libevdev pipewire wayland \
-  libdrm libcap libnotify libayatana-appindicator libpulse libva \
-  libx11 libxcb libxfixes libxi libxrandr libxtst miniupnpc \
-  numactl avahi opus libmfx mesa which nodejs npm labwc cuda
+sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
+  desktop-file-utils boost boost-libs curl openssl libevdev pipewire wayland \
+  wayland-protocols libdrm libcap libnotify libayatana-appindicator \
+  libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst \
+  miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \
+  labwc cuda
 ```
 
 </details>
@@ -205,6 +211,7 @@ systemctl --user enable --now polaris
 |---|---|---|
 | Linux host OS | Supported | Polaris is Linux-first today |
 | Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
+| Fedora 43 | Recommended | Official release asset: `Polaris-fedora43-x86_64.rpm` |
 | Arch Linux | Recommended | Official release asset: `Polaris-arch-x86_64.pkg.tar.zst`; source and local PKGBUILD generation are also supported |
 | Debian-family distros | Supported from source | Less turnkey than Fedora right now |
 | NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
@@ -215,7 +222,7 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- Debian-family distros are still source-build oriented. Fedora 42 and Arch Linux have direct x86_64 release package assets.
+- Debian-family distros are still source-build oriented. Fedora 42, Fedora 43, and Arch Linux have direct x86_64 release package assets.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
 - Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova client.
 - MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.

@@ -41,6 +41,7 @@ PY
 
 expected_assets=(
   "Polaris-fedora42-x86_64.rpm"
+  "Polaris-fedora43-x86_64.rpm"
   "Polaris-arch-x86_64.pkg.tar.zst"
 )
 
