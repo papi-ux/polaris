@@ -150,6 +150,63 @@ jobs:
           su builder -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'"
           su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && makepkg --nodeps --noconfirm --nocheck"
 
+      - name: Smoke test Arch package
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+
+          pkg_path="$(find arch-pkgbuild -maxdepth 1 -type f -name 'polaris-[0-9]*-x86_64.pkg.tar.*' ! -name '*debug*' | sort | head -n 1)"
+          if [ -z "$pkg_path" ]; then
+            echo "No Arch package was produced" >&2
+            exit 1
+          fi
+
+          tar -xOf "$pkg_path" .BUILDINFO | tee arch-pkgbuild/package-buildinfo.txt
+          tar -xOf "$pkg_path" .PKGINFO | tee arch-pkgbuild/package-pkginfo.txt
+
+          boost_version="$(pacman -Q boost-libs | awk '{ print $2 }' | sed 's/-.*$//')"
+          if ! grep -Fq "installed = boost-libs-${boost_version}-" arch-pkgbuild/package-buildinfo.txt; then
+            echo "Arch package was not built against installed boost-libs ${boost_version}" >&2
+            exit 1
+          fi
+
+          extract_dir="$(mktemp -d)"
+          bsdtar -xf "$pkg_path" -C "$extract_dir" usr/bin
+          binary="$(find "$extract_dir/usr/bin" -maxdepth 1 -type f -name 'polaris-*' -perm -111 | sort | head -n 1)"
+          if [ -z "$binary" ]; then
+            echo "Packaged Polaris binary was not found" >&2
+            exit 1
+          fi
+
+          readelf -d "$binary" | tee arch-pkgbuild/package-needed.txt
+          boost_sonames="$(awk -F '[][]' '/NEEDED.*libboost/ { print $2 }' arch-pkgbuild/package-needed.txt)"
+          if [ -z "$boost_sonames" ]; then
+            echo "No dynamic Boost sonames were found in the Arch package" >&2
+            exit 1
+          fi
+
+          while IFS= read -r soname; do
+            if [[ "$soname" != *".${boost_version}" ]]; then
+              echo "Arch package Boost soname mismatch: ${soname} does not match boost-libs ${boost_version}" >&2
+              exit 1
+            fi
+          done <<< "$boost_sonames"
+
+          pacman -U --noconfirm "$pkg_path"
+          installed_binary="$(pacman -Ql polaris | awk '/\/usr\/bin\/polaris-[^/]+$/ { print $2; exit }')"
+          if [ -z "$installed_binary" ]; then
+            echo "Installed Polaris binary was not found" >&2
+            exit 1
+          fi
+
+          ldd "$installed_binary" | tee arch-pkgbuild/package-ldd.txt
+          if grep -Fq "not found" arch-pkgbuild/package-ldd.txt; then
+            echo "Installed Arch package has unresolved shared-library dependencies" >&2
+            exit 1
+          fi
+
+          polaris --version | tee arch-pkgbuild/package-version.txt
+
       - name: Summarize Arch validation
         if: always()
         run: |
@@ -182,6 +239,7 @@ jobs:
             arch-pkgbuild/*.pkg.tar.*.sig
             arch-pkgbuild/*.src.tar.*
             arch-pkgbuild/*.log
+            arch-pkgbuild/package-*.txt
           if-no-files-found: warn
 
       - name: Upload Arch build metadata
@@ -267,11 +325,15 @@ jobs:
         run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
 
   fedora-rpm-build:
-    name: Fedora RPM build
+    name: Fedora ${{ matrix.fedora }} RPM build
     needs: web-checks
     runs-on: ubuntu-24.04
     container:
-      image: fedora:42
+      image: fedora:${{ matrix.fedora }}
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: [ '42', '43' ]
     env:
       CCACHE_DIR: /github/home/.cache/ccache
       CCACHE_COMPILERCHECK: content
@@ -291,17 +353,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /github/home/.cache/ccache
-          key: polaris-fedora-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          key: polaris-fedora-${{ matrix.fedora }}-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
           restore-keys: |
-            polaris-fedora-ccache-
+            polaris-fedora-${{ matrix.fedora }}-ccache-
 
       - name: Cache npm downloads
         uses: actions/cache@v4
         with:
           path: /github/home/.npm
-          key: polaris-fedora-npm-${{ hashFiles('package-lock.json') }}
+          key: polaris-fedora-${{ matrix.fedora }}-npm-${{ hashFiles('package-lock.json') }}
           restore-keys: |
-            polaris-fedora-npm-
+            polaris-fedora-${{ matrix.fedora }}-npm-
 
       - name: Install Fedora build dependencies
         run: dnf builddep -y packaging/linux/fedora/Polaris.spec
@@ -340,11 +402,48 @@ jobs:
       - name: Build RPM package
         run: cpack -G RPM --config ./build/CPackConfig.cmake
 
+      - name: Smoke test Fedora RPM package
+        run: |
+          set -euo pipefail
+
+          rpm_path="$(find build/cpack_artifacts -maxdepth 1 -type f -name '*.rpm' ! -name '*.src.rpm' | sort | head -n 1)"
+          if [ -z "$rpm_path" ]; then
+            echo "No binary RPM was produced" >&2
+            exit 1
+          fi
+
+          rpm -Kv "$rpm_path"
+          rpm -qpi "$rpm_path" | tee build/cpack_artifacts/package-info.txt
+          rpm -qpR "$rpm_path" | sort | tee build/cpack_artifacts/package-requires.txt
+
+          expected_miniupnpc="$(rpm -q --provides miniupnpc | awk '/libminiupnpc\.so\.[0-9]+\(\)\(64bit\)/ { print $1; exit }')"
+          actual_miniupnpc="$(awk '/libminiupnpc\.so\.[0-9]+\(\)\(64bit\)/ { print $1; exit }' build/cpack_artifacts/package-requires.txt)"
+          if [ -z "$expected_miniupnpc" ] || [ "$actual_miniupnpc" != "$expected_miniupnpc" ]; then
+            echo "RPM miniupnpc soname mismatch: expected '${expected_miniupnpc}', got '${actual_miniupnpc}'" >&2
+            exit 1
+          fi
+
+          dnf install -y "$rpm_path"
+          binary="$(rpm -ql polaris | awk '/\/usr\/bin\/polaris-[^/]+$/ { print; exit }')"
+          if [ -z "$binary" ]; then
+            echo "Installed Polaris versioned binary was not found" >&2
+            exit 1
+          fi
+
+          readelf -d "$binary" | tee build/cpack_artifacts/package-needed.txt
+          ldd "$binary" | tee build/cpack_artifacts/package-ldd.txt
+          if grep -Fq "not found" build/cpack_artifacts/package-ldd.txt; then
+            echo "Installed Fedora RPM has unresolved shared-library dependencies" >&2
+            exit 1
+          fi
+
+          polaris --version | tee build/cpack_artifacts/package-version.txt
+
       - name: Summarize Fedora RPM validation
         if: always()
         run: |
           {
-            echo "## Fedora RPM validation"
+            echo "## Fedora ${{ matrix.fedora }} RPM validation"
             echo
             echo "- Spec dependency source: \`packaging/linux/fedora/Polaris.spec\`"
             echo "- Build tree directory: \`build/\`"
@@ -356,7 +455,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fedora-rpm-artifacts
+          name: fedora-${{ matrix.fedora }}-rpm-artifacts
           path: |
             build/cpack_artifacts/*.rpm
             build/cpack_artifacts/*.src.rpm
@@ -366,8 +465,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fedora-rpm-metadata
+          name: fedora-${{ matrix.fedora }}-rpm-metadata
           path: |
+            build/cpack_artifacts/package-*.txt
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/SPECS/*.spec
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.out
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.err
@@ -390,11 +490,17 @@ jobs:
           name: arch-package-outputs
           path: release-assets/raw/arch
 
-      - name: Download Fedora RPM artifacts
+      - name: Download Fedora 42 RPM artifacts
         uses: actions/download-artifact@v8
         with:
-          name: fedora-rpm-artifacts
-          path: release-assets/raw/fedora
+          name: fedora-42-rpm-artifacts
+          path: release-assets/raw/fedora42
+
+      - name: Download Fedora 43 RPM artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: fedora-43-rpm-artifacts
+          path: release-assets/raw/fedora43
 
       - name: Prepare release asset names
         run: |
@@ -408,6 +514,8 @@ jobs:
             case "$arch_path" in
               *.pkg.tar.*.sig)
                 arch_signatures+=("$arch_path")
+                ;;
+              *debug*.pkg.tar.*)
                 ;;
               *.pkg.tar.*)
                 arch_packages+=("$arch_path")
@@ -437,26 +545,35 @@ jobs:
             cp "${arch_sources[0]}" "release-assets/final/Polaris-arch-src.tar${arch_source_suffix}"
           fi
 
-          binary_rpms=()
-          source_rpms=()
-          for rpm_path in release-assets/raw/fedora/*.rpm; do
-            if [[ "$rpm_path" == *.src.rpm ]]; then
-              source_rpms+=("$rpm_path")
-            else
-              binary_rpms+=("$rpm_path")
+          copy_fedora_rpms() {
+            local fedora_version="$1"
+            local raw_dir="$2"
+            local binary_rpms=()
+            local source_rpms=()
+            local rpm_path
+
+            for rpm_path in "${raw_dir}"/*.rpm; do
+              if [[ "$rpm_path" == *.src.rpm ]]; then
+                source_rpms+=("$rpm_path")
+              else
+                binary_rpms+=("$rpm_path")
+              fi
+            done
+
+            if [ "${#binary_rpms[@]}" -eq 0 ]; then
+              echo "No binary RPMs were produced for Fedora ${fedora_version}" >&2
+              exit 1
             fi
-          done
 
-          if [ "${#binary_rpms[@]}" -eq 0 ]; then
-            echo "No binary RPMs were produced by the Fedora packaging job" >&2
-            exit 1
-          fi
+            cp "${binary_rpms[0]}" "release-assets/final/Polaris-fedora${fedora_version}-x86_64.rpm"
 
-          cp "${binary_rpms[0]}" release-assets/final/Polaris-fedora42-x86_64.rpm
+            if [ "${#source_rpms[@]}" -gt 0 ]; then
+              cp "${source_rpms[0]}" "release-assets/final/Polaris-fedora${fedora_version}-src.rpm"
+            fi
+          }
 
-          if [ "${#source_rpms[@]}" -gt 0 ]; then
-            cp "${source_rpms[0]}" release-assets/final/Polaris-fedora42-src.rpm
-          fi
+          copy_fedora_rpms 42 release-assets/raw/fedora42
+          copy_fedora_rpms 43 release-assets/raw/fedora43
 
           ls -la release-assets/final
 
@@ -478,8 +595,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
-          if [ "${asset_count}" -ne 2 ]; then
-            echo "Expected Fedora and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
+          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
+          if [ "${asset_count}" -ne 3 ]; then
+            echo "Expected Fedora 42, Fedora 43, and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
             exit 1
           fi
