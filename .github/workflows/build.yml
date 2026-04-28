@@ -301,11 +301,8 @@ jobs:
           cmake -B build -G Ninja \
             -DBUILD_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DPOLARIS_ASSETS_DIR=share/polaris \
-            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF
 
@@ -379,8 +376,11 @@ jobs:
           cmake -B build -G Ninja \
             -DBUILD_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPOLARIS_ASSETS_DIR=share/polaris \
+            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF
 
