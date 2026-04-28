@@ -3,9 +3,16 @@
 Bazzite is Fedora-based, but it is an immutable rpm-ostree system rather than a normal
 DNF-managed Fedora install. Polaris can use the matching Fedora RPM as a layered system package.
 
-This path is experimental until it has been validated on real Bazzite Desktop Mode and Game Mode
-hardware. Use it when you want to test Polaris as a Bazzite host and are comfortable with
-rpm-ostree package layering.
+This path is extremely experimental until it has been validated on real Bazzite Desktop Mode and
+Game Mode hardware. It is much more prone to breaking than the Fedora and Arch package paths
+because rpm-ostree layering, Desktop Mode, Game Mode, gamescope, and GPU capture all need separate
+validation. Use it only when you want to test Polaris as a Bazzite host and are comfortable with
+debugging and rolling back rpm-ostree package layering.
+
+> [!WARNING]
+> Treat the Bazzite package path as a tester path, not a stable recommended install. Bazzite updates,
+> Game Mode behavior, compositor changes, and GPU driver differences can break this flow while
+> support is still being validated.
 
 ## Install
 
@@ -28,9 +35,9 @@ GameStream-compatible client.
 
 ## First validation path
 
-Start in Desktop Mode first. Game Mode and Deck-style gamescope sessions are still experimental as
-host environments, and they can hide display, portal, and environment details that are easier to
-debug from Desktop Mode.
+Start in Desktop Mode first. Game Mode and Deck-style gamescope sessions are especially
+experimental as host environments, and they can hide display, portal, and environment details that
+are easier to debug from Desktop Mode.
 
 The recommended Bazzite test path is:
 
@@ -119,5 +126,5 @@ Please include these details when reporting Bazzite issues:
 ## Current Status
 
 Fedora 42 and Fedora 43 RPMs are release-tested in CI. Bazzite uses those same RPM assets, but
-the immutable install flow and Steam Deck-oriented runtime behavior need separate validation before
-this path is marked recommended.
+the immutable install flow and Steam Deck-oriented runtime behavior need separate real-hardware
+validation before this path is marked recommended.
