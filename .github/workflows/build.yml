@@ -256,7 +256,6 @@ jobs:
   ubuntu-build:
     name: Ubuntu build
     needs: web-checks
-    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-24.04
     env:
       CCACHE_DIR: ~/.cache/ccache
@@ -301,8 +300,11 @@ jobs:
           cmake -B build -G Ninja \
             -DBUILD_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPOLARIS_ASSETS_DIR=share/polaris \
+            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF
 
@@ -323,6 +325,71 @@ jobs:
 
       - name: Run fast C++ tests
         run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
+
+      - name: Build DEB package
+        run: cpack -G DEB --config ./build/CPackConfig.cmake
+
+      - name: Smoke test Ubuntu DEB package
+        run: |
+          set -euo pipefail
+
+          deb_path="$(find build/cpack_artifacts -maxdepth 1 -type f -name '*.deb' | sort | head -n 1)"
+          if [ -z "$deb_path" ]; then
+            echo "No binary DEB was produced" >&2
+            exit 1
+          fi
+
+          dpkg-deb --info "$deb_path" | tee build/cpack_artifacts/package-info.txt
+          dpkg-deb --field "$deb_path" Depends | tee build/cpack_artifacts/package-depends.txt
+          dpkg-deb --contents "$deb_path" | tee build/cpack_artifacts/package-files.txt
+
+          sudo apt-get install -y "./$deb_path"
+          package_name="$(dpkg-deb --field "$deb_path" Package)"
+          binary="$(dpkg -L "$package_name" | awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[^/]+$/ { print; exit }')"
+          if [ -z "$binary" ]; then
+            echo "Installed Polaris binary was not found" >&2
+            exit 1
+          fi
+
+          readelf -d "$binary" | tee build/cpack_artifacts/package-needed.txt
+          ldd "$binary" | tee build/cpack_artifacts/package-ldd.txt
+          if grep -Fq "not found" build/cpack_artifacts/package-ldd.txt; then
+            echo "Installed Ubuntu DEB has unresolved shared-library dependencies" >&2
+            exit 1
+          fi
+
+          polaris --version | tee build/cpack_artifacts/package-version.txt
+
+      - name: Summarize Ubuntu DEB validation
+        if: always()
+        run: |
+          {
+            echo "## Ubuntu 24.04 DEB validation"
+            echo
+            echo "- Build tree directory: \`build/\`"
+            echo "- DEB output directory: \`build/cpack_artifacts/\`"
+            echo "- DEB artifacts and generated CPack metadata are uploaded from this job."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Ubuntu DEB artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ubuntu-24.04-deb-artifacts
+          path: |
+            build/cpack_artifacts/*.deb
+          if-no-files-found: warn
+
+      - name: Upload Ubuntu DEB metadata
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ubuntu-24.04-deb-metadata
+          path: |
+            build/cpack_artifacts/package-*.txt
+            build/cpack_artifacts/_CPack_Packages/Linux/DEB/**/*.out
+            build/cpack_artifacts/_CPack_Packages/Linux/DEB/**/*.err
+          if-no-files-found: warn
 
   fedora-rpm-build:
     name: Fedora ${{ matrix.fedora }} RPM build
@@ -481,6 +548,7 @@ jobs:
     name: Release assets
     needs:
       - arch-build
+      - ubuntu-build
       - fedora-rpm-build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -505,6 +573,12 @@ jobs:
         with:
           name: fedora-43-rpm-artifacts
           path: release-assets/raw/fedora43
+
+      - name: Download Ubuntu 24.04 DEB artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ubuntu-24.04-deb-artifacts
+          path: release-assets/raw/ubuntu24.04
 
       - name: Prepare release asset names
         run: |
@@ -579,6 +653,18 @@ jobs:
           copy_fedora_rpms 42 release-assets/raw/fedora42
           copy_fedora_rpms 43 release-assets/raw/fedora43
 
+          ubuntu_debs=()
+          for deb_path in release-assets/raw/ubuntu24.04/*.deb; do
+            ubuntu_debs+=("$deb_path")
+          done
+
+          if [ "${#ubuntu_debs[@]}" -eq 0 ]; then
+            echo "No binary DEBs were produced for Ubuntu 24.04" >&2
+            exit 1
+          fi
+
+          cp "${ubuntu_debs[0]}" "release-assets/final/Polaris-ubuntu24.04-x86_64.deb"
+
           ls -la release-assets/final
 
       - name: Upload release assets to GitHub release
@@ -599,8 +685,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
-          if [ "${asset_count}" -ne 3 ]; then
-            echo "Expected Fedora 42, Fedora 43, and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
+          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
+          if [ "${asset_count}" -ne 4 ]; then
+            echo "Expected Fedora 42, Fedora 43, Ubuntu 24.04, and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
             exit 1
           fi

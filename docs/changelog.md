@@ -5,6 +5,16 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## Unreleased
+
+Highlights:
+
+- Added an experimental Bazzite install path using the Fedora RPM through `rpm-ostree`
+- Added a Bazzite validation checklist for desktop mode, gamemode, GPU, pairing, and headless behavior
+- Added Ubuntu 24.04 DEB packaging for the next tagged release: `Polaris-ubuntu24.04-x86_64.deb`
+- Added an Ubuntu install guide with package, source-build fallback, and validation notes
+- Polaris config saves now stay isolated from legacy Sunshine config paths
+
 ## v1.0.2
 
 Patch release focused on validated Linux release packages.
@@ -52,4 +62,5 @@ Current official public assets:
 
 - `Polaris-fedora42-x86_64.rpm`
 - `Polaris-fedora43-x86_64.rpm`
+- `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`
