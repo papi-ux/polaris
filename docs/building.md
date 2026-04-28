@@ -3,7 +3,9 @@
 Polaris is a Linux-first host today. The fastest install paths are the Fedora RPM and Arch
 package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). Source
 builds remain the right path for Debian-family distros and local development, and Arch also
-supports a local package-build flow in addition to the published package asset.
+supports a local package-build flow in addition to the published package asset. Bazzite can use
+the Fedora RPM through `rpm-ostree`, but that install path is experimental until real-hardware
+validation is complete. Ubuntu 24.04 DEB packaging is staged for the next tagged release.
 
 ## Release packages
 
@@ -22,7 +24,28 @@ sudo polaris --setup-host
 polaris
 ```
 
+```bash
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
+sudo polaris --setup-host
+polaris
+```
+
+```bash
+fedora_version="$(rpm -E %fedora)"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+systemctl reboot
+
+# After reboot:
+sudo polaris --setup-host
+polaris
+```
+
 The web UI will be available at `https://localhost:47990`.
+
+See the [Bazzite install guide](bazzite.md) and [Ubuntu install guide](ubuntu.md) for caveats,
+fallback paths, and validation notes.
 
 ## Source Build
 
@@ -118,6 +141,9 @@ The public release assets are currently:
 
 - `Polaris-fedora42-x86_64.rpm`
 - `Polaris-fedora43-x86_64.rpm`
+- `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`
 
-Debian-family and other distro paths are still source-build oriented for now.
+Bazzite installs use the matching Fedora RPM through `rpm-ostree` for now. Ubuntu 24.04 DEB
+packaging is staged for the next tagged release; other Debian-family distro paths are still
+source-build oriented.
