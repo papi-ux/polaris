@@ -301,8 +301,11 @@ jobs:
           cmake -B build -G Ninja \
             -DBUILD_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPOLARIS_ASSETS_DIR=share/polaris \
+            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF
 
@@ -424,7 +427,8 @@ jobs:
           fi
 
           dnf install -y "$rpm_path"
-          binary="$(rpm -ql polaris | awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[^/]+$/ { print; exit }')"
+          rpm -ql polaris | tee build/cpack_artifacts/package-files.txt
+          binary="$(awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[^/]+$/ { print; exit }' build/cpack_artifacts/package-files.txt)"
           if [ -z "$binary" ]; then
             echo "Installed Polaris binary was not found" >&2
             exit 1
