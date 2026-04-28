@@ -28,10 +28,10 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42, Fedora 43, and Arch Linux have direct `v1.0.1` release packages; Debian-family and other distro installs are still source-build oriented.
+> Polaris is a Linux host today. Fedora 42, Fedora 43, and Arch Linux have direct `v1.0.2` release packages. Bazzite can use the Fedora RPM through `rpm-ostree`, but that path is still experimental while real-hardware validation continues. Ubuntu 24.04 DEB packaging is staged for the next tagged release; Debian-family distros remain source-build oriented until that asset is published.
 
 > [!NOTE]
-> `v1.0.1` is the current public Polaris release line. The host, web console, Fedora RPM, and Arch package are ready for broader testing, but this is still an early public surface. Expect some distro, GPU, and client edge cases while compatibility keeps expanding.
+> `v1.0.2` is the current public Polaris release line. The host, web console, Fedora RPM, and Arch package are ready for broader testing, but this is still an early public surface. Expect some distro, GPU, and client edge cases while compatibility keeps expanding.
 
 ## Quick Start
 
@@ -55,6 +55,32 @@ sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
 sudo polaris --setup-host
 polaris
 ```
+
+### Experimental install: Bazzite
+
+```bash
+fedora_version="$(rpm -E %fedora)"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+systemctl reboot
+
+# After reboot:
+sudo polaris --setup-host
+polaris
+```
+
+Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. See the [Bazzite install guide](docs/bazzite.md) for caveats, rollback, and validation notes.
+
+### Upcoming install: Ubuntu 24.04 DEB
+
+```bash
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
+sudo polaris --setup-host
+polaris
+```
+
+The Ubuntu DEB asset is staged for the next tagged release. Until that release exists, use the source build path below. See the [Ubuntu install guide](docs/ubuntu.md) for package status, source build fallback, and validation notes.
 
 ### Source build: Debian, dev machines, or custom setups
 
@@ -89,12 +115,14 @@ polaris
 
 ### Recommended package path
 
-If you are on Fedora or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds. Both package paths install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit so the installer does not silently change input or KMS permissions.
+If you are on Fedora, Bazzite, Ubuntu, or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds. These package paths install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit so the installer does not silently change input or KMS permissions.
 
 | Public release asset | Use it for |
 |---|---|
 | `Polaris-fedora42-x86_64.rpm` | Fedora 42 x86_64 hosts |
 | `Polaris-fedora43-x86_64.rpm` | Fedora 43 x86_64 hosts |
+| `Polaris-fedora42-x86_64.rpm` or `Polaris-fedora43-x86_64.rpm` via `rpm-ostree` | Bazzite x86_64 hosts, experimental |
+| `Polaris-ubuntu24.04-x86_64.deb` | Ubuntu 24.04 x86_64 hosts, next tagged release |
 | `Polaris-arch-x86_64.pkg.tar.zst` | Arch Linux x86_64 hosts |
 
 ```bash
@@ -107,6 +135,22 @@ sudo polaris --setup-host
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
+sudo polaris --setup-host
+```
+
+```bash
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
+sudo polaris --setup-host
+```
+
+```bash
+fedora_version="$(rpm -E %fedora)"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+systemctl reboot
+
+# After reboot:
 sudo polaris --setup-host
 ```
 
@@ -212,6 +256,8 @@ systemctl --user enable --now polaris
 | Linux host OS | Supported | Polaris is Linux-first today |
 | Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
 | Fedora 43 | Recommended | Official release asset: `Polaris-fedora43-x86_64.rpm` |
+| Bazzite | Experimental | Use the matching Fedora RPM through `rpm-ostree`; see [Bazzite install guide](docs/bazzite.md) |
+| Ubuntu 24.04 | Upcoming package path | `Polaris-ubuntu24.04-x86_64.deb` is staged for the next tagged release; source build works today |
 | Arch Linux | Recommended | Official release asset: `Polaris-arch-x86_64.pkg.tar.zst`; source and local PKGBUILD generation are also supported |
 | Debian-family distros | Supported from source | Less turnkey than Fedora right now |
 | NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
@@ -222,7 +268,9 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- Debian-family distros are still source-build oriented. Fedora 42, Fedora 43, and Arch Linux have direct x86_64 release package assets.
+- Bazzite support is experimental until desktop/gamemode, AMD/NVIDIA, and Steam Deck client flows are validated on real hardware.
+- Ubuntu 24.04 DEB packaging is staged for the next tagged release; other Debian-family distros are still source-build oriented.
+- Fedora 42, Fedora 43, and Arch Linux have direct x86_64 release package assets today.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
 - Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova client.
 - MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.
