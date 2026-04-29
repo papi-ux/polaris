@@ -23,6 +23,21 @@ namespace wl {
   static int env_width;
   static int env_height;
 
+  bool supports_gpu_native_capture(platf::mem_type_e hwdevice_type) {
+    switch (hwdevice_type) {
+#ifdef POLARIS_BUILD_VAAPI
+      case platf::mem_type_e::vaapi:
+        return true;
+#endif
+#ifdef POLARIS_BUILD_CUDA
+      case platf::mem_type_e::cuda:
+        return true;
+#endif
+      default:
+        return false;
+    }
+  }
+
   struct img_t: public platf::img_t {
     ~img_t() override {
       delete[] data;
@@ -710,6 +725,7 @@ namespace platf {
     }
 
     bool prefer_ram_capture = (hwdevice_type == platf::mem_type_e::system);
+    const bool gpu_native_capture_supported = wl::supports_gpu_native_capture(hwdevice_type);
     bool prefer_linear_dmabuf = false;
     bool attempt_headless_extcopy = false;
 #ifdef __linux__
@@ -739,7 +755,15 @@ namespace platf {
     }
 #endif
 
-    if (attempt_headless_extcopy && (hwdevice_type == platf::mem_type_e::vaapi || hwdevice_type == platf::mem_type_e::cuda)) {
+    if (!prefer_ram_capture && !gpu_native_capture_supported) {
+      BOOST_LOG(info)
+        << "wlr: Using RAM capture path because this build does not include a GPU-native uploader for the selected encoder"sv;
+      prefer_ram_capture = true;
+      attempt_headless_extcopy = false;
+      prefer_linear_dmabuf = false;
+    }
+
+    if (attempt_headless_extcopy && gpu_native_capture_supported) {
       auto wlr = std::make_shared<wl::wlr_extcopy_vram_t>();
       if (!wlr->init(hwdevice_type, display_name, config)) {
         return wlr;
@@ -749,7 +773,7 @@ namespace platf {
       prefer_ram_capture = true;
     }
 
-    if (!prefer_ram_capture && (hwdevice_type == platf::mem_type_e::vaapi || hwdevice_type == platf::mem_type_e::cuda)) {
+    if (!prefer_ram_capture && gpu_native_capture_supported) {
       auto wlr = std::make_shared<wl::wlr_vram_t>();
       wlr->dmabuf.prefer_linear_dmabuf = prefer_linear_dmabuf;
       if (wlr->init(hwdevice_type, display_name, config)) {

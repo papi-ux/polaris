@@ -7,7 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
-No unreleased changes yet.
+- Added the Linux headless runtime helpers to package dependencies: `labwc`, `wlr-randr`, Xwayland, and `xdpyinfo`/`x11-utils`
+- Avoided GPU DMA-BUF capture when the build lacks a matching GPU upload path, preventing invalid CPU frame conversion in headless labwc sessions
 
 ## v1.0.4
 
