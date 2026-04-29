@@ -52,6 +52,8 @@
           <ul class="space-y-1 text-sm text-storm list-disc list-inside">
             <li>{{ $t('recovery.notes.full_path') }}</li>
             <li>{{ $t('recovery.notes.source_build') }}</li>
+            <li>{{ $t('recovery.notes.same_user') }}</li>
+            <li>{{ $t('recovery.notes.restart') }}</li>
             <li>{{ $t('recovery.notes.keep_safe') }}</li>
           </ul>
         </div>
@@ -86,19 +88,19 @@ const commandVariants = computed(() => [
     id: 'installed',
     title: t('recovery.commands.installed_title'),
     description: t('recovery.commands.installed_desc'),
-    command: 'polaris --creds <new-username> <new-password>',
+    command: 'polaris --creds new-username new-password',
   },
   {
     id: 'source',
     title: t('recovery.commands.source_title'),
     description: t('recovery.commands.source_desc'),
-    command: './build/polaris --creds <new-username> <new-password>',
+    command: './build/polaris --creds new-username new-password',
   },
   {
     id: 'appimage',
     title: t('recovery.commands.appimage_title'),
     description: t('recovery.commands.appimage_desc'),
-    command: './polaris.AppImage --creds <new-username> <new-password>',
+    command: './polaris.AppImage --creds new-username new-password',
   },
 ])
 

@@ -564,11 +564,13 @@
     "steps": {
       "open_terminal": "Open a terminal on the host machine running Polaris.",
       "run_command": "Run the command that matches how Polaris is installed on that host.",
-      "return_login": "Return here and sign in with the new username and password."
+      "return_login": "Restart Polaris, then return here and sign in with the new username and password."
     },
     "notes": {
       "full_path": "If `polaris` is not on your PATH, use the full path to the executable instead.",
       "source_build": "Source builds often use `./build/polaris` from the repository root.",
+      "same_user": "Run the command as the same user account that runs Polaris. Do not use sudo unless Polaris itself runs as root.",
+      "restart": "A running Polaris process keeps the old credentials in memory until it is restarted.",
       "keep_safe": "Store the new credentials somewhere safe. Polaris does not expose a remote self-service reset flow."
     }
   },

@@ -11,6 +11,20 @@ Reset the web UI username and password:
 polaris --creds new-username new-password
 ```
 
+Run this as the same user account that runs Polaris. Do not use `sudo` unless Polaris itself runs
+as root, because that can update a different config directory.
+
+Restart Polaris after changing credentials. A running Polaris process keeps the previous credentials
+in memory until restart.
+
+For packaged user-service installs:
+
+```bash
+systemctl --user restart polaris
+```
+
+For foreground sessions, stop Polaris and start it again.
+
 ## Web UI does not load
 
 1. Confirm Polaris is running.

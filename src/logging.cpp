@@ -297,7 +297,7 @@ namespace logging {
       << "    Note: The configuration will be created if it doesn't exist."sv << std::endl
       << std::endl
       << "    --help                    | print help"sv << std::endl
-      << "    --creds username password | set user credentials for the Web manager"sv << std::endl
+      << "    --creds username password | set Web UI credentials; restart Polaris afterwards"sv << std::endl
 #ifdef __linux__
       << "    --setup-host [--enable-kms] | apply Linux udev/modules setup explicitly"sv << std::endl
 #endif
