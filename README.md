@@ -28,10 +28,10 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42, Fedora 43, and Arch Linux are the most validated direct `v1.0.3` release package paths. Bazzite and Ubuntu 24.04 packages exist for testing, but they are extremely experimental, less validated on real hardware, and more prone to breaking across distro, compositor, driver, and GPU combinations. Other Debian-family distros remain source-build oriented for now.
+> Polaris is a Linux host today. Fedora 42, Fedora 43, and Arch Linux are the most validated direct `v1.0.4` release package paths. Bazzite and Ubuntu 24.04 packages exist for testing, but they are extremely experimental, less validated on real hardware, and more prone to breaking across distro, compositor, driver, and GPU combinations. Other Debian-family distros remain source-build oriented for now.
 
 > [!NOTE]
-> `v1.0.3` is the current public Polaris release line. The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite rpm-ostree path and Ubuntu DEB are earlier validation paths and should be treated as much more fragile.
+> `v1.0.4` is the current public Polaris release line. The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite rpm-ostree path and Ubuntu DEB are earlier validation paths and should be treated as much more fragile.
 
 ## Quick Start
 

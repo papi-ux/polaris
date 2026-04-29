@@ -9,6 +9,18 @@ starts at `v1.0.0`.
 
 No unreleased changes yet.
 
+## v1.0.4
+
+Patch release focused on Bazzite tester feedback and credential recovery.
+
+Highlights:
+
+- Fixed BGR0 CPU-frame conversion fallback by inferring packed row stride when capture reports `row_pitch = 0`
+- Prevented headless `labwc` fallback paths from failing encode conversion with `src_stride=0`
+- Updated the Bazzite guide with `labwc`/`wlr-randr` layering, Desktop Mode-first validation, and known log-message guidance
+- Marked Bazzite and Ubuntu package paths as extremely experimental tester paths until broader real-hardware validation is complete
+- Clarified web credential recovery: run `polaris --creds` as the same user, restart Polaris afterwards, and avoid shell-confusing placeholder commands
+
 ## v1.0.3
 
 Highlights:
