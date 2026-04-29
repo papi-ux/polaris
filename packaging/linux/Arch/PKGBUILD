@@ -21,6 +21,7 @@ depends=(
   'avahi'
   'boost-libs'
   'curl'
+  'labwc'
   'libayatana-appindicator'
   'libcap'
   'libdrm'
@@ -44,6 +45,9 @@ depends=(
   'udev'
   'wayland'
   'which'
+  'wlr-randr'
+  'xorg-xdpyinfo'
+  'xorg-xwayland'
 )
 
 makedepends=(
@@ -61,7 +65,6 @@ makedepends=(
 )
 
 optdepends=(
-  'labwc: isolated stream compositor runtime'
   'libva-mesa-driver: AMD GPU encoding support'
 )
 

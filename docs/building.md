@@ -62,6 +62,8 @@ fallback paths, and validation notes before using either experimental path.
 | Wayland client libs | Linux compositor integration |
 | Node.js 18+ | Web UI build |
 | labwc | Isolated stream compositor |
+| wlr-randr | Configure the isolated stream output mode |
+| Xwayland and xdpyinfo | Launch and detect X11 clients inside labwc |
 | CUDA toolkit | Needed for NVENC builds |
 
 ### Example packages
@@ -73,6 +75,7 @@ Run this from the cloned Polaris checkout so `dnf builddep` can read the package
 ```bash
 sudo dnf install dnf-plugins-core git
 sudo dnf builddep -y packaging/linux/fedora/Polaris.spec
+sudo dnf install labwc wlr-randr xorg-x11-server-Xwayland xdpyinfo
 ```
 
 #### Arch
@@ -83,7 +86,7 @@ sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
   wayland-protocols libdrm libcap libnotify libayatana-appindicator \
   libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst \
   miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \
-  labwc cuda
+  labwc wlr-randr xorg-xwayland xorg-xdpyinfo cuda
 ```
 
 ### Build and install
