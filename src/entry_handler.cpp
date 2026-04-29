@@ -166,7 +166,16 @@ namespace args {
       help(name);
     }
 
-    http::save_user_creds(config::sunshine.credentials_file, argv[0], argv[1]);
+    const auto status = http::save_user_creds(config::sunshine.credentials_file, argv[0], argv[1]);
+    if (status != 0) {
+      return status;
+    }
+
+    BOOST_LOG(info) << "Credentials file: "sv << config::sunshine.credentials_file;
+    BOOST_LOG(info) << "Restart any running Polaris process before signing in with the new web credentials."sv;
+#ifdef __linux__
+    BOOST_LOG(info) << "If Polaris runs as a user service, run [systemctl --user restart polaris]."sv;
+#endif
 
     return 0;
   }

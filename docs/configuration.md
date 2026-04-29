@@ -95,6 +95,15 @@ If you lose access to the web UI credentials:
 polaris --creds new-username new-password
 ```
 
+Run the command as the same user account that runs Polaris, then restart Polaris before signing in
+with the new credentials:
+
+```bash
+systemctl --user restart polaris
+```
+
+If Polaris is running in the foreground, stop it and start it again instead.
+
 ## Host setup helper
 
 To re-run the host setup steps explicitly:

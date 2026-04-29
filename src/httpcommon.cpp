@@ -142,7 +142,7 @@ namespace http {
       return -1;
     }
 
-    BOOST_LOG(info) << "New credentials have been created"sv;
+    BOOST_LOG(info) << "New web UI credentials have been saved"sv;
     return 0;
   }
 
