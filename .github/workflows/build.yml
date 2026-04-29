@@ -68,6 +68,7 @@ jobs:
       - name: Initialize submodules
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
             git submodule sync --recursive
             if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
@@ -278,6 +279,7 @@ jobs:
 
       - name: Initialize submodules
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
             git submodule sync --recursive
             if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
@@ -446,6 +448,7 @@ jobs:
 
       - name: Initialize submodules
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
             git submodule sync --recursive
             if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
