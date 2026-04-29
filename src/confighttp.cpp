@@ -3157,7 +3157,7 @@ namespace confighttp {
       if (!http::verify_user_password(username, password, &needs_upgrade)) {
         write_login_error(
           SimpleWeb::StatusCode::client_error_unauthorized,
-          "Invalid username or password. If you forgot your credentials, reset them on the host with the --creds command.",
+          "Invalid username or password. If you reset credentials with --creds, restart Polaris before signing in again.",
           true
         );
         return;
