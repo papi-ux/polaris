@@ -550,5 +550,13 @@ namespace video {
   std::string current_encoder_topology_key_for_tests();
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
+
+  int software_frame_input_linesize_for_tests(
+    int row_pitch,
+    int pixel_pitch,
+    int image_width,
+    int frame_width,
+    int av_pixel_format
+  );
 #endif
 }  // namespace video
