@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.6
+
+Patch release focused on first-run Bazzite setup clarity and web credential routing.
+
 - Redirect first-run `/login` and `/recover` visits to the welcome wizard when no web credentials exist
 - Clarified first-run setup URLs in the README and Bazzite guide
 - Updated the Bazzite guide to run `sudo polaris --setup-host --enable-kms` for the DRM/KMS capture path
