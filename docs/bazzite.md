@@ -3,7 +3,8 @@
 Bazzite is Fedora-based, but it is an immutable `rpm-ostree` system rather than a
 normal DNF-managed Fedora install. The clean Polaris path for everyday Bazzite
 users is to layer the matching Fedora RPM, reboot into the new deployment, run
-the host setup once, then start the Polaris user service.
+the host setup once with DRM/KMS capture enabled, then start the Polaris user
+service.
 
 This is still a validation path until Bazzite Desktop Mode, Game Mode, NVIDIA,
 AMD, and common Moonlight client flows have more real-hardware coverage. The
@@ -37,13 +38,22 @@ sudo rpm-ostree install -r "./${rpm_name}"
 After the reboot:
 
 ```bash
-sudo polaris --setup-host
+sudo polaris --setup-host --enable-kms
 systemctl --user enable --now polaris
 ```
 
-Open `https://localhost:47990/#/welcome`, create the web UI account, and pair
+Open `https://127.0.0.1:47990/#/welcome`, create the web UI account, and pair
 Moonlight, Nova, or another GameStream-compatible client. After credentials are
-created, `https://localhost:47990` opens the normal console.
+created, `https://127.0.0.1:47990` opens the normal console.
+
+The `--enable-kms` flag applies `cap_sys_admin` to the installed Polaris binary.
+That is required for the current Bazzite DRM/KMS capture path. If you already
+ran `sudo polaris --setup-host` without that flag, run the command above and
+restart the user service:
+
+```bash
+systemctl --user restart polaris
+```
 
 ## Why rpm-ostree Layering
 
@@ -124,6 +134,10 @@ headless flow.
 CPU BGR0 frame without a valid row pitch. Use a release newer than `v1.0.4`, where
 the headless CPU fallback path was fixed.
 
+`Failed to gain CAP_SYS_ADMIN` or `You must run [sudo setcap ...] for KMS display
+capture to work` means the KMS capability was not applied. Run
+`sudo polaris --setup-host --enable-kms`, then restart the user service.
+
 If local Plasma receives remote mouse or keyboard input while using headless
 labwc, treat that as an input-isolation bug and include the validation details
 below.
@@ -137,9 +151,10 @@ Please include these details when reporting Bazzite issues:
 - GPU model and driver stack
 - Polaris RPM asset used, such as `Polaris-fedora44-x86_64.rpm`
 - output of `command -v polaris labwc wlr-randr`
-- whether `sudo polaris --setup-host` completed successfully
+- output of `getcap "$(readlink -f "$(command -v polaris)")"`
+- whether `sudo polaris --setup-host --enable-kms` completed successfully
 - whether `systemctl --user status polaris` is running
-- whether the web UI opens at `https://localhost:47990`
+- whether the web UI opens at `https://127.0.0.1:47990`
 - client used for pairing, such as Steam Deck Moonlight, Android Moonlight, or Nova
 - active capture path shown in the Polaris dashboard
 - whether headless mode and virtual display behavior worked after a reboot
