@@ -61,6 +61,26 @@ which can hold the capability-marked runtime copy used by the user service.
 Re-run the `/usr/local/bin/polaris-kms` copy and `setcap` commands after each
 Polaris package update so the service uses the newly installed binary.
 
+If you want to test the EVDI virtual display path instead of the headless labwc
+path, pre-create one EVDI device before starting Polaris:
+
+```bash
+systemctl --user stop polaris
+sudo modprobe -r evdi
+sudo modprobe evdi initial_device_count=1
+cat /sys/devices/evdi/count
+ls -l /dev/dri/card*
+systemctl --user start polaris
+```
+
+The expected result is `cat /sys/devices/evdi/count` returning `1` and an extra
+`/dev/dri/cardN` whose driver is `evdi`. To make that survive reboots:
+
+```bash
+echo evdi | sudo tee /etc/modules-load.d/evdi.conf
+echo 'options evdi initial_device_count=1' | sudo tee /etc/modprobe.d/evdi-polaris.conf
+```
+
 ## Why rpm-ostree Layering
 
 Polaris needs host-level integration: the binary, web assets, desktop metadata,
@@ -146,6 +166,16 @@ user service is running. On Bazzite, copy the current packaged binary to
 `/usr/local/bin/polaris-kms`, apply `setcap` there, and make sure the
 `~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf` override points
 `ExecStart` at that file.
+
+`Virtual display: failed to open EVDI device` usually means the EVDI kernel
+module is loaded without a pre-created DRM card. Load EVDI with
+`initial_device_count=1` and confirm that `/sys/devices/evdi/count` returns `1`
+before starting Polaris.
+
+`Virtual display: could not determine EVDI output name, using fallback
+[VIRTUAL-1]` means Polaris could not map the opened EVDI card to its DRM
+connector. On Bazzite with a pre-created device, the connector should look like
+`card1-DVI-I-1` under `/sys/class/drm`.
 
 `wlr: Using RAM capture path because this build does not include a GPU-native
 uploader for the selected encoder` and `capture will incur an extra CPU-side
