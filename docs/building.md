@@ -3,9 +3,9 @@
 Polaris is a Linux-first host today. The most validated install paths are the Fedora RPM and Arch
 package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). Source builds
 remain the right path for other Debian-family distros and local development, and Arch also supports
-a local package-build flow in addition to the published package asset. Bazzite can use the Fedora
-RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both of those package paths are
-extremely experimental and more prone to breaking until real-hardware validation is broader.
+a local package-build flow in addition to the published package asset. Bazzite can use the matching
+Fedora RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both of those package paths
+need broader real-hardware validation.
 
 ## Release packages
 
@@ -33,13 +33,13 @@ polaris
 
 ```bash
 fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm"
-systemctl reboot
+rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
+sudo rpm-ostree install -r "./${rpm_name}"
 
 # After reboot:
 sudo polaris --setup-host
-polaris
+systemctl --user enable --now polaris
 ```
 
 The web UI will be available at `https://localhost:47990`.
@@ -144,9 +144,10 @@ The public release assets are currently:
 
 - `Polaris-fedora42-x86_64.rpm`
 - `Polaris-fedora43-x86_64.rpm`
+- `Polaris-fedora44-x86_64.rpm`
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`
 
 Bazzite installs use the matching Fedora RPM through `rpm-ostree` for now. Ubuntu 24.04 has a
-direct DEB package. Both are extremely experimental tester paths; other Debian-family distro paths
-are still source-build oriented.
+direct DEB package. Both still need broader validation; other Debian-family distro paths are still
+source-build oriented.

@@ -61,15 +61,24 @@ BuildRequires: xorg-x11-server-Xvfb
 %if 0%{?fedora} <= 41
 BuildRequires: gcc13
 BuildRequires: gcc13-c++
-%global gcc_version 13
+%global cc_binary gcc-13
+%global cxx_binary g++-13
 %global cuda_version 12.9.1
 %global cuda_build 575.57.08
-%elif %{?fedora} >= 42
+%elif 0%{?fedora} <= 43
 BuildRequires: gcc14
 BuildRequires: gcc14-c++
-%global gcc_version 14
+%global cc_binary gcc-14
+%global cxx_binary g++-14
 %global cuda_version 12.9.1
 %global cuda_build 575.57.08
+%else
+BuildRequires: gcc
+BuildRequires: gcc-c++
+%global cc_binary gcc
+%global cxx_binary g++
+%global cuda_version %{nil}
+%global cuda_build %{nil}
 %endif
 
 %global cuda_dir %{_builddir}/cuda
@@ -132,8 +141,8 @@ cmake_args=(
   "-DPOLARIS_PUBLISHER_ISSUE_URL=https://github.com/papi-ux/polaris/issues"
 )
 
-export CC=gcc-%{gcc_version}
-export CXX=g++-%{gcc_version}
+export CC=%{cc_binary}
+export CXX=%{cxx_binary}
 
 function install_cuda() {
   # check if we need to install cuda
@@ -186,7 +195,7 @@ if [ -n "%{cuda_version}" ] && [[ " ${cuda_supported_architectures[@]} " =~ " ${
   install_cuda
   cmake_args+=("-DPOLARIS_ENABLE_CUDA=ON")
   cmake_args+=("-DCMAKE_CUDA_COMPILER:PATH=%{cuda_dir}/bin/nvcc")
-  cmake_args+=("-DCMAKE_CUDA_HOST_COMPILER=gcc-%{gcc_version}")
+  cmake_args+=("-DCMAKE_CUDA_HOST_COMPILER=%{cc_binary}")
 else
   cmake_args+=("-DPOLARIS_ENABLE_CUDA=OFF")
 fi
