@@ -7,6 +7,9 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Redirect first-run `/login` and `/recover` visits to the welcome wizard when no web credentials exist
+- Clarified first-run setup URLs in the README and Bazzite guide
+
 ## v1.0.5
 
 Patch release focused on cleaner Bazzite/Fedora 44 packaging and headless runtime dependency coverage.

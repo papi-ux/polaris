@@ -41,8 +41,9 @@ sudo polaris --setup-host
 systemctl --user enable --now polaris
 ```
 
-Open `https://localhost:47990`, create the web UI password, and pair Moonlight,
-Nova, or another GameStream-compatible client.
+Open `https://localhost:47990/#/welcome`, create the web UI account, and pair
+Moonlight, Nova, or another GameStream-compatible client. After credentials are
+created, `https://localhost:47990` opens the normal console.
 
 ## Why rpm-ostree Layering
 

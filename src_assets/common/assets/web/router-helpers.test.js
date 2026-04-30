@@ -1,4 +1,5 @@
 import {
+  getAuthRedirectPath,
   getIpv4LoopbackUrl,
   isDynamicImportError,
   isPublicRoute,
@@ -61,6 +62,32 @@ describe('router helpers', () => {
     expect(isPublicRoute('/welcome')).toBe(true)
     expect(isPublicRoute('/recover')).toBe(true)
     expect(isPublicRoute('/config')).toBe(false)
+  })
+
+  it('maps auth redirects from API probes to SPA routes', () => {
+    expect(getAuthRedirectPath({
+      redirected: true,
+      url: 'https://127.0.0.1:47990/welcome',
+    })).toBe('/welcome')
+    expect(getAuthRedirectPath({
+      redirected: true,
+      url: 'https://127.0.0.1:47990/login',
+    })).toBe('/login')
+  })
+
+  it('ignores non-auth API probe responses', () => {
+    expect(getAuthRedirectPath({
+      redirected: false,
+      url: 'https://127.0.0.1:47990/welcome',
+    })).toBe('')
+    expect(getAuthRedirectPath({
+      redirected: true,
+      url: 'https://127.0.0.1:47990/config',
+    })).toBe('')
+    expect(getAuthRedirectPath({
+      redirected: true,
+      url: 'not a url',
+    })).toBe('')
   })
 
   it('adds a CSRF header only to mutating fetch requests', async () => {

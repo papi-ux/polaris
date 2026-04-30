@@ -45,7 +45,9 @@ sudo polaris --setup-host
 polaris
 ```
 
-Open **https://localhost:47990**, create your web UI password, and pair a client.
+Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
+a client. After credentials are created, **https://localhost:47990** opens the
+normal console.
 
 ### Fastest install: Arch package
 
@@ -96,7 +98,7 @@ polaris
 
 ### First stream checklist
 
-1. Open the Polaris web UI at **https://localhost:47990**.
+1. Open the first-run setup at **https://localhost:47990/#/welcome**.
 2. Confirm the recommended Linux path:
    - `headless_mode = enabled`
    - `linux_use_cage_compositor = true`
