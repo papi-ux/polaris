@@ -63,6 +63,7 @@ BuildRequires: gcc13
 BuildRequires: gcc13-c++
 %global cc_binary gcc-13
 %global cxx_binary g++-13
+%global boost_use_static ON
 %global cuda_version 12.9.1
 %global cuda_build 575.57.08
 %elif 0%{?fedora} <= 43
@@ -70,6 +71,7 @@ BuildRequires: gcc14
 BuildRequires: gcc14-c++
 %global cc_binary gcc-14
 %global cxx_binary g++-14
+%global boost_use_static ON
 %global cuda_version 12.9.1
 %global cuda_build 575.57.08
 %else
@@ -77,6 +79,7 @@ BuildRequires: gcc
 BuildRequires: gcc-c++
 %global cc_binary gcc
 %global cxx_binary g++
+%global boost_use_static OFF
 %global cuda_version %{nil}
 %global cuda_build %{nil}
 %endif
@@ -130,6 +133,7 @@ cmake_args=(
   "-DBUILD_DOCS=OFF"
   "-DBUILD_WERROR=ON"
   "-DCMAKE_BUILD_TYPE=Release"
+  "-DBOOST_USE_STATIC=%{boost_use_static}"
   "-DCMAKE_INSTALL_PREFIX=%{_prefix}"
   "-DPOLARIS_ASSETS_DIR=%{_datadir}/polaris"
   "-DPOLARIS_EXECUTABLE_PATH=%{_bindir}/polaris"
