@@ -5,6 +5,7 @@ import DashboardView from './views/DashboardView.vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import i18n from './locale'
 import {
+  getAuthRedirectPath,
   isDynamicImportError,
   isPublicRoute,
   redirectToIpv4Loopback,
@@ -84,17 +85,30 @@ function reloadDynamicImportTarget(to) {
 }
 
 router.beforeEach(async (to, _from) => {
-  if (!isPublicRoute(to.path)) {
-    if (authed) return
+  if (isPublicRoute(to.path) && to.path !== '/welcome') {
     try {
       const res = await fetch('./api/config', { credentials: 'include' })
-      const finalPath = res.redirected ? new URL(res.url).pathname : ''
-      if (finalPath.endsWith('/welcome')) {
+      if (getAuthRedirectPath(res) === '/welcome') {
         window.__POLARIS_AUTHENTICATED__ = false
         clearCachedConfig()
         return '/welcome'
       }
-      if (finalPath.endsWith('/login')) {
+    } catch {
+      // Keep public routes reachable if the first-run probe cannot complete.
+    }
+  }
+
+  if (!isPublicRoute(to.path)) {
+    if (authed) return
+    try {
+      const res = await fetch('./api/config', { credentials: 'include' })
+      const authRedirectPath = getAuthRedirectPath(res)
+      if (authRedirectPath === '/welcome') {
+        window.__POLARIS_AUTHENTICATED__ = false
+        clearCachedConfig()
+        return '/welcome'
+      }
+      if (authRedirectPath === '/login') {
         window.__POLARIS_AUTHENTICATED__ = false
         clearCachedConfig()
         return redirectToLoginWithReturnTarget(to)

@@ -56,6 +56,26 @@ export function isPublicRoute(path) {
   return PUBLIC_ROUTES.has(path)
 }
 
+export function getAuthRedirectPath(response, baseUrl = window.location.href) {
+  if (!response?.redirected || !response?.url) {
+    return ''
+  }
+
+  try {
+    const finalPath = new URL(response.url, baseUrl).pathname
+    if (finalPath.endsWith('/welcome')) {
+      return '/welcome'
+    }
+    if (finalPath.endsWith('/login')) {
+      return '/login'
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
 export function wrapFetchWithCsrfToken(originalFetch, initialCsrfToken, getRefreshUrl = () => window.location.pathname || '/') {
   let csrfToken = initialCsrfToken
 
