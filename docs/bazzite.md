@@ -43,12 +43,8 @@ systemctl --user stop polaris 2>/dev/null || true
 sudo install -D -m 0755 "$(readlink -f "$(command -v polaris)")" /usr/local/bin/polaris-kms
 sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms
 getcap /usr/local/bin/polaris-kms
-mkdir -p ~/.config/systemd/user/polaris.service.d
-cat > ~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf <<'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/local/bin/polaris-kms
-EOF
+printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/polaris-kms\n' \
+  | systemctl --user edit --stdin --drop-in=10-bazzite-kms.conf polaris
 systemctl --user daemon-reload
 systemctl --user enable --now polaris
 ```
@@ -150,6 +146,17 @@ user service is running. On Bazzite, copy the current packaged binary to
 `/usr/local/bin/polaris-kms`, apply `setcap` there, and make sure the
 `~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf` override points
 `ExecStart` at that file.
+
+`wlr: Using RAM capture path because this build does not include a GPU-native
+uploader for the selected encoder` and `capture will incur an extra CPU-side
+copy/conversion path` are expected with the current headless labwc runtime. They
+are performance notes, not startup failures. Confirm the stream is healthy by
+looking for `session_event: stream_active`, `CLIENT CONNECTED`, `Selected monitor
+[Headless output 1]`, and `Found H.264 encoder: h264_nvenc [nvenc]`.
+
+`display_preview: Failed to capture cage screenshot` affects the web dashboard
+preview path. It does not mean the Moonlight/Nova stream failed if the client is
+already connected and receiving frames.
 
 If local Plasma receives remote mouse or keyboard input while using headless
 labwc, treat that as an input-isolation bug and include the validation details

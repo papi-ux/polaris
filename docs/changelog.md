@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Replaced the Bazzite service override heredoc with a `systemctl --user edit --stdin` command and documented the validated headless labwc success markers
+
 ## v1.0.7
 
 Patch release focused on the first-run credential wizard.
