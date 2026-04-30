@@ -1,45 +1,68 @@
 # Bazzite Install Guide
 
-Bazzite is Fedora-based, but it is an immutable rpm-ostree system rather than a normal
-DNF-managed Fedora install. Polaris can use the matching Fedora RPM as a layered system package.
+Bazzite is Fedora-based, but it is an immutable `rpm-ostree` system rather than a
+normal DNF-managed Fedora install. The clean Polaris path for everyday Bazzite
+users is to layer the matching Fedora RPM, reboot into the new deployment, run
+the host setup once, then start the Polaris user service.
 
-This path is extremely experimental until it has been validated on real Bazzite Desktop Mode and
-Game Mode hardware. It is much more prone to breaking than the Fedora and Arch package paths
-because rpm-ostree layering, Desktop Mode, Game Mode, gamescope, and GPU capture all need separate
-validation. Use it only when you want to test Polaris as a Bazzite host and are comfortable with
-debugging and rolling back rpm-ostree package layering.
+This is still a validation path until Bazzite Desktop Mode, Game Mode, NVIDIA,
+AMD, and common Moonlight client flows have more real-hardware coverage. The
+install should be simple, but keep the rollback notes handy.
 
-> [!WARNING]
-> Treat the Bazzite package path as a tester path, not a stable recommended install. Bazzite updates,
-> Game Mode behavior, compositor changes, and GPU driver differences can break this flow while
-> support is still being validated.
+> [!IMPORTANT]
+> Use a Polaris release that includes an RPM matching your Bazzite Fedora base.
+> Bazzite 44 should use `Polaris-fedora44-x86_64.rpm`. If the latest release
+> does not include your Fedora version yet, wait for the next release or use a
+> tester build intentionally.
 
 ## Install
 
+If you already enabled Sunshine on Bazzite, stop it first. Sunshine and Polaris
+both use the default GameStream ports, so only one host should be running.
+
 ```bash
-fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm" labwc wlr-randr
-systemctl reboot
+systemctl --user disable --now homebrew.sunshine.service 2>/dev/null || true
+systemctl --user disable --now app-dev.lizardbyte.app.Sunshine.service 2>/dev/null || true
 ```
 
-After reboot:
+Install Polaris from the matching Fedora release RPM:
+
+```bash
+fedora_version="$(rpm -E %fedora)"
+rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
+sudo rpm-ostree install -r "./${rpm_name}"
+```
+
+After the reboot:
 
 ```bash
 sudo polaris --setup-host
-polaris
+systemctl --user enable --now polaris
 ```
 
-Open `https://localhost:47990`, create the web UI password, and pair Moonlight, Nova, or another
-GameStream-compatible client.
+Open `https://localhost:47990`, create the web UI password, and pair Moonlight,
+Nova, or another GameStream-compatible client.
 
-## First validation path
+## Why rpm-ostree Layering
 
-Start in Desktop Mode first. Game Mode and Deck-style gamescope sessions are especially
-experimental as host environments, and they can hide display, portal, and environment details that
-are easier to debug from Desktop Mode.
+Polaris needs host-level integration: the binary, web assets, desktop metadata,
+the user service, udev rules for virtual input, and compositor helpers such as
+`labwc`, `wlr-randr`, Xwayland, and `xdpyinfo`. On Bazzite, layering the RPM is
+cleaner than running Polaris from a toolbox, distrobox, or unpacked archive
+because the package manager can install those host dependencies into the booted
+deployment.
 
-The recommended Bazzite test path is:
+The Polaris RPM declares the headless runtime dependencies, so the install
+command should not need separate `labwc` or `wlr-randr` arguments.
+
+## First Validation Path
+
+Start in Desktop Mode first. Game Mode and Deck-style gamescope sessions can hide
+display, portal, and environment details that are easier to debug from Desktop
+Mode.
+
+Use the headless labwc path for the first stream:
 
 ```ini
 headless_mode = enabled
@@ -47,67 +70,62 @@ linux_use_cage_compositor = true
 linux_prefer_gpu_native_capture = enabled
 ```
 
-This path creates an isolated `labwc` runtime for the stream. It does not target a physical HDMI
-dummy plug. If you want to test a physical dummy plug instead, leave headless/labwc disabled and
-test it as a normal host display.
+This creates an isolated `labwc` runtime for the stream and does not target your
+physical monitor. Do not manually export `WAYLAND_DISPLAY`; Polaris starts
+`labwc` with its own Wayland socket and routes launched apps into that socket.
 
-Do not manually export `WAYLAND_DISPLAY` when testing headless mode. Polaris starts `labwc` with
-its own Wayland socket and routes launched apps into that socket.
-
-## Optional setup
-
-Enable the user service if you want Polaris to start in the background:
-
-```bash
-systemctl --user enable --now polaris
-```
-
-Only enable DRM/KMS capture if you specifically need it:
-
-```bash
-sudo polaris --setup-host --enable-kms
-```
-
-The default compositor and portal paths do not require granting KMS capability.
-
-## Known Bazzite log messages
-
-`labwc: No new Wayland socket appeared within 5s` means the isolated `labwc` runtime failed to
-start or exited before creating its Wayland socket. Confirm `labwc` and `wlr-randr` are layered,
-rebooted into the new deployment, and retry from Desktop Mode first.
-
-`Environment variable WAYLAND_DISPLAY has not been defined` usually points to a windowed Wayland
-runtime being launched without a parent Wayland session. It is expected to appear after a failed
-manual environment experiment, but it is not the intended headless flow.
-
-`Couldn't scale frame ... src_fmt=bgr0 ... src_stride=0` means Polaris received a CPU BGR0 frame
-without a valid row pitch. This is a Polaris capture/conversion bug, not a user configuration
-mistake.
+If you want to test a physical dummy plug instead, leave headless/labwc disabled
+and test it as a normal host display.
 
 ## Update
 
-Download the newer Fedora RPM from the latest release and layer it again:
+Layer the newer matching Fedora RPM and reboot. `rpm-ostree` will stage the
+newer local RPM over the existing layered Polaris package:
 
 ```bash
 fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo rpm-ostree uninstall polaris
-sudo rpm-ostree install "./Polaris-fedora${fedora_version}-x86_64.rpm" labwc wlr-randr
-systemctl reboot
+rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
+wget -O "${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
+sudo rpm-ostree install -r "./${rpm_name}"
+```
+
+## Roll Back
+
+Bazzite keeps previous deployments. If the new deployment does not work, choose
+the previous deployment from the boot menu or run:
+
+```bash
+sudo rpm-ostree rollback -r
 ```
 
 ## Uninstall
 
-```bash
-sudo rpm-ostree uninstall polaris
-systemctl reboot
-```
-
-If you enabled the user service, disable it before uninstalling:
+Disable the user service before removing the layer:
 
 ```bash
 systemctl --user disable --now polaris
+sudo rpm-ostree uninstall -r polaris
 ```
+
+## Known Bazzite Log Messages
+
+`labwc: No new Wayland socket appeared within 5s` means the isolated `labwc`
+runtime failed to start or exited before creating its Wayland socket. Confirm the
+matching Fedora RPM was installed, rebooted into the new deployment, and retry
+from Desktop Mode first.
+
+`Environment variable WAYLAND_DISPLAY has not been defined` usually points to a
+windowed Wayland runtime being launched without a parent Wayland session. It is
+expected after a failed manual environment experiment, but it is not the intended
+headless flow.
+
+`Couldn't scale frame ... src_fmt=bgr0 ... src_stride=0` means Polaris received a
+CPU BGR0 frame without a valid row pitch. Use a release newer than `v1.0.4`, where
+the headless CPU fallback path was fixed.
+
+If local Plasma receives remote mouse or keyboard input while using headless
+labwc, treat that as an input-isolation bug and include the validation details
+below.
 
 ## Validation Checklist
 
@@ -116,8 +134,10 @@ Please include these details when reporting Bazzite issues:
 - Bazzite image name and version from `rpm-ostree status`
 - Desktop Mode or Game Mode
 - GPU model and driver stack
-- output of `command -v labwc wlr-randr`
+- Polaris RPM asset used, such as `Polaris-fedora44-x86_64.rpm`
+- output of `command -v polaris labwc wlr-randr`
 - whether `sudo polaris --setup-host` completed successfully
+- whether `systemctl --user status polaris` is running
 - whether the web UI opens at `https://localhost:47990`
 - client used for pairing, such as Steam Deck Moonlight, Android Moonlight, or Nova
 - active capture path shown in the Polaris dashboard
@@ -125,6 +145,7 @@ Please include these details when reporting Bazzite issues:
 
 ## Current Status
 
-Fedora 42 and Fedora 43 RPMs are release-tested in CI. Bazzite uses those same RPM assets, but
-the immutable install flow and Steam Deck-oriented runtime behavior need separate real-hardware
-validation before this path is marked recommended.
+Fedora 42, Fedora 43, and Fedora 44 RPMs are release-tested in CI. Bazzite uses
+the matching Fedora RPM through `rpm-ostree`; Bazzite-specific Desktop Mode and
+Game Mode runtime behavior still needs broader real-hardware validation before
+this path is marked recommended.

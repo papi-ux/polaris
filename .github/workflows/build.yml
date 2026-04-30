@@ -425,13 +425,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        fedora: [ '42', '43' ]
+        include:
+          - fedora: '42'
+            cc: gcc-14
+            cxx: g++-14
+          - fedora: '43'
+            cc: gcc-14
+            cxx: g++-14
+          - fedora: '44'
+            cc: gcc
+            cxx: g++
     env:
       CCACHE_DIR: /github/home/.cache/ccache
       CCACHE_COMPILERCHECK: content
       NPM_CONFIG_CACHE: /github/home/.npm
-      CC: gcc-14
-      CXX: g++-14
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
 
     steps:
       - name: Bootstrap Fedora container
@@ -632,6 +641,12 @@ jobs:
           name: fedora-43-rpm-artifacts
           path: release-assets/raw/fedora43
 
+      - name: Download Fedora 44 RPM artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: fedora-44-rpm-artifacts
+          path: release-assets/raw/fedora44
+
       - name: Download Ubuntu 24.04 DEB artifacts
         uses: actions/download-artifact@v8
         with:
@@ -710,6 +725,7 @@ jobs:
 
           copy_fedora_rpms 42 release-assets/raw/fedora42
           copy_fedora_rpms 43 release-assets/raw/fedora43
+          copy_fedora_rpms 44 release-assets/raw/fedora44
 
           ubuntu_debs=()
           for deb_path in release-assets/raw/ubuntu24.04/*.deb; do
@@ -743,8 +759,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
-          if [ "${asset_count}" -ne 4 ]; then
-            echo "Expected Fedora 42, Fedora 43, Ubuntu 24.04, and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
+          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
+          if [ "${asset_count}" -ne 5 ]; then
+            echo "Expected Fedora 42, Fedora 43, Fedora 44, Ubuntu 24.04, and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
             exit 1
           fi

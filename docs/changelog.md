@@ -7,8 +7,14 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.5
+
+Patch release focused on cleaner Bazzite/Fedora 44 packaging and headless runtime dependency coverage.
+
 - Added the Linux headless runtime helpers to package dependencies: `labwc`, `wlr-randr`, Xwayland, and `xdpyinfo`/`x11-utils`
 - Avoided GPU DMA-BUF capture when the build lacks a matching GPU upload path, preventing invalid CPU frame conversion in headless labwc sessions
+- Added Fedora 44 RPM release assets for Bazzite 44 and Fedora 44 users
+- Simplified the Bazzite install guide around one matching Fedora RPM layered through `rpm-ostree`
 
 ## v1.0.4
 
