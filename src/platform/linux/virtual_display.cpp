@@ -593,6 +593,7 @@ namespace virtual_display {
       // Try to open an existing EVDI device first (created via modprobe initial_device_count=1).
       // Falls back to evdi_open_attached_to() which creates a new device (needs privileges).
       evdi_handle_t handle = nullptr;
+      std::string opened_device_path;
 
       // Find existing EVDI card index
       for (const auto &entry : fs::directory_iterator("/sys/class/drm/")) {
@@ -606,7 +607,10 @@ namespace virtual_display {
               try { card_idx = std::stoi(name.substr(4)); } catch (...) {}
               BOOST_LOG(info) << "Virtual display: opening existing EVDI device "sv << name << " (index "sv << card_idx << ")"sv;
               handle = fn_open(card_idx);
-              if (handle) break;
+              if (handle) {
+                opened_device_path = "/dev/dri/" + name;
+                break;
+              }
             }
           }
         }
@@ -658,6 +662,10 @@ namespace virtual_display {
           }
         }
       } catch (...) {}
+
+      if (new_device_path.empty() && !opened_device_path.empty()) {
+        new_device_path = opened_device_path;
+      }
 
       // Find the output connector name
       std::string output_name;
