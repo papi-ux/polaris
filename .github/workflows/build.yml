@@ -429,12 +429,15 @@ jobs:
           - fedora: '42'
             cc: gcc-14
             cxx: g++-14
+            boost_static: ON
           - fedora: '43'
             cc: gcc-14
             cxx: g++-14
+            boost_static: ON
           - fedora: '44'
             cc: gcc
             cxx: g++
+            boost_static: OFF
     env:
       CCACHE_DIR: /github/home/.cache/ccache
       CCACHE_COMPILERCHECK: content
@@ -513,6 +516,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBOOST_USE_STATIC=${{ matrix.boost_static }} \
             -DPOLARIS_ASSETS_DIR=share/polaris \
             -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
             -DPOLARIS_ENABLE_CUDA=OFF \
