@@ -3,8 +3,8 @@
 Bazzite is Fedora-based, but it is an immutable `rpm-ostree` system rather than a
 normal DNF-managed Fedora install. The clean Polaris path for everyday Bazzite
 users is to layer the matching Fedora RPM, reboot into the new deployment, run
-the host setup once with DRM/KMS capture enabled, then start the Polaris user
-service.
+the host setup once, then start Polaris from a writable `/usr/local` copy when
+DRM/KMS capture is needed.
 
 This is still a validation path until Bazzite Desktop Mode, Game Mode, NVIDIA,
 AMD, and common Moonlight client flows have more real-hardware coverage. The
@@ -38,7 +38,18 @@ sudo rpm-ostree install -r "./${rpm_name}"
 After the reboot:
 
 ```bash
-sudo polaris --setup-host --enable-kms
+sudo polaris --setup-host
+systemctl --user stop polaris 2>/dev/null || true
+sudo install -D -m 0755 "$(readlink -f "$(command -v polaris)")" /usr/local/bin/polaris-kms
+sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms
+getcap /usr/local/bin/polaris-kms
+mkdir -p ~/.config/systemd/user/polaris.service.d
+cat > ~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/polaris-kms
+EOF
+systemctl --user daemon-reload
 systemctl --user enable --now polaris
 ```
 
@@ -46,14 +57,13 @@ Open `https://127.0.0.1:47990/#/welcome`, create the web UI account, and pair
 Moonlight, Nova, or another GameStream-compatible client. After credentials are
 created, `https://127.0.0.1:47990` opens the normal console.
 
-The `--enable-kms` flag applies `cap_sys_admin` to the installed Polaris binary.
-That is required for the current Bazzite DRM/KMS capture path. If you already
-ran `sudo polaris --setup-host` without that flag, run the command above and
-restart the user service:
+This Bazzite-specific copy is intentional. Bazzite's `/usr` deployment is backed
+by composefs, so `setcap` can fail on the layered `/usr/bin/polaris-*` binary
+even when run with `sudo`. `/usr/local` points into writable `/var/usrlocal`,
+which can hold the capability-marked runtime copy used by the user service.
 
-```bash
-systemctl --user restart polaris
-```
+Re-run the `/usr/local/bin/polaris-kms` copy and `setcap` commands after each
+Polaris package update so the service uses the newly installed binary.
 
 ## Why rpm-ostree Layering
 
@@ -135,8 +145,11 @@ CPU BGR0 frame without a valid row pitch. Use a release newer than `v1.0.4`, whe
 the headless CPU fallback path was fixed.
 
 `Failed to gain CAP_SYS_ADMIN` or `You must run [sudo setcap ...] for KMS display
-capture to work` means the KMS capability was not applied. Run
-`sudo polaris --setup-host --enable-kms`, then restart the user service.
+capture to work` means the KMS capability was not applied to the binary that the
+user service is running. On Bazzite, copy the current packaged binary to
+`/usr/local/bin/polaris-kms`, apply `setcap` there, and make sure the
+`~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf` override points
+`ExecStart` at that file.
 
 If local Plasma receives remote mouse or keyboard input while using headless
 labwc, treat that as an input-isolation bug and include the validation details
@@ -151,8 +164,9 @@ Please include these details when reporting Bazzite issues:
 - GPU model and driver stack
 - Polaris RPM asset used, such as `Polaris-fedora44-x86_64.rpm`
 - output of `command -v polaris labwc wlr-randr`
-- output of `getcap "$(readlink -f "$(command -v polaris)")"`
-- whether `sudo polaris --setup-host --enable-kms` completed successfully
+- output of `getcap /usr/local/bin/polaris-kms`
+- output of `systemctl --user cat polaris`
+- whether `sudo polaris --setup-host` completed successfully
 - whether `systemctl --user status polaris` is running
 - whether the web UI opens at `https://127.0.0.1:47990`
 - client used for pairing, such as Steam Deck Moonlight, Android Moonlight, or Nova
