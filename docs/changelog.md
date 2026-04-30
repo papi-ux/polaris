@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.7
+
+Patch release focused on the first-run credential wizard.
+
 - Documented the Bazzite composefs workaround for KMS capture: copy Polaris to `/usr/local/bin/polaris-kms`, apply `setcap` there, and run the user service from that writable copy
 - Prevented the first-run credential wizard from staying on `Saving...` forever when the browser-side password request fails
 
