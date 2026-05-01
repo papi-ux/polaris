@@ -20,9 +20,11 @@
 #include "../../logging.h"
 
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <dirent.h>
 #include <functional>
 #include <fstream>
 #include <cstdlib>
@@ -71,11 +73,72 @@ namespace cage_display_router {
 
   static std::string runtime_dir() {
     const char *xdg = getenv("XDG_RUNTIME_DIR");
-    return xdg ? xdg : "/run/user/1000";
+    return (xdg && *xdg) ? xdg : "/run/user/" + std::to_string(getuid());
   }
 
   static std::string socket_path(const std::string &socket_name) {
     return runtime_dir() + "/" + socket_name;
+  }
+
+  static bool executable_accessible(const std::string &path) {
+    return !path.empty() && access(path.c_str(), X_OK) == 0;
+  }
+
+  static std::string resolve_executable(const std::string &name) {
+    if (name.find('/') != std::string::npos) {
+      return executable_accessible(name) ? name : "";
+    }
+
+    const char *path_env = getenv("PATH");
+    std::string path = (path_env && *path_env) ? path_env : "/usr/local/bin:/usr/bin:/bin";
+    size_t start = 0;
+
+    while (start <= path.size()) {
+      const auto end = path.find(':', start);
+      auto dir = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
+      if (dir.empty()) {
+        dir = ".";
+      }
+
+      const auto candidate = dir + "/" + name;
+      if (executable_accessible(candidate)) {
+        return candidate;
+      }
+
+      if (end == std::string::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    return "";
+  }
+
+  static bool is_wayland_socket_name(std::string_view name) {
+    constexpr std::string_view prefix = "wayland-";
+    if (name.size() <= prefix.size() || name.substr(0, prefix.size()) != prefix) {
+      return false;
+    }
+
+    for (char ch : name.substr(prefix.size())) {
+      if (!std::isdigit(static_cast<unsigned char>(ch))) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  static std::string describe_child_status(int status) {
+    if (WIFEXITED(status)) {
+      return "exited with status " + std::to_string(WEXITSTATUS(status));
+    }
+
+    if (WIFSIGNALED(status)) {
+      return "terminated by signal " + std::to_string(WTERMSIG(status));
+    }
+
+    return "changed state before startup completed";
   }
 
   template<typename Predicate>
@@ -104,25 +167,54 @@ namespace cage_display_router {
   static std::set<std::string> snapshot_wayland_sockets() {
     std::set<std::string> sockets;
     auto runtime = runtime_dir();
-    for (int n = 0; n < 50; ++n) {
-      std::string name = "wayland-" + std::to_string(n);
-      std::string path = runtime + "/" + name;
-      if (access(path.c_str(), F_OK) == 0) {
-        sockets.insert(name);
+
+    DIR *dir = opendir(runtime.c_str());
+    if (!dir) {
+      BOOST_LOG(debug) << "labwc: Could not inspect runtime directory ["sv << runtime
+                       << "]: "sv << std::strerror(errno);
+      return sockets;
+    }
+
+    while (auto *entry = readdir(dir)) {
+      std::string name = entry->d_name;
+      if (!is_wayland_socket_name(name)) {
+        continue;
+      }
+
+      const auto path = runtime + "/" + name;
+      struct stat statbuf {};
+      if (stat(path.c_str(), &statbuf) == 0 && S_ISSOCK(statbuf.st_mode)) {
+        sockets.insert(std::move(name));
       }
     }
+
+    closedir(dir);
     return sockets;
   }
 
   /**
    * @brief Find which new Wayland socket appeared after cage started.
    */
-  static std::string find_new_socket(const std::set<std::string> &before, int max_wait_ms = 5000) {
+  static std::string find_new_socket(
+    const std::set<std::string> &before,
+    int max_wait_ms = 10000,
+    std::optional<int> *exit_status = nullptr
+  ) {
     const auto poll_interval = 50ms;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_wait_ms);
     while (std::chrono::steady_clock::now() < deadline) {
-      if (cage_pid > 0 && kill(cage_pid, 0) != 0) {
-        return "";
+      if (cage_pid > 0) {
+        int status = 0;
+        const auto ret = waitpid(cage_pid, &status, WNOHANG);
+        if (ret == cage_pid) {
+          if (exit_status) {
+            *exit_status = status;
+          }
+          return "";
+        }
+        if (ret < 0 && errno == ECHILD) {
+          return "";
+        }
       }
 
       auto current = snapshot_wayland_sockets();
@@ -268,6 +360,10 @@ namespace cage_display_router {
   ) {
     return output_reports_current_mode(wlr_randr_output, output_name, width, height);
   }
+
+  bool is_wayland_socket_name_for_tests(std::string_view name) {
+    return is_wayland_socket_name(name);
+  }
 #endif
 
   // -----------------------------------------------------------------------
@@ -302,6 +398,29 @@ namespace cage_display_router {
     }
     BOOST_LOG(info) << "labwc: Starting in "sv << (headless ? "headless"sv : "windowed"sv)
                     << " mode — resolution="sv << width << "x"sv << height;
+
+    const auto labwc_path = resolve_executable("labwc");
+    if (labwc_path.empty()) {
+      BOOST_LOG(error) << "labwc: Required executable [labwc] was not found in PATH; install labwc and restart Polaris"sv;
+      return false;
+    }
+
+    const auto wlr_randr_path = resolve_executable("wlr-randr");
+    if (wlr_randr_path.empty()) {
+      BOOST_LOG(error) << "labwc: Required executable [wlr-randr] was not found in PATH; install wlr-randr and restart Polaris"sv;
+      return false;
+    }
+
+    if (headless && !game_cmd.empty()) {
+      if (resolve_executable("Xwayland").empty()) {
+        BOOST_LOG(warning) << "labwc: Xwayland was not found in PATH; X11 games and Steam may fail inside the headless runtime"sv;
+      }
+      if (resolve_executable("xdpyinfo").empty()) {
+        BOOST_LOG(warning) << "labwc: xdpyinfo was not found in PATH; Polaris cannot wait for labwc XWayland readiness"sv;
+      }
+    }
+
+    BOOST_LOG(info) << "labwc: Using executable ["sv << labwc_path << ']';
 
     // Config directory for kiosk-mode rc.xml (no decorations, maximize all)
     std::string config_dir = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/.config/labwc-polaris";
@@ -346,6 +465,8 @@ namespace cage_display_router {
 
     // Snapshot existing sockets to detect the new one labwc creates
     auto sockets_before = snapshot_wayland_sockets();
+    BOOST_LOG(info) << "labwc: Watching runtime directory ["sv << runtime_dir()
+                    << "] for a new Wayland socket"sv;
 
     // Save and clear MangoHud env vars before fork — MangoHud crashes labwc
     // if injected into the compositor. Will be re-set for the game via startup cmd.
@@ -406,11 +527,11 @@ namespace cage_display_router {
       }
 
       // labwc -C: config dir for rc.xml, -s: startup command (game)
-      execl("/usr/bin/labwc", "labwc",
+      execl(labwc_path.c_str(), "labwc",
         "-C", config_dir.c_str(),
         "-s", ("bash -c '" + startup_cmd + "'").c_str(),
         nullptr);
-      _exit(1);
+      _exit(errno == ENOENT ? 127 : 126);
     } else if (pid > 0) {
       cage_pid = pid;
       // Restore MangoHud in parent (was cleared to prevent labwc crash)
@@ -423,9 +544,17 @@ namespace cage_display_router {
     }
 
     // Discover which Wayland socket cage created (it auto-picks the next available)
-    cage_wayland_socket = find_new_socket(sockets_before, 5000);
+    std::optional<int> labwc_exit_status;
+    cage_wayland_socket = find_new_socket(sockets_before, 10000, &labwc_exit_status);
     if (cage_wayland_socket.empty()) {
-      BOOST_LOG(error) << "labwc: No new Wayland socket appeared within 5s"sv;
+      if (labwc_exit_status) {
+        BOOST_LOG(error) << "labwc: Exited before creating a Wayland socket ("sv
+                         << describe_child_status(*labwc_exit_status)
+                         << "); check labwc, wlroots, and headless runtime dependencies"sv;
+      } else {
+        BOOST_LOG(error) << "labwc: No new Wayland socket appeared within 10s in ["sv
+                         << runtime_dir() << ']';
+      }
       stop();
       return false;
     }
