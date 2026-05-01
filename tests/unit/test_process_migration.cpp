@@ -143,7 +143,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamBigPictureLaunchAndAddsCleanupUn
 }
 
 #ifdef __linux__
-TEST(ProcessMigrationTests, ParseAddsSteamBigPicturePrelaunchShutdownForLinuxCage) {
+TEST(ProcessMigrationTests, ParseDoesNotAddSteamBigPicturePrelaunchShutdownForLinuxCage) {
   linux_cage_compositor_guard_t guard;
   config::video.linux_display.use_cage_compositor = true;
 
@@ -174,20 +174,9 @@ TEST(ProcessMigrationTests, ParseAddsSteamBigPicturePrelaunchShutdownForLinuxCag
   });
 
   ASSERT_NE(steam_ctx, parsed_apps.end());
-  ASSERT_EQ(steam_ctx->prep_cmds.size(), 2);
-  EXPECT_NE(
-    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
-      return cmd.do_cmd == "setsid bash -lc \"steam -shutdown >/dev/null 2>&1 || true; sleep 2\"" &&
-             cmd.undo_cmd.empty();
-    }),
-    steam_ctx->prep_cmds.end()
-  );
-  EXPECT_NE(
-    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
-      return cmd.do_cmd.empty() && cmd.undo_cmd == "setsid steam -shutdown";
-    }),
-    steam_ctx->prep_cmds.end()
-  );
+  ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
+  EXPECT_TRUE(steam_ctx->prep_cmds.front().do_cmd.empty());
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
 
   std::filesystem::remove(file_path);
 }
@@ -295,7 +284,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
 }
 
 #ifdef __linux__
-TEST(ProcessMigrationTests, ParseAddsSteamLibraryPrelaunchShutdownForLinuxCage) {
+TEST(ProcessMigrationTests, ParseDoesNotAddSteamLibraryPrelaunchShutdownForLinuxCage) {
   linux_cage_compositor_guard_t guard;
   config::video.linux_display.use_cage_compositor = true;
 
@@ -328,20 +317,9 @@ TEST(ProcessMigrationTests, ParseAddsSteamLibraryPrelaunchShutdownForLinuxCage) 
   });
 
   ASSERT_NE(steam_ctx, parsed_apps.end());
-  ASSERT_EQ(steam_ctx->prep_cmds.size(), 2);
-  EXPECT_NE(
-    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
-      return cmd.do_cmd == "setsid bash -lc \"steam -shutdown >/dev/null 2>&1 || true; sleep 2\"" &&
-             cmd.undo_cmd.empty();
-    }),
-    steam_ctx->prep_cmds.end()
-  );
-  EXPECT_NE(
-    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
-      return cmd.do_cmd.empty() && cmd.undo_cmd == "setsid steam -shutdown";
-    }),
-    steam_ctx->prep_cmds.end()
-  );
+  ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
+  EXPECT_TRUE(steam_ctx->prep_cmds.front().do_cmd.empty());
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
 
   std::filesystem::remove(file_path);
 }

@@ -54,6 +54,20 @@ namespace stream_stats {
       }
     }
 
+    const char *stream_display_mode_label() {
+      const auto &linux_display = config::video.linux_display;
+      if (!linux_display.headless_mode) {
+        return "Desktop Display";
+      }
+      if (!linux_display.use_cage_compositor) {
+        return "Host Virtual Display";
+      }
+      if (linux_display.prefer_gpu_native_capture) {
+        return "Windowed Stream";
+      }
+      return "Headless Stream";
+    }
+
     long long percentile_value(std::vector<long long> values, double percentile) {
       if (values.empty()) {
         return 0;
@@ -75,6 +89,7 @@ namespace stream_stats {
     j["runtime_requested_headless"] = runtime_requested_headless;
     j["runtime_effective_headless"] = runtime_effective_headless;
     j["runtime_gpu_native_override_active"] = runtime_gpu_native_override_active;
+    j["stream_display_mode"] = stream_display_mode_label();
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);

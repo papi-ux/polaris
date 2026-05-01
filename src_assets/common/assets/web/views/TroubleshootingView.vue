@@ -364,7 +364,7 @@ const sessionSnapshotItems = computed(() => {
     { label: 'Active Sessions', value: `${s.active_sessions ?? 0}` },
     { label: 'Requested FPS', value: formatFps(s.requested_client_fps) },
     { label: 'Runtime Backend', value: s.runtime_backend || '(unknown)' },
-    { label: 'Headless', value: `${yesNo(s.runtime_effective_headless)} effective / ${yesNo(s.runtime_requested_headless)} requested` },
+    { label: 'Stream Display Mode', value: s.stream_display_mode || `${yesNo(s.runtime_effective_headless)} effective / ${yesNo(s.runtime_requested_headless)} requested` },
     { label: 'Capture Path', value: `${s.capture_transport || 'unknown'} / ${s.capture_residency || 'unknown'} / ${s.capture_format || 'unknown'}` },
     { label: 'Pacing Policy', value: s.pacing_policy || 'none' },
     { label: 'Optimization Source', value: s.optimization_source || 'default' },

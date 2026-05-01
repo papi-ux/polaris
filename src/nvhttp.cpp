@@ -2991,10 +2991,16 @@ namespace nvhttp {
       tuning["mangohud_configured"] = proc::proc.current_app_has_mangohud();
 
       auto &display_mode = output["display_mode"];
+      const auto stream_display_mode_label =
+        !config::video.linux_display.headless_mode ? "Desktop Display" :
+        !config::video.linux_display.use_cage_compositor ? "Host Virtual Display" :
+        config::video.linux_display.prefer_gpu_native_capture ? "Windowed Stream" :
+        "Headless Stream";
       const std::string display_mode_selection =
-        stats.runtime_effective_headless ? "headless" :
-        proc::proc.virtual_display ? "virtual_display" :
-        "host_display";
+        !config::video.linux_display.headless_mode ? "desktop_display" :
+        !config::video.linux_display.use_cage_compositor ? "host_virtual_display" :
+        config::video.linux_display.prefer_gpu_native_capture ? "windowed_stream" :
+        "headless_stream";
       display_mode["virtual_display"] = proc::proc.virtual_display;
       display_mode["requested_headless"] = stats.runtime_requested_headless;
       display_mode["effective_headless"] = stats.runtime_effective_headless;
@@ -3006,10 +3012,7 @@ namespace nvhttp {
         proc::proc.session_display_mode_is_explicit() ?
           (proc::proc.virtual_display ? "virtual_display" : "headless") :
           "auto";
-      display_mode["label"] =
-        stats.runtime_effective_headless ? "Headless" :
-        proc::proc.virtual_display ? "Virtual Display" :
-        "Host Display";
+      display_mode["label"] = stream_display_mode_label;
 
       // Capture info
       auto &capture_info = output["capture"];

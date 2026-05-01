@@ -477,17 +477,17 @@ namespace confighttp {
     }
 
     fs::path resolve_web_asset_path(const fs::path &relative_path) {
-      const fs::path installed_path = fs::path(POLARIS_ASSETS_DIR) / "web" / relative_path;
-      if (fs::exists(installed_path)) {
-        return installed_path;
-      }
-
       const auto exe_dir = executable_dir();
       if (exe_dir) {
         const fs::path local_build_path = *exe_dir / "assets" / "web" / relative_path;
         if (fs::exists(local_build_path)) {
           return local_build_path;
         }
+      }
+
+      const fs::path installed_path = fs::path(POLARIS_ASSETS_DIR) / "web" / relative_path;
+      if (fs::exists(installed_path)) {
+        return installed_path;
       }
 
       return installed_path;
@@ -968,8 +968,8 @@ namespace confighttp {
    * @return True if the path is a child of the base path, false otherwise.
    */
   bool isChildPath(fs::path const &base, fs::path const &query) {
-    auto relPath = fs::relative(base, query);
-    return *(relPath.begin()) != fs::path("..");
+    auto relPath = fs::relative(query, base);
+    return relPath.empty() || *(relPath.begin()) != fs::path("..");
   }
 
   /**
@@ -980,13 +980,13 @@ namespace confighttp {
   void getNodeModules(resp_https_t response, req_https_t request) {
     print_req(request);
 
-    fs::path webDirPath = resolve_web_asset_path("");
+    fs::path webDirPath = fs::weakly_canonical(resolve_web_asset_path(""));
 
     // .relative_path is needed to shed any leading slash that might exist in the request path
     auto filePath = fs::weakly_canonical(webDirPath / fs::path(request->path).relative_path());
 
     // Don't do anything if file does not exist or is outside the web directory
-    if (!isChildPath(filePath, webDirPath)) {
+    if (!isChildPath(webDirPath, filePath)) {
       BOOST_LOG(warning) << "Someone requested a path " << filePath << " that is outside the assets folder";
       bad_request(response, request);
       return;
@@ -2336,19 +2336,23 @@ namespace confighttp {
                key == "runtime_backend"sv ||
                key == "runtime_requested_headless"sv ||
                key == "runtime_effective_headless"sv ||
-               key == "runtime_gpu_native_override_active"sv;
+               key == "runtime_gpu_native_override_active"sv ||
+               key == "stream_display_mode"sv;
       };
       std::string validation_error;
+      for (auto it = input_tree.begin(); it != input_tree.end();) {
+        if (is_response_only_config_key(it.key())) {
+          it = input_tree.erase(it);
+        } else {
+          ++it;
+        }
+      }
       if (!validation::validate_config_payload(input_tree, validation_error)) {
         bad_request(response, request, validation_error);
         return;
       }
       const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
       for (const auto &[k, v] : input_tree.items()) {
-        if (is_response_only_config_key(k)) {
-          continue;
-        }
-
         if (v.is_null()) {
           continue;
         }

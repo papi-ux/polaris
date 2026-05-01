@@ -85,7 +85,8 @@ namespace config {
              key == "runtime_backend"sv ||
              key == "runtime_requested_headless"sv ||
              key == "runtime_effective_headless"sv ||
-             key == "runtime_gpu_native_override_active"sv;
+             key == "runtime_gpu_native_override_active"sv ||
+             key == "stream_display_mode"sv;
     }
   }  // namespace
 
