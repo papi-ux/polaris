@@ -165,6 +165,11 @@ namespace cage_display_router {
     int width,
     int height
   );
+
+  /**
+   * @brief Test helper for Wayland socket file name filtering.
+   */
+  bool is_wayland_socket_name_for_tests(std::string_view name);
 #endif
 
 }  // namespace cage_display_router

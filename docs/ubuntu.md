@@ -71,6 +71,22 @@ sudo polaris --setup-host --enable-kms
 
 The default compositor and portal paths do not require granting KMS capability.
 
+## Headless Labwc Checks
+
+If a headless stream reports that video capture failed, confirm that the helper
+programs used by the private labwc runtime are installed and visible to Polaris:
+
+```bash
+command -v labwc wlr-randr Xwayland xdpyinfo
+labwc --version
+```
+
+`labwc: Required executable [labwc] was not found in PATH` means the package or
+source install is missing the isolated compositor runtime. `labwc: Exited before
+creating a Wayland socket` means labwc started but failed before it could expose
+the stream-only Wayland socket; check the installed labwc/wlroots stack and retry
+from a normal Wayland desktop session first.
+
 ## Validation Checklist
 
 Please include these details when reporting Ubuntu issues:
