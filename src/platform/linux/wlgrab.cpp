@@ -286,11 +286,31 @@ namespace wl {
               dst_line[x * 4 + 3] = 255;
             }
           }
-        } else if (src_stride == dst_stride && copy_bytes == src_stride) {
-          std::memcpy(dst, src, static_cast<std::size_t>(copy_h) * copy_bytes);
         } else {
-          for (int y = 0; y < copy_h; ++y) {
-            std::memcpy(dst + y * dst_stride, src + y * src_stride, copy_bytes);
+          // XBGR8888/ABGR8888 (fourcc 0x34324258/0x34324241) have memory layout
+          // [R,G,B,X] on little-endian; swap R↔B so the encoder receives [B,G,R,A].
+          // All other 4bpp formats (XRGB8888/ARGB8888) are already [B,G,R,X] and
+          // can be copied directly.
+          const uint32_t fmt = dmabuf.shm_info.format;
+          const bool needs_rb_swap = (fmt == 0x34324258 /* XBGR8888 */ ||
+                                      fmt == 0x34324241 /* ABGR8888 */);
+          if (needs_rb_swap) {
+            for (int y = 0; y < copy_h; ++y) {
+              const uint8_t *src_line = src + y * src_stride;
+              uint8_t *dst_line = dst + y * dst_stride;
+              for (int x = 0; x < copy_w; ++x) {
+                dst_line[x * 4 + 0] = src_line[x * 4 + 2];  // B ← src B
+                dst_line[x * 4 + 1] = src_line[x * 4 + 1];  // G
+                dst_line[x * 4 + 2] = src_line[x * 4 + 0];  // R ← src R
+                dst_line[x * 4 + 3] = src_line[x * 4 + 3];  // A/X
+              }
+            }
+          } else if (src_stride == dst_stride && copy_bytes == src_stride) {
+            std::memcpy(dst, src, static_cast<std::size_t>(copy_h) * copy_bytes);
+          } else {
+            for (int y = 0; y < copy_h; ++y) {
+              std::memcpy(dst + y * dst_stride, src + y * src_stride, copy_bytes);
+            }
           }
         }
 
