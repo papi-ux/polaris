@@ -181,6 +181,14 @@ int main(int argc, char *argv[]) {
   // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
   // the version should be printed to the log before anything else
   BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
+#ifdef __linux__
+  #ifdef POLARIS_BUILD_CUDA
+  constexpr auto linux_cuda_build_feature = "enabled"sv;
+  #else
+  constexpr auto linux_cuda_build_feature = "disabled"sv;
+  #endif
+  BOOST_LOG(info) << "Build features: cuda="sv << linux_cuda_build_feature;
+#endif
 
   // Log publisher metadata
   log_publisher_data();
