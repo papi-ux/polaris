@@ -16,6 +16,23 @@ install should be simple, but keep the rollback notes handy.
 > does not include your Fedora version yet, wait for the next release or use a
 > tester build intentionally.
 
+## Validation Status
+
+| Image | Session | Result |
+|:------|:--------|:-------|
+| `bazzite-nvidia-open:stable` `44.20260430` | KDE Plasma Wayland Desktop Mode | Polaris service and ports validated |
+| `bazzite-nvidia-open:stable` `44.20260430` | Steam/Game Mode | Pending on a Game Mode-capable image |
+
+The tested `bazzite-nvidia-open:stable` host is a Desktop image based on
+Kinoite. It exposes only `/usr/share/wayland-sessions/plasma.desktop` to the
+display manager. The host has `gamescope`, `gamescopectl`, `gamescopestream`,
+`bazzite-steam`, and Steam installed, but it does not include a
+`gamescope-session` package or a selectable Steam/Game Mode session.
+
+That means this validation currently covers Desktop Mode only. Do not treat this
+image as real Bazzite Game Mode coverage until Polaris is retested on an image
+that can enter a gamescope Steam session from the host UI.
+
 ## Install
 
 If you already enabled Sunshine on Bazzite, stop it first. Sunshine and Polaris
@@ -103,16 +120,107 @@ Use the headless labwc path for the first stream:
 
 ```ini
 headless_mode = enabled
-linux_use_cage_compositor = true
-linux_prefer_gpu_native_capture = enabled
+linux_use_cage_compositor = enabled
+linux_prefer_gpu_native_capture = disabled
 ```
 
 This creates an isolated `labwc` runtime for the stream and does not target your
 physical monitor. Do not manually export `WAYLAND_DISPLAY`; Polaris starts
 `labwc` with its own Wayland socket and routes launched apps into that socket.
+Do not add EVDI or dummy-plug display routing for this validation path.
 
 If you want to test a physical dummy plug instead, leave headless/labwc disabled
 and test it as a normal host display.
+
+## Desktop Mode Baseline
+
+On the tested NVIDIA Desktop image:
+
+- `polaris.service` was active under the user manager.
+- The service was enabled through `xdg-desktop-autostart.target`.
+- A local drop-in launched `/usr/local/bin/polaris-kms`.
+- `/usr/local/bin/polaris-kms` had `cap_sys_admin=ep`.
+- Polaris listened on `47984`, `47989`, `47990`, and `48010`.
+- The active graphical session was KDE Plasma Wayland through
+  `plasmalogin-autologin`.
+
+Baseline checks:
+
+```bash
+systemctl --user status polaris --no-pager -l
+systemctl --user cat polaris
+getcap /usr/local/bin/polaris-kms
+grep -E 'headless_mode|linux_use_cage_compositor|linux_prefer_gpu_native_capture' \
+  ~/.config/polaris/polaris.conf
+loginctl list-sessions
+loginctl show-session "$XDG_SESSION_ID" -p Type -p Desktop -p Class -p State
+ss -ltnup | grep -E '47984|47989|47990|48010'
+```
+
+The Desktop Mode logs still reported the physical display:
+
+```text
+Name: DP-3
+Found monitor: Samsung Electric Company Odyssey G95NC
+Resolution: 7680x2160
+```
+
+This is expected for the Desktop image before a client launches a headless labwc
+stream.
+
+## Game Mode Validation
+
+Game Mode remains pending for `bazzite-nvidia-open:stable` Desktop images. A
+valid Game Mode test host must expose a real Steam/Game Mode session, usually
+through a gamescope session package and display-manager entry.
+
+After entering Game Mode, verify Polaris before connecting a client:
+
+```bash
+systemctl --user is-active polaris
+systemctl --user status polaris --no-pager -l
+ss -ltnup | grep -E '47984|47989|47990|48010' || true
+journalctl --user -u polaris --since "5 minutes ago" --no-pager
+```
+
+Then connect with Nova at `1920x1080x60`, followed by Moonlight or a Retroid
+profile such as `1280x720x60`. For each connection, collect:
+
+```bash
+journalctl --user -u polaris --since "3 minutes ago" --no-pager \
+  | grep -Ei "New streaming|stream_active|CLIENT|RTSP|session_event|labwc|HEADLESS|Steam|failed|Warning|Error"
+```
+
+Success markers include:
+
+```text
+labwc: Starting in headless mode
+labwc: Ready
+Selected monitor [Headless output 1] for streaming
+Encoder cache saved: nvenc
+New streaming session started
+session_event: stream_active
+CLIENT CONNECTED
+```
+
+Steam should report the client stream resolution, not the physical `7680x2160`
+`DP-3` desktop.
+
+If Polaris is inactive after entering Game Mode, treat it as a service or
+autostart packaging issue first:
+
+```bash
+systemctl --user restart polaris
+systemctl --user status polaris --no-pager -l
+```
+
+If Polaris is active but clients cannot discover or connect, verify listener
+ports and mDNS/Avahi from the Game Mode session before changing encoder code.
+
+If clients connect but the stream is black, check whether logs mention
+`HEADLESS-1` or the physical display. `DP-3` means app routing escaped the
+headless labwc runtime. `HEADLESS-1` means routing worked and capture or encoder
+warnings should be inspected next.
 
 ## Update
 
@@ -183,6 +291,8 @@ copy/conversion path` are expected with the current headless labwc runtime. They
 are performance notes, not startup failures. Confirm the stream is healthy by
 looking for `session_event: stream_active`, `CLIENT CONNECTED`, `Selected monitor
 [Headless output 1]`, and `Found H.264 encoder: h264_nvenc [nvenc]`.
+The `capture_transport=shm frame_residency=cpu frame_format=bgra8` warning is
+acceptable when the stream works.
 
 `display_preview: Failed to capture cage screenshot` affects the web dashboard
 preview path. It does not mean the Moonlight/Nova stream failed if the client is
@@ -213,6 +323,6 @@ Please include these details when reporting Bazzite issues:
 ## Current Status
 
 Fedora 42, Fedora 43, and Fedora 44 RPMs are release-tested in CI. Bazzite uses
-the matching Fedora RPM through `rpm-ostree`; Bazzite-specific Desktop Mode and
-Game Mode runtime behavior still needs broader real-hardware validation before
-this path is marked recommended.
+the matching Fedora RPM through `rpm-ostree`; `bazzite-nvidia-open:stable`
+`44.20260430` has Desktop Mode service and port validation only. Game Mode still
+needs validation on a Bazzite image that exposes a real gamescope Steam session.

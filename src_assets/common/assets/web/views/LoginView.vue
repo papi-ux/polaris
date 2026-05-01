@@ -1,28 +1,26 @@
 <template>
-  <div class="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center px-4 py-8 sm:px-6">
-    <div class="w-full max-w-5xl">
-      <section class="page-hero auth-stage auth-stage--login overflow-visible">
-        <div class="page-hero-content auth-login-header items-start">
-          <div class="page-hero-copy auth-login-copy">
-            <div class="flex items-center gap-3">
-              <img src="/images/logo-polaris.svg" class="h-12" alt="Polaris">
-              <div>
-                <div class="page-hero-kicker">Host Console</div>
-                <h1 class="page-hero-title">{{ $t('welcome.greeting') }}</h1>
-              </div>
+  <div class="relative min-h-screen overflow-hidden bg-background">
+    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(124,115,255,0.18),transparent_35%),radial-gradient(circle_at_bottom_right,rgba(200,214,229,0.08),transparent_28%)]"></div>
+    <div class="relative mx-auto flex min-h-screen max-w-5xl items-center justify-center p-4 sm:p-6">
+      <div class="grid w-full max-w-4xl gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <section class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
+          <div class="flex items-center gap-3">
+            <img src="/images/logo-polaris.svg" class="h-12" alt="Polaris">
+            <div>
+              <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/85">Host Console</div>
+              <h1 class="mt-1 text-3xl font-bold text-silver">{{ $t('welcome.greeting') }}</h1>
             </div>
+          </div>
 
-            <p class="page-hero-copy-text auth-login-copy-text">
-              Sign in to manage the host from one local control surface.
+          <div class="mt-6 max-w-2xl">
+            <p class="text-sm leading-relaxed text-storm">
+              Sign in to manage pairing, library entries, host health, and stream configuration. This is the control surface for the machine, not just a passive dashboard.
             </p>
           </div>
-        </div>
 
-        <div class="relative z-[1] auth-login-body px-6 pb-6 pt-4 md:px-7 md:pb-7 md:pt-3">
-          <form @submit.prevent="login" class="auth-login-form">
-            <div class="space-y-4">
-              <div>
-                <label for="usernameInput" class="mb-1 block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
+          <form @submit.prevent="login" class="mt-8 space-y-4">
+            <div>
+              <label for="usernameInput" class="mb-1 block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
               <input
                 id="usernameInput"
                 v-model="passwordData.username"
@@ -32,103 +30,84 @@
                 autofocus
                 class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]"
               />
-              </div>
-              <div>
-                <div class="mb-1 flex items-center gap-2">
-                  <label for="passwordInput" class="block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                  <InfoHint label="Password guidance">
-                    Use the local Polaris web credentials for this host. Keep them separate from game launcher or platform passwords.
-                  </InfoHint>
-                </div>
-                <input
-                  id="passwordInput"
-                  v-model="passwordData.password"
-                  type="password"
-                  autocomplete="current-password"
-                  required
-                  class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]"
-                />
-              </div>
+            </div>
+            <div>
+              <label for="passwordInput" class="mb-1 block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
+              <input
+                id="passwordInput"
+                v-model="passwordData.password"
+                type="password"
+                autocomplete="current-password"
+                required
+                class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]"
+              />
+            </div>
 
-              <div class="flex flex-col gap-3 rounded-2xl border border-storm/20 bg-deep/35 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <label for="savePassword" class="flex items-center gap-2 text-sm text-storm">
-                  <input id="savePassword" v-model="savePassword" type="checkbox" class="h-4 w-4 rounded border-storm bg-void text-ice accent-ice focus:ring-ice" />
-                  {{ $t('login.save_password') }}
-                </label>
-                <div class="flex items-center gap-2 text-xs text-storm">
-                  <span>Trusted device only</span>
-                  <InfoHint align="right" label="Remember password details">
-                    This stores your Polaris web credentials in local browser storage. Use it only on a machine you control.
-                  </InfoHint>
-                </div>
-              </div>
+            <div class="flex flex-col gap-3 rounded-2xl border border-storm/20 bg-deep/35 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <label for="savePassword" class="flex items-center gap-2 text-sm text-storm">
+                <input id="savePassword" v-model="savePassword" type="checkbox" class="h-4 w-4 rounded border-storm bg-void text-ice accent-ice focus:ring-ice" />
+                {{ $t('login.save_password') }}
+              </label>
+              <div class="text-xs text-storm">Use this only on a device you control.</div>
+            </div>
 
-              <button
-                type="submit"
-                class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.25)] disabled:opacity-50"
-                :disabled="loading"
-              >
-                {{ loading ? 'Signing In…' : $t('welcome.login') }}
-              </button>
+            <button
+              type="submit"
+              class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.25)] disabled:opacity-50"
+              :disabled="loading"
+            >
+              {{ loading ? 'Signing In…' : $t('welcome.login') }}
+            </button>
 
-              <div class="flex flex-wrap items-center gap-2 text-sm text-storm">
-                <span>{{ $t('login.recovery_hint') }}</span>
-                <router-link to="/recover" class="text-ice transition-colors no-underline hover:text-ice/80">
-                  {{ $t('login.forgot_password') }}
-                </router-link>
-                <InfoHint label="Recovery flow">
-                  Recovery is handled on the host itself. Polaris will show the exact terminal command to reset the local web credentials safely.
-                </InfoHint>
-              </div>
+            <div class="text-sm text-storm">
+              {{ $t('login.recovery_hint') }}
+              <router-link to="/recover" class="ml-1 text-ice transition-colors no-underline hover:text-ice/80">
+                {{ $t('login.forgot_password') }}
+              </router-link>
+            </div>
 
-              <div v-if="error" class="rounded-2xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-100">
-                <b>{{ $t('_common.error') }}</b> {{ error }}
-              </div>
-              <div v-if="success" class="rounded-2xl border border-green-500/25 bg-green-500/10 px-4 py-3 text-sm text-green-100">
-                <b>{{ $t('_common.success') }}</b> {{ $t('welcome.login_success') }}
-              </div>
+            <div v-if="error" class="rounded-2xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+              <b>{{ $t('_common.error') }}</b> {{ error }}
+            </div>
+            <div v-if="success" class="rounded-2xl border border-green-500/25 bg-green-500/10 px-4 py-3 text-sm text-green-100">
+              <b>{{ $t('_common.success') }}</b> {{ $t('welcome.login_success') }}
             </div>
           </form>
+        </section>
 
-          <aside class="auth-login-aside hidden lg:block" aria-label="After sign-in overview">
-            <div class="auth-login-summary">
-              <div class="auth-panel-kicker">After Sign-In</div>
-              <div class="auth-panel-copy auth-login-summary-copy">
-                Mission Control, pairing, Library, and Settings stay one click away.
-              </div>
+        <aside class="section-card self-center">
+          <div class="section-kicker">Before You Continue</div>
+          <h2 class="section-title">What this login gives you</h2>
+          <p class="section-copy">
+            Once signed in, you can publish launch entries, review runtime telemetry, change host security settings, and restart Polaris from the web UI.
+          </p>
 
-              <div class="auth-orbit-field auth-orbit-field--compact auth-login-summary-visual" aria-hidden="true">
-                <div class="auth-orbit-ring auth-orbit-ring--outer"></div>
-                <div class="auth-orbit-ring auth-orbit-ring--mid"></div>
-                <div class="auth-orbit-core"></div>
-                <span class="auth-orbit-node auth-orbit-node--primary">Mission Control</span>
-                <span class="auth-orbit-node auth-orbit-node--right">Library</span>
-                <span class="auth-orbit-node auth-orbit-node--lower-left">Pairing</span>
-                <span class="auth-orbit-node auth-orbit-node--lower-right">Settings</span>
-              </div>
-
-              <div class="auth-login-summary-note">
-                <span>Secure session on trusted devices only.</span>
-                <InfoHint align="right" label="Session security">
-                  Treat Polaris like a local system console. Sign out or close the browser on shared devices when you are done.
-                </InfoHint>
-              </div>
+          <div class="mt-5 space-y-3">
+            <div class="surface-subtle p-4">
+              <div class="text-sm font-semibold text-silver">Security</div>
+              <p class="mt-2 text-sm leading-relaxed text-storm">
+                Pairing and password changes affect who can control the host. Treat this interface like a system console, not a public status page.
+              </p>
             </div>
-          </aside>
-        </div>
-      </section>
+            <div class="surface-subtle p-4">
+              <div class="text-sm font-semibold text-silver">Recovery</div>
+              <p class="mt-2 text-sm leading-relaxed text-storm">
+                If credentials stop working, use the recovery flow or reset them locally on the host before troubleshooting anything else.
+              </p>
+            </div>
+          </div>
+        </aside>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import InfoHint from '../components/InfoHint.vue'
+import { useRouter } from 'vue-router'
 import { isDynamicImportError } from '../router-helpers.js'
 
 const router = useRouter()
-const route = useRoute()
 
 const error = ref('')
 const success = ref(false)
@@ -148,64 +127,6 @@ if (savedPasswordStr) {
     passwordData.value = { username, password }
   } catch (e) {
     console.error('Reading saved password failed!', e)
-  }
-}
-
-function getRedirectTarget() {
-  const rawTarget = Array.isArray(route.query.redirect) ? route.query.redirect[0] : route.query.redirect
-  const decodedTarget = typeof rawTarget === 'string' ? decodeURIComponent(rawTarget) : ''
-  if (!decodedTarget.startsWith('/') || decodedTarget.startsWith('//')) {
-    return '/'
-  }
-
-  return decodedTarget
-}
-
-function getPostLoginUrl(target = getRedirectTarget()) {
-  const hashTarget = `#${target}`
-
-  if (window.location.hostname === 'localhost') {
-    return `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}${hashTarget}`
-  }
-
-  return `${window.location.origin}${window.location.pathname}${hashTarget}`
-}
-
-async function finishLoginRedirect() {
-  const target = getRedirectTarget()
-  if (window.location.hostname === 'localhost') {
-    window.location.replace(getPostLoginUrl(target))
-    return
-  }
-
-  try {
-    await router.replace(target)
-  } catch (e) {
-    if (isDynamicImportError(e)) {
-      window.location.replace(getPostLoginUrl(target))
-      return
-    }
-
-    throw e
-  }
-}
-
-async function tryResumeAuthenticatedSession() {
-  try {
-    const probe = await fetch('./api/config', {
-      credentials: 'same-origin',
-      cache: 'no-store',
-    })
-
-    if (!probe.ok) {
-      return false
-    }
-
-    success.value = true
-    await finishLoginRedirect()
-    return true
-  } catch {
-    return false
   }
 }
 
@@ -231,7 +152,12 @@ async function login() {
       if (savePassword.value) {
         localStorage.setItem('login', JSON.stringify(passwordData.value))
       }
-      await finishLoginRedirect()
+      if (window.location.hostname === 'localhost') {
+        const ipv4Url = `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}#/`
+        window.location.replace(ipv4Url)
+        return
+      }
+      await router.push('/')
       return
     }
 
@@ -274,10 +200,6 @@ async function login() {
     }
 
     if (e instanceof TypeError && e.message === 'Failed to fetch') {
-      if (await tryResumeAuthenticatedSession()) {
-        return
-      }
-
       if (window.location.hostname === 'localhost') {
         const fallbackUrl = `${window.location.protocol}//127.0.0.1:${window.location.port}${window.location.pathname}#/login`
         error.value = `Login failed: Polaris could not be reached on localhost. This instance may be listening on IPv4 only. Open ${fallbackUrl} instead.`
@@ -293,120 +215,3 @@ async function login() {
   }
 }
 </script>
-
-<style scoped>
-.auth-login-form {
-  display: block;
-  max-width: 44rem;
-}
-
-.auth-login-header {
-  display: block;
-  padding: 1.2rem 1.45rem 0.25rem;
-  align-items: start;
-}
-
-.auth-login-copy {
-  max-width: 36rem;
-}
-
-.auth-login-copy-text {
-  max-width: 23rem;
-}
-
-.auth-login-aside {
-  width: min(100%, 18rem);
-}
-
-.auth-login-summary-copy {
-  margin-top: 0.35rem;
-  max-width: 18rem;
-}
-
-.auth-login-body {
-  display: grid;
-  gap: 1.6rem;
-  align-items: start;
-}
-
-.auth-login-summary {
-  display: grid;
-  gap: 0.65rem;
-  min-width: 0;
-}
-
-.auth-login-summary-visual {
-  min-height: 116px;
-  margin-top: 0;
-}
-
-.auth-login-summary-note {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  color: var(--theme-text-soft);
-  font-size: 0.78rem;
-  line-height: 1.45;
-}
-
-.auth-orbit-field--compact {
-  min-height: 124px;
-  margin-top: 0.8rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-ring--outer) {
-  width: 8.6rem;
-  height: 8.6rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-ring--mid) {
-  width: 5.9rem;
-  height: 5.9rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-core) {
-  width: 3.35rem;
-  height: 3.35rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node) {
-  padding: 0.28rem 0.56rem;
-  font-size: 0.64rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--primary) {
-  top: 0.55rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--right) {
-  right: 0;
-  top: 2.45rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--lower-left) {
-  left: 0.55rem;
-  bottom: 0.55rem;
-}
-
-.auth-stage--login :deep(.auth-orbit-field--compact .auth-orbit-node--lower-right) {
-  right: 0.2rem;
-  bottom: 0;
-}
-
-.auth-login-summary-visual.auth-orbit-field--compact {
-  min-height: 116px;
-  margin-top: 0;
-}
-
-@media (max-width: 1279px) {
-  .auth-login-aside {
-    width: 100%;
-  }
-}
-
-@media (min-width: 1024px) {
-  .auth-login-body {
-    grid-template-columns: minmax(0, 1fr) 18rem;
-  }
-}
-</style>

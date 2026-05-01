@@ -1,31 +1,42 @@
 <template>
   <div class="page-shell">
-    <section class="page-header settings-page-header sticky top-4 z-20">
-      <div class="settings-toolbar-copy">
-        <div class="settings-toolbar-title-row">
-          <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
-          <span class="meta-pill">{{ commandCenterTitle }}</span>
-          <span
-            v-if="hasUnsavedChanges"
-            class="meta-pill border-amber-300/40 bg-amber-300/10 text-amber-300"
-          >
-            {{ $t('config.pending_badge') }}
-          </span>
-          <span
-            v-else
-            class="meta-pill border-green-400/30 bg-green-400/10 text-green-300"
-          >
-            {{ $t('config.synced_badge') }}
-          </span>
-          <span v-if="config && searchQuery" class="meta-pill">{{ searchSummary }}</span>
+    <section class="page-header">
+      <div class="page-heading">
+        <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
+        <p class="page-subtitle max-w-2xl">{{ $t('config.configuration_desc') }}</p>
+      </div>
+      <div v-if="config" class="page-meta">
+        <span class="meta-pill">{{ visibleTabCountLabel }}</span>
+        <span class="meta-pill">{{ activePanelTitle }}</span>
+        <span class="meta-pill">{{ activePanelGroupLabel }}</span>
+        <span class="meta-pill" :class="hasUnsavedChanges ? 'border-amber-300/40 bg-amber-300/10 text-amber-300' : 'border-green-400/30 bg-green-400/10 text-green-300'">
+          {{ hasUnsavedChanges ? $t('config.unsaved_changes') : $t('config.all_changes_saved') }}
+        </span>
+        <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
+      </div>
+    </section>
+
+    <section class="section-card settings-command-bar sticky top-4 z-20">
+      <div class="settings-command-copy">
+        <div class="section-kicker">{{ $t('config.action_center') }}</div>
+        <div class="settings-command-title">
+          {{ commandCenterTitle }}
+        </div>
+        <div class="settings-command-note">
+          {{ commandCenterNote }}
         </div>
       </div>
 
-      <div class="settings-toolbar-actions">
+      <div class="settings-command-tools">
+        <div class="settings-command-meta">
+          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
+          <span v-if="hasUnsavedChanges" class="meta-pill border-amber-300/40 bg-amber-300/10 text-amber-300">{{ $t('config.pending_badge') }}</span>
+          <span v-else class="meta-pill border-green-400/30 bg-green-400/10 text-green-300">{{ $t('config.synced_badge') }}</span>
+        </div>
+
         <input
           v-model="searchQuery"
           type="text"
-          autocomplete="off"
           :placeholder="$t('config.search_placeholder')"
           class="focus-ring settings-search-input"
           @input="onSearch"
@@ -53,9 +64,11 @@
     <Skeleton type="card" />
   </div>
 
-  <div v-if="config" class="settings-workspace" :class="{ 'is-searching': !!searchQuery }">
-    <aside class="settings-sidebar">
-      <div class="section-kicker">{{ $t('config.settings_map_title') }}</div>
+  <div v-if="config" class="settings-workspace">
+    <aside class="section-card settings-sidebar">
+      <div class="section-kicker">{{ $t('config.settings_map_kicker') }}</div>
+      <h2 class="section-title">{{ $t('config.settings_map_title') }}</h2>
+      <p class="section-copy">{{ $t('config.settings_map_desc') }}</p>
 
       <div class="settings-nav-groups">
         <div v-for="group in tabGroups" :key="group.id" class="settings-nav-group">
@@ -90,23 +103,39 @@
         </button>
       </div>
 
-      <section v-if="searchQuery" class="settings-search-strip">
-        <div class="settings-search-strip-copy">
-          <div class="settings-search-strip-title">
-            {{ searchHasResults ? $t('config.search_focus_title') : $t('config.search_empty_title') }}
-          </div>
-          <div class="settings-search-strip-note">
-            {{ searchHasResults ? searchSummary : searchEmptyCopy }}
-          </div>
+      <section class="section-card settings-tab-hero">
+        <div class="settings-tab-hero-copy">
+          <div class="section-kicker">{{ activePanelGroupLabel }}</div>
+          <h2 class="settings-tab-title">{{ activePanelTitle }}</h2>
+          <p class="settings-tab-copy">{{ activePanelHeroCopy }}</p>
         </div>
-        <div class="shrink-0">
+        <div class="settings-tab-meta">
+          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
+          <span class="meta-pill">{{ activePanelGroupLabel }}</span>
+          <span v-if="currentTabIsEncoder" class="meta-pill">{{ activeTabMeta?.name }}</span>
+          <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
+          <span class="meta-pill">{{ hasUnsavedChanges ? $t('config.pending_badge') : $t('config.synced_badge') }}</span>
+        </div>
+      </section>
+
+      <section v-if="searchQuery" class="surface-subtle p-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0">
+            <div class="eyebrow-label">
+              {{ searchHasResults ? $t('config.search_focus_title') : $t('config.search_empty_title') }}
+            </div>
+            <div class="mt-2 text-sm leading-relaxed text-storm">
+              {{ searchHasResults ? searchFocusCopy : searchEmptyCopy }}
+            </div>
+          </div>
           <button class="focus-ring settings-action-button settings-action-button-secondary" @click="clearSearch">
             {{ $t('config.clear_search') }}
           </button>
         </div>
       </section>
 
-      <section v-if="currentTabIsEncoder" class="settings-subnav-card">
+      <section v-if="currentTabIsEncoder" class="section-card settings-subnav-card">
+        <div class="section-kicker">Encoder Switcher</div>
         <div class="settings-subnav-row">
           <button
             v-for="tab in encoderTabs"
@@ -121,7 +150,13 @@
         </div>
       </section>
 
-      <div v-if="!searchQuery || searchHasResults" ref="settingsContentRef" class="settings-tab-content">
+      <section v-if="searchQuery && !searchHasResults" class="section-card">
+        <div class="section-kicker">{{ $t('config.search_empty_title') }}</div>
+        <h3 class="section-title">{{ $t('config.search_empty_heading') }}</h3>
+        <p class="section-copy">{{ searchEmptyCopy }}</p>
+      </section>
+
+      <div v-else ref="settingsContentRef" class="settings-tab-content">
         <general
           v-if="shouldShowTab('general')"
           :config="config"
@@ -215,36 +250,13 @@ const initialSerialized = ref("")
 const settingsContentRef = ref(null)
 let searchHighlightTimeout = null
 let highlightedSearchTarget = null
-let restartReloadTimeout = null
-let restartReloadInterval = null
-let restartReloadFallbackTimeout = null
-const writeOnlySecrets = {
-  api_key: { presentFlag: 'has_api_key' },
-  ai_api_key: { presentFlag: 'has_ai_api_key', clearFlag: 'clear_ai_api_key' },
-  steamgriddb_api_key: { presentFlag: 'has_steamgriddb_api_key', clearFlag: 'clear_steamgriddb_api_key' },
-}
-const responseOnlyConfigKeys = [
-  'status',
-  'platform',
-  'version',
-  'has_ai_api_key',
-  'has_steamgriddb_api_key',
-  'has_api_key',
-  'vdisplayStatus',
-  'vdisplayAvailable',
-  'vdisplayBackend',
-  'runtime_backend',
-  'runtime_requested_headless',
-  'runtime_effective_headless',
-  'runtime_gpu_native_override_active',
-]
 const tabs = ref([
   {
     id: "general",
     name: "General",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Host identity, tray behavior, metadata, and automation.",
+    summary: "Identity, logging, desktop UI behavior, metadata integrations, and automation commands.",
     options: {
       "locale": "en",
       "sunshine_name": "",
@@ -265,7 +277,7 @@ const tabs = ref([
     name: "Input",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Controller, keyboard, mouse, cursor, and touch behavior.",
+    summary: "Controller, keyboard, mouse, cursor, and touch passthrough behavior.",
     options: {
       "controller": "enabled",
       "gamepad": "auto",
@@ -293,7 +305,7 @@ const tabs = ref([
     name: "Audio/Video",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Audio routing, displays, capture path, and stream delivery.",
+    summary: "Capture strategy, audio routing, display outputs, virtual display management, and stream delivery controls.",
     options: {
       "audio_sink": "",
       "virtual_sink": "",
@@ -317,8 +329,7 @@ const tabs = ref([
       "dd_mode_remapping": {"mixed": [], "resolution_only": [], "refresh_rate_only": []},
       "dd_wa_hdr_toggle": "disabled",
       "headless_mode": "disabled",
-      "linux_use_cage_compositor": "disabled",
-      "linux_prefer_gpu_native_capture": "disabled",
+      "linux_prefer_gpu_native_capture": "enabled",
       "linux_capture_profile": "disabled",
       "double_refreshrate": "disabled",
       "max_bitrate": 0,
@@ -333,7 +344,7 @@ const tabs = ref([
     name: "Network",
     group: "core",
     groupLabel: "Core Setup",
-    summary: "Discovery, pairing access, ports, encryption, and trusted networks.",
+    summary: "Discovery, pairing access, ports, encryption, web UI exposure, and trusted networks.",
     options: {
       "upnp": "disabled",
       "address_family": "ipv4",
@@ -351,7 +362,7 @@ const tabs = ref([
     name: "Config Files",
     group: "host",
     groupLabel: "Host & Runtime",
-    summary: "Apps, logs, certificates, credentials, and runtime paths.",
+    summary: "Paths for apps, logs, certificates, credentials, and runtime state.",
     options: {
       "file_apps": "",
       "credentials_file": "",
@@ -366,7 +377,7 @@ const tabs = ref([
     name: "Advanced",
     group: "host",
     groupLabel: "Host & Runtime",
-    summary: "Compatibility flags, codec advertising, capture path, and encoder choice.",
+    summary: "Compatibility flags, codec advertising, capture path, and encoder selection.",
     options: {
       "fec_percentage": 20,
       "qp": 28,
@@ -386,7 +397,7 @@ const tabs = ref([
     name: "AI",
     group: "host",
     groupLabel: "Host & Runtime",
-    summary: "Provider, runtime, cache, and optimization defaults.",
+    summary: "Provider choice, runtime behavior, cache policy, and optimization defaults.",
     options: {
       "ai_enabled": "disabled",
       "ai_provider": "anthropic",
@@ -404,7 +415,7 @@ const tabs = ref([
     name: "NVIDIA NVENC Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Latency, bitrate shaping, AQ, and NVIDIA tuning.",
+    summary: "Latency, bitrate shaping, AQ, and NVIDIA-specific hardware encode behavior.",
     options: {
       "nvenc_preset": 1,
       "nvenc_twopass": "quarter_res",
@@ -422,7 +433,7 @@ const tabs = ref([
     name: "Intel QuickSync Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Preset, entropy coding, and HEVC fallback behavior.",
+    summary: "Intel preset, entropy coding, and HEVC fallback behavior.",
     options: {
       "qsv_preset": "medium",
       "qsv_coder": "auto",
@@ -434,7 +445,7 @@ const tabs = ref([
     name: "AMD AMF Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Rate control, quality, VBAQ, and AMD tuning.",
+    summary: "AMF rate control, quality, VBAQ, and AMD-specific encode tuning.",
     options: {
       "amd_usage": "ultralowlatency",
       "amd_rc": "vbr_latency",
@@ -450,7 +461,7 @@ const tabs = ref([
     name: "VideoToolbox Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Entropy coding, realtime mode, and software fallback.",
+    summary: "Apple VideoToolbox entropy coding, realtime mode, and software fallback.",
     options: {
       "vt_coder": "auto",
       "vt_software": "auto",
@@ -462,7 +473,7 @@ const tabs = ref([
     name: "VA-API Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Strict rate-control behavior for AMD and Intel GPUs.",
+    summary: "Linux VA-API strict rate-control behavior for AMD and Intel GPUs.",
     options: {
       "vaapi_strict_rc_buffer": "disabled",
     },
@@ -472,7 +483,7 @@ const tabs = ref([
     name: "Software Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "CPU preset and tune selection for fallback paths.",
+    summary: "CPU encoding preset and tune selection for fallback and low-GPU paths.",
     options: {
       "sw_preset": "superfast",
       "sw_tune": "zerolatency",
@@ -565,6 +576,7 @@ const tabGroups = computed(() => {
     )
 })
 const mobileNavItems = computed(() => tabGroups.value.flatMap(group => group.items))
+const visibleTabCountLabel = computed(() => i18n.t('config.visible_tabs', { count: matchingTabs.value.length, total: tabs.value.length }))
 const searchSummary = computed(() => i18n.t('config.search_results', { query: searchQuery.value, count: matchingTabs.value.length }))
 const searchHasResults = computed(() => matchingTabs.value.length > 0)
 const hasUnsavedChanges = computed(() => {
@@ -572,11 +584,44 @@ const hasUnsavedChanges = computed(() => {
   return JSON.stringify(serialize()) !== initialSerialized.value
 })
 const activePanelTitle = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.name || 'General'))
+const activePanelGroupLabel = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.groupLabel || 'Core Setup'))
+const activePanelSummary = computed(() => {
+  if (currentTabIsEncoder.value) {
+    return 'Choose the hardware or software encode profile Polaris should use when that path is active. Each profile keeps its own tuning without cluttering the main host settings map.'
+  }
+  return activeTabMeta.value?.summary || 'Adjust the active Polaris section.'
+})
 const commandCenterTitle = computed(() => {
   if (searchQuery.value && !searchHasResults.value) return i18n.t('config.search_empty_heading')
   if (searchQuery.value) return i18n.t('config.search_focus_heading')
-  return activePanelTitle.value
+  if (hasUnsavedChanges.value) return i18n.t('config.unsaved_banner')
+  return i18n.t('config.saved_banner')
 })
+const commandCenterNote = computed(() => {
+  if (searchQuery.value && !searchHasResults.value) {
+    return i18n.t('config.search_empty_desc', { query: searchQuery.value })
+  }
+  if (searchQuery.value) {
+    return i18n.t('config.search_focus_desc', { query: searchQuery.value, count: matchingTabs.value.length })
+  }
+  if (hasUnsavedChanges.value) {
+    return i18n.t('config.command_unsaved_note')
+  }
+  if (saved.value) {
+    return i18n.t('config.apply_note')
+  }
+  return i18n.t('config.command_saved_note')
+})
+const activePanelHeroCopy = computed(() => {
+  if (searchQuery.value) {
+    return searchHasResults.value ? searchFocusCopy.value : searchEmptyCopy.value
+  }
+  return activePanelSummary.value
+})
+const searchFocusCopy = computed(() => i18n.t('config.search_focus_desc', {
+  query: searchQuery.value,
+  count: matchingTabs.value.length,
+}))
 const searchEmptyCopy = computed(() => i18n.t('config.search_empty_desc', { query: searchQuery.value }))
 
 function shouldShowTab(tabId) {
@@ -687,32 +732,6 @@ function serialize() {
   return configCopy
 }
 
-function finalizeWriteOnlySecrets(configCopy) {
-  Object.entries(writeOnlySecrets).forEach(([secretKey, meta]) => {
-    const clearRequested = !!config.value?.[meta.clearFlag]
-    const nextValue = configCopy[secretKey]
-
-    if (clearRequested) {
-      configCopy[secretKey] = ''
-      return
-    }
-
-    if (!nextValue) {
-      delete configCopy[secretKey]
-    }
-  })
-}
-
-function stripClientOnlyConfigFields(configCopy) {
-  Object.values(writeOnlySecrets).forEach((meta) => {
-    delete configCopy[meta.presentFlag]
-    delete configCopy[meta.clearFlag]
-  })
-  responseOnlyConfigKeys.forEach((key) => {
-    delete configCopy[key]
-  })
-}
-
 function save() {
   if (!config.value || saving.value) return Promise.resolve(false)
   saving.value = true
@@ -733,15 +752,12 @@ function save() {
     })
   })
 
-  finalizeWriteOnlySecrets(configCopy)
-  stripClientOnlyConfigFields(configCopy)
-
   return fetch("./api/config", {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
     body: JSON.stringify(configCopy),
-  }).then(async (r) => {
+  }).then((r) => {
     if (r.status === 200) {
       saved.value = true
       initialSerialized.value = JSON.stringify(serialize())
@@ -757,75 +773,12 @@ function save() {
       return saved.value
     }
     else {
-      let errorMessage = 'Failed to save configuration'
-      try {
-        const text = (await r.text()).trim()
-        if (text) {
-          try {
-            const parsed = JSON.parse(text)
-            errorMessage = parsed?.error || text
-          } catch {
-            errorMessage = text
-          }
-          if (r.status === 403) {
-            errorMessage = `${errorMessage}. Refresh Polaris and try again.`
-          }
-        }
-      } catch {
-        // Fall back to the generic message when the response body cannot be read.
-      }
-
-      toast(errorMessage, 'error')
+      toast('Failed to save configuration', 'error')
       return false
     }
   }).finally(() => {
     saving.value = false
   })
-}
-
-function clearRestartReloadWatchers() {
-  if (restartReloadTimeout) {
-    window.clearTimeout(restartReloadTimeout)
-    restartReloadTimeout = null
-  }
-  if (restartReloadInterval) {
-    window.clearInterval(restartReloadInterval)
-    restartReloadInterval = null
-  }
-  if (restartReloadFallbackTimeout) {
-    window.clearTimeout(restartReloadFallbackTimeout)
-    restartReloadFallbackTimeout = null
-  }
-}
-
-function watchForRestartRecovery() {
-  clearRestartReloadWatchers()
-
-  const tryReload = async () => {
-    try {
-      const response = await fetch("./api/config", {
-        credentials: 'include',
-        cache: 'no-store',
-      })
-
-      if (response.ok || response.status === 401 || response.status === 403) {
-        clearRestartReloadWatchers()
-        window.location.reload()
-      }
-    } catch {
-      // Polaris is still restarting. Keep polling until it responds again.
-    }
-  }
-
-  restartReloadTimeout = window.setTimeout(() => {
-    void tryReload()
-    restartReloadInterval = window.setInterval(() => { void tryReload() }, 1200)
-  }, 1200)
-
-  restartReloadFallbackTimeout = window.setTimeout(() => {
-    clearRestartReloadWatchers()
-    window.location.reload()
-  }, 15000)
 }
 
 function apply() {
@@ -849,19 +802,15 @@ function apply() {
         headers: { 'Content-Type': 'application/json' }
       })
       .then((resp) => {
-        if (resp.status === 200) {
-          watchForRestartRecovery()
-          return
-        }
         if (resp.status !== 200) {
-          window.location.reload()
+          location.reload()
           return
         }
       })
       .catch((e) => {
         console.error(e)
         restarting.value = false
-        watchForRestartRecovery()
+        setTimeout(() => { location.reload() }, 1000)
       })
     }
   })
@@ -898,10 +847,13 @@ fetch("./api/config", { credentials: 'include' })
       tabs.value = tabs.value.filter((el) => el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi")
     }
 
+    // remove values we don't want in the config file
+    delete config.value.platform
+    delete config.value.status
+    delete config.value.version
+
     vdisplayStatus.value = config.value.vdisplayStatus
-    responseOnlyConfigKeys.forEach((key) => {
-      delete config.value[key]
-    })
+    delete config.value.vdisplayStatus
 
     fallbackDisplayModeCache = config.value.fallback_mode || ""
 
@@ -934,12 +886,6 @@ fetch("./api/config", { credentials: 'include' })
       }
     }
     config.value.trusted_subnets ??= []
-    config.value.trusted_subnet_auto_pairing ??= "disabled"
-    config.value.has_ai_api_key = !!config.value.has_ai_api_key
-    config.value.has_steamgriddb_api_key = !!config.value.has_steamgriddb_api_key
-    config.value.has_api_key = !!config.value.has_api_key
-    config.value.clear_ai_api_key = false
-    config.value.clear_steamgriddb_api_key = false
 
     // Populate default values from tabs options
     tabs.value.forEach(tab => {
@@ -1025,7 +971,6 @@ watch(currentTab, async (value) => {
 
 onUnmounted(() => {
   clearSearchHighlight()
-  clearRestartReloadWatchers()
   window.removeEventListener("hashchange", handleHash)
 })
 </script>

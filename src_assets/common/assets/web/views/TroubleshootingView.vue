@@ -2,30 +2,38 @@
   <div class="page-shell pb-2">
     <section class="page-header">
       <div class="page-heading">
-        <div class="section-kicker">{{ $t('troubleshooting.troubleshooting') }}</div>
         <h1 class="page-title">{{ $t('troubleshooting.troubleshooting') }}</h1>
-        <p class="page-subtitle">Recover the host, inspect sessions, and review logs.</p>
-        <div class="page-meta">
-          <span v-if="platform" class="meta-pill">{{ platform }}</span>
-          <span v-if="resolvedVersion" class="meta-pill">v{{ resolvedVersion }}</span>
-          <span class="meta-pill">{{ groupedRecentIssues.length }} issues</span>
-          <span class="meta-pill" :class="streamStatsConnected ? 'border-green-500/40 bg-green-500/10 text-green-300' : 'border-storm/30 bg-deep/60 text-storm'">
-            {{ streamStatsConnected ? $t('troubleshooting.session_snapshot_connected') : $t('troubleshooting.session_snapshot_disconnected') }}
-          </span>
-        </div>
+        <p class="page-subtitle">{{ $t('troubleshooting.overview') }}</p>
+      </div>
+      <div class="page-meta">
+        <span v-if="platform" class="meta-pill">
+          {{ platform }}
+        </span>
+        <span v-if="version" class="meta-pill">
+          v{{ version }}
+        </span>
       </div>
     </section>
 
     <section class="section-card space-y-4">
-      <h2 class="section-title">Recovery</h2>
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div class="section-kicker">{{ $t('troubleshooting.recovery_ladder') }}</div>
+          <h2 class="section-title">{{ $t('troubleshooting.quick_recovery') }}</h2>
+          <p class="section-copy">{{ $t('troubleshooting.quick_recovery_desc') }}</p>
+        </div>
+        <div class="page-meta">
+          <span class="meta-pill">{{ $t('troubleshooting.recovery_guidance') }}</span>
+        </div>
+      </div>
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <div class="surface-subtle flex h-full flex-col border-green-500/15 p-4">
           <div class="flex items-center justify-between gap-3">
             <span class="rounded-full bg-green-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-green-300">{{ $t('troubleshooting.recovery_rank_1') }}</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_1_label') }}</span>
           </div>
-          <h3 id="close_apps" class="mt-3 section-title">{{ $t('troubleshooting.force_close') }}</h3>
-          <div class="flex-1"></div>
+          <h3 id="close_apps" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.force_close') }}</h3>
+          <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.force_close_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="closeAppStatus === true">
             {{ $t('troubleshooting.force_close_success') }}
           </div>
@@ -44,8 +52,8 @@
             <span class="rounded-full bg-amber-300/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-200">{{ $t('troubleshooting.recovery_rank_2') }}</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_2_label') }}</span>
           </div>
-          <h3 id="restart" class="mt-3 section-title">{{ $t('troubleshooting.restart_polaris') }}</h3>
-          <div class="flex-1"></div>
+          <h3 id="restart" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.restart_polaris') }}</h3>
+          <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.restart_polaris_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="serverRestarting">
             {{ $t('troubleshooting.restart_polaris_success') }}
           </div>
@@ -61,8 +69,8 @@
             <span class="rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-red-300">{{ $t('troubleshooting.recovery_rank_3') }}</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_3_label') }}</span>
           </div>
-          <h3 id="quit" class="mt-3 section-title">{{ $t('troubleshooting.quit_polaris') }}</h3>
-          <div class="flex-1"></div>
+          <h3 id="quit" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.quit_polaris') }}</h3>
+          <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.quit_polaris_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="serverQuit">
             {{ $t('troubleshooting.quit_polaris_success') }}
           </div>
@@ -81,8 +89,8 @@
             <span class="rounded-full bg-sky-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-200">Optional</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">Display reset</span>
           </div>
-          <h3 id="dd_reset" class="mt-3 section-title">{{ $t('troubleshooting.dd_reset') }}</h3>
-          <div class="flex-1"></div>
+          <h3 id="dd_reset" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.dd_reset') }}</h3>
+          <p class="mt-2 flex-1 whitespace-pre-line text-sm text-storm">{{ $t('troubleshooting.dd_reset_desc') }}</p>
           <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="ddResetStatus === true">
             {{ $t('troubleshooting.dd_reset_success') }}
           </div>
@@ -102,12 +110,8 @@
       <div class="section-card">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <div class="section-title-row">
-              <h2 id="session_snapshot" class="section-title">Session</h2>
-              <InfoHint size="sm" label="Session snapshot details">
-                {{ $t('troubleshooting.session_snapshot_desc') }}
-              </InfoHint>
-            </div>
+            <h2 id="session_snapshot" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.session_snapshot') }}</h2>
+            <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.session_snapshot_desc') }}</p>
           </div>
           <span class="rounded-full border px-2.5 py-1 text-sm"
                 :class="streamStatsConnected ? 'border-green-500/40 bg-green-500/10 text-green-300' : 'border-storm/40 bg-deep/60 text-storm'">
@@ -138,15 +142,11 @@
       </div>
 
       <div class="section-card">
-        <div class="section-title-row">
-          <h2 id="diagnostics" class="section-title">Issues</h2>
-          <InfoHint size="sm" label="Diagnostics details">
-            {{ $t('troubleshooting.diagnostics_desc') }}
-          </InfoHint>
-        </div>
+        <h2 id="diagnostics" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.diagnostics') }}</h2>
+        <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.diagnostics_desc') }}</p>
         <div v-if="groupedRecentIssues.length" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4">
           <div class="flex items-center justify-between gap-3">
-            <div class="text-sm font-medium text-silver">Recent issues</div>
+            <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.recent_incidents') }}</div>
             <div class="text-xs text-storm">{{ groupedRecentIssues.length }} {{ $t('troubleshooting.visible_now') }}</div>
           </div>
           <div class="mt-3 space-y-2">
@@ -174,21 +174,23 @@
         <div v-else class="mt-4 rounded-xl border border-dashed border-storm/25 bg-deep/35 px-4 py-5 text-sm text-storm">
           {{ $t('troubleshooting.recent_incidents_empty') }}
         </div>
-        <div class="mt-4">
-          <div class="troubleshooting-utility-grid mt-3">
+        <div class="mt-4 grid gap-2 sm:grid-cols-2">
           <button class="focus-ring troubleshooting-action-card" @click="copyRecentIssues">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.copy_recent_issues') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.copy_recent_issues_desc') }}</div>
           </button>
           <button class="focus-ring troubleshooting-action-card" :disabled="downloadingSupportBundle" @click="downloadSupportBundle">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.download_support_bundle') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.download_support_bundle_desc') }}</div>
           </button>
           <button class="focus-ring troubleshooting-action-card" :disabled="clearingAiCache" @click="clearAiCache">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.clear_ai_cache') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.clear_ai_cache_desc') }}</div>
           </button>
           <button v-if="platform === 'linux'" class="focus-ring troubleshooting-action-card" :disabled="cleaningStaleVirtualDisplay" @click="cleanupStaleVirtualDisplay">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.cleanup_stale_virtual_display') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.cleanup_stale_virtual_display_desc') }}</div>
           </button>
-        </div>
         </div>
       </div>
     </section>
@@ -196,18 +198,13 @@
     <section class="section-card">
       <div class="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <div class="section-title-row">
-            <h2 id="logs" class="section-title">Log stream</h2>
-            <InfoHint size="sm" label="Logs details">
-              {{ $t('troubleshooting.logs_desc') }}
-            </InfoHint>
-          </div>
-          <div class="mt-3 page-meta">
-            <span class="meta-pill">{{ actualLogLineCount }} lines</span>
+          <h2 id="logs" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.logs') }}</h2>
+          <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.logs_desc') }}</p>
+        </div>
+        <div class="flex w-full flex-col gap-3 xl:w-auto xl:items-end">
+          <div class="page-meta">
             <span class="meta-pill">{{ logFilterSummary }}</span>
           </div>
-        </div>
-        <div class="surface-muted troubleshooting-filter-panel w-full p-3 xl:w-auto xl:min-w-[430px]">
           <div class="flex flex-wrap items-center gap-2">
             <button v-for="level in ['All', 'Error', 'Warning', 'Fatal']" :key="level"
                     @click="logLevelFilter = level === 'All' ? null : level"
@@ -215,10 +212,10 @@
                     :class="(logLevelFilter === level || (level === 'All' && !logLevelFilter))
                       ? 'is-active'
                       : ''">
-              {{ level === 'Warning' ? 'Warn' : level }}
+              {{ level }}
             </button>
           </div>
-          <div class="mt-3 flex w-full flex-col gap-2 sm:flex-row">
+          <div class="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
             <input
               type="text"
               name="logs-filter"
@@ -229,17 +226,8 @@
               :placeholder="$t('troubleshooting.logs_find')"
             >
             <button
-              v-if="logFilter || logLevelFilter"
-              class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary"
-              :aria-label="$t('troubleshooting.logs_clear_filters')"
-              @click="clearLogFilters"
-            >
-              Clear
-            </button>
-            <button
               class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary"
               :disabled="clearingLogs"
-              :aria-label="$t('troubleshooting.logs_clear_output')"
               @click="clearLogs"
             >
               {{ $t('troubleshooting.logs_clear') }}
@@ -268,16 +256,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onBeforeUnmount, inject, defineAsyncComponent } from 'vue'
+import { ref, computed, onBeforeUnmount, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
-import InfoHint from '../components/InfoHint.vue'
-
-const VirtualLogViewer = defineAsyncComponent(() => import('../components/VirtualLogViewer.vue'))
+import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
-const appVersion = inject('appVersion', null)
 const { stats: streamStats, connected: streamStatsConnected } = useStreamStats()
 
 const closeAppPressed = ref(false)
@@ -297,7 +282,6 @@ const serverQuitting = ref(false)
 const serverQuit = ref(false)
 const platform = ref("")
 const version = ref("")
-const resolvedVersion = computed(() => appVersion?.value || version.value || '')
 
 function yesNo(value) {
   return value ? 'Yes' : 'No'
@@ -417,7 +401,6 @@ const actualLogs = computed(() => {
 
 const logsLoading = computed(() => logs.value === 'Loading...')
 const hasFilteredLogs = computed(() => actualLogs.value.trim().length > 0)
-const actualLogLineCount = computed(() => actualLogs.value.split('\n').filter(Boolean).length)
 const logFilterSummary = computed(() => {
   const parts = []
   parts.push(logLevelFilter.value ? `${logLevelFilter.value} only` : i18n.t('troubleshooting.logs_filter_all'))
@@ -428,11 +411,6 @@ const logFilterSummary = computed(() => {
   }
   return parts.join(' · ')
 })
-
-function clearLogFilters() {
-  logFilter.value = null
-  logLevelFilter.value = null
-}
 
 function refreshLogs() {
   fetch("./api/logs", { credentials: 'include' })
@@ -614,7 +592,7 @@ async function downloadSupportBundle() {
     const bundle = {
       generated_at: new Date().toISOString(),
       platform: platform.value || 'unknown',
-      version: resolvedVersion.value || 'unknown',
+      version: version.value || 'unknown',
       browser_user_agent: navigator.userAgent,
       stream_stats_connected: streamStatsConnected.value,
       session_snapshot: streamStats.value,
@@ -694,7 +672,7 @@ function ddResetPersistence() {
 }
 
 // created() logic
-fetch("./api/config", { credentials: 'include' })
+fetch("/api/config")
   .then((r) => r.json())
   .then((r) => {
     platform.value = r.platform
