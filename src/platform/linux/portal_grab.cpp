@@ -853,7 +853,7 @@ namespace portal {
           }
         }
       } else {
-        // 4bpp format: direct copy (XRGB8888/ARGB8888 are already [B,G,R,X] on LE)
+        // 4bpp format (XRGB8888/ARGB8888) — direct copy
         int copy_bytes = std::min((int) st.stride, img_out->row_pitch);
         for (int y = 0; y < copy_h; ++y) {
           std::memcpy(img_out->data + y * img_out->row_pitch,
