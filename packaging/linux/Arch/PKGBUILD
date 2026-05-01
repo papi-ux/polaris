@@ -80,6 +80,10 @@ if [[ "${_use_cuda::1}" == "d" ]] && pacman -Qi cuda &> /dev/null; then
 fi
 
 if [[ "${_use_cuda::1}" == "t" ]]; then
+  makedepends+=(
+    'cuda'
+  )
+
   optdepends+=(
     'cuda: Nvidia GPU encoding support'
   )
@@ -187,6 +191,8 @@ build() {
     if [[ "${_use_cuda::1}" != "t" ]]; then
       _cmake_options+=(-DPOLARIS_ENABLE_CUDA=OFF -DCUDA_FAIL_ON_MISSING=OFF)
     else
+      _cmake_options+=(-DPOLARIS_ENABLE_CUDA=ON -DCUDA_FAIL_ON_MISSING=ON)
+
       # If cuda has just been installed, its variables will not be available in the environment
       # therefore, set them manually to the expected values on Arch Linux
       if [ -z "${CUDA_PATH:-}" ] && pacman -Qi cuda &> /dev/null; then
@@ -198,6 +204,7 @@ build() {
         export CUDACXX="${CUDA_PATH}/bin/nvcc"
         export NVCC_CCBIN="${NVCC_CCBIN:-/usr/bin/g++}"
         _cmake_options+=(-DCMAKE_CUDA_COMPILER:FILEPATH="${CUDA_PATH}/bin/nvcc")
+        _cmake_options+=(-DCMAKE_CUDA_HOST_COMPILER:FILEPATH="$(command -v "${CXX}")")
       fi
     fi
 
