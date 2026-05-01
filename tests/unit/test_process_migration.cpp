@@ -7,6 +7,21 @@
 #include <src/file_handler.h>
 #include <src/process.h>
 
+#ifdef __linux__
+namespace {
+  struct linux_cage_compositor_guard_t {
+    linux_cage_compositor_guard_t():
+        use_cage_compositor(config::video.linux_display.use_cage_compositor) {}
+
+    ~linux_cage_compositor_guard_t() {
+      config::video.linux_display.use_cage_compositor = use_cage_compositor;
+    }
+
+    bool use_cage_compositor;
+  };
+}  // namespace
+#endif
+
 TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
   const auto file_path = test_paths::root() / "legacy_apps_migration.json";
 
@@ -81,6 +96,11 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 }
 
 TEST(ProcessMigrationTests, ParseNormalizesSteamBigPictureLaunchAndAddsCleanupUndo) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
   const auto file_path = test_paths::root() / "steam_big_picture_normalization.json";
 
   const nlohmann::json apps = {
@@ -122,7 +142,63 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamBigPictureLaunchAndAddsCleanupUn
   std::filesystem::remove(file_path);
 }
 
+#ifdef __linux__
+TEST(ProcessMigrationTests, ParseAddsSteamBigPicturePrelaunchShutdownForLinuxCage) {
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = true;
+
+  const auto file_path = test_paths::root() / "steam_big_picture_cage_prelaunch_shutdown.json";
+
+  const nlohmann::json apps = {
+    {"version", 2},
+    {"apps", {
+      {
+        {"name", "Steam Big Picture"},
+        {"uuid", "steam-big-picture-cage-prelaunch"},
+        {"cmd", ""},
+        {"detached", {"setsid steam -gamepadui"}},
+        {"prep-cmd", nlohmann::json::array()},
+        {"image-path", "./assets/steam.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Steam Big Picture";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+  ASSERT_EQ(steam_ctx->prep_cmds.size(), 2);
+  EXPECT_NE(
+    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
+      return cmd.do_cmd == "setsid bash -lc \"steam -shutdown >/dev/null 2>&1 || true; sleep 2\"" &&
+             cmd.undo_cmd.empty();
+    }),
+    steam_ctx->prep_cmds.end()
+  );
+  EXPECT_NE(
+    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
+      return cmd.do_cmd.empty() && cmd.undo_cmd == "setsid steam -shutdown";
+    }),
+    steam_ctx->prep_cmds.end()
+  );
+
+  std::filesystem::remove(file_path);
+}
+#endif
+
 TEST(ProcessMigrationTests, ParseStripsSteamBigPictureMangoHudEvenWithExistingCleanupUndo) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
   const auto file_path = test_paths::root() / "steam_big_picture_existing_cleanup.json";
 
   const nlohmann::json apps = {
@@ -165,6 +241,11 @@ TEST(ProcessMigrationTests, ParseStripsSteamBigPictureMangoHudEvenWithExistingCl
 }
 
 TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
   const auto file_path = test_paths::root() / "steam_library_launch_normalization.json";
 
   const nlohmann::json apps = {
@@ -212,3 +293,56 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
 
   std::filesystem::remove(file_path);
 }
+
+#ifdef __linux__
+TEST(ProcessMigrationTests, ParseAddsSteamLibraryPrelaunchShutdownForLinuxCage) {
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = true;
+
+  const auto file_path = test_paths::root() / "steam_library_cage_prelaunch_shutdown.json";
+
+  const nlohmann::json apps = {
+    {"version", 2},
+    {"apps", {
+      {
+        {"name", "Indiana Jones and the Great Circle"},
+        {"uuid", "steam-library-cage-prelaunch"},
+        {"cmd", ""},
+        {"detached", {"setsid steam steam://rungameid/2677660"}},
+        {"prep-cmd", nlohmann::json::array()},
+        {"source", "steam"},
+        {"steam-appid", "2677660"},
+        {"image-path", "./assets/indiana.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Indiana Jones and the Great Circle";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+  ASSERT_EQ(steam_ctx->prep_cmds.size(), 2);
+  EXPECT_NE(
+    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
+      return cmd.do_cmd == "setsid bash -lc \"steam -shutdown >/dev/null 2>&1 || true; sleep 2\"" &&
+             cmd.undo_cmd.empty();
+    }),
+    steam_ctx->prep_cmds.end()
+  );
+  EXPECT_NE(
+    std::find_if(steam_ctx->prep_cmds.begin(), steam_ctx->prep_cmds.end(), [](const auto &cmd) {
+      return cmd.do_cmd.empty() && cmd.undo_cmd == "setsid steam -shutdown";
+    }),
+    steam_ctx->prep_cmds.end()
+  );
+
+  std::filesystem::remove(file_path);
+}
+#endif

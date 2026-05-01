@@ -293,6 +293,13 @@ namespace proc {
       return steam_big_picture_command_prefix(reference_cmd) + "steam -shutdown";
     }
 
+#ifdef __linux__
+    std::string canonical_steam_prelaunch_shutdown_command(const std::string &reference_cmd) {
+      return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
+             "bash -lc \"steam -shutdown >/dev/null 2>&1 || true; sleep 2\"";
+    }
+#endif
+
     std::string canonical_steam_library_bootstrap_command(const std::string &reference_cmd) {
       return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) + "steam -gamepadui";
     }
@@ -356,19 +363,59 @@ namespace proc {
              command_contains_steam_gamepadui_flag(cmd);
     }
 
-    bool prep_cmd_closes_steam_big_picture(const proc::cmd_t &cmd) {
-      return command_contains_steam_big_picture_close(cmd.do_cmd) ||
-             command_contains_steam_big_picture_close(cmd.undo_cmd);
-    }
-
     bool command_requests_steam_shutdown(const std::string &cmd) {
       return boost::icontains(cmd, "steam -shutdown");
     }
 
-    bool prep_cmd_stops_steam(const proc::cmd_t &cmd) {
-      return prep_cmd_closes_steam_big_picture(cmd) ||
-             command_requests_steam_shutdown(cmd.do_cmd) ||
+    bool prep_cmd_do_stops_steam(const proc::cmd_t &cmd) {
+      return command_contains_steam_big_picture_close(cmd.do_cmd) ||
+             command_requests_steam_shutdown(cmd.do_cmd);
+    }
+
+    bool prep_cmd_undo_stops_steam(const proc::cmd_t &cmd) {
+      return command_contains_steam_big_picture_close(cmd.undo_cmd) ||
              command_requests_steam_shutdown(cmd.undo_cmd);
+    }
+
+    std::string steam_launch_reference_command(const proc::ctx_t &ctx) {
+      if (!ctx.detached.empty()) {
+        return ctx.detached.front();
+      }
+
+      if (!ctx.cmd.empty()) {
+        return ctx.cmd;
+      }
+
+      return "steam";
+    }
+
+    void ensure_steam_prelaunch_shutdown(proc::ctx_t &ctx, const char *label) {
+#ifdef __linux__
+      if (!config::video.linux_display.use_cage_compositor) {
+        return;
+      }
+
+      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_do_stops_steam)) {
+        return;
+      }
+
+      auto shutdown_cmd = canonical_steam_prelaunch_shutdown_command(steam_launch_reference_command(ctx));
+      BOOST_LOG(info) << "process: added " << label << " pre-launch shutdown command [" << shutdown_cmd << ']';
+      ctx.prep_cmds.emplace_back(std::move(shutdown_cmd), ""s, false);
+#else
+      (void) ctx;
+      (void) label;
+#endif
+    }
+
+    void ensure_steam_cleanup_undo(proc::ctx_t &ctx, const char *label) {
+      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_undo_stops_steam)) {
+        return;
+      }
+
+      auto shutdown_cmd = canonical_steam_shutdown_command(steam_launch_reference_command(ctx));
+      BOOST_LOG(info) << "process: added " << label << " cleanup undo command [" << shutdown_cmd << ']';
+      ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
     }
 
     bool is_steam_library_app(const proc::ctx_t &ctx) {
@@ -448,22 +495,8 @@ namespace proc {
         }
       }
 
-      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_stops_steam)) {
-        return;
-      }
-
-      std::string reference_cmd;
-      if (!ctx.detached.empty()) {
-        reference_cmd = ctx.detached.front();
-      } else if (!ctx.cmd.empty()) {
-        reference_cmd = ctx.cmd;
-      } else {
-        reference_cmd = "steam";
-      }
-
-      auto shutdown_cmd = canonical_steam_shutdown_command(reference_cmd);
-      BOOST_LOG(info) << "process: added Steam Big Picture cleanup undo command [" << shutdown_cmd << ']';
-      ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
+      ensure_steam_prelaunch_shutdown(ctx, "Steam Big Picture");
+      ensure_steam_cleanup_undo(ctx, "Steam Big Picture");
     }
 
     void normalize_steam_library_app(proc::ctx_t &ctx) {
@@ -530,22 +563,8 @@ namespace proc {
         }
       }
 
-      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_stops_steam)) {
-        return;
-      }
-
-      std::string shutdown_reference_cmd;
-      if (!ctx.detached.empty()) {
-        shutdown_reference_cmd = ctx.detached.front();
-      } else if (!ctx.cmd.empty()) {
-        shutdown_reference_cmd = ctx.cmd;
-      } else {
-        shutdown_reference_cmd = "steam";
-      }
-
-      auto shutdown_cmd = canonical_steam_shutdown_command(shutdown_reference_cmd);
-      BOOST_LOG(info) << "process: added Steam library cleanup undo command [" << shutdown_cmd << ']';
-      ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
+      ensure_steam_prelaunch_shutdown(ctx, "Steam library");
+      ensure_steam_cleanup_undo(ctx, "Steam library");
     }
 
     std::optional<int> coerce_json_int(const nlohmann::json &value) {
