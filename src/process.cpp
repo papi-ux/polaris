@@ -293,13 +293,6 @@ namespace proc {
       return steam_big_picture_command_prefix(reference_cmd) + "steam -shutdown";
     }
 
-#ifdef __linux__
-    std::string canonical_steam_prelaunch_shutdown_command(const std::string &reference_cmd) {
-      return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
-             "bash -lc \"steam -shutdown >/dev/null 2>&1 || true; sleep 2\"";
-    }
-#endif
-
     std::string canonical_steam_library_bootstrap_command(const std::string &reference_cmd) {
       return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) + "steam -gamepadui";
     }
@@ -367,11 +360,6 @@ namespace proc {
       return boost::icontains(cmd, "steam -shutdown");
     }
 
-    bool prep_cmd_do_stops_steam(const proc::cmd_t &cmd) {
-      return command_contains_steam_big_picture_close(cmd.do_cmd) ||
-             command_requests_steam_shutdown(cmd.do_cmd);
-    }
-
     bool prep_cmd_undo_stops_steam(const proc::cmd_t &cmd) {
       return command_contains_steam_big_picture_close(cmd.undo_cmd) ||
              command_requests_steam_shutdown(cmd.undo_cmd);
@@ -387,25 +375,6 @@ namespace proc {
       }
 
       return "steam";
-    }
-
-    void ensure_steam_prelaunch_shutdown(proc::ctx_t &ctx, const char *label) {
-#ifdef __linux__
-      if (!config::video.linux_display.use_cage_compositor) {
-        return;
-      }
-
-      if (std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), prep_cmd_do_stops_steam)) {
-        return;
-      }
-
-      auto shutdown_cmd = canonical_steam_prelaunch_shutdown_command(steam_launch_reference_command(ctx));
-      BOOST_LOG(info) << "process: added " << label << " pre-launch shutdown command [" << shutdown_cmd << ']';
-      ctx.prep_cmds.emplace_back(std::move(shutdown_cmd), ""s, false);
-#else
-      (void) ctx;
-      (void) label;
-#endif
     }
 
     void ensure_steam_cleanup_undo(proc::ctx_t &ctx, const char *label) {
@@ -495,7 +464,6 @@ namespace proc {
         }
       }
 
-      ensure_steam_prelaunch_shutdown(ctx, "Steam Big Picture");
       ensure_steam_cleanup_undo(ctx, "Steam Big Picture");
     }
 
@@ -563,7 +531,6 @@ namespace proc {
         }
       }
 
-      ensure_steam_prelaunch_shutdown(ctx, "Steam library");
       ensure_steam_cleanup_undo(ctx, "Steam library");
     }
 
@@ -1941,6 +1908,8 @@ namespace proc {
     }
 
 #ifdef __linux__
+    bool cage_started_with_detached_client = false;
+
     auto reprobe_encoders_for_cage = [&]() -> bool {
       if (!config::video.linux_display.use_cage_compositor || rtsp_stream::session_count() != 0) {
         return true;
@@ -2128,6 +2097,7 @@ namespace proc {
         confighttp::emit_session_event("error", "Failed to start cage compositor");
         return 503;
       } else {
+        cage_started_with_detached_client = true;
         confighttp::set_session_state(confighttp::session_state_e::game_launching);
         confighttp::emit_session_event("game_launching", "Launching " + _app.name);
       }
@@ -2190,7 +2160,14 @@ namespace proc {
 #endif
 
     if (_app.cmd.empty()) {
-      BOOST_LOG(info) << "No commands configured, showing desktop..."sv;
+#ifdef __linux__
+      if (cage_started_with_detached_client) {
+        BOOST_LOG(info) << "App command is empty; continuing with cage startup client"sv;
+      } else
+#endif
+      {
+        BOOST_LOG(info) << "No commands configured, showing desktop..."sv;
+      }
       placebo = true;
     } else {
       boost::filesystem::path working_dir = _app.working_dir.empty() ?

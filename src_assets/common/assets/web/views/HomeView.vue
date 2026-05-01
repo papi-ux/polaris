@@ -468,7 +468,7 @@ const sessionModeDescription = computed(() => {
   if (!mode) return ''
   if (mode.includes('wayland')) return 'Wayland compositor active.'
   if (mode.includes('x11')) return 'X11 desktop session active.'
-  if (mode.includes('headless')) return 'Headless compositor active.'
+  if (mode.includes('headless')) return 'Headless Stream runtime active.'
   return 'Live compositor mode reported by the host.'
 })
 

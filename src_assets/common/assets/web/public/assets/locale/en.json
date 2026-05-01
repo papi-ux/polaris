@@ -349,14 +349,14 @@
     "global_prep_cmd_desc": "Configure a list of commands to be executed before or after running any application. If any of the specified preparation commands fail, the application launch process will be aborted.",
     "global_state_cmd": "Resume/Pause Commands",
     "global_state_cmd_desc": "Configure a list of commands to be executed when resuming(first client connects when no clients are connected) or pausing(all clients disconnect) any application.\nDo commands for resume and Undo command for pause.\nPlease make sure to clean up any side effects of the commands in the preparation undo commands.\nPlease note that pause command will not be executed when the session terminates.",
-    "headless_mode": "Headless Mode",
-    "headless_mode_desc": "Request headless streaming. Enable the isolated labwc compositor as well if you want Polaris to stop using the visible desktop as the stream path.",
+    "headless_mode": "Headless Stream",
+    "headless_mode_desc": "Starts games on a hidden stream-only display. Your desktop layout is not changed.",
     "linux_capture_profile": "Capture Telemetry Profiling",
     "linux_capture_profile_desc": "Emit periodic Linux capture timing summaries to the Polaris log for transport-path analysis.",
-    "linux_use_cage_compositor": "Isolated labwc Compositor",
+    "linux_use_cage_compositor": "Private Compositor Runtime",
     "linux_use_cage_compositor_desc": "Run Linux sessions inside Polaris' private labwc Wayland compositor instead of the current desktop session.",
-    "linux_prefer_gpu_native_capture": "Prefer GPU-Native Capture",
-    "linux_prefer_gpu_native_capture_desc": "Prefer DMA-BUF and other GPU-native capture paths, even when that may force the isolated compositor into a visible window instead of true headless mode.",
+    "linux_prefer_gpu_native_capture": "Windowed Stream GPU-Native Capture",
+    "linux_prefer_gpu_native_capture_desc": "Experimental. Shows the stream runtime as a desktop window when testing GPU-native capture.",
     "hevc_mode": "HEVC Support",
     "hevc_mode_0": "Polaris will advertise support for HEVC based on encoder capabilities (recommended)",
     "hevc_mode_1": "Polaris will not advertise support for HEVC",
@@ -696,8 +696,8 @@
     "restart_badge": "Restart",
     "items": {
       "headless_mode": {
-        "label": "Headless Mode",
-        "desc": "Enable Polaris' Linux headless path and its isolated compositor."
+        "label": "Headless Stream",
+        "desc": "Start sessions on a hidden stream-only display."
       },
       "adaptive_bitrate_enabled": {
         "label": "Adaptive Bitrate",

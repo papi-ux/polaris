@@ -727,7 +727,7 @@ namespace platf {
     bool prefer_ram_capture = (hwdevice_type == platf::mem_type_e::system);
     const bool gpu_native_capture_supported = wl::supports_gpu_native_capture(hwdevice_type);
     bool prefer_linear_dmabuf = false;
-    bool attempt_headless_extcopy = false;
+    bool using_headless_ram_capture = false;
 #ifdef __linux__
     if (!prefer_ram_capture &&
         config::video.linux_display.use_cage_compositor &&
@@ -742,7 +742,8 @@ namespace platf {
         }
         prefer_linear_dmabuf = true;
       } else if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
-        attempt_headless_extcopy = true;
+        prefer_ram_capture = true;
+        using_headless_ram_capture = true;
       } else {
         prefer_ram_capture = true;
 
@@ -759,18 +760,7 @@ namespace platf {
       BOOST_LOG(info)
         << "wlr: Using RAM capture path because this build does not include a GPU-native uploader for the selected encoder"sv;
       prefer_ram_capture = true;
-      attempt_headless_extcopy = false;
       prefer_linear_dmabuf = false;
-    }
-
-    if (attempt_headless_extcopy && gpu_native_capture_supported) {
-      auto wlr = std::make_shared<wl::wlr_extcopy_vram_t>();
-      if (!wlr->init(hwdevice_type, display_name, config)) {
-        return wlr;
-      }
-
-      BOOST_LOG(info) << "wlr: Headless ext-image-copy-capture DMA-BUF path unavailable; falling back to RAM capture"sv;
-      prefer_ram_capture = true;
     }
 
     if (!prefer_ram_capture && gpu_native_capture_supported) {
@@ -785,9 +775,9 @@ namespace platf {
 
     auto wlr = std::make_shared<wl::wlr_ram_t>();
     wlr->prefer_shm_screencopy = prefer_ram_capture;
-    if (attempt_headless_extcopy && cage_display_router::should_log_headless_ram_capture_warning()) {
+    if (using_headless_ram_capture && cage_display_router::should_log_headless_ram_capture_warning()) {
       BOOST_LOG(info)
-        << "wlr: Using RAM capture path for headless labwc because the experimental ext-image-copy-capture DMA-BUF path was unavailable on this stack"sv;
+        << "wlr: Using RAM capture path for headless labwc because GPU-native override is not active"sv;
     }
     if (wlr->init(hwdevice_type, display_name, config)) {
       return nullptr;

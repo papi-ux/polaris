@@ -18,6 +18,7 @@ const props = defineProps({
 const defaults = {
   headless_mode: 'disabled',
   linux_use_cage_compositor: 'disabled',
+  linux_prefer_gpu_native_capture: 'disabled',
   adaptive_bitrate_enabled: 'disabled',
   ai_enabled: 'disabled',
   stream_audio: 'enabled',
@@ -39,6 +40,7 @@ const responseOnlyConfigKeys = [
   'runtime_requested_headless',
   'runtime_effective_headless',
   'runtime_gpu_native_override_active',
+  'stream_display_mode',
 ]
 
 function isEnabled(key) {
@@ -90,6 +92,7 @@ async function toggle(key) {
     existing[key] = newVal
     if (key === 'headless_mode' && platform === 'linux') {
       existing.linux_use_cage_compositor = newVal
+      existing.linux_prefer_gpu_native_capture = 'disabled'
     }
 
     const response = await fetch('./api/config', {
@@ -102,6 +105,7 @@ async function toggle(key) {
     syncKey(key, newVal)
     if (key === 'headless_mode' && platform === 'linux') {
       syncKey('linux_use_cage_compositor', newVal)
+      syncKey('linux_prefer_gpu_native_capture', 'disabled')
     }
     notifyChange(key, newVal)
     await loadConfig()

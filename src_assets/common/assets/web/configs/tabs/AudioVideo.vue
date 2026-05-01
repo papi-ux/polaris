@@ -30,6 +30,81 @@ const config = ref(props.config)
 const isLinux = computed(() => props.platform === 'linux')
 const isWindows = computed(() => props.platform === 'windows')
 
+const streamDisplayModes = [
+  {
+    id: 'headless_stream',
+    title: 'Headless Stream',
+    badge: 'Recommended',
+    copy: 'Recommended. Starts games on a hidden stream-only display. Your desktop layout is not changed.',
+    restartCopy: 'Requires restart. Polaris will start sessions on a hidden stream-only runtime.',
+  },
+  {
+    id: 'host_virtual_display',
+    title: 'Host Virtual Display',
+    badge: 'Compatibility',
+    copy: 'Compatibility mode. Creates a display the operating system can see. Your desktop may rearrange or remember it.',
+    restartCopy: 'Requires restart. KDE, GNOME, or display tools may see this as a monitor.',
+  },
+  {
+    id: 'desktop_display',
+    title: 'Desktop Display',
+    badge: 'Visible desktop',
+    copy: 'Streams from your current desktop session.',
+    restartCopy: 'Requires restart. Polaris will stream from the current desktop session.',
+  },
+  {
+    id: 'windowed_stream',
+    title: 'Windowed Stream',
+    badge: 'Experimental',
+    copy: 'Experimental. Shows the stream runtime as a desktop window when testing GPU-native capture.',
+    restartCopy: 'Requires restart. Windowed Stream is experimental and should stay limited to GPU-native capture testing.',
+  },
+]
+
+const streamDisplayMode = computed(() => {
+  const headless = config.value.headless_mode === 'enabled'
+  const cage = config.value.linux_use_cage_compositor === 'enabled'
+  const gpuNative = config.value.linux_prefer_gpu_native_capture === 'enabled'
+
+  if (headless && cage && gpuNative) return 'windowed_stream'
+  if (headless && cage) return 'headless_stream'
+  if (headless) return 'host_virtual_display'
+  return 'desktop_display'
+})
+
+const selectedStreamDisplayMode = computed(() => (
+  streamDisplayModes.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes[0]
+))
+
+function setEnabledConfig(key, enabled) {
+  config.value[key] = enabled ? 'enabled' : 'disabled'
+}
+
+function setStreamDisplayMode(mode) {
+  switch (mode) {
+    case 'headless_stream':
+      setEnabledConfig('headless_mode', true)
+      setEnabledConfig('linux_use_cage_compositor', true)
+      setEnabledConfig('linux_prefer_gpu_native_capture', false)
+      break
+    case 'host_virtual_display':
+      setEnabledConfig('headless_mode', true)
+      setEnabledConfig('linux_use_cage_compositor', false)
+      setEnabledConfig('linux_prefer_gpu_native_capture', false)
+      break
+    case 'desktop_display':
+      setEnabledConfig('headless_mode', false)
+      setEnabledConfig('linux_use_cage_compositor', false)
+      setEnabledConfig('linux_prefer_gpu_native_capture', false)
+      break
+    case 'windowed_stream':
+      setEnabledConfig('headless_mode', true)
+      setEnabledConfig('linux_use_cage_compositor', true)
+      setEnabledConfig('linux_prefer_gpu_native_capture', true)
+      break
+  }
+}
+
 const validateFallbackMode = (event) => {
   const value = event.target.value;
   if (!value.match(/^\d+x\d+x\d+(\.\d+)?$/)) {
@@ -54,89 +129,120 @@ const validateFallbackMode = (event) => {
         <div v-if="isLinux" class="settings-subtle-surface space-y-4">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <div class="text-sm font-medium text-silver flex items-center gap-2">
-                Headless Mode
-                <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-ice">Primary path</span>
+              <div class="section-kicker">Stream Display Mode</div>
+              <div class="mt-2 text-sm text-storm">Choose where Polaris starts and captures Linux sessions.</div>
+            </div>
+            <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-ice">
+              {{ selectedStreamDisplayMode.title }}
+            </span>
+          </div>
+
+          <div class="grid gap-3 xl:grid-cols-2">
+            <button
+              v-for="mode in streamDisplayModes"
+              :key="mode.id"
+              type="button"
+              class="focus-ring min-h-[112px] rounded-lg border p-4 text-left transition"
+              :class="streamDisplayMode === mode.id ? 'border-ice/60 bg-ice/10' : 'border-storm/40 bg-deep/40 hover:border-storm/70'"
+              @click="setStreamDisplayMode(mode.id)"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="text-sm font-semibold text-silver">{{ mode.title }}</div>
+                <span
+                  class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                  :class="mode.id === 'headless_stream'
+                    ? 'border-green-400/30 bg-green-400/10 text-green-300'
+                    : mode.id === 'windowed_stream'
+                      ? 'border-amber-300/40 bg-amber-300/10 text-amber-200'
+                      : 'border-storm/40 bg-storm/10 text-storm'"
+                >
+                  {{ mode.badge }}
+                </span>
               </div>
-              <div class="mt-1 text-sm text-storm">Request hidden-runtime streaming instead of treating the visible desktop as the stream target.</div>
-            </div>
-            <label class="relative inline-flex shrink-0 items-center cursor-pointer">
-              <input
-                type="checkbox"
-                class="sr-only peer"
-                :checked="config.headless_mode === 'enabled'"
-                @change="config.headless_mode = $event.target.checked ? 'enabled' : 'disabled'"
-              />
-              <div class="h-5 w-9 rounded-full bg-storm/40 transition-colors peer peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-            </label>
+              <div class="mt-3 text-sm leading-relaxed text-storm">{{ mode.copy }}</div>
+            </button>
           </div>
 
-          <div
-            v-if="config.headless_mode === 'enabled' && config.linux_use_cage_compositor !== 'enabled'"
-            class="settings-warning-surface"
-          >
-            Requires restart. Headless is only requested right now. Enable <span class="font-semibold text-silver">Isolated labwc Compositor</span> below for the true hidden runtime instead of falling back to the live desktop.
+          <div class="settings-warning-surface">
+            {{ selectedStreamDisplayMode.restartCopy }}
           </div>
 
-          <div
-            v-else-if="config.headless_mode === 'enabled'"
-            class="settings-warning-surface"
-          >
-            Requires restart. Polaris will move streams into a private labwc runtime instead of the visible desktop, which eliminates most KWin rules, live-desktop preview, and focus-stealing edge cases.
-          </div>
+          <details class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
+            <summary class="settings-disclosure-summary p-4">
+              <div>
+                <div class="section-kicker">Advanced</div>
+                <h4 class="mt-2 text-sm font-semibold text-silver">Advanced Linux runtime flags</h4>
+                <div class="mt-1 text-sm text-storm">Direct access to the existing config keys used by the mode selector.</div>
+              </div>
+              <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+            </summary>
 
-          <div class="grid gap-4 xl:grid-cols-2">
-            <div class="surface-muted p-4">
-              <div class="text-sm font-medium text-silver">Isolated labwc Compositor</div>
-              <div class="mt-1 text-sm text-storm">Run streams inside Polaris' private Wayland compositor instead of the current KDE session.</div>
-              <label class="mt-4 flex items-center justify-between gap-4">
-                <span class="text-xs uppercase tracking-[0.18em] text-storm">Required for true Linux headless</span>
-                <input
-                  type="checkbox"
-                  class="sr-only peer"
-                  :checked="config.linux_use_cage_compositor === 'enabled'"
-                  @change="config.linux_use_cage_compositor = $event.target.checked ? 'enabled' : 'disabled'"
-                >
-                <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-              </label>
-            </div>
+            <div class="grid gap-4 p-4 pt-0 xl:grid-cols-2">
+              <div class="surface-muted p-4">
+                <div class="text-sm font-medium text-silver">Hidden-output request</div>
+                <div class="mt-1 text-sm text-storm">Existing headless_mode config key. Enabled by Headless Stream and Host Virtual Display.</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_mode</div>
+                <label class="mt-4 flex items-center justify-between gap-4">
+                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Requested</span>
+                  <input
+                    type="checkbox"
+                    class="sr-only peer"
+                    :checked="config.headless_mode === 'enabled'"
+                    @change="config.headless_mode = $event.target.checked ? 'enabled' : 'disabled'"
+                  >
+                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                </label>
+              </div>
 
-            <div class="surface-muted p-4">
-              <div class="text-sm font-medium text-silver">Prefer GPU-Native Capture</div>
-              <div class="mt-1 text-sm text-storm">Keep DMA-BUF and other GPU capture paths first, even if that can force the isolated compositor into a visible window.</div>
-              <label class="mt-4 flex items-center justify-between gap-4">
-                <span class="text-xs uppercase tracking-[0.18em] text-storm">Performance first</span>
-                <input
-                  type="checkbox"
-                  class="sr-only peer"
-                  :checked="config.linux_prefer_gpu_native_capture === 'enabled'"
-                  @change="config.linux_prefer_gpu_native_capture = $event.target.checked ? 'enabled' : 'disabled'"
-                >
-                <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-              </label>
-              <div
-                v-if="config.headless_mode === 'enabled' && config.linux_use_cage_compositor === 'enabled' && config.linux_prefer_gpu_native_capture === 'enabled'"
-                class="mt-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
-              >
-                This can override true headless mode and make labwc visible on the desktop when Polaris finds a faster GPU-native capture path.
+              <div class="surface-muted p-4">
+                <div class="text-sm font-medium text-silver">Private compositor runtime</div>
+                <div class="mt-1 text-sm text-storm">Existing linux_use_cage_compositor config key. Enabled by Headless Stream and Windowed Stream.</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_use_cage_compositor</div>
+                <label class="mt-4 flex items-center justify-between gap-4">
+                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Use labwc</span>
+                  <input
+                    type="checkbox"
+                    class="sr-only peer"
+                    :checked="config.linux_use_cage_compositor === 'enabled'"
+                    @change="config.linux_use_cage_compositor = $event.target.checked ? 'enabled' : 'disabled'"
+                  >
+                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                </label>
+              </div>
+
+              <div class="surface-muted p-4">
+                <div class="text-sm font-medium text-silver">GPU-native capture preference</div>
+                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled only by Windowed Stream.</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_prefer_gpu_native_capture</div>
+                <label class="mt-4 flex items-center justify-between gap-4">
+                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Experimental</span>
+                  <input
+                    type="checkbox"
+                    class="sr-only peer"
+                    :checked="config.linux_prefer_gpu_native_capture === 'enabled'"
+                    @change="config.linux_prefer_gpu_native_capture = $event.target.checked ? 'enabled' : 'disabled'"
+                  >
+                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                </label>
+              </div>
+
+              <div class="surface-muted p-4">
+                <div class="text-sm font-medium text-silver">Capture telemetry profiling</div>
+                <div class="mt-1 text-sm text-storm">Emit timing summaries while validating capture backends.</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_capture_profile</div>
+                <label class="mt-4 flex items-center justify-between gap-4">
+                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Diagnostics</span>
+                  <input
+                    type="checkbox"
+                    class="sr-only peer"
+                    :checked="config.linux_capture_profile === 'enabled'"
+                    @change="config.linux_capture_profile = $event.target.checked ? 'enabled' : 'disabled'"
+                  >
+                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                </label>
               </div>
             </div>
-
-            <div class="surface-muted p-4">
-              <div class="text-sm font-medium text-silver">Capture Telemetry Profiling</div>
-              <div class="mt-1 text-sm text-storm">Emit timing summaries while validating capture backends.</div>
-              <label class="mt-4 flex items-center justify-between gap-4">
-                <span class="text-xs uppercase tracking-[0.18em] text-storm">Diagnostics</span>
-                <input
-                  type="checkbox"
-                  class="sr-only peer"
-                  :checked="config.linux_capture_profile === 'enabled'"
-                  @change="config.linux_capture_profile = $event.target.checked ? 'enabled' : 'disabled'"
-                >
-                <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-              </label>
-            </div>
-          </div>
+          </details>
         </div>
 
         <div v-if="isWindows" class="settings-subtle-surface">

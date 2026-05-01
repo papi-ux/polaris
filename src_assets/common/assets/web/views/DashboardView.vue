@@ -761,7 +761,13 @@ function titleizeToken(value) {
 }
 
 function modeLabelFromBool(value) {
-  return value ? 'Headless' : 'Windowed'
+  return value ? 'Headless Stream' : 'Windowed Stream'
+}
+
+function streamDisplayModeLabel(statsPayload) {
+  const explicitMode = statsPayload?.stream_display_mode
+  if (explicitMode) return explicitMode
+  return modeLabelFromBool(Boolean(statsPayload?.runtime_effective_headless))
 }
 
 const runtimeBackendLabel = computed(() => {
@@ -775,17 +781,23 @@ const runtimeRequestedMode = computed(() => {
 
 const runtimeEffectiveMode = computed(() => {
   if (!stats.value?.streaming) return '--'
-  return modeLabelFromBool(Boolean(stats.value?.runtime_effective_headless))
+  return streamDisplayModeLabel(stats.value)
 })
 
 const runtimeModeTone = computed(() => {
   if (!stats.value?.streaming) return 'bg-storm/20 text-storm'
-  return stats.value?.runtime_effective_headless ? 'bg-accent/15 text-accent' : 'bg-amber-500/15 text-amber-300'
+  const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
+  if (mode.includes('headless stream')) return 'bg-accent/15 text-accent'
+  if (mode.includes('windowed stream') || mode.includes('host virtual')) return 'bg-amber-500/15 text-amber-300'
+  return 'bg-storm/20 text-storm'
 })
 
 const runtimeEffectiveTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
-  return stats.value?.runtime_effective_headless ? 'text-accent' : 'text-amber-300'
+  const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
+  if (mode.includes('headless stream')) return 'text-accent'
+  if (mode.includes('windowed stream') || mode.includes('host virtual')) return 'text-amber-300'
+  return 'text-silver'
 })
 
 const runtimeOverrideLabel = computed(() => {
@@ -1072,9 +1084,9 @@ const recommendations = computed(() => {
   if (gpu.value && gpu.value.utilization_pct < 30 && s.encode_time_ms < 4)
     recs.push({ color: 'text-green-400', message: `GPU utilization is low (${gpu.value.utilization_pct}%) with fast encode — you have headroom for higher resolution or quality.` })
 
-  // Headless mode recommendations
+  // Stream display mode recommendations
   if (!s.headless_mode && s.streaming)
-    recs.push({ color: 'text-accent', message: `Enable Headless Mode in Audio/Video settings for invisible streaming. If GPU-native capture is preferred, Polaris can still switch to a visible compositor window when performance requires it.` })
+    recs.push({ color: 'text-accent', message: `Use Headless Stream in Audio/Video settings for hidden stream-only sessions that leave the desktop layout alone.` })
 
   // AI optimizer recommendations
   if (!s.ai_enabled && s.streaming)
