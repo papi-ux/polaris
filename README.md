@@ -635,7 +635,7 @@ debugging, comparison, and drafting aids, especially when validating unfamiliar
 Linux compositor, packaging, and client behavior.
 
 Those tools do not decide what Polaris is or what ships. I review changes,
-test the pieces I can test, and own the final decisions around validation,
+test every aspect, and own the final decisions around validation,
 trust boundaries, and release quality.
 
 ## Contributing
@@ -654,9 +654,7 @@ Contributions are welcome, especially focused fixes, docs, translations, packagi
 ## Donate
 
 Polaris is a spare-time project built to make Linux game streaming safer,
-clearer, and easier to trust. If it becomes part of your setup, that alone
-matters. Donations are appreciated but never expected; bug reports, testing
-notes, and thoughtful feedback help just as much.
+clearer, and easier to trust. If it becomes part of your setup, that alone makes my day, donations are appreciated but never expected. They help with my actual coffee budget, which coffee obviously keeps the project moving. Bug reports, testing notes, and thoughtful feedback help too.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=for-the-badge&logo=ko-fi&labelColor=1a1a2e)](https://ko-fi.com/papiux)
 &nbsp;
