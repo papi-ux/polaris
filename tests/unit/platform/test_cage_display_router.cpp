@@ -167,6 +167,17 @@ TEST(CageDisplayRouterPolicyTests, OutputModeParserRejectsNonCurrentRequestedMod
     1080
   ));
 }
+
+TEST(CageDisplayRouterPolicyTests, WaylandSocketNameParserAcceptsNumberedSocketsOnly) {
+  EXPECT_TRUE(cage_display_router::is_wayland_socket_name_for_tests("wayland-0"));
+  EXPECT_TRUE(cage_display_router::is_wayland_socket_name_for_tests("wayland-50"));
+  EXPECT_TRUE(cage_display_router::is_wayland_socket_name_for_tests("wayland-123"));
+
+  EXPECT_FALSE(cage_display_router::is_wayland_socket_name_for_tests("wayland-"));
+  EXPECT_FALSE(cage_display_router::is_wayland_socket_name_for_tests("wayland-1.lock"));
+  EXPECT_FALSE(cage_display_router::is_wayland_socket_name_for_tests("pipewire-0"));
+  EXPECT_FALSE(cage_display_router::is_wayland_socket_name_for_tests("nested-wayland-1"));
+}
 #endif
 #else
 TEST(CageDisplayRouterPolicyTests, LinuxOnly) {

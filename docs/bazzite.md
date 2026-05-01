@@ -254,7 +254,7 @@ sudo rpm-ostree uninstall -r polaris
 
 ## Known Bazzite Log Messages
 
-`labwc: No new Wayland socket appeared within 5s` means the isolated `labwc`
+`labwc: No new Wayland socket appeared within 10s` means the isolated `labwc`
 runtime failed to start or exited before creating its Wayland socket. Confirm the
 matching Fedora RPM was installed, rebooted into the new deployment, and retry
 from Desktop Mode first.
