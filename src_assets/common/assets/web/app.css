@@ -598,6 +598,7 @@ textarea {
 
 .dashboard-live-stage {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.95fr)];
+  align-items: start;
 }
 
 .dashboard-live-stage.is-preview-expanded {
@@ -610,6 +611,10 @@ textarea {
 
 .dashboard-preview-panel {
   @apply rounded-2xl border border-storm/20 bg-deep/35 p-4;
+}
+
+.dashboard-live-main {
+  @apply space-y-4;
 }
 
 .dashboard-preview-header {
@@ -674,14 +679,15 @@ textarea {
 
 .dashboard-live-side {
   @apply space-y-4;
+  align-self: start;
 }
 
 .dashboard-metric-grid {
-  @apply mt-3 grid gap-3 sm:grid-cols-2;
+  @apply mt-3 grid gap-2 sm:grid-cols-2;
 }
 
 .dashboard-metric-tile {
-  @apply rounded-2xl border border-storm/15 bg-void/35 px-4 py-3;
+  @apply rounded-2xl border border-storm/15 bg-void/35 px-3.5 py-3;
 }
 
 .dashboard-metric-label {
@@ -704,8 +710,20 @@ textarea {
   @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
 }
 
+.dashboard-runtime-pill-grid {
+  @apply mt-3 flex flex-wrap gap-2;
+}
+
+.dashboard-runtime-pill {
+  @apply inline-flex items-center gap-2 rounded-full border border-storm/15 bg-void/35 px-3 py-1.5;
+}
+
 .dashboard-list-row {
   @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2.5;
+}
+
+.dashboard-client-row {
+  @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2;
 }
 
 .dashboard-empty-state {
@@ -713,7 +731,35 @@ textarea {
 }
 
 .dashboard-live-support-grid {
-  @apply grid gap-4 xl:grid-cols-2;
+  @apply grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)];
+}
+
+.dashboard-support-card {
+  @apply space-y-4;
+}
+
+.dashboard-support-subsection {
+  @apply mt-4 space-y-2 border-t border-storm/15 pt-4;
+}
+
+.dashboard-support-subtitle {
+  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+}
+
+.dashboard-context-card {
+  @apply space-y-4;
+}
+
+.dashboard-context-section {
+  @apply space-y-3 border-t border-storm/15 pt-4 first:border-t-0 first:pt-0;
+}
+
+.dashboard-context-header {
+  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+}
+
+.dashboard-rail-footnote {
+  @apply mt-3 text-[11px] text-storm;
 }
 
 .dashboard-telemetry-card {
@@ -721,7 +767,7 @@ textarea {
 }
 
 .dashboard-telemetry-grid {
-  @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
+  @apply grid gap-3 md:grid-cols-2;
 }
 
 .troubleshooting-action-button {
