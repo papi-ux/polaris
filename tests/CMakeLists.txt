@@ -81,6 +81,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
 )
 
 set(TEST_AUDIT_SOURCES
