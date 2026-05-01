@@ -17,8 +17,8 @@ If you change `port` in `polaris.conf`, the web UI moves to `https://localhost:<
 
 ```ini
 headless_mode = enabled
-linux_use_cage_compositor = true
-linux_prefer_gpu_native_capture = enabled
+linux_use_cage_compositor = enabled
+linux_prefer_gpu_native_capture = disabled
 trusted_subnets = ["10.0.0.0/24"]
 encoder = nvenc
 adaptive_bitrate_enabled = enabled
@@ -32,8 +32,8 @@ These are the settings most people should confirm first on a Linux host.
 | Key | Typical value | What it controls |
 | --- | --- | --- |
 | `headless_mode` | `enabled` | Use an isolated invisible runtime instead of the physical desktop |
-| `linux_use_cage_compositor` | `true` | Enable the dedicated compositor path |
-| `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF and other GPU-native capture paths |
+| `linux_use_cage_compositor` | `enabled` | Enable the dedicated compositor path |
+| `linux_prefer_gpu_native_capture` | `disabled` | Keep true headless labwc behavior for first validation; enable only after testing GPU-native capture on your stack |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |

@@ -38,12 +38,13 @@ Confirm these settings first:
 
 ```ini
 headless_mode = enabled
-linux_use_cage_compositor = true
-linux_prefer_gpu_native_capture = enabled
+linux_use_cage_compositor = enabled
+linux_prefer_gpu_native_capture = disabled
 ```
 
 That is the intended Linux path. It avoids touching your normal desktop layout and reduces display
-mode churn after a session ends.
+mode churn after a session ends. Enable GPU-native capture later only after the headless path is
+working on your driver and compositor stack.
 
 ## Steam Big Picture black screen or tiny window
 

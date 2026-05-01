@@ -6,8 +6,10 @@
 
 **Self-hosted game streaming for Linux.**
 
-Stream your PC games to Moonlight clients without wrecking your desktop layout.
-Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web UI, and clear runtime telemetry so you can see what the host is actually doing.
+Stream PC games to Nova and Moonlight clients without letting the stream take
+over your desktop. Polaris combines an isolated Linux compositor runtime,
+GameStream-compatible pairing, GPU-aware capture, and a web console that shows
+what the host is actually doing.
 
 [![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1a1a2e)](https://github.com/papi-ux/polaris/stargazers)
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
@@ -28,10 +30,10 @@ Polaris combines an isolated compositor runtime, GPU-aware capture, a modern web
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42, Fedora 43, Fedora 44, and Arch Linux are the most validated direct release package paths. Bazzite and Ubuntu 24.04 packages exist for testing, but they are experimental, less validated on real hardware, and more prone to breaking across distro, compositor, driver, and GPU combinations. Other Debian-family distros remain source-build oriented for now.
+> Polaris is a Linux host today. Fedora 42, Fedora 43, Fedora 44, and Arch Linux are the recommended package paths. Bazzite Desktop Mode has NVIDIA validation with the headless `labwc` runtime, but real Steam/Game Mode validation is still pending on a Game Mode-capable image. Ubuntu 24.04 packages remain experimental.
 
 > [!NOTE]
-> The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite `rpm-ostree` path and Ubuntu DEB are earlier validation paths and should be treated as more fragile.
+> The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite `rpm-ostree` path is usable for testers who follow the Bazzite guide. The Ubuntu DEB should still be treated as a fragile validation path.
 
 ## Quick Start
 
@@ -71,7 +73,7 @@ sudo polaris --setup-host
 systemctl --user enable --now polaris
 ```
 
-Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. Use the release RPM that matches your Bazzite Fedora base, such as `Polaris-fedora44-x86_64.rpm` on Bazzite 44. See the [Bazzite install guide](docs/bazzite.md) for caveats, rollback, and validation notes.
+Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. Use the release RPM that matches your Bazzite Fedora base, such as `Polaris-fedora44-x86_64.rpm` on Bazzite 44. See the [Bazzite install guide](docs/bazzite.md) for the current Desktop Mode validation notes, Game Mode status, rollback commands, and `/usr/local` KMS setup.
 
 ### Extremely experimental install: Ubuntu 24.04 DEB
 
@@ -101,8 +103,8 @@ polaris
 1. Open the first-run setup at **https://localhost:47990/#/welcome**.
 2. Confirm the recommended Linux path:
    - `headless_mode = enabled`
-   - `linux_use_cage_compositor = true`
-   - `linux_prefer_gpu_native_capture = enabled`
+   - `linux_use_cage_compositor = enabled`
+   - `linux_prefer_gpu_native_capture = disabled`
 3. Pair a client:
    - **Trusted Pair (TOFU)** on a trusted LAN subnet
    - **QR** pairing for Nova
@@ -263,7 +265,7 @@ systemctl --user enable --now polaris
 | Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
 | Fedora 43 | Recommended | Official release asset: `Polaris-fedora43-x86_64.rpm` |
 | Fedora 44 | Recommended | Official release asset: `Polaris-fedora44-x86_64.rpm` |
-| Bazzite | Experimental | Use the matching Fedora RPM through `rpm-ostree`; see [Bazzite install guide](docs/bazzite.md) |
+| Bazzite | Experimental | Desktop Mode validated on NVIDIA with headless `labwc`; real Steam/Game Mode pending on a Game Mode-capable image; see [Bazzite install guide](docs/bazzite.md) |
 | Ubuntu 24.04 | Extremely experimental | Official release asset: `Polaris-ubuntu24.04-x86_64.deb`; source build also works, but this path needs more real-hardware validation |
 | Arch Linux | Recommended | Official release asset: `Polaris-arch-x86_64.pkg.tar.zst`; source and local PKGBUILD generation are also supported |
 | Debian-family distros | Supported from source | Less turnkey than Fedora right now |
@@ -275,7 +277,7 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- Bazzite support is experimental until Desktop Mode, Game Mode, AMD/NVIDIA, and Steam Deck client flows are validated on more real hardware.
+- Bazzite support is experimental. Desktop Mode has NVIDIA validation with the headless `labwc` runtime, while real Steam/Game Mode, AMD, and Steam Deck client flows still need more hardware coverage.
 - Ubuntu 24.04 DEB packaging is extremely experimental and needs broader real-hardware validation; other Debian-family distros are still source-build oriented.
 - Fedora 42, Fedora 43, Fedora 44, Ubuntu 24.04, and Arch Linux have direct x86_64 release package assets today.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
@@ -298,7 +300,7 @@ Polaris takes a different route:
 
 | Area | What You Get |
 |---|---|
-| Runtime | Isolated `labwc` streaming compositor |
+| Runtime | Isolated headless `labwc` streaming compositor |
 | Capture | GPU-native capture when available, clear fallback visibility when not |
 | Dashboard | Preview, charts, runtime path, controls, and diagnostics |
 | Library | Steam, Lutris, Heroic imports, SteamGridDB art, and Linux Steam launch handling that keeps Gamepad UI inside the isolated stream runtime |
@@ -417,7 +419,8 @@ flowchart TB
 <summary><b>Linux runtime notes</b></summary>
 
 - `headless_mode` requests an invisible `labwc` runtime.
-- `linux_prefer_gpu_native_capture=enabled` keeps the intent to prefer DMA-BUF and GPU-native capture, but Polaris will surface SHM fallback explicitly when the current stack cannot hold the fast path.
+- `linux_use_cage_compositor=enabled` routes launched apps into Polaris' private Wayland compositor.
+- `linux_prefer_gpu_native_capture=disabled` keeps true headless labwc behavior as the first validation path. Enable it only when you want to prefer DMA-BUF or another GPU-native capture path on a stack you have already tested.
 - Deferred headless encoder capabilities are primed before first launch negotiation so Main10 support is advertised correctly on the first real launch.
 - Runtime stats surface the requested mode, effective mode, capture transport, frame residency, and frame format.
 - AI recovery stores both latest-session results and rolling trend data, grades sessions against the actual target FPS, and invalidates poor cached recommendations automatically.
@@ -446,8 +449,8 @@ Config file: `~/.config/polaris/polaris.conf`
 ```ini
 # Isolated compositor path
 headless_mode = enabled
-linux_use_cage_compositor = true
-linux_prefer_gpu_native_capture = enabled
+linux_use_cage_compositor = enabled
+linux_prefer_gpu_native_capture = disabled
 
 # Pairing on your trusted LAN
 trusted_subnets = ["10.0.0.0/24"]
@@ -515,8 +518,8 @@ ai_base_url = http://127.0.0.1:11434/v1
 | Key | Default | Description |
 |-----|---------|-------------|
 | `headless_mode` | `disabled` | Request an invisible `labwc` runtime |
-| `linux_use_cage_compositor` | `false` | Enable the isolated compositor runtime |
-| `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF and GPU-native capture when the stack supports it |
+| `linux_use_cage_compositor` | `disabled` | Enable the isolated compositor runtime |
+| `linux_prefer_gpu_native_capture` | `disabled` | Prefer DMA-BUF and GPU-native capture when enabled and supported by the stack |
 | `trusted_subnets` | `[]` | CIDR blocks that enable Trusted Pair (TOFU) |
 | `encoder` | `nvenc` | Encoder: `nvenc`, `vaapi`, `software` |
 | `ai_enabled` | `disabled` | Enable AI-assisted stream optimization |
@@ -601,7 +604,7 @@ Yes. Set `max_sessions` above `1`. Polaris tracks owner vs viewer roles explicit
 <details>
 <summary><b>My KDE layout gets corrupted after streaming</b></summary>
 
-That failure mode is the reason Polaris exists. Enable `headless_mode = enabled` and `linux_use_cage_compositor = true`, and Polaris will stop treating your physical displays as the stream path.
+That failure mode is the reason Polaris exists. Enable `headless_mode = enabled` and `linux_use_cage_compositor = enabled`, and Polaris will stop treating your physical displays as the stream path.
 
 </details>
 
@@ -627,9 +630,13 @@ The AI optimizer is optional and disabled by default. When enabled, it sends dev
 
 ## AI Transparency
 
-Polaris is built by me and only me, with help from tools like ClaudeCode 4.7, OpenAI Codex 5.5, and local models.
+Polaris is a maintainer-led project. I use AI-assisted tools as research,
+debugging, comparison, and drafting aids, especially when validating unfamiliar
+Linux compositor, packaging, and client behavior.
 
-I use them as a sounding board and look for ways to cut a lot of fat from the debugging process. I also use it to compare approaches, draft tests and docs, research the headless-first components, and spot things I might have missed. They do not decide what Polaris is or what ships. I have been around engineering and IT for a while, I'm not a vibe-coder, but as we all know in this industry, the capabilites of these tools definitely have solid pratical use cases for working with them. Regardless, I still am adament and always careful about validation, trust boundaries, and release quality. I review the work, test the pieces I can test, and own the final decisions.
+Those tools do not decide what Polaris is or what ships. I review changes,
+test the pieces I can test, and own the final decisions around validation,
+trust boundaries, and release quality.
 
 ## Contributing
 
@@ -646,7 +653,10 @@ Contributions are welcome, especially focused fixes, docs, translations, packagi
 
 ## Donate
 
-Polaris is a fun project I build in my spare time simply because I want more people to make the switch to Linux gaming while making users safer, clearer, and easier to trust. If it becomes part of your setup, that alone makes my day, donations are appreciated but never expected. They help with my actual coffee budget, which coffee obviously keeps the project moving. Bug reports, testing notes, and thoughtful feedback help too.
+Polaris is a spare-time project built to make Linux game streaming safer,
+clearer, and easier to trust. If it becomes part of your setup, that alone
+matters. Donations are appreciated but never expected; bug reports, testing
+notes, and thoughtful feedback help just as much.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=for-the-badge&logo=ko-fi&labelColor=1a1a2e)](https://ko-fi.com/papiux)
 &nbsp;
