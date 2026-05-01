@@ -4,12 +4,16 @@
  */
 #pragma once
 
+// standard includes
+#include <optional>
+
 // lib includes
 #include <boost/locale.hpp>
 #include <inputtino/input.hpp>
 #include <libevdev/libevdev.h>
 
 // local includes
+#include "inputtino_wayland_virtual_input.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -29,32 +33,46 @@ namespace platf {
 
   struct input_raw_t {
     input_raw_t():
-        mouse(inputtino::Mouse::create({
-          .name = "Mouse passthrough",
-          .vendor_id = 0xBEEF,
-          .product_id = 0xDEAD,
-          .version = 0x111,
-        })),
-        keyboard(inputtino::Keyboard::create({
-          .name = "Keyboard passthrough",
-          .vendor_id = 0xBEEF,
-          .product_id = 0xDEAD,
-          .version = 0x111,
-        })),
         gamepads(MAX_GAMEPADS) {
-      if (!mouse) {
-        BOOST_LOG(warning) << "Unable to create virtual mouse: " << mouse.getErrorMessage();
-      }
-      if (!keyboard) {
-        BOOST_LOG(warning) << "Unable to create virtual keyboard: " << keyboard.getErrorMessage();
-      }
     }
 
     ~input_raw_t() = default;
 
+    inputtino::Result<inputtino::Mouse> *ensure_mouse() {
+      if (!mouse) {
+        mouse.emplace(inputtino::Mouse::create({
+          .name = "Polaris Mouse passthrough",
+          .vendor_id = 0xBEEF,
+          .product_id = 0xDEAD,
+          .version = 0x111,
+        }));
+        if (!*mouse) {
+          BOOST_LOG(warning) << "Unable to create virtual mouse: " << mouse->getErrorMessage();
+        }
+      }
+      return &*mouse;
+    }
+
+    inputtino::Result<inputtino::Keyboard> *ensure_keyboard() {
+      if (!keyboard) {
+        keyboard.emplace(inputtino::Keyboard::create({
+          .name = "Polaris Keyboard passthrough",
+          .vendor_id = 0xBEEF,
+          .product_id = 0xDEAD,
+          .version = 0x111,
+        }));
+        if (!*keyboard) {
+          BOOST_LOG(warning) << "Unable to create virtual keyboard: " << keyboard->getErrorMessage();
+        }
+      }
+      return &*keyboard;
+    }
+
+    wayland_virtual_input_t wayland_input;
+
     // All devices are wrapped in Result because it might be that we aren't able to create them (ex: udev permission denied)
-    inputtino::Result<inputtino::Mouse> mouse;
-    inputtino::Result<inputtino::Keyboard> keyboard;
+    std::optional<inputtino::Result<inputtino::Mouse>> mouse;
+    std::optional<inputtino::Result<inputtino::Keyboard>> keyboard;
 
     /**
      * A list of gamepads that are currently connected.

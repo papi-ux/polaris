@@ -193,6 +193,21 @@ if(WAYLAND_FOUND)
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "staging/ext-image-capture-source" ext-image-capture-source-v1)
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "staging/ext-image-copy-capture" ext-image-copy-capture-v1)
     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-screencopy-unstable-v1)
+    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-virtual-pointer-unstable-v1)
+    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/src/platform/linux" "protocols" virtual-keyboard-unstable-v1)
+
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(XKBCOMMON xkbcommon)
+    endif()
+    if(XKBCOMMON_FOUND)
+        add_compile_definitions(POLARIS_BUILD_WAYLAND_VIRTUAL_INPUT)
+        include_directories(SYSTEM ${XKBCOMMON_INCLUDE_DIRS})
+        link_directories(${XKBCOMMON_LIBRARY_DIRS})
+        list(APPEND PLATFORM_LIBRARIES ${XKBCOMMON_LIBRARIES})
+    else()
+        message(STATUS "xkbcommon not found; labwc-local virtual input disabled")
+    endif()
 
     include_directories(
             SYSTEM
