@@ -7,10 +7,16 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.8
+
+Patch release focused on Bazzite headless stream validation and host-session isolation.
+
 - Fixed Linux EVDI virtual display output detection when Polaris opens a pre-created EVDI DRM card
 - Documented the Bazzite EVDI `initial_device_count=1` setup path for virtual display validation
 - Replaced the Bazzite service override heredoc with a `systemctl --user edit --stdin` command and documented the validated headless labwc success markers
 - Clarified the recommended Bazzite Headless Stream optimization, expected SHM/RAM capture warnings, and host-input isolation success markers
+- Routed headless labwc virtual input through the labwc socket and blocked host uinput fallback when the headless runtime is active
+- Cleared host `DISPLAY` from cage-launched app and Steam follow-up commands so launched processes stay inside the stream runtime
 
 ## v1.0.7
 
