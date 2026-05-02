@@ -20,7 +20,7 @@ install should be simple, but keep the rollback notes handy.
 
 | Image | Session | Result |
 |:------|:--------|:-------|
-| `bazzite-nvidia-open:stable` `44.20260430` | KDE Plasma Wayland Desktop Mode | Polaris service and ports validated |
+| `bazzite-nvidia-open:stable` `44.20260430` | KDE Plasma Wayland Desktop Mode | Polaris service, ports, Headless Stream launch, client profile application, and host-input isolation validated |
 | `bazzite-nvidia-open:stable` `44.20260430` | Steam/Game Mode | Pending on a Game Mode-capable image |
 
 The tested `bazzite-nvidia-open:stable` host is a Desktop image based on
@@ -110,13 +110,13 @@ deployment.
 The Polaris RPM declares the headless runtime dependencies, so the install
 command should not need separate `labwc` or `wlr-randr` arguments.
 
-## First Validation Path
+## Recommended Bazzite Optimization
 
 Start in Desktop Mode first. Game Mode and Deck-style gamescope sessions can hide
 display, portal, and environment details that are easier to debug from Desktop
 Mode.
 
-Use the headless labwc path for the first stream:
+Use Headless Stream for the first stream:
 
 ```ini
 headless_mode = enabled
@@ -124,10 +124,20 @@ linux_use_cage_compositor = enabled
 linux_prefer_gpu_native_capture = disabled
 ```
 
-This creates an isolated `labwc` runtime for the stream and does not target your
-physical monitor. Do not manually export `WAYLAND_DISPLAY`; Polaris starts
-`labwc` with its own Wayland socket and routes launched apps into that socket.
-Do not add EVDI or dummy-plug display routing for this validation path.
+This is the validated Bazzite optimization for the current NVIDIA Desktop Mode
+path. It creates an isolated headless `labwc` runtime for the stream, routes
+launched apps and virtual input into that socket, and avoids targeting the
+physical KDE desktop.
+
+Keep `linux_prefer_gpu_native_capture = disabled` until the stream is healthy on
+your hardware. On this path, logs may report SHM/RAM capture, CPU frame
+residency, or an extra CPU-side copy/conversion path. Treat those as performance
+notes, not startup failures, when the client receives a stable stream from
+`HEADLESS-1`.
+
+Do not manually export `WAYLAND_DISPLAY`; Polaris starts `labwc` with its own
+Wayland socket and routes launched apps into that socket. Do not add EVDI or
+dummy-plug display routing for this validation path.
 
 If you want to test a physical dummy plug instead, leave headless/labwc disabled
 and test it as a normal host display.
@@ -194,9 +204,12 @@ journalctl --user -u polaris --since "3 minutes ago" --no-pager \
 Success markers include:
 
 ```text
+Applying client profile for "<client name>"
+session_optimization: ... layers=client_profile+device_db+runtime_policy
 labwc: Starting in headless mode
 labwc: Ready
 Selected monitor [Headless output 1] for streaming
+Wayland virtual input: routing supported devices to labwc socket
 Encoder cache saved: nvenc
 New streaming session started
 session_event: stream_active
@@ -205,6 +218,11 @@ CLIENT CONNECTED
 
 Steam should report the client stream resolution, not the physical `7680x2160`
 `DP-3` desktop.
+
+There should not be a warning that virtual input is falling back to host uinput
+during a healthy headless `labwc` stream. If that appears, stop testing and
+report it as an input-isolation issue because host Plasma may receive remote
+mouse or keyboard input.
 
 If Polaris is inactive after entering Game Mode, treat it as a service or
 autostart packaging issue first:

@@ -42,9 +42,11 @@ linux_use_cage_compositor = enabled
 linux_prefer_gpu_native_capture = disabled
 ```
 
-That is the intended Linux path. It avoids touching your normal desktop layout and reduces display
-mode churn after a session ends. Enable GPU-native capture later only after the headless path is
-working on your driver and compositor stack.
+That is the intended Headless Stream path. It avoids touching your normal desktop layout and reduces
+display mode churn after a session ends. On Bazzite, this is also the first NVIDIA Desktop Mode
+validation path; SHM/RAM capture warnings are performance notes if the client is receiving a stable
+`HEADLESS-1` stream. Enable GPU-native capture later only after the headless path is working on your
+driver and compositor stack.
 
 ## Steam Big Picture black screen or tiny window
 
