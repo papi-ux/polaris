@@ -10,6 +10,7 @@ starts at `v1.0.0`.
 - Fixed Linux EVDI virtual display output detection when Polaris opens a pre-created EVDI DRM card
 - Documented the Bazzite EVDI `initial_device_count=1` setup path for virtual display validation
 - Replaced the Bazzite service override heredoc with a `systemctl --user edit --stdin` command and documented the validated headless labwc success markers
+- Clarified the recommended Bazzite Headless Stream optimization, expected SHM/RAM capture warnings, and host-input isolation success markers
 
 ## v1.0.7
 

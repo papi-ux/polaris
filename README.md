@@ -30,7 +30,7 @@ what the host is actually doing.
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42, Fedora 43, Fedora 44, and Arch Linux are the recommended package paths. Bazzite Desktop Mode has NVIDIA validation with the headless `labwc` runtime, but real Steam/Game Mode validation is still pending on a Game Mode-capable image. Ubuntu 24.04 packages remain experimental.
+> Polaris is a Linux host today. Fedora 42, Fedora 43, Fedora 44, and Arch Linux are the recommended package paths. Bazzite Desktop Mode has NVIDIA validation for the Headless Stream path: matching Fedora RPM layered through `rpm-ostree`, headless `labwc`, client profile application, and host-input isolation. Real Steam/Game Mode validation is still pending on a Game Mode-capable image. Ubuntu 24.04 packages remain experimental.
 
 > [!NOTE]
 > The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite `rpm-ostree` path is usable for testers who follow the Bazzite guide. The Ubuntu DEB should still be treated as a fragile validation path.
@@ -73,7 +73,7 @@ sudo polaris --setup-host
 systemctl --user enable --now polaris
 ```
 
-Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. Use the release RPM that matches your Bazzite Fedora base, such as `Polaris-fedora44-x86_64.rpm` on Bazzite 44. See the [Bazzite install guide](docs/bazzite.md) for the current Desktop Mode validation notes, Game Mode status, rollback commands, and `/usr/local` KMS setup.
+Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. Use the release RPM that matches your Bazzite Fedora base, such as `Polaris-fedora44-x86_64.rpm` on Bazzite 44. The validated Bazzite optimization starts conservatively with Headless Stream and `linux_prefer_gpu_native_capture = disabled`; SHM/RAM capture warnings are expected performance notes on that path unless the client stream fails. See the [Bazzite install guide](docs/bazzite.md) for the current Desktop Mode validation notes, Game Mode status, rollback commands, and `/usr/local` KMS setup.
 
 ### Extremely experimental install: Ubuntu 24.04 DEB
 
@@ -265,7 +265,7 @@ systemctl --user enable --now polaris
 | Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
 | Fedora 43 | Recommended | Official release asset: `Polaris-fedora43-x86_64.rpm` |
 | Fedora 44 | Recommended | Official release asset: `Polaris-fedora44-x86_64.rpm` |
-| Bazzite | Experimental | Desktop Mode validated on NVIDIA with headless `labwc`; real Steam/Game Mode pending on a Game Mode-capable image; see [Bazzite install guide](docs/bazzite.md) |
+| Bazzite | Experimental | Desktop Mode validated on NVIDIA with Headless Stream, headless `labwc`, and host-input isolation; real Steam/Game Mode pending on a Game Mode-capable image; see [Bazzite install guide](docs/bazzite.md) |
 | Ubuntu 24.04 | Extremely experimental | Official release asset: `Polaris-ubuntu24.04-x86_64.deb`; source build also works, but this path needs more real-hardware validation |
 | Arch Linux | Recommended | Official release asset: `Polaris-arch-x86_64.pkg.tar.zst`; source and local PKGBUILD generation are also supported |
 | Debian-family distros | Supported from source | Less turnkey than Fedora right now |
@@ -277,7 +277,7 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- Bazzite support is experimental. Desktop Mode has NVIDIA validation with the headless `labwc` runtime, while real Steam/Game Mode, AMD, and Steam Deck client flows still need more hardware coverage.
+- Bazzite support is experimental. Desktop Mode has NVIDIA validation with the recommended Headless Stream settings, while real Steam/Game Mode, AMD, and Steam Deck client flows still need more hardware coverage.
 - Ubuntu 24.04 DEB packaging is extremely experimental and needs broader real-hardware validation; other Debian-family distros are still source-build oriented.
 - Fedora 42, Fedora 43, Fedora 44, Ubuntu 24.04, and Arch Linux have direct x86_64 release package assets today.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
@@ -418,9 +418,9 @@ flowchart TB
 <details>
 <summary><b>Linux runtime notes</b></summary>
 
-- `headless_mode` requests an invisible `labwc` runtime.
+- `headless_mode` requests a stream-only session instead of the visible desktop.
 - `linux_use_cage_compositor=enabled` routes launched apps into Polaris' private Wayland compositor.
-- `linux_prefer_gpu_native_capture=disabled` keeps true headless labwc behavior as the first validation path. Enable it only when you want to prefer DMA-BUF or another GPU-native capture path on a stack you have already tested.
+- `linux_prefer_gpu_native_capture=disabled` keeps Headless Stream behavior as the first validation path. Enable it only when testing a stack where you intentionally want to prefer DMA-BUF or another GPU-native capture path.
 - Deferred headless encoder capabilities are primed before first launch negotiation so Main10 support is advertised correctly on the first real launch.
 - Runtime stats surface the requested mode, effective mode, capture transport, frame residency, and frame format.
 - AI recovery stores both latest-session results and rolling trend data, grades sessions against the actual target FPS, and invalidates poor cached recommendations automatically.
@@ -447,7 +447,7 @@ Config file: `~/.config/polaris/polaris.conf`
 ### Recommended first config
 
 ```ini
-# Isolated compositor path
+# Headless Stream path
 headless_mode = enabled
 linux_use_cage_compositor = enabled
 linux_prefer_gpu_native_capture = disabled
@@ -464,7 +464,7 @@ max_sessions = 2
 ```
 
 > [!TIP]
-> In headless mode you generally do not need KDE window rules, `kscreen-doctor` scripts, HDMI dummy plugs, or manual portal juggling. Turn on the isolated compositor path and let Polaris manage the runtime.
+> With Headless Stream you generally do not need KDE window rules, `kscreen-doctor` scripts, HDMI dummy plugs, or manual portal juggling. Turn on the recommended stream runtime and let Polaris manage the compositor, app routing, and input isolation.
 
 <details>
 <summary><b>AI provider examples</b></summary>
@@ -517,9 +517,9 @@ ai_base_url = http://127.0.0.1:11434/v1
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `headless_mode` | `disabled` | Request an invisible `labwc` runtime |
-| `linux_use_cage_compositor` | `disabled` | Enable the isolated compositor runtime |
-| `linux_prefer_gpu_native_capture` | `disabled` | Prefer DMA-BUF and GPU-native capture when enabled and supported by the stack |
+| `headless_mode` | `disabled` | Request a stream-only session instead of the visible desktop |
+| `linux_use_cage_compositor` | `disabled` | Enable Polaris' private stream runtime |
+| `linux_prefer_gpu_native_capture` | `disabled` | Prefer DMA-BUF or another GPU-native capture path only when enabled and supported by the stack |
 | `trusted_subnets` | `[]` | CIDR blocks that enable Trusted Pair (TOFU) |
 | `encoder` | `nvenc` | Encoder: `nvenc`, `vaapi`, `software` |
 | `ai_enabled` | `disabled` | Enable AI-assisted stream optimization |

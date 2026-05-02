@@ -25,15 +25,15 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
-These are the settings most people should confirm first on a Linux host.
+These are the settings behind the recommended Headless Stream mode on a Linux host.
 
 ## Common options
 
 | Key | Typical value | What it controls |
 | --- | --- | --- |
-| `headless_mode` | `enabled` | Use an isolated invisible runtime instead of the physical desktop |
-| `linux_use_cage_compositor` | `enabled` | Enable the dedicated compositor path |
-| `linux_prefer_gpu_native_capture` | `disabled` | Keep true headless labwc behavior for first validation; enable only after testing GPU-native capture on your stack |
+| `headless_mode` | `enabled` | Request a stream-only session instead of the visible desktop |
+| `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
+| `linux_prefer_gpu_native_capture` | `disabled` | Keep Headless Stream as the first validation path; enable only after testing GPU-native capture on your stack |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
