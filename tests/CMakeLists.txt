@@ -81,8 +81,13 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
 )
+
+if (NOT WIN32 AND NOT APPLE)
+    list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
+    )
+endif()
 
 set(TEST_AUDIT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_config_consistency.cpp
