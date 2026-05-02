@@ -19,6 +19,10 @@ using namespace std::literals;
 
 namespace platf::touch {
   void update(client_input_raw_t *raw, const touch_port_t &touch_port, const touch_input_t &touch) {
+    if (raw->global->wayland_input.should_block_host_fallback()) {
+      return;
+    }
+
     if (raw->touch) {
       switch (touch.eventType) {
         case LI_TOUCH_EVENT_HOVER:

@@ -31,6 +31,7 @@ namespace platf {
     bool hscroll(int high_res_distance);
     bool keyboard_update(std::uint16_t modcode, bool release);
     bool unicode(std::string_view hex_unicode);
+    bool should_block_host_fallback();
     void reset();
 
   private:

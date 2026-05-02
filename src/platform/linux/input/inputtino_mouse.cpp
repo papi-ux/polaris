@@ -23,6 +23,9 @@ namespace platf::mouse {
     if (raw->wayland_input.move(deltaX, deltaY)) {
       return;
     }
+    if (raw->wayland_input.should_block_host_fallback()) {
+      return;
+    }
 
     auto *mouse = raw->ensure_mouse();
     if (*mouse) {
@@ -34,6 +37,9 @@ namespace platf::mouse {
     if (raw->wayland_input.move_abs(touch_port, x, y)) {
       return;
     }
+    if (raw->wayland_input.should_block_host_fallback()) {
+      return;
+    }
 
     auto *mouse = raw->ensure_mouse();
     if (*mouse) {
@@ -43,6 +49,9 @@ namespace platf::mouse {
 
   void button(input_raw_t *raw, int button, bool release) {
     if (raw->wayland_input.button(button, release)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback()) {
       return;
     }
 
@@ -81,6 +90,9 @@ namespace platf::mouse {
     if (raw->wayland_input.scroll(high_res_distance)) {
       return;
     }
+    if (raw->wayland_input.should_block_host_fallback()) {
+      return;
+    }
 
     auto *mouse = raw->ensure_mouse();
     if (*mouse) {
@@ -90,6 +102,9 @@ namespace platf::mouse {
 
   void hscroll(input_raw_t *raw, int high_res_distance) {
     if (raw->wayland_input.hscroll(high_res_distance)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback()) {
       return;
     }
 

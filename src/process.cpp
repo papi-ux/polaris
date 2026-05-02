@@ -2104,16 +2104,18 @@ namespace proc {
       // Launch remaining detached commands (if any) with cage's WAYLAND_DISPLAY
       for (size_t i = 1; i < _app.detached.size(); ++i) {
         auto &cmd = _app.detached[i];
+        auto cmd_env = _env;
         auto cage_socket = cage_display_router::get_wayland_socket();
         if (!cage_socket.empty()) {
-          _env["WAYLAND_DISPLAY"] = cage_socket;
-          _env["AT_SPI_BUS_ADDRESS"] = "";
+          cmd_env["WAYLAND_DISPLAY"] = cage_socket;
+          cmd_env["AT_SPI_BUS_ADDRESS"] = "";
+          cmd_env.erase("DISPLAY");
         }
         boost::filesystem::path working_dir = _app.working_dir.empty() ?
-                                                find_working_directory(cmd, _env) :
+                                                find_working_directory(cmd, cmd_env) :
                                                 boost::filesystem::path(_app.working_dir);
         BOOST_LOG(info) << "Spawning ["sv << cmd << "] in ["sv << working_dir << ']';
-        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, cmd_env, _pipe.get(), ec, nullptr);
         if (ec) {
           BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
         } else {
@@ -2147,16 +2149,19 @@ namespace proc {
 #ifdef __linux__
     // Set cage environment for the app command (if cage is running and app has a cmd)
     std::string effective_cmd = _app.cmd;
+    auto launch_env = _env;
     if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running() && !_app.cmd.empty()) {
       auto cage_socket = cage_display_router::get_wayland_socket();
       if (!cage_socket.empty()) {
-        _env["WAYLAND_DISPLAY"] = cage_socket;
-        _env["AT_SPI_BUS_ADDRESS"] = "";
-        BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket << " for app command"sv;
+        launch_env["WAYLAND_DISPLAY"] = cage_socket;
+        launch_env["AT_SPI_BUS_ADDRESS"] = "";
+        launch_env.erase("DISPLAY");
+        BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket << " and cleared DISPLAY for app command"sv;
       }
     }
 #else
     const std::string &effective_cmd = _app.cmd;
+    auto &launch_env = _env;
 #endif
 
     if (_app.cmd.empty()) {
@@ -2171,10 +2176,10 @@ namespace proc {
       placebo = true;
     } else {
       boost::filesystem::path working_dir = _app.working_dir.empty() ?
-                                              find_working_directory(effective_cmd, _env) :
+                                              find_working_directory(effective_cmd, launch_env) :
                                               boost::filesystem::path(_app.working_dir);
       BOOST_LOG(info) << "Executing: ["sv << effective_cmd << "] in ["sv << working_dir << ']';
-      _process = platf::run_command(_app.elevated, true, effective_cmd, working_dir, _env, _pipe.get(), ec, &_process_group);
+      _process = platf::run_command(_app.elevated, true, effective_cmd, working_dir, launch_env, _pipe.get(), ec, &_process_group);
       if (ec) {
         BOOST_LOG(warning) << "Couldn't run ["sv << effective_cmd << "]: System: "sv << ec.message();
         return -1;
