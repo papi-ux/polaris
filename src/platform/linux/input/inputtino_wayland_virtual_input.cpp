@@ -208,6 +208,10 @@ namespace platf {
       return runtime.backend_name == "labwc"sv && runtime.effective_headless;
     }
 
+    std::string_view host_fallback_status() const {
+      return cage_runtime_active() ? "host uinput fallback blocked for headless labwc"sv : "falling back to host uinput"sv;
+    }
+
     void disconnect() {
       if (keyboard) {
         zwp_virtual_keyboard_v1_destroy(keyboard);
@@ -247,7 +251,7 @@ namespace platf {
       }
 
       if (wl_display_flush(display) < 0 || wl_display_get_error(display) != 0) {
-        BOOST_LOG(warning) << "Wayland virtual input: labwc connection failed, falling back to host uinput"sv;
+        BOOST_LOG(warning) << "Wayland virtual input: labwc connection failed; "sv << host_fallback_status();
         disconnect();
         return false;
       }
@@ -276,7 +280,7 @@ namespace platf {
       if (!display) {
         if (!logged_fallback) {
           BOOST_LOG(warning) << "Wayland virtual input: unable to connect to labwc socket ["sv << socket
-                             << "], falling back to host uinput"sv;
+                             << "]; "sv << host_fallback_status();
           logged_fallback = true;
         }
         return false;
@@ -294,11 +298,13 @@ namespace platf {
       wl_display_roundtrip(display);
 
       if (!pointer_manager && !logged_pointer_unavailable) {
-        BOOST_LOG(warning) << "Wayland virtual input: labwc does not expose zwlr_virtual_pointer_manager_v1; mouse will use host uinput fallback"sv;
+        BOOST_LOG(warning) << "Wayland virtual input: labwc does not expose zwlr_virtual_pointer_manager_v1; "sv
+                           << (cage_runtime_active() ? "mouse input will be dropped to protect the host session"sv : "mouse will use host uinput fallback"sv);
         logged_pointer_unavailable = true;
       }
       if ((!keyboard_manager || !seat) && !logged_keyboard_unavailable) {
-        BOOST_LOG(warning) << "Wayland virtual input: labwc does not expose virtual keyboard support; keyboard will use host uinput fallback"sv;
+        BOOST_LOG(warning) << "Wayland virtual input: labwc does not expose virtual keyboard support; "sv
+                           << (cage_runtime_active() ? "keyboard input will be dropped to protect the host session"sv : "keyboard will use host uinput fallback"sv);
         logged_keyboard_unavailable = true;
       }
 
@@ -323,7 +329,7 @@ namespace platf {
       if (!pointer) {
         pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(pointer_manager, seat);
         if (!pointer) {
-          BOOST_LOG(warning) << "Wayland virtual input: unable to create virtual pointer, falling back to host uinput"sv;
+          BOOST_LOG(warning) << "Wayland virtual input: unable to create virtual pointer; "sv << host_fallback_status();
           return false;
         }
         wl_display_roundtrip(display);
@@ -343,7 +349,7 @@ namespace platf {
 
       keyboard = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(keyboard_manager, seat);
       if (!keyboard) {
-        BOOST_LOG(warning) << "Wayland virtual input: unable to create virtual keyboard, falling back to host uinput"sv;
+        BOOST_LOG(warning) << "Wayland virtual input: unable to create virtual keyboard; "sv << host_fallback_status();
         return false;
       }
 
@@ -390,6 +396,15 @@ namespace platf {
 #ifdef POLARIS_BUILD_WAYLAND_VIRTUAL_INPUT
     std::scoped_lock lock(impl->mutex);
     impl->disconnect();
+#endif
+  }
+
+  bool wayland_virtual_input_t::should_block_host_fallback() {
+#ifdef POLARIS_BUILD_WAYLAND_VIRTUAL_INPUT
+    std::scoped_lock lock(impl->mutex);
+    return impl->cage_runtime_active();
+#else
+    return false;
 #endif
   }
 

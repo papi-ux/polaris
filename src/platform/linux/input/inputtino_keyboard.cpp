@@ -152,6 +152,9 @@ namespace platf::keyboard {
     if (raw->wayland_input.keyboard_update(modcode, release)) {
       return;
     }
+    if (raw->wayland_input.should_block_host_fallback()) {
+      return;
+    }
 
     auto *keyboard = raw->ensure_keyboard();
     if (*keyboard) {
@@ -173,6 +176,9 @@ namespace platf::keyboard {
     BOOST_LOG(debug) << "Unicode, typing U+"sv << hex_unicode;
 
     if (raw->wayland_input.unicode(hex_unicode)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback()) {
       return;
     }
 
