@@ -57,34 +57,52 @@ TEST(WlgrabPixelCopy, Rgb888ExpansionHandlesRowsAndPadding) {
   expect_pixel(dst.data(), dst_stride + 4, 0x0C, 0x0B, 0x0A, 0xFF);
 }
 
-TEST(WlgrabPixelCopy, XBGR8888CopiesWithoutSwap) {
+TEST(WlgrabPixelCopy, XBGR8888SwapsRedAndBlue) {
   const std::array<std::uint8_t, 4> src {0x11, 0x22, 0x33, 0xFF};
   std::array<std::uint8_t, 4> dst {};
 
   wl::copy_shm_4bpp_to_bgra(src.data(), 4, dst.data(), 4, 1, 1, DRM_FORMAT_XBGR8888);
 
-  expect_pixel(dst.data(), 0, 0x11, 0x22, 0x33, 0xFF);
+  expect_pixel(dst.data(), 0, 0x33, 0x22, 0x11, 0xFF);
 }
 
-TEST(WlgrabPixelCopy, ABGR8888CopiesWithoutSwap) {
+TEST(WlgrabPixelCopy, ABGR8888SwapsRedAndBlue) {
   const std::array<std::uint8_t, 4> src {0xAA, 0xBB, 0xCC, 0x80};
   std::array<std::uint8_t, 4> dst {};
 
   wl::copy_shm_4bpp_to_bgra(src.data(), 4, dst.data(), 4, 1, 1, DRM_FORMAT_ABGR8888);
 
-  expect_pixel(dst.data(), 0, 0xAA, 0xBB, 0xCC, 0x80);
+  expect_pixel(dst.data(), 0, 0xCC, 0xBB, 0xAA, 0x80);
 }
 
-TEST(WlgrabPixelCopy, XRGB8888CopiesWithoutSwap) {
+TEST(WlgrabPixelCopy, XRGB8888SwapsRedAndBlue) {
   const std::array<std::uint8_t, 4> src {0x11, 0x22, 0x33, 0xFF};
   std::array<std::uint8_t, 4> dst {};
 
   wl::copy_shm_4bpp_to_bgra(src.data(), 4, dst.data(), 4, 1, 1, DRM_FORMAT_XRGB8888);
 
+  expect_pixel(dst.data(), 0, 0x33, 0x22, 0x11, 0xFF);
+}
+
+TEST(WlgrabPixelCopy, ARGB8888SwapsRedAndBlue) {
+  const std::array<std::uint8_t, 4> src {0xAA, 0xBB, 0xCC, 0x40};
+  std::array<std::uint8_t, 4> dst {};
+
+  wl::copy_shm_4bpp_to_bgra(src.data(), 4, dst.data(), 4, 1, 1, DRM_FORMAT_ARGB8888);
+
+  expect_pixel(dst.data(), 0, 0xCC, 0xBB, 0xAA, 0x40);
+}
+
+TEST(WlgrabPixelCopy, Unknown4bppFormatCopiesWithoutSwap) {
+  const std::array<std::uint8_t, 4> src {0x11, 0x22, 0x33, 0xFF};
+  std::array<std::uint8_t, 4> dst {};
+
+  wl::copy_shm_4bpp_to_bgra(src.data(), 4, dst.data(), 4, 1, 1, 0);
+
   expect_pixel(dst.data(), 0, 0x11, 0x22, 0x33, 0xFF);
 }
 
-TEST(WlgrabPixelCopy, XBGR8888CopyAppliedToEveryRowAndPixel) {
+TEST(WlgrabPixelCopy, XBGR8888SwapAppliedToEveryRowAndPixel) {
   const std::array<std::uint8_t, 16> src {
     0x10, 0x20, 0x30, 0xFF,
     0x40, 0x50, 0x60, 0xFF,
@@ -95,13 +113,13 @@ TEST(WlgrabPixelCopy, XBGR8888CopyAppliedToEveryRowAndPixel) {
 
   wl::copy_shm_4bpp_to_bgra(src.data(), 8, dst.data(), 8, 2, 2, DRM_FORMAT_XBGR8888);
 
-  expect_pixel(dst.data(), 0, 0x10, 0x20, 0x30, 0xFF);
-  expect_pixel(dst.data(), 4, 0x40, 0x50, 0x60, 0xFF);
-  expect_pixel(dst.data(), 8, 0x70, 0x80, 0x90, 0xFF);
-  expect_pixel(dst.data(), 12, 0xA0, 0xB0, 0xC0, 0xFF);
+  expect_pixel(dst.data(), 0, 0x30, 0x20, 0x10, 0xFF);
+  expect_pixel(dst.data(), 4, 0x60, 0x50, 0x40, 0xFF);
+  expect_pixel(dst.data(), 8, 0x90, 0x80, 0x70, 0xFF);
+  expect_pixel(dst.data(), 12, 0xC0, 0xB0, 0xA0, 0xFF);
 }
 
-TEST(WlgrabPixelCopy, XBGR8888CopyIgnoresSourceRowPadding) {
+TEST(WlgrabPixelCopy, XBGR8888SwapIgnoresSourceRowPadding) {
   constexpr int width = 2;
   constexpr int height = 2;
   constexpr int src_stride = width * 4 + 4;
@@ -118,8 +136,8 @@ TEST(WlgrabPixelCopy, XBGR8888CopyIgnoresSourceRowPadding) {
   std::array<std::uint8_t, dst_stride * height> dst {};
   wl::copy_shm_4bpp_to_bgra(src.data(), src_stride, dst.data(), dst_stride, width, height, DRM_FORMAT_XBGR8888);
 
-  expect_pixel(dst.data(), 0, 0x01, 0x02, 0x03, 0xFF);
-  expect_pixel(dst.data(), 4, 0x04, 0x05, 0x06, 0xFF);
-  expect_pixel(dst.data(), dst_stride, 0x07, 0x08, 0x09, 0xFF);
-  expect_pixel(dst.data(), dst_stride + 4, 0x0A, 0x0B, 0x0C, 0xFF);
+  expect_pixel(dst.data(), 0, 0x03, 0x02, 0x01, 0xFF);
+  expect_pixel(dst.data(), 4, 0x06, 0x05, 0x04, 0xFF);
+  expect_pixel(dst.data(), dst_stride, 0x09, 0x08, 0x07, 0xFF);
+  expect_pixel(dst.data(), dst_stride + 4, 0x0C, 0x0B, 0x0A, 0xFF);
 }
