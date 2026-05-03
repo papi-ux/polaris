@@ -574,6 +574,35 @@ Yes. Polaris speaks the Moonlight protocol. Any Moonlight client can connect. Po
 </details>
 
 <details>
+<summary><b>Do I need to uninstall Sunshine before trying Polaris?</b></summary>
+
+No. Polaris keeps its host config separate at `~/.config/polaris`, so installing it should not remove or overwrite an existing Sunshine setup. For testing, stop Sunshine before starting Polaris because both are GameStream/Moonlight hosts and can collide on the same default ports and discovery records.
+
+```bash
+systemctl --user stop sunshine
+systemctl --user enable --now polaris
+```
+
+If your Sunshine install runs as a system service instead of a user service, use the matching service command for your distro. You can switch back by stopping Polaris and starting Sunshine again.
+
+</details>
+
+<details>
+<summary><b>Does Moonlight lock streams to 60 FPS?</b></summary>
+
+No. Moonlight can request higher frame rates on clients that expose them, but Polaris treats the client's requested display mode as the ceiling. If a client requests `1280x800x60`, Polaris will not force a `90 FPS` optimization above that request even when the device profile supports it.
+
+Check the client frame-rate setting first. The host logs will show the important decision points:
+
+```text
+Display mode for client [...]
+session_optimization: requested=... selected=...
+session_pacing: policy=... target_fps=...
+```
+
+</details>
+
+<details>
 <summary><b>Does headless mode work on Hyprland, Sway, or GNOME?</b></summary>
 
 The headless `labwc` runtime creates its own Wayland instance, so it is not tied to one desktop environment. Polaris has been tested most heavily on KDE Plasma Wayland, but the model is not KDE-specific.
