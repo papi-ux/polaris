@@ -157,6 +157,30 @@ jobs:
         run: |
           useradd -m builder
           pacman -S --noconfirm --needed cuda
+
+          # CUDA 13 supports GCC up to 15.x. Arch rolling moved to GCC 16,
+          # so pin the release CUDA validation to the last supported GCC 15
+          # toolchain from the Arch Linux Archive until CUDA catches up.
+          gcc_major="$(g++ -dumpfullversion | cut -d. -f1)"
+          if [ "${gcc_major}" -gt 15 ]; then
+            gcc15_version="15.2.1+r604+g0b99615a8aef-1"
+            archive_base="https://archive.archlinux.org/packages"
+            pacman -U --noconfirm \
+              "${archive_base}/g/gcc/gcc-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/g/gcc-libs/gcc-libs-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libasan/libasan-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libatomic/libatomic-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libgcc/libgcc-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libgfortran/libgfortran-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libgomp/libgomp-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/liblsan/liblsan-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libobjc/libobjc-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libquadmath/libquadmath-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libstdc++/libstdc++-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libtsan/libtsan-${gcc15_version}-x86_64.pkg.tar.zst" \
+              "${archive_base}/l/libubsan/libubsan-${gcc15_version}-x86_64.pkg.tar.zst"
+          fi
+
           install -d "$CCACHE_DIR"
           chown -R builder:builder "$GITHUB_WORKSPACE"
           chown -R builder:builder "$CCACHE_DIR"
