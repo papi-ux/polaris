@@ -263,29 +263,37 @@ function finishWizard() {
   document.location.reload()
 }
 
-function save() {
+async function save() {
   if (passwordData.newPassword !== passwordData.confirmNewPassword) {
     error.value = "Password mismatch"
     return
   }
   error.value = null
   loading.value = true
-  fetch("./api/password", {
-    headers: { 'Content-Type': 'application/json' },
-    method: 'POST',
-    body: JSON.stringify(passwordData),
-  }).then((r) => {
-    loading.value = false
-    if (r.status === 200) {
-      r.json().then((rj) => {
-        success.value = rj.status
-        if (success.value !== true) {
-          error.value = rj.error
-        }
-      })
-    } else {
+
+  try {
+    const response = await fetch("./api/password", {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify(passwordData),
+    })
+
+    if (response.status !== 200) {
       error.value = "Internal Server Error"
+      return
     }
-  })
+
+    const payload = await response.json()
+    success.value = payload.status
+
+    if (success.value !== true) {
+      error.value = payload.error
+    }
+  } catch (e) {
+    error.value = "Internal Server Error"
+  } finally {
+    loading.value = false
+  }
 }
 </script>
