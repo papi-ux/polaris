@@ -118,15 +118,15 @@ build() {
     export BUILD_VERSION="@BUILD_VERSION@"
     export COMMIT="${_commit}"
 
-    export CC="gcc"
-    export CXX="g++"
+    export CC="${CC:-gcc}"
+    export CXX="${CXX:-g++}"
 
     export CFLAGS="${CFLAGS/-Werror=format-security/}"
     export CXXFLAGS="${CXXFLAGS/-Werror=format-security/}"
 
     # GCC 15 plus Polaris' current Release workaround can conflict with Arch's
     # injected fortify defines during makepkg validation rebuilds.
-    if [[ "$(g++ -dumpfullversion | cut -d. -f1)" == "15" ]]; then
+    if [[ "$("${CXX}" -dumpfullversion | cut -d. -f1)" == "15" ]]; then
       local _filtered_cppflags=()
       local _filtered_cflags=()
       local _filtered_cxxflags=()
@@ -200,11 +200,13 @@ build() {
       fi
 
       if [ -n "${CUDA_PATH:-}" ] && [ -x "${CUDA_PATH}/bin/nvcc" ]; then
+        local _cuda_host_compiler
+        _cuda_host_compiler="${NVCC_CCBIN:-$(command -v "${CXX}")}"
         export PATH="${CUDA_PATH}/bin:${PATH}"
         export CUDACXX="${CUDA_PATH}/bin/nvcc"
-        export NVCC_CCBIN="${NVCC_CCBIN:-/usr/bin/g++}"
+        export NVCC_CCBIN="${_cuda_host_compiler}"
         _cmake_options+=(-DCMAKE_CUDA_COMPILER:FILEPATH="${CUDA_PATH}/bin/nvcc")
-        _cmake_options+=(-DCMAKE_CUDA_HOST_COMPILER:FILEPATH="$(command -v "${CXX}")")
+        _cmake_options+=(-DCMAKE_CUDA_HOST_COMPILER:FILEPATH="${_cuda_host_compiler}")
       fi
     fi
 
@@ -227,8 +229,8 @@ check() {
     ./polaris --version
 
     if [[ "${_run_unit_tests::1}" == "t" ]]; then
-      export CC="gcc"
-      export CXX="g++"
+      export CC="${CC:-gcc}"
+      export CXX="${CXX:-g++}"
 
       cd "${srcdir}/build/tests"
       ./test_polaris --gtest_color=yes
