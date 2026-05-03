@@ -7,6 +7,17 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.9
+
+Patch release focused on Linux headless color correctness and support clarity.
+
+- Fixed AMD/Mesa true-headless SHM color channel handling for reported 3bpp and 4bpp formats
+- Prevented the first-run welcome wizard from staying on `Saving...` when browser-side credential saving fails
+- Clarified Headless Stream vs Desktop Display behavior on Linux
+- Clarified current Linux HDR/Main10 limits and the recommended SDR VAAPI validation path
+- Documented that Polaris can be installed alongside Sunshine, but both hosts should not run on the same default GameStream ports at the same time
+- Clarified that Moonlight is not inherently capped to 60 FPS; Polaris respects the FPS explicitly requested by the client
+
 ## v1.0.8
 
 Patch release focused on Bazzite headless stream validation and host-session isolation.
@@ -111,5 +122,6 @@ Current official public assets:
 
 - `Polaris-fedora42-x86_64.rpm`
 - `Polaris-fedora43-x86_64.rpm`
+- `Polaris-fedora44-x86_64.rpm`
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`

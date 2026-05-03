@@ -32,6 +32,22 @@ For foreground sessions, stop Polaris and start it again.
 3. Accept the local HTTPS certificate warning in the browser.
 4. Check your local firewall rules if the UI is unreachable from another device on the LAN.
 
+## Polaris and Sunshine on the same host
+
+Polaris keeps its config under `~/.config/polaris`, so installing it should not remove or overwrite
+an existing Sunshine setup. Do not run both hosts on the default GameStream/Moonlight ports at the
+same time unless you intentionally change one host's `port` value.
+
+For a quick Polaris test, stop Sunshine first:
+
+```bash
+systemctl --user stop sunshine
+systemctl --user enable --now polaris
+```
+
+If Sunshine runs as a system service on your distro, use the matching system-service command instead.
+To switch back, stop Polaris and start Sunshine again.
+
 ## Headless session does not start cleanly
 
 Confirm these settings first:
