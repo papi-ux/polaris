@@ -83,6 +83,12 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
 )
 
+if (NOT WIN32 AND NOT APPLE)
+    list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
+    )
+endif()
+
 set(TEST_AUDIT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_config_consistency.cpp
     ${CMAKE_SOURCE_DIR}/tests/integration/test_locale_consistency.cpp

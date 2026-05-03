@@ -3,7 +3,6 @@
  * @brief Definitions for wlgrab capture.
  */
 // standard includes
-#include <cstring>
 #include <thread>
 
 // local includes
@@ -16,6 +15,7 @@
 #include "src/video.h"
 #include "vaapi.h"
 #include "wayland.h"
+#include "wlgrab_pixel_copy.h"
 
 using namespace std::literals;
 
@@ -263,7 +263,6 @@ namespace wl {
         int copy_w = std::min((int) dmabuf.shm_info.width, img_out->width);
         int src_stride = dmabuf.shm_info.stride;
         int dst_stride = img_out->row_pitch;
-        int copy_bytes = std::min(src_stride, dst_stride);
         const bool is_3bpp = (src_stride == dmabuf.shm_info.width * 3);
 
         if (is_3bpp) {
@@ -274,24 +273,19 @@ namespace wl {
             logged_bgr888_conversion = true;
           }
 
-          for (int y = 0; y < copy_h; ++y) {
-            const uint8_t *src_line = src + y * src_stride;
-            uint8_t *dst_line = dst + y * dst_stride;
-            for (int x = 0; x < copy_w; ++x) {
-              // Match the portal screencopy path: headless wlroots SHM frames
-              // report BGR888 but the byte order is effectively RGB.
-              dst_line[x * 4 + 0] = src_line[x * 3 + 2];
-              dst_line[x * 4 + 1] = src_line[x * 3 + 1];
-              dst_line[x * 4 + 2] = src_line[x * 3 + 0];
-              dst_line[x * 4 + 3] = 255;
-            }
-          }
-        } else if (src_stride == dst_stride && copy_bytes == src_stride) {
-          std::memcpy(dst, src, static_cast<std::size_t>(copy_h) * copy_bytes);
+          // Match the portal screencopy path: headless wlroots SHM frames
+          // report BGR888 but the byte order is effectively RGB.
+          copy_shm_3bpp_rgb_to_bgra(src, src_stride, dst, dst_stride, copy_w, copy_h);
         } else {
-          for (int y = 0; y < copy_h; ++y) {
-            std::memcpy(dst + y * dst_stride, src + y * src_stride, copy_bytes);
-          }
+          copy_shm_4bpp_to_bgra(
+            src,
+            src_stride,
+            dst,
+            dst_stride,
+            copy_w,
+            copy_h,
+            dmabuf.shm_info.format
+          );
         }
 
         img_out->frame_timestamp = frame_timestamp;
