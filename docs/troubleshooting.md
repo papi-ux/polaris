@@ -48,6 +48,11 @@ validation path; SHM/RAM capture warnings are performance notes if the client is
 `HEADLESS-1` stream. Enable GPU-native capture later only after the headless path is working on your
 driver and compositor stack.
 
+The built-in Desktop entry does not launch your existing KDE, GNOME, or wlroots desktop inside this
+private compositor. If the client connects but shows an empty or black desktop while app entries work,
+that usually means the headless runtime is alive but nothing visible has been launched in it. Use
+Desktop Display mode when you want to stream the already-running host desktop session.
+
 ## Steam Big Picture black screen or tiny window
 
 Clear Steam's HTML cache:
@@ -87,6 +92,13 @@ If you do not need DRM/KMS capture, keep using the default compositor and portal
 If Polaris cannot hold the preferred hardware path, open Mission Control or Troubleshooting and
 check the active runtime path. Polaris surfaces when capture or encode falls back so you do not
 need to guess from a black-box client session.
+
+## Linux HDR or Main10 has wrong colors
+
+If the log says `Display is HDR: false`, treat that stream as SDR. A client HDR request or
+`hdr_mode = 2` can still move the encoder into a 10-bit/P010 path, but it does not make a non-HDR
+Linux capture path into a true HDR source. On AMD VAAPI systems, keep `hdr_mode = 0` and disable
+client HDR requests until SDR colors are correct, then test HEVC Main 8-bit before testing Main10.
 
 ## Support bundle and logs
 

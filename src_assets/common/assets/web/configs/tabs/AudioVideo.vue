@@ -35,8 +35,8 @@ const streamDisplayModes = [
     id: 'headless_stream',
     title: 'Headless Stream',
     badge: 'Recommended',
-    copy: 'Recommended. Starts games on a hidden stream-only display. Your desktop layout is not changed.',
-    restartCopy: 'Requires restart. Polaris will start sessions on a hidden stream-only runtime.',
+    copy: 'Recommended. Starts apps inside a private hidden compositor. It does not mirror your current desktop.',
+    restartCopy: 'Requires restart. Polaris will stream an isolated hidden runtime, not the existing KDE or GNOME session.',
   },
   {
     id: 'host_virtual_display',
@@ -49,14 +49,14 @@ const streamDisplayModes = [
     id: 'desktop_display',
     title: 'Desktop Display',
     badge: 'Visible desktop',
-    copy: 'Streams from your current desktop session.',
+    copy: 'Streams from your current desktop session when you want the visible KDE, GNOME, or wlroots desktop.',
     restartCopy: 'Requires restart. Polaris will stream from the current desktop session.',
   },
   {
     id: 'windowed_stream',
     title: 'Windowed Stream',
     badge: 'Experimental',
-    copy: 'Experimental. Shows the stream runtime as a desktop window when testing GPU-native capture.',
+    copy: 'Experimental. Shows the private stream runtime as a desktop window when testing GPU-native capture.',
     restartCopy: 'Requires restart. Windowed Stream is experimental and should stay limited to GPU-native capture testing.',
   },
 ]
