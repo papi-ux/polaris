@@ -27,6 +27,15 @@ max_sessions = 2
 
 These are the settings behind the recommended Headless Stream mode on a Linux host.
 
+## Linux display modes
+
+Headless Stream starts apps inside Polaris' private labwc compositor. It is intentionally isolated
+from your normal KDE, GNOME, or wlroots desktop, so the built-in Desktop entry can be empty if no
+desktop shell or app is launched inside that runtime.
+
+Use Desktop Display mode when you want to stream the visible host desktop session. Use Headless
+Stream when you want a stream-only runtime that leaves the host desktop layout alone.
+
 ## Common options
 
 | Key | Typical value | What it controls |
@@ -42,6 +51,23 @@ These are the settings behind the recommended Headless Stream mode on a Linux ho
 | `enable_discovery` | `enabled` | Advertise Polaris over mDNS |
 | `stream_audio` | `enabled` | Capture and stream audio |
 | `steamgriddb_api_key` | key | Cover art lookups for non-Steam apps |
+
+## Linux HDR and Main10
+
+On Linux, treat sessions that log `Display is HDR: false` as SDR even if the client requests HDR.
+Forcing `hdr_mode = 2` can still select a 10-bit HEVC/Main10 or P010 encode path, but that does not
+create a true HDR source when the captured display path is SDR and may produce incorrect colors on
+some VAAPI stacks.
+
+For AMD VAAPI hosts, validate SDR first:
+
+```ini
+encoder = vaapi
+hdr_mode = 0
+color_range = 1
+```
+
+Then test HEVC Main 8-bit before enabling Main10 or client HDR requests.
 
 ## AI provider settings
 
