@@ -3,7 +3,12 @@
  * @brief Definitions for graphics related functions.
  */
 // standard includes
+#include <array>
 #include <fcntl.h>
+#include <filesystem>
+#include <limits.h>
+#include <utility>
+#include <unistd.h>
 
 // local includes
 #include "graphics.h"
@@ -31,6 +36,29 @@ using namespace std::literals;
 
 namespace gl {
   GladGLContext ctx;
+
+  std::optional<std::filesystem::path> executable_dir() {
+    std::array<char, PATH_MAX + 1> path {};
+    const auto len = readlink("/proc/self/exe", path.data(), path.size() - 1);
+    if (len <= 0) {
+      return std::nullopt;
+    }
+
+    path[static_cast<std::size_t>(len)] = '\0';
+    return std::filesystem::path {path.data()}.parent_path();
+  }
+
+  std::filesystem::path resolve_shader_asset_path(std::string_view shader_name) {
+    if (const auto exe_dir = executable_dir()) {
+      const auto local_path = *exe_dir / "assets" / "shaders" / "opengl" / std::string {shader_name};
+      std::error_code ec;
+      if (std::filesystem::exists(local_path, ec)) {
+        return local_path;
+      }
+    }
+
+    return std::filesystem::path {POLARIS_SHADERS_DIR} / std::string {shader_name};
+  }
 
   void drain_errors(const std::string_view &prefix) {
     GLenum err;
@@ -744,32 +772,35 @@ namespace egl {
     auto width_i = 1.0f / sws.out_width;
 
     {
-      const char *sources[] {
-        POLARIS_SHADERS_DIR "/ConvertUV.frag",
-        POLARIS_SHADERS_DIR "/ConvertUV.vert",
-        POLARIS_SHADERS_DIR "/ConvertY.frag",
-        POLARIS_SHADERS_DIR "/Scene.vert",
-        POLARIS_SHADERS_DIR "/Scene.frag",
-      };
+      constexpr std::array<std::pair<std::string_view, GLenum>, 5> shaders {{
+        {"ConvertUV.frag"sv, GL_FRAGMENT_SHADER},
+        {"ConvertUV.vert"sv, GL_VERTEX_SHADER},
+        {"ConvertY.frag"sv, GL_FRAGMENT_SHADER},
+        {"Scene.vert"sv, GL_VERTEX_SHADER},
+        {"Scene.frag"sv, GL_FRAGMENT_SHADER},
+      }};
 
-      GLenum shader_type[2] {
-        GL_FRAGMENT_SHADER,
-        GL_VERTEX_SHADER,
-      };
-
-      constexpr auto count = sizeof(sources) / sizeof(const char *);
+      constexpr auto count = shaders.size();
 
       util::Either<gl::shader_t, std::string> compiled_sources[count];
 
       bool error_flag = false;
       for (int x = 0; x < count; ++x) {
         auto &compiled_source = compiled_sources[x];
+        const auto shader_path = gl::resolve_shader_asset_path(shaders[x].first);
+        const auto source = file_handler::read_file(shader_path.string().c_str());
 
-        compiled_source = gl::shader_t::compile(file_handler::read_file(sources[x]), shader_type[x % 2]);
+        if (source.empty()) {
+          BOOST_LOG(error) << shader_path << ": shader source is empty or missing"sv;
+          error_flag = true;
+          continue;
+        }
+
+        compiled_source = gl::shader_t::compile(source, shaders[x].second);
         gl_drain_errors;
 
         if (compiled_source.has_right()) {
-          BOOST_LOG(error) << sources[x] << ": "sv << compiled_source.right();
+          BOOST_LOG(error) << shader_path << ": "sv << compiled_source.right();
           error_flag = true;
         }
       }
