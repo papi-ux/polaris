@@ -423,6 +423,10 @@ jobs:
             echo "Installed Ubuntu DEB has unresolved shared-library dependencies" >&2
             exit 1
           fi
+          if strings "$binary" | grep -Eq '/__w/|src_assets/.*/assets/shaders'; then
+            echo "Installed Ubuntu DEB binary contains a source-tree shader path" >&2
+            exit 1
+          fi
 
           polaris --version | tee build/cpack_artifacts/package-version.txt
 
@@ -617,6 +621,10 @@ jobs:
           ldd "$binary" | tee build/cpack_artifacts/package-ldd.txt
           if grep -Fq "not found" build/cpack_artifacts/package-ldd.txt; then
             echo "Installed Fedora RPM has unresolved shared-library dependencies" >&2
+            exit 1
+          fi
+          if strings "$binary" | grep -Eq '/__w/|src_assets/.*/assets/shaders'; then
+            echo "Installed Fedora RPM binary contains a source-tree shader path" >&2
             exit 1
           fi
 
