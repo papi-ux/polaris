@@ -37,7 +37,7 @@ sudo apt-get install -y \
   libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
   libappindicator3-dev libgtk-3-dev \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-  wayland-protocols labwc wlr-randr xwayland x11-utils nodejs npm
+  wayland-protocols grim labwc wlr-randr xwayland x11-utils nodejs npm
 
 git clone --recursive https://github.com/papi-ux/polaris.git
 cd polaris

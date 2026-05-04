@@ -87,6 +87,7 @@ BuildRequires: gcc-c++
 %global cuda_dir %{_builddir}/cuda
 
 Requires: labwc
+Requires: grim
 Requires: libayatana-appindicator3 >= 0.5.3
 Requires: libcap >= 2.22
 Requires: libcurl >= 7.0

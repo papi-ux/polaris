@@ -131,6 +131,7 @@ set(TEST_AUDIO_SOURCES
 
 set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
 )
 
 set(TEST_VIDEO_SOURCES

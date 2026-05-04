@@ -8,6 +8,8 @@
 
 // standard includes
 #include <array>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -264,6 +266,16 @@ namespace confighttp {
     }
 
 #ifdef __linux__
+    constexpr auto PREVIEW_FAILURE_LOG_BACKOFF = std::chrono::seconds(60);
+
+    struct preview_failure_log_state_t {
+      std::chrono::steady_clock::time_point last_log {};
+      std::uint32_t suppressed_count = 0;
+    };
+
+    std::mutex preview_failure_log_mutex;
+    std::unordered_map<std::string, preview_failure_log_state_t> preview_failure_log_state;
+
     std::string preview_xdg_runtime_dir() {
       if (const char *xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && *xdg) {
         return xdg;
@@ -305,6 +317,57 @@ namespace confighttp {
       }
       cmd << shell_escape(outfile) << " 2>/dev/null";
       return cmd.str();
+    }
+
+    std::string preview_failure_log_key(const std::string &capture_kind,
+                                        const std::string &socket_name,
+                                        const std::string &output_name) {
+      return capture_kind + "|" + socket_name + "|" + output_name;
+    }
+
+    void clear_cage_preview_capture_failure(const std::string &capture_kind,
+                                            const std::string &socket_name,
+                                            const std::string &output_name) {
+      std::lock_guard lock(preview_failure_log_mutex);
+      preview_failure_log_state.erase(preview_failure_log_key(capture_kind, socket_name, output_name));
+    }
+
+    void log_cage_preview_capture_failure(const std::string &capture_kind,
+                                          const std::string &socket_name,
+                                          const std::string &output_name) {
+      const auto now = std::chrono::steady_clock::now();
+      std::uint32_t suppressed_count = 0;
+      bool should_log = false;
+
+      {
+        std::lock_guard lock(preview_failure_log_mutex);
+        auto &state = preview_failure_log_state[preview_failure_log_key(capture_kind, socket_name, output_name)];
+        if (state.last_log.time_since_epoch().count() == 0 ||
+            now - state.last_log >= PREVIEW_FAILURE_LOG_BACKOFF) {
+          suppressed_count = state.suppressed_count;
+          state.suppressed_count = 0;
+          state.last_log = now;
+          should_log = true;
+        } else {
+          ++state.suppressed_count;
+        }
+      }
+
+      if (!should_log) {
+        return;
+      }
+
+      std::ostringstream message;
+      message << "display_preview: Failed to capture cage " << capture_kind
+              << " on socket " << socket_name
+              << " output=" << (output_name.empty() ? "(auto)" : output_name)
+              << "; preview capture is separate from the active stream, suppressing repeats for "
+              << PREVIEW_FAILURE_LOG_BACKOFF.count() << "s";
+      if (suppressed_count > 0) {
+        message << " (" << suppressed_count << " repeat"
+                << (suppressed_count == 1 ? "" : "s") << " suppressed)";
+      }
+      BOOST_LOG(warning) << message.str();
     }
 #endif
 
@@ -3245,10 +3308,9 @@ namespace confighttp {
         cage_capture_required = true;
         if (std::system(cmd.c_str()) == 0) {
           captured = true;
+          clear_cage_preview_capture_failure("screenshot", cage_socket, preview_output);
         } else {
-          BOOST_LOG(warning) << "display_preview: Failed to capture cage screenshot on socket "sv
-                             << cage_socket << " output="sv
-                             << (preview_output.empty() ? "(auto)"sv : preview_output);
+          log_cage_preview_capture_failure("screenshot", cage_socket, preview_output);
         }
       }
     }
@@ -3262,7 +3324,9 @@ namespace confighttp {
     if (!captured) {
       nlohmann::json err;
       err["status"] = false;
-      err["error"] = "Screenshot capture failed";
+      err["error"] = cage_capture_required ?
+        "Preview capture failed; the active stream may still be healthy" :
+        "Screenshot capture failed";
       send_response(response, err);
       return;
     }
@@ -3344,10 +3408,9 @@ namespace confighttp {
             cage_capture_required = true;
             if (std::system(cmd.c_str()) == 0) {
               captured = true;
+              clear_cage_preview_capture_failure("MJPEG frame", cage_socket, preview_output);
             } else {
-              BOOST_LOG(warning) << "display_preview: Failed to capture cage MJPEG frame on socket "sv
-                                 << cage_socket << " output="sv
-                                 << (preview_output.empty() ? "(auto)"sv : preview_output);
+              log_cage_preview_capture_failure("MJPEG frame", cage_socket, preview_output);
               break;
             }
           }

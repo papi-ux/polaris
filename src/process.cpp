@@ -2418,9 +2418,8 @@ namespace proc {
           stats.dropped_frame_ratio >= 0.04 ||
           fps_gap >= 4.0;
         const bool capture_fallback =
-          stats.capture_residency == platf::frame_residency_e::cpu ||
-          stats.encode_target_residency == platf::frame_residency_e::cpu ||
-          stats.capture_transport == platf::frame_transport_e::shm;
+          stream_stats::capture_path_uses_cpu_copy(stats);
+        const auto capture_path = stream_stats::capture_path_summary(stats);
         const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
         const bool hdr_risk = stats.dynamic_range > 0 && (pacing_risk || encoder_risk);
         const std::string codec_lower = boost::algorithm::to_lower_copy(session.last_codec);
@@ -2431,11 +2430,15 @@ namespace proc {
         session.last_network_risk = network_risk ? "elevated" : "normal";
         session.last_decoder_risk = decoder_risk ? "elevated" : "normal";
         session.last_hdr_risk = hdr_risk ? "elevated" : "normal";
-        session.last_capture_path =
-          _launch_session->virtual_display ? "virtual_display" :
-          capture_fallback ? "cpu_fallback" :
-          stats.runtime_effective_headless ? "headless" :
-          "desktop";
+        if (_launch_session->virtual_display) {
+          session.last_capture_path = capture_fallback ? "virtual_display_" + capture_path : "virtual_display";
+        } else if (capture_fallback) {
+          session.last_capture_path = capture_path;
+        } else if (stats.runtime_effective_headless) {
+          session.last_capture_path = "headless";
+        } else {
+          session.last_capture_path = capture_path == "gpu_native" ? "gpu_native" : "desktop";
+        }
         if (network_risk) session.last_primary_issue = "network_jitter";
         else if (hdr_risk) session.last_primary_issue = "hdr_path";
         else if (virtual_display_risk) session.last_primary_issue = "virtual_display_path";

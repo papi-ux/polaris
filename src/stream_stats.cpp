@@ -93,6 +93,9 @@ namespace stream_stats {
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
+    j["capture_path"] = capture_path_summary(*this);
+    j["capture_cpu_copy"] = capture_path_uses_cpu_copy(*this);
+    j["capture_gpu_native"] = capture_path_is_gpu_native(*this);
     j["encode_target_device"] = encode_target_device;
     j["encode_target_residency"] = platf::from_frame_residency(encode_target_residency);
     j["encode_target_format"] = platf::from_frame_format(encode_target_format);
@@ -151,6 +154,47 @@ namespace stream_stats {
     j["active_sessions"] = static_cast<int>(clients.size());
 
     return j.dump();
+  }
+
+  bool capture_path_uses_cpu_copy(const stats_t &stats) {
+    return
+      stats.capture_transport == platf::frame_transport_e::shm ||
+      stats.capture_residency == platf::frame_residency_e::cpu ||
+      stats.encode_target_residency == platf::frame_residency_e::cpu;
+  }
+
+  bool capture_path_is_gpu_native(const stats_t &stats) {
+    return
+      stats.capture_transport == platf::frame_transport_e::dmabuf &&
+      stats.capture_residency == platf::frame_residency_e::gpu &&
+      stats.encode_target_residency == platf::frame_residency_e::gpu;
+  }
+
+  std::string capture_path_summary(const stats_t &stats) {
+    const bool capture_unknown =
+      stats.capture_transport == platf::frame_transport_e::unknown &&
+      stats.capture_residency == platf::frame_residency_e::unknown &&
+      stats.encode_target_residency == platf::frame_residency_e::unknown;
+    if (capture_unknown) {
+      return "unknown";
+    }
+    if (stats.capture_transport == platf::frame_transport_e::shm) {
+      return "shm_cpu_capture";
+    }
+    if (stats.capture_residency == platf::frame_residency_e::cpu) {
+      return "cpu_capture";
+    }
+    if (stats.encode_target_residency == platf::frame_residency_e::cpu) {
+      return "cpu_encode_upload";
+    }
+    if (capture_path_is_gpu_native(stats)) {
+      return "gpu_native";
+    }
+    if (stats.capture_transport == platf::frame_transport_e::dmabuf &&
+        stats.capture_residency == platf::frame_residency_e::gpu) {
+      return "gpu_capture";
+    }
+    return "mixed_or_unknown";
   }
 
   void update_stream_active(bool active, const std::string &client_name, const std::string &client_ip) {

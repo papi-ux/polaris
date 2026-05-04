@@ -102,13 +102,13 @@ echo 'options evdi initial_device_count=1' | sudo tee /etc/modprobe.d/evdi-polar
 
 Polaris needs host-level integration: the binary, web assets, desktop metadata,
 the user service, udev rules for virtual input, and compositor helpers such as
-`labwc`, `wlr-randr`, Xwayland, and `xdpyinfo`. On Bazzite, layering the RPM is
+`grim`, `labwc`, `wlr-randr`, Xwayland, and `xdpyinfo`. On Bazzite, layering the RPM is
 cleaner than running Polaris from a toolbox, distrobox, or unpacked archive
 because the package manager can install those host dependencies into the booted
 deployment.
 
 The Polaris RPM declares the headless runtime dependencies, so the install
-command should not need separate `labwc` or `wlr-randr` arguments.
+command should not need separate `grim`, `labwc`, or `wlr-randr` arguments.
 
 ## Recommended Bazzite Optimization
 
@@ -305,16 +305,19 @@ connector. On Bazzite with a pre-created device, the connector should look like
 
 `wlr: Using RAM capture path because this build does not include a GPU-native
 uploader for the selected encoder` and `capture will incur an extra CPU-side
-copy/conversion path` are expected with the current headless labwc runtime. They
-are performance notes, not startup failures. Confirm the stream is healthy by
-looking for `session_event: stream_active`, `CLIENT CONNECTED`, `Selected monitor
-[Headless output 1]`, and `Found H.264 encoder: h264_nvenc [nvenc]`.
-The `capture_transport=shm frame_residency=cpu frame_format=bgra8` warning is
-acceptable when the stream works.
+copy/conversion path` are not startup failures. Confirm the stream is connected
+by looking for `session_event: stream_active`, `CLIENT CONNECTED`, `Selected
+monitor [Headless output 1]`, and `Found H.264 encoder: h264_nvenc [nvenc]`.
+For performance reports, though, treat `capture_transport=shm
+frame_residency=cpu frame_format=bgra8`, `target_residency=cpu`, or `Build
+features: cuda=disabled` with NVENC as important clues because they mean Polaris
+is taking a CPU copy/upload path.
 
 `display_preview: Failed to capture cage screenshot` affects the web dashboard
 preview path. It does not mean the Moonlight/Nova stream failed if the client is
-already connected and receiving frames.
+already connected and receiving frames. Polaris rate-limits repeated preview
+capture failures, but if the preview itself matters, include `command -v grim`
+with the report.
 
 If local Plasma receives remote mouse or keyboard input while using headless
 labwc, treat that as an input-isolation bug and include the validation details
@@ -328,7 +331,8 @@ Please include these details when reporting Bazzite issues:
 - Desktop Mode or Game Mode
 - GPU model and driver stack
 - Polaris RPM asset used, such as `Polaris-fedora44-x86_64.rpm`
-- output of `command -v polaris labwc wlr-randr`
+- output of `command -v polaris grim labwc wlr-randr`
+- the `Build features: cuda=...` line
 - output of `getcap /usr/local/bin/polaris-kms`
 - output of `systemctl --user cat polaris`
 - whether `sudo polaris --setup-host` completed successfully
@@ -336,6 +340,7 @@ Please include these details when reporting Bazzite issues:
 - whether the web UI opens at `https://127.0.0.1:47990`
 - client used for pairing, such as Steam Deck Moonlight, Android Moonlight, or Nova
 - active capture path shown in the Polaris dashboard
+- requested client resolution, FPS, codec, and whether the web UI preview was open
 - whether headless mode and virtual display behavior worked after a reboot
 
 ## Current Status

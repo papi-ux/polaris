@@ -123,6 +123,15 @@ mount options for the binary path. File capabilities are ignored on `nosuid` mou
 builds can be misleading; copy the test binary to a normal path such as `/usr/local/bin` before
 applying `setcap`.
 
+For low-FPS NVIDIA headless reports, check `Build features: cuda=...` first. If the log says
+`cuda=disabled` and later shows `Attempting to use NVENC without CUDA support. Reverting back to
+GPU -> RAM -> GPU`, the stream is taking an extra CPU copy/upload path. Use a CUDA-enabled package
+or rebuild with `-DPOLARIS_ENABLE_CUDA=ON` before comparing headless performance against Sunshine.
+
+`display_preview: Failed to capture cage screenshot` is the web dashboard preview path, not the
+stream capture path. Repeated failures are rate-limited in the log. If the preview is missing,
+confirm `grim` is installed with `command -v grim`.
+
 ## VAAPI or software encode fallback
 
 If Polaris cannot hold the preferred hardware path, open Mission Control or Troubleshooting and
