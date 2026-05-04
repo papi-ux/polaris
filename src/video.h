@@ -476,9 +476,12 @@ namespace video {
    * ensure the best encoder is selected. Encoder availability can change
    * at runtime due to all sorts of things from driver updates to eGPUs.
    *
+   * @param strict_configured_encoder If true and an encoder is explicitly configured, fail instead of falling back.
+   * @param save_successful_cache If false, do not persist the selected encoder to the probe cache.
+   *
    * @warning This is only safe to call when there is no client actively streaming.
    */
-  int probe_encoders();
+  int probe_encoders(bool strict_configured_encoder = false, bool save_successful_cache = true);
 
   /**
    * @brief Get the name of the currently selected encoder.
