@@ -20,7 +20,7 @@ namespace device_db {
    * @brief Known device profile with optimal streaming settings.
    */
   struct device_t {
-    std::string type;              ///< "handheld", "phone", "tablet", "desktop"
+    std::string type;              ///< "handheld", "phone", "tablet", "vr", "desktop"
     std::string display_mode;      ///< Optimal "WxHxFPS" (e.g., "1920x1080x60")
     std::string preferred_codec;   ///< "hevc", "av1", "h264"
     int ideal_bitrate_kbps = 0;    ///< Recommended bitrate

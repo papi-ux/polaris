@@ -86,3 +86,16 @@ TEST(DeviceDbCodecPolicyTests, NonUiAppsDoNotGetForcedBackToH264) {
   ASSERT_TRUE(normalized.has_value());
   EXPECT_EQ(*normalized, "hevc");
 }
+
+TEST(DeviceDbProfileTests, Quest3UsesHighThroughputVrDefaults) {
+  const auto profile = device_db::get_device("Quest 3");
+
+  ASSERT_TRUE(profile.has_value());
+  EXPECT_EQ(profile->type, "vr");
+  EXPECT_EQ(profile->display_mode, "3840x2160x90");
+  EXPECT_EQ(profile->preferred_codec, "av1");
+  EXPECT_EQ(profile->ideal_bitrate_kbps, 60000);
+  EXPECT_FALSE(profile->virtual_display);
+  EXPECT_EQ(device_db::canonicalize_name("Quest 3"), "Meta Quest 3");
+  EXPECT_EQ(device_db::friendly_name("Quest 3"), "Meta Quest 3");
+}

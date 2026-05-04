@@ -187,6 +187,30 @@ namespace device_db {
       "Samsung Galaxy Tab S9 — 2560x1600, 120Hz, HEVC/AV1"
     };
 
+    // --- VR and high-throughput Android clients ---
+    devices["Meta Quest 3"] = {
+      "vr", "3840x2160x90", "av1", 60000, 2, false, false, 2,
+      "Meta Quest 3 — VR headset used as a high-throughput Moonlight/Nova client"
+    };
+    devices["Quest 3"] = devices["Meta Quest 3"];
+    devices["Oculus Quest 3"] = devices["Meta Quest 3"];
+    register_canonical_alias("Meta Quest 3", "Meta Quest 3");
+    register_canonical_alias("Quest 3", "Meta Quest 3");
+    register_canonical_alias("Oculus Quest 3", "Meta Quest 3");
+    register_friendly_alias("Meta Quest 3", "Meta Quest 3");
+    register_friendly_alias("Quest 3", "Meta Quest 3");
+    register_friendly_alias("Oculus Quest 3", "Meta Quest 3");
+
+    devices["Meta Quest 3S"] = {
+      "vr", "3840x2160x90", "av1", 55000, 2, false, false, 2,
+      "Meta Quest 3S — VR headset used as a high-throughput Moonlight/Nova client"
+    };
+    devices["Quest 3S"] = devices["Meta Quest 3S"];
+    register_canonical_alias("Meta Quest 3S", "Meta Quest 3S");
+    register_canonical_alias("Quest 3S", "Meta Quest 3S");
+    register_friendly_alias("Meta Quest 3S", "Meta Quest 3S");
+    register_friendly_alias("Quest 3S", "Meta Quest 3S");
+
     // --- Desktop clients ---
     devices["Desktop"] = {
       "desktop", "", "hevc", 80000, 2, true, false, 1,
