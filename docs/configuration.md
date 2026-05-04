@@ -54,10 +54,24 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 
 ## Linux HDR and Main10
 
-On Linux, treat sessions that log `Display is HDR: false` as SDR even if the client requests HDR.
+On Linux, treat sessions that log `stream_hdr_enabled=false` as SDR even if the client requests HDR.
 Forcing `hdr_mode = 2` can still select a 10-bit HEVC/Main10 or P010 encode path, but that does not
 create a true HDR source when the captured display path is SDR and may produce incorrect colors on
 some VAAPI stacks.
+
+True Linux HDR requires the active capture path to expose HDR display metadata. Today that means a
+KMS/DRM display path with an HDR-capable output reporting `HDR_OUTPUT_METADATA`, plus a client HDR
+request and a 10-bit-capable encoder. A valid true HDR session logs:
+
+```text
+HDR metadata: available=true
+Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)
+HDR decision: ... display_hdr=true hdr_metadata_available=true stream_hdr_enabled=true
+```
+
+Headless labwc/wlroots sessions are intentionally treated as SDR until the headless display path can
+truthfully provide HDR metadata. In that mode, `hdr_mode = 2` can still be useful to test Main10/P010
+encode support, but Polaris will not advertise true HDR to the client without metadata.
 
 For AMD VAAPI hosts, validate SDR first:
 

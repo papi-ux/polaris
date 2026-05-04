@@ -373,7 +373,8 @@ namespace nvhttp {
         stats.encode_target_residency == platf::frame_residency_e::cpu ||
         stats.capture_transport == platf::frame_transport_e::shm;
       const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
-      const bool hdr_risk = stats.dynamic_range > 0 && (pacing_risk || encoder_risk);
+      const bool hdr_source_missing = stats.dynamic_range > 0 && !stats.stream_hdr_enabled;
+      const bool hdr_risk = stats.stream_hdr_enabled && (pacing_risk || encoder_risk);
       const bool decoder_risk =
         (active_codec_family == "av1" || stats.encode_target_format == platf::frame_format_e::p010) &&
         (pacing_risk || fps_gap >= 4.0) &&
@@ -476,9 +477,10 @@ namespace nvhttp {
       health["recommendations"] = std::move(recommendations);
       health["safe_bitrate_kbps"] = safe_bitrate_kbps;
       health["safe_display_mode"] = (virtual_display_risk || host_prefers_headless()) ? "headless" : (current_virtual_display ? "virtual_display" : "headless");
-      health["safe_hdr"] = stats.dynamic_range > 0 && !hdr_risk;
+      health["safe_hdr"] = stats.stream_hdr_enabled && !hdr_risk;
       health["decoder_risk"] = decoder_risk ? "elevated" : "normal";
       health["hdr_risk"] = hdr_risk ? "elevated" : "normal";
+      health["hdr_source"] = hdr_source_missing ? "missing" : (stats.stream_hdr_enabled ? "metadata" : "sdr");
       health["network_risk"] = network_risk ? "elevated" : "normal";
       health["relaunch_recommended"] = hdr_risk || decoder_risk || virtual_display_risk;
       if (safe_codec) {
@@ -2972,6 +2974,12 @@ namespace nvhttp {
       output["game_uuid"] = proc::proc.get_running_app_uuid();
       output["cursor_visible"] = cursor::visible();
       output["dynamic_range"] = stats.dynamic_range;
+      auto &hdr = output["hdr"];
+      hdr["client_dynamic_range"] = stats.dynamic_range;
+      hdr["display_hdr"] = stats.display_hdr;
+      hdr["metadata_available"] = stats.hdr_metadata_available;
+      hdr["stream_hdr_enabled"] = stats.stream_hdr_enabled;
+      hdr["color_coding"] = stats.color_coding;
       output["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
       output["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
       output["ai_optimizer_enabled"] = ai_optimizer::is_enabled();

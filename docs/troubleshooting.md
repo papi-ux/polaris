@@ -103,6 +103,11 @@ nvidia_drm.modeset=1
 
 If you do not need DRM/KMS capture, keep using the default compositor and portal paths instead.
 
+If a manually copied test binary still logs `Failed to gain CAP_SYS_ADMIN` after `setcap`, check the
+mount options for the binary path. File capabilities are ignored on `nosuid` mounts, so `/tmp`
+builds can be misleading; copy the test binary to a normal path such as `/usr/local/bin` before
+applying `setcap`.
+
 ## VAAPI or software encode fallback
 
 If Polaris cannot hold the preferred hardware path, open Mission Control or Troubleshooting and
@@ -111,10 +116,21 @@ need to guess from a black-box client session.
 
 ## Linux HDR or Main10 has wrong colors
 
-If the log says `Display is HDR: false`, treat that stream as SDR. A client HDR request or
+If the log says `stream_hdr_enabled=false`, treat that stream as SDR. A client HDR request or
 `hdr_mode = 2` can still move the encoder into a 10-bit/P010 path, but it does not make a non-HDR
 Linux capture path into a true HDR source. On AMD VAAPI systems, keep `hdr_mode = 0` and disable
 client HDR requests until SDR colors are correct, then test HEVC Main 8-bit before testing Main10.
+
+For true HDR, look for all of these lines in the same launch:
+
+```text
+HDR metadata: available=true
+Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)
+HDR decision: ... display_hdr=true hdr_metadata_available=true stream_hdr_enabled=true
+```
+
+If `stream_hdr_enabled=false`, Polaris is being conservative: the client may have requested HDR or Main10,
+but the active Linux display path did not provide enough metadata to advertise a real HDR stream.
 
 ## Support bundle and logs
 

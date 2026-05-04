@@ -316,6 +316,70 @@ namespace video {
     }
 #endif
 
+    std::string_view color_coding_label(const sunshine_colorspace_t &colorspace) {
+      switch (colorspace.colorspace) {
+        case colorspace_e::bt2020:
+          return "HDR (Rec. 2020 + SMPTE 2084 PQ)"sv;
+        case colorspace_e::rec601:
+          return "SDR (Rec. 601)"sv;
+        case colorspace_e::rec709:
+          return "SDR (Rec. 709)"sv;
+        case colorspace_e::bt2020sdr:
+          return "SDR (Rec. 2020)"sv;
+        default:
+          return "unknown"sv;
+      }
+    }
+
+    struct hdr_probe_t {
+      bool display_hdr = false;
+      std::optional<SS_HDR_METADATA> metadata;
+    };
+
+    void log_hdr_metadata_summary(const SS_HDR_METADATA &metadata) {
+      BOOST_LOG(info)
+        << "HDR metadata: available=true"
+        << " max_luminance="sv << metadata.maxDisplayLuminance
+        << " min_luminance="sv << metadata.minDisplayLuminance
+        << " max_cll="sv << metadata.maxContentLightLevel
+        << " max_fall="sv << metadata.maxFrameAverageLightLevel;
+    }
+
+    hdr_probe_t probe_display_hdr(platf::display_t &disp, const config_t &config) {
+      hdr_probe_t probe;
+      probe.display_hdr = disp.is_hdr();
+
+      if (config.dynamicRange > 0 && probe.display_hdr) {
+        SS_HDR_METADATA metadata {};
+        if (disp.get_hdr_metadata(metadata)) {
+          probe.metadata = metadata;
+          log_hdr_metadata_summary(metadata);
+        } else {
+          BOOST_LOG(warning)
+            << "HDR decision: client_dynamic_range="sv << config.dynamicRange
+            << " display_hdr=true hdr_metadata_available=false stream_hdr_enabled=false; treating stream as SDR because display metadata could not be read"sv;
+        }
+      }
+
+      return probe;
+    }
+
+    hdr_info_t make_hdr_info(const platf::encode_device_t &encode_device) {
+      hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
+      if (!colorspace_is_hdr(encode_device.colorspace)) {
+        return hdr_info;
+      }
+
+      if (!encode_device.hdr_metadata) {
+        BOOST_LOG(error) << "Couldn't send HDR metadata when colorspace selection indicates it should have one"sv;
+        return hdr_info;
+      }
+
+      hdr_info->metadata = *encode_device.hdr_metadata;
+      hdr_info->enabled = true;
+      return hdr_info;
+    }
+
     std::string trim_trailing_ascii_whitespace(std::string value) {
       while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ' || value.back() == '\t')) {
         value.pop_back();
@@ -2519,10 +2583,12 @@ namespace video {
     frame->colorspace = ctx->colorspace;
     frame->chroma_location = ctx->chroma_sample_location;
 
+    const auto frame_hdr_metadata = encode_device->hdr_metadata;
+
     // Attach HDR metadata to the AVFrame
     if (colorspace_is_hdr(colorspace)) {
-      SS_HDR_METADATA hdr_metadata;
-      if (disp->get_hdr_metadata(hdr_metadata)) {
+      if (frame_hdr_metadata) {
+        const auto &hdr_metadata = *frame_hdr_metadata;
         auto mdm = av_mastering_display_metadata_create_side_data(frame.get());
 
         mdm->display_primaries[0][0] = av_make_q(hdr_metadata.displayPrimaries[0].x, 50000);
@@ -2548,7 +2614,7 @@ namespace video {
           clm->MaxFALL = hdr_metadata.maxFrameAverageLightLevel;
         }
       } else {
-        BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
+        BOOST_LOG(error) << "Couldn't attach HDR metadata when colorspace selection indicates it should have one";
       }
     }
 
@@ -2561,6 +2627,7 @@ namespace video {
         return nullptr;
       }
       software_encode_device->colorspace = colorspace;
+      software_encode_device->hdr_metadata = frame_hdr_metadata;
 
       encode_device_final = std::move(software_encode_device);
     } else {
@@ -3000,7 +3067,8 @@ namespace video {
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
     std::unique_ptr<platf::encode_device_t> result;
 
-    auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
+    const auto hdr_probe = probe_display_hdr(disp, config);
+    auto colorspace = colorspace_from_client_config(config, hdr_probe.metadata.has_value());
 
     auto pix_fmt = select_encoder_output_pix_fmt(encoder, config, colorspace);
     if (!pix_fmt) {
@@ -3012,15 +3080,16 @@ namespace video {
 
       BOOST_LOG(info) << "Creating encoder " << logging::bracket(encoder_name);
 
-      auto color_coding = colorspace.colorspace == colorspace_e::bt2020    ? "HDR (Rec. 2020 + SMPTE 2084 PQ)" :
-                          colorspace.colorspace == colorspace_e::rec601    ? "SDR (Rec. 601)" :
-                          colorspace.colorspace == colorspace_e::rec709    ? "SDR (Rec. 709)" :
-                          colorspace.colorspace == colorspace_e::bt2020sdr ? "SDR (Rec. 2020)" :
-                                                                             "unknown";
+      auto color_coding = color_coding_label(colorspace);
 
       BOOST_LOG(info) << "Color coding: " << color_coding;
       BOOST_LOG(info) << "Color depth: " << colorspace.bit_depth << "-bit";
       BOOST_LOG(info) << "Color range: " << (colorspace.full_range ? "JPEG" : "MPEG");
+      BOOST_LOG(info)
+        << "HDR decision: client_dynamic_range="sv << config.dynamicRange
+        << " display_hdr="sv << (hdr_probe.display_hdr ? "true" : "false")
+        << " hdr_metadata_available="sv << (hdr_probe.metadata ? "true" : "false")
+        << " stream_hdr_enabled="sv << (colorspace_is_hdr(colorspace) ? "true" : "false");
     }
 
     if (dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get())) {
@@ -3049,6 +3118,15 @@ namespace video {
 
     if (result) {
       result->colorspace = colorspace;
+      if (colorspace_is_hdr(colorspace)) {
+        result->hdr_metadata = hdr_probe.metadata;
+      }
+      stream_stats::update_hdr_state(
+        hdr_probe.display_hdr,
+        hdr_probe.metadata.has_value(),
+        colorspace_is_hdr(colorspace),
+        std::string {color_coding_label(colorspace)}
+      );
     }
 
     return result;
@@ -3073,15 +3151,7 @@ namespace video {
     ctx.touch_port_events->raise(make_port(disp, ctx.config));
 
     // Update client with our current HDR display state
-    hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
-    if (colorspace_is_hdr(encode_device->colorspace)) {
-      if (disp->get_hdr_metadata(hdr_info->metadata)) {
-        hdr_info->enabled = true;
-      } else {
-        BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
-      }
-    }
-    ctx.hdr_events->raise(std::move(hdr_info));
+    ctx.hdr_events->raise(make_hdr_info(*encode_device));
 
     auto session = make_encode_session(disp, encoder, ctx.config, frame.width, frame.height, std::move(encode_device));
     if (!session) {
@@ -3342,15 +3412,7 @@ namespace video {
       touch_port_event->raise(make_port(display.get(), config));
 
       // Update client with our current HDR display state
-      hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
-      if (colorspace_is_hdr(encode_device->colorspace)) {
-        if (display->get_hdr_metadata(hdr_info->metadata)) {
-          hdr_info->enabled = true;
-        } else {
-          BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
-        }
-      }
-      hdr_event->raise(std::move(hdr_info));
+      hdr_event->raise(make_hdr_info(*encode_device));
 
       encode_run(
         frame_nr,

@@ -70,6 +70,30 @@ namespace {
   };
 }  // namespace
 
+TEST(VideoColorSpaceTests, ClientHdrRequestWithoutDisplayMetadataStaysSdrMain10) {
+  video::config_t config {};
+  config.encoderCscMode = 2;  // Rec. 709 SDR
+  config.dynamicRange = 1;
+
+  const auto colorspace = video::colorspace_from_client_config(config, false);
+
+  EXPECT_FALSE(video::colorspace_is_hdr(colorspace));
+  EXPECT_EQ(colorspace.colorspace, video::colorspace_e::rec709);
+  EXPECT_EQ(colorspace.bit_depth, 10);
+}
+
+TEST(VideoColorSpaceTests, ClientHdrRequestWithDisplayMetadataEnablesTrueHdr) {
+  video::config_t config {};
+  config.encoderCscMode = 2;  // ignored for true HDR
+  config.dynamicRange = 1;
+
+  const auto colorspace = video::colorspace_from_client_config(config, true);
+
+  EXPECT_TRUE(video::colorspace_is_hdr(colorspace));
+  EXPECT_EQ(colorspace.colorspace, video::colorspace_e::bt2020);
+  EXPECT_EQ(colorspace.bit_depth, 10);
+}
+
 TEST(VideoCacheTests, DriverVersionCacheHitRequiresMatchingBinaryMetadata) {
   const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-video-cache-tests";
   const auto cache_path = cache_dir / "driver_version_cache.txt";

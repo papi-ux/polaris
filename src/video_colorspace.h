@@ -28,7 +28,7 @@ namespace video {
   // Declared in video.h
   struct config_t;
 
-  sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_display);
+  sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_metadata_available);
 
   struct avcodec_colorspace_t {
     AVColorPrimaries primaries;

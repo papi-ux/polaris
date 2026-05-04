@@ -97,6 +97,10 @@ namespace stream_stats {
     j["encode_target_residency"] = platf::from_frame_residency(encode_target_residency);
     j["encode_target_format"] = platf::from_frame_format(encode_target_format);
     j["dynamic_range"] = dynamic_range;
+    j["display_hdr"] = display_hdr;
+    j["hdr_metadata_available"] = hdr_metadata_available;
+    j["stream_hdr_enabled"] = stream_hdr_enabled;
+    j["color_coding"] = color_coding;
     j["fps"] = fps;
     j["requested_client_fps"] = requested_client_fps;
     j["session_target_fps"] = session_target_fps;
@@ -343,6 +347,17 @@ namespace stream_stats {
   void update_dynamic_range(int dynamic_range) {
     std::lock_guard<std::mutex> lock(stats_mutex);
     current_stats.dynamic_range = dynamic_range;
+  }
+
+  void update_hdr_state(bool display_hdr,
+                        bool hdr_metadata_available,
+                        bool stream_hdr_enabled,
+                        const std::string &color_coding) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.display_hdr = display_hdr;
+    current_stats.hdr_metadata_available = hdr_metadata_available;
+    current_stats.stream_hdr_enabled = stream_hdr_enabled;
+    current_stats.color_coding = color_coding;
   }
 
   void update_capture_profile(const capture_profile_sample_t &sample) {
