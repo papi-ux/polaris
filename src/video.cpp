@@ -3877,7 +3877,7 @@ namespace video {
                     << ", topology " << topology << ")";
   }
 
-  int probe_encoders() {
+  int probe_encoders(bool strict_configured_encoder, bool save_successful_cache) {
     if (!allow_encoder_probing()) {
       // Error already logged
       return -1;
@@ -3907,6 +3907,17 @@ namespace video {
 
     // Restart encoder selection
     auto previous_encoder = chosen_encoder;
+    const auto previous_hevc_mode = active_hevc_mode;
+    const auto previous_av1_mode = active_av1_mode;
+    const auto previous_ref_frames_invalidation = last_encoder_probe_supported_ref_frames_invalidation;
+    const auto previous_yuv444_for_codec = last_encoder_probe_supported_yuv444_for_codec;
+    auto restore_previous_probe_state = [&]() {
+      chosen_encoder = previous_encoder;
+      active_hevc_mode = previous_hevc_mode;
+      active_av1_mode = previous_av1_mode;
+      last_encoder_probe_supported_ref_frames_invalidation = previous_ref_frames_invalidation;
+      last_encoder_probe_supported_yuv444_for_codec = previous_yuv444_for_codec;
+    };
     reset_encoder_probe_state();
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
@@ -3953,6 +3964,13 @@ namespace video {
       if (chosen_encoder == nullptr) {
         BOOST_LOG(error) << "Couldn't find any working encoder matching ["sv << config::video.encoder << ']';
       }
+    }
+
+    if (strict_configured_encoder && !config::video.encoder.empty() && chosen_encoder == nullptr) {
+      BOOST_LOG(info) << "Configured encoder ["sv << config::video.encoder
+                      << "] failed strict runtime probe; not trying fallback encoders"sv;
+      restore_previous_probe_state();
+      return -1;
     }
 
     BOOST_LOG(info) << "// Testing for available encoders, this may generate errors. You can safely ignore those errors. //"sv;
@@ -4076,15 +4094,19 @@ namespace video {
       active_av1_mode = encoder.av1[encoder_t::PASSED] ? (encoder.av1[encoder_t::DYNAMIC_RANGE] ? 3 : 2) : 1;
     }
 
-    // Cache the successful encoder and its effective codec capabilities for accurate prelaunch advertising.
-    save_encoder_cache(
-      std::string(encoder.name),
-      codec_capability_state_t {
-        active_hevc_mode,
-        active_av1_mode,
-        last_encoder_probe_supported_yuv444_for_codec
-      }
-    );
+    if (save_successful_cache) {
+      // Cache the successful encoder and its effective codec capabilities for accurate prelaunch advertising.
+      save_encoder_cache(
+        std::string(encoder.name),
+        codec_capability_state_t {
+          active_hevc_mode,
+          active_av1_mode,
+          last_encoder_probe_supported_yuv444_for_codec
+        }
+      );
+    } else {
+      BOOST_LOG(info) << "Encoder cache not updated for temporary runtime probe"sv;
+    }
 
     return 0;
   }

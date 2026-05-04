@@ -1940,7 +1940,7 @@ namespace proc {
 #ifdef __linux__
     bool cage_started_with_detached_client = false;
 
-    auto reprobe_encoders_for_cage = [&]() -> bool {
+    auto reprobe_encoders_for_cage = [&](bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
       if (!config::video.linux_display.use_cage_compositor || rtsp_stream::session_count() != 0) {
         return true;
       }
@@ -1962,7 +1962,7 @@ namespace proc {
       platf::set_env("WAYLAND_DISPLAY", cage_socket);
       platf::set_env("AT_SPI_BUS_ADDRESS", "");
 
-      const int probe_status = video::probe_encoders();
+      const int probe_status = video::probe_encoders(strict_configured_encoder, save_successful_cache);
 
       restore_env_var("AT_SPI_BUS_ADDRESS", original_at_spi_bus_address);
       restore_env_var("WAYLAND_DISPLAY", original_wayland_display);
@@ -1984,12 +1984,14 @@ namespace proc {
     const bool requested_headless = config::video.linux_display.headless_mode;
     const bool prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
     const bool encoder_requires_gpu_native_capture = video::active_encoder_requires_gpu_native_capture();
+    const bool should_try_gpu_native_cage_probe =
+      prefer_gpu_native_capture || encoder_requires_gpu_native_capture;
     const bool should_probe_windowed_cage_for_gpu_native =
       config::video.linux_display.use_cage_compositor &&
       cage_display_router::should_attempt_windowed_gpu_native_probe(
         requested_headless,
         prefer_gpu_native_capture,
-        encoder_requires_gpu_native_capture
+        should_try_gpu_native_cage_probe
       );
     const auto cached_windowed_gpu_native_probe_result =
       should_probe_windowed_cage_for_gpu_native ?
@@ -2023,7 +2025,7 @@ namespace proc {
                       << " gpu_native_override_active="sv << runtime_state.gpu_native_override_active;
     };
 
-    auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed) -> bool {
+    auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed, bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
       if (cage_display_router::is_running()) {
         cage_display_router::stop();
       }
@@ -2032,7 +2034,7 @@ namespace proc {
         return false;
       }
 
-      if (!reprobe_encoders_for_cage()) {
+      if (!reprobe_encoders_for_cage(strict_configured_encoder, save_successful_cache)) {
         cage_display_router::stop();
         return false;
       }
@@ -2062,7 +2064,7 @@ namespace proc {
         }
       });
 
-      if (!start_cage_session("", true)) {
+      if (!start_cage_session("", true, true, false)) {
         cage_display_router::update_windowed_gpu_native_probe_result(false);
         BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe could not initialize the compositor/encoder path; staying headless"sv;
         return false;

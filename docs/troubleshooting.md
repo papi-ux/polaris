@@ -108,6 +108,34 @@ If local Plasma/GNOME audio is still mixed into the stream, include the audio se
 and whether the client requested host audio. Host-audio mode intentionally captures the host sink,
 so same-user local apps can still be part of that stream.
 
+## Thread priority warning during a stream
+
+If the log shows this warning during an otherwise working stream:
+
+```text
+Thread priority elevation unavailable; continuing with the default scheduler
+```
+
+Polaris is running, but the user service cannot raise capture, encode, or audio worker priority.
+Packaged installs include `LimitRTPRIO=95` and `LimitNICE=-10` in `polaris.service`; reload the user
+manager and restart Polaris after updating the package:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart polaris
+```
+
+If the warning remains, the user manager inherited stricter limits from the login session. Confirm
+the active unit with:
+
+```bash
+systemctl --user cat polaris
+journalctl --user -u polaris -b --no-pager | grep -E 'Thread priority|RealtimeKit|SCHED_FIFO'
+```
+
+Installing and running RealtimeKit can also allow priority elevation without granting broad
+capabilities to the Polaris binary.
+
 ## NVIDIA KMS capture issues
 
 If KMS capture gives a black screen on NVIDIA, confirm the kernel is using:

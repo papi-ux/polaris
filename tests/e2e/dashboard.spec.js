@@ -30,6 +30,14 @@ test.describe('dashboard', () => {
       runtime_effective_headless: true,
       runtime_gpu_native_override_active: false,
       capture_transport: 'dmabuf',
+      capture_residency: 'gpu',
+      capture_format: 'bgra8',
+      capture_path: 'gpu_native',
+      capture_cpu_copy: false,
+      capture_gpu_native: true,
+      encode_target_device: 'cuda',
+      encode_target_residency: 'gpu',
+      encode_target_format: 'nv12',
     }
 
     await loggedInPage.addInitScript((payload) => {
@@ -69,5 +77,6 @@ test.describe('dashboard', () => {
     for (const label of ['FPS', 'Bitrate', 'Encode', 'Latency', 'GPU Load', 'Packet Loss']) {
       await expect(loggedInPage.getByText(label, { exact: false }).first()).toBeVisible()
     }
+    await expect(loggedInPage.getByText(/GPU Native/i).first()).toBeVisible()
   })
 })
