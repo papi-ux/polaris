@@ -21,6 +21,7 @@ depends=(
   'avahi'
   'boost-libs'
   'curl'
+  'grim'
   'labwc'
   'libayatana-appindicator'
   'libcap'
