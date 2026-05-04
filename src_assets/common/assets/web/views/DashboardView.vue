@@ -108,7 +108,7 @@
                     <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
                     <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
                     <span class="data-pill">{{ runtimeBackendLabel }}</span>
-                    <span class="data-pill">{{ captureTransportLabel }}</span>
+                    <span class="data-pill">{{ capturePathLabel }}</span>
                   </div>
                   <div class="text-xs text-storm">{{ previewStatusText }}</div>
                 </div>
@@ -838,11 +838,59 @@ const captureFormatLabel = computed(() => {
   return String(format).toUpperCase()
 })
 
+const capturePathLabel = computed(() => {
+  if (!stats.value?.streaming) return '--'
+  return titleizeToken(stats.value?.capture_path || 'unknown')
+})
+
+const captureCpuCopyLabel = computed(() => {
+  if (!stats.value?.streaming) return '--'
+  return stats.value?.capture_cpu_copy ? 'CPU copy' : 'No CPU copy'
+})
+
+const captureCpuCopyTone = computed(() => {
+  if (!stats.value?.streaming) return 'text-storm'
+  return stats.value?.capture_cpu_copy ? 'text-orange-300' : 'text-green-400'
+})
+
+const captureGpuNativeLabel = computed(() => {
+  if (!stats.value?.streaming) return '--'
+  return stats.value?.capture_gpu_native ? 'GPU native' : 'Mixed path'
+})
+
+const captureGpuNativeTone = computed(() => {
+  if (!stats.value?.streaming) return 'text-storm'
+  return stats.value?.capture_gpu_native ? 'text-green-400' : 'text-amber-300'
+})
+
+const encodeTargetLabel = computed(() => {
+  if (!stats.value?.streaming) return '--'
+  const device = stats.value?.encode_target_device || 'unknown'
+  const residency = stats.value?.encode_target_residency || 'unknown'
+  const format = stats.value?.encode_target_format || 'unknown'
+  return `${titleizeToken(device)} / ${titleizeToken(residency)} / ${String(format).toUpperCase()}`
+})
+
+const encodeTargetTone = computed(() => {
+  if (!stats.value?.streaming) return 'text-storm'
+  return String(stats.value?.encode_target_residency || '').toLowerCase() === 'gpu'
+    ? 'text-green-400'
+    : 'text-orange-300'
+})
+
 const runtimePathNote = computed(() => {
   if (!stats.value?.streaming) return ''
 
   if (nestedLabwcShmFallbackActive.value) {
     return 'Nested labwc fallback is active: Polaris is capturing the windowed compositor through SHM instead of the GPU-native fast path.'
+  }
+
+  if (stats.value?.capture_cpu_copy) {
+    return 'Capture or encode is still crossing the CPU; check capture transport, capture residency, and encode target.'
+  }
+
+  if (stats.value?.capture_gpu_native) {
+    return 'GPU-native path is active: capture stays DMA-BUF/GPU-resident into the encoder path.'
   }
 
   if (stats.value?.runtime_gpu_native_override_active) {
@@ -855,6 +903,8 @@ const runtimePathNote = computed(() => {
 const runtimePathNoteTone = computed(() => {
   if (!runtimePathNote.value) return 'text-storm'
   if (nestedLabwcShmFallbackActive.value) return 'text-orange-300'
+  if (stats.value?.capture_cpu_copy) return 'text-orange-300'
+  if (stats.value?.capture_gpu_native) return 'text-green-400'
   return 'text-amber-300'
 })
 
@@ -1039,9 +1089,13 @@ const aiOptimizationSummary = computed(() => {
 
 const runtimeSummaryRows = computed(() => ([
   { label: 'Backend', value: runtimeBackendLabel.value, tone: 'text-silver' },
-  { label: 'Capture', value: captureTransportLabel.value, tone: 'text-silver' },
+  { label: 'Path', value: capturePathLabel.value, tone: captureGpuNativeTone.value },
+  { label: 'Transport', value: captureTransportLabel.value, tone: 'text-silver' },
   { label: 'Format', value: captureFormatLabel.value, tone: 'text-silver' },
   { label: 'Residency', value: captureResidencyLabel.value, tone: 'text-silver' },
+  { label: 'Encode', value: encodeTargetLabel.value, tone: encodeTargetTone.value },
+  { label: 'Copy', value: captureCpuCopyLabel.value, tone: captureCpuCopyTone.value },
+  { label: 'Native', value: captureGpuNativeLabel.value, tone: captureGpuNativeTone.value },
   { label: 'Requested', value: runtimeRequestedMode.value, tone: 'text-silver' },
   { label: 'Effective', value: runtimeEffectiveMode.value, tone: runtimeEffectiveTone.value },
   { label: 'Override', value: runtimeOverrideLabel.value, tone: runtimeOverrideTone.value },

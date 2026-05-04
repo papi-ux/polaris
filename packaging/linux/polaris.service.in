@@ -10,6 +10,10 @@ ExecStartPre=/bin/sleep 5
 @POLARIS_SERVICE_STOP_COMMAND@
 Restart=on-failure
 RestartSec=5s
+# Give capture, encode, and audio workers room to request realtime or
+# negative-nice priority when the user manager allows it.
+LimitRTPRIO=95
+LimitNICE=-10
 
 [Install]
 WantedBy=xdg-desktop-autostart.target
