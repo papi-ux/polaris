@@ -170,46 +170,27 @@ namespace audio {
       return;
     }
 
-    // Order of priority:
-    // 1. Virtual sink
-    // 2. Audio sink
-    // 3. Host
-    std::string *sink = &ref->sink.host;
-    if (!config::audio.sink.empty()) {
-      sink = &config::audio.sink;
-    }
+    const bool host_audio = config.flags[config_t::HOST_AUDIO];
+    const auto sink = select_sink_name(*ref.get(), stream.channelCount, host_audio);
+    const bool route_without_default = should_route_session_sink_without_default(*ref.get(), sink, host_audio);
 
-    // Prefer the virtual sink if host playback is disabled or there's no other sink
-    if (ref->sink.null && (!config.flags[config_t::HOST_AUDIO] || sink->empty())) {
-      auto &null = *ref->sink.null;
-      switch (stream.channelCount) {
-        case 2:
-          sink = &null.stereo;
-          break;
-        case 6:
-          sink = &null.surround51;
-          break;
-        case 8:
-          sink = &null.surround71;
-          break;
-      }
-    }
-
-    BOOST_LOG(info) << "Selected audio sink: "sv << *sink;
+    BOOST_LOG(info) << "Selected audio sink: "sv << sink;
 
     // Only the first to start a session may change the default sink
     if (!ref->sink_flag->exchange(true, std::memory_order_acquire)) {
       // If the selected sink is different than the current one, change sinks.
-      ref->restore_sink = ref->sink.host != *sink;
-      if (ref->restore_sink) {
-        if (control->set_sink(*sink)) {
+      ref->restore_sink = !route_without_default && ref->sink.host != sink;
+      if (route_without_default) {
+        BOOST_LOG(info) << "Linux audio isolation: capturing virtual sink without changing the user's default sink"sv;
+      } else if (ref->restore_sink) {
+        if (control->set_sink(sink)) {
           return;
         }
       }
     }
 
     auto frame_size = config.packetDuration * stream.sampleRate / 1000;
-    auto mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size);
+    auto mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size, sink);
     if (!mic) {
       return;
     }
@@ -247,7 +228,7 @@ namespace audio {
             BOOST_LOG(info) << "Reinitializing audio capture"sv;
             mic.reset();
             do {
-              mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size);
+              mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size, sink);
               if (!mic) {
                 BOOST_LOG(warning) << "Couldn't re-initialize audio input"sv;
               }
@@ -266,6 +247,44 @@ namespace audio {
   audio_ctx_ref_t get_audio_ctx_ref() {
     static auto control_shared {safe::make_shared<audio_ctx_t>(start_audio_control, stop_audio_control)};
     return control_shared.ref();
+  }
+
+  std::string select_sink_name(const audio_ctx_t &ctx, int channels, bool host_audio) {
+    // Order of priority:
+    // 1. Virtual sink, when host playback is disabled or no host sink exists
+    // 2. Explicit audio sink
+    // 3. Host/default sink
+    std::string sink = config::audio.sink.empty() ? ctx.sink.host : config::audio.sink;
+
+    if (ctx.sink.null && (!host_audio || sink.empty())) {
+      const auto &null = *ctx.sink.null;
+      switch (channels) {
+        case 6:
+          return null.surround51;
+        case 8:
+          return null.surround71;
+        case 2:
+        default:
+          return null.stereo;
+      }
+    }
+
+    return sink;
+  }
+
+  bool sink_is_virtual(const audio_ctx_t &ctx, const std::string &sink) {
+    return ctx.sink.null &&
+           (sink == ctx.sink.null->stereo ||
+            sink == ctx.sink.null->surround51 ||
+            sink == ctx.sink.null->surround71);
+  }
+
+  bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio) {
+#ifdef __linux__
+    return !host_audio && config::audio.sink.empty() && sink_is_virtual(ctx, sink);
+#else
+    return false;
+#endif
   }
 
   bool is_audio_ctx_sink_available(const audio_ctx_t &ctx) {

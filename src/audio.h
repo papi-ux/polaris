@@ -10,6 +10,7 @@
 #include "utility.h"
 
 #include <bitset>
+#include <string>
 
 namespace audio {
   enum stream_config_e : int {
@@ -78,6 +79,12 @@ namespace audio {
   using audio_ctx_ref_t = safe::shared_t<audio_ctx_t>::ptr_t;
 
   void capture(safe::mail_t mail, config_t config, void *channel_data);
+
+  std::string select_sink_name(const audio_ctx_t &ctx, int channels, bool host_audio);
+
+  bool sink_is_virtual(const audio_ctx_t &ctx, const std::string &sink);
+
+  bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio);
 
   /**
    * @brief Get the reference to the audio context.

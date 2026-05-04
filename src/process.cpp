@@ -894,6 +894,17 @@ namespace proc {
       return std::nullopt;
     }
 
+    int normalized_audio_channel_count(int channel_count) {
+      switch (channel_count) {
+        case 6:
+        case 8:
+          return channel_count;
+        case 2:
+        default:
+          return 2;
+      }
+    }
+
     void restore_env_var(const char *key, const std::optional<std::string> &value) {
       if (value) {
         platf::set_env(key, *value);
@@ -1864,6 +1875,25 @@ namespace proc {
     }
     _session_env_keys.clear();
 
+#ifdef __linux__
+    _audio_context = {};
+    if (config::audio.stream) {
+      _audio_context = audio::get_audio_ctx_ref();
+      if (_audio_context) {
+        const auto session_audio_channels = normalized_audio_channel_count(channelCount);
+        const auto sink = audio::select_sink_name(*_audio_context.get(), session_audio_channels, launch_session->host_audio);
+        if (audio::should_route_session_sink_without_default(*_audio_context.get(), sink, launch_session->host_audio)) {
+          set_session_env_var(_env, _session_env_keys, "PULSE_SINK", sink);
+          set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_AUDIO_SINK", sink);
+          BOOST_LOG(info) << "Linux audio isolation: routing launched apps to virtual sink ["sv
+                          << sink << "] without changing the user's default sink"sv;
+        }
+      } else {
+        BOOST_LOG(warning) << "Linux audio isolation: audio control unavailable; launched apps will use the current default sink"sv;
+      }
+    }
+#endif
+
     // If MangoHud is enabled, also set DLSYM mode for safer Vulkan hooking
     // (prevents crashes in Wine utilities like d3ddriverquery64.exe)
     if (_app.env_vars.count("MANGOHUD") && _app.env_vars.at("MANGOHUD") == "1") {
@@ -2517,9 +2547,11 @@ namespace proc {
       platf::unset_env(key);
     }
     for (const auto &key : _session_env_keys) {
+      _env.erase(key);
       platf::unset_env(key);
     }
     _session_env_keys.clear();
+    _audio_context = {};
 
 #ifdef __linux__
     // Stop labwc compositor — this kills all games running inside it.
