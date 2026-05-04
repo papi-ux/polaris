@@ -175,6 +175,14 @@ namespace nvhttp {
 #endif
     }
 
+    bool build_has_cuda() {
+#ifdef POLARIS_BUILD_CUDA
+      return true;
+#else
+      return false;
+#endif
+    }
+
     bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile) {
       if (!device_profile) {
         return false;
@@ -369,9 +377,13 @@ namespace nvhttp {
         stats.dropped_frame_ratio >= 0.04 ||
         fps_gap >= 4.0;
       const bool capture_fallback =
-        stats.capture_residency == platf::frame_residency_e::cpu ||
-        stats.encode_target_residency == platf::frame_residency_e::cpu ||
-        stats.capture_transport == platf::frame_transport_e::shm;
+        stream_stats::capture_path_uses_cpu_copy(stats);
+      const auto capture_path = stream_stats::capture_path_summary(stats);
+      const auto active_encoder_name = video::active_encoder_name();
+      const bool nvenc_cuda_disabled_path =
+        active_encoder_name == "nvenc" &&
+        !build_has_cuda() &&
+        capture_fallback;
       const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
       const bool hdr_source_missing = stats.dynamic_range > 0 && !stats.stream_hdr_enabled;
       const bool hdr_risk = stats.stream_hdr_enabled && (pacing_risk || encoder_risk);
@@ -396,7 +408,11 @@ namespace nvhttp {
       }
       if (capture_fallback) {
         issues.push_back("capture_fallback");
-        recommendations.push_back("Prefer the GPU-native capture path or the headless compositor path on this host.");
+        recommendations.push_back("Current capture or encode upload path is using a CPU-side copy; check capture transport, residency, and encoder target residency.");
+      }
+      if (nvenc_cuda_disabled_path) {
+        issues.push_back("nvenc_cuda_disabled");
+        recommendations.push_back("Use a CUDA-enabled Polaris build/package before judging NVIDIA headless performance.");
       }
       if (encoder_risk) {
         issues.push_back("encoder_load");
@@ -420,6 +436,7 @@ namespace nvhttp {
       else if (hdr_risk) primary_issue = "hdr_path";
       else if (virtual_display_risk) primary_issue = "virtual_display_path";
       else if (decoder_risk) primary_issue = "decoder_path";
+      else if (nvenc_cuda_disabled_path) primary_issue = "nvenc_cuda_disabled";
       else if (capture_fallback) primary_issue = "capture_fallback";
       else if (pacing_risk) primary_issue = "frame_pacing";
       else if (encoder_risk) primary_issue = "encoder_load";
@@ -428,6 +445,7 @@ namespace nvhttp {
         static_cast<int>(network_risk) +
         static_cast<int>(pacing_risk) +
         static_cast<int>(capture_fallback) +
+        static_cast<int>(nvenc_cuda_disabled_path) +
         static_cast<int>(encoder_risk) +
         static_cast<int>(hdr_risk) +
         static_cast<int>(decoder_risk) +
@@ -472,6 +490,7 @@ namespace nvhttp {
         hdr_risk ? "The current HDR path looks unstable." :
         virtual_display_risk ? "The virtual display path is likely adding pacing overhead." :
         decoder_risk ? "The current codec path looks harder on this client than expected." :
+        nvenc_cuda_disabled_path ? "The NVIDIA path is using a CUDA-disabled CPU copy fallback." :
         "The stream needs a safer pacing or encode path.";
       health["issues"] = std::move(issues);
       health["recommendations"] = std::move(recommendations);
@@ -482,7 +501,12 @@ namespace nvhttp {
       health["hdr_risk"] = hdr_risk ? "elevated" : "normal";
       health["hdr_source"] = hdr_source_missing ? "missing" : (stats.stream_hdr_enabled ? "metadata" : "sdr");
       health["network_risk"] = network_risk ? "elevated" : "normal";
-      health["relaunch_recommended"] = hdr_risk || decoder_risk || virtual_display_risk;
+      health["capture_path"] = capture_path;
+      health["capture_cpu_copy"] = capture_fallback;
+      health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
+      health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
+      health["cuda_build"] = build_has_cuda();
+      health["relaunch_recommended"] = hdr_risk || decoder_risk || virtual_display_risk || nvenc_cuda_disabled_path;
       if (safe_codec) {
         health["safe_codec"] = *safe_codec;
       }
@@ -2888,6 +2912,9 @@ namespace nvhttp {
       output["server"] = "polaris";
       output["version"] = PROJECT_VERSION;
 
+      auto &build = output["build"];
+      build["cuda"] = build_has_cuda();
+
       // Feature flags
       auto &features = output["features"];
       features["ai_optimizer"] = ai_optimizer::is_enabled();
@@ -2945,6 +2972,8 @@ namespace nvhttp {
       output["state"] = session_state;
       output["streaming_active"] = stats.streaming;
       output["shutdown_requested"] = shutdown_requested;
+      auto &build = output["build"];
+      build["cuda"] = build_has_cuda();
 #ifdef __linux__
       output["cage_pid"] = cage_display_router::get_pid();
       output["screen_locked"] = session_manager::is_screen_locked();
@@ -3029,9 +3058,13 @@ namespace nvhttp {
       capture_info["transport"] = platf::from_frame_transport(stats.capture_transport);
       capture_info["residency"] = platf::from_frame_residency(stats.capture_residency);
       capture_info["format"] = platf::from_frame_format(stats.capture_format);
+      capture_info["path"] = stream_stats::capture_path_summary(stats);
+      capture_info["cpu_copy"] = stream_stats::capture_path_uses_cpu_copy(stats);
+      capture_info["gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
 
       // Encoder info
       auto &encoder = output["encoder"];
+      encoder["active_backend"] = video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name();
       encoder["codec"] = stats.codec;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;

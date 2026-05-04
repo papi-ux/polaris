@@ -115,6 +115,24 @@ namespace stream_stats {
   };
 
   /**
+   * @brief Whether the current capture/encode path requires a CPU-side copy.
+   * @param stats Current stream statistics snapshot.
+   */
+  bool capture_path_uses_cpu_copy(const stats_t &stats);
+
+  /**
+   * @brief Whether both capture and encode conversion are GPU-resident.
+   * @param stats Current stream statistics snapshot.
+   */
+  bool capture_path_is_gpu_native(const stats_t &stats);
+
+  /**
+   * @brief Human-readable capture path classification for diagnostics.
+   * @param stats Current stream statistics snapshot.
+   */
+  std::string capture_path_summary(const stats_t &stats);
+
+  /**
    * @brief Update stream active state.
    * @param active Whether streaming is active.
    * @param client_name Name of the connected client.

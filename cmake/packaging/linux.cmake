@@ -39,6 +39,7 @@ set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
             debianutils, \
+            grim, \
             labwc, \
             libcap2, \
             libcurl4, \
@@ -59,6 +60,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             xwayland")
 set(CPACK_RPM_PACKAGE_REQUIRES "\
             ${CPACK_RPM_PLATFORM_PACKAGE_REQUIRES} \
+            grim, \
             labwc, \
             libcap >= 2.22, \
             libcurl >= 7.0, \
