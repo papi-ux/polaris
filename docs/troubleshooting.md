@@ -93,6 +93,21 @@ sudo usermod -aG input "$USER"
 
 Then sign out and back in.
 
+## Local desktop audio is captured during a headless stream
+
+In headless `labwc` sessions, Polaris routes launched apps to the Polaris virtual sink and captures
+that sink directly instead of changing the user's global default audio output. The healthy log path
+looks like:
+
+```text
+Linux audio isolation: routing launched apps to virtual sink [sink-sunshine-stereo] without changing the user's default sink
+Linux audio isolation: capturing virtual sink without changing the user's default sink
+```
+
+If local Plasma/GNOME audio is still mixed into the stream, include the audio section of the logs
+and whether the client requested host audio. Host-audio mode intentionally captures the host sink,
+so same-user local apps can still be part of that stream.
+
 ## NVIDIA KMS capture issues
 
 If KMS capture gives a black screen on NVIDIA, confirm the kernel is using:
