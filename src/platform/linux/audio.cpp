@@ -858,6 +858,21 @@ namespace platf {
           sink.null = std::make_optional(sink_t::null_t {stereo, surround51, surround71});
         }
 
+        if (!sink.host.empty()) {
+          const auto current_default = get_default_sink_name();
+          const bool virtual_sink_promoted =
+            current_default == stereo ||
+            current_default == surround51 ||
+            current_default == surround71;
+
+          if (virtual_sink_promoted && current_default != sink.host) {
+            BOOST_LOG(info) << "Linux audio isolation: restoring original default sink ["sv
+                            << sink.host << "] after virtual sink creation promoted ["sv
+                            << current_default << ']';
+            set_sink(sink.host);
+          }
+        }
+
         return std::make_optional(std::move(sink));
       }
 
@@ -914,15 +929,19 @@ namespace platf {
         return monitor_name;
       }
 
-      std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size) override {
+      std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &selected_sink) override {
         // Sink choice priority:
-        // 1. Config sink
-        // 2. Last sink swapped to (Usually virtual in this case)
-        // 3. Default Sink
+        // 1. Selected session sink
+        // 2. Config sink
+        // 3. Last sink swapped to (Usually virtual in this case)
+        // 4. Default Sink
         // An attempt was made to always use default to match the switching mechanic,
         // but this happens right after the swap so the default returned by PA was not
         // the new one just set!
-        auto sink_name = config::audio.sink;
+        auto sink_name = selected_sink;
+        if (sink_name.empty()) {
+          sink_name = config::audio.sink;
+        }
         if (sink_name.empty()) {
           sink_name = requested_sink;
         }

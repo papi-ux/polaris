@@ -28,6 +28,7 @@
 
 // local includes
 #include "config.h"
+#include "audio.h"
 #include "platform/common.h"
 #include "rtsp.h"
 #include "utility.h"
@@ -171,6 +172,7 @@ namespace proc {
 
     std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
     std::shared_ptr<config::input_t> _saved_input_config;
+    audio::audio_ctx_ref_t _audio_context;
 
     std::vector<ctx_t> _apps;
     ctx_t _app;

@@ -5,8 +5,22 @@
 #include "../tests_common.h"
 
 #include <src/audio.h>
+#include <src/config.h>
 
 using namespace audio;
+
+namespace {
+  audio_ctx_t make_sink_context() {
+    audio_ctx_t ctx {};
+    ctx.sink.host = "alsa_output.host";
+    ctx.sink.null = platf::sink_t::null_t {
+      "sink-sunshine-stereo",
+      "sink-sunshine-surround51",
+      "sink-sunshine-surround71",
+    };
+    return ctx;
+  }
+}
 
 struct AudioTest: PlatformTestSuite, testing::WithParamInterface<std::tuple<std::basic_string_view<char>, config_t>> {
   void SetUp() override {
@@ -65,4 +79,50 @@ TEST_P(AudioTest, TestEncode) {
 
   timer.join();
   capture.join();
+}
+
+TEST(AudioSinkSelectionTest, SelectsVirtualSinkWhenHostAudioIsDisabled) {
+  auto old_sink = config::audio.sink;
+  config::audio.sink.clear();
+  auto ctx = make_sink_context();
+
+  const auto sink = audio::select_sink_name(ctx, 2, false);
+
+  EXPECT_EQ(sink, "sink-sunshine-stereo");
+  EXPECT_TRUE(audio::sink_is_virtual(ctx, sink));
+#ifdef __linux__
+  EXPECT_TRUE(audio::should_route_session_sink_without_default(ctx, sink, false));
+#else
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
+#endif
+
+  config::audio.sink = old_sink;
+}
+
+TEST(AudioSinkSelectionTest, SelectsHostSinkWhenHostAudioIsEnabled) {
+  auto old_sink = config::audio.sink;
+  config::audio.sink.clear();
+  auto ctx = make_sink_context();
+
+  const auto sink = audio::select_sink_name(ctx, 2, true);
+
+  EXPECT_EQ(sink, "alsa_output.host");
+  EXPECT_FALSE(audio::sink_is_virtual(ctx, sink));
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, true));
+
+  config::audio.sink = old_sink;
+}
+
+TEST(AudioSinkSelectionTest, ExplicitConfiguredSinkKeepsDefaultRoutingBehavior) {
+  auto old_sink = config::audio.sink;
+  config::audio.sink = "alsa_output.configured";
+  auto ctx = make_sink_context();
+
+  const auto sink = audio::select_sink_name(ctx, 2, false);
+
+  EXPECT_EQ(sink, "sink-sunshine-stereo");
+  EXPECT_TRUE(audio::sink_is_virtual(ctx, sink));
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
+
+  config::audio.sink = old_sink;
 }
