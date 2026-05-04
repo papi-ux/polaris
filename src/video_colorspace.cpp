@@ -20,14 +20,12 @@ namespace video {
     return colorspace.colorspace == colorspace_e::bt2020;
   }
 
-  sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_display) {
+  sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_metadata_available) {
     sunshine_colorspace_t colorspace;
 
     /* See video::config_t declaration for details */
 
-    BOOST_LOG(info) << "Client dynamicRange: " << config.dynamicRange << ", Display is HDR: " << hdr_display;
-
-    if (config.dynamicRange > 0 && hdr_display) {
+    if (config.dynamicRange > 0 && hdr_metadata_available) {
       // Rec. 2020 with ST 2084 perceptual quantizer
       colorspace.colorspace = colorspace_e::bt2020;
     } else {

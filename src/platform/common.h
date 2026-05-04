@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // lib includes
@@ -516,6 +517,7 @@ namespace platf {
     }
 
     video::sunshine_colorspace_t colorspace;
+    std::optional<SS_HDR_METADATA> hdr_metadata;
   };
 
   struct avcodec_encode_device_t: encode_device_t {

@@ -624,6 +624,13 @@ Yes, if the client explicitly requests a 10-bit path and the active encoder/runt
 </details>
 
 <details>
+<summary><b>Can Polaris stream true HDR on Linux?</b></summary>
+
+Yes, but Polaris only advertises true HDR when the active capture path reports HDR display metadata. For now, validate this on a KMS/DRM path with an HDR-capable output exposing `HDR_OUTPUT_METADATA`; headless labwc/wlroots sessions remain honest SDR until that runtime can provide real metadata. A valid true HDR session logs `hdr_metadata_available=true` and `stream_hdr_enabled=true`.
+
+</details>
+
+<details>
 <summary><b>Can multiple people watch the same stream?</b></summary>
 
 Yes. Set `max_sessions` above `1`. Polaris tracks owner vs viewer roles explicitly, and passive watch mode is designed so a second client can observe without taking over the session. Viewers must match the active owner profile rather than silently creating a different downgraded stream.

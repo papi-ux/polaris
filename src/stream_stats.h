@@ -66,6 +66,10 @@ namespace stream_stats {
     platf::frame_residency_e encode_target_residency = platf::frame_residency_e::unknown;
     platf::frame_format_e encode_target_format = platf::frame_format_e::unknown;
     int dynamic_range = 0;
+    bool display_hdr = false;
+    bool hdr_metadata_available = false;
+    bool stream_hdr_enabled = false;
+    std::string color_coding;
 
     // Video (primary/first client for backward compatibility)
     double fps = 0;
@@ -234,6 +238,18 @@ namespace stream_stats {
    * @param dynamic_range Dynamic range mode from the active RTSP session.
    */
   void update_dynamic_range(int dynamic_range);
+
+  /**
+   * @brief Update the display HDR state and negotiated stream color coding.
+   * @param display_hdr Whether the active display path reports HDR.
+   * @param hdr_metadata_available Whether HDR metadata was available from the display path.
+   * @param stream_hdr_enabled Whether Polaris is advertising true HDR for the stream.
+   * @param color_coding Human-readable color coding label.
+   */
+  void update_hdr_state(bool display_hdr,
+                        bool hdr_metadata_available,
+                        bool stream_hdr_enabled,
+                        const std::string &color_coding);
 
   /**
    * @brief Record a single capture timing sample into the shared telemetry sink.

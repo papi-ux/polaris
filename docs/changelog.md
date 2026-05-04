@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Gate true HDR streaming on display HDR metadata instead of client dynamic-range requests alone
+- Add Linux true HDR diagnostics to logs, session status, and support data
+- Document the KMS/DRM HDR validation path and current headless labwc SDR behavior
+
 ## v1.0.9
 
 Patch release focused on Linux headless color correctness and support clarity.
