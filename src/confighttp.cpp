@@ -925,6 +925,18 @@ namespace confighttp {
     response->write(code, tree.dump(), headers);
   }
 
+  void forbidden(resp_https_t response, [[maybe_unused]] req_https_t request, const std::string &error_message = "Forbidden") {
+    constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::client_error_forbidden;
+    nlohmann::json tree;
+    tree["status_code"] = static_cast<int>(code);
+    tree["status"] = false;
+    tree["error"] = error_message;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+
+    response->write(code, tree.dump(), headers);
+  }
+
 
   /**
    * @brief Validate the request content type and send bad request when mismatch.
@@ -987,6 +999,7 @@ namespace confighttp {
     }
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
+    headers.emplace("Cache-Control", "no-store");
     append_common_security_headers(headers);
     response->write(content, headers);
   }
@@ -4191,7 +4204,7 @@ namespace confighttp {
                           auth_header->second.substr(0, 7) == "Bearer ";
         if (!has_bearer && !hasVerifiedClientCert(request) && !validateCsrf(request)) {
           BOOST_LOG(warning) << "CSRF token validation failed for "sv << request->path;
-          bad_request(response, request, "CSRF token missing or invalid");
+          forbidden(response, request, "CSRF token missing or invalid");
           return;
         }
         handler(response, request);
