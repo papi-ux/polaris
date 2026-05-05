@@ -39,6 +39,10 @@ extern "C" {
 #include "utility.h"
 #include "confighttp.h"
 
+#ifdef __linux__
+#include "platform/linux/cage_display_router.h"
+#endif
+
 #define IDX_START_A 0
 #define IDX_START_B 1
 #define IDX_INVALIDATE_REF_FRAMES 2
@@ -89,6 +93,21 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace stream {
+
+  namespace {
+    bool should_terminate_on_last_client_disconnect() {
+#ifdef __linux__
+      if (!config::video.linux_display.use_cage_compositor) {
+        return false;
+      }
+
+      const auto runtime_state = cage_display_router::runtime_state();
+      return cage_display_router::is_running() && runtime_state.effective_headless;
+#else
+      return false;
+#endif
+    }
+  }  // namespace
 
   enum class socket_e : int {
     video,  ///< Video
@@ -2174,6 +2193,9 @@ namespace stream {
         if (proc::proc.running()) {
           if (proc::proc.session_shutdown_requested()) {
             BOOST_LOG(info) << "Skipping pause because host shutdown is already in progress"sv;
+          } else if (should_terminate_on_last_client_disconnect()) {
+            BOOST_LOG(info) << "Last client disconnected from headless cage runtime; terminating app instead of pausing"sv;
+            proc::proc.terminate();
           } else {
             proc::proc.pause();
           }
