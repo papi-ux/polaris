@@ -64,10 +64,15 @@ KMS/DRM display path with an HDR-capable output reporting `HDR_OUTPUT_METADATA`,
 request and a 10-bit-capable encoder. A valid true HDR session logs:
 
 ```text
-HDR metadata: available=true
+HDR metadata: available=true usable=true
 Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)
 HDR decision: ... display_hdr=true hdr_metadata_available=true stream_hdr_enabled=true
 ```
+
+If the log says `HDR metadata: available=true usable=false`, Polaris found an HDR
+metadata blob but the static metadata is incomplete, such as a custom EDID with a
+zero max luminance value. Polaris treats that stream as SDR instead of tagging it
+as HDR with unusable metadata.
 
 Headless labwc/wlroots sessions are intentionally treated as SDR until the headless display path can
 truthfully provide HDR metadata. In that mode, `hdr_mode = 2` can still be useful to test Main10/P010

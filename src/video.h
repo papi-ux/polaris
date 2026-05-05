@@ -554,6 +554,8 @@ namespace video {
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
 
+  bool hdr_metadata_is_usable_for_tests(const SS_HDR_METADATA &metadata);
+
   int software_frame_input_linesize_for_tests(
     int row_pitch,
     int pixel_pitch,

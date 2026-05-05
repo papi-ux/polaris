@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <list>
+#include <string>
 #include <thread>
 
 // lib includes
@@ -336,9 +337,48 @@ namespace video {
       std::optional<SS_HDR_METADATA> metadata;
     };
 
+    bool hdr_metadata_has_display_primaries(const SS_HDR_METADATA &metadata) {
+      for (const auto &primary : metadata.displayPrimaries) {
+        if (primary.x == 0 || primary.y == 0) {
+          return false;
+        }
+      }
+
+      return metadata.whitePoint.x != 0 && metadata.whitePoint.y != 0;
+    }
+
+    bool hdr_metadata_has_mastering_luminance(const SS_HDR_METADATA &metadata) {
+      return metadata.maxDisplayLuminance != 0;
+    }
+
+    bool hdr_metadata_is_usable(const SS_HDR_METADATA &metadata) {
+      return hdr_metadata_has_display_primaries(metadata) &&
+             hdr_metadata_has_mastering_luminance(metadata);
+    }
+
+    std::string hdr_metadata_rejection_reason(const SS_HDR_METADATA &metadata) {
+      const bool missing_primaries = !hdr_metadata_has_display_primaries(metadata);
+      const bool missing_luminance = !hdr_metadata_has_mastering_luminance(metadata);
+
+      if (missing_primaries && missing_luminance) {
+        return "display primaries/white point and max display luminance are missing";
+      }
+
+      if (missing_primaries) {
+        return "display primaries/white point are missing";
+      }
+
+      if (missing_luminance) {
+        return "max display luminance is missing";
+      }
+
+      return "metadata is incomplete";
+    }
+
     void log_hdr_metadata_summary(const SS_HDR_METADATA &metadata) {
       BOOST_LOG(info)
         << "HDR metadata: available=true"
+        << " usable="sv << (hdr_metadata_is_usable(metadata) ? "true" : "false")
         << " max_luminance="sv << metadata.maxDisplayLuminance
         << " min_luminance="sv << metadata.minDisplayLuminance
         << " max_cll="sv << metadata.maxContentLightLevel
@@ -352,8 +392,15 @@ namespace video {
       if (config.dynamicRange > 0 && probe.display_hdr) {
         SS_HDR_METADATA metadata {};
         if (disp.get_hdr_metadata(metadata)) {
-          probe.metadata = metadata;
           log_hdr_metadata_summary(metadata);
+          if (hdr_metadata_is_usable(metadata)) {
+            probe.metadata = metadata;
+          } else {
+            BOOST_LOG(warning)
+              << "HDR decision: client_dynamic_range="sv << config.dynamicRange
+              << " display_hdr=true hdr_metadata_available=false stream_hdr_enabled=false; treating stream as SDR because "
+              << hdr_metadata_rejection_reason(metadata);
+          }
         } else {
           BOOST_LOG(warning)
             << "HDR decision: client_dynamic_range="sv << config.dynamicRange
@@ -4463,6 +4510,10 @@ namespace video {
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {
     return reset_display_retry_delay(attempt);
+  }
+
+  bool hdr_metadata_is_usable_for_tests(const SS_HDR_METADATA &metadata) {
+    return hdr_metadata_is_usable(metadata);
   }
 
   int software_frame_input_linesize_for_tests(

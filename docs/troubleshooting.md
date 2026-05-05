@@ -176,13 +176,15 @@ client HDR requests until SDR colors are correct, then test HEVC Main 8-bit befo
 For true HDR, look for all of these lines in the same launch:
 
 ```text
-HDR metadata: available=true
+HDR metadata: available=true usable=true
 Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)
 HDR decision: ... display_hdr=true hdr_metadata_available=true stream_hdr_enabled=true
 ```
 
 If `stream_hdr_enabled=false`, Polaris is being conservative: the client may have requested HDR or Main10,
 but the active Linux display path did not provide enough metadata to advertise a real HDR stream.
+If `usable=false`, the display path exposed an HDR metadata blob, but Polaris rejected it because core
+static metadata such as display primaries or max display luminance was missing.
 
 ## Support bundle and logs
 
