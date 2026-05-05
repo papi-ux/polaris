@@ -290,6 +290,11 @@ namespace proc {
     }
 
     std::string canonical_steam_shutdown_command(const std::string &reference_cmd) {
+#ifdef __linux__
+      if (boost::istarts_with(boost::trim_copy(reference_cmd), "setsid ")) {
+        return "setsid -f steam -shutdown";
+      }
+#endif
       return steam_big_picture_command_prefix(reference_cmd) + "steam -shutdown";
     }
 
@@ -456,11 +461,13 @@ namespace proc {
       }
 
       for (auto &cmd : ctx.prep_cmds) {
-        if (command_contains_steam_big_picture_close(cmd.undo_cmd)) {
+        if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
-          BOOST_LOG(info) << "process: upgraded Steam Big Picture cleanup command from ["
-                          << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
-          cmd.undo_cmd = shutdown_cmd;
+          if (shutdown_cmd != cmd.undo_cmd) {
+            BOOST_LOG(info) << "process: upgraded Steam Big Picture cleanup command from ["
+                            << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
+            cmd.undo_cmd = shutdown_cmd;
+          }
         }
       }
 
@@ -523,11 +530,13 @@ namespace proc {
       }
 
       for (auto &cmd : ctx.prep_cmds) {
-        if (command_contains_steam_big_picture_close(cmd.undo_cmd)) {
+        if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
-          BOOST_LOG(info) << "process: upgraded Steam cleanup command from ["
-                          << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
-          cmd.undo_cmd = shutdown_cmd;
+          if (shutdown_cmd != cmd.undo_cmd) {
+            BOOST_LOG(info) << "process: upgraded Steam cleanup command from ["
+                            << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
+            cmd.undo_cmd = shutdown_cmd;
+          }
         }
       }
 
