@@ -94,6 +94,7 @@ namespace stream_stats {
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
     j["capture_path"] = capture_path_summary(*this);
+    j["capture_path_reason"] = capture_path_reason(*this);
     j["capture_cpu_copy"] = capture_path_uses_cpu_copy(*this);
     j["capture_gpu_native"] = capture_path_is_gpu_native(*this);
     j["encode_target_device"] = encode_target_device;
@@ -194,6 +195,50 @@ namespace stream_stats {
         stats.capture_residency == platf::frame_residency_e::gpu) {
       return "gpu_capture";
     }
+    return "mixed_or_unknown";
+  }
+
+  std::string capture_path_reason(const stats_t &stats) {
+    const bool capture_unknown =
+      stats.capture_transport == platf::frame_transport_e::unknown &&
+      stats.capture_residency == platf::frame_residency_e::unknown &&
+      stats.encode_target_residency == platf::frame_residency_e::unknown;
+    if (capture_unknown) {
+      return "no_capture_metadata";
+    }
+
+    if (capture_path_is_gpu_native(stats)) {
+      return "gpu_native";
+    }
+
+    const auto &linux_display = config::video.linux_display;
+    const bool gpu_native_requested =
+      stats.runtime_gpu_native_override_active ||
+      linux_display.prefer_gpu_native_capture;
+
+    if (stats.capture_transport == platf::frame_transport_e::shm) {
+      if (gpu_native_requested) {
+        return "gpu_native_requested_shm_fallback";
+      }
+      if (stats.runtime_effective_headless && linux_display.use_cage_compositor) {
+        return "headless_shm_default";
+      }
+      return "shm_capture";
+    }
+
+    if (stats.capture_residency == platf::frame_residency_e::cpu) {
+      return gpu_native_requested ? "gpu_native_requested_cpu_capture" : "cpu_capture";
+    }
+
+    if (stats.encode_target_residency == platf::frame_residency_e::cpu) {
+      return gpu_native_requested ? "gpu_native_requested_cpu_encode_upload" : "encoder_upload_cpu";
+    }
+
+    if (stats.capture_transport == platf::frame_transport_e::dmabuf &&
+        stats.capture_residency == platf::frame_residency_e::gpu) {
+      return "dmabuf_gpu_capture";
+    }
+
     return "mixed_or_unknown";
   }
 

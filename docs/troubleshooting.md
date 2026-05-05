@@ -157,8 +157,14 @@ GPU -> RAM -> GPU`, the stream is taking an extra CPU copy/upload path. Use a CU
 or rebuild with `-DPOLARIS_ENABLE_CUDA=ON` before comparing headless performance against Sunshine.
 
 `display_preview: Failed to capture cage screenshot` is the web dashboard preview path, not the
-stream capture path. Repeated failures are rate-limited in the log. If the preview is missing,
-confirm `grim` is installed with `command -v grim`.
+stream capture path. Repeated failures are rate-limited in the log, and the dashboard backs off
+preview refreshes after failed captures. If the preview is missing, confirm `grim` is installed with
+`command -v grim`.
+
+For capture performance, check `/polaris/v1/session/status` or `/polaris/v1/stream-policy` and look
+at `capture.path`, `capture.reason`, `capture.cpu_copy`, and `capture.gpu_native`. A reason such as
+`headless_shm_default` means the conservative SHM path is active; `gpu_native_requested_shm_fallback`
+means GPU-native capture was requested but the Wayland capture path still fell back to SHM.
 
 ## VAAPI or software encode fallback
 
