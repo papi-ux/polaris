@@ -329,7 +329,7 @@ const tabs = ref([
       "dd_mode_remapping": {"mixed": [], "resolution_only": [], "refresh_rate_only": []},
       "dd_wa_hdr_toggle": "disabled",
       "headless_mode": "disabled",
-      "linux_prefer_gpu_native_capture": "enabled",
+      "linux_prefer_gpu_native_capture": "disabled",
       "linux_capture_profile": "disabled",
       "double_refreshrate": "disabled",
       "max_bitrate": 0,
