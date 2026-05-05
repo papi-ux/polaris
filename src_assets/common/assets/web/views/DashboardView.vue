@@ -51,6 +51,21 @@
             <span class="meta-pill">{{ viewerCountLabel }}</span>
             <span class="meta-pill">{{ qualitySummaryLabel }}</span>
             <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
+            <span class="meta-pill" :class="captureGpuNativeTone">{{ capturePathLabel }}</span>
+          </div>
+        </div>
+
+        <div v-if="streamPathNotices.length" class="grid gap-2 md:grid-cols-2">
+          <div
+            v-for="notice in streamPathNotices"
+            :key="notice.key"
+            class="rounded-lg border px-3 py-2"
+            :class="notice.surfaceClass"
+          >
+            <div class="text-[11px] font-semibold uppercase tracking-[0.16em]" :class="notice.titleClass">
+              {{ notice.title }}
+            </div>
+            <div class="mt-1 text-sm leading-relaxed text-silver">{{ notice.message }}</div>
           </div>
         </div>
 
@@ -756,8 +771,34 @@ function titleizeToken(value) {
   return String(value)
     .split(/[_-]+/)
     .filter(Boolean)
-    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) => {
+      const token = part.toLowerCase()
+      const labels = {
+        av1: 'AV1',
+        bgra8: 'BGRA8',
+        cpu: 'CPU',
+        cuda: 'CUDA',
+        dmabuf: 'DMA-BUF',
+        drm: 'DRM',
+        gpu: 'GPU',
+        h264: 'H.264',
+        hevc: 'HEVC',
+        kms: 'KMS',
+        nv12: 'NV12',
+        nvenc: 'NVENC',
+        p010: 'P010',
+        shm: 'SHM',
+        vaapi: 'VAAPI',
+        yuv420p: 'YUV420P',
+      }
+      return labels[token] || part.charAt(0).toUpperCase() + part.slice(1)
+    })
     .join(' ')
+}
+
+function metricNumber(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function modeLabelFromBool(value) {
@@ -808,6 +849,15 @@ const runtimeOverrideLabel = computed(() => {
 const runtimeOverrideTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
   return stats.value?.runtime_gpu_native_override_active ? 'text-amber-300' : 'text-green-400'
+})
+
+const headlessGpuNativeOverrideActive = computed(() => {
+  if (!stats.value?.streaming) return false
+  const effectiveKnown = stats.value?.runtime_effective_headless !== undefined && stats.value?.runtime_effective_headless !== null
+  return Boolean(stats.value?.runtime_requested_headless) &&
+    effectiveKnown &&
+    !Boolean(stats.value?.runtime_effective_headless) &&
+    Boolean(stats.value?.runtime_gpu_native_override_active)
 })
 
 const nestedLabwcShmFallbackActive = computed(() => {
@@ -906,6 +956,64 @@ const runtimePathNoteTone = computed(() => {
   if (stats.value?.capture_cpu_copy) return 'text-orange-300'
   if (stats.value?.capture_gpu_native) return 'text-green-400'
   return 'text-amber-300'
+})
+
+const fpsTargetGap = computed(() => {
+  if (!stats.value?.streaming) return null
+  const encoded = metricNumber(stats.value?.fps)
+  const target = metricNumber(stats.value?.session_target_fps || stats.value?.requested_client_fps)
+
+  if (target < 90 || encoded <= 0 || encoded >= target * 0.85) return null
+  return { encoded, target }
+})
+
+const streamPathNotices = computed(() => {
+  if (!stats.value?.streaming) return []
+
+  const notices = []
+  const transport = captureTransportLabel.value
+  const residency = captureResidencyLabel.value
+  const encodeTarget = encodeTargetLabel.value
+
+  if (headlessGpuNativeOverrideActive.value) {
+    notices.push({
+      key: 'gpu-native-override',
+      title: 'GPU-native override',
+      message: 'Polaris requested headless, but is running windowed labwc so DMA-BUF/CUDA capture can stay GPU-resident.',
+      surfaceClass: 'border-amber-300/25 bg-amber-300/10',
+      titleClass: 'text-amber-200',
+    })
+  }
+
+  if (stats.value?.capture_gpu_native) {
+    notices.push({
+      key: 'gpu-native-active',
+      title: 'GPU-native path active',
+      message: `Capture is ${transport}/${residency} and encode target is ${encodeTarget}. This is the fast path.`,
+      surfaceClass: 'border-green-400/25 bg-green-400/10',
+      titleClass: 'text-green-300',
+    })
+  } else if (stats.value?.capture_cpu_copy) {
+    notices.push({
+      key: 'cpu-copy-active',
+      title: 'CPU copy path active',
+      message: `Capture is ${transport}/${residency}. Expect lower headroom than the DMA-BUF/CUDA path.`,
+      surfaceClass: 'border-orange-300/25 bg-orange-300/10',
+      titleClass: 'text-orange-200',
+    })
+  }
+
+  if (fpsTargetGap.value) {
+    notices.push({
+      key: 'fps-target-gap',
+      title: 'FPS target gap',
+      message: `Client target is ${fpsTargetGap.value.target.toFixed(0)} FPS; encoder is averaging ${fpsTargetGap.value.encoded.toFixed(1)} FPS. Check game caps, VSync, or launch flags before treating this as a capture fallback.`,
+      surfaceClass: 'border-ice/25 bg-ice/10',
+      titleClass: 'text-ice',
+    })
+  }
+
+  return notices
 })
 
 const liveSessionTitle = computed(() => (
@@ -1156,18 +1264,28 @@ const recommendations = computed(() => {
   else if (s.packet_loss > 0.5)
     recs.push({ color: 'text-yellow-400', message: `Minor packet loss (${s.packet_loss.toFixed(1)}%) — stream may have occasional artifacts.` })
 
-  if (s.fps < 55 && s.fps > 0)
+  if (fpsTargetGap.value)
+    recs.push({ color: 'text-ice', message: `Client requested ${fpsTargetGap.value.target.toFixed(0)} FPS, but encode is near ${fpsTargetGap.value.encoded.toFixed(1)} FPS. Check the game's frame cap, VSync, or idle/menu throttling first.` })
+  else if (s.fps < 55 && s.fps > 0)
     recs.push({ color: 'text-yellow-400', message: `FPS dropped to ${s.fps.toFixed(1)} — GPU may be overloaded. Consider lowering resolution or quality.` })
 
   if (s.latency_ms > 40)
     recs.push({ color: 'text-yellow-400', message: `Latency is ${s.latency_ms.toFixed(0)}ms — check network path or try wired connection.` })
 
-  if (gpu.value && gpu.value.utilization_pct < 30 && s.encode_time_ms < 4)
+  if (fpsTargetGap.value && gpu.value && gpu.value.utilization_pct < 30 && s.encode_time_ms < 4)
+    recs.push({ color: 'text-green-400', message: `GPU and encoder headroom are available (${gpu.value.utilization_pct}% GPU, ${s.encode_time_ms.toFixed(1)}ms encode), so this looks more like an app/output cap than encoder pressure.` })
+  else if (gpu.value && gpu.value.utilization_pct < 30 && s.encode_time_ms < 4)
     recs.push({ color: 'text-green-400', message: `GPU utilization is low (${gpu.value.utilization_pct}%) with fast encode — you have headroom for higher resolution or quality.` })
 
   // Stream display mode recommendations
   if (!s.headless_mode && s.streaming)
     recs.push({ color: 'text-accent', message: `Use Headless Stream in Audio/Video settings for hidden stream-only sessions that leave the desktop layout alone.` })
+
+  if (headlessGpuNativeOverrideActive.value)
+    recs.push({ color: 'text-amber-300', message: `GPU-native override is active: Polaris requested headless but is using windowed labwc to preserve the GPU-resident capture path.` })
+
+  if (s.capture_cpu_copy)
+    recs.push({ color: 'text-orange-300', message: `Capture is crossing system memory. Use GPU-Native Test with CUDA/NVENC when validating high-FPS headroom.` })
 
   // AI optimizer recommendations
   if (!s.ai_enabled && s.streaming)
