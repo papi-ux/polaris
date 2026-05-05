@@ -97,7 +97,7 @@
                   </div>
                   <div v-if="previewError" class="dashboard-preview-overlay dashboard-preview-overlay-error">
                     <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_error') }}</div>
-                    <button @click="refreshPreview" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
+                    <button @click="retryPreviewNow" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
                       {{ $t('dashboard.preview_retry') }}
                     </button>
                   </div>
@@ -952,26 +952,40 @@ function formatSessionDate(ts) {
 }
 
 // Display preview (polling screenshot endpoint)
+const PREVIEW_REFRESH_MS = 2000
+const PREVIEW_FAILURE_BACKOFF_MS = 15000
+const PREVIEW_MAX_BACKOFF_MS = 60000
 const streamingOutput = ref('')
 const showPreview = ref(false)
 const previewExpanded = ref(false)
 const previewLoaded = ref(false)
 const previewError = ref(false)
 const previewUrl = ref('')
+const previewBackoffMs = ref(PREVIEW_REFRESH_MS)
 let previewTimer = null
 
 function startPreview() {
   previewLoaded.value = false
   previewError.value = false
+  previewBackoffMs.value = PREVIEW_REFRESH_MS
   showPreview.value = true
-  if (previewTimer) {
-    clearInterval(previewTimer)
-  }
   refreshPreview()
-  previewTimer = setInterval(refreshPreview, 2000)
+}
+
+function schedulePreviewRefresh(delayMs) {
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
+  if (!showPreview.value) return
+  previewTimer = setTimeout(refreshPreview, delayMs)
 }
 
 function refreshPreview() {
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
   previewError.value = false
   // When streaming, crop to the streaming output; otherwise show full display
   const output = streamingOutput.value ? `&output=${encodeURIComponent(streamingOutput.value)}` : ''
@@ -981,11 +995,23 @@ function refreshPreview() {
 function handlePreviewLoad() {
   previewLoaded.value = true
   previewError.value = false
+  previewBackoffMs.value = PREVIEW_REFRESH_MS
+  schedulePreviewRefresh(PREVIEW_REFRESH_MS)
 }
 
 function handlePreviewError() {
   previewLoaded.value = false
   previewError.value = true
+  previewBackoffMs.value = Math.min(
+    Math.max(PREVIEW_FAILURE_BACKOFF_MS, previewBackoffMs.value * 2),
+    PREVIEW_MAX_BACKOFF_MS,
+  )
+  schedulePreviewRefresh(previewBackoffMs.value)
+}
+
+function retryPreviewNow() {
+  previewBackoffMs.value = PREVIEW_REFRESH_MS
+  refreshPreview()
 }
 
 function togglePreviewExpanded() {
@@ -1000,7 +1026,8 @@ function stopPreview() {
   previewExpanded.value = false
   previewLoaded.value = false
   previewError.value = false
-  if (previewTimer) { clearInterval(previewTimer); previewTimer = null }
+  previewBackoffMs.value = PREVIEW_REFRESH_MS
+  if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
 }
 
 // Stream quality scoring (0-100, computed from live stats)
@@ -1075,7 +1102,7 @@ const previewSupportCopy = computed(() => (
 ))
 
 const previewStatusText = computed(() => {
-  if (previewError.value) return t('dashboard.preview_error')
+  if (previewError.value) return t('dashboard.preview_unavailable_status')
   if (!previewLoaded.value) return t('dashboard.preview_capturing')
   return t('dashboard.preview_status')
 })
