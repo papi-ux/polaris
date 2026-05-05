@@ -94,6 +94,43 @@ TEST(VideoColorSpaceTests, ClientHdrRequestWithDisplayMetadataEnablesTrueHdr) {
   EXPECT_EQ(colorspace.bit_depth, 10);
 }
 
+namespace {
+  SS_HDR_METADATA usable_hdr_metadata() {
+    SS_HDR_METADATA metadata {};
+    metadata.displayPrimaries[0].x = 34000;
+    metadata.displayPrimaries[0].y = 16000;
+    metadata.displayPrimaries[1].x = 13250;
+    metadata.displayPrimaries[1].y = 34500;
+    metadata.displayPrimaries[2].x = 7500;
+    metadata.displayPrimaries[2].y = 3000;
+    metadata.whitePoint.x = 15635;
+    metadata.whitePoint.y = 16450;
+    metadata.maxDisplayLuminance = 1000;
+    metadata.minDisplayLuminance = 1;
+    return metadata;
+  }
+}  // namespace
+
+TEST(VideoHdrMetadataTests, AcceptsMetadataWithPrimariesAndMasteringLuminance) {
+  auto metadata = usable_hdr_metadata();
+
+  EXPECT_TRUE(video::hdr_metadata_is_usable_for_tests(metadata));
+}
+
+TEST(VideoHdrMetadataTests, RejectsMetadataWithoutMasteringLuminance) {
+  auto metadata = usable_hdr_metadata();
+  metadata.maxDisplayLuminance = 0;
+
+  EXPECT_FALSE(video::hdr_metadata_is_usable_for_tests(metadata));
+}
+
+TEST(VideoHdrMetadataTests, RejectsMetadataWithoutDisplayPrimaries) {
+  auto metadata = usable_hdr_metadata();
+  metadata.displayPrimaries[1].x = 0;
+
+  EXPECT_FALSE(video::hdr_metadata_is_usable_for_tests(metadata));
+}
+
 TEST(VideoCacheTests, DriverVersionCacheHitRequiresMatchingBinaryMetadata) {
   const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-video-cache-tests";
   const auto cache_path = cache_dir / "driver_version_cache.txt";
