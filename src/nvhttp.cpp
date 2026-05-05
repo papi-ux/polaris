@@ -15,6 +15,7 @@
 #include <format>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <string>
@@ -181,6 +182,252 @@ namespace nvhttp {
 #else
       return false;
 #endif
+    }
+
+    bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile);
+
+    std::string stream_display_mode_label() {
+#ifdef __linux__
+      const auto &linux_display = config::video.linux_display;
+      if (!linux_display.headless_mode) {
+        return "Desktop Display";
+      }
+      if (!linux_display.use_cage_compositor) {
+        return "Host Virtual Display";
+      }
+      if (linux_display.prefer_gpu_native_capture) {
+        return "Windowed Stream";
+      }
+      return "Headless Stream";
+#else
+      return proc::proc.virtual_display ? "Host Virtual Display" : "Desktop Display";
+#endif
+    }
+
+    std::string stream_display_mode_selection() {
+#ifdef __linux__
+      const auto &linux_display = config::video.linux_display;
+      if (!linux_display.headless_mode) {
+        return "desktop_display";
+      }
+      if (!linux_display.use_cage_compositor) {
+        return "host_virtual_display";
+      }
+      if (linux_display.prefer_gpu_native_capture) {
+        return "windowed_stream";
+      }
+      return "headless_stream";
+#else
+      return proc::proc.virtual_display ? "host_virtual_display" : "desktop_display";
+#endif
+    }
+
+    double stream_policy_target_fps(const stream_stats::stats_t &stats) {
+      if (stats.session_target_fps > 0.0) {
+        return stats.session_target_fps;
+      }
+      if (stats.encode_target_fps > 0.0) {
+        return stats.encode_target_fps;
+      }
+      if (stats.requested_client_fps > 0.0) {
+        return stats.requested_client_fps;
+      }
+      return stats.fps;
+    }
+
+    std::string format_stream_policy_fps(double fps) {
+      if (fps <= 0.0) {
+        return {};
+      }
+      const auto rounded = std::round(fps);
+      if (std::abs(fps - rounded) < 0.01) {
+        return std::to_string(static_cast<int>(rounded));
+      }
+      return std::format("{:.2f}", fps);
+    }
+
+    std::string format_stream_policy_display_mode(int width, int height, double fps) {
+      if (width <= 0 || height <= 0) {
+        return {};
+      }
+
+      const auto fps_text = format_stream_policy_fps(fps);
+      if (fps_text.empty()) {
+        return std::to_string(width) + "x" + std::to_string(height);
+      }
+
+      return std::to_string(width) + "x" + std::to_string(height) + "x" + fps_text;
+    }
+
+    bool parse_stream_policy_display_mode(const std::string &value, int &width, int &height, double &fps) {
+      std::stringstream mode(value);
+      std::string segment;
+      int index = 0;
+      width = 0;
+      height = 0;
+      fps = 0.0;
+
+      while (std::getline(mode, segment, 'x')) {
+        if (segment.empty()) {
+          return false;
+        }
+
+        try {
+          if (index == 0) {
+            width = std::stoi(segment);
+          } else if (index == 1) {
+            height = std::stoi(segment);
+          } else if (index == 2) {
+            fps = std::stod(segment);
+          } else {
+            return false;
+          }
+        } catch (...) {
+          return false;
+        }
+        ++index;
+      }
+
+      return index == 3 && width > 0 && height > 0 && fps > 0.0;
+    }
+
+    std::string stream_policy_source_label(const std::string &source) {
+      const auto normalized = lower_copy(source);
+      if (normalized == "paired_client") {
+        return "Paired client override";
+      }
+      if (normalized.find("ai_live") != std::string::npos) {
+        return "Live AI recommendation";
+      }
+      if (normalized.find("ai_cached") != std::string::npos) {
+        return "Cached AI recommendation";
+      }
+      if (normalized.find("device_db") != std::string::npos) {
+        return "Device profile";
+      }
+      if (normalized.find("runtime_policy") != std::string::npos) {
+        return "Runtime policy";
+      }
+      if (normalized == "default") {
+        return "Server default";
+      }
+      return source.empty() ? "Server default" : source;
+    }
+
+    void append_stream_policy_warning(nlohmann::json &warnings,
+                                      const std::string &code,
+                                      const std::string &message) {
+      warnings.push_back({
+        {"code", code},
+        {"message", message}
+      });
+    }
+
+    nlohmann::json build_stream_policy_json(const crypto::named_cert_t &client,
+                                            const stream_stats::stats_t &stats,
+                                            const nlohmann::json &health) {
+      const auto device_profile = device_db::get_device(client.name);
+      const bool paired_display_override = !client.display_mode.empty();
+      const double target_fps = stream_policy_target_fps(stats);
+      const int selected_width = stats.width > 0 ? stats.width : 0;
+      const int selected_height = stats.height > 0 ? stats.height : 0;
+      std::string selected_display_mode =
+        format_stream_policy_display_mode(selected_width, selected_height, target_fps);
+
+      if (selected_display_mode.empty() && paired_display_override) {
+        selected_display_mode = client.display_mode;
+      }
+      if (selected_display_mode.empty() && device_profile && !device_profile->display_mode.empty()) {
+        selected_display_mode = device_profile->display_mode;
+      }
+
+      int policy_width = selected_width;
+      int policy_height = selected_height;
+      double policy_fps = target_fps;
+      if ((policy_width <= 0 || policy_height <= 0 || policy_fps <= 0.0) && !selected_display_mode.empty()) {
+        parse_stream_policy_display_mode(selected_display_mode, policy_width, policy_height, policy_fps);
+      }
+
+      const auto capture_path = stream_stats::capture_path_summary(stats);
+      const bool capture_cpu_copy = stream_stats::capture_path_uses_cpu_copy(stats);
+      const bool capture_gpu_native = stream_stats::capture_path_is_gpu_native(stats);
+      const int target_bitrate_kbps =
+        stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps :
+        stats.bitrate_kbps > 0 ? stats.bitrate_kbps :
+        device_profile ? device_profile->ideal_bitrate_kbps : 0;
+      const std::string source = paired_display_override ? "paired_client" :
+        (!stats.optimization_source.empty() ? stats.optimization_source :
+          (device_profile ? "device_db" : "default"));
+
+      nlohmann::json warnings = nlohmann::json::array();
+      if (paired_display_override) {
+        append_stream_policy_warning(
+          warnings,
+          "paired_display_mode_override",
+          "This paired client has a saved display-mode override; it wins over device profile display-mode recommendations until cleared."
+        );
+      }
+      if (capture_cpu_copy) {
+        append_stream_policy_warning(
+          warnings,
+          "capture_cpu_copy",
+          "The active capture or encode path crosses system memory, so high-resolution 120 FPS streams may be limited by CPU-side copies."
+        );
+      }
+      if (stats.dynamic_range > 0 && !stats.stream_hdr_enabled) {
+        append_stream_policy_warning(
+          warnings,
+          "hdr_downgraded",
+          "The client requested HDR, but the active capture path is not exposing HDR metadata; Polaris is reporting the stream as SDR."
+        );
+      }
+      if (device_profile && is_mobile_client_type(device_profile) &&
+          policy_width > 1920 && policy_height > 1080 && policy_fps >= 100.0) {
+        append_stream_policy_warning(
+          warnings,
+          "high_resolution_120_mobile",
+          "This handheld/phone policy is above 1080p at 100+ FPS; 1080p120 is the safer target for steady true-headless testing."
+        );
+      }
+      const auto health_primary_issue = health.value("primary_issue", std::string {"steady"});
+      if (health_primary_issue != "steady") {
+        append_stream_policy_warning(
+          warnings,
+          health_primary_issue.empty() ? "session_health" : health_primary_issue,
+          health.value("summary", std::string {"The active session has a stream-health warning."})
+        );
+      }
+
+      nlohmann::json policy;
+      policy["version"] = 1;
+      policy["mode"] = stream_display_mode_selection();
+      policy["mode_label"] = stream_display_mode_label();
+      policy["source"] = source;
+      policy["source_label"] = stream_policy_source_label(source);
+      policy["optimization_source"] = stats.optimization_source;
+      policy["selected_display_mode"] = selected_display_mode;
+      policy["requested_display_mode"] = format_stream_policy_display_mode(
+        stats.width > 0 ? stats.width : policy_width,
+        stats.height > 0 ? stats.height : policy_height,
+        stats.requested_client_fps > 0.0 ? stats.requested_client_fps : policy_fps
+      );
+      policy["paired_display_mode_override"] = client.display_mode;
+      policy["paired_display_mode_locked"] = paired_display_override;
+      policy["target_fps"] = policy_fps;
+      policy["target_bitrate_kbps"] = target_bitrate_kbps;
+      policy["preferred_codec"] = stats.codec;
+      policy["hdr_requested"] = stats.dynamic_range > 0;
+      policy["hdr_active"] = stats.stream_hdr_enabled;
+      policy["hdr_metadata_available"] = stats.hdr_metadata_available;
+      policy["capture_path"] = capture_path;
+      policy["capture_cpu_copy"] = capture_cpu_copy;
+      policy["capture_gpu_native"] = capture_gpu_native;
+      policy["capture_transport"] = platf::from_frame_transport(stats.capture_transport);
+      policy["capture_residency"] = platf::from_frame_residency(stats.capture_residency);
+      policy["capture_format"] = platf::from_frame_format(stats.capture_format);
+      policy["warnings"] = std::move(warnings);
+      policy["has_warnings"] = !policy["warnings"].empty();
+      return policy;
     }
 
     bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile) {
@@ -2923,6 +3170,7 @@ namespace nvhttp {
       features["game_library"] = true;
       features["session_lifecycle"] = true;
       features["device_profiles"] = true;
+      features["stream_policy_v1"] = true;
       features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
 #ifdef __linux__
@@ -2979,6 +3227,9 @@ namespace nvhttp {
       output["screen_locked"] = session_manager::is_screen_locked();
 #endif
       output["owned_by_client"] = owned_by_client;
+      output["session_token"] = session_token;
+      output["owner_unique_id"] = proc::proc.get_session_owner_unique_id();
+      output["owner_device_name"] = proc::proc.get_session_owner_device_name();
       output["viewer_count"] = rtsp_stream::viewer_count();
 
       std::string client_role = "none";
@@ -3028,28 +3279,22 @@ namespace nvhttp {
       tuning["mangohud_configured"] = proc::proc.current_app_has_mangohud();
 
       auto &display_mode = output["display_mode"];
-      const auto stream_display_mode_label =
-        !config::video.linux_display.headless_mode ? "Desktop Display" :
-        !config::video.linux_display.use_cage_compositor ? "Host Virtual Display" :
-        config::video.linux_display.prefer_gpu_native_capture ? "Windowed Stream" :
-        "Headless Stream";
-      const std::string display_mode_selection =
-        !config::video.linux_display.headless_mode ? "desktop_display" :
-        !config::video.linux_display.use_cage_compositor ? "host_virtual_display" :
-        config::video.linux_display.prefer_gpu_native_capture ? "windowed_stream" :
-        "headless_stream";
+      const auto stream_display_mode = stream_display_mode_selection();
       display_mode["virtual_display"] = proc::proc.virtual_display;
       display_mode["requested_headless"] = stats.runtime_requested_headless;
       display_mode["effective_headless"] = stats.runtime_effective_headless;
       display_mode["gpu_native_override_active"] = stats.runtime_gpu_native_override_active;
-      display_mode["selection"] = display_mode_selection;
+      display_mode["selection"] = stream_display_mode;
+      display_mode["stream_display_mode"] = stream_display_mode;
       display_mode["explicit_choice"] = proc::proc.session_display_mode_is_explicit();
       display_mode["requested"] =
         session_token.empty() ? "" :
         proc::proc.session_display_mode_is_explicit() ?
           (proc::proc.virtual_display ? "virtual_display" : "headless") :
           "auto";
-      display_mode["label"] = stream_display_mode_label;
+      display_mode["label"] = stream_display_mode_label();
+      display_mode["paired_display_mode_override"] = named_cert_p->display_mode;
+      display_mode["paired_display_mode_locked"] = !named_cert_p->display_mode.empty();
 
       // Capture info
       auto &capture_info = output["capture"];
@@ -3081,16 +3326,118 @@ namespace nvhttp {
       encoder["optimization_reasoning"] = stats.optimization_reasoning;
       encoder["optimization_normalization_reason"] = stats.optimization_normalization_reason;
       encoder["recommendation_version"] = stats.recommendation_version;
-      output["health"] = build_session_health_json(
+      const auto health = build_session_health_json(
         stats,
         proc::proc.virtual_display,
         named_cert_p->name,
         proc::proc.get_last_run_app_name()
       );
+      output["health"] = health;
+      output["stream_policy"] = build_stream_policy_json(
+        *named_cert_p,
+        stats,
+        health
+      );
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
       response->write(output.dump(), headers);
+    };
+
+    auto polarisStreamPolicy = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      try {
+        auto query = request->parse_query_string();
+        std::string app_name = proc::proc.get_last_run_app_name();
+        for (auto &[key, val] : query) {
+          if (key == "game") {
+            app_name = val;
+          }
+        }
+
+        if (request->method == "POST") {
+          std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+          const auto body = body_str.empty() ? nlohmann::json::object() : nlohmann::json::parse(body_str);
+
+          std::string display_mode = named_cert_p->display_mode;
+          if (body.value("clear_display_mode", false)) {
+            display_mode.clear();
+          } else if (body.contains("display_mode")) {
+            if (!body["display_mode"].is_string()) {
+              nlohmann::json err;
+              err["error"] = "display_mode must be a string";
+              SimpleWeb::CaseInsensitiveMultimap headers;
+              headers.emplace("Content-Type", "application/json");
+              response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+              return;
+            }
+            display_mode = body["display_mode"].get<std::string>();
+          }
+
+          int width = 0;
+          int height = 0;
+          double fps = 0.0;
+          if (!display_mode.empty() && !parse_stream_policy_display_mode(display_mode, width, height, fps)) {
+            nlohmann::json err;
+            err["error"] = "display_mode must use WIDTHxHEIGHTxFPS, for example 1920x1080x120";
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Content-Type", "application/json");
+            response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+            return;
+          }
+
+          const bool updated = update_device_info(
+            named_cert_p->uuid,
+            named_cert_p->name,
+            display_mode,
+            named_cert_p->do_cmds,
+            named_cert_p->undo_cmds,
+            named_cert_p->perm,
+            named_cert_p->enable_legacy_ordering,
+            named_cert_p->allow_client_commands,
+            named_cert_p->always_use_virtual_display
+          );
+
+          if (!updated) {
+            nlohmann::json err;
+            err["error"] = "paired client not found";
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Content-Type", "application/json");
+            response->write(SimpleWeb::StatusCode::client_error_not_found, err.dump(), headers);
+            return;
+          }
+        }
+
+        const auto stats = stream_stats::get_current();
+        const auto health = build_session_health_json(
+          stats,
+          proc::proc.virtual_display,
+          named_cert_p->name,
+          app_name
+        );
+
+        nlohmann::json output;
+        output["status"] = true;
+        output["stream_policy"] = build_stream_policy_json(*named_cert_p, stats, health);
+        output["health"] = health;
+
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+      } catch (std::exception &e) {
+        nlohmann::json err;
+        err["error"] = e.what();
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+      }
     };
 
     // Game library — returns games with metadata, covers, categories
@@ -3800,6 +4147,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/stream-policy$"]["GET"] = polarisStreamPolicy;
+    https_server.resource["^/polaris/v1/stream-policy$"]["POST"] = polarisStreamPolicy;
     https_server.resource["^/polaris/v1/session/bitrate$"]["POST"] = polarisSetBitrate;
     https_server.resource["^/polaris/v1/session/adaptive-bitrate$"]["POST"] = polarisSetAdaptiveBitrate;
     https_server.resource["^/polaris/v1/session/ai-optimizer$"]["POST"] = polarisSetAiOptimizer;
