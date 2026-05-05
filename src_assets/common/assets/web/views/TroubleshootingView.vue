@@ -303,6 +303,41 @@ function formatResolution(width, height) {
   return `${width}x${height}`
 }
 
+function hasRuntimeOverride(s) {
+  const effectiveKnown = s.runtime_effective_headless !== undefined && s.runtime_effective_headless !== null
+  return Boolean(s.runtime_requested_headless) &&
+    effectiveKnown &&
+    !Boolean(s.runtime_effective_headless) &&
+    Boolean(s.runtime_gpu_native_override_active)
+}
+
+function runtimeModeDescription(s) {
+  if (s.stream_display_mode) return s.stream_display_mode
+  return `${yesNo(s.runtime_effective_headless)} effective / ${yesNo(s.runtime_requested_headless)} requested`
+}
+
+function runtimeOverrideDescription(s) {
+  if (hasRuntimeOverride(s)) {
+    return 'GPU-native override active: requested headless, running windowed labwc'
+  }
+  return s.runtime_gpu_native_override_active ? 'GPU-native override active' : 'None'
+}
+
+function fpsTargetGapDescription(s) {
+  const encoded = Number(s.fps)
+  const target = Number(s.session_target_fps || s.requested_client_fps)
+
+  if (!Number.isFinite(encoded) || !Number.isFinite(target) || target < 90 || encoded <= 0) {
+    return 'None'
+  }
+
+  if (encoded >= target * 0.85) {
+    return 'None'
+  }
+
+  return `${formatFps(encoded)} encoded against ${formatFps(target)} target`
+}
+
 function normalizeIssueLine(line) {
   return line.replace(/^\[[^\]]+\]:\s*/, '').replace(/^\w+:\s*/, '').replace(/\s+/g, ' ').trim()
 }
@@ -364,7 +399,9 @@ const sessionSnapshotItems = computed(() => {
     { label: 'Active Sessions', value: `${s.active_sessions ?? 0}` },
     { label: 'Requested FPS', value: formatFps(s.requested_client_fps) },
     { label: 'Runtime Backend', value: s.runtime_backend || '(unknown)' },
-    { label: 'Stream Display Mode', value: s.stream_display_mode || `${yesNo(s.runtime_effective_headless)} effective / ${yesNo(s.runtime_requested_headless)} requested` },
+    { label: 'Stream Display Mode', value: runtimeModeDescription(s) },
+    { label: 'Runtime Override', value: runtimeOverrideDescription(s) },
+    { label: 'FPS Target Gap', value: fpsTargetGapDescription(s) },
     { label: 'Capture Path', value: s.capture_path || 'unknown' },
     { label: 'Capture Transport', value: `${s.capture_transport || 'unknown'} / ${s.capture_residency || 'unknown'} / ${s.capture_format || 'unknown'}` },
     { label: 'Encode Target', value: `${s.encode_target_device || 'unknown'} / ${s.encode_target_residency || 'unknown'} / ${s.encode_target_format || 'unknown'}` },
