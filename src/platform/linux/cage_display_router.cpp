@@ -23,6 +23,7 @@
 #include <cerrno>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <dirent.h>
 #include <functional>
@@ -306,7 +307,8 @@ namespace cage_display_router {
     std::string_view wlr_randr_output,
     std::string_view output_name,
     int width,
-    int height
+    int height,
+    int refresh_hz = 0
   ) {
     const std::string mode = std::to_string(width) + "x" + std::to_string(height);
     std::istringstream stream(std::string {wlr_randr_output});
@@ -333,7 +335,23 @@ namespace cage_display_router {
 
       if (line.find(mode) != std::string::npos &&
           (line.find("current") != std::string::npos || line.find('*') != std::string::npos)) {
-        return true;
+        if (refresh_hz <= 0) {
+          return true;
+        }
+
+        const auto hz_pos = line.find(" Hz");
+        const auto comma_pos = line.rfind(',', hz_pos);
+        if (hz_pos == std::string::npos || comma_pos == std::string::npos || comma_pos >= hz_pos) {
+          continue;
+        }
+
+        try {
+          const auto refresh_value = std::stod(line.substr(comma_pos + 1, hz_pos - comma_pos - 1));
+          if (std::abs(refresh_value - static_cast<double>(refresh_hz)) < 0.5) {
+            return true;
+          }
+        } catch (...) {
+        }
       }
     }
 
@@ -345,6 +363,7 @@ namespace cage_display_router {
     const std::string &output_name,
     int width,
     int height,
+    int refresh_hz,
     int max_wait_ms = 5000
   ) {
     return wait_for_condition(
@@ -353,9 +372,17 @@ namespace cage_display_router {
       50ms,
       [&]() {
         auto outputs = exec_capture("WAYLAND_DISPLAY=" + socket_name + " wlr-randr 2>/dev/null");
-        return output_reports_current_mode(outputs, output_name, width, height);
+        return output_reports_current_mode(outputs, output_name, width, height, refresh_hz);
       }
     );
+  }
+
+  static std::string format_wlr_custom_mode(int width, int height, int refresh_hz) {
+    auto mode = std::to_string(width) + "x" + std::to_string(height);
+    if (refresh_hz > 0) {
+      mode += "@" + std::to_string(refresh_hz) + "Hz";
+    }
+    return mode;
   }
 
   bool should_attempt_windowed_gpu_native_probe(
@@ -415,9 +442,14 @@ namespace cage_display_router {
     std::string_view wlr_randr_output,
     std::string_view output_name,
     int width,
-    int height
+    int height,
+    int refresh_hz
   ) {
-    return output_reports_current_mode(wlr_randr_output, output_name, width, height);
+    return output_reports_current_mode(wlr_randr_output, output_name, width, height, refresh_hz);
+  }
+
+  std::string format_wlr_custom_mode_for_tests(int width, int height, int refresh_hz) {
+    return format_wlr_custom_mode(width, height, refresh_hz);
   }
 
   bool is_wayland_socket_name_for_tests(std::string_view name) {
@@ -429,7 +461,7 @@ namespace cage_display_router {
   // Public API
   // -----------------------------------------------------------------------
 
-  bool start(int width, int height, const std::string &game_cmd, bool force_windowed) {
+  bool start(int width, int height, int refresh_hz, const std::string &game_cmd, bool force_windowed) {
     const auto startup_begin = std::chrono::steady_clock::now();
 
     if (cage_pid > 0 && is_running()) {
@@ -457,7 +489,8 @@ namespace cage_display_router {
       BOOST_LOG(warning) << "labwc: Headless mode overridden to windowed mode to preserve GPU-native capture"sv;
     }
     BOOST_LOG(info) << "labwc: Starting in "sv << (headless ? "headless"sv : "windowed"sv)
-                    << " mode — resolution="sv << width << "x"sv << height;
+                    << " mode — resolution="sv << width << "x"sv << height
+                    << "@"sv << refresh_hz << "Hz"sv;
 
     const auto labwc_path = resolve_executable("labwc");
     if (labwc_path.empty()) {
@@ -484,7 +517,7 @@ namespace cage_display_router {
 
     // Config directory for kiosk-mode rc.xml (no decorations, maximize all)
     std::string config_dir = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/.config/labwc-polaris";
-    std::string mode = std::to_string(width) + "x" + std::to_string(height);
+    const std::string mode = format_wlr_custom_mode(width, height, refresh_hz);
 
     // Build startup command: set resolution then run the game
     // In headless mode, the output name is HEADLESS-1 instead of WL-1
@@ -627,9 +660,9 @@ namespace cage_display_router {
       return false;
     }
 
-    if (!wait_for_requested_mode(cage_wayland_socket, output_name, width, height, 5000)) {
+    if (!wait_for_requested_mode(cage_wayland_socket, output_name, width, height, refresh_hz, 5000)) {
       BOOST_LOG(warning) << "labwc: Output ["sv << output_name << "] did not settle to "
-                         << width << "x"sv << height
+                         << width << "x"sv << height << "@"sv << refresh_hz << "Hz"sv
                          << " before startup continued"sv;
     }
 

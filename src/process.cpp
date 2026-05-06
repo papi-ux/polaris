@@ -2191,6 +2191,7 @@ namespace proc {
         cage_display_router::cached_windowed_gpu_native_probe_result() :
         std::optional<bool> {};
     bool force_windowed_cage_for_gpu_native = false;
+    const int cage_refresh_hz = std::max(pacing_target_fps, 1);
 
     const int gpu_native_probe_fps = std::max(pacing_target_fps, 1);
     const video::config_t gpu_native_probe_config {
@@ -2223,7 +2224,7 @@ namespace proc {
         cage_display_router::stop();
       }
 
-      if (!cage_display_router::start(render_width, render_height, startup_cmd, force_windowed)) {
+      if (!cage_display_router::start(render_width, render_height, cage_refresh_hz, startup_cmd, force_windowed)) {
         return false;
       }
 
