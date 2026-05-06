@@ -45,13 +45,14 @@ namespace cage_display_router {
    *
    * @param width    Resolution width inside cage (default 1920)
    * @param height   Resolution height inside cage (default 1080)
+   * @param refresh_hz Refresh rate inside cage (default 60)
    * @param game_cmd Optional game command to run as cage's primary client
    * @param force_windowed Force the compositor to run windowed even if headless
    *                       mode is configured. Used when GPU-native capture must
    *                       take priority over invisibility.
    * @return true if cage started successfully and wayland socket is available
    */
-  bool start(int width = 1920, int height = 1080, const std::string &game_cmd = "", bool force_windowed = false);
+  bool start(int width = 1920, int height = 1080, int refresh_hz = 60, const std::string &game_cmd = "", bool force_windowed = false);
 
   /**
    * @brief Wrap a command to run inside the cage compositor.
@@ -169,8 +170,14 @@ namespace cage_display_router {
     std::string_view wlr_randr_output,
     std::string_view output_name,
     int width,
-    int height
+    int height,
+    int refresh_hz = 0
   );
+
+  /**
+   * @brief Test helper for formatting a wlr-randr custom mode string.
+   */
+  std::string format_wlr_custom_mode_for_tests(int width, int height, int refresh_hz);
 
   /**
    * @brief Test helper for Wayland socket file name filtering.
