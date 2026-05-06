@@ -152,6 +152,40 @@ TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentMod
   ));
 }
 
+TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentRefresh) {
+  constexpr std::string_view output = R"(HEADLESS-1 "Headless output 1"
+  Enabled: yes
+  Modes:
+    1920x1080 px, 60.000000 Hz
+    1920x1080 px, 120.000000 Hz (current)
+)";
+
+  EXPECT_TRUE(cage_display_router::output_reports_current_mode_for_tests(
+    output,
+    "HEADLESS-1",
+    1920,
+    1080,
+    120
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, OutputModeParserRejectsWrongCurrentRefresh) {
+  constexpr std::string_view output = R"(HEADLESS-1 "Headless output 1"
+  Enabled: yes
+  Modes:
+    1920x1080 px, 60.000000 Hz (current)
+    1920x1080 px, 120.000000 Hz
+)";
+
+  EXPECT_FALSE(cage_display_router::output_reports_current_mode_for_tests(
+    output,
+    "HEADLESS-1",
+    1920,
+    1080,
+    120
+  ));
+}
+
 TEST(CageDisplayRouterPolicyTests, OutputModeParserRejectsNonCurrentRequestedMode) {
   constexpr std::string_view output = R"(HEADLESS-1 "Headless output 1"
   Enabled: yes
@@ -166,6 +200,13 @@ TEST(CageDisplayRouterPolicyTests, OutputModeParserRejectsNonCurrentRequestedMod
     1920,
     1080
   ));
+}
+
+TEST(CageDisplayRouterPolicyTests, FormatWlrCustomModeIncludesRefresh) {
+  EXPECT_EQ(
+    cage_display_router::format_wlr_custom_mode_for_tests(1920, 1080, 120),
+    "1920x1080@120Hz"
+  );
 }
 
 TEST(CageDisplayRouterPolicyTests, WaylandSocketNameParserAcceptsNumberedSocketsOnly) {
