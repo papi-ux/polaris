@@ -68,4 +68,6 @@ elseif(UNIX)  # Linux
             "Enable native PipeWire audio support." ON)
     option(POLARIS_ENABLE_PORTAL
             "Enable XDG Desktop Portal screen capture if available." ON)
+    option(POLARIS_ENABLE_WEBRTC
+            "Enable experimental browser WebRTC streaming support." OFF)
 endif()

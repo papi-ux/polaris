@@ -45,6 +45,7 @@ namespace cage_display_router {
 
   static pid_t cage_pid = 0;
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
+  static std::string cage_x11_display;  // e.g., ":1"
   static std::atomic_bool headless_ram_capture_warning_logged {false};
   static std::atomic_bool windowed_ram_capture_warning_logged {false};
   static std::atomic<int> windowed_gpu_native_probe_result {0};
@@ -129,6 +130,20 @@ namespace cage_display_router {
     return true;
   }
 
+  static bool is_x11_socket_name(std::string_view name) {
+    if (name.size() <= 1 || name.front() != 'X') {
+      return false;
+    }
+
+    for (char ch : name.substr(1)) {
+      if (!std::isdigit(static_cast<unsigned char>(ch))) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   static std::string describe_child_status(int status) {
     if (WIFEXITED(status)) {
       return "exited with status " + std::to_string(WEXITSTATUS(status));
@@ -192,6 +207,32 @@ namespace cage_display_router {
     return sockets;
   }
 
+  static std::set<std::string> snapshot_x11_displays() {
+    std::set<std::string> displays;
+
+    DIR *dir = opendir("/tmp/.X11-unix");
+    if (!dir) {
+      BOOST_LOG(debug) << "labwc: Could not inspect X11 socket directory: "sv << std::strerror(errno);
+      return displays;
+    }
+
+    while (auto *entry = readdir(dir)) {
+      std::string name = entry->d_name;
+      if (!is_x11_socket_name(name)) {
+        continue;
+      }
+
+      const auto path = "/tmp/.X11-unix/"s + name;
+      struct stat statbuf {};
+      if (stat(path.c_str(), &statbuf) == 0 && S_ISSOCK(statbuf.st_mode)) {
+        displays.insert(":" + name.substr(1));
+      }
+    }
+
+    closedir(dir);
+    return displays;
+  }
+
   /**
    * @brief Find which new Wayland socket appeared after cage started.
    */
@@ -221,6 +262,24 @@ namespace cage_display_router {
       for (auto &s : current) {
         if (before.find(s) == before.end()) {
           return s;  // This socket is new
+        }
+      }
+      std::this_thread::sleep_for(poll_interval);
+    }
+    return "";
+  }
+
+  static std::string find_new_x11_display(
+    const std::set<std::string> &before,
+    int max_wait_ms = 3000
+  ) {
+    const auto poll_interval = 50ms;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_wait_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      auto current = snapshot_x11_displays();
+      for (auto &display : current) {
+        if (before.find(display) == before.end()) {
+          return display;
         }
       }
       std::this_thread::sleep_for(poll_interval);
@@ -381,6 +440,7 @@ namespace cage_display_router {
     // Reset stale state
     cage_pid = 0;
     cage_wayland_socket.clear();
+    cage_x11_display.clear();
 
     bool requested_headless = config::video.linux_display.headless_mode;
     bool headless = requested_headless && !force_windowed;
@@ -465,6 +525,7 @@ namespace cage_display_router {
 
     // Snapshot existing sockets to detect the new one labwc creates
     auto sockets_before = snapshot_wayland_sockets();
+    auto x11_displays_before = snapshot_x11_displays();
     BOOST_LOG(info) << "labwc: Watching runtime directory ["sv << runtime_dir()
                     << "] for a new Wayland socket"sv;
 
@@ -572,6 +633,13 @@ namespace cage_display_router {
                          << " before startup continued"sv;
     }
 
+    cage_x11_display = find_new_x11_display(x11_displays_before, 3000);
+    if (!cage_x11_display.empty()) {
+      BOOST_LOG(info) << "labwc: XWayland display ready — "sv << cage_x11_display;
+    } else {
+      BOOST_LOG(debug) << "labwc: XWayland display was not observed during startup; X11 follow-up commands will rely on Wayland only"sv;
+    }
+
     BOOST_LOG(info) << "labwc: Ready — "sv
                     << (headless ? "headless compositor active, socket="sv
                                  : "window visible on desktop, socket="sv)
@@ -590,10 +658,15 @@ namespace cage_display_router {
 
     // Set WAYLAND_DISPLAY so the game renders inside cage.
     // Also unset AT_SPI_BUS_ADDRESS to avoid at-spi2 interference (Fedora 43 Steam fix).
-    std::string wrapped = "WAYLAND_DISPLAY=" + cage_wayland_socket +
-                          " AT_SPI_BUS_ADDRESS= " + cmd;
+    std::string wrapped = "WAYLAND_DISPLAY=" + cage_wayland_socket + " ";
+    if (!cage_x11_display.empty()) {
+      wrapped += "DISPLAY=" + cage_x11_display + " ";
+    }
+    wrapped += "AT_SPI_BUS_ADDRESS= " + cmd;
     BOOST_LOG(info) << "labwc: Wrapping command with WAYLAND_DISPLAY="sv
-                    << cage_wayland_socket;
+                    << cage_wayland_socket
+                    << (cage_x11_display.empty() ? ""sv : " DISPLAY="sv)
+                    << cage_x11_display;
     return wrapped;
   }
 
@@ -626,6 +699,7 @@ namespace cage_display_router {
     BOOST_LOG(info) << "labwc: Stopped"sv;
     cage_pid = 0;
     cage_wayland_socket.clear();
+    cage_x11_display.clear();
     cage_runtime_state = {
       .requested_headless = false,
       .effective_headless = false,
@@ -653,6 +727,10 @@ namespace cage_display_router {
 
   std::string get_wayland_socket() {
     return cage_wayland_socket;
+  }
+
+  std::string get_x11_display() {
+    return cage_x11_display;
   }
 
   platf::runtime_state_t runtime_state() {

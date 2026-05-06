@@ -169,6 +169,7 @@ namespace config {
     std::string fallback_mode;
     bool isolated_virtual_display_option;
     bool ignore_encoder_probe_failure;
+    bool webrtc_browser_streaming;
 
     struct ai_optimizer_t {
       bool enabled = false;

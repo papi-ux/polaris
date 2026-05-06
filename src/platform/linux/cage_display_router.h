@@ -93,6 +93,12 @@ namespace cage_display_router {
   std::string get_wayland_socket();
 
   /**
+   * @brief Returns the XWayland display exposed by cage (e.g., ":1").
+   * Empty string if cage has not started XWayland.
+   */
+  std::string get_x11_display();
+
+  /**
    * @brief Returns the current runtime state for the labwc backend.
    */
   platf::runtime_state_t runtime_state();

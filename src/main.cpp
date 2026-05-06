@@ -28,6 +28,8 @@
 #ifdef _WIN32
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
+#elif __linux__
+  #include "platform/linux/stream_display_policy.h"
 #endif
 
 #define PROBE_DISPLAY_UUID "38F72B96-B00C-4F21-8B6C-E1BFF1602B0E"
@@ -380,7 +382,7 @@ int main(int argc, char *argv[]) {
 
   bool defer_encoder_probe_until_cage = false;
 #ifdef __linux__
-  defer_encoder_probe_until_cage = config::video.linux_display.use_cage_compositor;
+  defer_encoder_probe_until_cage = stream_display_policy::resolve(stream_display_policy::input_t {}).should_defer_encoder_probe;
 #endif
 
   if (defer_encoder_probe_until_cage) {

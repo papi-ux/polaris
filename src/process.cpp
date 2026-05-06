@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iomanip>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -62,6 +63,9 @@
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_display_policy.h"
+  #include <dirent.h>
+  #include <signal.h>
   #include <unistd.h>
 #elif __APPLE__
   #include <mach-o/dyld.h>
@@ -364,6 +368,179 @@ namespace proc {
     bool command_requests_steam_shutdown(const std::string &cmd) {
       return boost::icontains(cmd, "steam -shutdown");
     }
+
+#ifdef __linux__
+    std::string strip_leading_setsid_for_cage(std::string cmd) {
+      auto trimmed = boost::trim_left_copy(cmd);
+      if (!boost::istarts_with(trimmed, "setsid")) {
+        return cmd;
+      }
+
+      if (trimmed.size() > 6 && !std::isspace(static_cast<unsigned char>(trimmed[6]))) {
+        return cmd;
+      }
+
+      auto rest = trimmed.substr(std::min<size_t>(trimmed.size(), 6));
+      boost::trim_left(rest);
+
+      if (boost::istarts_with(rest, "-f")) {
+        if (rest.size() == 2 || std::isspace(static_cast<unsigned char>(rest[2]))) {
+          rest = rest.substr(std::min<size_t>(rest.size(), 2));
+          boost::trim_left(rest);
+        }
+      } else if (boost::istarts_with(rest, "--fork")) {
+        if (rest.size() == 6 || std::isspace(static_cast<unsigned char>(rest[6]))) {
+          rest = rest.substr(std::min<size_t>(rest.size(), 6));
+          boost::trim_left(rest);
+        }
+      }
+
+      return rest.empty() ? cmd : rest;
+    }
+
+    std::string cage_runtime_command(const std::string &cmd) {
+      auto sanitized = strip_leading_setsid_for_cage(cmd);
+      if (sanitized != cmd) {
+        BOOST_LOG(info) << "process: stripped leading setsid for cage runtime command ["
+                        << cmd << "] -> [" << sanitized << ']';
+      }
+      return sanitized;
+    }
+
+    bool is_proc_pid_dir(std::string_view name) {
+      return !name.empty() && std::all_of(name.begin(), name.end(), [](char ch) {
+        return std::isdigit(static_cast<unsigned char>(ch));
+      });
+    }
+
+    std::string read_proc_text(pid_t pid, std::string_view file_name) {
+      std::ifstream file("/proc/" + std::to_string(pid) + "/" + std::string(file_name), std::ios::binary);
+      if (!file) {
+        return {};
+      }
+
+      std::ostringstream buffer;
+      buffer << file.rdbuf();
+      return buffer.str();
+    }
+
+    bool proc_text_contains_steam_appid(const std::string &text, const std::string &appid) {
+      if (appid.empty() || text.empty()) {
+        return false;
+      }
+
+      return text.find("SteamLaunch AppId=" + appid) != std::string::npos ||
+             text.find("SteamAppId=" + appid) != std::string::npos ||
+             text.find("SteamGameId=" + appid) != std::string::npos ||
+             text.find("steam://rungameid/" + appid) != std::string::npos ||
+             (text.find("-applaunch") != std::string::npos && text.find(appid) != std::string::npos);
+    }
+
+    std::vector<pid_t> steam_app_pids(const std::string &appid) {
+      std::vector<pid_t> pids;
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        return pids;
+      }
+
+      while (auto *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (!is_proc_pid_dir(name)) {
+          continue;
+        }
+
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == getpid()) {
+          continue;
+        }
+
+        if (proc_text_contains_steam_appid(read_proc_text(pid, "cmdline"), appid) ||
+            proc_text_contains_steam_appid(read_proc_text(pid, "environ"), appid)) {
+          pids.emplace_back(pid);
+        }
+      }
+
+      closedir(dir);
+      return pids;
+    }
+
+    std::string steam_appid_for_context(const proc::ctx_t &ctx) {
+      if (!ctx.steam_appid.empty()) {
+        return ctx.steam_appid;
+      }
+
+      if (auto appid = extract_steam_appid_from_command(ctx.cmd)) {
+        return *appid;
+      }
+
+      for (const auto &cmd : ctx.detached) {
+        if (auto appid = extract_steam_appid_from_command(cmd)) {
+          return *appid;
+        }
+      }
+
+      return {};
+    }
+
+    void terminate_steam_app_processes(const proc::ctx_t &ctx) {
+      const auto appid = steam_appid_for_context(ctx);
+      if (appid.empty()) {
+        return;
+      }
+
+      auto pids = steam_app_pids(appid);
+      if (pids.empty()) {
+        return;
+      }
+
+      std::set<pid_t> groups;
+      for (auto pid : pids) {
+        const auto pgid = getpgid(pid);
+        if (pgid > 1 && pgid != getpgrp()) {
+          groups.insert(pgid);
+        }
+      }
+
+      BOOST_LOG(info) << "process: terminating Steam app ["sv << appid
+                      << "] process groups="sv << groups.size()
+                      << " matched_pids="sv << pids.size();
+
+      for (auto pgid : groups) {
+        kill(-pgid, SIGTERM);
+      }
+      for (auto pid : pids) {
+        kill(pid, SIGTERM);
+      }
+
+      for (int i = 0; i < 20; ++i) {
+        if (steam_app_pids(appid).empty()) {
+          return;
+        }
+        std::this_thread::sleep_for(100ms);
+      }
+
+      pids = steam_app_pids(appid);
+      if (!pids.empty()) {
+        BOOST_LOG(warning) << "process: Steam app ["sv << appid
+                           << "] did not exit after SIGTERM; sending SIGKILL"sv;
+      }
+
+      groups.clear();
+      for (auto pid : pids) {
+        const auto pgid = getpgid(pid);
+        if (pgid > 1 && pgid != getpgrp()) {
+          groups.insert(pgid);
+        }
+      }
+
+      for (auto pgid : groups) {
+        kill(-pgid, SIGKILL);
+      }
+      for (auto pid : pids) {
+        kill(pid, SIGKILL);
+      }
+    }
+#endif
 
     bool prep_cmd_undo_stops_steam(const proc::cmd_t &cmd) {
       return command_contains_steam_big_picture_close(cmd.undo_cmd) ||
@@ -1639,18 +1816,24 @@ namespace proc {
 
 #elif __linux__
 
-    // Linux virtual display creation — analogous to Windows SUDOVDA path above
-    // Skip if linux_auto_manage_displays is enabled (user manages displays via kscreen-doctor config)
-    bool using_headless_cage =
-      config::video.linux_display.headless_mode &&
-      config::video.linux_display.use_cage_compositor;
+    // Linux virtual display creation — analogous to Windows SUDOVDA path above.
+    // Resolve the display runtime once so launch, encoder probing, and UI report
+    // the same effective policy.
+    const auto display_policy = stream_display_policy::resolve_current(
+      video::active_encoder_requires_gpu_native_capture()
+    );
+    const bool using_headless_cage =
+      display_policy.requested_headless &&
+      display_policy.use_cage_runtime;
+    const bool should_use_linux_virtual_display =
+      display_policy.use_host_virtual_display ||
+      launch_session->virtual_display ||
+      (!launch_session->user_locked_virtual_display && _app.virtual_display);
 
     if (
-      !using_headless_cage &&
+      !display_policy.use_cage_runtime &&
       !config::video.linux_display.auto_manage_displays && (
-        config::video.linux_display.headless_mode // Headless mode
-        || launch_session->virtual_display // User requested virtual display
-        || (!launch_session->user_locked_virtual_display && _app.virtual_display) // App default when client didn't explicitly choose
+        should_use_linux_virtual_display
       )
     ) {
       if (isLinuxVDisplayAvailable()) {
@@ -1690,10 +1873,10 @@ namespace proc {
         launch_session->virtual_display = false;
       }
     } else if (using_headless_cage) {
-      // labwc headless mode already provides its own HEADLESS-* output.
-      // Creating an additional Linux virtual display here only adds setup
-      // overhead and can confuse output selection.
-      BOOST_LOG(info) << "Linux virtual display: skipped because labwc headless compositor owns the streaming output"sv;
+      BOOST_LOG(info) << "Linux virtual display: skipped because "sv
+                      << display_policy.label
+                      << " owns the streaming output ("sv
+                      << display_policy.reason << ")"sv;
     }
 
     display_device::configure_display(config::video, *launch_session);
@@ -1721,7 +1904,8 @@ namespace proc {
     // due to hotplugging, driver crash, primary monitor change,
     // or any number of other factors).
 #ifdef __linux__
-    const bool delay_encoder_probe_until_cage = config::video.linux_display.use_cage_compositor;
+    const bool delay_encoder_probe_until_cage =
+      stream_display_policy::resolve(stream_display_policy::input_t {}).should_defer_encoder_probe;
 #else
     constexpr bool delay_encoder_probe_until_cage = false;
 #endif
@@ -2132,7 +2316,7 @@ namespace proc {
     // Start cage with the first detached command as its primary client.
     // Cage is a kiosk compositor — it only displays its main process fullscreen.
     if (config::video.linux_display.use_cage_compositor && !_app.detached.empty()) {
-      std::string game_cmd = _app.detached[0];
+      std::string game_cmd = cage_runtime_command(_app.detached[0]);
       if (!start_cage_with_runtime_fallback(game_cmd)) {
         BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
         confighttp::emit_session_event("error", "Failed to start cage compositor");
@@ -2144,19 +2328,24 @@ namespace proc {
       }
       // Launch remaining detached commands (if any) with cage's WAYLAND_DISPLAY
       for (size_t i = 1; i < _app.detached.size(); ++i) {
-        auto &cmd = _app.detached[i];
+        auto cmd = cage_runtime_command(_app.detached[i]);
         auto cmd_env = _env;
         auto cage_socket = cage_display_router::get_wayland_socket();
         if (!cage_socket.empty()) {
           cmd_env["WAYLAND_DISPLAY"] = cage_socket;
           cmd_env["AT_SPI_BUS_ADDRESS"] = "";
-          cmd_env.erase("DISPLAY");
+          auto cage_display = cage_display_router::get_x11_display();
+          if (!cage_display.empty()) {
+            cmd_env["DISPLAY"] = cage_display;
+          } else {
+            cmd_env.erase("DISPLAY");
+          }
         }
         boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                 find_working_directory(cmd, cmd_env) :
                                                 boost::filesystem::path(_app.working_dir);
         BOOST_LOG(info) << "Spawning ["sv << cmd << "] in ["sv << working_dir << ']';
-        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, cmd_env, _pipe.get(), ec, nullptr);
+        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
         if (ec) {
           BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
         } else {
@@ -2192,12 +2381,21 @@ namespace proc {
     std::string effective_cmd = _app.cmd;
     auto launch_env = _env;
     if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running() && !_app.cmd.empty()) {
+      effective_cmd = cage_runtime_command(_app.cmd);
       auto cage_socket = cage_display_router::get_wayland_socket();
       if (!cage_socket.empty()) {
         launch_env["WAYLAND_DISPLAY"] = cage_socket;
         launch_env["AT_SPI_BUS_ADDRESS"] = "";
-        launch_env.erase("DISPLAY");
-        BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket << " and cleared DISPLAY for app command"sv;
+        auto cage_display = cage_display_router::get_x11_display();
+        if (!cage_display.empty()) {
+          launch_env["DISPLAY"] = cage_display;
+          BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket
+                          << " DISPLAY="sv << cage_display
+                          << " for app command"sv;
+        } else {
+          launch_env.erase("DISPLAY");
+          BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket << " and cleared DISPLAY for app command"sv;
+        }
       }
     }
 #else
@@ -2573,6 +2771,7 @@ namespace proc {
     // and keep running after the stream ends.
     if (config::video.linux_display.use_cage_compositor) {
       cage_display_router::stop();
+      terminate_steam_app_processes(_app);
     }
 #endif
 
@@ -2588,6 +2787,16 @@ namespace proc {
                         << cmd.undo_cmd << ']';
         continue;
       }
+
+#ifdef __linux__
+      if (config::video.linux_display.use_cage_compositor &&
+          !steam_appid_for_context(_app).empty() &&
+          command_requests_steam_shutdown(cmd.undo_cmd)) {
+        BOOST_LOG(info) << "Skipping Steam shutdown undo after isolated cage Steam app cleanup ["sv
+                        << cmd.undo_cmd << ']';
+        continue;
+      }
+#endif
 
       boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                               find_working_directory(cmd.undo_cmd, _env) :

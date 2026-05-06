@@ -548,6 +548,85 @@ namespace virtual_display {
       return {};
     }
 
+    static bool supported_gpu_driver(const std::string &driver) {
+      return driver == "nvidia" || driver == "amdgpu" || driver == "i915";
+    }
+
+    static std::string drm_device_sysfs_path(const std::string &drm_node) {
+      if (drm_node.empty()) {
+        return {};
+      }
+
+      fs::path node_path {drm_node};
+      std::string node_name = node_path.filename().string();
+      if (node_name.empty()) {
+        node_name = drm_node;
+      }
+
+      if (node_name.find("card") != 0 && node_name.find("renderD") != 0) {
+        return {};
+      }
+
+      const auto device_path = fs::path("/sys/class/drm") / node_name / "device";
+      try {
+        if (fs::exists(device_path)) {
+          return fs::canonical(device_path).string();
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(debug) << "Virtual display: failed to resolve adapter sysfs path for ["
+                         << drm_node << "]: " << e.what();
+      }
+
+      return {};
+    }
+
+    static std::string configured_gpu_sysfs_path() {
+      const auto &adapter_name = config::video.adapter_name;
+      if (adapter_name.empty()) {
+        return {};
+      }
+
+      auto path = drm_device_sysfs_path(adapter_name);
+      if (!path.empty()) {
+        BOOST_LOG(info) << "Virtual display: using configured adapter ["sv
+                        << adapter_name << "] at "sv << path;
+        return path;
+      }
+
+      BOOST_LOG(info) << "Virtual display: configured adapter ["sv
+                      << adapter_name
+                      << "] is not a DRM node; falling back to DRM GPU discovery"sv;
+      return {};
+    }
+
+    static std::string first_supported_gpu_sysfs_path() {
+      try {
+        for (const auto &entry : fs::directory_iterator("/sys/class/drm/")) {
+          std::string name = entry.path().filename().string();
+          if (name.find("card") != 0 || name.find('-') != std::string::npos) {
+            continue;
+          }
+
+          auto driver_link = entry.path() / "device" / "driver" / "module";
+          if (!fs::exists(driver_link)) {
+            continue;
+          }
+
+          auto driver = fs::read_symlink(driver_link).filename().string();
+          if (supported_gpu_driver(driver)) {
+            auto path = fs::canonical(entry.path() / "device").string();
+            BOOST_LOG(info) << "Virtual display: attaching EVDI to discovered GPU ["
+                            << name << "] driver=" << driver << " path=" << path;
+            return path;
+          }
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "Virtual display: error finding GPU sysfs path: "sv << e.what();
+      }
+
+      return {};
+    }
+
     /**
      * @brief Create a virtual display using EVDI.
      */
@@ -569,25 +648,9 @@ namespace virtual_display {
 
       // Find the GPU's sysfs device path to attach the EVDI device to.
       // evdi_open_attached_to(nullptr) crashes with strlen(nullptr) on some libevdi versions.
-      std::string gpu_sysfs_path;
-      try {
-        for (const auto &entry : fs::directory_iterator("/sys/class/drm/")) {
-          std::string name = entry.path().filename().string();
-          // Look for cardN (not cardN-DP-1 etc)
-          if (name.find("card") == 0 && name.find('-') == std::string::npos) {
-            auto driver_link = entry.path() / "device" / "driver" / "module";
-            if (fs::exists(driver_link)) {
-              auto driver = fs::read_symlink(driver_link).filename().string();
-              if (driver == "nvidia" || driver == "amdgpu" || driver == "i915") {
-                gpu_sysfs_path = fs::canonical(entry.path() / "device").string();
-                BOOST_LOG(info) << "Virtual display: attaching EVDI to GPU at "sv << gpu_sysfs_path;
-                break;
-              }
-            }
-          }
-        }
-      } catch (const std::exception &e) {
-        BOOST_LOG(warning) << "Virtual display: error finding GPU sysfs path: "sv << e.what();
+      std::string gpu_sysfs_path = configured_gpu_sysfs_path();
+      if (gpu_sysfs_path.empty()) {
+        gpu_sysfs_path = first_supported_gpu_sysfs_path();
       }
 
       // Try to open an existing EVDI device first (created via modprobe initial_device_count=1).
