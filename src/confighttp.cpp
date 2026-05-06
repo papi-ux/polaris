@@ -73,6 +73,7 @@
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/wayland.h"
 #endif
 
@@ -3497,10 +3498,77 @@ namespace confighttp {
 
     bool available = cached_backend != virtual_display::backend_e::NONE;
     output_tree["available"] = available;
+    const auto runtime_state = cage_display_router::runtime_state();
+    const auto display_policy = stream_display_policy::resolve(stream_display_policy::input_t {
+      available,
+      video::active_encoder_requires_gpu_native_capture(),
+      runtime_state.gpu_native_override_active,
+    });
     output_tree["backend"] = virtual_display::backend_name(cached_backend);
     output_tree["backend_id"] = static_cast<int>(cached_backend);
+    output_tree["configured_adapter"] = config::video.adapter_name;
+    output_tree["policy_mode"] = display_policy.selection;
+    output_tree["policy_label"] = display_policy.label;
+    output_tree["policy_reason"] = display_policy.reason;
+    output_tree["runtime_backend"] = runtime_state.backend_name;
+    output_tree["runtime_effective_headless"] = runtime_state.effective_headless;
 
     send_response(response, output_tree);
+  }
+
+  void getWebRtcStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+#ifdef POLARIS_ENABLE_WEBRTC
+    constexpr bool webrtc_build_enabled = true;
+#else
+    constexpr bool webrtc_build_enabled = false;
+#endif
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["build_enabled"] = webrtc_build_enabled;
+    output["config_enabled"] = config::video.webrtc_browser_streaming;
+    output["available"] = false;
+    output["state"] =
+      !output["build_enabled"].get<bool>() ? "not_built" :
+      !config::video.webrtc_browser_streaming ? "disabled" :
+      "backend_pending";
+    output["message"] =
+      !output["build_enabled"].get<bool>() ?
+        "This Polaris build was not compiled with WebRTC browser streaming support." :
+      !config::video.webrtc_browser_streaming ?
+        "WebRTC browser streaming is disabled in configuration." :
+        "WebRTC browser streaming is configured, but the media/signaling backend is not active yet.";
+    output["moonlight_compatible_path"] = true;
+    output["lan_only"] = true;
+    output["input_plan"] = "RTCDataChannel keyboard, pointer, and gamepad input";
+
+    send_response(response, output);
+  }
+
+  void postWebRtcUnavailable(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+#ifdef POLARIS_ENABLE_WEBRTC
+    constexpr bool webrtc_build_enabled = true;
+#else
+    constexpr bool webrtc_build_enabled = false;
+#endif
+
+    nlohmann::json output;
+    output["status"] = false;
+    output["error"] = "WebRTC browser streaming is not available in this build yet";
+    output["build_enabled"] = webrtc_build_enabled;
+    output["config_enabled"] = config::video.webrtc_browser_streaming;
+    send_response(response, output);
   }
 
   /**
@@ -4234,6 +4302,7 @@ namespace confighttp {
     server.resource["^/login/?$"]["GET"] = getSpaPage;
     server.resource["^/recover/?$"]["GET"] = getSpaPage;
     server.resource["^/troubleshooting/?$"]["GET"] = getSpaPage;
+    server.resource["^/webrtc/?$"]["GET"] = getSpaPage;
     // Login is exempt from CSRF (it's the entry point; rate limiting protects it instead)
     server.resource["^/api/login"]["POST"] = login;
     server.resource["^/api/logout$"]["POST"] = withCsrf(logout);
@@ -4286,6 +4355,10 @@ namespace confighttp {
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
     server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);
     server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
+    server.resource["^/api/webrtc/status$"]["GET"] = getWebRtcStatus;
+    server.resource["^/api/webrtc/session/start$"]["POST"] = withCsrf(postWebRtcUnavailable);
+    server.resource["^/api/webrtc/session/answer$"]["POST"] = withCsrf(postWebRtcUnavailable);
+    server.resource["^/api/webrtc/session/stop$"]["POST"] = withCsrf(postWebRtcUnavailable);
 #ifdef __linux__
     server.resource["^/api/display/screenshot$"]["GET"] = getDisplayScreenshot;
     server.resource["^/api/display/stream$"]["GET"] = getDisplayStream;

@@ -102,7 +102,10 @@ namespace stream {
       }
 
       const auto runtime_state = cage_display_router::runtime_state();
-      return cage_display_router::is_running() && runtime_state.effective_headless;
+      return cage_display_router::is_running() &&
+             (runtime_state.effective_headless ||
+              runtime_state.requested_headless ||
+              runtime_state.gpu_native_override_active);
 #else
       return false;
 #endif
@@ -2194,7 +2197,7 @@ namespace stream {
           if (proc::proc.session_shutdown_requested()) {
             BOOST_LOG(info) << "Skipping pause because host shutdown is already in progress"sv;
           } else if (should_terminate_on_last_client_disconnect()) {
-            BOOST_LOG(info) << "Last client disconnected from headless cage runtime; terminating app instead of pausing"sv;
+            BOOST_LOG(info) << "Last client disconnected from isolated cage runtime; terminating app instead of pausing"sv;
             proc::proc.terminate();
           } else {
             proc::proc.pause();

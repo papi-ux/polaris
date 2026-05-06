@@ -53,13 +53,14 @@
 #include "device_db.h"
 #include "confighttp.h"
 #include "stream_stats.h"
+#include "video.h"
 #ifdef __linux__
   #include "platform/linux/cage_display_router.h"
   #include "platform/linux/session_manager.h"
+  #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/virtual_display.h"
 #endif
 #include "uuid.h"
-#include "video.h"
 #include "zwpad.h"
 
 #ifdef _WIN32
@@ -168,9 +169,7 @@ namespace nvhttp {
 
     bool host_prefers_headless() {
 #ifdef __linux__
-      return
-        config::video.linux_display.use_cage_compositor &&
-        config::video.linux_display.headless_mode;
+      return stream_display_policy::resolve(stream_display_policy::input_t {}).mode == stream_display_policy::mode_e::HEADLESS;
 #else
       return false;
 #endif
@@ -188,17 +187,13 @@ namespace nvhttp {
 
     std::string stream_display_mode_label() {
 #ifdef __linux__
-      const auto &linux_display = config::video.linux_display;
-      if (!linux_display.headless_mode) {
-        return "Desktop Display";
-      }
-      if (!linux_display.use_cage_compositor) {
-        return "Host Virtual Display";
-      }
-      if (linux_display.prefer_gpu_native_capture) {
-        return "Windowed Stream";
-      }
-      return "Headless Stream";
+      return stream_display_policy::resolve(
+        stream_display_policy::input_t {
+          host_virtual_display_available(),
+          video::active_encoder_requires_gpu_native_capture(),
+          cage_display_router::runtime_state().gpu_native_override_active,
+        }
+      ).label;
 #else
       return proc::proc.virtual_display ? "Host Virtual Display" : "Desktop Display";
 #endif
@@ -206,19 +201,31 @@ namespace nvhttp {
 
     std::string stream_display_mode_selection() {
 #ifdef __linux__
-      const auto &linux_display = config::video.linux_display;
-      if (!linux_display.headless_mode) {
-        return "desktop_display";
-      }
-      if (!linux_display.use_cage_compositor) {
-        return "host_virtual_display";
-      }
-      if (linux_display.prefer_gpu_native_capture) {
-        return "windowed_stream";
-      }
-      return "headless_stream";
+      return stream_display_policy::resolve(
+        stream_display_policy::input_t {
+          host_virtual_display_available(),
+          video::active_encoder_requires_gpu_native_capture(),
+          cage_display_router::runtime_state().gpu_native_override_active,
+        }
+      ).selection;
 #else
       return proc::proc.virtual_display ? "host_virtual_display" : "desktop_display";
+#endif
+    }
+
+    std::string stream_display_mode_reason() {
+#ifdef __linux__
+      return stream_display_policy::resolve(
+        stream_display_policy::input_t {
+          host_virtual_display_available(),
+          video::active_encoder_requires_gpu_native_capture(),
+          cage_display_router::runtime_state().gpu_native_override_active,
+        }
+      ).reason;
+#else
+      return proc::proc.virtual_display ?
+        "Polaris is streaming from a host virtual display." :
+        "Polaris is streaming from the current desktop session.";
 #endif
     }
 
@@ -434,6 +441,7 @@ namespace nvhttp {
       policy["version"] = 1;
       policy["mode"] = stream_display_mode_selection();
       policy["mode_label"] = stream_display_mode_label();
+      policy["mode_reason"] = stream_display_mode_reason();
       policy["source"] = source;
       policy["source_label"] = stream_policy_source_label(source);
       policy["optimization_source"] = stats.optimization_source;
@@ -3329,6 +3337,7 @@ namespace nvhttp {
           (proc::proc.virtual_display ? "virtual_display" : "headless") :
           "auto";
       display_mode["label"] = stream_display_mode_label();
+      display_mode["reason"] = stream_display_mode_reason();
       display_mode["paired_display_mode_override"] = named_cert_p->display_mode;
       display_mode["paired_display_mode_locked"] = !named_cert_p->display_mode.empty();
 

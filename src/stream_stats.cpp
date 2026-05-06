@@ -19,6 +19,10 @@
 #include "config.h"
 #include "logging.h"
 #include "stream_stats.h"
+#ifdef __linux__
+  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_display_policy.h"
+#endif
 
 namespace stream_stats {
 
@@ -55,6 +59,15 @@ namespace stream_stats {
     }
 
     const char *stream_display_mode_label() {
+#ifdef __linux__
+      static thread_local std::string label;
+      label = stream_display_policy::resolve(stream_display_policy::input_t {
+        false,
+        false,
+        cage_display_router::runtime_state().gpu_native_override_active,
+      }).label;
+      return label.c_str();
+#else
       const auto &linux_display = config::video.linux_display;
       if (!linux_display.headless_mode) {
         return "Desktop Display";
@@ -66,6 +79,7 @@ namespace stream_stats {
         return "Windowed Stream";
       }
       return "Headless Stream";
+#endif
     }
 
     long long percentile_value(std::vector<long long> values, double percentile) {

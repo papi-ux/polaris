@@ -78,6 +78,13 @@ const config = ref(props.config)
                 default="false"
       ></Checkbox>
 
+      <Checkbox class="mb-3"
+                id="webrtc_browser_streaming"
+                locale-prefix="config"
+                v-model="config.webrtc_browser_streaming"
+                default="false"
+      ></Checkbox>
+
       <div class="mb-3">
         <label for="hevc_mode" class="block text-sm font-medium text-storm mb-1">{{ $t('config.hevc_mode') }}</label>
         <select id="hevc_mode" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.hevc_mode">
