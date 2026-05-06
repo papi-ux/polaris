@@ -36,6 +36,7 @@ const streamDisplayModes = [
     title: 'Headless Stream',
     badge: 'Recommended',
     copy: 'Recommended. Starts apps inside a private hidden compositor. It does not mirror your current desktop.',
+    note: 'Best isolation path. On some wlroots headless outputs this can fall back to SHM/RAM capture instead of DMA-BUF.',
     restartCopy: 'Requires restart. Polaris will stream an isolated hidden runtime, not the existing KDE or GNOME session.',
   },
   {
@@ -43,6 +44,7 @@ const streamDisplayModes = [
     title: 'Host Virtual Display',
     badge: 'Compatibility',
     copy: 'Compatibility mode. Creates a display the operating system can see. Your desktop may rearrange or remember it.',
+    note: 'Use this when the hidden compositor path is not available or the desktop needs to own the virtual output.',
     restartCopy: 'Requires restart. KDE, GNOME, or display tools may see this as a monitor.',
   },
   {
@@ -50,14 +52,16 @@ const streamDisplayModes = [
     title: 'Desktop Display',
     badge: 'Visible desktop',
     copy: 'Streams from your current desktop session when you want the visible KDE, GNOME, or wlroots desktop.',
+    note: 'Useful for quick validation, but it is not isolated from the host desktop.',
     restartCopy: 'Requires restart. Polaris will stream from the current desktop session.',
   },
   {
     id: 'windowed_stream',
-    title: 'Windowed Stream',
+    title: 'GPU-Native Test',
     badge: 'Experimental',
-    copy: 'Experimental. Shows the private stream runtime as a desktop window when testing GPU-native capture.',
-    restartCopy: 'Requires restart. Windowed Stream is experimental and should stay limited to GPU-native capture testing.',
+    copy: 'Requests a private stream runtime and allows Polaris to run it windowed when that is needed to preserve DMA-BUF/CUDA capture.',
+    note: 'This is the fast-path validation mode. It can look less "headless" on purpose so capture stays GPU-resident.',
+    restartCopy: 'Requires restart. GPU-Native Test may override hidden headless into a windowed labwc runtime to avoid the SHM/RAM copy path.',
   },
 ]
 
@@ -160,11 +164,29 @@ const validateFallbackMode = (event) => {
                 </span>
               </div>
               <div class="mt-3 text-sm leading-relaxed text-storm">{{ mode.copy }}</div>
+              <div class="mt-3 rounded-md border border-storm/20 bg-void/25 px-2.5 py-2 text-xs leading-relaxed text-storm">
+                {{ mode.note }}
+              </div>
             </button>
           </div>
 
           <div class="settings-warning-surface">
             {{ selectedStreamDisplayMode.restartCopy }}
+          </div>
+
+          <div class="grid gap-3 xl:grid-cols-3">
+            <div class="surface-muted p-3">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-accent">Isolation</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">Headless Stream keeps apps off your real desktop and is the default stability target.</div>
+            </div>
+            <div class="surface-muted p-3">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Test favors DMA-BUF and CUDA/NVENC residency, even if that means a visible labwc window.</div>
+            </div>
+            <div class="surface-muted p-3">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">A 120 FPS client target still needs the game/output to render above 60 FPS; Polaris will show the live gap on the dashboard.</div>
+            </div>
           </div>
 
           <details class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
@@ -212,7 +234,7 @@ const validateFallbackMode = (event) => {
 
               <div class="surface-muted p-4">
                 <div class="text-sm font-medium text-silver">GPU-native capture preference</div>
-                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled only by Windowed Stream.</div>
+                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by GPU-Native Test. When active, Polaris may run labwc windowed instead of truly hidden so capture can stay on the GPU.</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_prefer_gpu_native_capture</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
                   <span class="text-xs uppercase tracking-[0.18em] text-storm">Experimental</span>

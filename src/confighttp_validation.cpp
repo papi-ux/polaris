@@ -202,6 +202,7 @@ namespace confighttp::validation {
       "upnp"sv,
       "vaapi_strict_rc_buffer"sv,
       "virtual_sink"sv,
+      "webrtc_browser_streaming"sv,
       "vt_coder"sv,
       "vt_realtime"sv,
       "vt_software"sv,
