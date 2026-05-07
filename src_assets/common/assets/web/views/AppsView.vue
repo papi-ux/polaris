@@ -351,6 +351,10 @@
               <div class="truncate text-sm font-medium text-silver">{{ game.name }}</div>
               <div v-if="game.already_imported" class="mt-1 text-xs text-storm">Already imported</div>
               <div v-else class="mt-1 text-xs text-storm">Ready to import into Polaris.</div>
+              <div v-if="game.source === 'lutris' && (game.runner || game.slug)" class="mt-2 flex flex-wrap gap-1.5 text-[11px] text-storm">
+                <span v-if="game.runner" class="control-chip">{{ game.runner }}</span>
+                <span v-if="game.slug" class="control-chip">{{ game.slug }}</span>
+              </div>
               <div v-if="game.game_category && game.game_category !== 'unknown'" class="mt-2">
                 <span class="control-chip">{{ formatCategory(game.game_category) }}</span>
               </div>

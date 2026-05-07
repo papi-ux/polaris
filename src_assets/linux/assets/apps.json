@@ -31,6 +31,17 @@
         "setsid steam -gamepadui"
       ],
       "image-path": "steam.png"
+    },
+    {
+      "name": "Lutris",
+      "detached": [
+        "setsid lutris"
+      ],
+      "image-path": "lutris.png",
+      "source": "lutris",
+      "auto-detach": true,
+      "wait-all": true,
+      "exit-timeout": 5
     }
   ]
 }
