@@ -76,9 +76,10 @@ namespace audio {
 
   using buffer_t = util::buffer_t<std::uint8_t>;
   using packet_t = std::pair<void *, buffer_t>;
+  using packet_queue_t = safe::mail_raw_t::queue_t<packet_t>;
   using audio_ctx_ref_t = safe::shared_t<audio_ctx_t>::ptr_t;
 
-  void capture(safe::mail_t mail, config_t config, void *channel_data);
+  void capture(safe::mail_t mail, config_t config, void *channel_data, packet_queue_t packets = nullptr);
 
   std::string select_sink_name(const audio_ctx_t &ctx, int channels, bool host_audio);
 

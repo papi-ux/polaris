@@ -37,6 +37,16 @@ TEST(ConfigValidationTests, RejectsUnsupportedConfigKeys) {
   EXPECT_NE(error.find("Unsupported config key"), std::string::npos);
 }
 
+TEST(ConfigValidationTests, AcceptsBrowserStreamPrimaryAndDeprecatedAliasKeys) {
+  nlohmann::json payload = {
+    {"browser_streaming", "enabled"},
+    {"webrtc_browser_streaming", "disabled"}
+  };
+
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+}
+
 TEST(AppValidationTests, AcceptsAWellFormedAppPayload) {
   nlohmann::json payload = {
     {"name", "Nova"},

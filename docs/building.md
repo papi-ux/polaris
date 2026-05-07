@@ -102,6 +102,15 @@ sudo polaris --setup-host
 polaris
 ```
 
+Experimental Browser Stream builds can include the WebTransport helper with:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_BROWSER_STREAM=ON
+cmake --build build -j"$(nproc)"
+```
+
+`POLARIS_ENABLE_WEBRTC` remains available as a deprecated alias for older local build scripts.
+
 Optional DRM/KMS setup:
 
 ```bash

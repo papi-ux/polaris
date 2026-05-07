@@ -99,6 +99,7 @@ namespace confighttp::validation {
       "auto_capture_sink"sv,
       "av1_mode"sv,
       "back_button_timeout"sv,
+      "browser_streaming"sv,
       "capture"sv,
       "cert"sv,
       "color_range"sv,

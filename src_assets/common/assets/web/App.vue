@@ -192,9 +192,9 @@ const navSections = computed(() => {
           label: i18nReady ? t('navbar.pairing') : 'Pairing',
         },
         {
-          to: '/webrtc',
+          to: '/browser-stream',
           icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h10a4 4 0 014 4v2a4 4 0 01-4 4H7a4 4 0 01-4-4v-2a4 4 0 014-4z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-2-2l2 2-2 2"/></svg>',
-          label: i18nReady ? t('navbar.webrtc') : 'WebRTC',
+          label: i18nReady ? t('navbar.browser_stream') : 'Browser Stream',
         },
       ],
     },

@@ -386,7 +386,7 @@ const tabs = ref([
       "envvar_compatibility_mode": "disabled",
       "legacy_ordering": "disabled",
       "ignore_encoder_probe_failure": "disabled",
-      "webrtc_browser_streaming": "disabled",
+      "browser_streaming": "disabled",
       "hevc_mode": 0,
       "av1_mode": 0,
       "capture": "",

@@ -6,8 +6,17 @@ import {
   redirectToIpv4Loopback,
   wrapFetchWithCsrfToken,
 } from './router-helpers.js'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 describe('router helpers', () => {
+  it('keeps Browser Stream primary route and WebRTC compatibility redirect', () => {
+    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/main.js'), 'utf8')
+
+    expect(source).toContain("path: '/browser-stream'")
+    expect(source).toContain("path: '/webrtc', redirect: '/browser-stream'")
+  })
+
   it('builds an IPv4 loopback URL from the current location', () => {
     expect(getIpv4LoopbackUrl({
       protocol: 'https:',

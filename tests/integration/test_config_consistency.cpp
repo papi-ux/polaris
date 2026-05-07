@@ -460,6 +460,7 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
     "recording_replay_buffer",
     "recording_replay_buffer_minutes",
     "trusted_subnet_auto_pairing",  // Security opt-in is currently surfaced as inline copy rather than localized config docs
+    "webrtc_browser_streaming",  // Deprecated alias for browser_streaming
   };
 
   std::vector<std::string> missingFromFiles;

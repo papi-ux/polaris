@@ -116,6 +116,29 @@ add_custom_target(web-ui ALL DEPENDS "${WEB_UI_BUILD_STAMP}")
 
 add_dependencies(polaris web-ui)
 
+if(POLARIS_ENABLE_BROWSER_STREAM)
+    find_program(GO_EXECUTABLE go REQUIRED)
+    set(BROWSER_STREAM_HELPER_OUTPUT "${CMAKE_BINARY_DIR}/polaris-browser-stream-helper")
+    file(GLOB_RECURSE BROWSER_STREAM_HELPER_SOURCE_FILES CONFIGURE_DEPENDS
+            "${CMAKE_SOURCE_DIR}/browser_stream_helper/*.go"
+            "${CMAKE_SOURCE_DIR}/browser_stream_helper/go.mod"
+            "${CMAKE_SOURCE_DIR}/browser_stream_helper/go.sum")
+    add_custom_command(
+            OUTPUT "${BROWSER_STREAM_HELPER_OUTPUT}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/browser_stream_helper"
+            COMMENT "Building Browser Stream WebTransport helper"
+            COMMAND "${GO_EXECUTABLE}" build -trimpath -o "${BROWSER_STREAM_HELPER_OUTPUT}" .
+            DEPENDS ${BROWSER_STREAM_HELPER_SOURCE_FILES}
+            VERBATIM)
+    add_custom_target(browser-stream-helper ALL DEPENDS "${BROWSER_STREAM_HELPER_OUTPUT}")
+    add_dependencies(polaris browser-stream-helper)
+
+    if(UNIX AND NOT APPLE)
+        install(PROGRAMS "${BROWSER_STREAM_HELPER_OUTPUT}"
+                DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    endif()
+endif()
+
 # tests
 if(BUILD_TESTS)
     add_subdirectory(tests)

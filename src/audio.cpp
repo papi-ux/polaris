@@ -83,8 +83,7 @@ namespace audio {
     },
   };
 
-  void encodeThread(sample_queue_t samples, config_t config, void *channel_data) {
-    auto packets = mail::man->queue<packet_t>(mail::audio_packets);
+  void encodeThread(sample_queue_t samples, config_t config, void *channel_data, packet_queue_t packets) {
     auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
     if (config.flags[config_t::CUSTOM_SURROUND_PARAMS]) {
       apply_surround_params(stream, config.customStreamParams);
@@ -140,7 +139,7 @@ namespace audio {
     }
   }
 
-  void capture(safe::mail_t mail, config_t config, void *channel_data) {
+  void capture(safe::mail_t mail, config_t config, void *channel_data, packet_queue_t packets) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     if (!config::audio.stream || config.input_only) {
       shutdown_event->view();
@@ -202,7 +201,10 @@ namespace audio {
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     auto samples = std::make_shared<sample_queue_t::element_type>(30);
-    std::thread thread {encodeThread, samples, config, channel_data};
+    if (!packets) {
+      packets = mail::man->queue<packet_t>(mail::audio_packets);
+    }
+    std::thread thread {encodeThread, samples, config, channel_data, packets};
 
     auto fg = util::fail_guard([&]() {
       samples->stop();

@@ -426,6 +426,7 @@ namespace video {
   };
 
   using packet_t = std::unique_ptr<packet_raw_t>;
+  using packet_queue_t = safe::mail_raw_t::queue_t<packet_t>;
 
   struct hdr_info_raw_t {
     explicit hdr_info_raw_t(bool enabled):
@@ -460,6 +461,13 @@ namespace video {
     safe::mail_t mail,
     config_t config,
     void *channel_data
+  );
+
+  void capture(
+    safe::mail_t mail,
+    config_t config,
+    void *channel_data,
+    packet_queue_t packets
   );
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure);
