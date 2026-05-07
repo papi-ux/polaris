@@ -23,6 +23,7 @@ namespace input {
 
   bool probe_gamepads();
 
+  void preallocate_gamepad();
   std::shared_ptr<input_t> alloc(safe::mail_t mail);
 
   struct touch_port_t: public platf::touch_port_t {

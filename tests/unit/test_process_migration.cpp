@@ -56,7 +56,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 7);
+  EXPECT_EQ(migrated_tree["version"], 8);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -278,7 +278,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 7);
+  EXPECT_EQ(migrated_tree["version"], 8);
 
   std::filesystem::remove(file_path);
 }
@@ -320,6 +320,102 @@ TEST(ProcessMigrationTests, ParseDoesNotAddSteamLibraryPrelaunchShutdownForLinux
   ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
   EXPECT_TRUE(steam_ctx->prep_cmds.front().do_cmd.empty());
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, ParsePreservesLutrisImportMetadataAndSource) {
+  const auto file_path = test_paths::root() / "lutris_import_metadata.json";
+
+  const nlohmann::json apps = {
+    {"version", 8},
+    {"apps", {{
+      {"name", "Lutris Game"},
+      {"uuid", "a4a9a18a-3898-4b34-9e3d-21a7a9647712"},
+      {"source", "lutris"},
+      {"lutris-slug", "lutris-game"},
+      {"lutris-runner", "wine"},
+      {"detached", {"setsid lutris lutris:rungame/lutris-game"}},
+      {"gamepad", "ds5"},
+      {"game-category", "cinematic"},
+      {"auto-detach", true},
+      {"wait-all", true},
+      {"exit-timeout", 5}
+    }}}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  ASSERT_TRUE(migrated_tree.contains("apps"));
+  ASSERT_EQ(migrated_tree["apps"].size(), 1);
+  const auto &migrated_app = migrated_tree["apps"][0];
+  EXPECT_EQ(migrated_app["source"], "lutris");
+  EXPECT_EQ(migrated_app["lutris-slug"], "lutris-game");
+  EXPECT_EQ(migrated_app["lutris-runner"], "wine");
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto lutris_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Lutris Game";
+  });
+
+  ASSERT_NE(lutris_ctx, parsed_apps.end());
+  EXPECT_EQ(lutris_ctx->source, "lutris");
+  EXPECT_EQ(lutris_ctx->gamepad, "ds5");
+  EXPECT_EQ(lutris_ctx->game_category, "cinematic");
+  ASSERT_EQ(lutris_ctx->detached.size(), 1);
+  EXPECT_EQ(lutris_ctx->detached[0], "setsid lutris lutris:rungame/lutris-game");
+}
+
+TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
+  const auto file_path = test_paths::root() / "lutris_launcher_migration.json";
+
+  const nlohmann::json apps = {
+    {"version", 7},
+    {"apps", {{
+      {"name", "Black Myth: Wukong"},
+      {"uuid", "45cb1d9d-90d3-6023-0800-457901181759"},
+      {"source", "lutris"},
+      {"lutris-slug", "black-myth-wukong"},
+      {"detached", {"setsid lutris lutris:rungame/black-myth-wukong"}},
+      {"auto-detach", true},
+      {"wait-all", true},
+      {"exit-timeout", 5}
+    }}}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  EXPECT_EQ(migrated_tree["version"], 8);
+  ASSERT_TRUE(migrated_tree.contains("apps"));
+
+  const auto &migrated_apps = migrated_tree["apps"];
+  const auto lutris_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {
+    return app.value("name", "") == "Lutris";
+  });
+
+  ASSERT_NE(lutris_app, migrated_apps.end());
+  EXPECT_EQ((*lutris_app)["source"], "lutris");
+  EXPECT_EQ((*lutris_app)["image-path"], "lutris.png");
+  ASSERT_TRUE((*lutris_app).contains("detached"));
+  ASSERT_EQ((*lutris_app)["detached"].size(), 1);
+  EXPECT_EQ((*lutris_app)["detached"][0], "setsid lutris");
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto parsed_lutris = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Lutris";
+  });
+
+  ASSERT_NE(parsed_lutris, parsed_apps.end());
+  ASSERT_EQ(parsed_lutris->detached.size(), 1);
+  EXPECT_EQ(parsed_lutris->detached[0], "setsid lutris");
 
   std::filesystem::remove(file_path);
 }
