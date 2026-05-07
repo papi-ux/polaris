@@ -108,7 +108,7 @@ TEST(LutrisLibraryScannerTests, ScansMultipleXdgDirectories) {
 
 TEST(LutrisLibraryScannerTests, ParsesLutrisListGamesJson) {
   const auto games = game_library::parse_lutris_list_games_json(R"json([
-    {"id": 3, "slug": "arc-raiders", "name": "ARC Raiders", "runner": "steam", "coverPath": "/home/papi/.local/share/lutris/coverart/arc-raiders.jpg"},
+    {"id": 3, "slug": "arc-raiders", "name": "ARC Raiders", "runner": "steam", "coverPath": "lutris/coverart/arc-raiders.jpg"},
     {"id": 14, "slug": "vam-vr", "name": "VaM (VR)", "runner": "wine"},
     {"id": 99, "slug": "bad slug", "name": "Unsafe", "runner": "linux"},
     {"id": 100, "slug": "missing-name", "runner": "linux"}
@@ -119,7 +119,7 @@ TEST(LutrisLibraryScannerTests, ParsesLutrisListGamesJson) {
   EXPECT_EQ(games[0].slug, "arc-raiders");
   EXPECT_EQ(games[0].runner, "steam");
   EXPECT_EQ(games[0].command, "setsid lutris lutris:rungame/arc-raiders");
-  EXPECT_EQ(games[0].image_path, "/home/papi/.local/share/lutris/coverart/arc-raiders.jpg");
+  EXPECT_EQ(games[0].image_path, "lutris/coverart/arc-raiders.jpg");
   EXPECT_EQ(games[1].name, "VaM (VR)");
   EXPECT_EQ(games[1].slug, "vam-vr");
   EXPECT_EQ(games[1].runner, "wine");
