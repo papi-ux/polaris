@@ -3,7 +3,7 @@
  * @brief Session lifecycle management for Polaris streaming on Linux.
  *
  * Manages the streaming session lifecycle using the cage-as-window architecture:
- * - Environment validation (WAYLAND_DISPLAY, DBUS, XDG_RUNTIME_DIR)
+ * - Environment validation (Wayland, DBUS, XDG_RUNTIME_DIR)
  * - Lock screen inhibition via D-Bus during active sessions
  * - Minimal desktop state save/restore (no display switching)
  *
@@ -34,11 +34,11 @@ namespace session_manager {
    * @brief Validate that the session environment supports streaming.
    *
    * Checks for required environment variables:
-   * - WAYLAND_DISPLAY (Wayland compositor access)
+   * - WAYLAND_DISPLAY (Wayland compositor access; optional for private Headless Stream)
    * - DBUS_SESSION_BUS_ADDRESS (D-Bus for lock screen, KWin)
    * - XDG_RUNTIME_DIR (Wayland sockets, PipeWire)
    *
-   * @return true if all required variables are present
+   * @return true if the required variables for the selected runtime are present
    */
   bool validate_environment();
 

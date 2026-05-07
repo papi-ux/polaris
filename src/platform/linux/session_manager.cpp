@@ -16,6 +16,7 @@
  */
 
 #include "session_manager.h"
+#include "../../config.h"
 #include "../../logging.h"
 
 #include <atomic>
@@ -23,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <thread>
 
 using namespace std::literals;
@@ -63,11 +65,21 @@ namespace session_manager {
 
   bool validate_environment() {
     bool ok = true;
+    const bool private_headless_runtime =
+      config::video.linux_display.headless_mode &&
+      config::video.linux_display.use_cage_compositor;
 
     const char *vars[] = {"WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"};
     for (auto var : vars) {
       const char *val = getenv(var);
       if (!val || val[0] == '\0') {
+        if (std::string_view {var} == "WAYLAND_DISPLAY"sv && private_headless_runtime) {
+          BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY is not set; continuing because Headless Stream "
+                          << "will start a private labwc socket. Desktop preview and portal capture may be "
+                          << "unavailable until Polaris is launched from a desktop session."sv;
+          continue;
+        }
+
         BOOST_LOG(error) << "session_manager: Required environment variable "sv
                          << var << " is not set. "
                          << "Polaris requires a graphical session. "

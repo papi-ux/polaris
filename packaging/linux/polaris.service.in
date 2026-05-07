@@ -1,11 +1,14 @@
 [Unit]
 Description=@PROJECT_DESCRIPTION@
+After=graphical-session.target
+PartOf=graphical-session.target
 StartLimitIntervalSec=500
 StartLimitBurst=5
 
 [Service]
 # Avoid starting Polaris before the desktop is fully initialized.
 ExecStartPre=/bin/sleep 5
+PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XAUTHORITY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
 @POLARIS_SERVICE_START_COMMAND@
 @POLARIS_SERVICE_STOP_COMMAND@
 Restart=on-failure

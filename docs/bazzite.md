@@ -278,9 +278,10 @@ matching Fedora RPM was installed, rebooted into the new deployment, and retry
 from Desktop Mode first.
 
 `Environment variable WAYLAND_DISPLAY has not been defined` usually points to a
-windowed Wayland runtime being launched without a parent Wayland session. It is
-expected after a failed manual environment experiment, but it is not the intended
-headless flow.
+windowed Wayland runtime being launched without a parent Wayland session. In
+private Headless Stream mode, Polaris can still start its own `labwc` socket for
+the client; treat the message as a desktop-preview or portal-capture clue unless
+the client stream itself fails to connect.
 
 `Couldn't scale frame ... src_fmt=bgr0 ... src_stride=0` means Polaris received a
 CPU BGR0 frame without a valid row pitch. Use a release newer than `v1.0.4`, where
@@ -312,6 +313,13 @@ For performance reports, though, treat `capture_transport=shm
 frame_residency=cpu frame_format=bgra8`, `target_residency=cpu`, or `Build
 features: cuda=disabled` with NVENC as important clues because they mean Polaris
 is taking a CPU copy/upload path.
+
+For NVIDIA true-headless performance testing, the fast path should report
+`Build features: cuda=enabled`, `capture_transport=dmabuf frame_residency=gpu`,
+and `target_device=cuda target_residency=gpu`. In the web UI or
+`/polaris/v1/session/status`, `capture.reason=headless_extcopy_dmabuf` is the
+desired true-headless marker; `headless_shm_fallback` means the stream can still
+be healthy, but it is using the conservative CPU-side capture path.
 
 `display_preview: Failed to capture cage screenshot` affects the web dashboard
 preview path. It does not mean the Moonlight/Nova stream failed if the client is
