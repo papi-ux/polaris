@@ -796,6 +796,26 @@ function titleizeToken(value) {
     .join(' ')
 }
 
+function captureReasonMessage(reason) {
+  const key = String(reason || '').toLowerCase()
+  const messages = {
+    gpu_native: 'Capture and encoder conversion are GPU-resident.',
+    headless_extcopy_dmabuf: 'True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.',
+    windowed_dmabuf_override: 'Windowed private compositor is preserving the DMA-BUF/CUDA capture path.',
+    headless_shm_fallback: 'Headless Stream is using SHM/system-memory capture. The stream can be healthy, but high-FPS NVIDIA testing needs the GPU-native path.',
+    headless_shm_default: 'Headless Stream is using SHM/system-memory capture. The stream can be healthy, but high-FPS NVIDIA testing needs the GPU-native path.',
+    gpu_native_requested_shm_fallback: 'GPU-native capture was requested, but Wayland capture fell back to SHM/system-memory frames.',
+    gpu_native_requested_cpu_capture: 'GPU-native capture was requested, but capture frames are CPU-resident.',
+    gpu_native_requested_cpu_encode_upload: 'GPU-native capture was requested, but encoder upload/conversion is CPU-resident.',
+    encoder_upload_cpu: 'Capture is GPU-resident, but encoder upload/conversion crosses system memory.',
+    cpu_capture: 'The active capture path is CPU-resident.',
+    shm_capture: 'The active capture path is CPU-resident.',
+    dmabuf_gpu_capture: 'Capture is using DMA-BUF/GPU frames, but the encoder path is not fully GPU-native.',
+    no_capture_metadata: 'No capture metadata has been reported yet.',
+  }
+  return messages[key] || 'The active capture and encoder path is mixed or not fully classified.'
+}
+
 function metricNumber(value) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
@@ -893,6 +913,11 @@ const capturePathLabel = computed(() => {
   return titleizeToken(stats.value?.capture_path || 'unknown')
 })
 
+const captureReasonLabel = computed(() => {
+  if (!stats.value?.streaming) return '--'
+  return captureReasonMessage(stats.value?.capture_path_reason)
+})
+
 const captureCpuCopyLabel = computed(() => {
   if (!stats.value?.streaming) return '--'
   return stats.value?.capture_cpu_copy ? 'CPU copy' : 'No CPU copy'
@@ -930,17 +955,26 @@ const encodeTargetTone = computed(() => {
 
 const runtimePathNote = computed(() => {
   if (!stats.value?.streaming) return ''
+  const reason = String(stats.value?.capture_path_reason || '').toLowerCase()
 
   if (nestedLabwcShmFallbackActive.value) {
     return 'Nested labwc fallback is active: Polaris is capturing the windowed compositor through SHM instead of the GPU-native fast path.'
   }
 
+  if (reason === 'headless_shm_fallback' || reason === 'headless_shm_default') {
+    return captureReasonMessage(reason)
+  }
+
+  if (reason === 'headless_extcopy_dmabuf') {
+    return captureReasonMessage(reason)
+  }
+
   if (stats.value?.capture_cpu_copy) {
-    return 'Capture or encode is still crossing the CPU; check capture transport, capture residency, and encode target.'
+    return captureReasonMessage(reason)
   }
 
   if (stats.value?.capture_gpu_native) {
-    return 'GPU-native path is active: capture stays DMA-BUF/GPU-resident into the encoder path.'
+    return captureReasonMessage(reason)
   }
 
   if (stats.value?.runtime_gpu_native_override_active) {
@@ -989,7 +1023,7 @@ const streamPathNotices = computed(() => {
     notices.push({
       key: 'gpu-native-active',
       title: 'GPU-native path active',
-      message: `Capture is ${transport}/${residency} and encode target is ${encodeTarget}. This is the fast path.`,
+      message: `${captureReasonLabel.value} Capture is ${transport}/${residency} and encode target is ${encodeTarget}.`,
       surfaceClass: 'border-green-400/25 bg-green-400/10',
       titleClass: 'text-green-300',
     })
@@ -997,7 +1031,7 @@ const streamPathNotices = computed(() => {
     notices.push({
       key: 'cpu-copy-active',
       title: 'CPU copy path active',
-      message: `Capture is ${transport}/${residency}. Expect lower headroom than the DMA-BUF/CUDA path.`,
+      message: `${captureReasonLabel.value} Capture is ${transport}/${residency}.`,
       surfaceClass: 'border-orange-300/25 bg-orange-300/10',
       titleClass: 'text-orange-200',
     })
@@ -1285,7 +1319,7 @@ const recommendations = computed(() => {
     recs.push({ color: 'text-amber-300', message: `GPU-native override is active: Polaris requested headless but is using windowed labwc to preserve the GPU-resident capture path.` })
 
   if (s.capture_cpu_copy)
-    recs.push({ color: 'text-orange-300', message: `Capture is crossing system memory. Use GPU-Native Test with CUDA/NVENC when validating high-FPS headroom.` })
+    recs.push({ color: 'text-orange-300', message: captureReasonLabel.value })
 
   // AI optimizer recommendations
   if (!s.ai_enabled && s.streaming)

@@ -136,6 +136,12 @@ journalctl --user -u polaris -b --no-pager | grep -E 'Thread priority|RealtimeKi
 Installing and running RealtimeKit can also allow priority elevation without granting broad
 capabilities to the Polaris binary.
 
+Packaged Linux user units are ordered with `graphical-session.target` and pass through common
+desktop environment variables such as `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and
+`DBUS_SESSION_BUS_ADDRESS`. In private Headless Stream mode, a missing parent `WAYLAND_DISPLAY`
+is logged as a limited desktop-preview/portal warning instead of a stream startup failure because
+Polaris starts its own `labwc` Wayland socket for the client session.
+
 ## NVIDIA KMS capture issues
 
 If KMS capture gives a black screen on NVIDIA, confirm the kernel is using:
@@ -156,15 +162,27 @@ For low-FPS NVIDIA headless reports, check `Build features: cuda=...` first. If 
 GPU -> RAM -> GPU`, the stream is taking an extra CPU copy/upload path. Use a CUDA-enabled package
 or rebuild with `-DPOLARIS_ENABLE_CUDA=ON` before comparing headless performance against Sunshine.
 
+The expected fast-path markers for NVIDIA true-headless testing look like this:
+
+```text
+Build features: cuda=enabled
+labwc: Starting in headless mode
+wlr: Using ext-image-copy-capture DMA-BUF for headless labwc
+capture_transport=dmabuf frame_residency=gpu
+target_device=cuda target_residency=gpu
+```
+
 `display_preview: Failed to capture cage screenshot` is the web dashboard preview path, not the
 stream capture path. Repeated failures are rate-limited in the log, and the dashboard backs off
 preview refreshes after failed captures. If the preview is missing, confirm `grim` is installed with
 `command -v grim`.
 
 For capture performance, check `/polaris/v1/session/status` or `/polaris/v1/stream-policy` and look
-at `capture.path`, `capture.reason`, `capture.cpu_copy`, and `capture.gpu_native`. A reason such as
-`headless_shm_default` means the conservative SHM path is active; `gpu_native_requested_shm_fallback`
-means GPU-native capture was requested but the Wayland capture path still fell back to SHM.
+at `capture.path`, `capture.reason`, `capture.reason_message`, `capture.cpu_copy`, and
+`capture.gpu_native`. A reason such as `headless_shm_fallback` means Headless Stream is healthy
+enough to run but still using the conservative SHM/system-memory path. `headless_extcopy_dmabuf`
+is the true-headless DMA-BUF path, and `gpu_native_requested_shm_fallback` means GPU-native capture
+was requested but the Wayland capture path still fell back to SHM.
 
 ## VAAPI or software encode fallback
 
