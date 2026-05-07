@@ -63,6 +63,7 @@ set(TEST_MAIN_SOURCE
 
 set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
+    ${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
@@ -78,6 +79,7 @@ set(TEST_AUDIT_SUPPORT_SOURCES
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_browser_stream_protocol.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp

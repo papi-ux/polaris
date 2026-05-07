@@ -35,6 +35,7 @@
 
 // local includes
 #include "config.h"
+#include "browser_stream.h"
 #include "confighttp.h"
 #include "confighttp_validation.h"
 #include "crypto.h"
@@ -574,7 +575,7 @@ namespace confighttp {
       headers.emplace("Referrer-Policy", "no-referrer");
       headers.emplace("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()");
       headers.emplace("Strict-Transport-Security", "max-age=31536000");
-      headers.emplace("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none';");
+      headers.emplace("Content-Security-Policy", std::format("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*:{}; font-src 'self'; frame-ancestors 'none';", browser_stream::default_webtransport_port));
     }
 
     void append_json_security_headers(SimpleWeb::CaseInsensitiveMultimap &headers) {
@@ -2503,6 +2504,9 @@ namespace confighttp {
       }
       output_tree[name] = value;
     }
+    if (!output_tree.contains("browser_streaming") && output_tree.contains("webrtc_browser_streaming")) {
+      output_tree["browser_streaming"] = output_tree["webrtc_browser_streaming"];
+    }
     output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
     output_tree["has_api_key"] = output_tree.value("has_api_key", false);
@@ -3689,58 +3693,78 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
-  void getWebRtcStatus(resp_https_t response, req_https_t request) {
+  void getBrowserStreamStatus(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
     }
 
     print_req(request);
+    send_response(response, browser_stream::status_json());
+  }
 
-#ifdef POLARIS_ENABLE_WEBRTC
-    constexpr bool webrtc_build_enabled = true;
-#else
-    constexpr bool webrtc_build_enabled = false;
-#endif
+  void postBrowserStreamStart(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    auto remote_address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    if (net::from_address(remote_address) > net::LAN) {
+      forbidden(response, request, "Browser Stream is LAN-only");
+      return;
+    }
+
+    if (!browser_stream::build_enabled()) {
+      bad_request(response, request, "Browser Stream was not enabled at build time");
+      return;
+    }
+
+    if (!config::video.browser_streaming) {
+      bad_request(response, request, "Browser Stream is disabled in configuration");
+      return;
+    }
+
+    std::string app_uuid;
+    std::string stream_profile = "balanced";
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      if (auto body = ss.str(); !body.empty()) {
+        const auto input = nlohmann::json::parse(body);
+        app_uuid = input.value("app_uuid", input.value("uuid", ""));
+        stream_profile = input.value("stream_profile", input.value("profile", stream_profile));
+      }
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+      return;
+    }
+
+    const auto host_header = request->header.find("host");
+    const auto host = host_header == request->header.end() ? remote_address : host_header->second;
+    send_response(response, browser_stream::create_session(remote_address, host, app_uuid, stream_profile));
+  }
+
+  void postBrowserStreamStop(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    std::string token;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      if (auto body = ss.str(); !body.empty()) {
+        const auto input = nlohmann::json::parse(body);
+        token = input.value("session_token", "");
+      }
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "BrowserStreamStop: "sv << e.what();
+    }
 
     nlohmann::json output;
     output["status"] = true;
-    output["build_enabled"] = webrtc_build_enabled;
-    output["config_enabled"] = config::video.webrtc_browser_streaming;
-    output["available"] = false;
-    output["state"] =
-      !output["build_enabled"].get<bool>() ? "not_built" :
-      !config::video.webrtc_browser_streaming ? "disabled" :
-      "backend_pending";
-    output["message"] =
-      !output["build_enabled"].get<bool>() ?
-        "This Polaris build was not compiled with WebRTC browser streaming support." :
-      !config::video.webrtc_browser_streaming ?
-        "WebRTC browser streaming is disabled in configuration." :
-        "WebRTC browser streaming is configured, but the media/signaling backend is not active yet.";
-    output["moonlight_compatible_path"] = true;
-    output["lan_only"] = true;
-    output["input_plan"] = "RTCDataChannel keyboard, pointer, and gamepad input";
-
-    send_response(response, output);
-  }
-
-  void postWebRtcUnavailable(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-    print_req(request);
-
-#ifdef POLARIS_ENABLE_WEBRTC
-    constexpr bool webrtc_build_enabled = true;
-#else
-    constexpr bool webrtc_build_enabled = false;
-#endif
-
-    nlohmann::json output;
-    output["status"] = false;
-    output["error"] = "WebRTC browser streaming is not available in this build yet";
-    output["build_enabled"] = webrtc_build_enabled;
-    output["config_enabled"] = config::video.webrtc_browser_streaming;
+    output["stopped"] = !token.empty() && browser_stream::stop_session(token);
     send_response(response, output);
   }
 
@@ -4475,6 +4499,7 @@ namespace confighttp {
     server.resource["^/login/?$"]["GET"] = getSpaPage;
     server.resource["^/recover/?$"]["GET"] = getSpaPage;
     server.resource["^/troubleshooting/?$"]["GET"] = getSpaPage;
+    server.resource["^/browser-stream/?$"]["GET"] = getSpaPage;
     server.resource["^/webrtc/?$"]["GET"] = getSpaPage;
     // Login is exempt from CSRF (it's the entry point; rate limiting protects it instead)
     server.resource["^/api/login"]["POST"] = login;
@@ -4528,10 +4553,10 @@ namespace confighttp {
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
     server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);
     server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
-    server.resource["^/api/webrtc/status$"]["GET"] = getWebRtcStatus;
-    server.resource["^/api/webrtc/session/start$"]["POST"] = withCsrf(postWebRtcUnavailable);
-    server.resource["^/api/webrtc/session/answer$"]["POST"] = withCsrf(postWebRtcUnavailable);
-    server.resource["^/api/webrtc/session/stop$"]["POST"] = withCsrf(postWebRtcUnavailable);
+    server.resource["^/api/browser-stream/status$"]["GET"] = getBrowserStreamStatus;
+    server.resource["^/api/browser-stream/session/start$"]["POST"] = withCsrf(postBrowserStreamStart);
+    server.resource["^/api/browser-stream/session/stop$"]["POST"] = withCsrf(postBrowserStreamStop);
+    server.resource["^/api/webrtc/status$"]["GET"] = getBrowserStreamStatus;
 #ifdef __linux__
     server.resource["^/api/display/screenshot$"]["GET"] = getDisplayScreenshot;
     server.resource["^/api/display/stream$"]["GET"] = getDisplayStream;

@@ -74,6 +74,10 @@ list(APPEND PLATFORM_TARGET_FILES ${NVENC_SOURCES})
 set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/adaptive_bitrate.h"
         "${CMAKE_SOURCE_DIR}/src/adaptive_bitrate.cpp"
+        "${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.h"
+        "${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/browser_stream.h"
+        "${CMAKE_SOURCE_DIR}/src/browser_stream.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Input.h"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Rtsp.h"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/RtspParser.c"

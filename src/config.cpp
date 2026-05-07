@@ -575,7 +575,7 @@ namespace config {
     "1920x1080x60",  // fallback_mode
     false, // isolated Display
     false, // ignore_encoder_probe_failure
-    false, // webrtc_browser_streaming
+    false, // browser_streaming
 
     {     // ai_optimizer
       false,  // enabled
@@ -1319,7 +1319,8 @@ namespace config {
     string_f(vars, "fallback_mode", video.fallback_mode);
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
-    bool_f(vars, "webrtc_browser_streaming", video.webrtc_browser_streaming);
+    bool_f(vars, "webrtc_browser_streaming", video.browser_streaming);
+    bool_f(vars, "browser_streaming", video.browser_streaming);
 
     // AI Optimizer
     bool_f(vars, "ai_enabled", video.ai_optimizer.enabled);

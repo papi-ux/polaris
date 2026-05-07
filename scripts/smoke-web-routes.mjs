@@ -25,7 +25,8 @@ const routes = [
   { name: 'apps-new', hash: '#/apps?new=1', text: /Application Editor|New App/i },
   { name: 'apps-import', hash: '#/apps?import=1&scan=1', text: /Stage imports|Library/i },
   { name: 'pairing', hash: '#/pin', heading: /pair/i },
-  { name: 'webrtc', hash: '#/webrtc', heading: /^WebRTC$/i },
+  { name: 'browser-stream', hash: '#/browser-stream', heading: /^Browser Stream$/i },
+  { name: 'webrtc-alias', hash: '#/webrtc', heading: /^Browser Stream$/i },
   { name: 'troubleshooting', hash: '#/troubleshooting', heading: /^Troubleshooting$/i },
   { name: 'welcome', hash: '#/welcome', heading: /Welcome to Polaris/i },
 ]

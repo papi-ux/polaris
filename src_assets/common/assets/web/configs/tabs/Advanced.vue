@@ -79,9 +79,9 @@ const config = ref(props.config)
       ></Checkbox>
 
       <Checkbox class="mb-3"
-                id="webrtc_browser_streaming"
+                id="browser_streaming"
                 locale-prefix="config"
-                v-model="config.webrtc_browser_streaming"
+                v-model="config.browser_streaming"
                 default="false"
       ></Checkbox>
 

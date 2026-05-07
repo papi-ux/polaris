@@ -68,6 +68,13 @@ elseif(UNIX)  # Linux
             "Enable native PipeWire audio support." ON)
     option(POLARIS_ENABLE_PORTAL
             "Enable XDG Desktop Portal screen capture if available." ON)
+    option(POLARIS_ENABLE_BROWSER_STREAM
+            "Enable experimental Browser Stream WebTransport support." OFF)
     option(POLARIS_ENABLE_WEBRTC
-            "Enable experimental browser WebRTC streaming support." OFF)
+            "Deprecated alias for POLARIS_ENABLE_BROWSER_STREAM." OFF)
+    if(POLARIS_ENABLE_WEBRTC)
+        message(DEPRECATION "POLARIS_ENABLE_WEBRTC is deprecated; use POLARIS_ENABLE_BROWSER_STREAM instead.")
+        set(POLARIS_ENABLE_BROWSER_STREAM ON CACHE BOOL
+                "Enable experimental Browser Stream WebTransport support." FORCE)
+    endif()
 endif()
