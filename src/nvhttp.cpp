@@ -334,6 +334,12 @@ namespace nvhttp {
       if (reason == "gpu_native") {
         return "Capture and encoder conversion are GPU-resident.";
       }
+      if (reason == "headless_extcopy_dmabuf") {
+        return "True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.";
+      }
+      if (reason == "windowed_dmabuf_override") {
+        return "Polaris is using a windowed private compositor so DMA-BUF/CUDA capture can stay GPU-resident.";
+      }
       if (reason == "gpu_native_requested_shm_fallback") {
         return "GPU-native capture was requested, but the active Wayland capture fell back to SHM/system-memory frames.";
       }
@@ -343,8 +349,8 @@ namespace nvhttp {
       if (reason == "gpu_native_requested_cpu_encode_upload") {
         return "GPU-native capture was requested, but encoder upload/conversion is still CPU-resident.";
       }
-      if (reason == "headless_shm_default") {
-        return "Headless cage capture is using the conservative SHM/system-memory path.";
+      if (reason == "headless_shm_fallback" || reason == "headless_shm_default") {
+        return "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but high-FPS NVIDIA testing should use a CUDA-enabled GPU-native path.";
       }
       if (reason == "encoder_upload_cpu") {
         return "Capture is GPU-resident, but encoder upload/conversion crosses system memory.";
@@ -461,6 +467,7 @@ namespace nvhttp {
       policy["hdr_metadata_available"] = stats.hdr_metadata_available;
       policy["capture_path"] = capture_path;
       policy["capture_path_reason"] = capture_reason;
+      policy["capture_path_reason_message"] = capture_path_reason_message(capture_reason);
       policy["capture_cpu_copy"] = capture_cpu_copy;
       policy["capture_gpu_native"] = capture_gpu_native;
       policy["capture_transport"] = platf::from_frame_transport(stats.capture_transport);
@@ -793,6 +800,7 @@ namespace nvhttp {
       health["network_risk"] = network_risk ? "elevated" : "normal";
       health["capture_path"] = capture_path;
       health["capture_path_reason"] = capture_reason;
+      health["capture_path_reason_message"] = capture_path_reason_message(capture_reason);
       health["capture_cpu_copy"] = capture_fallback;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
@@ -3349,7 +3357,9 @@ namespace nvhttp {
       capture_info["residency"] = platf::from_frame_residency(stats.capture_residency);
       capture_info["format"] = platf::from_frame_format(stats.capture_format);
       capture_info["path"] = stream_stats::capture_path_summary(stats);
-      capture_info["reason"] = stream_stats::capture_path_reason(stats);
+      const auto capture_reason = stream_stats::capture_path_reason(stats);
+      capture_info["reason"] = capture_reason;
+      capture_info["reason_message"] = capture_path_reason_message(capture_reason);
       capture_info["cpu_copy"] = stream_stats::capture_path_uses_cpu_copy(stats);
       capture_info["gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
 

@@ -323,6 +323,26 @@ function runtimeOverrideDescription(s) {
   return s.runtime_gpu_native_override_active ? 'GPU-native override active' : 'None'
 }
 
+function captureReasonDescription(reason) {
+  const key = String(reason || '').toLowerCase()
+  const messages = {
+    gpu_native: 'Capture and encoder conversion are GPU-resident.',
+    headless_extcopy_dmabuf: 'True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.',
+    windowed_dmabuf_override: 'Windowed private compositor is preserving the DMA-BUF/CUDA capture path.',
+    headless_shm_fallback: 'Headless Stream is using SHM/system-memory capture; healthy streams can still show this, but high-FPS NVIDIA testing needs the GPU-native path.',
+    headless_shm_default: 'Headless Stream is using SHM/system-memory capture; healthy streams can still show this, but high-FPS NVIDIA testing needs the GPU-native path.',
+    gpu_native_requested_shm_fallback: 'GPU-native capture was requested, but Wayland capture fell back to SHM/system-memory frames.',
+    gpu_native_requested_cpu_capture: 'GPU-native capture was requested, but capture frames are CPU-resident.',
+    gpu_native_requested_cpu_encode_upload: 'GPU-native capture was requested, but encoder upload/conversion is CPU-resident.',
+    encoder_upload_cpu: 'Capture is GPU-resident, but encoder upload/conversion crosses system memory.',
+    cpu_capture: 'The active capture path is CPU-resident.',
+    shm_capture: 'The active capture path is CPU-resident.',
+    dmabuf_gpu_capture: 'Capture is using DMA-BUF/GPU frames, but the encoder path is not fully GPU-native.',
+    no_capture_metadata: 'No capture metadata has been reported yet.',
+  }
+  return messages[key] || 'The active capture and encoder path is mixed or not fully classified.'
+}
+
 function fpsTargetGapDescription(s) {
   const encoded = Number(s.fps)
   const target = Number(s.session_target_fps || s.requested_client_fps)
@@ -403,6 +423,7 @@ const sessionSnapshotItems = computed(() => {
     { label: 'Runtime Override', value: runtimeOverrideDescription(s) },
     { label: 'FPS Target Gap', value: fpsTargetGapDescription(s) },
     { label: 'Capture Path', value: s.capture_path || 'unknown' },
+    { label: 'Capture Reason', value: captureReasonDescription(s.capture_path_reason) },
     { label: 'Capture Transport', value: `${s.capture_transport || 'unknown'} / ${s.capture_residency || 'unknown'} / ${s.capture_format || 'unknown'}` },
     { label: 'Encode Target', value: `${s.encode_target_device || 'unknown'} / ${s.encode_target_residency || 'unknown'} / ${s.encode_target_format || 'unknown'}` },
     { label: 'GPU Native', value: yesNo(s.capture_gpu_native) },
