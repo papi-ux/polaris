@@ -121,16 +121,34 @@ namespace cage_display_router {
   bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state);
 
   /**
+   * @brief Returns whether a headless labwc runtime should try the
+   *        ext-image-copy-capture DMA-BUF path before falling back to SHM.
+   */
+  bool should_attempt_headless_extcopy_dmabuf(const platf::runtime_state_t &runtime_state);
+
+  /**
    * @brief Returns the cached result of the windowed GPU-native probe for the
    *        current Polaris process, if one exists.
    */
   std::optional<bool> cached_windowed_gpu_native_probe_result();
 
   /**
+   * @brief Returns the cached result of the headless ext-image-copy-capture
+   *        DMA-BUF probe for the current Polaris process, if one exists.
+   */
+  std::optional<bool> cached_headless_extcopy_dmabuf_probe_result();
+
+  /**
    * @brief Update the cached result of the windowed GPU-native probe for the
    *        current Polaris process.
    */
   void update_windowed_gpu_native_probe_result(bool supported);
+
+  /**
+   * @brief Update the cached result of the headless ext-image-copy-capture
+   *        DMA-BUF probe for the current Polaris process.
+   */
+  void update_headless_extcopy_dmabuf_probe_result(bool supported);
 
   /**
    * @brief Returns whether RAM-capture fallback logging should describe the

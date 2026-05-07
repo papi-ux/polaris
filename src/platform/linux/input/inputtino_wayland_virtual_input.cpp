@@ -153,6 +153,7 @@ namespace platf {
     zwp_virtual_keyboard_manager_v1 *keyboard_manager {nullptr};
     zwp_virtual_keyboard_v1 *keyboard {nullptr};
     std::string socket_name;
+    pid_t connected_pid {0};
     bool logged_ready {false};
     bool logged_pointer_unavailable {false};
     bool logged_keyboard_unavailable {false};
@@ -242,6 +243,7 @@ namespace platf {
         display = nullptr;
       }
       socket_name.clear();
+      connected_pid = 0;
       logged_ready = false;
     }
 
@@ -271,7 +273,12 @@ namespace platf {
         return false;
       }
 
-      if (display && socket_name == socket) {
+      const auto current_pid = cage_display_router::get_pid();
+      if (current_pid <= 0) {
+        return false;
+      }
+
+      if (display && socket_name == socket && connected_pid == current_pid) {
         return true;
       }
 
@@ -287,6 +294,7 @@ namespace platf {
       }
 
       socket_name = socket;
+      connected_pid = current_pid;
       registry = wl_display_get_registry(display);
       if (!registry) {
         disconnect();

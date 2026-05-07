@@ -26,12 +26,20 @@ namespace platf::gamepad {
     GAMEPAD_STATUS  ///< Helper to indicate the number of status
   };
 
-  auto create_xbox_one() {
+  auto create_xbox_one(int globalIndex) {
+    std::string device_id = "";
+
+    if (globalIndex >= 0 && globalIndex <= 255) {
+      device_id = std::format("02:00:00:00:10:{:02x}", globalIndex);
+    }
+
     return inputtino::XboxOneJoypad::create({.name = "Sunshine X-Box One (virtual) pad",
                                              // https://github.com/torvalds/linux/blob/master/drivers/input/joystick/xpad.c#L147
                                              .vendor_id = 0x045E,
                                              .product_id = 0x02EA,
-                                             .version = 0x0408});
+                                             .version = 0x0408,
+                                             .device_phys = device_id,
+                                             .device_uniq = device_id});
   }
 
   auto create_switch() {
@@ -119,7 +127,7 @@ namespace platf::gamepad {
     switch (selectedGamepadType) {
       case XboxOneWired:
         {
-          auto xOne = create_xbox_one();
+          auto xOne = create_xbox_one(id.globalIndex);
           if (xOne) {
             (*xOne).set_on_rumble(on_rumble_fn);
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*xOne));
@@ -276,7 +284,7 @@ namespace platf::gamepad {
 
     auto ds5 = create_ds5(-1);  // Index -1 will result in a random MAC virtual device, which is fine for probing
     auto switchPro = create_switch();
-    auto xOne = create_xbox_one();
+    auto xOne = create_xbox_one(0);
 
     static std::vector gps {
       supported_gamepad_t {"auto", true, ""},

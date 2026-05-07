@@ -46,6 +46,7 @@
 #include "confighttp.h"
 #include "process.h"
 #include "httpcommon.h"
+#include "input.h"
 #include "system_tray.h"
 #include "utility.h"
 #include "video.h"
@@ -218,6 +219,57 @@ namespace proc {
 
     bool is_steam_big_picture_name(const std::string &name) {
       return boost::iequals(boost::trim_copy(name), "Steam Big Picture");
+    }
+
+    bool is_lutris_library_app(const nlohmann::json &app) {
+      const auto app_name = json_string_member_or(app, "name");
+      if (boost::iequals(boost::trim_copy(app_name), "Lutris")) {
+        return true;
+      }
+
+      const auto cmd = boost::trim_copy(json_string_member_or(app, "cmd"));
+      if (boost::iequals(cmd, "setsid lutris") || boost::iequals(cmd, "lutris")) {
+        return true;
+      }
+
+      if (!app.contains("detached") || !app["detached"].is_array()) {
+        return false;
+      }
+
+      for (const auto &detached : app["detached"]) {
+        if (!detached.is_string()) {
+          continue;
+        }
+        const auto value = boost::trim_copy(detached.get<std::string>());
+        if (boost::iequals(value, "setsid lutris") || boost::iequals(value, "lutris")) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    bool has_lutris_game_app(const nlohmann::json &app) {
+      const auto source = json_string_member_or(app, "source");
+      if (!boost::iequals(source, "lutris")) {
+        return false;
+      }
+
+      return !json_string_member_or(app, "lutris-slug").empty();
+    }
+
+    nlohmann::json lutris_library_app() {
+      return {
+        {"name", "Lutris"},
+        {"uuid", ""},
+        {"cmd", ""},
+        {"detached", {"setsid lutris"}},
+        {"image-path", "lutris.png"},
+        {"source", "lutris"},
+        {"auto-detach", true},
+        {"wait-all", true},
+        {"exit-timeout", 5}
+      };
     }
 
     bool command_contains_steam_big_picture_open(const std::string &cmd) {
@@ -1142,6 +1194,17 @@ namespace proc {
 
       return value != "0" && value != "false" && value != "off" && value != "no";
     }
+
+    bool app_gamepad_override_is_supported(const std::string &value) {
+      if (value == "disabled"sv) {
+        return true;
+      }
+
+      const auto supported_gamepads = platf::supported_gamepads(nullptr);
+      return std::any_of(supported_gamepads.begin(), supported_gamepads.end(), [&](const auto &gamepad) {
+        return gamepad.name == value;
+      });
+    }
   }  // namespace
 
 #ifdef _WIN32
@@ -1695,14 +1758,18 @@ namespace proc {
 #endif
     });
 
-    if (!app.gamepad.empty()) {
+    if (!app.gamepad.empty() && app_gamepad_override_is_supported(app.gamepad)) {
       _saved_input_config = std::make_shared<config::input_t>(config::input);
       if (app.gamepad == "disabled") {
         config::input.controller = false;
+        BOOST_LOG(info) << "process: virtual gamepad disabled for app ["sv << app.name << ']';
       } else {
         config::input.controller = true;
         config::input.gamepad = app.gamepad;
+        BOOST_LOG(info) << "process: virtual gamepad override for app ["sv << app.name << "] set to ["sv << app.gamepad << ']';
       }
+    } else if (!app.gamepad.empty()) {
+      BOOST_LOG(warning) << "process: ignoring unsupported virtual gamepad override ["sv << app.gamepad << "] for app ["sv << app.name << ']';
     }
 
 #ifdef _WIN32
@@ -2190,6 +2257,10 @@ namespace proc {
       should_probe_windowed_cage_for_gpu_native ?
         cage_display_router::cached_windowed_gpu_native_probe_result() :
         std::optional<bool> {};
+    const auto cached_headless_extcopy_dmabuf_probe_result =
+      should_probe_windowed_cage_for_gpu_native ?
+        cage_display_router::cached_headless_extcopy_dmabuf_probe_result() :
+        std::optional<bool> {};
     bool force_windowed_cage_for_gpu_native = false;
     const int cage_refresh_hz = std::max(pacing_target_fps, 1);
 
@@ -2242,6 +2313,53 @@ namespace proc {
       return true;
     };
 
+    auto probe_headless_extcopy_dmabuf_cage = [&]() -> bool {
+      if (!should_probe_windowed_cage_for_gpu_native || rtsp_stream::session_count() != 0) {
+        return false;
+      }
+
+      auto encoder_name = video::active_encoder_name();
+      auto encoder_label = encoder_name.empty() ? "unknown" : encoder_name;
+      BOOST_LOG(info) << "session_manager: Probing headless_extcopy_dmabuf with encoder ["
+                      << encoder_label << ']';
+
+      auto stop_probe_cage = util::fail_guard([&]() {
+        if (cage_display_router::is_running()) {
+          cage_display_router::stop();
+        }
+      });
+
+      if (!start_cage_session("", false, true, false)) {
+        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe could not initialize the compositor/encoder path"sv;
+        return false;
+      }
+
+      const auto runtime_state = cage_display_router::runtime_state();
+      if (!runtime_state.effective_headless) {
+        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not start an effective headless runtime"sv;
+        return false;
+      }
+
+      if (!video::active_encoder_runtime_supports_config(gpu_native_probe_config)) {
+        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not validate the active encoder configuration"sv;
+        return false;
+      }
+
+      if (cage_display_router::cached_headless_extcopy_dmabuf_probe_result() != std::optional<bool> {true}) {
+        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not initialize DMA-BUF capture"sv;
+        return false;
+      }
+
+      cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+      BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe succeeded with encoder ["
+                      << video::active_encoder_name() << ']';
+      return true;
+    };
+
     auto probe_windowed_gpu_native_cage = [&]() -> bool {
       if (!should_probe_windowed_cage_for_gpu_native || rtsp_stream::session_count() != 0) {
         return false;
@@ -2276,25 +2394,38 @@ namespace proc {
       return true;
     };
 
-    if (cached_windowed_gpu_native_probe_result == std::optional<bool> {true}) {
-      force_windowed_cage_for_gpu_native = true;
-      BOOST_LOG(info) << "session_manager: Reusing cached windowed GPU-native cage probe result; attempting nested DMA-BUF capture"sv;
-    } else if (cached_windowed_gpu_native_probe_result == std::optional<bool> {false}) {
-      BOOST_LOG(info) << "session_manager: Cached windowed GPU-native cage probe result indicates nested DMA-BUF capture is unavailable on this runtime; staying headless"sv;
-    } else {
-      force_windowed_cage_for_gpu_native = probe_windowed_gpu_native_cage();
+    auto resolve_windowed_gpu_native_fallback = [&]() -> bool {
+      if (cached_windowed_gpu_native_probe_result == std::optional<bool> {true}) {
+        BOOST_LOG(info) << "session_manager: Reusing cached windowed_dmabuf_override probe result"sv;
+        return true;
+      }
+
+      if (cached_windowed_gpu_native_probe_result == std::optional<bool> {false}) {
+        BOOST_LOG(info) << "session_manager: Cached windowed_dmabuf_override probe result indicates nested DMA-BUF capture is unavailable on this runtime"sv;
+        return false;
+      }
+
+      return probe_windowed_gpu_native_cage();
+    };
+
+    if (cached_headless_extcopy_dmabuf_probe_result == std::optional<bool> {true}) {
+      BOOST_LOG(info) << "session_manager: Reusing cached headless_extcopy_dmabuf probe result; keeping true headless runtime"sv;
+    } else if (cached_headless_extcopy_dmabuf_probe_result == std::optional<bool> {false}) {
+      BOOST_LOG(info) << "session_manager: Cached headless_extcopy_dmabuf probe result indicates headless DMA-BUF capture is unavailable; evaluating windowed fallback"sv;
+      force_windowed_cage_for_gpu_native = resolve_windowed_gpu_native_fallback();
+    } else if (probe_headless_extcopy_dmabuf_cage()) {
+      BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf selected; keeping true headless runtime"sv;
+    } else if (should_probe_windowed_cage_for_gpu_native) {
+      BOOST_LOG(info) << "session_manager: headless_shm_fallback would be used for true headless; evaluating windowed GPU-native fallback"sv;
+      force_windowed_cage_for_gpu_native = resolve_windowed_gpu_native_fallback();
     }
 
     auto encoder_name = video::active_encoder_name();
     auto encoder_label = encoder_name.empty() ? "unknown" : encoder_name;
     if (force_windowed_cage_for_gpu_native) {
-      BOOST_LOG(warning) << "session_manager: Headless cage requested, and runtime probing confirmed encoder ["
+      BOOST_LOG(warning) << "session_manager: windowed_dmabuf_override selected because headless_extcopy_dmabuf was unavailable and encoder ["
                          << encoder_label
-                         << "] can use a GPU-native capture path; starting labwc windowed instead"sv;
-    } else if (should_probe_windowed_cage_for_gpu_native && !cached_windowed_gpu_native_probe_result.has_value()) {
-      BOOST_LOG(info) << "session_manager: Headless cage requested with encoder ["
-                      << encoder_label
-                      << "], but the runtime probe could not validate nested DMA-BUF capture; staying headless"sv;
+                         << "] can use a GPU-native capture path"sv;
     }
 
     auto start_cage_with_runtime_fallback = [&](const std::string &startup_cmd) -> bool {
@@ -2307,12 +2438,16 @@ namespace proc {
 
       if (force_windowed_cage_for_gpu_native) {
         cage_display_router::update_windowed_gpu_native_probe_result(false);
-        BOOST_LOG(warning) << "session_manager: Windowed GPU-native cage start failed; falling back to headless RAM capture"sv;
+        BOOST_LOG(warning) << "session_manager: windowed_dmabuf_override start failed; falling back to headless_shm_fallback if headless DMA-BUF remains unavailable"sv;
         force_windowed_cage_for_gpu_native = false;
       }
 
       return start_cage_session(startup_cmd, false);
     };
+
+    if (!_app.detached.empty() || !_app.cmd.empty()) {
+      input::preallocate_gamepad();
+    }
 
     // Start cage with the first detached command as its primary client.
     // Cage is a kiosk compositor — it only displays its main process fullscreen.
@@ -3531,8 +3666,41 @@ namespace proc {
     BOOST_LOG(info) << "Migrated Steam library launch handling to v7.";
   }
 
+  void migration_v4(nlohmann::json &fileTree) {
+    static const int this_version = 8;
+    int file_version = json_int_member_or(fileTree, "version", 0);
+    if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
+      BOOST_LOG(info) << "Cannot parse apps.json version while checking Lutris library migration, treating as v0.";
+    }
+
+    if (file_version >= this_version) {
+      return;
+    }
+
+    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+      fileTree["version"] = this_version;
+      return;
+    }
+
+    const auto &apps = fileTree["apps"];
+    const bool has_lutris_games = std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+      return has_lutris_game_app(app);
+    });
+    const bool has_lutris_launcher = std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+      return is_lutris_library_app(app);
+    });
+
+    if (has_lutris_games && !has_lutris_launcher) {
+      auto app = lutris_library_app();
+      migrate_apps(&fileTree, &app);
+      BOOST_LOG(info) << "Migrated app list to add Lutris library launcher.";
+    }
+
+    fileTree["version"] = this_version;
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 7;
+    int last_version = 8;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -3542,6 +3710,7 @@ namespace proc {
     if (file_version < last_version) {
       migration_v2(fileTree);
       migration_v3(fileTree);
+      migration_v4(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }

@@ -222,6 +222,15 @@ namespace stream_stats {
     }
 
     if (capture_path_is_gpu_native(stats)) {
+#ifdef __linux__
+      const auto &linux_display = config::video.linux_display;
+      if (stats.runtime_effective_headless && linux_display.use_cage_compositor) {
+        return "headless_extcopy_dmabuf";
+      }
+      if (stats.runtime_gpu_native_override_active) {
+        return "windowed_dmabuf_override";
+      }
+#endif
       return "gpu_native";
     }
 
@@ -231,11 +240,11 @@ namespace stream_stats {
       linux_display.prefer_gpu_native_capture;
 
     if (stats.capture_transport == platf::frame_transport_e::shm) {
+      if (stats.runtime_effective_headless && linux_display.use_cage_compositor) {
+        return "headless_shm_fallback";
+      }
       if (gpu_native_requested) {
         return "gpu_native_requested_shm_fallback";
-      }
-      if (stats.runtime_effective_headless && linux_display.use_cage_compositor) {
-        return "headless_shm_default";
       }
       return "shm_capture";
     }

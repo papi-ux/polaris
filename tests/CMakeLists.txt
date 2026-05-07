@@ -64,6 +64,7 @@ set(TEST_MAIN_SOURCE
 set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
     ${CMAKE_SOURCE_DIR}/src/rswrapper.c
@@ -79,6 +80,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
 )

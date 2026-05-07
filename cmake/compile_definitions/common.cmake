@@ -92,6 +92,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/ai_optimizer.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_classifier.h"
         "${CMAKE_SOURCE_DIR}/src/game_classifier.cpp"
+        "${CMAKE_SOURCE_DIR}/src/game_library_scanner.h"
+        "${CMAKE_SOURCE_DIR}/src/game_library_scanner.cpp"
         "${CMAKE_SOURCE_DIR}/src/config.h"
         "${CMAKE_SOURCE_DIR}/src/config.cpp"
         "${CMAKE_SOURCE_DIR}/src/display_device.h"

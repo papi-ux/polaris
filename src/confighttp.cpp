@@ -57,6 +57,7 @@
 #include "device_db.h"
 #include "ai_optimizer.h"
 #include "game_classifier.h"
+#include "game_library_scanner.h"
 
 #include <curl/curl.h>
 
@@ -1096,6 +1097,10 @@ namespace confighttp {
    *
    * @api_examples{/api/apps| GET| null}
    */
+  std::vector<fs::path> lutris_art_roots();
+  std::string lutris_image_path_for_app_node(const nlohmann::json &app);
+  void hydrate_lutris_app_images(nlohmann::json &file_tree);
+
   void getApps(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -1106,6 +1111,7 @@ namespace confighttp {
     try {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
+      hydrate_lutris_app_images(file_tree);
 
       file_tree["current_app"] = proc::proc.get_running_app_uuid();
       file_tree["host_uuid"] = http::unique_id;
@@ -1520,8 +1526,138 @@ namespace confighttp {
   }
 
   /**
-   * @brief Scan for installed Steam and Lutris games.
+   * @brief Scan for installed Steam, Lutris, and Heroic games.
    */
+  std::vector<fs::path> lutris_game_config_dirs() {
+    std::vector<fs::path> dirs;
+    const char *home = std::getenv("HOME");
+    if (!home || !*home) {
+      return dirs;
+    }
+
+    const char *xdg_config_home = std::getenv("XDG_CONFIG_HOME");
+    const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
+    dirs.emplace_back(
+      xdg_config_home && *xdg_config_home ?
+        fs::path(xdg_config_home) / "lutris/games" :
+        fs::path(home) / ".config/lutris/games"
+    );
+    dirs.emplace_back(
+      xdg_data_home && *xdg_data_home ?
+        fs::path(xdg_data_home) / "lutris/games" :
+        fs::path(home) / ".local/share/lutris/games"
+    );
+
+    return dirs;
+  }
+
+  std::vector<fs::path> lutris_art_roots() {
+    std::vector<fs::path> roots;
+    const char *home = std::getenv("HOME");
+    if (!home || !*home) {
+      return roots;
+    }
+
+    const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
+    const char *xdg_cache_home = std::getenv("XDG_CACHE_HOME");
+    roots.emplace_back(
+      xdg_data_home && *xdg_data_home ?
+        fs::path(xdg_data_home) / "lutris" :
+        fs::path(home) / ".local/share/lutris"
+    );
+    roots.emplace_back(
+      xdg_cache_home && *xdg_cache_home ?
+        fs::path(xdg_cache_home) / "lutris" :
+        fs::path(home) / ".cache/lutris"
+    );
+
+    return roots;
+  }
+
+  std::string lutris_image_path_for_app_node(const nlohmann::json &app) {
+    if (!app.is_object()) {
+      return {};
+    }
+
+    if (app.contains("image-path") && app["image-path"].is_string() && !app["image-path"].get<std::string>().empty()) {
+      return {};
+    }
+
+    const auto source = app.contains("source") && app["source"].is_string() ? app["source"].get<std::string>() : "";
+    if (!boost::iequals(source, "lutris")) {
+      return {};
+    }
+
+    const auto slug = app.contains("lutris-slug") && app["lutris-slug"].is_string() ? app["lutris-slug"].get<std::string>() : "";
+    if (!game_library::is_lutris_slug_safe(slug)) {
+      return {};
+    }
+
+    return game_library::find_lutris_image_path(slug, lutris_art_roots());
+  }
+
+  void hydrate_lutris_app_images(nlohmann::json &file_tree) {
+    if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+      return;
+    }
+
+    for (auto &app : file_tree["apps"]) {
+      auto image_path = lutris_image_path_for_app_node(app);
+      if (!image_path.empty()) {
+        app["image-path"] = image_path;
+      }
+    }
+  }
+
+  void ensure_lutris_library_app(nlohmann::json &file_tree) {
+    if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+      file_tree["apps"] = nlohmann::json::array();
+    }
+
+    for (const auto &app : file_tree["apps"]) {
+      if (!app.is_object()) {
+        continue;
+      }
+
+      const auto name = app.value("name", "");
+      if (boost::iequals(boost::trim_copy(name), "Lutris")) {
+        return;
+      }
+
+      const auto cmd = boost::trim_copy(app.value("cmd", ""));
+      if (boost::iequals(cmd, "setsid lutris") || boost::iequals(cmd, "lutris")) {
+        return;
+      }
+
+      if (!app.contains("detached") || !app["detached"].is_array()) {
+        continue;
+      }
+
+      for (const auto &detached : app["detached"]) {
+        if (!detached.is_string()) {
+          continue;
+        }
+        const auto value = boost::trim_copy(detached.get<std::string>());
+        if (boost::iequals(value, "setsid lutris") || boost::iequals(value, "lutris")) {
+          return;
+        }
+      }
+    }
+
+    nlohmann::json app {
+      {"name", "Lutris"},
+      {"uuid", ""},
+      {"cmd", ""},
+      {"detached", nlohmann::json::array({"setsid lutris"})},
+      {"image-path", "lutris.png"},
+      {"source", "lutris"},
+      {"auto-detach", true},
+      {"wait-all", true},
+      {"exit-timeout", 5}
+    };
+    proc::migrate_apps(&file_tree, &app);
+  }
+
   void scanGames(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -1531,6 +1667,7 @@ namespace confighttp {
 
     // Get existing apps to check for duplicates
     std::set<std::string> existing_cmds;
+    std::set<std::string> existing_lutris_slugs;
     try {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       auto apps_tree = nlohmann::json::parse(content);
@@ -1543,6 +1680,13 @@ namespace confighttp {
           }
           if (app.contains("cmd") && app["cmd"].is_string()) {
             existing_cmds.insert(app["cmd"].get<std::string>());
+          }
+          const auto app_source = app.contains("source") && app["source"].is_string() ? app["source"].get<std::string>() : "";
+          if (boost::iequals(app_source, "lutris")) {
+            const auto slug = app.contains("lutris-slug") && app["lutris-slug"].is_string() ? app["lutris-slug"].get<std::string>() : "";
+            if (!slug.empty()) {
+              existing_lutris_slugs.insert(slug);
+            }
           }
         }
       }
@@ -1622,52 +1766,33 @@ namespace confighttp {
     // Scan Lutris games
     nlohmann::json lutris_games = nlohmann::json::array();
     if (home) {
-      std::string lutris_db_path = std::string(home) + "/.local/share/lutris/pga.db";
-      std::string lutris_yml_dir = std::string(home) + "/.config/lutris/games/";
+      auto lutris_yml_dirs = lutris_game_config_dirs();
+      auto lutris_roots = lutris_art_roots();
 
-      // Scan Lutris YAML game configs
-      if (std::filesystem::exists(lutris_yml_dir)) {
-        for (const auto &entry : std::filesystem::directory_iterator(lutris_yml_dir)) {
-          if (!entry.is_regular_file()) continue;
-          auto fname = entry.path().filename().string();
-          if (fname.find(".yml") == std::string::npos) continue;
+      for (const auto &lutris_game : game_library::scan_lutris_library(lutris_yml_dirs)) {
+        bool already = existing_cmds.count(lutris_game.command) > 0 ||
+          existing_lutris_slugs.count(lutris_game.slug) > 0;
 
-          // Extract slug from filename (e.g., "doom-eternal.yml" -> "doom-eternal")
-          auto slug = fname.substr(0, fname.rfind('.'));
-
-          // Read the YAML file to get the game name
-          std::ifstream yml_file(entry.path());
-          std::string game_name;
-          std::string line;
-          while (std::getline(yml_file, line)) {
-            // Simple YAML parsing — find "name: ..." or "game:" section
-            if (line.find("name:") == 0 || line.find("name: ") == 0) {
-              game_name = line.substr(line.find(':') + 1);
-              // Trim whitespace and quotes
-              while (!game_name.empty() && (game_name.front() == ' ' || game_name.front() == '\'' || game_name.front() == '"'))
-                game_name.erase(0, 1);
-              while (!game_name.empty() && (game_name.back() == ' ' || game_name.back() == '\'' || game_name.back() == '"'))
-                game_name.pop_back();
-              break;
-            }
-          }
-          if (game_name.empty()) {
-            // Use slug as fallback name, replacing hyphens with spaces
-            game_name = slug;
-            std::replace(game_name.begin(), game_name.end(), '-', ' ');
-          }
-
-          std::string launch_cmd = "setsid lutris lutris:rungame/" + slug;
-          bool already = existing_cmds.count(launch_cmd) > 0;
-
-          nlohmann::json game;
-          game["name"] = game_name;
-          game["slug"] = slug;
-          game["cmd"] = launch_cmd;
-          game["source"] = "lutris";
-          game["already_imported"] = already;
-          lutris_games.push_back(game);
+        nlohmann::json game;
+        game["name"] = lutris_game.name;
+        game["slug"] = lutris_game.slug;
+        game["cmd"] = lutris_game.command;
+        game["source"] = "lutris";
+        game["already_imported"] = already;
+        if (!lutris_game.runner.empty()) {
+          game["runner"] = lutris_game.runner;
         }
+        auto image_path = lutris_game.image_path.empty() ?
+          game_library::find_lutris_image_path(lutris_game.slug, lutris_roots) :
+          lutris_game.image_path;
+        if (!image_path.empty()) {
+          game["image_path"] = image_path;
+          game["image-path"] = image_path;
+          game["cover_path"] = image_path;
+        }
+        auto cat = game_classifier::classify(lutris_game.name, {});
+        game["game_category"] = game_classifier::category_to_string(cat);
+        lutris_games.push_back(game);
       }
     }
 
@@ -1809,6 +1934,7 @@ namespace confighttp {
       nlohmann::json fileTree = nlohmann::json::parse(content);
 
       int imported = 0;
+      bool imported_lutris_game = false;
       for (const auto &game : body["games"]) {
         std::string name = game.value("name", "");
         std::string source = game.value("source", "steam");
@@ -1845,7 +1971,30 @@ namespace confighttp {
           } else {
             app["image-path"] = "https://steamcdn-a.akamaihd.net/steam/apps/" + appid + "/library_600x900_2x.jpg";
           }
-        } else if (source == "lutris" || source == "heroic") {
+        } else if (source == "lutris") {
+          std::string slug = game.value("slug", game.value("lutris-slug", ""));
+          if (!game_library::is_lutris_slug_safe(slug)) {
+            BOOST_LOG(warning) << "Skipping Lutris import for [" << name << "]: missing or unsafe slug";
+            continue;
+          }
+
+          app["lutris-slug"] = slug;
+          app["detached"] = nlohmann::json::array({ game_library::lutris_launch_command(slug) });
+
+          std::string runner = game.value("runner", game.value("lutris-runner", ""));
+          if (!runner.empty()) {
+            app["lutris-runner"] = runner;
+          }
+
+          std::string image_path = game.value("image_path", game.value("image-path", game.value("cover_path", "")));
+          if (image_path.empty()) {
+            image_path = game_library::find_lutris_image_path(slug, lutris_art_roots());
+          }
+          if (!image_path.empty()) {
+            app["image-path"] = image_path;
+          }
+          imported_lutris_game = true;
+        } else if (source == "heroic") {
           // Use the launch command provided by the scanner
           std::string cmd = game.value("cmd", "");
           if (!cmd.empty()) {
@@ -1864,6 +2013,10 @@ namespace confighttp {
         // Merge into apps file
         proc::migrate_apps(&fileTree, &app);
         imported++;
+      }
+
+      if (imported_lutris_game) {
+        ensure_lutris_library_app(fileTree);
       }
 
       // Write back
@@ -2532,6 +2685,26 @@ namespace confighttp {
         image_path = app.image_path;
         break;
       }
+    }
+
+    if (image_path.empty()) {
+      try {
+        std::string content = file_handler::read_file(config::stream.file_apps.c_str());
+        auto file_tree = nlohmann::json::parse(content);
+        if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
+          for (const auto &app : file_tree["apps"]) {
+            if (!app.is_object() || app.value("name", "") != name_it->second) {
+              continue;
+            }
+
+            image_path = app.value("image-path", "");
+            if (image_path.empty()) {
+              image_path = lutris_image_path_for_app_node(app);
+            }
+            break;
+          }
+        }
+      } catch (...) {}
     }
 
     if (image_path.empty()) {

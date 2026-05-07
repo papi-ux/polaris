@@ -114,6 +114,11 @@ namespace input {
 
   static platf::input_t platf_input;
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
+  static std::mutex preallocated_gamepad_mutex;
+  static int preallocated_controller_number {-1};
+  static int preallocated_gamepad_id {-1};
+  static safe::mail_t preallocated_gamepad_mail;
+  static platf::feedback_queue_t preallocated_gamepad_feedback_queue;
 
   void free_gamepad(platf::input_t &platf_input, int id) {
     platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
@@ -194,6 +199,71 @@ namespace input {
     int32_t accumulated_vscroll_delta;
     int32_t accumulated_hscroll_delta;
   };
+
+  bool ensure_gamepad_allocated(const std::shared_ptr<input_t> &input, int controller_number, const platf::gamepad_arrival_t &arrival, const char *reason) {
+    if (!config::input.controller) {
+      return false;
+    }
+
+    if (controller_number < 0 || static_cast<std::size_t>(controller_number) >= input->gamepads.size()) {
+      BOOST_LOG(warning) << "ControllerNumber out of range ["sv << controller_number << ']';
+      return false;
+    }
+
+    auto &gamepad = input->gamepads[controller_number];
+    if (gamepad.id >= 0) {
+      return true;
+    }
+
+    auto id = alloc_id(gamepadMask);
+    if (id < 0) {
+      return false;
+    }
+
+    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, arrival, input->feedback_queue)) {
+      free_id(gamepadMask, id);
+      return false;
+    }
+
+    gamepad.id = id;
+    if (reason && *reason) {
+      BOOST_LOG(info) << "ControllerNumber ["sv << controller_number << "] allocated for "sv << reason;
+    }
+    return true;
+  }
+
+  void preallocate_gamepad() {
+    if (!config::input.controller) {
+      return;
+    }
+
+    std::scoped_lock lock {preallocated_gamepad_mutex};
+    if (preallocated_gamepad_id >= 0 || gamepadMask.any()) {
+      return;
+    }
+
+    auto id = alloc_id(gamepadMask);
+    if (id < 0) {
+      return;
+    }
+
+    if (!preallocated_gamepad_mail) {
+      preallocated_gamepad_mail = std::make_shared<safe::mail_raw_t>();
+      preallocated_gamepad_feedback_queue = preallocated_gamepad_mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
+    }
+
+    constexpr int controller_number = 0;
+    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, {}, preallocated_gamepad_feedback_queue)) {
+      free_id(gamepadMask, id);
+      BOOST_LOG(warning) << "ControllerNumber [0] could not be preallocated before app launch"sv;
+      return;
+    }
+
+    preallocated_controller_number = controller_number;
+    preallocated_gamepad_id = id;
+    platf::gamepad_update(platf_input, id, {});
+    BOOST_LOG(info) << "ControllerNumber [0] preallocated before app launch"sv;
+  }
 
   /**
    * @brief Apply shortcut based on VKEY
@@ -839,13 +909,13 @@ namespace input {
       return;
     }
 
-    if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
+    if (packet->controllerNumber < 0 || static_cast<std::size_t>(packet->controllerNumber) >= input->gamepads.size()) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
     }
 
     if (input->gamepads[packet->controllerNumber].id >= 0) {
-      BOOST_LOG(warning) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
+      BOOST_LOG(debug) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
       return;
     }
 
@@ -855,18 +925,7 @@ namespace input {
       util::endian::little(packet->supportedButtonFlags),
     };
 
-    auto id = alloc_id(gamepadMask);
-    if (id < 0) {
-      return;
-    }
-
-    // Allocate a new gamepad
-    if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
-      free_id(gamepadMask, id);
-      return;
-    }
-
-    input->gamepads[packet->controllerNumber].id = id;
+    ensure_gamepad_allocated(input, packet->controllerNumber, arrival, "controller arrival");
   }
 
   /**
@@ -1094,17 +1153,9 @@ namespace input {
     // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
     // send a controller arrival instead of this but it's still supported for legacy clients.
     if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
-      auto id = alloc_id(gamepadMask);
-      if (id < 0) {
+      if (!ensure_gamepad_allocated(input, packet->controllerNumber, {}, "controller input")) {
         return;
       }
-
-      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
-        free_id(gamepadMask, id);
-        return;
-      }
-
-      gamepad.id = id;
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
       free_gamepad(platf_input, gamepad.id);
@@ -1696,6 +1747,26 @@ namespace input {
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
+
+    bool adopted_preallocated_gamepad = false;
+    {
+      std::scoped_lock lock {preallocated_gamepad_mutex};
+      if (preallocated_controller_number == 0 && preallocated_gamepad_id >= 0) {
+        input->gamepads[0].id = preallocated_gamepad_id;
+        preallocated_controller_number = -1;
+        preallocated_gamepad_id = -1;
+        preallocated_gamepad_mail.reset();
+        preallocated_gamepad_feedback_queue.reset();
+        adopted_preallocated_gamepad = true;
+        BOOST_LOG(info) << "ControllerNumber [0] adopted preallocated gamepad for session startup"sv;
+      }
+    }
+
+    task_pool.push([input, adopted_preallocated_gamepad]() {
+      if (adopted_preallocated_gamepad || ensure_gamepad_allocated(input, 0, {}, "session startup")) {
+        platf::gamepad_update(platf_input, input->gamepads[0].id, {});
+      }
+    });
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {
