@@ -722,6 +722,7 @@ namespace platf {
     const bool gpu_native_capture_supported = wl::supports_gpu_native_capture(hwdevice_type);
     bool prefer_linear_dmabuf = false;
     bool using_headless_ram_capture = false;
+    bool try_headless_extcopy_dmabuf = false;
 #ifdef __linux__
     if (!prefer_ram_capture &&
         config::video.linux_display.use_cage_compositor &&
@@ -738,6 +739,8 @@ namespace platf {
       } else if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
         prefer_ram_capture = true;
         using_headless_ram_capture = true;
+        try_headless_extcopy_dmabuf =
+          cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state);
       } else {
         prefer_ram_capture = true;
 
@@ -765,6 +768,22 @@ namespace platf {
       }
 
       return wlr;
+    }
+
+    if (try_headless_extcopy_dmabuf && gpu_native_capture_supported) {
+      auto wlr = std::make_shared<wl::wlr_extcopy_vram_t>();
+      if (!wlr->init(hwdevice_type, display_name, config)) {
+#ifdef __linux__
+        cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+#endif
+        BOOST_LOG(info) << "wlr: Using ext-image-copy-capture DMA-BUF for headless labwc"sv;
+        return wlr;
+      }
+
+#ifdef __linux__
+      cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+#endif
+      BOOST_LOG(info) << "wlr: Headless ext-image-copy-capture DMA-BUF unavailable; using SHM fallback"sv;
     }
 
     auto wlr = std::make_shared<wl::wlr_ram_t>();

@@ -46,7 +46,7 @@ TEST(StreamStatsCapturePathTests, DetectsShmCpuCapture) {
   stats.encode_target_residency = platf::frame_residency_e::cpu;
 
   EXPECT_EQ(stream_stats::capture_path_summary(stats), "shm_cpu_capture");
-  EXPECT_EQ(stream_stats::capture_path_reason(stats), "headless_shm_default");
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "headless_shm_fallback");
   EXPECT_TRUE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
 }
@@ -63,7 +63,7 @@ TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {
   stats.encode_target_residency = platf::frame_residency_e::cpu;
 
   EXPECT_EQ(stream_stats::capture_path_summary(stats), "shm_cpu_capture");
-  EXPECT_EQ(stream_stats::capture_path_reason(stats), "gpu_native_requested_shm_fallback");
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "headless_shm_fallback");
   EXPECT_TRUE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
 }
@@ -88,6 +88,38 @@ TEST(StreamStatsCapturePathTests, DetectsFullyGpuNativePath) {
 
   EXPECT_EQ(stream_stats::capture_path_summary(stats), "gpu_native");
   EXPECT_EQ(stream_stats::capture_path_reason(stats), "gpu_native");
+  EXPECT_FALSE(stream_stats::capture_path_uses_cpu_copy(stats));
+  EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));
+}
+
+TEST(StreamStatsCapturePathTests, LabelsHeadlessExtcopyDmabufPath) {
+  LinuxDisplayConfigGuard guard;
+  config::video.linux_display.use_cage_compositor = true;
+
+  stream_stats::stats_t stats {};
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+
+  EXPECT_EQ(stream_stats::capture_path_summary(stats), "gpu_native");
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "headless_extcopy_dmabuf");
+  EXPECT_FALSE(stream_stats::capture_path_uses_cpu_copy(stats));
+  EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));
+}
+
+TEST(StreamStatsCapturePathTests, LabelsWindowedDmabufOverridePath) {
+  LinuxDisplayConfigGuard guard;
+  config::video.linux_display.use_cage_compositor = true;
+
+  stream_stats::stats_t stats {};
+  stats.runtime_gpu_native_override_active = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+
+  EXPECT_EQ(stream_stats::capture_path_summary(stats), "gpu_native");
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "windowed_dmabuf_override");
   EXPECT_FALSE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));
 }

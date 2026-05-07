@@ -55,6 +55,28 @@ TEST(CageDisplayRouterPolicyTests, HeadlessRuntimeDoesNotAttemptGpuNativeCapture
   EXPECT_FALSE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
 }
 
+TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessAttemptsExtcopyDmabufBeforeShmFallback) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state));
+}
+
+TEST(CageDisplayRouterPolicyTests, WindowedOverrideDoesNotAttemptHeadlessExtcopyDmabuf) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_FALSE(cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state));
+}
+
 TEST(CageDisplayRouterPolicyTests, RequestedHeadlessWithoutOverrideStillReportsHeadlessFallback) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,
@@ -134,6 +156,28 @@ TEST(CageDisplayRouterPolicyTests, WindowedGpuNativeProbeResultCachesSuccess) {
   cage_display_router::update_windowed_gpu_native_probe_result(true);
 
   EXPECT_EQ(cage_display_router::cached_windowed_gpu_native_probe_result(), std::optional<bool> {true});
+}
+
+TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeResultDefaultsToUnknown) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+
+  EXPECT_FALSE(cage_display_router::cached_headless_extcopy_dmabuf_probe_result().has_value());
+}
+
+TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeResultCachesFailure) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+
+  cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+
+  EXPECT_EQ(cage_display_router::cached_headless_extcopy_dmabuf_probe_result(), std::optional<bool> {false});
+}
+
+TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeResultCachesSuccess) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+
+  cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+
+  EXPECT_EQ(cage_display_router::cached_headless_extcopy_dmabuf_probe_result(), std::optional<bool> {true});
 }
 
 TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentMode) {

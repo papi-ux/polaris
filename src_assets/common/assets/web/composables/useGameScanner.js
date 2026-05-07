@@ -59,7 +59,10 @@ export function useGameScanner() {
             name: g.name,
             appid: g.appid || '',
             source: g.source,
+            slug: g.slug || '',
+            runner: g.runner || '',
             cmd: g.cmd || '',
+            image_path: g.image_path || g['image-path'] || g.cover_path || '',
             game_category: g.game_category || '',
             genres: g.genres || []
           }))
