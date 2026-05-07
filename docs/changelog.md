@@ -7,6 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.11
+
+Patch release focused on Browser Stream validation and Linux stream-runtime polish.
+
+- Added experimental Browser Stream using WebTransport and WebCodecs, with `/browser-stream` routing and `/webrtc` compatibility aliases
+- Added the Polaris-launched WebTransport helper, browser session API, WebCodecs playback, and browser keyboard, pointer, wheel, and touch input routing
+- Added Browser Stream UI modes for Game Mode, in-game expansion, pop-out streaming, stream profiles, latency statistics, and unsupported-browser messaging
+- Improved Linux stream runtime diagnostics, stream display policy reporting, and GPU-native/headless capture path explanations
+- Improved Linux launcher integration, labwc refresh-rate handling, headless preview diagnostics, and stream cleanup behavior
+- Fixed SHM capture color handling for reported wlgrab pixel formats and expanded unit coverage for the copy path
+- Tightened HDR metadata gating, web config save behavior, and Browser Stream route/config/status test coverage
+
 ## v1.0.10
 
 Patch release focused on Linux streaming diagnostics and host-session isolation.
