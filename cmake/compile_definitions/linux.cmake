@@ -49,6 +49,11 @@ if(${POLARIS_ENABLE_CUDA})
             list(APPEND CMAKE_CUDA_ARCHITECTURES 103 121)
         endif()
 
+        # https://docs.nvidia.com/cuda/archive/13.2.0/cuda-compiler-driver-nvcc/index.html
+        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.2)
+            list(APPEND CMAKE_CUDA_ARCHITECTURES 88)
+        endif()
+
         # https://docs.nvidia.com/cuda/archive/13.0.0/cuda-compiler-driver-nvcc/index.html
         if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
             list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES 101)
