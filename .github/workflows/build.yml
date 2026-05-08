@@ -650,23 +650,27 @@ jobs:
               echo "CUDA math_functions.h was not found" >&2
               exit 1
             fi
-            sed -E -i \
-              -e 's/(sinpi\(double x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
-              -e 's/(sinpif\(float x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
-              -e 's/(cospi\(double x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
-              -e 's/(cospif\(float x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
-              "${math_header}"
-            for declaration in \
-              'sinpi\(double x\) noexcept ?\(true\);' \
-              'sinpif\(float x\) noexcept ?\(true\);' \
-              'cospi\(double x\) noexcept ?\(true\);' \
-              'cospif\(float x\) noexcept ?\(true\);'
-            do
-              if ! grep -Eq "${declaration}" "${math_header}"; then
-                echo "CUDA math_functions.h is missing ${declaration}" >&2
-                exit 1
-              fi
-            done
+            if grep -Fq "__NV_IEC_60559_FUNCS_EXCEPTION_SPECIFIER" "${math_header}"; then
+              echo "${math_header} already has NVIDIA IEC 60559 exception specifiers"
+            else
+              sed -E -i \
+                -e 's/(sinpi\([^)]*\))( noexcept( ?\(true\))?)?;/\1 noexcept(true);/' \
+                -e 's/(sinpif\([^)]*\))( noexcept( ?\(true\))?)?;/\1 noexcept(true);/' \
+                -e 's/(cospi\([^)]*\))( noexcept( ?\(true\))?)?;/\1 noexcept(true);/' \
+                -e 's/(cospif\([^)]*\))( noexcept( ?\(true\))?)?;/\1 noexcept(true);/' \
+                "${math_header}"
+              for declaration in \
+                'sinpi\([^)]*\) noexcept ?\(true\);' \
+                'sinpif\([^)]*\) noexcept ?\(true\);' \
+                'cospi\([^)]*\) noexcept ?\(true\);' \
+                'cospif\([^)]*\) noexcept ?\(true\);'
+              do
+                if ! grep -Eq "${declaration}" "${math_header}"; then
+                  echo "CUDA math_functions.h is missing ${declaration}" >&2
+                  exit 1
+                fi
+              done
+            fi
           fi
 
       - name: Configure
