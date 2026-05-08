@@ -102,10 +102,10 @@ sudo polaris --setup-host
 polaris
 ```
 
-Experimental Browser Stream builds can include the WebTransport helper with:
+Experimental Browser Stream builds require Go and can include the WebTransport helper with:
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_BROWSER_STREAM=ON
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=ON -DPOLARIS_ENABLE_BROWSER_STREAM=ON
 cmake --build build -j"$(nproc)"
 ```
 

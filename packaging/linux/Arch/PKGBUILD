@@ -58,6 +58,7 @@ makedepends=(
   'desktop-file-utils'
   'gcc'
   'git'
+  'go'
   'make'
   'ninja'
   'nlohmann-json'
@@ -184,6 +185,7 @@ build() {
       -D CMAKE_INSTALL_PREFIX=/usr
       -D POLARIS_EXECUTABLE_PATH=/usr/bin/polaris
       -D POLARIS_ASSETS_DIR="share/polaris"
+      -D POLARIS_ENABLE_BROWSER_STREAM=ON
       -D POLARIS_PUBLISHER_NAME='Polaris Project'
       -D POLARIS_PUBLISHER_WEBSITE='https://github.com/papi-ux/polaris'
       -D POLARIS_PUBLISHER_ISSUE_URL='https://github.com/papi-ux/polaris/issues'
