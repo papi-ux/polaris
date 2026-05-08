@@ -159,26 +159,31 @@ jobs:
           pacman -S --noconfirm --needed cuda
 
           # CUDA 13 supports GCC up to 15.x. Arch rolling moved to GCC 16,
-          # so pin the release CUDA validation to the last supported GCC 15
-          # toolchain from the Arch Linux Archive until CUDA catches up.
+          # so use Arch's cuda-provided gcc15 toolchain when present. Older
+          # images may still need the archive downgrade fallback.
+          arch_makepkg_env="_use_cuda=true"
           gcc_major="$(g++ -dumpfullversion | cut -d. -f1)"
           if [ "${gcc_major}" -gt 15 ]; then
-            gcc15_version="15.2.1+r604+g0b99615a8aef-1"
-            archive_base="https://archive.archlinux.org/packages"
-            pacman -U --noconfirm \
-              "${archive_base}/g/gcc/gcc-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/g/gcc-libs/gcc-libs-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libasan/libasan-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libatomic/libatomic-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libgcc/libgcc-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libgfortran/libgfortran-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libgomp/libgomp-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/liblsan/liblsan-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libobjc/libobjc-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libquadmath/libquadmath-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libstdc++/libstdc++-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libtsan/libtsan-${gcc15_version}-x86_64.pkg.tar.zst" \
-              "${archive_base}/l/libubsan/libubsan-${gcc15_version}-x86_64.pkg.tar.zst"
+            if command -v g++-15 >/dev/null 2>&1 && command -v gcc-15 >/dev/null 2>&1; then
+              arch_makepkg_env="CC=$(command -v gcc-15) CXX=$(command -v g++-15) NVCC_CCBIN=$(command -v g++-15) ${arch_makepkg_env}"
+            else
+              gcc15_version="15.2.1+r604+g0b99615a8aef-1"
+              archive_base="https://archive.archlinux.org/packages"
+              pacman -U --noconfirm \
+                "${archive_base}/g/gcc/gcc-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/g/gcc-libs/gcc-libs-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libasan/libasan-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libatomic/libatomic-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libgcc/libgcc-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libgfortran/libgfortran-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libgomp/libgomp-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/liblsan/liblsan-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libobjc/libobjc-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libquadmath/libquadmath-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libstdc++/libstdc++-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libtsan/libtsan-${gcc15_version}-x86_64.pkg.tar.zst" \
+                "${archive_base}/l/libubsan/libubsan-${gcc15_version}-x86_64.pkg.tar.zst"
+            fi
           fi
 
           install -d "$CCACHE_DIR"
@@ -186,7 +191,7 @@ jobs:
           chown -R builder:builder "$CCACHE_DIR"
           su builder -c "git config --global protocol.file.allow always"
           su builder -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'"
-          su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && _use_cuda=true makepkg --nodeps --noconfirm --nocheck"
+          su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && ${arch_makepkg_env} makepkg --nodeps --noconfirm --nocheck"
 
       - name: Smoke test Arch package
         if: startsWith(github.ref, 'refs/tags/v')
