@@ -7,8 +7,13 @@
 #include <bitset>
 #include <chrono>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 // lib includes
 #include <boost/regex.hpp>
@@ -633,6 +638,40 @@ namespace platf {
       alarm->ring(status ? 0 : 1);
     }
 
+    bool process_env_has_session_audio_sink(pid_t pid, const std::string &sink) {
+      if (pid <= 1 || sink.empty()) {
+        return false;
+      }
+
+      std::ifstream env_file("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+      if (!env_file) {
+        return false;
+      }
+
+      std::string env {
+        std::istreambuf_iterator<char> {env_file},
+        std::istreambuf_iterator<char> {}
+      };
+      const std::string audio_sink_marker = "POLARIS_SESSION_AUDIO_SINK=" + sink;
+      const std::string pulse_sink_marker = "PULSE_SINK=" + sink;
+
+      std::size_t pos = 0;
+      while (pos < env.size()) {
+        const auto end = env.find('\0', pos);
+        const auto len = end == std::string::npos ? std::string::npos : end - pos;
+        const auto entry = std::string_view {env.data() + pos, len == std::string::npos ? env.size() - pos : len};
+        if (entry == std::string_view {audio_sink_marker} || entry == std::string_view {pulse_sink_marker}) {
+          return true;
+        }
+        if (end == std::string::npos) {
+          break;
+        }
+        pos = end + 1;
+      }
+
+      return false;
+    }
+
     class server_t: public audio_control_t {
       enum ctx_event_e : int {
         ready,
@@ -927,6 +966,145 @@ namespace platf {
         // No need to check status. If it failed just return default name.
         BOOST_LOG(info) << "Found default monitor by name: "sv << monitor_name;
         return monitor_name;
+      }
+
+      std::optional<std::uint32_t> sink_index_by_name(const std::string &sink_name) {
+        std::optional<std::uint32_t> sink_index;
+        auto alarm = safe::make_alarm<int>();
+
+        if (sink_name.empty()) {
+          return sink_index;
+        }
+
+        cb_t<pa_sink_info *> sink_f = [&](ctx_t::pointer ctx, const pa_sink_info *sink_info, int eol) {
+          if (!sink_info) {
+            if (!eol) {
+              BOOST_LOG(error) << "Couldn't get pulseaudio sink info for ["sv << sink_name
+                               << "]: "sv << pa_strerror(pa_context_errno(ctx));
+              alarm->ring(-1);
+            }
+
+            alarm->ring(0);
+            return;
+          }
+
+          sink_index = sink_info->index;
+        };
+
+        op_t sink_op {pa_context_get_sink_info_by_name(ctx.get(), sink_name.c_str(), cb<pa_sink_info *>, &sink_f)};
+
+        if (!sink_op) {
+          BOOST_LOG(error) << "Couldn't create sink lookup operation for ["sv << sink_name
+                           << "]: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          return std::nullopt;
+        }
+
+        alarm->wait();
+        if (*alarm->status()) {
+          return std::nullopt;
+        }
+
+        return sink_index;
+      }
+
+      void route_process_audio_to_sink(const std::string &sink) override {
+        auto target_sink = sink_index_by_name(sink);
+        if (!target_sink) {
+          return;
+        }
+
+        struct sink_input_route_t {
+          std::uint32_t index;
+          std::uint32_t current_sink;
+          pid_t pid;
+          std::string app_name;
+        };
+
+        std::vector<sink_input_route_t> routes;
+        auto alarm = safe::make_alarm<int>();
+
+        cb_t<pa_sink_input_info *> input_f = [&](ctx_t::pointer ctx, const pa_sink_input_info *input_info, int eol) {
+          if (!input_info) {
+            if (!eol) {
+              BOOST_LOG(error) << "Couldn't get pulseaudio sink input info: "sv << pa_strerror(pa_context_errno(ctx));
+              alarm->ring(-1);
+            }
+
+            alarm->ring(0);
+            return;
+          }
+
+          if (input_info->sink == *target_sink) {
+            return;
+          }
+
+          const char *pid_text = pa_proplist_gets(input_info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
+          if (!pid_text || !*pid_text) {
+            return;
+          }
+
+          char *end = nullptr;
+          const auto pid_long = std::strtol(pid_text, &end, 10);
+          if (end == pid_text || pid_long <= 1 || pid_long > std::numeric_limits<pid_t>::max()) {
+            return;
+          }
+
+          const auto pid = static_cast<pid_t>(pid_long);
+          if (!process_env_has_session_audio_sink(pid, sink)) {
+            return;
+          }
+
+          const char *app_name = pa_proplist_gets(input_info->proplist, PA_PROP_APPLICATION_NAME);
+          routes.push_back(sink_input_route_t {
+            input_info->index,
+            input_info->sink,
+            pid,
+            app_name ? app_name : "unknown"
+          });
+        };
+
+        op_t list_op {pa_context_get_sink_input_info_list(ctx.get(), cb<pa_sink_input_info *>, &input_f)};
+        if (!list_op) {
+          BOOST_LOG(error) << "Couldn't create sink input list operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          return;
+        }
+
+        alarm->wait();
+        if (*alarm->status()) {
+          return;
+        }
+
+        for (const auto &route : routes) {
+          BOOST_LOG(info) << "Linux audio isolation: moving session audio stream ["sv
+                          << route.app_name << "] pid="sv << route.pid
+                          << " sink_input="sv << route.index
+                          << " from sink #"sv << route.current_sink
+                          << " to ["sv << sink << ']';
+
+          auto move_alarm = safe::make_alarm<int>();
+          op_t move_op {
+            pa_context_move_sink_input_by_name(
+              ctx.get(),
+              route.index,
+              sink.c_str(),
+              success_cb,
+              move_alarm.get()
+            )
+          };
+
+          if (!move_op) {
+            BOOST_LOG(warning) << "Linux audio isolation: failed to create move operation for sink_input="sv
+                               << route.index << ": "sv << pa_strerror(pa_context_errno(ctx.get()));
+            continue;
+          }
+
+          move_alarm->wait();
+          if (*move_alarm->status()) {
+            BOOST_LOG(warning) << "Linux audio isolation: failed to move session audio stream ["sv
+                               << route.app_name << "] pid="sv << route.pid
+                               << " to ["sv << sink << "]: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          }
+        }
       }
 
       std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &selected_sink) override {
