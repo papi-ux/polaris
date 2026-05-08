@@ -480,8 +480,8 @@ jobs:
             cxx: g++-14
             boost_static: ON
           - fedora: '44'
-            cc: gcc
-            cxx: g++
+            cc: gcc-15
+            cxx: g++-15
             boost_static: OFF
     env:
       CCACHE_DIR: /github/home/.cache/ccache
