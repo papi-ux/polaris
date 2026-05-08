@@ -16,6 +16,10 @@ Patch release focused on Browser Stream validation and Linux stream-runtime poli
 - Added Browser Stream UI modes for Game Mode, in-game expansion, pop-out streaming, stream profiles, latency statistics, and unsupported-browser messaging
 - Improved Linux stream runtime diagnostics, stream display policy reporting, and GPU-native/headless capture path explanations
 - Improved Linux launcher integration, labwc refresh-rate handling, headless preview diagnostics, and stream cleanup behavior
+- Fixed Browser Stream close handling so the helper, transport, cage runtime, and launched Steam game are cleaned up together
+- Fixed Steam handoff after Browser Stream cleanup so Nova/Moonlight launches are not blocked by stale Steam child processes
+- Fixed isolated Linux audio routing so game audio streams that move back to the host sink are returned to the Polaris virtual stream sink
+- Added isolated Linux process cleanup for Steam-launched children that escape the direct app process group
 - Fixed SHM capture color handling for reported wlgrab pixel formats and expanded unit coverage for the copy path
 - Tightened HDR metadata gating, web config save behavior, and Browser Stream route/config/status test coverage
 
