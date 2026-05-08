@@ -332,12 +332,25 @@ namespace browser_stream {
              path_ends_with(argv0_path, "/ubuntu12_32/steam");
     }
 
-    std::optional<std::string> running_steam_client_summary() {
+    bool is_transient_steam_client_cmdline(std::string_view cmdline) {
+      auto lower_cmdline = ascii_lower(std::string {cmdline});
+      return lower_cmdline.find("-shutdown") != std::string::npos ||
+             lower_cmdline.find("-child-update-ui") != std::string::npos ||
+             lower_cmdline.find("-srt-logger-opened") != std::string::npos;
+    }
+
+    struct steam_client_status_t {
+      std::string summary;
+      bool transient = false;
+    };
+
+    std::optional<steam_client_status_t> running_steam_client_status() {
       DIR *dir = opendir("/proc");
       if (!dir) {
         return std::nullopt;
       }
 
+      std::optional<steam_client_status_t> transient_client;
       const auto this_pid = getpid();
       while (auto *entry = readdir(dir)) {
         const std::string name = entry->d_name;
@@ -362,18 +375,54 @@ namespace browser_stream {
           continue;
         }
 
-        closedir(dir);
+        const bool transient = is_transient_steam_client_cmdline(cmdline);
         std::replace(cmdline.begin(), cmdline.end(), '\0', ' ');
         auto summary = cmdline.empty() ? comm : cmdline;
         if (summary.size() > 160) {
           summary.resize(157);
           summary += "...";
         }
-        return std::to_string(pid) + ": " + summary;
+        steam_client_status_t status {
+          .summary = std::to_string(pid) + ": " + summary,
+          .transient = transient,
+        };
+        if (!transient) {
+          closedir(dir);
+          return status;
+        }
+
+        if (!transient_client) {
+          transient_client = std::move(status);
+        }
       }
 
       closedir(dir);
-      return std::nullopt;
+      return transient_client;
+    }
+
+    std::optional<std::string> wait_for_steam_client_blocker() {
+      for (int attempt = 0; attempt < 32; ++attempt) {
+        auto status = running_steam_client_status();
+        if (!status) {
+          return std::nullopt;
+        }
+
+        if (!status->transient) {
+          return status->summary;
+        }
+
+        if (attempt == 0) {
+          BOOST_LOG(info) << "Browser Stream waiting for transient Steam client to settle ["sv
+                          << status->summary << ']';
+        }
+        std::this_thread::sleep_for(250ms);
+      }
+
+      auto status = running_steam_client_status();
+      if (!status) {
+        return std::nullopt;
+      }
+      return status->summary;
     }
 
     std::shared_ptr<rtsp_stream::launch_session_t> browser_launch_session() {
@@ -402,7 +451,7 @@ namespace browser_stream {
       }
 
       if (app_uses_steam(app)) {
-        if (auto running_steam = running_steam_client_summary()) {
+        if (auto running_steam = wait_for_steam_client_blocker()) {
           error_out = "Steam is already running on the host desktop. Quit Steam first, then start Browser Stream so Steam launches inside Headless Stream instead of reusing the host instance.";
           BOOST_LOG(warning) << "Browser Stream refused isolated Steam launch because a host Steam client is already running ["
                              << *running_steam << ']';

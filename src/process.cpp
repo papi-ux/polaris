@@ -10,10 +10,12 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
@@ -476,6 +478,174 @@ namespace proc {
       return buffer.str();
     }
 
+    std::mutex isolated_browser_stream_steam_cleanup_mutex;
+    std::chrono::steady_clock::time_point isolated_browser_stream_steam_settle_until {};
+
+    std::string ascii_lower_copy(std::string_view value) {
+      std::string lowered {value};
+      std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      return lowered;
+    }
+
+    std::string proc_argv0_lower(const std::string &cmdline) {
+      const auto end = cmdline.find('\0');
+      return ascii_lower_copy(std::string_view {cmdline.data(), end == std::string::npos ? cmdline.size() : end});
+    }
+
+    std::string proc_argv0_basename(std::string_view argv0_path) {
+      auto argv0 = std::string {argv0_path};
+      if (const auto slash = argv0.find_last_of('/'); slash != std::string::npos) {
+        argv0 = argv0.substr(slash + 1);
+      }
+      return argv0;
+    }
+
+    bool path_ends_with(std::string_view value, std::string_view suffix) {
+      return value.size() >= suffix.size() &&
+             value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
+    bool process_is_steam_client(std::string_view comm, std::string_view argv0_path) {
+      const auto argv0 = proc_argv0_basename(argv0_path);
+      return comm == "steam" ||
+             argv0 == "steam" ||
+             argv0 == "steam.sh" ||
+             path_ends_with(argv0_path, "/steam.sh") ||
+             path_ends_with(argv0_path, "/ubuntu12_32/steam");
+    }
+
+    std::vector<pid_t> scan_proc_pids(const std::function<bool(pid_t)> &predicate) {
+      std::vector<pid_t> pids;
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        return pids;
+      }
+
+      while (auto *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (!is_proc_pid_dir(name)) {
+          continue;
+        }
+
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == getpid()) {
+          continue;
+        }
+
+        if (predicate(pid)) {
+          pids.emplace_back(pid);
+        }
+      }
+
+      closedir(dir);
+      return pids;
+    }
+
+    std::vector<pid_t> transient_steam_client_pids() {
+      return scan_proc_pids([](pid_t pid) {
+        auto comm = ascii_lower_copy(read_proc_text(pid, "comm"));
+        boost::trim(comm);
+
+        const auto cmdline = read_proc_text(pid, "cmdline");
+        const auto argv0 = proc_argv0_lower(cmdline);
+        if (!process_is_steam_client(comm, argv0)) {
+          return false;
+        }
+
+        const auto lower_cmdline = ascii_lower_copy(cmdline);
+        return lower_cmdline.find("-shutdown") != std::string::npos ||
+               lower_cmdline.find("-child-update-ui") != std::string::npos ||
+               lower_cmdline.find("-srt-logger-opened") != std::string::npos;
+      });
+    }
+
+    std::vector<pid_t> steam_runtime_probe_pids() {
+      return scan_proc_pids([](pid_t pid) {
+        const auto lower_cmdline = ascii_lower_copy(read_proc_text(pid, "cmdline"));
+        const auto lower_environ = ascii_lower_copy(read_proc_text(pid, "environ"));
+        return lower_cmdline.find("d3ddriverquery") != std::string::npos ||
+               lower_environ.find("d3ddriverquery") != std::string::npos;
+      });
+    }
+
+    bool pid_exists(pid_t pid) {
+      return std::filesystem::exists(std::filesystem::path("/proc") / std::to_string(pid));
+    }
+
+    bool any_pid_exists(const std::vector<pid_t> &pids) {
+      return std::any_of(pids.begin(), pids.end(), pid_exists);
+    }
+
+    void signal_processes_and_groups(const std::vector<pid_t> &pids, int signal) {
+      std::set<pid_t> groups;
+      for (auto pid : pids) {
+        const auto pgid = getpgid(pid);
+        if (pgid > 1 && pgid != getpgrp()) {
+          groups.insert(pgid);
+        }
+      }
+
+      for (auto pgid : groups) {
+        kill(-pgid, signal);
+      }
+      for (auto pid : pids) {
+        kill(pid, signal);
+      }
+    }
+
+    void terminate_steam_runtime_probes(std::string_view reason) {
+      auto pids = steam_runtime_probe_pids();
+      if (pids.empty()) {
+        return;
+      }
+
+      BOOST_LOG(info) << "process: terminating "sv << pids.size()
+                      << " Steam runtime probe process(es) "sv << reason;
+      signal_processes_and_groups(pids, SIGTERM);
+
+      for (int i = 0; i < 10; ++i) {
+        if (!any_pid_exists(pids)) {
+          return;
+        }
+        std::this_thread::sleep_for(100ms);
+      }
+
+      pids = steam_runtime_probe_pids();
+      if (!pids.empty()) {
+        BOOST_LOG(warning) << "process: Steam runtime probe process(es) did not exit after SIGTERM; sending SIGKILL"sv;
+        signal_processes_and_groups(pids, SIGKILL);
+      }
+    }
+
+    bool wait_for_transient_steam_clients(std::chrono::milliseconds timeout, std::string_view reason) {
+      const auto deadline = std::chrono::steady_clock::now() + timeout;
+      bool logged = false;
+
+      while (std::chrono::steady_clock::now() < deadline) {
+        auto pids = transient_steam_client_pids();
+        if (pids.empty()) {
+          return true;
+        }
+
+        if (!logged) {
+          BOOST_LOG(info) << "process: waiting for "sv << pids.size()
+                          << " transient Steam client process(es) "sv << reason;
+          logged = true;
+        }
+        std::this_thread::sleep_for(250ms);
+      }
+
+      auto pids = transient_steam_client_pids();
+      if (!pids.empty()) {
+        BOOST_LOG(warning) << "process: "sv << pids.size()
+                           << " transient Steam client process(es) still running after settle window"sv;
+        return false;
+      }
+      return true;
+    }
+
     bool proc_text_contains_steam_appid(const std::string &text, const std::string &appid) {
       if (appid.empty() || text.empty()) {
         return false;
@@ -638,6 +808,52 @@ namespace proc {
         return command_contains_steam_game_launch_uri(cmd) || command_contains_steam_applaunch(cmd);
       });
     }
+
+#ifdef __linux__
+    bool context_uses_steam(const proc::ctx_t &ctx) {
+      return is_steam_big_picture_app(ctx) ||
+             is_steam_library_app(ctx) ||
+             !steam_appid_for_context(ctx).empty();
+    }
+
+    bool is_browser_stream_session(const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session) {
+      return launch_session && launch_session->device_name == "Browser Stream";
+    }
+
+    void settle_isolated_browser_stream_steam_cleanup(const proc::ctx_t &ctx) {
+      if (!context_uses_steam(ctx)) {
+        return;
+      }
+
+      terminate_steam_runtime_probes("after Browser Stream cleanup"sv);
+      wait_for_transient_steam_clients(4s, "after Browser Stream cleanup"sv);
+
+      std::lock_guard lock(isolated_browser_stream_steam_cleanup_mutex);
+      isolated_browser_stream_steam_settle_until = std::chrono::steady_clock::now() + 30s;
+    }
+
+    void settle_recent_browser_stream_steam_cleanup_before_launch(const proc::ctx_t &next_app) {
+      if (!context_uses_steam(next_app)) {
+        return;
+      }
+
+      {
+        std::lock_guard lock(isolated_browser_stream_steam_cleanup_mutex);
+        if (std::chrono::steady_clock::now() >= isolated_browser_stream_steam_settle_until) {
+          return;
+        }
+      }
+
+      BOOST_LOG(info) << "process: settling previous Browser Stream Steam cleanup before launching ["sv
+                      << next_app.name << ']';
+      terminate_steam_runtime_probes("before next Steam launch"sv);
+      wait_for_transient_steam_clients(8s, "before next Steam launch"sv);
+      std::this_thread::sleep_for(500ms);
+
+      std::lock_guard lock(isolated_browser_stream_steam_cleanup_mutex);
+      isolated_browser_stream_steam_settle_until = {};
+    }
+#endif
 
     void normalize_steam_big_picture_app(proc::ctx_t &ctx) {
       if (!is_steam_big_picture_app(ctx)) {
@@ -1420,6 +1636,10 @@ namespace proc {
       _launch_session->session_token = generate_session_token();
     }
     allow_client_commands = app.allow_client_commands;
+
+#ifdef __linux__
+    settle_recent_browser_stream_steam_cleanup_before_launch(_app);
+#endif
 
     this->initial_display = config::video.output_name;
     this->initial_color_range = config::video.color_range;
@@ -2902,12 +3122,20 @@ namespace proc {
     _audio_context = {};
 
 #ifdef __linux__
+    const bool should_settle_browser_stream_steam =
+      is_browser_stream_session(_launch_session) &&
+      config::video.linux_display.use_cage_compositor &&
+      context_uses_steam(_app);
+
     // Stop labwc compositor — this kills all games running inside it.
     // Without this, games launched with setsid escape the process group
     // and keep running after the stream ends.
     if (config::video.linux_display.use_cage_compositor) {
       cage_display_router::stop();
       terminate_steam_app_processes(_app);
+      if (should_settle_browser_stream_steam) {
+        settle_isolated_browser_stream_steam_cleanup(_app);
+      }
     }
 #endif
 
