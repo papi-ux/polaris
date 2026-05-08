@@ -303,13 +303,33 @@ namespace browser_stream {
       return buffer.str();
     }
 
-    std::string argv0_basename(std::string_view cmdline) {
-      const auto end = cmdline.find(' ');
-      auto argv0 = std::string {cmdline.substr(0, end)};
+    std::string proc_argv0(std::string_view cmdline) {
+      const auto end = cmdline.find('\0');
+      return ascii_lower(std::string {cmdline.substr(0, end)});
+    }
+
+    std::string argv0_basename(std::string_view argv0_path) {
+      auto argv0 = std::string {argv0_path};
       if (const auto slash = argv0.find_last_of('/'); slash != std::string::npos) {
         argv0 = argv0.substr(slash + 1);
       }
-      return ascii_lower(argv0);
+      return argv0;
+    }
+
+    bool path_ends_with(std::string_view value, std::string_view suffix) {
+      return value.size() >= suffix.size() &&
+             value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
+    bool is_steam_client_process(std::string_view comm, std::string_view argv0_path) {
+      const auto argv0 = argv0_basename(argv0_path);
+      // Only argv0 identifies the client. Steam runtime helpers often include
+      // Steam paths in later arguments and should not block isolated launch.
+      return comm == "steam" ||
+             argv0 == "steam" ||
+             argv0 == "steam.sh" ||
+             path_ends_with(argv0_path, "/steam.sh") ||
+             path_ends_with(argv0_path, "/ubuntu12_32/steam");
     }
 
     std::optional<std::string> running_steam_client_summary() {
@@ -336,23 +356,14 @@ namespace browser_stream {
         }
 
         auto cmdline = read_proc_file(pid, "cmdline");
-        std::replace(cmdline.begin(), cmdline.end(), '\0', ' ');
-        auto lower_cmdline = ascii_lower(cmdline);
-        auto argv0 = argv0_basename(cmdline);
+        auto argv0 = proc_argv0(cmdline);
 
-        const bool steam_client =
-          comm == "steam" ||
-          comm == "steamwebhelper" ||
-          argv0 == "steam" ||
-          argv0 == "steam.sh" ||
-          lower_cmdline.find("/steam.sh") != std::string::npos ||
-          lower_cmdline.find("/steamwebhelper") != std::string::npos ||
-          lower_cmdline.find("/ubuntu12_32/steam") != std::string::npos;
-        if (!steam_client) {
+        if (!is_steam_client_process(comm, argv0)) {
           continue;
         }
 
         closedir(dir);
+        std::replace(cmdline.begin(), cmdline.end(), '\0', ' ');
         auto summary = cmdline.empty() ? comm : cmdline;
         if (summary.size() > 160) {
           summary.resize(157);
