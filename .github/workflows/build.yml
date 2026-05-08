@@ -150,9 +150,10 @@ jobs:
 
       - name: Generate Arch package files
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
           BRANCH="${GITHUB_HEAD_REF:-$POLARIS_PACKAGE_REF_NAME}"
-          COMMIT="$(git rev-parse HEAD)"
+          COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
           env \
             BRANCH="$BRANCH" \
             BUILD_VERSION="$BUILD_VERSION" \
