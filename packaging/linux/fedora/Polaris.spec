@@ -48,6 +48,7 @@ BuildRequires: numactl-devel
 BuildRequires: openssl-devel
 BuildRequires: opus-devel
 BuildRequires: pulseaudio-libs-devel
+BuildRequires: python3
 BuildRequires: rpm-build
 BuildRequires: systemd-udev
 BuildRequires: systemd-rpm-macros
@@ -194,15 +195,38 @@ function install_cuda() {
   # we need to patch math_functions.h on fedora 42
   # see https://forums.developer.nvidia.com/t/error-exception-specification-is-incompatible-for-cospi-sinpi-cospif-sinpif-with-glibc-2-41/323591/3
   if [ "%{?fedora}" -eq 42 ]; then
-    echo "Original math_functions.h:"
-    find "%{cuda_dir}" -name math_functions.h -exec cat {} \;
+    local math_header
+    math_header="$(find "%{cuda_dir}" -path '*/include/crt/math_functions.h' -print -quit)"
+    if [ -z "${math_header}" ]; then
+      echo "CUDA math_functions.h was not found" >&2
+      exit 1
+    fi
+    python3 - "${math_header}" <<'PY'
+from pathlib import Path
+import sys
 
-    # Apply the patch
-    patch -p2 \
-      --backup \
-      --directory="%{cuda_dir}" \
-      --verbose \
-      < "%{_builddir}/Polaris/packaging/linux/patches/${architecture}/01-math_functions.patch"
+path = Path(sys.argv[1])
+text = path.read_text()
+replacements = {
+    "sinpi(double x);": "sinpi(double x) noexcept (true);",
+    "sinpif(float x);": "sinpif(float x) noexcept (true);",
+    "cospi(double x);": "cospi(double x) noexcept (true);",
+    "cospif(float x);": "cospif(float x) noexcept (true);",
+}
+changed = False
+for old, new in replacements.items():
+    if new in text:
+        continue
+    if old not in text:
+        raise SystemExit(f"expected CUDA declaration not found: {old}")
+    text = text.replace(old, new, 1)
+    changed = True
+if changed:
+    path.write_text(text)
+    print(f"Patched {path}")
+else:
+    print(f"{path} already has Fedora 42 CUDA noexcept declarations")
+PY
   fi
 }
 
