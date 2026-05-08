@@ -97,7 +97,7 @@
       </button>
       <div class="border-t border-storm/20 p-3 text-sm text-storm" :class="{ 'text-center': sidebarCollapsed }">
         <template v-if="!sidebarCollapsed">
-          <div>v{{ appVersion }} &middot; Polaris</div>
+          <div>{{ displayVersion }} &middot; Polaris</div>
           <div class="mt-1 text-xs text-storm/50">{{ paletteShortcut }}</div>
         </template>
         <template v-else>
@@ -149,6 +149,7 @@ import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
 import { initTheme, getTheme, setTheme as setThemeFn } from './theme.js'
+import { getCachedConfig } from './config-cache.js'
 
 const route = useRoute()
 const currentTheme = ref(getTheme())
@@ -157,7 +158,8 @@ const router = useRouter()
 const commandPaletteOpen = ref(false)
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(localStorage.getItem('sidebarCollapsed') === 'true')
-const appVersion = ref('1.0.0')
+const appVersion = ref('')
+const appVersionLoading = ref(false)
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
 
 let i18nReady = false
@@ -247,11 +249,33 @@ const currentNavItem = computed(() => navItems.value.find((item) => item.to === 
 const currentPageLabel = computed(() => currentNavItem.value?.label || 'Polaris')
 const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 'Core')
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
-const compactVersion = computed(() => appVersion.value.split('.')[0] || '1')
+const displayVersion = computed(() => appVersion.value ? `v${appVersion.value}` : 'v...')
+const compactVersion = computed(() => appVersion.value ? appVersion.value.split('.')[0] : '...')
 const authRoutes = new Set(['/login', '/welcome', '/recover'])
 
 const showNav = computed(() => {
   return !authRoutes.has(route.path)
+})
+
+async function loadAppVersion() {
+  if (appVersion.value || appVersionLoading.value) return
+  appVersionLoading.value = true
+  try {
+    const data = await getCachedConfig()
+    if (data?.version) {
+      appVersion.value = data.version
+    }
+  } catch {
+    // Auth routes can mount before the config endpoint is available.
+  } finally {
+    appVersionLoading.value = false
+  }
+}
+
+watch(showNav, (visible) => {
+  if (visible) {
+    void loadAppVersion()
+  }
 })
 
 function toggleCollapse() {
@@ -298,14 +322,7 @@ watch(() => route.path, () => { sidebarOpen.value = false })
 onMounted(() => {
   initTheme()
   window.addEventListener('keydown', handleKeydown)
-  fetch('./api/config', { credentials: 'include' })
-    .then((response) => response.ok ? response.json() : null)
-    .then((data) => {
-      if (data?.version) {
-        appVersion.value = data.version
-      }
-    })
-    .catch(() => {})
+  void loadAppVersion()
 })
 
 onUnmounted(() => {
