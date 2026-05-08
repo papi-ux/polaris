@@ -15,7 +15,7 @@ what the host is actually doing.
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
-[Quick Start](#quick-start) · [Install](#install) · [What's New](#whats-new-in-v1011) · [Compatibility](#compatibility) · [Known Limitations](#known-limitations) · [Roadmap](ROADMAP.md) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [FAQ](#faq)
+[Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Tour](#tour) · [Nova](#use-with-nova) · [Docs](#docs) · [FAQ](#faq) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [Roadmap](ROADMAP.md)
 
 **Support**: [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 
@@ -30,256 +30,86 @@ what the host is actually doing.
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42, Fedora 43, Fedora 44, and Arch Linux are the recommended package paths. Bazzite Desktop Mode has NVIDIA validation for the Headless Stream path: matching Fedora RPM layered through `rpm-ostree`, headless `labwc`, client profile application, and host-input isolation. Real Steam/Game Mode validation is still pending on a Game Mode-capable image. Ubuntu 24.04 packages remain experimental.
+> Polaris is a Linux host today. Fedora 42, Fedora 43, Fedora 44, and Arch Linux are the recommended package paths. Bazzite and Ubuntu 24.04 packages are available for testers, but they need more real-hardware coverage.
 
 > [!NOTE]
-> The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite `rpm-ostree` path is usable for testers who follow the Bazzite guide. The Ubuntu DEB should still be treated as a fragile validation path.
+> Start with **Headless Stream** if you want games to launch into a stream-only runtime without changing your KDE, GNOME, or wlroots desktop layout.
+
+## Quick Start
+
+### Fedora 42/43/44
+
+```bash
+fedora_version="$(rpm -E %fedora)"
+wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+sudo polaris --setup-host
+polaris
+```
+
+### Arch Linux
+
+```bash
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
+sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
+sudo polaris --setup-host
+polaris
+```
+
+Open **https://localhost:47990/#/welcome**, create your web UI account, and pair a client. After credentials are created, **https://localhost:47990** opens the normal console.
+
+### First stream checklist
+
+1. Open the first-run setup at **https://localhost:47990/#/welcome**.
+2. Confirm the recommended Linux path: `headless_mode = enabled`, `linux_use_cage_compositor = enabled`, and `linux_prefer_gpu_native_capture = disabled`.
+3. Pair with Trusted Pair on a trusted LAN, QR pairing for Nova, or manual PIN for standard Moonlight clients.
+4. Start a game from the Polaris library, Nova, or a Moonlight client.
+5. Watch the live session dashboard to confirm the active runtime and encoder path.
+
+> [!TIP]
+> If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
 ## What's New in v1.0.11
 
 Polaris `v1.0.11` focuses on Browser Stream validation and Linux stream-runtime polish.
 
-- Browser Stream is now available as an experimental browser client path using WebTransport and WebCodecs, with `/browser-stream` routing and `/webrtc` compatibility aliases.
-- Browser sessions clean up the helper, transport, isolated compositor, and launched Steam game together when the browser stream closes.
-- Nova and Moonlight launches are more reliable after Browser Stream sessions because Polaris settles Steam cleanup before the next app launch.
-- Linux Headless Stream audio isolation is stricter: game audio that moves back to the host sink is routed back into the Polaris virtual stream sink.
-- Steam-launched children that escape the direct app process group are cleaned up when the isolated stream runtime stops.
-- Release assets were refreshed so packaged Browser Stream installs include the WebTransport helper, and Fedora/Bazzite RPMs use CUDA-enabled NVENC builds for the validated NVIDIA path.
+- Browser Stream is available as an experimental browser client path using WebTransport and WebCodecs.
+- Browser sessions now clean up their helper, transport, isolated compositor, and launched Steam game together.
+- Nova and Moonlight launches are more reliable after Browser Stream sessions because Polaris waits for Steam cleanup before the next app launch.
+- Headless Stream audio and escaped Steam child cleanup are stricter on Linux.
+- Fedora/Bazzite RPM assets use CUDA-enabled NVENC builds for the validated NVIDIA path.
 
-## Quick Start
-
-### Fastest install: Fedora 42/43/44 RPM
-
-```bash
-fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo polaris --setup-host
-polaris
-```
-
-Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
-a client. After credentials are created, **https://localhost:47990** opens the
-normal console.
-
-### Fastest install: Arch package
-
-```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
-sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
-sudo polaris --setup-host
-polaris
-```
-
-### Experimental install: Bazzite
-
-```bash
-fedora_version="$(rpm -E %fedora)"
-rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
-sudo rpm-ostree install -r "./${rpm_name}"
-
-# After reboot:
-sudo polaris --setup-host
-systemctl --user enable --now polaris
-```
-
-Bazzite is Fedora-based but immutable, so Polaris is installed as a layered RPM and requires a reboot before the command is available. Use the release RPM that matches your Bazzite Fedora base, such as `Polaris-fedora44-x86_64.rpm` on Bazzite 44. The validated Bazzite optimization starts conservatively with Headless Stream and `linux_prefer_gpu_native_capture = disabled`; SHM/RAM capture warnings are expected performance notes on that path unless the client stream fails. See the [Bazzite install guide](docs/bazzite.md) for the current Desktop Mode validation notes, Game Mode status, rollback commands, and `/usr/local` KMS setup.
-
-### Extremely experimental install: Ubuntu 24.04 DEB
-
-```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
-sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
-sudo polaris --setup-host
-polaris
-```
-
-The Ubuntu DEB asset is published with `v1.0.3` and later, but it is extremely experimental and more prone to breaking than the Fedora and Arch package paths. See the [Ubuntu install guide](docs/ubuntu.md) for package status, source build fallback, and validation notes.
-
-### Source build: Debian, dev machines, or custom setups
-
-```bash
-git clone --recursive https://github.com/papi-ux/polaris.git
-cd polaris
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=ON
-cmake --build build -j$(nproc)
-sudo cmake --install build
-sudo polaris --setup-host
-polaris
-```
-
-### First stream checklist
-
-1. Open the first-run setup at **https://localhost:47990/#/welcome**.
-2. Confirm the recommended Linux path:
-   - `headless_mode = enabled`
-   - `linux_use_cage_compositor = enabled`
-   - `linux_prefer_gpu_native_capture = disabled`
-3. Pair a client:
-   - **Trusted Pair (TOFU)** on a trusted LAN subnet
-   - **QR** pairing for Nova
-   - **Manual PIN** for standard Moonlight clients
-4. Start a game from the Polaris library or from Nova.
-5. Watch the live runtime path in the dashboard to confirm the active capture and encode path.
-
-> [!TIP]
-> If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
+See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
 
-### Recommended package path
+Use the release package for your distro before considering source builds. Packages install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit through `sudo polaris --setup-host`.
 
-If you are on Fedora or Arch and just want Polaris running, use the GitHub release package for your distro before considering source builds. Bazzite and Ubuntu packages are available for testers, but they are less validated and more prone to breaking. These package paths install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit so the installer does not silently change input or KMS permissions.
-
-| Public release asset | Use it for |
+| Host | Best path |
 |---|---|
-| `Polaris-fedora42-x86_64.rpm` | Fedora 42 x86_64 hosts |
-| `Polaris-fedora43-x86_64.rpm` | Fedora 43 x86_64 hosts |
-| `Polaris-fedora44-x86_64.rpm` | Fedora 44 and Bazzite 44 x86_64 hosts |
-| `Polaris-ubuntu24.04-x86_64.deb` | Ubuntu 24.04 x86_64 hosts, extremely experimental |
-| `Polaris-arch-x86_64.pkg.tar.zst` | Arch Linux x86_64 hosts |
+| Fedora 42 | `Polaris-fedora42-x86_64.rpm` from the latest release |
+| Fedora 43 | `Polaris-fedora43-x86_64.rpm` from the latest release |
+| Fedora 44 | `Polaris-fedora44-x86_64.rpm` from the latest release |
+| Arch Linux | `Polaris-arch-x86_64.pkg.tar.zst` from the latest release |
+| Bazzite 44 | Layer the matching Fedora 44 RPM with `rpm-ostree`; see [Bazzite guide](docs/bazzite.md) |
+| Ubuntu 24.04 | Experimental DEB tester path; see [Ubuntu guide](docs/ubuntu.md) |
+| Debian-family or custom host | Source build; see [Building Polaris](docs/building.md) |
 
-```bash
-fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo polaris --setup-host
-```
-
-```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
-sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
-sudo polaris --setup-host
-```
-
-```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
-sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
-sudo polaris --setup-host
-```
-
-```bash
-fedora_version="$(rpm -E %fedora)"
-rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
-sudo rpm-ostree install -r "./${rpm_name}"
-
-# After reboot:
-sudo polaris --setup-host
-systemctl --user enable --now polaris
-```
-
-### Source build path
-
-Use the source build when:
-
-- you are on Debian or another distro without a direct package
-- you want a local/custom build
-- you are developing Polaris
-- you need to regenerate packages yourself
-
-If you are on Arch today, Polaris can be installed from the GitHub release asset, from source, or from a locally generated package built from the current commit.
-
-#### Core dependencies
-
-| Package | Why it matters |
-|---------|----------------|
-| CMake 3.20+ | Build system |
-| Boost 1.80+ | Core libraries |
-| OpenSSL | TLS and pairing crypto |
-| libevdev | Virtual input handling |
-| PipeWire | Audio capture |
-| wayland-client | Compositor integration |
-| CUDA toolkit | NVENC hardware encoding |
-| Node.js 18+ | Web UI build |
-| labwc | Isolated stream compositor |
-| wlr-randr | Configure the isolated stream output mode |
-| Xwayland and xdpyinfo | Launch and detect X11 clients inside labwc |
-
-#### Example distro packages
-
-<details>
-<summary><b>Fedora</b></summary>
-
-Run this from the cloned Polaris checkout so `dnf builddep` can read the packaged build requirements.
-
-```bash
-sudo dnf install dnf-plugins-core git
-sudo dnf builddep -y packaging/linux/fedora/Polaris.spec
-sudo dnf install labwc wlr-randr xorg-x11-server-Xwayland xdpyinfo
-```
-
-</details>
-
-<details>
-<summary><b>Arch</b></summary>
-
-```bash
-sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
-  desktop-file-utils boost boost-libs curl openssl libevdev pipewire wayland \
-  wayland-protocols libdrm libcap libnotify libayatana-appindicator \
-  libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst \
-  miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \
-  labwc wlr-randr xorg-xwayland xorg-xdpyinfo cuda
-```
-
-</details>
-
-#### Local Arch package build
-
-If you prefer an installable Arch package over a raw `cmake --install`, Polaris can generate a local `PKGBUILD` and build a `pkg.tar.zst` from the current commit. This is mainly for packagers and local release validation; most users should start with the GitHub release asset.
-
-```bash
-BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
-BRANCH="$(git branch --show-current)"
-COMMIT="$(git rev-parse HEAD)"
-env BRANCH="$BRANCH" BUILD_VERSION="$BUILD_VERSION" CLONE_URL="file://$PWD" COMMIT="$COMMIT" \
-  cmake -S . -B arch-pkgbuild -DPOLARIS_CONFIGURE_PKGBUILD=ON -DPOLARIS_CONFIGURE_ONLY=ON
-env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always \
-  bash -lc 'cd arch-pkgbuild && makepkg -si'
-```
-
-That local package path builds from the current committed state. The GitHub release asset is the easiest install path; the local package path is still useful when you want to package the exact current checkout.
-
-#### Build and install
-
-```bash
-git clone --recursive https://github.com/papi-ux/polaris.git
-cd polaris
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=ON
-cmake --build build -j$(nproc)
-sudo cmake --install build
-sudo polaris --setup-host
-```
-
-Optional DRM/KMS setup:
-
-```bash
-sudo polaris --setup-host --enable-kms
-```
-
-Optional autostart:
-
-```bash
-systemctl --user enable --now polaris
-```
+Detailed source builds, local Arch package builds, distro dependency lists, and Browser Stream build flags live in [docs/building.md](docs/building.md).
 
 > [!WARNING]
-> Only grant `cap_sys_admin` when you actually need DRM/KMS capture. Polaris works fine without it on the default compositor and portal paths.
+> Only grant `cap_sys_admin` with `sudo polaris --setup-host --enable-kms` when you actually need DRM/KMS capture. Polaris works fine without it on the default compositor and Headless Stream paths.
 
 ## Compatibility
 
 | Area | Status | Notes |
 |---|---|---|
 | Linux host OS | Supported | Polaris is Linux-first today |
-| Fedora 42 | Recommended | Official release asset: `Polaris-fedora42-x86_64.rpm` |
-| Fedora 43 | Recommended | Official release asset: `Polaris-fedora43-x86_64.rpm` |
-| Fedora 44 | Recommended | Official release asset: `Polaris-fedora44-x86_64.rpm` |
-| Bazzite | Experimental | Desktop Mode validated on NVIDIA with Headless Stream, headless `labwc`, and host-input isolation; real Steam/Game Mode pending on a Game Mode-capable image; see [Bazzite install guide](docs/bazzite.md) |
-| Ubuntu 24.04 | Extremely experimental | Official release asset: `Polaris-ubuntu24.04-x86_64.deb`; source build also works, but this path needs more real-hardware validation |
-| Arch Linux | Recommended | Official release asset: `Polaris-arch-x86_64.pkg.tar.zst`; source and local PKGBUILD generation are also supported |
-| Debian-family distros | Supported from source | Less turnkey than Fedora right now |
+| Fedora 42/43/44 | Recommended | Official RPM assets |
+| Arch Linux | Recommended | Official package asset |
+| Bazzite | Experimental | Desktop Mode validated on NVIDIA with Headless Stream; real Steam/Game Mode needs more coverage |
+| Ubuntu 24.04 | Extremely experimental | DEB asset is available, but this path needs broader real-hardware validation |
+| Debian-family distros | Supported from source | Less turnkey than Fedora or Arch |
 | NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
 | VAAPI / software encode | Supported | Works, but is less battle-tested than NVENC |
 | Nova for Android | Best experience | Full launch contract, watch mode, tuning, and richer live state |
@@ -289,11 +119,10 @@ systemctl --user enable --now polaris
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
-- Bazzite support is experimental. Desktop Mode has NVIDIA validation with the recommended Headless Stream settings, while real Steam/Game Mode, AMD, and Steam Deck client flows still need more hardware coverage.
-- Ubuntu 24.04 DEB packaging is extremely experimental and needs broader real-hardware validation; other Debian-family distros are still source-build oriented.
-- Fedora 42, Fedora 43, Fedora 44, Ubuntu 24.04, and Arch Linux have direct x86_64 release package assets today.
+- Bazzite support is experimental. Desktop Mode has NVIDIA validation with the recommended Headless Stream settings, while real Steam/Game Mode, AMD, and Steam Deck client flows need more hardware coverage.
+- Ubuntu 24.04 DEB packaging is extremely experimental; other Debian-family distros are still source-build oriented.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
-- Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova client.
+- Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova Android client.
 - MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.
 
 ## Why Polaris
@@ -307,18 +136,6 @@ Polaris takes a different route:
 - **Headless-first Linux path**: designed to avoid HDMI dummy plugs, display scripts, and manual compositor surgery
 - **Practical control surface**: live preview, telemetry, quality controls, library management, and pairing in one UI
 - **Shared viewing**: additional clients can watch an active stream without stealing ownership
-
-## What Polaris Gives You
-
-| Area | What You Get |
-|---|---|
-| Runtime | Isolated headless `labwc` streaming compositor |
-| Capture | GPU-native capture when available, clear fallback visibility when not |
-| Dashboard | Preview, charts, runtime path, controls, and diagnostics |
-| Library | Steam, Lutris, Heroic imports, SteamGridDB art, and Linux Steam launch handling that keeps Gamepad UI inside the isolated stream runtime |
-| Pairing | Trusted Pair (TOFU), QR, manual PIN |
-| Sessions | Ownership, viewers, watch mode, session state, target-relative quality grading, and client-report aware feedback |
-| Optimization | Adaptive bitrate, AI optimizer, confidence/cache state, recovery invalidation, per-game tuning, and live host controls |
 
 ## Use with Nova
 
@@ -403,54 +220,11 @@ When a stream is active, Polaris shifts from setup to operations: preview, chart
 
 ## How It Works
 
-Polaris launches a dedicated compositor runtime for the stream, captures frames from that runtime instead of your desktop session, then routes those frames into the encoder path best suited to the hardware and current Linux stack.
+Polaris launches games into a dedicated stream runtime, captures that runtime instead of your desktop session, and routes frames into the best available encoder path for the host.
 
-```mermaid
-flowchart TB
-  subgraph labwc ["labwc (isolated stream compositor)"]
-    game["Game / Steam / Wine\nXWayland + Vulkan"]
-  end
+The practical result: your real desktop can keep its layout, refresh rate, and windows while the stream gets its own controlled environment. The dashboard shows the active runtime, capture transport, frame residency, encoder, and session role so you can verify what actually happened.
 
-  subgraph desktop ["Your desktop session"]
-    apps["Browser, IDE, chat, etc.\nNo display switching"]
-  end
-
-  game -->|"wlr-screencopy\n(DMA-BUF when available)"| encoder
-  encoder["Capture import -> encoder\nNVENC / VAAPI / software"] -->|"Moonlight protocol\nencrypted + FEC"| client
-  client["Nova / Moonlight\nAndroid · iOS · PC"]
-
-  style labwc fill:#7c73ff15,stroke:#7c73ff,color:#c8d6e5
-  style desktop fill:#4c526515,stroke:#4c5265,color:#687b81
-  style encoder fill:#1a1a2e,stroke:#7c73ff,color:#c8d6e5
-  style client fill:#1a1a2e,stroke:#4ade80,color:#c8d6e5
-  style game fill:transparent,stroke:none,color:#a8b0b8
-  style apps fill:transparent,stroke:none,color:#687b81
-```
-
-<details>
-<summary><b>Linux runtime notes</b></summary>
-
-- `headless_mode` requests a stream-only session instead of the visible desktop.
-- `linux_use_cage_compositor=enabled` routes launched apps into Polaris' private Wayland compositor.
-- `linux_prefer_gpu_native_capture=disabled` keeps Headless Stream behavior as the first validation path. Enable it only when testing a stack where you intentionally want to prefer DMA-BUF or another GPU-native capture path.
-- Deferred headless encoder capabilities are primed before first launch negotiation so Main10 support is advertised correctly on the first real launch.
-- Runtime stats surface the requested mode, effective mode, capture transport, frame residency, and frame format.
-- AI recovery stores both latest-session results and rolling trend data, grades sessions against the actual target FPS, and invalidates poor cached recommendations automatically.
-- Steam library launches use an isolated Linux Gamepad UI bootstrap/cleanup path so Steam titles stay in-stream instead of bouncing back to the host desktop.
-- On Linux, Polaris uses RealtimeKit when available so thread-priority elevation can still succeed even when the user service inherits conservative limits.
-
-</details>
-
-<details>
-<summary><b>Session lifecycle notes</b></summary>
-
-- MangoHud is isolated from the compositor and only re-injected into the game launch path when requested.
-- Steam Big Picture and Steam/Proton helper paths are treated conservatively because MangoHud can crash Proton helpers before a usable frame exists.
-- Owner and viewer roles are tracked explicitly.
-- Watch mode is passive by design and uses the active owner profile instead of silently renegotiating a different stream.
-- Deferred headless launches cache encoder capabilities so cold-launch negotiation stays accurate.
-
-</details>
+For the deeper runtime model, see [Runtime and Streaming Model](docs/runtime.md).
 
 ## Configuration
 
@@ -478,76 +252,18 @@ max_sessions = 2
 > [!TIP]
 > With Headless Stream you generally do not need KDE window rules, `kscreen-doctor` scripts, HDMI dummy plugs, or manual portal juggling. Turn on the recommended stream runtime and let Polaris manage the compositor, app routing, and input isolation.
 
-<details>
-<summary><b>AI provider examples</b></summary>
+Full config tables, AI provider examples, HDR notes, and credential recovery steps live in [docs/configuration.md](docs/configuration.md).
 
-Use the AI tab in the web UI if you want a draft connection test before saving. If you prefer direct config edits, these are the working shapes Polaris expects.
+## Docs
 
-**Anthropic / Claude**
-
-```ini
-ai_enabled = enabled
-ai_provider = anthropic
-ai_model = claude-haiku-4-5-20251001
-ai_auth_mode = subscription
-```
-
-**OpenAI**
-
-```ini
-ai_enabled = enabled
-ai_provider = openai
-ai_model = gpt-5.4-mini
-ai_auth_mode = api_key
-ai_api_key = sk-proj-...
-```
-
-**Gemini**
-
-```ini
-ai_enabled = enabled
-ai_provider = gemini
-ai_model = gemini-2.5-flash
-ai_auth_mode = api_key
-ai_api_key = YOUR_GEMINI_KEY
-```
-
-**Ollama / LM Studio**
-
-```ini
-ai_enabled = enabled
-ai_provider = local
-ai_model = gpt-oss
-ai_auth_mode = none
-ai_base_url = http://127.0.0.1:11434/v1
-```
-
-</details>
-
-<details>
-<summary><b>Common options</b></summary>
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `headless_mode` | `disabled` | Request a stream-only session instead of the visible desktop |
-| `linux_use_cage_compositor` | `disabled` | Enable Polaris' private stream runtime |
-| `linux_prefer_gpu_native_capture` | `disabled` | Prefer DMA-BUF or another GPU-native capture path only when enabled and supported by the stack |
-| `trusted_subnets` | `[]` | CIDR blocks that enable Trusted Pair (TOFU) |
-| `encoder` | `nvenc` | Encoder: `nvenc`, `vaapi`, `software` |
-| `ai_enabled` | `disabled` | Enable AI-assisted stream optimization |
-| `ai_provider` | `anthropic` | AI backend: `anthropic`, `openai`, `gemini`, or `local` |
-| `ai_model` | provider default | Model identifier for the selected provider |
-| `ai_auth_mode` | provider default | Auth mode: `api_key`, `subscription`, or `none` |
-| `ai_api_key` | - | Provider API key for `api_key` mode |
-| `ai_base_url` | provider default | Override the provider endpoint for local servers |
-| `adaptive_bitrate_enabled` | `disabled` | Enable mid-stream bitrate adjustment |
-| `max_sessions` | `2` | Simultaneous sessions/viewers, `0` means unlimited up to the current hard cap of 8 |
-| `enable_pairing` | `enabled` | Accept new client pairing |
-| `enable_discovery` | `enabled` | Advertise over mDNS |
-| `stream_audio` | `enabled` | Enable audio capture |
-| `steamgriddb_api_key` | - | Fetch cover art for non-Steam games |
-
-</details>
+| Guide | Use it for |
+|---|---|
+| [Runtime and Streaming Model](docs/runtime.md) | Headless Stream, capture/encoder paths, Browser Stream, session lifecycle, HDR/Main10 behavior |
+| [Configuration](docs/configuration.md) | Config file paths, common options, AI provider settings, credential reset |
+| [Building Polaris](docs/building.md) | Source builds, local packages, distro dependencies, Browser Stream build flags |
+| [Troubleshooting](docs/troubleshooting.md) | Runtime logs, capture fallbacks, audio/session issues |
+| [Bazzite Install Guide](docs/bazzite.md) | Bazzite layering, validation status, rollback, Game Mode notes |
+| [Ubuntu Install Guide](docs/ubuntu.md) | Ubuntu DEB status, source fallback, validation notes |
 
 ## Client Apps
 
@@ -604,14 +320,6 @@ If your Sunshine install runs as a system service instead of a user service, use
 
 No. Moonlight can request higher frame rates on clients that expose them, but Polaris treats the client's requested display mode as the ceiling. If a client requests `1280x800x60`, Polaris will not force a `90 FPS` optimization above that request even when the device profile supports it.
 
-Check the client frame-rate setting first. The host logs will show the important decision points:
-
-```text
-Display mode for client [...]
-session_optimization: requested=... selected=...
-session_pacing: policy=... target_fps=...
-```
-
 </details>
 
 <details>
@@ -631,14 +339,14 @@ Trusted Pair is Polaris’ TOFU flow. If the client is on a configured trusted s
 <details>
 <summary><b>Can Polaris stream 10-bit to an SDR handheld screen?</b></summary>
 
-Yes, if the client explicitly requests a 10-bit path and the active encoder/runtime support Main10. This is especially useful with Nova: enabling HDR in Nova can request a 10-bit SDR stream even when the handheld panel itself is not HDR10-capable.
+Yes, if the client explicitly requests a 10-bit path and the active encoder/runtime support Main10. See [Runtime and Streaming Model](docs/runtime.md) for the difference between 10-bit SDR and true HDR.
 
 </details>
 
 <details>
 <summary><b>Can Polaris stream true HDR on Linux?</b></summary>
 
-Yes, but Polaris only advertises true HDR when the active capture path reports HDR display metadata. For now, validate this on a KMS/DRM path with an HDR-capable output exposing `HDR_OUTPUT_METADATA`; headless labwc/wlroots sessions remain honest SDR until that runtime can provide real metadata. A valid true HDR session logs `hdr_metadata_available=true` and `stream_hdr_enabled=true`.
+Yes, but Polaris only advertises true HDR when the active capture path reports HDR display metadata. Headless labwc/wlroots sessions remain honest SDR until that runtime can provide real metadata. See [Runtime and Streaming Model](docs/runtime.md) for details.
 
 </details>
 
