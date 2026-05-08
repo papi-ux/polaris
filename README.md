@@ -15,7 +15,7 @@ what the host is actually doing.
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
-[Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Known Limitations](#known-limitations) · [Roadmap](ROADMAP.md) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [FAQ](#faq)
+[Quick Start](#quick-start) · [Install](#install) · [What's New](#whats-new-in-v1011) · [Compatibility](#compatibility) · [Known Limitations](#known-limitations) · [Roadmap](ROADMAP.md) · [Why Polaris](#why-polaris) · [Use with Nova](#use-with-nova) · [How It Works](#how-it-works) · [Configuration](#configuration) · [Client Apps](#client-apps) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [FAQ](#faq)
 
 **Support**: [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 
@@ -34,6 +34,16 @@ what the host is actually doing.
 
 > [!NOTE]
 > The host, web console, Fedora RPMs, and Arch package are ready for broader testing. The Bazzite `rpm-ostree` path is usable for testers who follow the Bazzite guide. The Ubuntu DEB should still be treated as a fragile validation path.
+
+## What's New in v1.0.11
+
+Polaris `v1.0.11` focuses on Browser Stream validation and Linux stream-runtime polish.
+
+- Browser Stream is now available as an experimental browser client path using WebTransport and WebCodecs, with `/browser-stream` routing and `/webrtc` compatibility aliases.
+- Browser sessions clean up the helper, transport, isolated compositor, and launched Steam game together when the browser stream closes.
+- Nova and Moonlight launches are more reliable after Browser Stream sessions because Polaris settles Steam cleanup before the next app launch.
+- Linux Headless Stream audio isolation is stricter: game audio that moves back to the host sink is routed back into the Polaris virtual stream sink.
+- Steam-launched children that escape the direct app process group are cleaned up when the isolated stream runtime stops.
 
 ## Quick Start
 
@@ -273,6 +283,7 @@ systemctl --user enable --now polaris
 | VAAPI / software encode | Supported | Works, but is less battle-tested than NVENC |
 | Nova for Android | Best experience | Full launch contract, watch mode, tuning, and richer live state |
 | Standard Moonlight clients | Compatible | Core streaming works without Nova-specific UX |
+| Browser Stream | Experimental | Browser-based streaming path using WebTransport and WebCodecs; best tested on Chromium-family browsers |
 
 ## Known Limitations
 
