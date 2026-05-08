@@ -64,16 +64,24 @@ BuildRequires: gcc13-c++
 %global cc_binary gcc-13
 %global cxx_binary g++-13
 %global boost_use_static ON
-%global cuda_version 12.9.1
-%global cuda_build 575.57.08
+%global cuda_version 13.2.1
+%global cuda_build 595.58.03
 %elif 0%{?fedora} <= 43
 BuildRequires: gcc14
 BuildRequires: gcc14-c++
 %global cc_binary gcc-14
 %global cxx_binary g++-14
 %global boost_use_static ON
-%global cuda_version 12.9.1
-%global cuda_build 575.57.08
+%global cuda_version 13.2.1
+%global cuda_build 595.58.03
+%elif 0%{?fedora} <= 44
+BuildRequires: gcc15
+BuildRequires: gcc15-c++
+%global cc_binary gcc-15
+%global cxx_binary g++-15
+%global boost_use_static OFF
+%global cuda_version 13.2.1
+%global cuda_build 595.58.03
 %else
 BuildRequires: gcc
 BuildRequires: gcc-c++
