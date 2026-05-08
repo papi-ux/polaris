@@ -214,8 +214,14 @@ namespace audio {
     });
 
     int samples_per_frame = frame_size * stream.channelCount;
+    auto next_audio_route_check = std::chrono::steady_clock::now();
 
     while (!shutdown_event->peek()) {
+      if (route_without_default && std::chrono::steady_clock::now() >= next_audio_route_check) {
+        control->route_process_audio_to_sink(sink);
+        next_audio_route_check = std::chrono::steady_clock::now() + 1s;
+      }
+
       std::vector<float> sample_buffer;
       sample_buffer.resize(samples_per_frame);
 

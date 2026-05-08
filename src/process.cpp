@@ -686,6 +686,96 @@ namespace proc {
       return pids;
     }
 
+    bool proc_environ_contains_isolated_session_marker(const std::string &environ) {
+      return environ.find("POLARIS_SESSION_AUDIO_SINK=") != std::string::npos ||
+             environ.find("POLARIS_SESSION_TARGET_FPS=") != std::string::npos ||
+             environ.find("POLARIS_SESSION_REQUESTED_FPS=") != std::string::npos;
+    }
+
+    std::vector<pid_t> isolated_session_pids() {
+      std::vector<pid_t> pids;
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        return pids;
+      }
+
+      while (auto *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (!is_proc_pid_dir(name)) {
+          continue;
+        }
+
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == getpid()) {
+          continue;
+        }
+
+        if (proc_environ_contains_isolated_session_marker(read_proc_text(pid, "environ"))) {
+          pids.emplace_back(pid);
+        }
+      }
+
+      closedir(dir);
+      return pids;
+    }
+
+    void terminate_isolated_session_processes(std::string_view reason) {
+      auto pids = isolated_session_pids();
+      if (pids.empty()) {
+        return;
+      }
+
+      std::set<pid_t> groups;
+      for (auto pid : pids) {
+        const auto pgid = getpgid(pid);
+        if (pgid > 1 && pgid != getpgrp()) {
+          groups.insert(pgid);
+        }
+      }
+
+      BOOST_LOG(info) << "process: terminating "sv << pids.size()
+                      << " isolated session process(es) "sv << reason
+                      << " process_groups="sv << groups.size();
+
+      for (auto pgid : groups) {
+        kill(-pgid, SIGTERM);
+      }
+      for (auto pid : pids) {
+        kill(pid, SIGTERM);
+      }
+
+      for (int i = 0; i < 20; ++i) {
+        if (isolated_session_pids().empty()) {
+          return;
+        }
+        std::this_thread::sleep_for(100ms);
+      }
+
+      pids = isolated_session_pids();
+      if (pids.empty()) {
+        return;
+      }
+
+      BOOST_LOG(warning) << "process: "sv << pids.size()
+                         << " isolated session process(es) still running "sv
+                         << reason << "; sending SIGKILL"sv;
+
+      groups.clear();
+      for (auto pid : pids) {
+        const auto pgid = getpgid(pid);
+        if (pgid > 1 && pgid != getpgrp()) {
+          groups.insert(pgid);
+        }
+      }
+
+      for (auto pgid : groups) {
+        kill(-pgid, SIGKILL);
+      }
+      for (auto pid : pids) {
+        kill(pid, SIGKILL);
+      }
+    }
+
     std::string steam_appid_for_context(const proc::ctx_t &ctx) {
       if (!ctx.steam_appid.empty()) {
         return ctx.steam_appid;
@@ -1639,6 +1729,9 @@ namespace proc {
 
 #ifdef __linux__
     settle_recent_browser_stream_steam_cleanup_before_launch(_app);
+    if (config::video.linux_display.use_cage_compositor) {
+      terminate_isolated_session_processes("before launching isolated cage session"sv);
+    }
 #endif
 
     this->initial_display = config::video.output_name;
@@ -3132,6 +3225,7 @@ namespace proc {
     // and keep running after the stream ends.
     if (config::video.linux_display.use_cage_compositor) {
       cage_display_router::stop();
+      terminate_isolated_session_processes("after isolated cage stop"sv);
       terminate_steam_app_processes(_app);
       if (should_settle_browser_stream_steam) {
         settle_isolated_browser_stream_steam_cleanup(_app);
