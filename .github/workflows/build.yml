@@ -282,12 +282,13 @@ jobs:
           done <<< "$boost_sonames"
 
           pacman -U --noconfirm "$pkg_path"
-          installed_binary="$(pacman -Ql polaris | awk '/\/usr\/bin\/polaris-[0-9][^/]*$/ { print $2; exit }')"
+          pacman -Ql polaris | tee arch-pkgbuild/package-installed-files.txt >/dev/null
+          installed_binary="$(awk '/\/usr\/bin\/polaris-[0-9][^/]*$/ { print $2; exit }' arch-pkgbuild/package-installed-files.txt)"
           if [ -z "$installed_binary" ]; then
             echo "Installed Polaris binary was not found" >&2
             exit 1
           fi
-          if ! pacman -Ql polaris | awk '{ print $2 }' | grep -Fxq /usr/bin/polaris-browser-stream-helper; then
+          if [ ! -x /usr/bin/polaris-browser-stream-helper ]; then
             echo "Installed Arch package is missing the Browser Stream helper" >&2
             exit 1
           fi
