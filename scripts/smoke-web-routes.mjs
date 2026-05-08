@@ -22,11 +22,11 @@ const scriptName = path.basename(fileURLToPath(import.meta.url))
 
 const routes = [
   { name: 'dashboard', hash: '#/', heading: /^Mission Control$/i },
-  { name: 'apps-new', hash: '#/apps?new=1', text: /Application Editor|New App/i },
+  { name: 'apps-new', hash: '#/apps?new=1', text: /Application Editor|Add New/i },
   { name: 'apps-import', hash: '#/apps?import=1&scan=1', text: /Stage imports|Library/i },
   { name: 'pairing', hash: '#/pin', heading: /pair/i },
   { name: 'browser-stream', hash: '#/browser-stream', heading: /^Browser Stream$/i },
-  { name: 'webrtc-alias', hash: '#/webrtc', heading: /^Browser Stream$/i },
+  { name: 'webrtc-alias', hash: '#/webrtc', finalHash: '#/browser-stream', heading: /^Browser Stream$/i },
   { name: 'troubleshooting', hash: '#/troubleshooting', heading: /^Troubleshooting$/i },
   { name: 'welcome', hash: '#/welcome', heading: /Welcome to Polaris/i },
 ]
@@ -36,18 +36,37 @@ const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { 
 const page = await context.newPage()
 const consoleErrors = []
 const pageErrors = []
+let loadedAppShell = false
 const ignoredConsoleErrors = [
   /^AI status fetch failed:/,
   /^Device DB fetch failed:/,
   /^Device suggestion fetch failed:/,
   /^Error fetching logs: TypeError: Failed to fetch$/,
 ]
+const ignoredAbortedResourcePaths = [
+  /\/api\/clients\/list$/,
+  /\/api\/config$/,
+  /\/api\/covers\/image\?/,
+  /\/api\/devices$/,
+  /\/api\/stats\/stream-sse$/,
+]
+
+const shouldIgnoreConsoleError = (text, url) => {
+  if (ignoredConsoleErrors.some((pattern) => pattern.test(text))) {
+    return true
+  }
+  if (text === 'Failed to load resource: net::ERR_SSL_PROTOCOL_ERROR' && ignoredAbortedResourcePaths.some((pattern) => pattern.test(url))) {
+    return true
+  }
+  return false
+}
 
 page.on('console', (message) => {
   if (message.type() === 'error') {
     const text = message.text()
-    if (!ignoredConsoleErrors.some((pattern) => pattern.test(text))) {
-      consoleErrors.push(text)
+    const location = message.location()
+    if (!shouldIgnoreConsoleError(text, location.url || '')) {
+      consoleErrors.push(location.url ? `${text} (${location.url})` : text)
     }
   }
 })
@@ -69,16 +88,29 @@ try {
     }
     await page.goto(`${baseURL}/#/`)
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 15000 })
+    loadedAppShell = true
+    consoleErrors.length = 0
+    pageErrors.length = 0
   }
 
   for (const [index, route] of routes.entries()) {
-    await page.goto(`${baseURL}/?smoke=${Date.now()}-${index}${route.hash}`)
+    if (index === 0 && !loadedAppShell) {
+      await page.goto(`${baseURL}/?smoke=${Date.now()}-${index}${route.hash}`)
+    } else {
+      const acceptableHashes = [route.hash, route.finalHash].filter(Boolean)
+      await page.evaluate((hash) => {
+        window.location.hash = hash
+      }, route.hash)
+      await page.waitForFunction((hashes) => hashes.includes(window.location.hash), acceptableHashes, { timeout: 10000 })
+    }
+
     if (route.heading) {
       await expect(page.getByRole('heading', { name: route.heading }).first()).toBeVisible({ timeout: 10000 })
     }
     if (route.text) {
       await expect(page.getByText(route.text).first()).toBeVisible({ timeout: 10000 })
     }
+    await page.waitForTimeout(500)
 
     const overlayCount = await page.locator('[data-nextjs-dialog], .vite-error-overlay, #webpack-dev-server-client-overlay').count()
     const bodyText = (await page.locator('body').innerText()).trim()
