@@ -92,7 +92,7 @@ Use the release package for your distro before considering source builds. Packag
 | Fedora 44 | `Polaris-fedora44-x86_64.rpm` from the latest release |
 | Arch Linux | `Polaris-arch-x86_64.pkg.tar.zst` from the latest release |
 | Bazzite 44 | Layer the matching Fedora 44 RPM with `rpm-ostree`; see [Bazzite guide](docs/bazzite.md) |
-| Ubuntu 24.04 | Experimental DEB tester path; see [Ubuntu guide](docs/ubuntu.md) |
+| Ubuntu 24.04 | `Polaris-ubuntu24.04-x86_64.deb` experimental tester path; see [Ubuntu guide](docs/ubuntu.md) |
 | Debian-family or custom host | Source build; see [Building Polaris](docs/building.md) |
 
 Detailed source builds, local Arch package builds, distro dependency lists, and Browser Stream build flags live in [docs/building.md](docs/building.md).
