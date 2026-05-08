@@ -650,19 +650,19 @@ jobs:
               echo "CUDA math_functions.h was not found" >&2
               exit 1
             fi
-            sed -i \
-              -e 's/sinpi(double x);/sinpi(double x) noexcept (true);/' \
-              -e 's/sinpif(float x);/sinpif(float x) noexcept (true);/' \
-              -e 's/cospi(double x);/cospi(double x) noexcept (true);/' \
-              -e 's/cospif(float x);/cospif(float x) noexcept (true);/' \
+            sed -E -i \
+              -e 's/(sinpi\(double x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
+              -e 's/(sinpif\(float x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
+              -e 's/(cospi\(double x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
+              -e 's/(cospif\(float x\))( noexcept ?\(true\))?;/\1 noexcept(true);/' \
               "${math_header}"
             for declaration in \
-              'sinpi(double x) noexcept (true);' \
-              'sinpif(float x) noexcept (true);' \
-              'cospi(double x) noexcept (true);' \
-              'cospif(float x) noexcept (true);'
+              'sinpi\(double x\) noexcept ?\(true\);' \
+              'sinpif\(float x\) noexcept ?\(true\);' \
+              'cospi\(double x\) noexcept ?\(true\);' \
+              'cospif\(float x\) noexcept ?\(true\);'
             do
-              if ! grep -Fq "${declaration}" "${math_header}"; then
+              if ! grep -Eq "${declaration}" "${math_header}"; then
                 echo "CUDA math_functions.h is missing ${declaration}" >&2
                 exit 1
               fi
