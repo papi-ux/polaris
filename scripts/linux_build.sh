@@ -785,8 +785,8 @@ elif grep -q "Debian GNU/Linux 12 (bookworm)" /etc/os-release; then
   version="12"
   package_update_command="${sudo_cmd} apt-get update"
   package_install_command="${sudo_cmd} apt-get install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="13"
   nvm_node=0
 elif grep -q "Debian GNU/Linux 13 (trixie)" /etc/os-release; then
@@ -794,8 +794,8 @@ elif grep -q "Debian GNU/Linux 13 (trixie)" /etc/os-release; then
   version="13"
   package_update_command="${sudo_cmd} apt-get update"
   package_install_command="${sudo_cmd} apt-get install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="14"
   nvm_node=0
 elif grep -q "PLATFORM_ID=\"platform:f41\"" /etc/os-release; then
@@ -803,8 +803,8 @@ elif grep -q "PLATFORM_ID=\"platform:f41\"" /etc/os-release; then
   version="41"
   package_update_command="${sudo_cmd} dnf update -y"
   package_install_command="${sudo_cmd} dnf install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="13"
   nvm_node=0
   dev_tools_group="development-tools"
@@ -813,8 +813,8 @@ elif grep -q "PLATFORM_ID=\"platform:f42\"" /etc/os-release; then
   version="42"
   package_update_command="${sudo_cmd} dnf update -y"
   package_install_command="${sudo_cmd} dnf install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="14"
   nvm_node=0
   dev_tools_group="development-tools"
@@ -823,9 +823,19 @@ elif grep -q "PLATFORM_ID=\"platform:f43\"" /etc/os-release || (grep -q 'ID=fedo
   version="43"
   package_update_command="${sudo_cmd} dnf update -y"
   package_install_command="${sudo_cmd} dnf install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="14"
+  nvm_node=0
+  dev_tools_group="development-tools"
+elif grep -q "PLATFORM_ID=\"platform:f44\"" /etc/os-release || (grep -q 'ID=fedora' /etc/os-release && grep -q 'VERSION_ID=44' /etc/os-release); then
+  distro="fedora"
+  version="44"
+  package_update_command="${sudo_cmd} dnf update -y"
+  package_install_command="${sudo_cmd} dnf install -y"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
+  gcc_version="15"
   nvm_node=0
   dev_tools_group="development-tools"
 elif grep -q "Ubuntu 22.04" /etc/os-release; then
@@ -833,8 +843,8 @@ elif grep -q "Ubuntu 22.04" /etc/os-release; then
   version="22.04"
   package_update_command="${sudo_cmd} apt-get update"
   package_install_command="${sudo_cmd} apt-get install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="13"
   nvm_node=1
 elif grep -q "Ubuntu 24.04" /etc/os-release; then
@@ -842,8 +852,8 @@ elif grep -q "Ubuntu 24.04" /etc/os-release; then
   version="24.04"
   package_update_command="${sudo_cmd} apt-get update"
   package_install_command="${sudo_cmd} apt-get install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="14"
   nvm_node=1
 elif grep -q "Ubuntu 25.04" /etc/os-release; then
@@ -851,8 +861,8 @@ elif grep -q "Ubuntu 25.04" /etc/os-release; then
   version="25.04"
   package_update_command="${sudo_cmd} apt-get update"
   package_install_command="${sudo_cmd} apt-get install -y"
-  cuda_version="12.9.1"
-  cuda_build="575.57.08"
+  cuda_version="13.2.1"
+  cuda_build="595.58.03"
   gcc_version="14"
   nvm_node=0
 else
