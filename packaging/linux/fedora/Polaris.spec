@@ -203,23 +203,22 @@ function install_cuda() {
     fi
     python3 - "${math_header}" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
 replacements = {
-    "sinpi(double x);": "sinpi(double x) noexcept (true);",
-    "sinpif(float x);": "sinpif(float x) noexcept (true);",
-    "cospi(double x);": "cospi(double x) noexcept (true);",
-    "cospif(float x);": "cospif(float x) noexcept (true);",
+    r"(sinpi\(double x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
+    r"(sinpif\(float x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
+    r"(cospi\(double x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
+    r"(cospif\(float x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
 }
 changed = False
-for old, new in replacements.items():
-    if new in text:
-        continue
-    if old not in text:
-        raise SystemExit(f"expected CUDA declaration not found: {old}")
-    text = text.replace(old, new, 1)
+for pattern, replacement in replacements.items():
+    text, count = re.subn(pattern, replacement, text, count=1)
+    if count == 0:
+        raise SystemExit(f"expected CUDA declaration not found: {pattern}")
     changed = True
 if changed:
     path.write_text(text)
