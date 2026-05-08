@@ -37,6 +37,7 @@ BuildRequires: libXinerama-devel
 BuildRequires: libXrandr-devel
 BuildRequires: libXtst-devel
 BuildRequires: git
+BuildRequires: golang
 BuildRequires: mesa-libGL-devel
 BuildRequires: mesa-libgbm-devel
 BuildRequires: miniupnpc-devel
@@ -149,6 +150,7 @@ cmake_args=(
   "-DPOLARIS_ENABLE_WAYLAND=ON"
   "-DPOLARIS_ENABLE_X11=ON"
   "-DPOLARIS_ENABLE_DRM=ON"
+  "-DPOLARIS_ENABLE_BROWSER_STREAM=ON"
   "-DPOLARIS_PUBLISHER_NAME=papi"
   "-DPOLARIS_PUBLISHER_WEBSITE=https://github.com/papi-ux/polaris"
   "-DPOLARIS_PUBLISHER_ISSUE_URL=https://github.com/papi-ux/polaris/issues"

@@ -7,6 +7,15 @@ on:
   pull_request:
     branches: [ master ]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing v* release tag to rebuild and upload release assets for'
+        required: false
+        type: string
+
+env:
+  POLARIS_CHECKOUT_REF: ${{ inputs.release_tag || github.ref }}
+  POLARIS_PACKAGE_REF_NAME: ${{ inputs.release_tag || github.ref_name }}
 
 jobs:
   web-checks:
@@ -15,6 +24,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -60,13 +71,11 @@ jobs:
         run: pacman -Syu --noconfirm --needed archlinux-keyring git
 
       - uses: actions/checkout@v5
-        if: startsWith(github.ref, 'refs/tags/v')
-
-      - uses: actions/checkout@v5
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
       - name: Initialize submodules
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
@@ -101,12 +110,12 @@ jobs:
           pacman -S --noconfirm --needed \
             appstream appstream-glib avahi base-devel boost boost-libs ccache cmake curl \
             desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
-            gcc libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
+            gcc go libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
             libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
             nlohmann-json npm numactl openssl opus pipewire wayland wayland-protocols which
 
       - name: Configure
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         run: |
           cmake -B build -G Ninja \
             -DBUILD_TESTS=ON \
@@ -114,35 +123,36 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DPOLARIS_ENABLE_CUDA=OFF \
+            -DPOLARIS_ENABLE_BROWSER_STREAM=ON \
             -DCUDA_FAIL_ON_MISSING=OFF
 
       - name: Download prebuilt web UI bundle
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         uses: actions/download-artifact@v8
         with:
           name: web-ui-build
           path: .
 
       - name: Prepare prebuilt web UI bundle
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         run: |
           mkdir -p build/assets build/CMakeFiles node_modules
           tar -xzf web-ui-build.tar.gz -C build/assets
           touch node_modules/.polaris-web-ui-npm.stamp build/CMakeFiles/web-ui-build.stamp
 
       - name: Build
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         run: cmake --build build -j"$(nproc)"
 
       - name: Run fast C++ tests
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
 
       - name: Generate Arch package files
         run: |
           BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
-          BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          COMMIT="${GITHUB_SHA}"
+          BRANCH="${GITHUB_HEAD_REF:-$POLARIS_PACKAGE_REF_NAME}"
+          COMMIT="$(git rev-parse HEAD)"
           env \
             BRANCH="$BRANCH" \
             BUILD_VERSION="$BUILD_VERSION" \
@@ -153,7 +163,7 @@ jobs:
               -DPOLARIS_CONFIGURE_ONLY=ON
 
       - name: Validate Arch package
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           useradd -m builder
           pacman -S --noconfirm --needed cuda
@@ -194,7 +204,7 @@ jobs:
           su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && ${arch_makepkg_env} makepkg --nodeps --noconfirm --nocheck"
 
       - name: Smoke test Arch package
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           set -euo pipefail
 
@@ -225,9 +235,13 @@ jobs:
 
           extract_dir="$(mktemp -d)"
           bsdtar -xf "$pkg_path" -C "$extract_dir" usr/bin
-          binary="$(find "$extract_dir/usr/bin" -maxdepth 1 -type f -name 'polaris-*' -perm -111 | sort | head -n 1)"
+          binary="$(find "$extract_dir/usr/bin" -maxdepth 1 -type f -name 'polaris-[0-9]*' -perm -111 | sort | head -n 1)"
           if [ -z "$binary" ]; then
             echo "Packaged Polaris binary was not found" >&2
+            exit 1
+          fi
+          if [ ! -x "$extract_dir/usr/bin/polaris-browser-stream-helper" ]; then
+            echo "Packaged Browser Stream helper was not found" >&2
             exit 1
           fi
 
@@ -252,9 +266,13 @@ jobs:
           done <<< "$boost_sonames"
 
           pacman -U --noconfirm "$pkg_path"
-          installed_binary="$(pacman -Ql polaris | awk '/\/usr\/bin\/polaris-[^/]+$/ { print $2; exit }')"
+          installed_binary="$(pacman -Ql polaris | awk '/\/usr\/bin\/polaris-[0-9][^/]*$/ { print $2; exit }')"
           if [ -z "$installed_binary" ]; then
             echo "Installed Polaris binary was not found" >&2
+            exit 1
+          fi
+          if ! pacman -Ql polaris | awk '{ print $2 }' | grep -Fxq /usr/bin/polaris-browser-stream-helper; then
+            echo "Installed Arch package is missing the Browser Stream helper" >&2
             exit 1
           fi
 
@@ -322,6 +340,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
       - name: Initialize submodules
         run: |
@@ -364,6 +384,7 @@ jobs:
             libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
             libappindicator3-dev libgtk-3-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            golang-go \
             wayland-protocols
 
       - name: Configure
@@ -377,6 +398,7 @@ jobs:
             -DPOLARIS_ASSETS_DIR=share/polaris \
             -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
             -DPOLARIS_ENABLE_CUDA=OFF \
+            -DPOLARIS_ENABLE_BROWSER_STREAM=ON \
             -DCUDA_FAIL_ON_MISSING=OFF
 
       - name: Download prebuilt web UI bundle
@@ -416,9 +438,13 @@ jobs:
 
           sudo apt-get install -y "./$deb_path"
           package_name="$(dpkg-deb --field "$deb_path" Package)"
-          binary="$(dpkg -L "$package_name" | awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[^/]+$/ { print; exit }')"
+          binary="$(dpkg -L "$package_name" | awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }')"
           if [ -z "$binary" ]; then
             echo "Installed Polaris binary was not found" >&2
+            exit 1
+          fi
+          if ! dpkg -L "$package_name" | grep -Fxq /usr/bin/polaris-browser-stream-helper; then
+            echo "Installed Ubuntu DEB is missing the Browser Stream helper" >&2
             exit 1
           fi
 
@@ -507,6 +533,8 @@ jobs:
           exit 1
 
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
       - name: Initialize submodules
         run: |
@@ -551,16 +579,70 @@ jobs:
       - name: Install CI helper packages
         run: |
           for attempt in 1 2 3; do
-            dnf install -y ccache ninja-build && exit 0
+            dnf install -y ccache ninja-build patch && exit 0
             echo "dnf helper package install failed on attempt ${attempt}" >&2
             dnf clean expire-cache || true
             sleep $((attempt * 10))
           done
           exit 1
 
-      - name: Configure
+      - name: Install CUDA toolkit
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
-          cmake -B build -G Ninja \
+          set -euo pipefail
+
+          architecture="$(uname -m)"
+          cuda_supported_architectures=("x86_64" "aarch64")
+          if [[ ! " ${cuda_supported_architectures[*]} " =~ " ${architecture} " ]]; then
+            echo "CUDA toolkit install skipped for unsupported architecture ${architecture}"
+            exit 0
+          fi
+
+          cuda_version="13.2.1"
+          cuda_build="595.58.03"
+          cuda_dir="${GITHUB_WORKSPACE}/.cuda"
+          cuda_suffix=""
+          if [ "${architecture}" = "aarch64" ]; then
+            cuda_suffix="_sbsa"
+          fi
+
+          if [ ! -x "${cuda_dir}/bin/nvcc" ]; then
+            mkdir -p "${cuda_dir}" "${GITHUB_WORKSPACE}/.cuda-tmp"
+            cuda_url="https://developer.download.nvidia.com/compute/cuda/${cuda_version}/local_installers/cuda_${cuda_version}_${cuda_build}_linux${cuda_suffix}.run"
+            wget \
+              "${cuda_url}" \
+              --progress=bar:force:noscroll \
+              --retry-connrefused \
+              --tries=3 \
+              -q -O "${GITHUB_WORKSPACE}/cuda.run"
+            chmod a+x "${GITHUB_WORKSPACE}/cuda.run"
+            "${GITHUB_WORKSPACE}/cuda.run" \
+              --no-drm \
+              --no-man-page \
+              --no-opengl-libs \
+              --override \
+              --silent \
+              --tmpdir="${GITHUB_WORKSPACE}/.cuda-tmp" \
+              --toolkit \
+              --toolkitpath="${cuda_dir}"
+            rm "${GITHUB_WORKSPACE}/cuda.run"
+          fi
+
+          if [ "${{ matrix.fedora }}" = "42" ]; then
+            patch -p2 \
+              --backup \
+              --directory="${cuda_dir}" \
+              --verbose \
+              < "packaging/linux/patches/${architecture}/01-math_functions.patch"
+          fi
+
+      - name: Configure
+        env:
+          POLARIS_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        run: |
+          cmake_args=(
+            -B build
+            -G Ninja
             -DBUILD_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
@@ -569,8 +651,24 @@ jobs:
             -DBOOST_USE_STATIC=${{ matrix.boost_static }} \
             -DPOLARIS_ASSETS_DIR=share/polaris \
             -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
-            -DPOLARIS_ENABLE_CUDA=OFF \
-            -DCUDA_FAIL_ON_MISSING=OFF
+            -DPOLARIS_ENABLE_BROWSER_STREAM=ON
+          )
+
+          if [ "${POLARIS_RELEASE_BUILD}" = "true" ]; then
+            cmake_args+=(
+              -DPOLARIS_ENABLE_CUDA=ON
+              -DCUDA_FAIL_ON_MISSING=ON
+              -DCMAKE_CUDA_COMPILER:PATH="${GITHUB_WORKSPACE}/.cuda/bin/nvcc"
+              -DCMAKE_CUDA_HOST_COMPILER="${CXX}"
+            )
+          else
+            cmake_args+=(
+              -DPOLARIS_ENABLE_CUDA=OFF
+              -DCUDA_FAIL_ON_MISSING=OFF
+            )
+          fi
+
+          cmake "${cmake_args[@]}"
 
       - name: Download prebuilt web UI bundle
         uses: actions/download-artifact@v8
@@ -616,9 +714,13 @@ jobs:
 
           dnf install -y "$rpm_path"
           rpm -ql polaris | tee build/cpack_artifacts/package-files.txt
-          binary="$(awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[^/]+$/ { print; exit }' build/cpack_artifacts/package-files.txt)"
+          binary="$(awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }' build/cpack_artifacts/package-files.txt)"
           if [ -z "$binary" ]; then
             echo "Installed Polaris binary was not found" >&2
+            exit 1
+          fi
+          if ! grep -Fxq /usr/bin/polaris-browser-stream-helper build/cpack_artifacts/package-files.txt; then
+            echo "Installed Fedora RPM is missing the Browser Stream helper" >&2
             exit 1
           fi
 
@@ -634,6 +736,11 @@ jobs:
           fi
 
           polaris --version | tee build/cpack_artifacts/package-version.txt
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}" = "true" ] &&
+              ! grep -Fq "cuda=enabled" build/cpack_artifacts/package-version.txt; then
+            echo "Release Fedora RPM was not built with CUDA enabled" >&2
+            exit 1
+          fi
 
       - name: Summarize Fedora RPM validation
         if: always()
@@ -675,7 +782,7 @@ jobs:
       - arch-build
       - ubuntu-build
       - fedora-rpm-build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -804,21 +911,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release create "${GITHUB_REF_NAME}" \
-              --title "${GITHUB_REF_NAME}" \
-              --notes "Automated Fedora, Ubuntu, and Arch release assets for ${GITHUB_REF_NAME}."
+          if ! gh release view "${POLARIS_PACKAGE_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${POLARIS_PACKAGE_REF_NAME}" \
+              --title "${POLARIS_PACKAGE_REF_NAME}" \
+              --notes "Automated Fedora, Ubuntu, and Arch release assets for ${POLARIS_PACKAGE_REF_NAME}."
           fi
 
-          gh release upload "${GITHUB_REF_NAME}" release-assets/final/* --clobber
+          gh release upload "${POLARIS_PACKAGE_REF_NAME}" release-assets/final/* --clobber
 
       - name: Verify release assets on GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          asset_count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
+          asset_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
           if [ "${asset_count}" -ne 5 ]; then
-            echo "Expected Fedora 42, Fedora 43, Fedora 44, Ubuntu 24.04, and Arch binary release assets on ${GITHUB_REF_NAME}, found ${asset_count}" >&2
+            echo "Expected Fedora 42, Fedora 43, Fedora 44, Ubuntu 24.04, and Arch binary release assets on ${POLARIS_PACKAGE_REF_NAME}, found ${asset_count}" >&2
             exit 1
           fi

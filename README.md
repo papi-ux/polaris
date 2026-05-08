@@ -44,6 +44,7 @@ Polaris `v1.0.11` focuses on Browser Stream validation and Linux stream-runtime 
 - Nova and Moonlight launches are more reliable after Browser Stream sessions because Polaris settles Steam cleanup before the next app launch.
 - Linux Headless Stream audio isolation is stricter: game audio that moves back to the host sink is routed back into the Polaris virtual stream sink.
 - Steam-launched children that escape the direct app process group are cleaned up when the isolated stream runtime stops.
+- Release assets were refreshed so packaged Browser Stream installs include the WebTransport helper, and Fedora/Bazzite RPMs use CUDA-enabled NVENC builds for the validated NVIDIA path.
 
 ## Quick Start
 
