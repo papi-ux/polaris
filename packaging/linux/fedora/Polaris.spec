@@ -208,7 +208,7 @@ if [ -n "%{cuda_version}" ] && [[ " ${cuda_supported_architectures[@]} " =~ " ${
   install_cuda
   cmake_args+=("-DPOLARIS_ENABLE_CUDA=ON")
   cmake_args+=("-DCMAKE_CUDA_COMPILER:PATH=%{cuda_dir}/bin/nvcc")
-  cmake_args+=("-DCMAKE_CUDA_HOST_COMPILER=%{cc_binary}")
+  cmake_args+=("-DCMAKE_CUDA_HOST_COMPILER=%{cxx_binary}")
 else
   cmake_args+=("-DPOLARIS_ENABLE_CUDA=OFF")
 fi
