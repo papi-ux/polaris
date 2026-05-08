@@ -112,7 +112,7 @@ jobs:
             desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
             gcc go libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
             libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
-            nlohmann-json npm numactl openssl opus pipewire wayland wayland-protocols which
+            nlohmann-json npm numactl openssl opus pipewire python wayland wayland-protocols which
 
       - name: Configure
         if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
@@ -162,6 +162,21 @@ jobs:
             cmake -S . -B arch-pkgbuild \
               -DPOLARIS_CONFIGURE_PKGBUILD=ON \
               -DPOLARIS_CONFIGURE_ONLY=ON
+          python3 - <<'PY'
+          from pathlib import Path
+
+          pkgbuild = Path("arch-pkgbuild/PKGBUILD")
+          text = pkgbuild.read_text()
+          if "  'go'\n" not in text:
+              text = text.replace("  'git'\n", "  'git'\n  'go'\n")
+          if "-D POLARIS_ENABLE_BROWSER_STREAM=ON" not in text:
+              text = text.replace(
+                  '      -D POLARIS_ASSETS_DIR="share/polaris"\n',
+                  '      -D POLARIS_ASSETS_DIR="share/polaris"\n'
+                  '      -D POLARIS_ENABLE_BROWSER_STREAM=ON\n',
+              )
+          pkgbuild.write_text(text)
+          PY
 
       - name: Validate Arch package
         if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
@@ -580,7 +595,7 @@ jobs:
       - name: Install CI helper packages
         run: |
           for attempt in 1 2 3; do
-            dnf install -y ccache ninja-build patch && exit 0
+            dnf install -y ccache golang ninja-build patch python3 && exit 0
             echo "dnf helper package install failed on attempt ${attempt}" >&2
             dnf clean expire-cache || true
             sleep $((attempt * 10))
@@ -630,11 +645,28 @@ jobs:
           fi
 
           if [ "${{ matrix.fedora }}" = "42" ]; then
-            patch -p2 \
-              --backup \
-              --directory="${cuda_dir}" \
-              --verbose \
-              < "packaging/linux/patches/${architecture}/01-math_functions.patch"
+            math_header="$(find "${cuda_dir}" -path '*/include/crt/math_functions.h' -print -quit)"
+            if [ -z "${math_header}" ]; then
+              echo "CUDA math_functions.h was not found" >&2
+              exit 1
+            fi
+            sed -i \
+              -e 's/sinpi(double x);/sinpi(double x) noexcept (true);/' \
+              -e 's/sinpif(float x);/sinpif(float x) noexcept (true);/' \
+              -e 's/cospi(double x);/cospi(double x) noexcept (true);/' \
+              -e 's/cospif(float x);/cospif(float x) noexcept (true);/' \
+              "${math_header}"
+            for declaration in \
+              'sinpi(double x) noexcept (true);' \
+              'sinpif(float x) noexcept (true);' \
+              'cospi(double x) noexcept (true);' \
+              'cospif(float x) noexcept (true);'
+            do
+              if ! grep -Fq "${declaration}" "${math_header}"; then
+                echo "CUDA math_functions.h is missing ${declaration}" >&2
+                exit 1
+              fi
+            done
           fi
 
       - name: Configure
