@@ -208,23 +208,21 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-replacements = {
-    r"(sinpi\(double x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
-    r"(sinpif\(float x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
-    r"(cospi\(double x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
-    r"(cospif\(float x\))(?: noexcept ?\(true\))?;": r"\1 noexcept(true);",
-}
-changed = False
-for pattern, replacement in replacements.items():
-    text, count = re.subn(pattern, replacement, text, count=1)
-    if count == 0:
-        raise SystemExit(f"expected CUDA declaration not found: {pattern}")
-    changed = True
-if changed:
+if "__NV_IEC_60559_FUNCS_EXCEPTION_SPECIFIER" in text:
+    print(f"{path} already has NVIDIA IEC 60559 exception specifiers")
+else:
+    replacements = {
+        r"(sinpi\([^)]*\))(?: noexcept(?: ?\(true\))?)?;": r"\1 noexcept(true);",
+        r"(sinpif\([^)]*\))(?: noexcept(?: ?\(true\))?)?;": r"\1 noexcept(true);",
+        r"(cospi\([^)]*\))(?: noexcept(?: ?\(true\))?)?;": r"\1 noexcept(true);",
+        r"(cospif\([^)]*\))(?: noexcept(?: ?\(true\))?)?;": r"\1 noexcept(true);",
+    }
+    for pattern, replacement in replacements.items():
+        text, count = re.subn(pattern, replacement, text, count=1)
+        if count == 0:
+            raise SystemExit(f"expected CUDA declaration not found: {pattern}")
     path.write_text(text)
     print(f"Patched {path}")
-else:
-    print(f"{path} already has Fedora 42 CUDA noexcept declarations")
 PY
   fi
 }
