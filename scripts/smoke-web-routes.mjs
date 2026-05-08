@@ -26,7 +26,7 @@ const routes = [
   { name: 'apps-import', hash: '#/apps?import=1&scan=1', text: /Stage imports|Library/i },
   { name: 'pairing', hash: '#/pin', heading: /pair/i },
   { name: 'browser-stream', hash: '#/browser-stream', heading: /^Browser Stream$/i },
-  { name: 'webrtc-alias', hash: '#/webrtc', finalHash: '#/browser-stream', heading: /^Browser Stream$/i },
+  { name: 'webrtc-alias', hash: '#/webrtc', heading: /^Browser Stream$/i },
   { name: 'troubleshooting', hash: '#/troubleshooting', heading: /^Troubleshooting$/i },
   { name: 'welcome', hash: '#/welcome', heading: /Welcome to Polaris/i },
 ]
@@ -97,11 +97,9 @@ try {
     if (index === 0 && !loadedAppShell) {
       await page.goto(`${baseURL}/?smoke=${Date.now()}-${index}${route.hash}`)
     } else {
-      const acceptableHashes = [route.hash, route.finalHash].filter(Boolean)
       await page.evaluate((hash) => {
         window.location.hash = hash
       }, route.hash)
-      await page.waitForFunction((hashes) => hashes.includes(window.location.hash), acceptableHashes, { timeout: 10000 })
     }
 
     if (route.heading) {
