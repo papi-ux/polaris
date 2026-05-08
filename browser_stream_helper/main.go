@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,7 +135,71 @@ func (r *sessionRegistry) sendDatagram(token string, payload []byte) int {
 	return sent
 }
 
-func generateCertificate(now time.Time) (tls.Certificate, []byte, time.Time, error) {
+func addCertificateHost(dnsNames map[string]struct{}, ipAddresses map[string]net.IP, host string) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return
+	}
+
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		ipAddresses[ip.String()] = ip
+		return
+	}
+
+	dnsNames[strings.ToLower(host)] = struct{}{}
+}
+
+func localCertificateHosts() []string {
+	hosts := []string{"localhost", "127.0.0.1", "::1"}
+	if hostname, err := os.Hostname(); err == nil {
+		hostname = strings.TrimSpace(hostname)
+		if hostname != "" {
+			hosts = append(hosts, hostname)
+			shortName := strings.SplitN(hostname, ".", 2)[0]
+			if shortName != "" {
+				hosts = append(hosts, shortName, shortName+".lan", shortName+".local")
+			}
+		}
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return hosts
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch value := addr.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip == nil {
+				continue
+			}
+			hosts = append(hosts, ip.String())
+		}
+	}
+	return hosts
+}
+
+func generateCertificate(now time.Time, extraHosts []string) (tls.Certificate, []byte, time.Time, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, nil, time.Time{}, err
@@ -147,6 +212,24 @@ func generateCertificate(now time.Time) (tls.Certificate, []byte, time.Time, err
 		return tls.Certificate{}, nil, time.Time{}, err
 	}
 
+	dnsNames := make(map[string]struct{})
+	ipAddresses := make(map[string]net.IP)
+	for _, host := range localCertificateHosts() {
+		addCertificateHost(dnsNames, ipAddresses, host)
+	}
+	for _, host := range extraHosts {
+		addCertificateHost(dnsNames, ipAddresses, host)
+	}
+
+	certDNSNames := make([]string, 0, len(dnsNames))
+	for host := range dnsNames {
+		certDNSNames = append(certDNSNames, host)
+	}
+	certIPAddresses := make([]net.IP, 0, len(ipAddresses))
+	for _, ip := range ipAddresses {
+		certIPAddresses = append(certIPAddresses, ip)
+	}
+
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
@@ -157,11 +240,8 @@ func generateCertificate(now time.Time) (tls.Certificate, []byte, time.Time, err
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses: []net.IP{
-			net.ParseIP("127.0.0.1"),
-			net.ParseIP("::1"),
-		},
+		DNSNames:              certDNSNames,
+		IPAddresses:           certIPAddresses,
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
@@ -434,6 +514,7 @@ func handleWebTransportSession(ctx context.Context, token string, sess *webtrans
 
 func main() {
 	addr := flag.String("addr", ":47992", "UDP HTTPS/WebTransport bind address")
+	hosts := flag.String("hosts", "", "Comma-separated hostnames or IP addresses clients may use for WebTransport")
 	ipcSocket := flag.String("ipc-socket", "", "Unix socket path for Polaris IPC")
 	ipcToken := flag.String("ipc-token", "", "Random per-process IPC token")
 	inputIPCSocket := flag.String("input-ipc-socket", "", "Unix socket path for Browser Stream input IPC")
@@ -441,7 +522,12 @@ func main() {
 	certHashFile := flag.String("cert-hash-file", "", "Optional path to write the server certificate SHA-256 hex digest")
 	flag.Parse()
 
-	cert, der, _, err := generateCertificate(time.Now())
+	var extraHosts []string
+	if *hosts != "" {
+		extraHosts = strings.Split(*hosts, ",")
+	}
+
+	cert, der, _, err := generateCertificate(time.Now(), extraHosts)
 	if err != nil {
 		log.Fatalf("certificate generation failed: %v", err)
 	}
