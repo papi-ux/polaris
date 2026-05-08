@@ -2,19 +2,21 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"testing"
 	"time"
 )
 
 func TestGenerateCertificateUsesP256AndShortLifetime(t *testing.T) {
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
-	cert, der, notAfter, err := generateCertificate(now)
+	cert, der, notAfter, err := generateCertificate(now, nil)
 	if err != nil {
 		t.Fatalf("generateCertificate failed: %v", err)
 	}
@@ -30,7 +32,7 @@ func TestGenerateCertificateUsesP256AndShortLifetime(t *testing.T) {
 }
 
 func TestCertificateHashIsSHA256Hex(t *testing.T) {
-	_, der, _, err := generateCertificate(time.Now())
+	_, der, _, err := generateCertificate(time.Now(), nil)
 	if err != nil {
 		t.Fatalf("generateCertificate failed: %v", err)
 	}
@@ -153,5 +155,35 @@ func TestReadControlFrameRejectsOversizePayload(t *testing.T) {
 
 	if _, err := readControlFrame(reader); err == nil {
 		t.Fatal("expected oversized control frame to be rejected")
+	}
+}
+
+func TestGenerateCertificateIncludesExtraHosts(t *testing.T) {
+	_, der, _, err := generateCertificate(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), []string{
+		"pc-papi.lan",
+		"10.0.0.232:47990",
+		"[::1]:47990",
+	})
+	if err != nil {
+		t.Fatalf("generateCertificate failed: %v", err)
+	}
+
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate failed: %v", err)
+	}
+
+	if !slices.Contains(cert.DNSNames, "pc-papi.lan") {
+		t.Fatalf("expected pc-papi.lan DNS SAN, got %v", cert.DNSNames)
+	}
+	if !slices.ContainsFunc(cert.IPAddresses, func(ip net.IP) bool {
+		return ip.Equal(net.ParseIP("10.0.0.232"))
+	}) {
+		t.Fatalf("expected 10.0.0.232 IP SAN, got %v", cert.IPAddresses)
+	}
+	if !slices.ContainsFunc(cert.IPAddresses, func(ip net.IP) bool {
+		return ip.Equal(net.ParseIP("::1"))
+	}) {
+		t.Fatalf("expected ::1 IP SAN, got %v", cert.IPAddresses)
 	}
 }

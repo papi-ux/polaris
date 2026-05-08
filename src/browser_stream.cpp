@@ -725,7 +725,7 @@ namespace browser_stream {
       return true;
     }
 
-    bool ensure_helper_running_locked(std::string &error) {
+    bool ensure_helper_running_locked(std::string_view host, std::string &error) {
       if (helper_running_locked()) {
         return true;
       }
@@ -746,6 +746,7 @@ namespace browser_stream {
       const auto cert_hash_path = base_path.string() + ".sha256";
       const auto input_socket_path = base_path.string() + ".input.sock";
       const auto input_token = crypto::rand_alphabet(48, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"sv);
+      const auto certificate_hosts = normalize_host(host);
 
       if (!start_input_ipc_server_locked(input_socket_path, input_token, error)) {
         return false;
@@ -758,6 +759,7 @@ namespace browser_stream {
       helper_state.process = boost::process::v1::child(
         helper_path->string(),
         "-addr", addr,
+        "-hosts", certificate_hosts,
         "-ipc-socket", helper_state.ipc_socket,
         "-ipc-token", helper_state.ipc_token,
         "-input-ipc-socket", input_ipc_socket,
@@ -1580,7 +1582,7 @@ namespace browser_stream {
     {
       std::lock_guard lock(helper_mutex);
       std::string error;
-      if (!ensure_helper_running_locked(error)) {
+      if (!ensure_helper_running_locked(host, error)) {
         proc::proc.terminate(false, false);
         output["status"] = false;
         output["error"] = error;
