@@ -32,6 +32,7 @@ extern "C" {
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -152,6 +153,8 @@ namespace browser_stream {
       std::string ipc_socket;
       std::string ipc_token;
       std::string cert_hash;
+      std::string log_path;
+      FILE *log_file = nullptr;
     };
 
     std::mutex helper_mutex;
@@ -422,10 +425,19 @@ namespace browser_stream {
              input_ipc_running.load(std::memory_order_relaxed);
     }
 
+    void close_helper_log_locked() {
+      if (helper_state.log_file) {
+        std::fclose(helper_state.log_file);
+        helper_state.log_file = nullptr;
+      }
+    }
+
     void stop_helper_locked() {
       if (helper_state.process.valid() && helper_state.process.running()) {
+        BOOST_LOG(info) << "Browser Stream helper: stopping pid="sv << helper_state.process.id();
         helper_state.process.terminate();
       }
+      close_helper_log_locked();
       stop_input_ipc_server_locked();
       helper_state = {};
     }
@@ -629,12 +641,21 @@ namespace browser_stream {
         return;
       }
 
-      if (message->value("type", "") != "input_events") {
+      const auto message_type = message->value("type", "");
+      const auto session_token = message->value("session_token", "");
+
+      if (message_type == "transport_closed") {
+        const auto stopped = stop_session(session_token);
+        BOOST_LOG(info) << "Browser Stream transport closed; backend stop requested="sv << stopped;
+        write_input_ipc_response(socket, true, "");
+        return;
+      }
+
+      if (message_type != "input_events") {
         write_input_ipc_response(socket, false, "unknown input IPC message type");
         return;
       }
 
-      const auto session_token = message->value("session_token", "");
       const auto events = message->contains("events") ? message->at("events") : nlohmann::json::array();
       const auto result = submit_input(session_token, events);
       if (!result.value("status", false)) {
@@ -747,6 +768,7 @@ namespace browser_stream {
       const auto input_socket_path = base_path.string() + ".input.sock";
       const auto input_token = crypto::rand_alphabet(48, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"sv);
       const auto certificate_hosts = normalize_host(host);
+      helper_state.log_path = (platf::appdata() / "browser-stream-helper.log").string();
 
       if (!start_input_ipc_server_locked(input_socket_path, input_token, error)) {
         return false;
@@ -755,33 +777,65 @@ namespace browser_stream {
       const auto addr = ":"s + std::to_string(default_webtransport_port);
       auto env = proc::proc.get_env();
       auto working_dir = boost::filesystem::path(helper_path->parent_path().string());
+      helper_state.log_file = std::fopen(helper_state.log_path.c_str(), "a");
+      if (!helper_state.log_file) {
+        BOOST_LOG(warning) << "Browser Stream helper: could not open helper log ["sv << helper_state.log_path << "]";
+      }
+
+      BOOST_LOG(info) << "Browser Stream helper: starting path=["sv << helper_path->string()
+                      << "] addr=["sv << addr
+                      << "] hosts=["sv << certificate_hosts
+                      << "] log=["sv << helper_state.log_path << "]";
       std::error_code ec;
-      helper_state.process = boost::process::v1::child(
-        helper_path->string(),
-        "-addr", addr,
-        "-hosts", certificate_hosts,
-        "-ipc-socket", helper_state.ipc_socket,
-        "-ipc-token", helper_state.ipc_token,
-        "-input-ipc-socket", input_ipc_socket,
-        "-input-ipc-token", input_ipc_token,
-        "-cert-hash-file", cert_hash_path,
-        env,
-        boost::process::v1::start_dir(working_dir),
-        boost::process::v1::std_in < boost::process::v1::null,
-        boost::process::v1::std_out > boost::process::v1::null,
-        boost::process::v1::std_err > boost::process::v1::null,
-        boost::process::v1::limit_handles,
-        ec
-      );
+      if (helper_state.log_file) {
+        helper_state.process = boost::process::v1::child(
+          helper_path->string(),
+          "-addr", addr,
+          "-hosts", certificate_hosts,
+          "-ipc-socket", helper_state.ipc_socket,
+          "-ipc-token", helper_state.ipc_token,
+          "-input-ipc-socket", input_ipc_socket,
+          "-input-ipc-token", input_ipc_token,
+          "-cert-hash-file", cert_hash_path,
+          env,
+          boost::process::v1::start_dir(working_dir),
+          boost::process::v1::std_in < boost::process::v1::null,
+          boost::process::v1::std_out > helper_state.log_file,
+          boost::process::v1::std_err > helper_state.log_file,
+          boost::process::v1::limit_handles,
+          ec
+        );
+      } else {
+        helper_state.process = boost::process::v1::child(
+          helper_path->string(),
+          "-addr", addr,
+          "-hosts", certificate_hosts,
+          "-ipc-socket", helper_state.ipc_socket,
+          "-ipc-token", helper_state.ipc_token,
+          "-input-ipc-socket", input_ipc_socket,
+          "-input-ipc-token", input_ipc_token,
+          "-cert-hash-file", cert_hash_path,
+          env,
+          boost::process::v1::start_dir(working_dir),
+          boost::process::v1::std_in < boost::process::v1::null,
+          boost::process::v1::std_out > boost::process::v1::null,
+          boost::process::v1::std_err > boost::process::v1::null,
+          boost::process::v1::limit_handles,
+          ec
+        );
+      }
       if (ec || !helper_state.process.valid()) {
         error = ec ? ec.message() : "Browser Stream helper process could not be started";
+        close_helper_log_locked();
         stop_input_ipc_server_locked();
         return false;
       }
 
+      BOOST_LOG(info) << "Browser Stream helper: spawned pid="sv << helper_state.process.id();
       for (int i = 0; i < 30; ++i) {
         if (!helper_state.process.running()) {
           error = "Browser Stream helper exited before becoming ready";
+          close_helper_log_locked();
           stop_input_ipc_server_locked();
           return false;
         }
@@ -791,6 +845,8 @@ namespace browser_stream {
           std::filesystem::remove(cert_hash_path);
           if (cert_hash.size() == 64) {
             helper_state.cert_hash = std::move(cert_hash);
+            BOOST_LOG(info) << "Browser Stream helper: ready pid="sv << helper_state.process.id()
+                            << " cert_sha256="sv << helper_state.cert_hash;
             return true;
           }
         }
@@ -799,6 +855,7 @@ namespace browser_stream {
       }
 
       error = "Browser Stream helper did not become ready before timeout";
+      close_helper_log_locked();
       stop_input_ipc_server_locked();
       return false;
     }

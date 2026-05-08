@@ -135,6 +135,13 @@ func (r *sessionRegistry) sendDatagram(token string, payload []byte) int {
 	return sent
 }
 
+func tokenLabel(token string) string {
+	if len(token) <= 8 {
+		return token
+	}
+	return token[:8]
+}
+
 func addCertificateHost(dnsNames map[string]struct{}, ipAddresses map[string]net.IP, host string) {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -375,6 +382,38 @@ func forwardInputEvents(inputIPCSocket string, inputIPCToken string, sessionToke
 	return nil
 }
 
+func notifyTransportClosed(inputIPCSocket string, inputIPCToken string, sessionToken string) error {
+	if inputIPCSocket == "" {
+		return errors.New("input IPC socket is not configured")
+	}
+
+	conn, err := net.Dial("unix", inputIPCSocket)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if err := writeIPCMessage(conn, ipcMessage{
+		IPCToken:     inputIPCToken,
+		Type:         "transport_closed",
+		SessionToken: sessionToken,
+	}); err != nil {
+		return err
+	}
+
+	response, err := readIPCResponse(conn)
+	if err != nil {
+		return err
+	}
+	if response["status"] != "ok" {
+		if response["error"] == "" {
+			return errors.New("Polaris rejected the transport close notification")
+		}
+		return errors.New(response["error"])
+	}
+	return nil
+}
+
 func handleIPCConn(conn net.Conn, ipcToken string, registry *sessionRegistry) {
 	defer conn.Close()
 
@@ -398,9 +437,11 @@ func handleIPCConn(conn net.Conn, ipcToken string, registry *sessionRegistry) {
 				continue
 			}
 			registry.register(msg.SessionToken)
+			log.Printf("registered session token=%s", tokenLabel(msg.SessionToken))
 			writeIPCResponse(conn, "ok", "")
 		case "stop_session":
-			registry.stop(msg.SessionToken)
+			stopped := registry.stop(msg.SessionToken)
+			log.Printf("stopped session token=%s existed=%t", tokenLabel(msg.SessionToken), stopped)
 			writeIPCResponse(conn, "ok", "")
 		case "media_datagram":
 			payload, err := base64.StdEncoding.DecodeString(msg.Payload)
@@ -495,7 +536,14 @@ func handleControlStream(token string, stream io.ReadWriteCloser, inputIPCSocket
 
 func handleWebTransportSession(ctx context.Context, token string, sess *webtransport.Session, registry *sessionRegistry, inputIPCSocket string, inputIPCToken string) {
 	registry.attach(token, sess)
-	defer registry.detach(sess)
+	log.Printf("webtransport session attached token=%s", tokenLabel(token))
+	defer func() {
+		registry.detach(sess)
+		log.Printf("webtransport session detached token=%s", tokenLabel(token))
+		if err := notifyTransportClosed(inputIPCSocket, inputIPCToken, token); err != nil {
+			log.Printf("transport close notification failed token=%s: %v", tokenLabel(token), err)
+		}
+	}()
 
 	go func() {
 		for {
@@ -576,22 +624,27 @@ func main() {
 	mux.HandleFunc("/browser-stream", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
 		if !registry.has(token) {
+			log.Printf("webtransport rejected remote=%s token=%s reason=invalid-or-used", r.RemoteAddr, tokenLabel(token))
 			http.Error(w, "invalid or already used Browser Stream token", http.StatusForbidden)
 			return
 		}
 
+		log.Printf("webtransport upgrade requested remote=%s token=%s", r.RemoteAddr, tokenLabel(token))
 		sess, err := server.Upgrade(w, r)
 		if err != nil {
 			log.Printf("webtransport upgrade failed: %v", err)
 			return
 		}
 		if !registry.consume(token) {
+			log.Printf("webtransport rejected after upgrade remote=%s token=%s reason=invalid-or-used", r.RemoteAddr, tokenLabel(token))
 			_ = sess.CloseWithError(0, "invalid or already used Browser Stream token")
 			return
 		}
+		log.Printf("webtransport upgrade accepted remote=%s token=%s", r.RemoteAddr, tokenLabel(token))
 		go handleWebTransportSession(ctx, token, sess, registry, *inputIPCSocket, *inputIPCToken)
 	})
 
+	log.Printf("webtransport helper ready addr=%s hosts=%s cert_sha256=%s", *addr, *hosts, certHashHex)
 	_ = json.NewEncoder(os.Stdout).Encode(readyInfo{
 		Status:     "ready",
 		Addr:       *addr,
