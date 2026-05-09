@@ -741,6 +741,19 @@ namespace platf {
         using_headless_ram_capture = true;
         try_headless_extcopy_dmabuf =
           cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state);
+
+        // Even when GPU-native override is not active, opportunistically probe
+        // ext-image-copy DMA-BUF in headless cage mode. If unsupported, we
+        // fall back to the existing SHM path and keep current behavior.
+        if (!try_headless_extcopy_dmabuf && gpu_native_capture_supported) {
+          try_headless_extcopy_dmabuf = true;
+          static bool logged_headless_extcopy_probe = false;
+          if (!logged_headless_extcopy_probe) {
+            BOOST_LOG(info)
+              << "wlr: Probing ext-image-copy-capture DMA-BUF in headless labwc before falling back to SHM"sv;
+            logged_headless_extcopy_probe = true;
+          }
+        }
       } else {
         prefer_ram_capture = true;
 
