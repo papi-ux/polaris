@@ -314,50 +314,6 @@ namespace nvhttp {
       return true;
     }
 
-    std::string stream_display_mode_label() {
-#ifdef __linux__
-      return stream_display_policy::resolve(
-        stream_display_policy::input_t {
-          host_virtual_display_available(),
-          video::active_encoder_requires_gpu_native_capture(),
-          cage_display_router::runtime_state().gpu_native_override_active,
-        }
-      ).label;
-#else
-      return proc::proc.virtual_display ? "Host Virtual Display" : "Desktop Display";
-#endif
-    }
-
-    std::string stream_display_mode_selection() {
-#ifdef __linux__
-      return stream_display_policy::resolve(
-        stream_display_policy::input_t {
-          host_virtual_display_available(),
-          video::active_encoder_requires_gpu_native_capture(),
-          cage_display_router::runtime_state().gpu_native_override_active,
-        }
-      ).selection;
-#else
-      return proc::proc.virtual_display ? "host_virtual_display" : "desktop_display";
-#endif
-    }
-
-    std::string stream_display_mode_reason() {
-#ifdef __linux__
-      return stream_display_policy::resolve(
-        stream_display_policy::input_t {
-          host_virtual_display_available(),
-          video::active_encoder_requires_gpu_native_capture(),
-          cage_display_router::runtime_state().gpu_native_override_active,
-        }
-      ).reason;
-#else
-      return proc::proc.virtual_display ?
-        "Polaris is streaming from a host virtual display." :
-        "Polaris is streaming from the current desktop session.";
-#endif
-    }
-
     nlohmann::json stream_display_mode_options_json() {
       nlohmann::json modes = nlohmann::json::array();
       for (const auto &selection : {
@@ -444,10 +400,16 @@ namespace nvhttp {
       status["direction"] = "bidirectional";
       status["endpoint"] = "/polaris/v1/client-settings";
       status["source_of_truth"] = "polaris_effective_runtime";
-      status["state"] = relaunch_required ? "pending_relaunch" : "synced";
-      status["message"] = relaunch_required ?
-        "Desired settings are saved and will become effective after the active stream relaunches." :
-        "Desired settings match the current Polaris runtime state.";
+      status["state"] =
+        relaunch_required ? "pending_relaunch" :
+        adaptive_active ? "adaptive_active" :
+        "synced";
+      status["message"] =
+        relaunch_required ?
+          "Desired settings are saved and will become effective after the active stream relaunches." :
+        adaptive_active ?
+          "Adaptive bitrate is enabled; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
+          "Desired settings match the current Polaris runtime state.";
       status["fields"] = std::move(fields);
       return status;
     }
@@ -670,9 +632,10 @@ namespace nvhttp {
 
       nlohmann::json policy;
       policy["version"] = 1;
-      policy["mode"] = stream_display_mode_selection();
-      policy["mode_label"] = stream_display_mode_label();
-      policy["mode_reason"] = stream_display_mode_reason();
+      const auto policy_stream_display_mode = effective_stream_display_mode_selection(stats);
+      policy["mode"] = policy_stream_display_mode;
+      policy["mode_label"] = stream_display_mode_label_for_selection(policy_stream_display_mode);
+      policy["mode_reason"] = stream_display_mode_reason_for_selection(policy_stream_display_mode);
       policy["source"] = source;
       policy["source_label"] = stream_policy_source_label(source);
       policy["optimization_source"] = stats.optimization_source;
@@ -3647,7 +3610,7 @@ namespace nvhttp {
       tuning["mangohud_configured"] = proc::proc.current_app_has_mangohud();
 
       auto &display_mode = output["display_mode"];
-      const auto stream_display_mode = stream_display_mode_selection();
+      const auto stream_display_mode = effective_stream_display_mode_selection(stats);
       display_mode["virtual_display"] = proc::proc.virtual_display;
       display_mode["requested_headless"] = stats.runtime_requested_headless;
       display_mode["effective_headless"] = stats.runtime_effective_headless;
@@ -3660,8 +3623,8 @@ namespace nvhttp {
         proc::proc.session_display_mode_is_explicit() ?
           (proc::proc.virtual_display ? "virtual_display" : "headless") :
           "auto";
-      display_mode["label"] = stream_display_mode_label();
-      display_mode["reason"] = stream_display_mode_reason();
+      display_mode["label"] = stream_display_mode_label_for_selection(stream_display_mode);
+      display_mode["reason"] = stream_display_mode_reason_for_selection(stream_display_mode);
       display_mode["paired_display_mode_override"] = named_cert_p->display_mode;
       display_mode["paired_display_mode_locked"] = !named_cert_p->display_mode.empty();
       display_mode["paired_target_bitrate_kbps"] = named_cert_p->target_bitrate_kbps;
