@@ -1781,9 +1781,17 @@ namespace proc {
     optimization_locks_t optimization_locks;
     optimization_locks.display_mode = launch_session->user_locked_display_mode || !launch_session->enable_sops;
     optimization_locks.virtual_display = launch_session->user_locked_virtual_display;
-    optimization_locks.bitrate = config::video.max_bitrate > 0;
+    optimization_locks.bitrate = config::video.max_bitrate > 0 || launch_session->paired_target_bitrate_kbps.has_value();
 
     resolved_session_optimization_t resolved_optimization;
+    if (launch_session->paired_target_bitrate_kbps.has_value()) {
+      resolved_optimization.target_bitrate_kbps = *launch_session->paired_target_bitrate_kbps;
+      resolved_optimization.bitrate_source = "paired_client";
+      note_layer(resolved_optimization, "paired_client");
+      BOOST_LOG(info) << "Client profile: overriding bitrate to "sv
+                      << *launch_session->paired_target_bitrate_kbps << " kbps";
+    }
+
     auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
     if (client_profile) {
       BOOST_LOG(info) << "Applying client profile for \""sv << launch_session->device_name << '"';

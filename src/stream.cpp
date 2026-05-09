@@ -6,7 +6,9 @@
 // standard includes
 #include <fstream>
 #include <future>
+#include <atomic>
 #include <queue>
+#include <thread>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
@@ -38,10 +40,6 @@ extern "C" {
 #include "thread_safe.h"
 #include "utility.h"
 #include "confighttp.h"
-
-#ifdef __linux__
-#include "platform/linux/cage_display_router.h"
-#endif
 
 #define IDX_START_A 0
 #define IDX_START_B 1
@@ -93,22 +91,45 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace stream {
+  namespace session {
+    extern std::atomic_uint running_sessions;
+  }
 
   namespace {
-    bool should_terminate_on_last_client_disconnect() {
-#ifdef __linux__
-      if (!config::video.linux_display.use_cage_compositor) {
-        return false;
+    std::atomic_uint64_t disconnect_resume_timeout_generation {0};
+
+    void cancel_disconnect_resume_timeout() {
+      ++disconnect_resume_timeout_generation;
+    }
+
+    void schedule_disconnect_resume_timeout(std::string app_name) {
+      const auto timeout = config::stream.disconnect_resume_timeout;
+      if (timeout.count() <= 0) {
+        return;
       }
 
-      const auto runtime_state = cage_display_router::runtime_state();
-      return cage_display_router::is_running() &&
-             (runtime_state.effective_headless ||
-              runtime_state.requested_headless ||
-              runtime_state.gpu_native_override_active);
-#else
-      return false;
-#endif
+      const auto generation = ++disconnect_resume_timeout_generation;
+      BOOST_LOG(info) << "Paused session for ["sv << app_name << "] will remain resumable for "sv
+                      << timeout.count() << " second(s)"sv;
+
+      std::thread([generation, timeout, app_name = std::move(app_name)] {
+        std::this_thread::sleep_for(timeout);
+
+        if (disconnect_resume_timeout_generation.load(std::memory_order_relaxed) != generation ||
+            session::running_sessions.load(std::memory_order_relaxed) != 0 ||
+            !proc::proc.running() ||
+            proc::proc.session_shutdown_requested()) {
+          return;
+        }
+
+        BOOST_LOG(info) << "Paused session resume timeout expired for ["sv << app_name
+                        << "]; terminating app"sv;
+        confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+        confighttp::emit_session_event("stream_resume_timeout", "Paused session timed out");
+        proc::proc.terminate();
+        confighttp::set_session_state(confighttp::session_state_e::idle);
+        confighttp::emit_session_event("stream_ended", "Paused session timed out");
+      }).detach();
     }
   }  // namespace
 
@@ -2193,14 +2214,14 @@ namespace stream {
 
       if (remaining == 0) {
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
+        bool paused_for_resume = false;
         if (proc::proc.running()) {
           if (proc::proc.session_shutdown_requested()) {
             BOOST_LOG(info) << "Skipping pause because host shutdown is already in progress"sv;
-          } else if (should_terminate_on_last_client_disconnect()) {
-            BOOST_LOG(info) << "Last client disconnected from isolated cage runtime; terminating app instead of pausing"sv;
-            proc::proc.terminate();
           } else {
             proc::proc.pause();
+            paused_for_resume = proc::proc.running() > 0;
+            revert_display_config = !paused_for_resume && revert_display_config;
           }
         } else {
           // We have no app running and also no clients anymore.
@@ -2215,8 +2236,15 @@ namespace stream {
 
         // Clear stream stats when all sessions end
         stream_stats::update_stream_active(false);
-        confighttp::set_session_state(confighttp::session_state_e::idle);
-        confighttp::emit_session_event("stream_ended", "All sessions ended");
+        if (paused_for_resume) {
+          confighttp::set_session_state(confighttp::session_state_e::paused);
+          confighttp::emit_session_event("stream_paused", "Session paused; reconnect to resume");
+          schedule_disconnect_resume_timeout(proc::proc.get_last_run_app_name());
+        } else {
+          cancel_disconnect_resume_timeout();
+          confighttp::set_session_state(confighttp::session_state_e::idle);
+          confighttp::emit_session_event("stream_ended", "All sessions ended");
+        }
       }
     }
 
@@ -2310,6 +2338,7 @@ namespace stream {
       // If this is the first session, invoke the platform callbacks
       auto session_num = ++running_sessions;
       if (session_num == 1) {
+        cancel_disconnect_resume_timeout();
         platf::streaming_will_start();
         proc::proc.resume();
       }

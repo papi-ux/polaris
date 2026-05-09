@@ -699,6 +699,12 @@
     "disabled_now": "disabled",
     "live_badge": "Live",
     "live_default_badge": "Live by default",
+    "sync_ready_badge": "Nova sync ready",
+    "sync_pending_badge": "Sync pending",
+    "sync_unavailable_badge": "Sync unavailable",
+    "sync_ready_desc": "Nova can update live bitrate, Adaptive Bitrate, and AI Optimizer settings here; display mode changes apply on the next stream.",
+    "sync_pending_desc": "Polaris saved the requested display mode and will apply it after the active stream relaunches.",
+    "sync_unavailable_desc": "This host has not advertised the Nova client-settings endpoint yet.",
     "restart_badge": "Restart",
     "items": {
       "headless_mode": {

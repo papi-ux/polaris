@@ -30,6 +30,7 @@ namespace confighttp {
     cage_starting,   ///< Cage compositor spawning
     game_launching,  ///< Game process starting inside cage
     streaming,       ///< Stream active, frames flowing
+    paused,          ///< No active clients, app kept alive for resume
     tearing_down,    ///< Cleanup in progress
   };
 

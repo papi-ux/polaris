@@ -104,6 +104,7 @@ namespace crypto {
     std::string cert;
     std::string client_family;
     std::string display_mode;
+    int target_bitrate_kbps = 0;
     std::list<command_entry_t> do_cmds;
     std::list<command_entry_t> undo_cmds;
     PERM perm;

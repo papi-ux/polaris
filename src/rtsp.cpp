@@ -1115,19 +1115,12 @@ namespace rtsp_stream {
       config.monitor.enableIntraRefresh = util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
       if (session.preferred_codec) {
-        int preferred_video_format = config.monitor.videoFormat;
-        if (*session.preferred_codec == "h264") {
-          preferred_video_format = 0;
-        } else if (*session.preferred_codec == "hevc") {
-          preferred_video_format = 1;
-        } else if (*session.preferred_codec == "av1") {
-          preferred_video_format = 2;
-        }
-
-        if (preferred_video_format != config.monitor.videoFormat) {
-          BOOST_LOG(info) << "Session codec override: preferring "sv << *session.preferred_codec
-                          << " over client requested format "sv << config.monitor.videoFormat;
-          config.monitor.videoFormat = preferred_video_format;
+        const auto client_requested_codec = codec_name_for_video_format(config.monitor.videoFormat);
+        if (client_requested_codec != *session.preferred_codec) {
+          BOOST_LOG(info) << "Session codec preference ["sv << *session.preferred_codec
+                          << "] differs from client requested codec ["sv << client_requested_codec
+                          << "]; honoring client request for this RTSP session"sv;
+          session.preferred_codec.reset();
         }
       }
 

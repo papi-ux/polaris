@@ -1,6 +1,7 @@
 <script setup>
-import { ref, onMounted, onUnmounted, inject } from 'vue'
+import { computed, ref, onMounted, onUnmounted, inject } from 'vue'
 import { useToast } from '../composables/useToast'
+import { CLIENT_SETTINGS_RESPONSE_ONLY_KEYS, resolveClientSettingsSync } from '../client-settings-sync'
 
 const config = ref({})
 const pendingKey = ref(null)
@@ -41,6 +42,7 @@ const responseOnlyConfigKeys = [
   'runtime_effective_headless',
   'runtime_gpu_native_override_active',
   'stream_display_mode',
+  ...CLIENT_SETTINGS_RESPONSE_ONLY_KEYS,
 ]
 
 function isEnabled(key) {
@@ -155,6 +157,23 @@ const visibleToggles = () => (
     ? toggles.filter((toggle) => compactToggleKeys.includes(toggle.key))
     : toggles
 )
+
+const clientSettingsSync = computed(() => resolveClientSettingsSync(config.value))
+const syncBadgeKey = computed(() => {
+  if (!clientSettingsSync.value.available) return 'quick_controls.sync_unavailable_badge'
+  if (clientSettingsSync.value.relaunchRequired) return 'quick_controls.sync_pending_badge'
+  return 'quick_controls.sync_ready_badge'
+})
+const syncCopyKey = computed(() => {
+  if (!clientSettingsSync.value.available) return 'quick_controls.sync_unavailable_desc'
+  if (clientSettingsSync.value.relaunchRequired) return 'quick_controls.sync_pending_desc'
+  return 'quick_controls.sync_ready_desc'
+})
+const syncBadgeTone = computed(() => {
+  if (!clientSettingsSync.value.available) return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+  if (clientSettingsSync.value.relaunchRequired) return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+  return 'border-green-400/30 bg-green-400/10 text-green-300'
+})
 </script>
 
 <template>
@@ -165,7 +184,10 @@ const visibleToggles = () => (
         <div v-if="!props.compact" class="mt-1 text-[11px] text-storm">{{ $t('quick_controls.helper') }}</div>
         <div v-else class="mt-1 text-[11px] text-storm">Fast stream toggles.</div>
       </div>
-      <div class="control-chip whitespace-nowrap">{{ $t('quick_controls.live_default_badge') }}</div>
+      <div class="control-chip whitespace-nowrap" :class="syncBadgeTone">{{ $t(syncBadgeKey) }}</div>
+    </div>
+    <div v-if="!props.compact" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2 text-[11px] leading-relaxed text-storm">
+      {{ $t(syncCopyKey) }}
     </div>
     <button
       v-for="t in visibleToggles()"
@@ -197,7 +219,8 @@ const visibleToggles = () => (
       </div>
     </button>
     <div v-if="props.compact" class="pt-1 text-[11px] text-storm/90">
-      More host controls in <router-link to="/config" class="text-ice no-underline hover:text-ice/80">Settings</router-link>.
+      {{ $t(syncBadgeKey) }}.
+      <router-link to="/config" class="text-ice no-underline hover:text-ice/80">Settings</router-link>.
     </div>
     <div v-if="pendingKey" class="pt-1 text-center text-[11px] text-storm">{{ $t('quick_controls.saving') }}</div>
   </div>

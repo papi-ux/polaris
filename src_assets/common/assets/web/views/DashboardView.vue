@@ -386,11 +386,14 @@
               <div class="flex items-center justify-between gap-3">
                 <div>
                   <div class="eyebrow-label">{{ $t('dashboard.quick_controls') }}</div>
-                  <div class="mt-2 text-sm leading-relaxed text-storm">Keep the active stream stable. Use Settings for host-wide toggles.</div>
+                  <div class="mt-2 text-sm leading-relaxed text-storm">{{ clientSettingsSyncCopy }}</div>
                 </div>
-                <router-link to="/config" class="text-[11px] font-medium text-ice no-underline hover:text-ice/80">
-                  Settings
-                </router-link>
+                <div class="flex shrink-0 items-center gap-2">
+                  <span class="meta-pill whitespace-nowrap" :class="clientSettingsSyncTone">{{ clientSettingsSyncLabel }}</span>
+                  <router-link to="/config" class="text-[11px] font-medium text-ice no-underline hover:text-ice/80">
+                    Settings
+                  </router-link>
+                </div>
               </div>
               <div class="mt-4">
                 <QuickControls compact @change="handleQuickControlChange" />
@@ -601,6 +604,7 @@ import Skeleton from '../components/Skeleton.vue'
 import GaugeArc from '../components/GaugeArc.vue'
 import QuickControls from '../components/QuickControls.vue'
 import { useI18n } from 'vue-i18n'
+import { resolveClientSettingsSync } from '../client-settings-sync'
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
@@ -618,6 +622,7 @@ const version = ref('')
 const headlessEnabled = ref(false)
 const discoveryEnabled = ref(false)
 const pairingEnabled = ref(false)
+const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
 
 const actionSummary = computed(() => {
@@ -744,6 +749,33 @@ function handleQuickControlChange({ key, enabled }) {
       break
   }
 }
+
+function refreshClientSettingsSync(configPayload) {
+  clientSettingsSync.value = resolveClientSettingsSync(configPayload || {})
+}
+
+const clientSettingsSyncLabel = computed(() => {
+  if (!clientSettingsSync.value.available) return 'Sync unavailable'
+  if (clientSettingsSync.value.relaunchRequired) return 'Sync pending'
+  return 'Nova sync ready'
+})
+
+const clientSettingsSyncTone = computed(() => {
+  if (!clientSettingsSync.value.available || clientSettingsSync.value.relaunchRequired) {
+    return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+  }
+  return 'border-green-400/30 bg-green-400/10 text-green-300'
+})
+
+const clientSettingsSyncCopy = computed(() => {
+  if (!clientSettingsSync.value.available) {
+    return 'Nova-facing client settings are unavailable on this Polaris build.'
+  }
+  if (clientSettingsSync.value.relaunchRequired) {
+    return 'A requested display mode is saved and will become active after the stream relaunches.'
+  }
+  return 'Nova-facing controls are available for live bitrate, Adaptive Bitrate, AI Optimizer, and next-stream display choices.'
+})
 
 const connectedClients = computed(() => {
   if (!stats.value?.streaming) return []
@@ -1434,6 +1466,7 @@ async function fetchSystemInfo() {
     ])
     if (configRes.ok) {
       const config = await configRes.json()
+      refreshClientSettingsSync(config)
       systemInfo.gpuName = config.adapter_name || ''
       systemInfo.gpuDriver = config.gpu_driver || ''
       systemInfo.version = config.version || ''
@@ -1701,6 +1734,7 @@ onMounted(async () => {
     const res = await fetch('./api/config', { credentials: 'include' })
     if (res.ok) {
       const data = await res.json()
+      refreshClientSettingsSync(data)
       version.value = data.version || '0.0.0'
       headlessEnabled.value = data.headless_mode === 'enabled'
       discoveryEnabled.value = data.enable_discovery !== 'disabled'

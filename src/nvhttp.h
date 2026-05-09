@@ -271,6 +271,8 @@ namespace nvhttp {
    *
    * @param[in]  uuid       The uuid string
    * @param[in]  name       New name
+   * @param[in]  display_mode  Per-client display mode override
+   * @param[in]  target_bitrate_kbps  Per-client bitrate override
    * @param[in]  do_cmds    The do commands
    * @param[in]  undo_cmds  The undo commands
    * @param[in]  newPerm    New permission
@@ -284,6 +286,7 @@ namespace nvhttp {
     const std::string& uuid,
     const std::string& name,
     const std::string& display_mode,
+    const int target_bitrate_kbps,
     const cmd_list_t& do_cmds,
     const cmd_list_t& undo_cmds,
     const crypto::PERM newPerm,

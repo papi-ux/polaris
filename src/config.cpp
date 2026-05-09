@@ -601,6 +601,7 @@ namespace config {
 
   stream_t stream {
     10s,  // ping_timeout
+    300s,  // disconnect_resume_timeout
 
     APPS_JSON_PATH,
 
@@ -1365,6 +1366,12 @@ namespace config {
     int_between_f(vars, "ping_timeout", to, {-1, std::numeric_limits<int>::max()});
     if (to != -1) {
       stream.ping_timeout = std::chrono::milliseconds(to);
+    }
+
+    int disconnect_resume_timeout_seconds = -1;
+    int_between_f(vars, "disconnect_resume_timeout_seconds", disconnect_resume_timeout_seconds, {-1, 24 * 60 * 60});
+    if (disconnect_resume_timeout_seconds != -1) {
+      stream.disconnect_resume_timeout = std::chrono::seconds(disconnect_resume_timeout_seconds);
     }
 
     int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});

@@ -18,7 +18,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 
     # Enable dead code elimination via linker gc-sections
     list(APPEND POLARIS_COMPILE_OPTIONS -ffunction-sections -fdata-sections)
-    add_link_options(-Wl,--gc-sections)
+    if(APPLE)
+        add_link_options(-Wl,-dead_strip)
+    else()
+        add_link_options(-Wl,--gc-sections)
+    endif()
 
     # Reduce symbol table bloat and enable hidden visibility optimization
     list(APPEND POLARIS_COMPILE_OPTIONS -fvisibility=hidden -fvisibility-inlines-hidden)

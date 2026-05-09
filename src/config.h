@@ -199,6 +199,7 @@ namespace config {
 
   struct stream_t {
     std::chrono::milliseconds ping_timeout;
+    std::chrono::seconds disconnect_resume_timeout;
 
     std::string file_apps;
 

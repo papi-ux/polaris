@@ -7,6 +7,7 @@ import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
+import { resolveClientSettingsSync } from '../../client-settings-sync'
 
 const $t = inject('i18n').t;
 
@@ -79,6 +80,35 @@ const streamDisplayMode = computed(() => {
 const selectedStreamDisplayMode = computed(() => (
   streamDisplayModes.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes[0]
 ))
+
+const clientSettingsSync = computed(() => resolveClientSettingsSync(config.value))
+const clientSettingsSyncBadge = computed(() => {
+  if (!clientSettingsSync.value.available) return 'Unavailable'
+  if (clientSettingsSync.value.relaunchRequired) return 'Pending relaunch'
+  return 'Bidirectional'
+})
+const clientSettingsSyncTone = computed(() => {
+  if (!clientSettingsSync.value.available || clientSettingsSync.value.relaunchRequired) {
+    return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+  }
+  return 'border-green-400/30 bg-green-400/10 text-green-300'
+})
+const clientSettingsSyncCopy = computed(() => {
+  if (!clientSettingsSync.value.available) {
+    return 'Nova cannot see the Polaris client-settings endpoint on this host yet.'
+  }
+  if (clientSettingsSync.value.relaunchRequired) {
+    return 'Nova and Polaris agree on the saved display choice, but the active stream is still using the previous runtime path.'
+  }
+  return 'Nova can push desired settings and Polaris reports the effective runtime state back to the client.'
+})
+const clientSettingsRows = computed(() => [
+  { label: 'Display mode', value: clientSettingsSync.value.desiredModeLabel, note: 'Next stream' },
+  { label: 'Effective mode', value: clientSettingsSync.value.effectiveModeLabel, note: clientSettingsSync.value.relaunchRequired ? 'Pending' : 'Synced' },
+  { label: 'Bitrate limit', value: 'Live', note: 'Client write' },
+  { label: 'Adaptive Bitrate', value: 'Live', note: 'Host + Nova' },
+  { label: 'AI Optimizer', value: 'Live', note: 'Host + Nova' },
+])
 
 function setEnabledConfig(key, enabled) {
   config.value[key] = enabled ? 'enabled' : 'disabled'
@@ -172,6 +202,23 @@ const validateFallbackMode = (event) => {
 
           <div class="settings-warning-surface">
             {{ selectedStreamDisplayMode.restartCopy }}
+          </div>
+
+          <div class="settings-subtle-surface">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div class="section-kicker">Nova Sync</div>
+                <div class="mt-2 text-sm leading-relaxed text-storm">{{ clientSettingsSyncCopy }}</div>
+              </div>
+              <span class="meta-pill shrink-0" :class="clientSettingsSyncTone">{{ clientSettingsSyncBadge }}</span>
+            </div>
+            <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+              <div v-for="row in clientSettingsRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
+                <div class="text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ row.label }}</div>
+                <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
+                <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
+              </div>
+            </div>
           </div>
 
           <div class="grid gap-3 xl:grid-cols-3">
