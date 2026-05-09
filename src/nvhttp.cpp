@@ -3902,7 +3902,12 @@ namespace nvhttp {
               write_json({{"error", "adaptive_bitrate_enabled must be a boolean"}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
-            adaptive_bitrate::set_enabled(body["adaptive_bitrate_enabled"].get<bool>());
+            const bool enabled = body["adaptive_bitrate_enabled"].get<bool>();
+            if (!persist_config_values({{"adaptive_bitrate_enabled", bool_config_value(enabled)}})) {
+              write_json({{"error", "failed to persist adaptive bitrate setting"}}, SimpleWeb::StatusCode::server_error_internal_server_error);
+              return;
+            }
+            adaptive_bitrate::set_enabled(enabled);
           }
 
           if (body.contains("ai_optimizer_enabled")) {
@@ -3910,7 +3915,12 @@ namespace nvhttp {
               write_json({{"error", "ai_optimizer_enabled must be a boolean"}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
-            ai_optimizer::set_enabled(body["ai_optimizer_enabled"].get<bool>());
+            const bool enabled = body["ai_optimizer_enabled"].get<bool>();
+            if (!persist_config_values({{"ai_enabled", bool_config_value(enabled)}})) {
+              write_json({{"error", "failed to persist AI Optimizer setting"}}, SimpleWeb::StatusCode::server_error_internal_server_error);
+              return;
+            }
+            ai_optimizer::set_enabled(enabled);
           }
 
           if (stream_display_mode) {
@@ -4347,6 +4357,14 @@ namespace nvhttp {
         }
 
         const bool enabled = body["enabled"].get<bool>();
+        if (!persist_config_values({{"adaptive_bitrate_enabled", bool_config_value(enabled)}})) {
+          nlohmann::json err;
+          err["error"] = "failed to persist adaptive bitrate setting";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+          return;
+        }
         adaptive_bitrate::set_enabled(enabled);
         BOOST_LOG(info) << "Adaptive bitrate toggled via Polaris API: " << (enabled ? "enabled" : "disabled");
 
@@ -4396,6 +4414,14 @@ namespace nvhttp {
         }
 
         const bool enabled = body["enabled"].get<bool>();
+        if (!persist_config_values({{"ai_enabled", bool_config_value(enabled)}})) {
+          nlohmann::json err;
+          err["error"] = "failed to persist AI Optimizer setting";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+          return;
+        }
         ai_optimizer::set_enabled(enabled);
 
         nlohmann::json output;

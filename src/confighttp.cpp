@@ -35,6 +35,7 @@
 
 // local includes
 #include "config.h"
+#include "adaptive_bitrate.h"
 #include "browser_stream.h"
 #include "confighttp.h"
 #include "confighttp_validation.h"
@@ -223,6 +224,24 @@ namespace confighttp {
         } catch (...) {
         }
       }
+    }
+
+    std::string bool_config_value(bool enabled) {
+      return enabled ? "enabled"s : "disabled"s;
+    }
+
+    bool json_config_enabled(const nlohmann::json &value) {
+      if (value.is_boolean()) {
+        return value.get<bool>();
+      }
+      if (value.is_number_integer()) {
+        return value.get<int>() != 0;
+      }
+      if (value.is_string()) {
+        const auto text = boost::algorithm::to_lower_copy(value.get<std::string>());
+        return text == "enabled" || text == "true" || text == "1" || text == "yes";
+      }
+      return false;
     }
 
     std::vector<std::string> steam_library_launch_commands(const std::string &appid) {
@@ -2573,6 +2592,8 @@ namespace confighttp {
     output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
     output_tree["has_api_key"] = output_tree.value("has_api_key", false);
+    output_tree["adaptive_bitrate_enabled"] = bool_config_value(adaptive_bitrate::is_enabled());
+    output_tree["ai_enabled"] = bool_config_value(ai_optimizer::is_enabled());
     send_response(response, output_tree);
   }
 
@@ -2685,6 +2706,12 @@ namespace confighttp {
         BOOST_LOG(error) << "SaveConfig: "sv << message;
         bad_request(response, request, message);
         return;
+      }
+      if (input_tree.contains("adaptive_bitrate_enabled")) {
+        adaptive_bitrate::set_enabled(json_config_enabled(input_tree["adaptive_bitrate_enabled"]));
+      }
+      if (input_tree.contains("ai_enabled")) {
+        ai_optimizer::set_enabled(json_config_enabled(input_tree["ai_enabled"]));
       }
       output_tree["status"] = true;
       send_response(response, output_tree);
