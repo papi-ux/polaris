@@ -132,6 +132,9 @@
 [data-theme="oled"] .checkbox-field-input:checked {
   background: rgb(168, 200, 255);
 }
+[data-theme="oled"] .checkbox-field-input:focus-visible {
+  outline: 2px solid rgba(59, 130, 246, 0.85);
+}
 [data-theme="oled"] aside .border-b,
 [data-theme="oled"] aside .border-t {
   border-color: rgba(255, 255, 255, 0.04) !important;
@@ -271,7 +274,7 @@ textarea {
 }
 
 .checkbox-field-input:focus-visible {
-  outline: 2px solid rgba(59, 130, 246, 0.85);
+  outline: 2px solid rgb(168, 164, 255);
   outline-offset: 2px;
 }
 
