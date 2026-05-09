@@ -129,9 +129,6 @@
   background: rgba(168, 200, 255, 0.16);
   border-color: rgba(168, 200, 255, 0.3);
 }
-[data-theme="oled"] .checkbox-field:hover::before {
-  background: transparent;
-}
 [data-theme="oled"] .checkbox-field-input:checked {
   background: rgb(168, 200, 255);
 }
@@ -234,10 +231,6 @@ textarea {
   border-color: rgba(124, 115, 255, 0.3);
   transform: translateY(-1px);
 }
-
-/* .checkbox-field:hover::before {
-  background: transparent;
-} */
 
 .checkbox-field-control {
   display: flex;
