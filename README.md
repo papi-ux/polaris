@@ -69,15 +69,14 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.11
+## What's New in v1.0.12
 
-Polaris `v1.0.11` focuses on Browser Stream validation and Linux stream-runtime polish.
+Polaris `v1.0.12` focuses on corrected Fedora/Bazzite NVIDIA release assets.
 
-- Browser Stream is available as an experimental browser client path using WebTransport and WebCodecs.
-- Browser sessions now clean up their helper, transport, isolated compositor, and launched Steam game together.
-- Nova and Moonlight launches are more reliable after Browser Stream sessions because Polaris waits for Steam cleanup before the next app launch.
-- Headless Stream audio and escaped Steam child cleanup are stricter on Linux.
-- Fedora/Bazzite RPM assets use CUDA-enabled NVENC builds for the validated NVIDIA path.
+- Fedora/Bazzite RPM assets are rebuilt with CUDA enabled so NVIDIA/NVENC hosts can use the validated GPU-native upload path.
+- Tagged Fedora RPM release builds now fail validation if `polaris --version` reports `Build features: cuda=disabled`.
+- Fedora CUDA header patching is normalized for CUDA 13.2 and Fedora 42/43/44 release builds.
+- Browser Stream, Linux stream-runtime diagnostics, and Headless Stream behavior remain aligned with `v1.0.11`.
 
 See the [changelog](docs/changelog.md) for the full release history.
 

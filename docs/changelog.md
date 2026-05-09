@@ -7,6 +7,16 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.12
+
+Patch release focused on corrected Fedora/Bazzite NVIDIA release assets.
+
+- Rebuilt Fedora 42, Fedora 43, and Fedora 44 release RPMs with CUDA enabled so NVIDIA/NVENC hosts can use the validated GPU-native upload path
+- Added release validation that fails Fedora RPM packaging if a tagged release reports `Build features: cuda=disabled`
+- Normalized the Fedora CUDA toolkit header patching flow for CUDA 13.2 headers and Fedora 42/43/44 release builds
+- Fixed release dispatch packaging dependencies and Arch release validation so patch-release asset rebuilds are repeatable
+- Kept the v1.0.11 Browser Stream and Linux runtime diagnostics behavior otherwise unchanged
+
 ## v1.0.11
 
 Patch release focused on Browser Stream validation and Linux stream-runtime polish.
