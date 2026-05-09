@@ -270,6 +270,11 @@ textarea {
   transition: transform 0.2s ease;
 }
 
+.checkbox-field-input:focus-visible {
+  outline: 2px solid rgba(59, 130, 246, 0.85);
+  outline-offset: 2px;
+}
+
 .checkbox-field-input:checked {
   background: rgb(124, 115, 255);
 }
