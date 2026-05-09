@@ -106,12 +106,14 @@ const defValue = parsedDefaultPropValue ? "_common.enabled_def_cbox" : "_common.
 <template>
   <div :class="[props.class, { 'checkbox-field--compact': props.compact }]" :data-setting-key="props.id" class="checkbox-field">
     <label :for="props.id" class="checkbox-field-control">
-      <input type="checkbox"
-             class="checkbox-field-input"
-             :id="props.id"
-             v-model="model"
-             :true-value="checkboxValues.truthy"
-             :false-value="checkboxValues.falsy" />
+      <div class="checkbox-field-toggle">
+        <input type="checkbox"
+               class="checkbox-field-input"
+               :id="props.id"
+               v-model="model"
+               :true-value="checkboxValues.truthy"
+               :false-value="checkboxValues.falsy" />
+      </div>
       <span class="checkbox-field-copy">
         <span class="checkbox-field-title-row">
           <span class="text-silver cursor-pointer checkbox-field-label">
