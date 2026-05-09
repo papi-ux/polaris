@@ -344,6 +344,7 @@ namespace nvhttp {
       const auto effective_display_mode = policy.value("selected_display_mode", std::string {});
       const auto effective_bitrate_kbps = policy.value("target_bitrate_kbps", 0);
       const bool adaptive_active = adaptive_bitrate::is_enabled() && stats.adaptive_target_bitrate_kbps > 0;
+      const auto disconnect_resume_timeout_seconds = config::stream.disconnect_resume_timeout.count();
 
       nlohmann::json fields = nlohmann::json::object();
       fields["stream_display_mode"] = {
@@ -389,6 +390,15 @@ namespace nvhttp {
         {"scope", "host"},
         {"desired", ai_optimizer::is_enabled()},
         {"effective", ai_optimizer::is_enabled()},
+        {"status", "synced"},
+        {"live", true},
+        {"requires_relaunch", false}
+      };
+      fields["disconnect_resume_timeout_seconds"] = {
+        {"direction", "read_write"},
+        {"scope", "host"},
+        {"desired", disconnect_resume_timeout_seconds},
+        {"effective", disconnect_resume_timeout_seconds},
         {"status", "synced"},
         {"live", true},
         {"requires_relaunch", false}
@@ -685,6 +695,7 @@ namespace nvhttp {
       desired["target_bitrate_kbps"] = client.target_bitrate_kbps;
       desired["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
       desired["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+      desired["disconnect_resume_timeout_seconds"] = config::stream.disconnect_resume_timeout.count();
 
       nlohmann::json effective;
       effective["stream_display_mode"] = effective_mode;
@@ -695,6 +706,7 @@ namespace nvhttp {
       effective["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
       effective["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
       effective["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+      effective["disconnect_resume_timeout_seconds"] = config::stream.disconnect_resume_timeout.count();
       effective["capture_path"] = policy.value("capture_path", std::string {});
       effective["capture_gpu_native"] = policy.value("capture_gpu_native", false);
 
@@ -703,6 +715,7 @@ namespace nvhttp {
         std::to_string(client.target_bitrate_kbps) + "|" +
         (adaptive_bitrate::is_enabled() ? "1" : "0") + "|" +
         (ai_optimizer::is_enabled() ? "1" : "0") + "|" +
+        std::to_string(config::stream.disconnect_resume_timeout.count()) + "|" +
         effective_mode;
 
       nlohmann::json settings;
@@ -717,7 +730,8 @@ namespace nvhttp {
         {"display_mode_override", true},
         {"target_bitrate_override", true},
         {"adaptive_bitrate_control", true},
-        {"ai_optimizer_control", true}
+        {"ai_optimizer_control", true},
+        {"disconnect_resume_timeout_control", true}
       };
       settings["sync_status"] = build_client_settings_sync_status(
         client,
@@ -3488,6 +3502,7 @@ namespace nvhttp {
       features["device_profiles"] = true;
       features["stream_policy_v1"] = true;
       features["client_settings_v1"] = true;
+      features["disconnect_resume_v1"] = true;
       features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
 #ifdef __linux__
@@ -3504,7 +3519,8 @@ namespace nvhttp {
           "display_mode",
           "target_bitrate_kbps",
           "adaptive_bitrate_enabled",
-          "ai_optimizer_enabled"
+          "ai_optimizer_enabled",
+          "disconnect_resume_timeout_seconds"
         })}
       };
 
@@ -3573,11 +3589,15 @@ namespace nvhttp {
         client_role != "viewer" &&
         !shutdown_requested &&
         stats.streaming;
-      const bool quit_allowed =
-        host_tuning_allowed &&
-        proc::proc.allow_client_commands &&
-        named_cert_p->allow_client_commands &&
+      const bool session_command_allowed =
+        owned_by_client &&
+        client_role != "viewer" &&
+        !shutdown_requested &&
         proc::proc.running() > 0;
+      const bool quit_allowed =
+        session_command_allowed &&
+        proc::proc.allow_client_commands &&
+        named_cert_p->allow_client_commands;
 
       // Game info
       output["game_id"] = proc::proc.running();
@@ -3884,6 +3904,23 @@ namespace nvhttp {
               return;
             }
             ai_optimizer::set_enabled(enabled);
+          }
+
+          if (body.contains("disconnect_resume_timeout_seconds")) {
+            if (!body["disconnect_resume_timeout_seconds"].is_number_integer()) {
+              write_json({{"error", "disconnect_resume_timeout_seconds must be an integer"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            const int timeout_seconds = body["disconnect_resume_timeout_seconds"].get<int>();
+            if (timeout_seconds < 0 || timeout_seconds > 24 * 60 * 60) {
+              write_json({{"error", "disconnect_resume_timeout_seconds must be between 0 and 86400"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            if (!persist_config_values({{"disconnect_resume_timeout_seconds", std::to_string(timeout_seconds)}})) {
+              write_json({{"error", "failed to persist disconnect resume timeout setting"}}, SimpleWeb::StatusCode::server_error_internal_server_error);
+              return;
+            }
+            config::stream.disconnect_resume_timeout = std::chrono::seconds(timeout_seconds);
           }
 
           if (stream_display_mode) {

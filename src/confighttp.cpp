@@ -4734,6 +4734,7 @@ namespace confighttp {
       case session_state_e::cage_starting: return "cage_starting";
       case session_state_e::game_launching: return "game_launching";
       case session_state_e::streaming: return "streaming";
+      case session_state_e::paused: return "paused";
       case session_state_e::tearing_down: return "tearing_down";
       default: return "unknown";
     }
