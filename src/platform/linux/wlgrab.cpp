@@ -746,10 +746,22 @@ namespace platf {
         // ext-image-copy DMA-BUF in headless cage mode. If unsupported, we
         // fall back to the existing SHM path and keep current behavior.
         if (!try_headless_extcopy_dmabuf && gpu_native_capture_supported) {
-          try_headless_extcopy_dmabuf = true;
-          static bool logged_headless_extcopy_probe = false;
-          if (!logged_headless_extcopy_probe) {
-            BOOST_LOG(info)
+      auto wlr_extcopy = std::make_shared<wl::wlr_extcopy_vram_t>();
+      if (!wlr_extcopy->init(hwdevice_type, display_name, config)) {
+        return wlr_extcopy;
+      }
+
+      // Some runtimes expose unstable extcopy but still support standard
+      // screencopy DMA-BUF. Try the regular GPU-native path before SHM.
+      auto wlr_dmabuf = std::make_shared<wl::wlr_vram_t>();
+      wlr_dmabuf->dmabuf.prefer_linear_dmabuf = true;
+      if (!wlr_dmabuf->init(hwdevice_type, display_name, config)) {
+#ifdef __linux__
+        cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+#endif
+        BOOST_LOG(info) << "wlr: extcopy unavailable; using wlroots screencopy DMA-BUF for headless labwc"sv;
+        return wlr_dmabuf;
+      BOOST_LOG(info) << "wlr: Headless DMA-BUF capture unavailable; using SHM fallback"sv;
               << "wlr: Probing ext-image-copy-capture DMA-BUF in headless labwc before falling back to SHM"sv;
             logged_headless_extcopy_probe = true;
           }
