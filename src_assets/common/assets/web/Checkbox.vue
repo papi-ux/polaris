@@ -119,11 +119,11 @@ const defValue = parsedDefaultPropValue ? "_common.enabled_def_cbox" : "_common.
           <span class="text-silver cursor-pointer checkbox-field-label leading-snug">
             {{ $t(labelField) }}
           </span>
-          <span class="text-xs text-storm checkbox-field-default" v-if="showDefValue">
+          <span class="text-xs leading-snug text-storm checkbox-field-default" v-if="showDefValue">
             {{ $t(defValue) }}
           </span>
         </span>
-        <span class="text-sm text-storm checkbox-field-desc" v-if="showDesc">
+        <span class="text-sm leading-relaxed text-storm checkbox-field-desc" v-if="showDesc">
           {{ $t(descField) }}
           <slot></slot>
         </span>

@@ -228,6 +228,7 @@ import AiOptimizer from '../configs/tabs/AiOptimizer.vue'
 import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
+import { CLIENT_SETTINGS_RESPONSE_ONLY_KEYS, stripClientSettingsResponseOnly } from '../client-settings-sync'
 
 const { toast } = useToast()
 const i18n = inject('i18n')
@@ -240,6 +241,7 @@ const restarted = ref(false)
 const saving = ref(false)
 const restarting = ref(false)
 const config = ref(null)
+const responseOnlyConfig = ref({})
 const currentTab = ref("general")
 const vdisplayStatus = ref("1")
 const global_prep_cmd = ref([])
@@ -661,6 +663,15 @@ function clearSearchHighlight() {
   }
 }
 
+function captureResponseOnlyConfig(source) {
+  responseOnlyConfig.value = {}
+  for (const key of CLIENT_SETTINGS_RESPONSE_ONLY_KEYS) {
+    if (source[key] !== undefined) {
+      responseOnlyConfig.value[key] = source[key]
+    }
+  }
+}
+
 function resolveSearchTarget(optionKey) {
   if (!settingsContentRef.value || !optionKey) return null
   const escaped = escapeSelector(optionKey)
@@ -729,6 +740,8 @@ function serialize() {
   if (Array.isArray(configCopy.trusted_subnets)) {
     configCopy.trusted_subnets = configCopy.trusted_subnets.filter(s => s && s.trim()).join(',')
   }
+
+  stripClientSettingsResponseOnly(configCopy)
 
   return configCopy
 }
@@ -821,7 +834,7 @@ function resetLocalChanges() {
   if (!initialSerialized.value) return
   const serialized = JSON.parse(initialSerialized.value)
   Object.keys(config.value).forEach((key) => { delete config.value[key] })
-  Object.assign(config.value, serialized)
+  Object.assign(config.value, serialized, responseOnlyConfig.value)
   global_prep_cmd.value = Array.isArray(serialized.global_prep_cmd) ? serialized.global_prep_cmd : []
   global_state_cmd.value = Array.isArray(serialized.global_state_cmd) ? serialized.global_state_cmd : []
   server_cmd.value = Array.isArray(serialized.server_cmd) ? serialized.server_cmd : []
@@ -834,6 +847,7 @@ fetch("./api/config", { credentials: 'include' })
   .then((r) => r.json())
   .then((r) => {
     config.value = r
+    captureResponseOnlyConfig(config.value)
     platform.value = config.value.platform
 
     if (platform.value === "windows") {
