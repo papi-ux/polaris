@@ -57,6 +57,7 @@ namespace rtsp_stream {
     bool user_locked_display_mode;
     bool user_locked_virtual_display;
     uint32_t scale_factor;
+    std::optional<int> paired_target_bitrate_kbps;
     std::optional<int> target_bitrate_kbps;
     std::optional<int> nvenc_tune;
     std::optional<std::string> preferred_codec;

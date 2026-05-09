@@ -112,6 +112,7 @@ namespace confighttp::validation {
       "dd_manual_refresh_rate"sv,
       "dd_manual_resolution"sv,
       "dd_mode_remapping"sv,
+      "disconnect_resume_timeout_seconds"sv,
       "dd_refresh_rate_option"sv,
       "dd_resolution_option"sv,
       "dd_wa_hdr_toggle_delay"sv,

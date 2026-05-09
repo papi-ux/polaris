@@ -13,10 +13,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <string>
 
@@ -185,48 +188,240 @@ namespace nvhttp {
 
     bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile);
 
-    std::string stream_display_mode_label() {
-#ifdef __linux__
-      return stream_display_policy::resolve(
-        stream_display_policy::input_t {
-          host_virtual_display_available(),
-          video::active_encoder_requires_gpu_native_capture(),
-          cage_display_router::runtime_state().gpu_native_override_active,
-        }
-      ).label;
-#else
-      return proc::proc.virtual_display ? "Host Virtual Display" : "Desktop Display";
-#endif
+    std::string bool_config_value(bool enabled) {
+      return enabled ? "enabled"s : "disabled"s;
     }
 
-    std::string stream_display_mode_selection() {
-#ifdef __linux__
-      return stream_display_policy::resolve(
-        stream_display_policy::input_t {
-          host_virtual_display_available(),
-          video::active_encoder_requires_gpu_native_capture(),
-          cage_display_router::runtime_state().gpu_native_override_active,
+    bool persist_config_values(const std::unordered_map<std::string, std::string> &updates) {
+      if (updates.empty()) {
+        return true;
+      }
+
+      auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+      for (const auto &[key, value] : updates) {
+        vars[key] = value;
+      }
+
+      std::stringstream config_stream;
+      for (const auto &[key, value] : vars) {
+        if (value.empty()) {
+          continue;
         }
-      ).selection;
-#else
-      return proc::proc.virtual_display ? "host_virtual_display" : "desktop_display";
-#endif
+        config_stream << key << " = " << value << std::endl;
+      }
+
+      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+        BOOST_LOG(error) << "client_settings: failed to write config file: "sv << config::sunshine.config_file;
+        return false;
+      }
+
+      return true;
     }
 
-    std::string stream_display_mode_reason() {
-#ifdef __linux__
-      return stream_display_policy::resolve(
-        stream_display_policy::input_t {
-          host_virtual_display_available(),
-          video::active_encoder_requires_gpu_native_capture(),
-          cage_display_router::runtime_state().gpu_native_override_active,
-        }
-      ).reason;
-#else
-      return proc::proc.virtual_display ?
-        "Polaris is streaming from a host virtual display." :
-        "Polaris is streaming from the current desktop session.";
-#endif
+    std::string configured_stream_display_mode_selection() {
+      const auto &linux_display = config::video.linux_display;
+      if (!linux_display.headless_mode) {
+        return "desktop_display";
+      }
+      if (!linux_display.use_cage_compositor) {
+        return "host_virtual_display";
+      }
+      if (linux_display.prefer_gpu_native_capture) {
+        return "windowed_stream";
+      }
+      return "headless_stream";
+    }
+
+    std::string effective_stream_display_mode_selection(const stream_stats::stats_t &stats) {
+      if (!stats.streaming) {
+        return configured_stream_display_mode_selection();
+      }
+      if (stats.runtime_gpu_native_override_active) {
+        return "windowed_stream";
+      }
+      if (proc::proc.virtual_display) {
+        return "host_virtual_display";
+      }
+      if (stats.runtime_effective_headless) {
+        return "headless_stream";
+      }
+      return "desktop_display";
+    }
+
+    std::string stream_display_mode_label_for_selection(const std::string &selection) {
+      if (selection == "headless_stream") {
+        return "Headless Stream";
+      }
+      if (selection == "host_virtual_display") {
+        return "Host Virtual Display";
+      }
+      if (selection == "windowed_stream") {
+        return "GPU-Native Test";
+      }
+      return "Desktop Display";
+    }
+
+    std::string stream_display_mode_reason_for_selection(const std::string &selection) {
+      if (selection == "headless_stream") {
+        return "Polaris will stream from the private headless compositor runtime.";
+      }
+      if (selection == "host_virtual_display") {
+        return host_virtual_display_available() ?
+          "Polaris will create or use a host virtual display for this stream." :
+          "Polaris requested a host virtual display, but no backend is currently available.";
+      }
+      if (selection == "windowed_stream") {
+        return "Polaris may run the private compositor windowed when that is needed to keep capture GPU-native.";
+      }
+      return "Polaris will stream from the current desktop session.";
+    }
+
+    bool apply_stream_display_mode_selection(const std::string &selection,
+                                             std::string &error) {
+      bool headless = false;
+      bool cage = false;
+      bool gpu_native = false;
+
+      if (selection == "headless_stream") {
+        headless = true;
+        cage = true;
+      } else if (selection == "host_virtual_display") {
+        headless = true;
+      } else if (selection == "desktop_display") {
+        // Defaults already describe desktop display.
+      } else if (selection == "windowed_stream") {
+        headless = true;
+        cage = true;
+        gpu_native = true;
+      } else {
+        error = "stream_display_mode must be headless_stream, desktop_display, host_virtual_display, or windowed_stream";
+        return false;
+      }
+
+      config::video.linux_display.headless_mode = headless;
+      config::video.linux_display.use_cage_compositor = cage;
+      config::video.linux_display.prefer_gpu_native_capture = gpu_native;
+
+      if (!persist_config_values({
+            {"headless_mode", bool_config_value(headless)},
+            {"linux_use_cage_compositor", bool_config_value(cage)},
+            {"linux_prefer_gpu_native_capture", bool_config_value(gpu_native)}
+          })) {
+        error = "failed to persist stream display mode";
+        return false;
+      }
+
+      return true;
+    }
+
+    nlohmann::json stream_display_mode_options_json() {
+      nlohmann::json modes = nlohmann::json::array();
+      for (const auto &selection : {
+             "headless_stream"s,
+             "desktop_display"s,
+             "host_virtual_display"s,
+             "windowed_stream"s
+           }) {
+        modes.push_back({
+          {"value", selection},
+          {"label", stream_display_mode_label_for_selection(selection)},
+          {"available", selection != "host_virtual_display" || host_virtual_display_available()},
+          {"restart_required", true},
+          {"reason", stream_display_mode_reason_for_selection(selection)}
+        });
+      }
+      return modes;
+    }
+
+    nlohmann::json build_client_settings_sync_status(const crypto::named_cert_t &client,
+                                                     const stream_stats::stats_t &stats,
+                                                     const nlohmann::json &policy,
+                                                     const std::string &configured_mode,
+                                                     const std::string &effective_mode,
+                                                     bool relaunch_required) {
+      const bool paired_display_override = !client.display_mode.empty();
+      const bool paired_bitrate_override = client.target_bitrate_kbps > 0;
+      const auto effective_display_mode = policy.value("selected_display_mode", std::string {});
+      const auto effective_bitrate_kbps = policy.value("target_bitrate_kbps", 0);
+      const bool adaptive_active = adaptive_bitrate::is_enabled() && stats.adaptive_target_bitrate_kbps > 0;
+      const auto disconnect_resume_timeout_seconds = config::stream.disconnect_resume_timeout.count();
+
+      nlohmann::json fields = nlohmann::json::object();
+      fields["stream_display_mode"] = {
+        {"direction", "read_write"},
+        {"scope", "host"},
+        {"desired", configured_mode},
+        {"effective", effective_mode},
+        {"status", relaunch_required ? "pending_relaunch" : "synced"},
+        {"live", false},
+        {"requires_relaunch", relaunch_required}
+      };
+      fields["display_mode"] = {
+        {"direction", "read_write"},
+        {"scope", "paired_client"},
+        {"desired", client.display_mode},
+        {"effective", effective_display_mode},
+        {"status", paired_display_override && stats.streaming && effective_display_mode != client.display_mode ? "pending_next_launch" : "synced"},
+        {"live", false},
+        {"requires_relaunch", paired_display_override && stats.streaming && effective_display_mode != client.display_mode}
+      };
+      fields["target_bitrate_kbps"] = {
+        {"direction", "read_write"},
+        {"scope", "paired_client"},
+        {"desired", client.target_bitrate_kbps},
+        {"effective", effective_bitrate_kbps},
+        {"status", adaptive_active ? "adaptive_active" : "synced"},
+        {"live", true},
+        {"requires_relaunch", false},
+        {"adaptive_target_bitrate_kbps", stats.adaptive_target_bitrate_kbps},
+        {"paired_override_active", paired_bitrate_override}
+      };
+      fields["adaptive_bitrate_enabled"] = {
+        {"direction", "read_write"},
+        {"scope", "host"},
+        {"desired", adaptive_bitrate::is_enabled()},
+        {"effective", adaptive_bitrate::is_enabled()},
+        {"status", "synced"},
+        {"live", true},
+        {"requires_relaunch", false}
+      };
+      fields["ai_optimizer_enabled"] = {
+        {"direction", "read_write"},
+        {"scope", "host"},
+        {"desired", ai_optimizer::is_enabled()},
+        {"effective", ai_optimizer::is_enabled()},
+        {"status", "synced"},
+        {"live", true},
+        {"requires_relaunch", false}
+      };
+      fields["disconnect_resume_timeout_seconds"] = {
+        {"direction", "read_write"},
+        {"scope", "host"},
+        {"desired", disconnect_resume_timeout_seconds},
+        {"effective", disconnect_resume_timeout_seconds},
+        {"status", "synced"},
+        {"live", true},
+        {"requires_relaunch", false}
+      };
+
+      nlohmann::json status;
+      status["available"] = true;
+      status["version"] = 1;
+      status["direction"] = "bidirectional";
+      status["endpoint"] = "/polaris/v1/client-settings";
+      status["source_of_truth"] = "polaris_effective_runtime";
+      status["state"] =
+        relaunch_required ? "pending_relaunch" :
+        adaptive_active ? "adaptive_active" :
+        "synced";
+      status["message"] =
+        relaunch_required ?
+          "Desired settings are saved and will become effective after the active stream relaunches." :
+        adaptive_active ?
+          "Adaptive bitrate is enabled; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
+          "Desired settings match the current Polaris runtime state.";
+      status["fields"] = std::move(fields);
+      return status;
     }
 
     double stream_policy_target_fps(const stream_stats::stats_t &stats) {
@@ -372,6 +567,7 @@ namespace nvhttp {
                                             const nlohmann::json &health) {
       const auto device_profile = device_db::get_device(client.name);
       const bool paired_display_override = !client.display_mode.empty();
+      const bool paired_bitrate_override = client.target_bitrate_kbps > 0;
       const double target_fps = stream_policy_target_fps(stats);
       const int selected_width = stats.width > 0 ? stats.width : 0;
       const int selected_height = stats.height > 0 ? stats.height : 0;
@@ -399,8 +595,9 @@ namespace nvhttp {
       const int target_bitrate_kbps =
         stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps :
         stats.bitrate_kbps > 0 ? stats.bitrate_kbps :
+        paired_bitrate_override ? client.target_bitrate_kbps :
         device_profile ? device_profile->ideal_bitrate_kbps : 0;
-      const std::string source = paired_display_override ? "paired_client" :
+      const std::string source = (paired_display_override || paired_bitrate_override) ? "paired_client" :
         (!stats.optimization_source.empty() ? stats.optimization_source :
           (device_profile ? "device_db" : "default"));
 
@@ -445,9 +642,10 @@ namespace nvhttp {
 
       nlohmann::json policy;
       policy["version"] = 1;
-      policy["mode"] = stream_display_mode_selection();
-      policy["mode_label"] = stream_display_mode_label();
-      policy["mode_reason"] = stream_display_mode_reason();
+      const auto policy_stream_display_mode = effective_stream_display_mode_selection(stats);
+      policy["mode"] = policy_stream_display_mode;
+      policy["mode_label"] = stream_display_mode_label_for_selection(policy_stream_display_mode);
+      policy["mode_reason"] = stream_display_mode_reason_for_selection(policy_stream_display_mode);
       policy["source"] = source;
       policy["source_label"] = stream_policy_source_label(source);
       policy["optimization_source"] = stats.optimization_source;
@@ -459,6 +657,8 @@ namespace nvhttp {
       );
       policy["paired_display_mode_override"] = client.display_mode;
       policy["paired_display_mode_locked"] = paired_display_override;
+      policy["paired_target_bitrate_kbps"] = client.target_bitrate_kbps;
+      policy["paired_target_bitrate_locked"] = paired_bitrate_override;
       policy["target_fps"] = policy_fps;
       policy["target_bitrate_kbps"] = target_bitrate_kbps;
       policy["preferred_codec"] = stats.codec;
@@ -476,6 +676,73 @@ namespace nvhttp {
       policy["warnings"] = std::move(warnings);
       policy["has_warnings"] = !policy["warnings"].empty();
       return policy;
+    }
+
+    nlohmann::json build_client_settings_json(const crypto::named_cert_t &client,
+                                              const stream_stats::stats_t &stats,
+                                              const nlohmann::json &health) {
+      const auto policy = build_stream_policy_json(client, stats, health);
+      const auto configured_mode = configured_stream_display_mode_selection();
+      const auto effective_mode = effective_stream_display_mode_selection(stats);
+      const bool relaunch_required =
+        rtsp_stream::session_count() != 0 && configured_mode != effective_mode;
+
+      nlohmann::json desired;
+      desired["stream_display_mode"] = configured_mode;
+      desired["stream_display_mode_label"] = stream_display_mode_label_for_selection(configured_mode);
+      desired["stream_display_mode_reason"] = stream_display_mode_reason_for_selection(configured_mode);
+      desired["display_mode"] = client.display_mode;
+      desired["target_bitrate_kbps"] = client.target_bitrate_kbps;
+      desired["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
+      desired["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+      desired["disconnect_resume_timeout_seconds"] = config::stream.disconnect_resume_timeout.count();
+
+      nlohmann::json effective;
+      effective["stream_display_mode"] = effective_mode;
+      effective["stream_display_mode_label"] = stream_display_mode_label_for_selection(effective_mode);
+      effective["stream_display_mode_reason"] = stream_display_mode_reason_for_selection(effective_mode);
+      effective["display_mode"] = policy.value("selected_display_mode", std::string {});
+      effective["target_bitrate_kbps"] = policy.value("target_bitrate_kbps", 0);
+      effective["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
+      effective["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
+      effective["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
+      effective["disconnect_resume_timeout_seconds"] = config::stream.disconnect_resume_timeout.count();
+      effective["capture_path"] = policy.value("capture_path", std::string {});
+      effective["capture_gpu_native"] = policy.value("capture_gpu_native", false);
+
+      const std::string revision_seed =
+        configured_mode + "|" + client.display_mode + "|" +
+        std::to_string(client.target_bitrate_kbps) + "|" +
+        (adaptive_bitrate::is_enabled() ? "1" : "0") + "|" +
+        (ai_optimizer::is_enabled() ? "1" : "0") + "|" +
+        std::to_string(config::stream.disconnect_resume_timeout.count()) + "|" +
+        effective_mode;
+
+      nlohmann::json settings;
+      settings["version"] = 1;
+      settings["revision"] = std::to_string(std::hash<std::string> {}(revision_seed));
+      settings["desired"] = std::move(desired);
+      settings["effective"] = std::move(effective);
+      settings["policy"] = policy;
+      settings["health"] = health;
+      settings["capabilities"] = {
+        {"modes", stream_display_mode_options_json()},
+        {"display_mode_override", true},
+        {"target_bitrate_override", true},
+        {"adaptive_bitrate_control", true},
+        {"ai_optimizer_control", true},
+        {"disconnect_resume_timeout_control", true}
+      };
+      settings["sync_status"] = build_client_settings_sync_status(
+        client,
+        stats,
+        policy,
+        configured_mode,
+        effective_mode,
+        relaunch_required
+      );
+      settings["relaunch_required"] = relaunch_required;
+      return settings;
     }
 
     bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile) {
@@ -1065,39 +1332,41 @@ namespace nvhttp {
 
     nlohmann::json launch_mode_contract_for_app(const proc::ctx_t &app) {
       const bool app_prefers_virtual_display = app.virtual_display;
-      const std::string preferred_mode = app_prefers_virtual_display ? "virtual_display" : "headless";
+      const std::string preferred_mode = app_prefers_virtual_display ? "host_virtual_display" : "headless_stream";
       std::string recommended_mode = preferred_mode;
       std::string mode_reason;
 
       auto allowed_modes = nlohmann::json::array();
-      allowed_modes.push_back("headless");
+      allowed_modes.push_back("headless_stream");
+      allowed_modes.push_back("desktop_display");
+      allowed_modes.push_back("windowed_stream");
       if (host_virtual_display_available()) {
-        allowed_modes.push_back("virtual_display");
+        allowed_modes.push_back("host_virtual_display");
       }
 
       const bool steam_big_picture = boost::iequals(boost::trim_copy(app.name), "Steam Big Picture");
 
       if (app_prefers_virtual_display && host_virtual_display_available()) {
-        recommended_mode = "virtual_display";
+        recommended_mode = "host_virtual_display";
         mode_reason = steam_big_picture ?
           "Steam Big Picture is configured to prefer a dedicated virtual display on this host." :
           "This app is configured to prefer a dedicated virtual display on the host.";
       } else if (app_prefers_virtual_display && !host_virtual_display_available()) {
-        recommended_mode = "headless";
+        recommended_mode = "headless_stream";
         mode_reason =
-          "This app prefers Virtual Display, but Polaris does not currently have a virtual display backend available, so the non-virtual path is recommended.";
+          "This app prefers Host Virtual Display, but Polaris does not currently have a virtual display backend available, so Headless Stream is recommended.";
       } else if (host_prefers_headless()) {
-        recommended_mode = "headless";
+        recommended_mode = "headless_stream";
         mode_reason =
-          "Headless is recommended because this Polaris host is already configured for headless streaming.";
+          "Headless Stream is recommended because this Polaris host is already configured for headless streaming.";
       } else if (host_virtual_display_available()) {
-        recommended_mode = "headless";
+        recommended_mode = "headless_stream";
         mode_reason =
-          "This app defaults to the non-virtual path. Virtual Display is available when you want a dedicated display for the session.";
+          "This app defaults to Headless Stream. Host Virtual Display is available when you want a dedicated display for the session.";
       } else {
-        recommended_mode = "headless";
+        recommended_mode = "headless_stream";
         mode_reason =
-          "This app defaults to the non-virtual path on this host.";
+          "This app defaults to Headless Stream on this host.";
       }
 
       nlohmann::json launch_mode;
@@ -1401,6 +1670,7 @@ namespace nvhttp {
         named_cert_node["uuid"] = named_cert_p->uuid;
         named_cert_node["client_family"] = named_cert_p->client_family;
         named_cert_node["display_mode"] = named_cert_p->display_mode;
+        named_cert_node["target_bitrate_kbps"] = named_cert_p->target_bitrate_kbps;
         named_cert_node["perm"] = static_cast<uint32_t>(named_cert_p->perm);
         named_cert_node["enable_legacy_ordering"] = named_cert_p->enable_legacy_ordering;
         named_cert_node["allow_client_commands"] = named_cert_p->allow_client_commands;
@@ -1482,6 +1752,7 @@ namespace nvhttp {
             named_cert_p->uuid = uuid_util::uuid_t::generate().string();
             named_cert_p->client_family = "";
             named_cert_p->display_mode = "";
+            named_cert_p->target_bitrate_kbps = 0;
             named_cert_p->perm = PERM::_all;
             named_cert_p->enable_legacy_ordering = true;
             named_cert_p->allow_client_commands = true;
@@ -1501,6 +1772,7 @@ namespace nvhttp {
         named_cert_p->uuid = el.value("uuid", "");
         named_cert_p->client_family = el.value("client_family", "");
         named_cert_p->display_mode = el.value("display_mode", "");
+        named_cert_p->target_bitrate_kbps = util::get_non_string_json_value<int>(el, "target_bitrate_kbps", 0);
         named_cert_p->perm = (PERM)(util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t)PERM::_all)) & PERM::_all;
         named_cert_p->enable_legacy_ordering = el.value("enable_legacy_ordering", true);
         named_cert_p->allow_client_commands = el.value("allow_client_commands", true);
@@ -1628,6 +1900,11 @@ namespace nvhttp {
     launch_session->user_locked_display_mode = !named_cert_p->display_mode.empty();
     launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
+    if (named_cert_p->target_bitrate_kbps > 0) {
+      launch_session->paired_target_bitrate_kbps = named_cert_p->target_bitrate_kbps;
+    } else {
+      launch_session->paired_target_bitrate_kbps.reset();
+    }
 
     if (!launch_session->watch_only) {
       launch_session->client_do_cmds = named_cert_p->do_cmds;
@@ -2332,6 +2609,7 @@ namespace nvhttp {
       named_cert_node["uuid"] = named_cert->uuid;
       named_cert_node["client_family"] = named_cert->client_family;
       named_cert_node["display_mode"] = named_cert->display_mode;
+      named_cert_node["target_bitrate_kbps"] = named_cert->target_bitrate_kbps;
       named_cert_node["perm"] = static_cast<uint32_t>(named_cert->perm);
       named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
       named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
@@ -3223,11 +3501,28 @@ namespace nvhttp {
       features["session_lifecycle"] = true;
       features["device_profiles"] = true;
       features["stream_policy_v1"] = true;
+      features["client_settings_v1"] = true;
+      features["disconnect_resume_v1"] = true;
       features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
 #ifdef __linux__
       features["lock_screen_control"] = true;
 #endif
+
+      output["client_settings"] = {
+        {"version", 1},
+        {"endpoint", "/polaris/v1/client-settings"},
+        {"direction", "bidirectional"},
+        {"source_of_truth", "polaris_effective_runtime"},
+        {"fields", nlohmann::json::array({
+          "stream_display_mode",
+          "display_mode",
+          "target_bitrate_kbps",
+          "adaptive_bitrate_enabled",
+          "ai_optimizer_enabled",
+          "disconnect_resume_timeout_seconds"
+        })}
+      };
 
       // Capture info
       auto &capture = output["capture"];
@@ -3294,11 +3589,15 @@ namespace nvhttp {
         client_role != "viewer" &&
         !shutdown_requested &&
         stats.streaming;
-      const bool quit_allowed =
-        host_tuning_allowed &&
-        proc::proc.allow_client_commands &&
-        named_cert_p->allow_client_commands &&
+      const bool session_command_allowed =
+        owned_by_client &&
+        client_role != "viewer" &&
+        !shutdown_requested &&
         proc::proc.running() > 0;
+      const bool quit_allowed =
+        session_command_allowed &&
+        proc::proc.allow_client_commands &&
+        named_cert_p->allow_client_commands;
 
       // Game info
       output["game_id"] = proc::proc.running();
@@ -3331,7 +3630,7 @@ namespace nvhttp {
       tuning["mangohud_configured"] = proc::proc.current_app_has_mangohud();
 
       auto &display_mode = output["display_mode"];
-      const auto stream_display_mode = stream_display_mode_selection();
+      const auto stream_display_mode = effective_stream_display_mode_selection(stats);
       display_mode["virtual_display"] = proc::proc.virtual_display;
       display_mode["requested_headless"] = stats.runtime_requested_headless;
       display_mode["effective_headless"] = stats.runtime_effective_headless;
@@ -3344,10 +3643,12 @@ namespace nvhttp {
         proc::proc.session_display_mode_is_explicit() ?
           (proc::proc.virtual_display ? "virtual_display" : "headless") :
           "auto";
-      display_mode["label"] = stream_display_mode_label();
-      display_mode["reason"] = stream_display_mode_reason();
+      display_mode["label"] = stream_display_mode_label_for_selection(stream_display_mode);
+      display_mode["reason"] = stream_display_mode_reason_for_selection(stream_display_mode);
       display_mode["paired_display_mode_override"] = named_cert_p->display_mode;
       display_mode["paired_display_mode_locked"] = !named_cert_p->display_mode.empty();
+      display_mode["paired_target_bitrate_kbps"] = named_cert_p->target_bitrate_kbps;
+      display_mode["paired_target_bitrate_locked"] = named_cert_p->target_bitrate_kbps > 0;
 
       // Capture info
       auto &capture_info = output["capture"];
@@ -3390,6 +3691,11 @@ namespace nvhttp {
       );
       output["health"] = health;
       output["stream_policy"] = build_stream_policy_json(
+        *named_cert_p,
+        stats,
+        health
+      );
+      output["client_settings"] = build_client_settings_json(
         *named_cert_p,
         stats,
         health
@@ -3453,6 +3759,7 @@ namespace nvhttp {
             named_cert_p->uuid,
             named_cert_p->name,
             display_mode,
+            named_cert_p->target_bitrate_kbps,
             named_cert_p->do_cmds,
             named_cert_p->undo_cmds,
             named_cert_p->perm,
@@ -3493,6 +3800,177 @@ namespace nvhttp {
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+      }
+    };
+
+    auto polarisClientSettings = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      auto write_json = [&](const nlohmann::json &body,
+                            SimpleWeb::StatusCode status = SimpleWeb::StatusCode::success_ok) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(status, body.dump(), headers);
+      };
+
+      try {
+        if (request->method == "POST") {
+          std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+          const auto body = body_str.empty() ? nlohmann::json::object() : nlohmann::json::parse(body_str);
+
+          std::optional<std::string> stream_display_mode;
+          if (body.contains("stream_display_mode")) {
+            if (!body["stream_display_mode"].is_string()) {
+              write_json({{"error", "stream_display_mode must be a string"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+
+            std::string error;
+            stream_display_mode = body["stream_display_mode"].get<std::string>();
+            if (*stream_display_mode != "headless_stream" &&
+                *stream_display_mode != "desktop_display" &&
+                *stream_display_mode != "host_virtual_display" &&
+                *stream_display_mode != "windowed_stream") {
+              error = "stream_display_mode must be headless_stream, desktop_display, host_virtual_display, or windowed_stream";
+              write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+          }
+
+          std::string display_mode = named_cert_p->display_mode;
+          if (body.value("clear_display_mode", false)) {
+            display_mode.clear();
+          } else if (body.contains("display_mode")) {
+            if (!body["display_mode"].is_string()) {
+              write_json({{"error", "display_mode must be a string"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            display_mode = body["display_mode"].get<std::string>();
+          }
+
+          int width = 0;
+          int height = 0;
+          double fps = 0.0;
+          if (!display_mode.empty() && !parse_stream_policy_display_mode(display_mode, width, height, fps)) {
+            write_json(
+              {{"error", "display_mode must use WIDTHxHEIGHTxFPS, for example 1920x1080x120"}},
+              SimpleWeb::StatusCode::client_error_bad_request
+            );
+            return;
+          }
+
+          int target_bitrate_kbps = named_cert_p->target_bitrate_kbps;
+          if (body.value("clear_target_bitrate", false)) {
+            target_bitrate_kbps = 0;
+          } else if (body.contains("target_bitrate_kbps")) {
+            if (!body["target_bitrate_kbps"].is_number_integer()) {
+              write_json({{"error", "target_bitrate_kbps must be an integer"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            target_bitrate_kbps = body["target_bitrate_kbps"].get<int>();
+            if (target_bitrate_kbps != 0 && (target_bitrate_kbps < 1000 || target_bitrate_kbps > 300000)) {
+              write_json({{"error", "target_bitrate_kbps must be 0 or between 1000 and 300000"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+          }
+
+          if (body.contains("adaptive_bitrate_enabled")) {
+            if (!body["adaptive_bitrate_enabled"].is_boolean()) {
+              write_json({{"error", "adaptive_bitrate_enabled must be a boolean"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            const bool enabled = body["adaptive_bitrate_enabled"].get<bool>();
+            if (!persist_config_values({{"adaptive_bitrate_enabled", bool_config_value(enabled)}})) {
+              write_json({{"error", "failed to persist adaptive bitrate setting"}}, SimpleWeb::StatusCode::server_error_internal_server_error);
+              return;
+            }
+            adaptive_bitrate::set_enabled(enabled);
+          }
+
+          if (body.contains("ai_optimizer_enabled")) {
+            if (!body["ai_optimizer_enabled"].is_boolean()) {
+              write_json({{"error", "ai_optimizer_enabled must be a boolean"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            const bool enabled = body["ai_optimizer_enabled"].get<bool>();
+            if (!persist_config_values({{"ai_enabled", bool_config_value(enabled)}})) {
+              write_json({{"error", "failed to persist AI Optimizer setting"}}, SimpleWeb::StatusCode::server_error_internal_server_error);
+              return;
+            }
+            ai_optimizer::set_enabled(enabled);
+          }
+
+          if (body.contains("disconnect_resume_timeout_seconds")) {
+            if (!body["disconnect_resume_timeout_seconds"].is_number_integer()) {
+              write_json({{"error", "disconnect_resume_timeout_seconds must be an integer"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            const int timeout_seconds = body["disconnect_resume_timeout_seconds"].get<int>();
+            if (timeout_seconds < 0 || timeout_seconds > 24 * 60 * 60) {
+              write_json({{"error", "disconnect_resume_timeout_seconds must be between 0 and 86400"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            if (!persist_config_values({{"disconnect_resume_timeout_seconds", std::to_string(timeout_seconds)}})) {
+              write_json({{"error", "failed to persist disconnect resume timeout setting"}}, SimpleWeb::StatusCode::server_error_internal_server_error);
+              return;
+            }
+            config::stream.disconnect_resume_timeout = std::chrono::seconds(timeout_seconds);
+          }
+
+          if (stream_display_mode) {
+            std::string error;
+            if (!apply_stream_display_mode_selection(*stream_display_mode, error)) {
+              write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+          }
+
+          if (target_bitrate_kbps > 0) {
+            adaptive_bitrate::set_base_bitrate(target_bitrate_kbps);
+          }
+
+          const bool updated = update_device_info(
+            named_cert_p->uuid,
+            named_cert_p->name,
+            display_mode,
+            target_bitrate_kbps,
+            named_cert_p->do_cmds,
+            named_cert_p->undo_cmds,
+            named_cert_p->perm,
+            named_cert_p->enable_legacy_ordering,
+            named_cert_p->allow_client_commands,
+            named_cert_p->always_use_virtual_display
+          );
+
+          if (!updated) {
+            write_json({{"error", "paired client not found"}}, SimpleWeb::StatusCode::client_error_not_found);
+            return;
+          }
+        }
+
+        const auto stats = stream_stats::get_current();
+        const auto health = build_session_health_json(
+          stats,
+          proc::proc.virtual_display,
+          named_cert_p->name,
+          proc::proc.get_last_run_app_name()
+        );
+
+        nlohmann::json output;
+        output["status"] = true;
+        output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
+        output["sync_status"] = output["client_settings"]["sync_status"];
+        output["stream_policy"] = output["client_settings"]["policy"];
+        output["health"] = health;
+        write_json(output);
+      } catch (std::exception &e) {
+        write_json({{"error", e.what()}}, SimpleWeb::StatusCode::server_error_internal_server_error);
       }
     };
 
@@ -3814,7 +4292,8 @@ namespace nvhttp {
     // Real-time bitrate adjustment from client
     auto polarisSetBitrate = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
-      if (!get_verified_cert(request)) {
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
@@ -3836,6 +4315,15 @@ namespace nvhttp {
         nlohmann::json output;
         output["status"] = true;
         output["bitrate_kbps"] = bitrate_kbps;
+        const auto stats = stream_stats::get_current();
+        const auto health = build_session_health_json(
+          stats,
+          proc::proc.virtual_display,
+          named_cert_p->name,
+          proc::proc.get_last_run_app_name()
+        );
+        output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
+        output["sync_status"] = output["client_settings"]["sync_status"];
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(output.dump(), headers);
@@ -3850,7 +4338,8 @@ namespace nvhttp {
 
     auto polarisSetAdaptiveBitrate = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
-      if (!get_verified_cert(request)) {
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
@@ -3868,13 +4357,30 @@ namespace nvhttp {
         }
 
         const bool enabled = body["enabled"].get<bool>();
+        if (!persist_config_values({{"adaptive_bitrate_enabled", bool_config_value(enabled)}})) {
+          nlohmann::json err;
+          err["error"] = "failed to persist adaptive bitrate setting";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+          return;
+        }
         adaptive_bitrate::set_enabled(enabled);
         BOOST_LOG(info) << "Adaptive bitrate toggled via Polaris API: " << (enabled ? "enabled" : "disabled");
 
         nlohmann::json output;
         output["status"] = true;
         output["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
-        output["adaptive_target_bitrate_kbps"] = stream_stats::get_current().adaptive_target_bitrate_kbps;
+        const auto stats = stream_stats::get_current();
+        output["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
+        const auto health = build_session_health_json(
+          stats,
+          proc::proc.virtual_display,
+          named_cert_p->name,
+          proc::proc.get_last_run_app_name()
+        );
+        output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
+        output["sync_status"] = output["client_settings"]["sync_status"];
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(output.dump(), headers);
@@ -3889,7 +4395,8 @@ namespace nvhttp {
 
     auto polarisSetAiOptimizer = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
-      if (!get_verified_cert(request)) {
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
@@ -3907,12 +4414,29 @@ namespace nvhttp {
         }
 
         const bool enabled = body["enabled"].get<bool>();
+        if (!persist_config_values({{"ai_enabled", bool_config_value(enabled)}})) {
+          nlohmann::json err;
+          err["error"] = "failed to persist AI Optimizer setting";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+          return;
+        }
         ai_optimizer::set_enabled(enabled);
 
         nlohmann::json output;
         output["status"] = true;
         output["ai_optimizer_enabled"] = ai_optimizer::is_enabled();
         output["effective"] = ai_optimizer::is_enabled();
+        const auto stats = stream_stats::get_current();
+        const auto health = build_session_health_json(
+          stats,
+          proc::proc.virtual_display,
+          named_cert_p->name,
+          proc::proc.get_last_run_app_name()
+        );
+        output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
+        output["sync_status"] = output["client_settings"]["sync_status"];
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(output.dump(), headers);
@@ -4203,6 +4727,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;
+    https_server.resource["^/polaris/v1/client-settings$"]["POST"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/stream-policy$"]["GET"] = polarisStreamPolicy;
     https_server.resource["^/polaris/v1/stream-policy$"]["POST"] = polarisStreamPolicy;
     https_server.resource["^/polaris/v1/session/bitrate$"]["POST"] = polarisSetBitrate;
@@ -4312,6 +4838,7 @@ namespace nvhttp {
     const std::string& uuid,
     const std::string& name,
     const std::string& display_mode,
+    const int target_bitrate_kbps,
     const cmd_list_t& do_cmds,
     const cmd_list_t& undo_cmds,
     const crypto::PERM newPerm,
@@ -4328,6 +4855,7 @@ namespace nvhttp {
       if (named_cert_p->uuid == uuid) {
         named_cert_p->name = name;
         named_cert_p->display_mode = display_mode;
+        named_cert_p->target_bitrate_kbps = target_bitrate_kbps;
         named_cert_p->perm = newPerm;
         named_cert_p->do_cmds = do_cmds;
         named_cert_p->undo_cmds = undo_cmds;

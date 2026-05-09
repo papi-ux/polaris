@@ -35,6 +35,7 @@
 
 // local includes
 #include "config.h"
+#include "adaptive_bitrate.h"
 #include "browser_stream.h"
 #include "confighttp.h"
 #include "confighttp_validation.h"
@@ -223,6 +224,24 @@ namespace confighttp {
         } catch (...) {
         }
       }
+    }
+
+    std::string bool_config_value(bool enabled) {
+      return enabled ? "enabled"s : "disabled"s;
+    }
+
+    bool json_config_enabled(const nlohmann::json &value) {
+      if (value.is_boolean()) {
+        return value.get<bool>();
+      }
+      if (value.is_number_integer()) {
+        return value.get<int>() != 0;
+      }
+      if (value.is_string()) {
+        const auto text = boost::algorithm::to_lower_copy(value.get<std::string>());
+        return text == "enabled" || text == "true" || text == "1" || text == "yes";
+      }
+      return false;
     }
 
     std::vector<std::string> steam_library_launch_commands(const std::string &appid) {
@@ -2089,6 +2108,7 @@ namespace confighttp {
       std::string uuid = input_tree.value("uuid", "");
       std::string name = input_tree.value("name", "");
       std::string display_mode = input_tree.value("display_mode", "");
+      int target_bitrate_kbps = input_tree.value("target_bitrate_kbps", 0);
       bool enable_legacy_ordering = input_tree.value("enable_legacy_ordering", true);
       bool allow_client_commands = input_tree.value("allow_client_commands", true);
       bool always_use_virtual_display = input_tree.value("always_use_virtual_display", false);
@@ -2099,6 +2119,7 @@ namespace confighttp {
         uuid,
         name,
         display_mode,
+        target_bitrate_kbps,
         do_cmds,
         undo_cmds,
         perm,
@@ -2474,6 +2495,67 @@ namespace confighttp {
     output_tree["status"] = true;
     output_tree["platform"] = POLARIS_PLATFORM;
     output_tree["version"] = PROJECT_VERSION;
+
+    const auto stream_display_mode_label = [](const std::string &selection) {
+      if (selection == "headless_stream") {
+        return "Headless Stream"s;
+      }
+      if (selection == "host_virtual_display") {
+        return "Host Virtual Display"s;
+      }
+      if (selection == "windowed_stream") {
+        return "GPU-Native Test"s;
+      }
+      return "Desktop Display"s;
+    };
+    const auto configured_stream_display_mode = []() {
+      const auto &linux_display = config::video.linux_display;
+      if (!linux_display.headless_mode) {
+        return "desktop_display"s;
+      }
+      if (!linux_display.use_cage_compositor) {
+        return "host_virtual_display"s;
+      }
+      if (linux_display.prefer_gpu_native_capture) {
+        return "windowed_stream"s;
+      }
+      return "headless_stream"s;
+    };
+    const auto stats = stream_stats::get_current();
+    const auto configured_mode = configured_stream_display_mode();
+    auto effective_mode = configured_mode;
+    if (stats.streaming) {
+      if (stats.runtime_gpu_native_override_active) {
+        effective_mode = "windowed_stream";
+      } else if (proc::proc.virtual_display) {
+        effective_mode = "host_virtual_display";
+      } else if (stats.runtime_effective_headless) {
+        effective_mode = "headless_stream";
+      } else {
+        effective_mode = "desktop_display";
+      }
+    }
+    const bool client_settings_relaunch_required =
+      stats.streaming && configured_mode != effective_mode;
+    output_tree["client_settings_available"] = true;
+    output_tree["client_settings_v1"] = true;
+    output_tree["client_settings_endpoint"] = "/polaris/v1/client-settings";
+    output_tree["client_settings_sync_mode"] = "bidirectional";
+    output_tree["client_settings_authority"] = "polaris_effective_runtime";
+    output_tree["client_settings_relaunch_required"] = client_settings_relaunch_required;
+    output_tree["client_settings_stream_display_mode"] = configured_mode;
+    output_tree["client_settings_effective_stream_display_mode"] = effective_mode;
+    output_tree["client_settings_stream_display_mode_label"] = stream_display_mode_label(configured_mode);
+    output_tree["client_settings_effective_stream_display_mode_label"] = stream_display_mode_label(effective_mode);
+    output_tree["client_settings_live_fields"] = nlohmann::json::array({
+      "target_bitrate_kbps",
+      "adaptive_bitrate_enabled",
+      "ai_optimizer_enabled"
+    });
+    output_tree["client_settings_restart_fields"] = nlohmann::json::array({
+      "stream_display_mode",
+      "display_mode"
+    });
 #ifdef _WIN32
     output_tree["vdisplayStatus"] = (int)proc::vDisplayDriverStatus;
 #endif
@@ -2510,6 +2592,8 @@ namespace confighttp {
     output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
     output_tree["has_api_key"] = output_tree.value("has_api_key", false);
+    output_tree["adaptive_bitrate_enabled"] = bool_config_value(adaptive_bitrate::is_enabled());
+    output_tree["ai_enabled"] = bool_config_value(ai_optimizer::is_enabled());
     send_response(response, output_tree);
   }
 
@@ -2571,6 +2655,18 @@ namespace confighttp {
                key == "runtime_requested_headless"sv ||
                key == "runtime_effective_headless"sv ||
                key == "runtime_gpu_native_override_active"sv ||
+               key == "client_settings_available"sv ||
+               key == "client_settings_v1"sv ||
+               key == "client_settings_endpoint"sv ||
+               key == "client_settings_sync_mode"sv ||
+               key == "client_settings_authority"sv ||
+               key == "client_settings_relaunch_required"sv ||
+               key == "client_settings_stream_display_mode"sv ||
+               key == "client_settings_effective_stream_display_mode"sv ||
+               key == "client_settings_stream_display_mode_label"sv ||
+               key == "client_settings_effective_stream_display_mode_label"sv ||
+               key == "client_settings_live_fields"sv ||
+               key == "client_settings_restart_fields"sv ||
                key == "stream_display_mode"sv;
       };
       std::string validation_error;
@@ -2610,6 +2706,12 @@ namespace confighttp {
         BOOST_LOG(error) << "SaveConfig: "sv << message;
         bad_request(response, request, message);
         return;
+      }
+      if (input_tree.contains("adaptive_bitrate_enabled")) {
+        adaptive_bitrate::set_enabled(json_config_enabled(input_tree["adaptive_bitrate_enabled"]));
+      }
+      if (input_tree.contains("ai_enabled")) {
+        ai_optimizer::set_enabled(json_config_enabled(input_tree["ai_enabled"]));
       }
       output_tree["status"] = true;
       send_response(response, output_tree);
@@ -4553,11 +4655,11 @@ namespace confighttp {
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
     server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);
     server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
+#ifdef __linux__
     server.resource["^/api/browser-stream/status$"]["GET"] = getBrowserStreamStatus;
     server.resource["^/api/browser-stream/session/start$"]["POST"] = withCsrf(postBrowserStreamStart);
     server.resource["^/api/browser-stream/session/stop$"]["POST"] = withCsrf(postBrowserStreamStop);
     server.resource["^/api/webrtc/status$"]["GET"] = getBrowserStreamStatus;
-#ifdef __linux__
     server.resource["^/api/display/screenshot$"]["GET"] = getDisplayScreenshot;
     server.resource["^/api/display/stream$"]["GET"] = getDisplayStream;
     server.resource["^/api/vdisplay/status$"]["GET"] = getVDisplayStatus;
@@ -4632,6 +4734,7 @@ namespace confighttp {
       case session_state_e::cage_starting: return "cage_starting";
       case session_state_e::game_launching: return "game_launching";
       case session_state_e::streaming: return "streaming";
+      case session_state_e::paused: return "paused";
       case session_state_e::tearing_down: return "tearing_down";
       default: return "unknown";
     }
