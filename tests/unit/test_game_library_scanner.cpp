@@ -99,7 +99,7 @@ TEST(LutrisLibraryScannerTests, ScansMultipleXdgDirectories) {
     "slug: data-game\n"
     "runner: wine\n");
 
-  const auto games = game_library::scan_lutris_games({config_dir, data_dir});
+  const auto games = game_library::scan_lutris_games(std::vector<std::filesystem::path> {config_dir, data_dir});
   ASSERT_EQ(games.size(), 2);
   EXPECT_EQ(games[0].slug, "config-game");
   EXPECT_EQ(games[1].slug, "data-game");

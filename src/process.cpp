@@ -4182,6 +4182,9 @@ namespace proc {
           ctx.steam_appid = app_node.value("steam-appid", "");
           ctx.game_category = app_node.value("game-category", "");
           ctx.source = app_node.value("source", ctx.steam_appid.empty() ? "manual" : "steam");
+          ctx.lutris_runner = app_node.value("lutris-runner", "");
+          ctx.platform = app_node.value("platform", "");
+          ctx.runtime = app_node.value("runtime", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {
             for (const auto &g : app_node["genres"]) {
