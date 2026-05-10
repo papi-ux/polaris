@@ -111,7 +111,7 @@
                     <span>{{ $t('dashboard.preview_capturing') }}</span>
                   </div>
                   <div v-if="previewError" class="dashboard-preview-overlay dashboard-preview-overlay-error">
-                    <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_error') }}</div>
+                    <div class="text-sm font-medium text-silver">{{ previewErrorText }}</div>
                     <button @click="retryPreviewNow" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
                       {{ $t('dashboard.preview_retry') }}
                     </button>
@@ -605,6 +605,11 @@ import GaugeArc from '../components/GaugeArc.vue'
 import QuickControls from '../components/QuickControls.vue'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
+import {
+  PREVIEW_REFRESH_MS,
+  nextPreviewBackoffMs,
+  shouldPausePreviewPolling,
+} from '../display-preview-state'
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
@@ -1126,9 +1131,6 @@ function formatSessionDate(ts) {
 }
 
 // Display preview (polling screenshot endpoint)
-const PREVIEW_REFRESH_MS = 2000
-const PREVIEW_FAILURE_BACKOFF_MS = 15000
-const PREVIEW_MAX_BACKOFF_MS = 60000
 const streamingOutput = ref('')
 const showPreview = ref(false)
 const previewExpanded = ref(false)
@@ -1136,12 +1138,16 @@ const previewLoaded = ref(false)
 const previewError = ref(false)
 const previewUrl = ref('')
 const previewBackoffMs = ref(PREVIEW_REFRESH_MS)
+const previewFailureCount = ref(0)
 let previewTimer = null
+
+const previewPollingPaused = computed(() => shouldPausePreviewPolling(previewFailureCount.value))
 
 function startPreview() {
   previewLoaded.value = false
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
+  previewFailureCount.value = 0
   showPreview.value = true
   refreshPreview()
 }
@@ -1160,6 +1166,7 @@ function refreshPreview() {
     clearTimeout(previewTimer)
     previewTimer = null
   }
+  if (previewPollingPaused.value) return
   previewError.value = false
   // When streaming, crop to the streaming output; otherwise show full display
   const output = streamingOutput.value ? `&output=${encodeURIComponent(streamingOutput.value)}` : ''
@@ -1170,21 +1177,22 @@ function handlePreviewLoad() {
   previewLoaded.value = true
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
+  previewFailureCount.value = 0
   schedulePreviewRefresh(PREVIEW_REFRESH_MS)
 }
 
 function handlePreviewError() {
   previewLoaded.value = false
   previewError.value = true
-  previewBackoffMs.value = Math.min(
-    Math.max(PREVIEW_FAILURE_BACKOFF_MS, previewBackoffMs.value * 2),
-    PREVIEW_MAX_BACKOFF_MS,
-  )
+  previewFailureCount.value += 1
+  if (previewPollingPaused.value) return
+  previewBackoffMs.value = nextPreviewBackoffMs(previewBackoffMs.value)
   schedulePreviewRefresh(previewBackoffMs.value)
 }
 
 function retryPreviewNow() {
   previewBackoffMs.value = PREVIEW_REFRESH_MS
+  previewFailureCount.value = 0
   refreshPreview()
 }
 
@@ -1201,6 +1209,7 @@ function stopPreview() {
   previewLoaded.value = false
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
+  previewFailureCount.value = 0
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
 }
 
@@ -1276,10 +1285,17 @@ const previewSupportCopy = computed(() => (
 ))
 
 const previewStatusText = computed(() => {
+  if (previewPollingPaused.value) return t('dashboard.preview_paused_status')
   if (previewError.value) return t('dashboard.preview_unavailable_status')
   if (!previewLoaded.value) return t('dashboard.preview_capturing')
   return t('dashboard.preview_status')
 })
+
+const previewErrorText = computed(() => (
+  previewPollingPaused.value
+    ? t('dashboard.preview_paused')
+    : t('dashboard.preview_error')
+))
 
 const aiOptimizationSummary = computed(() => {
   const reasoning = aiOptimization.value?.reasoning
