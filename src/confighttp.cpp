@@ -1801,6 +1801,18 @@ namespace confighttp {
         game["already_imported"] = already;
         if (!lutris_game.runner.empty()) {
           game["runner"] = lutris_game.runner;
+          if (boost::iequals(lutris_game.runner, "wine")) {
+            game["platform"] = "windows";
+            game["runtime"] = "wine";
+          } else if (boost::iequals(lutris_game.runner, "proton")) {
+            game["platform"] = "windows";
+            game["runtime"] = "proton";
+          } else if (boost::iequals(lutris_game.runner, "linux")) {
+            game["platform"] = "linux";
+            game["runtime"] = "native";
+          } else if (boost::iequals(lutris_game.runner, "steam")) {
+            game["runtime"] = "steam";
+          }
         }
         auto image_path = lutris_game.image_path.empty() ?
           game_library::find_lutris_image_path(lutris_game.slug, lutris_roots) :
@@ -2023,6 +2035,12 @@ namespace confighttp {
         }
 
         // Persist game classification metadata
+        if (game.contains("platform") && game["platform"].is_string()) {
+          app["platform"] = game["platform"];
+        }
+        if (game.contains("runtime") && game["runtime"].is_string()) {
+          app["runtime"] = game["runtime"];
+        }
         if (game.contains("game_category") && game["game_category"].is_string()) {
           app["game-category"] = game["game_category"];
         }
