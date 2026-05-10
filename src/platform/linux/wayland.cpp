@@ -1414,19 +1414,49 @@ namespace wl {
     target.destroy();
 
     bool used_implicit_modifier = false;
+    bool attempted_linear_modifier = false;
     if (!chosen_format.modifiers.empty()) {
-      target.bo = gbm_bo_create_with_modifiers2(
-        gbm_device,
-        frame_width,
-        frame_height,
-        chosen_format.format,
-        chosen_format.modifiers.data(),
-        chosen_format.modifiers.size(),
-        GBM_BO_USE_RENDERING
-      );
+      auto requested_modifiers = chosen_format.modifiers;
+      auto linear_it = std::find(requested_modifiers.begin(), requested_modifiers.end(), DRM_FORMAT_MOD_LINEAR);
+      if (linear_it != requested_modifiers.end()) {
+        const std::uint64_t linear_modifier = *linear_it;
+        requested_modifiers.erase(linear_it);
+        attempted_linear_modifier = true;
+
+        BOOST_LOG(info) << "Extcopy DMA-BUF capture: preferring linear modifier advertised by capture constraints"sv;
+        target.bo = gbm_bo_create_with_modifiers2(
+          gbm_device,
+          frame_width,
+          frame_height,
+          chosen_format.format,
+          &linear_modifier,
+          1,
+          GBM_BO_USE_RENDERING
+        );
+      }
+
+      if (!target.bo && !requested_modifiers.empty()) {
+        if (attempted_linear_modifier) {
+          BOOST_LOG(info) << "Extcopy DMA-BUF capture: linear modifier allocation failed; retrying remaining advertised modifiers"sv;
+        }
+
+        target.bo = gbm_bo_create_with_modifiers2(
+          gbm_device,
+          frame_width,
+          frame_height,
+          chosen_format.format,
+          requested_modifiers.data(),
+          requested_modifiers.size(),
+          GBM_BO_USE_RENDERING
+        );
+      }
     }
 
     if (!target.bo && chosen_format.implicit_modifier) {
+      if (attempted_linear_modifier) {
+        BOOST_LOG(info) << "Extcopy DMA-BUF capture: linear modifier allocation failed; retrying implicit modifier allocation"sv;
+      }
+
       used_implicit_modifier = true;
       target.bo = gbm_bo_create(
         gbm_device,
