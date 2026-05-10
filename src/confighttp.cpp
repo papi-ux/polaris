@@ -288,7 +288,7 @@ namespace confighttp {
     }
 
 #ifdef __linux__
-    constexpr auto PREVIEW_FAILURE_LOG_BACKOFF = std::chrono::seconds(60);
+    constexpr auto PREVIEW_FAILURE_LOG_BACKOFF = std::chrono::minutes(5);
 
     struct preview_failure_log_state_t {
       std::chrono::steady_clock::time_point last_log {};
