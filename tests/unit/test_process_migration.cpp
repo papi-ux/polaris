@@ -133,7 +133,11 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamBigPictureLaunchAndAddsCleanupUn
 
   ASSERT_NE(steam_ctx, parsed_apps.end());
   ASSERT_EQ(steam_ctx->detached.size(), 1);
+#ifdef __linux__
   EXPECT_EQ(steam_ctx->detached.front(), "setsid steam -gamepadui");
+#else
+  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://open/bigpicture");
+#endif
   EXPECT_TRUE(steam_ctx->cmd.empty());
   ASSERT_FALSE(steam_ctx->prep_cmds.empty());
   EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, "setsid steam -shutdown");
@@ -335,6 +339,8 @@ TEST(ProcessMigrationTests, ParsePreservesLutrisImportMetadataAndSource) {
       {"source", "lutris"},
       {"lutris-slug", "lutris-game"},
       {"lutris-runner", "wine"},
+      {"platform", "windows"},
+      {"runtime", "wine"},
       {"detached", {"setsid lutris lutris:rungame/lutris-game"}},
       {"gamepad", "ds5"},
       {"game-category", "cinematic"},
@@ -364,6 +370,9 @@ TEST(ProcessMigrationTests, ParsePreservesLutrisImportMetadataAndSource) {
 
   ASSERT_NE(lutris_ctx, parsed_apps.end());
   EXPECT_EQ(lutris_ctx->source, "lutris");
+  EXPECT_EQ(lutris_ctx->lutris_runner, "wine");
+  EXPECT_EQ(lutris_ctx->platform, "windows");
+  EXPECT_EQ(lutris_ctx->runtime, "wine");
   EXPECT_EQ(lutris_ctx->gamepad, "ds5");
   EXPECT_EQ(lutris_ctx->game_category, "cinematic");
   ASSERT_EQ(lutris_ctx->detached.size(), 1);

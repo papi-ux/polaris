@@ -60,6 +60,9 @@ TEST(AppValidationTests, AcceptsAWellFormedAppPayload) {
     {"prep-cmd", {{{"do", "echo start"}, {"undo", "echo stop"}, {"elevated", false}}}},
     {"detached", {"mangohud --dlsym"}},
     {"game-category", "fast_action"},
+    {"lutris-runner", "wine"},
+    {"platform", "windows"},
+    {"runtime", "wine"},
     {"source", "manual"}
   };
 
@@ -98,4 +101,26 @@ TEST(AppValidationTests, RejectsUnexpectedCommandShapes) {
   std::string error;
   EXPECT_FALSE(confighttp::validation::validate_app_payload(payload, error));
   EXPECT_NE(error.find("unsupported field"), std::string::npos);
+}
+
+TEST(AppValidationTests, RejectsUnknownPlatformMetadata) {
+  nlohmann::json payload = {
+    {"name", "Broken App"},
+    {"platform", "solaris"}
+  };
+
+  std::string error;
+  EXPECT_FALSE(confighttp::validation::validate_app_payload(payload, error));
+  EXPECT_NE(error.find("platform must be one of"), std::string::npos);
+}
+
+TEST(AppValidationTests, RejectsUnknownRuntimeMetadata) {
+  nlohmann::json payload = {
+    {"name", "Broken App"},
+    {"runtime", "dosbox"}
+  };
+
+  std::string error;
+  EXPECT_FALSE(confighttp::validation::validate_app_payload(payload, error));
+  EXPECT_NE(error.find("runtime must be one of"), std::string::npos);
 }

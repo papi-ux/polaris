@@ -370,6 +370,7 @@ namespace confighttp::validation {
       "gamepad"sv,
       "id"sv,
       "image-path"sv,
+      "lutris-runner"sv,
       "name"sv,
       "output"sv,
       "steam-appid"sv,
@@ -401,6 +402,22 @@ namespace confighttp::validation {
       "lutris"sv,
       "manual"sv,
       "steam"sv,
+    };
+    constexpr std::array platform_values {
+      ""sv,
+      "linux"sv,
+      "macos"sv,
+      "unknown"sv,
+      "windows"sv,
+    };
+    constexpr std::array runtime_values {
+      ""sv,
+      "native"sv,
+      "proton"sv,
+      "steam"sv,
+      "umu"sv,
+      "unknown"sv,
+      "wine"sv,
     };
     constexpr std::array category_values {
       ""sv,
@@ -481,6 +498,30 @@ namespace confighttp::validation {
 
         if (!contains(source_values, std::string_view {value.get<std::string>()})) {
           error = "source must be one of manual, steam, lutris, or heroic";
+          return false;
+        }
+        continue;
+      }
+
+      if (key == "platform") {
+        if (!validate_safe_string(key, value, error)) {
+          return false;
+        }
+
+        if (!contains(platform_values, std::string_view {value.get<std::string>()})) {
+          error = "platform must be one of linux, macos, unknown, or windows";
+          return false;
+        }
+        continue;
+      }
+
+      if (key == "runtime") {
+        if (!validate_safe_string(key, value, error)) {
+          return false;
+        }
+
+        if (!contains(runtime_values, std::string_view {value.get<std::string>()})) {
+          error = "runtime must be one of native, proton, steam, umu, unknown, or wine";
           return false;
         }
         continue;

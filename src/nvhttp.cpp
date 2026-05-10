@@ -143,6 +143,147 @@ namespace nvhttp {
       return value;
     }
 
+    std::string trim_copy(std::string value) {
+      auto is_space = [](unsigned char c) {
+        return std::isspace(c) != 0;
+      };
+      value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char c) {
+        return !is_space(c);
+      }));
+      value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char c) {
+        return !is_space(c);
+      }).base(), value.end());
+      return value;
+    }
+
+    std::string normalized_token(std::string value) {
+      return lower_copy(trim_copy(std::move(value)));
+    }
+
+    std::string app_command_blob(const proc::ctx_t &app) {
+      std::string blob = app.cmd;
+      for (const auto &cmd : app.detached) {
+        if (!blob.empty()) {
+          blob += '\n';
+        }
+        blob += cmd;
+      }
+      return blob;
+    }
+
+    std::string infer_runtime_label(const std::string &runtime) {
+      const auto normalized = normalized_token(runtime);
+      if (normalized == "native") {
+        return "Native";
+      }
+      if (normalized == "proton") {
+        return "Proton";
+      }
+      if (normalized == "wine") {
+        return "Wine";
+      }
+      if (normalized == "steam") {
+        return "Steam";
+      }
+      if (normalized == "umu") {
+        return "UMU";
+      }
+      return {};
+    }
+
+    std::string infer_platform_label(const std::string &platform) {
+      const auto normalized = normalized_token(platform);
+      if (normalized == "linux") {
+        return "Linux";
+      }
+      if (normalized == "windows") {
+        return "Windows";
+      }
+      if (normalized == "macos") {
+        return "macOS";
+      }
+      return {};
+    }
+
+    struct app_runtime_metadata_t {
+      std::string source;
+      std::string launcher_detail;
+      std::string platform;
+      std::string runtime;
+    };
+
+    app_runtime_metadata_t infer_app_runtime_metadata(const proc::ctx_t &app) {
+      app_runtime_metadata_t metadata;
+      metadata.source = normalized_token(app.source);
+      if (metadata.source.empty()) {
+        metadata.source = app.steam_appid.empty() ? "manual" : "steam";
+      }
+
+      metadata.platform = normalized_token(app.platform);
+      metadata.runtime = normalized_token(app.runtime);
+      metadata.launcher_detail = normalized_token(app.lutris_runner);
+
+      const auto commands = app_command_blob(app);
+      const auto lower_commands = lower_copy(commands);
+      const bool has_wine = lower_commands.find("wine") != std::string::npos;
+      const bool has_proton = lower_commands.find("proton") != std::string::npos ||
+                              lower_commands.find("steamcompat") != std::string::npos ||
+                              lower_commands.find("steam_compat") != std::string::npos;
+      const bool has_umu = lower_commands.find("umu-run") != std::string::npos;
+
+      if (metadata.source == "lutris") {
+        const auto runner = metadata.launcher_detail;
+        if (metadata.runtime.empty()) {
+          if (runner == "wine") {
+            metadata.runtime = "wine";
+          } else if (runner == "proton") {
+            metadata.runtime = "proton";
+          } else if (runner == "linux") {
+            metadata.runtime = "native";
+          } else if (runner == "steam") {
+            metadata.runtime = "steam";
+          } else if (!runner.empty()) {
+            metadata.runtime = runner;
+          }
+        }
+        if (metadata.platform.empty()) {
+          if (metadata.runtime == "wine" || metadata.runtime == "proton") {
+            metadata.platform = "windows";
+          } else if (metadata.runtime == "native") {
+            metadata.platform = "linux";
+          }
+        }
+      } else if (metadata.source == "steam") {
+        if (metadata.runtime.empty()) {
+          metadata.runtime = (has_proton || has_umu) ? "proton" : "steam";
+        }
+        if (metadata.platform.empty() && metadata.runtime == "proton") {
+          metadata.platform = "windows";
+        }
+      } else {
+        if (metadata.runtime.empty()) {
+          if (has_umu || has_proton) {
+            metadata.runtime = "proton";
+          } else if (has_wine) {
+            metadata.runtime = "wine";
+          }
+        }
+        if (metadata.platform.empty()) {
+          if (metadata.runtime == "wine" || metadata.runtime == "proton") {
+            metadata.platform = "windows";
+          }
+        }
+      }
+
+      if (metadata.runtime.empty()) {
+        metadata.runtime = "unknown";
+      }
+      if (metadata.platform.empty()) {
+        metadata.platform = "unknown";
+      }
+      return metadata;
+    }
+
     bool is_poor_quality_grade(const std::string &grade) {
       const auto normalized = lower_copy(grade);
       return normalized == "d" || normalized == "f";
@@ -4012,11 +4153,16 @@ namespace nvhttp {
           if (name_lower.find(query_lower) == std::string::npos) continue;
         }
 
+        const auto metadata = infer_app_runtime_metadata(app);
+
         // Source filter
         if (!source_filter.empty()) {
-          bool is_steam = !app.steam_appid.empty();
-          if (source_filter == "steam" && !is_steam) continue;
-          if (source_filter == "other" && is_steam) continue;
+          const auto normalized_source_filter = normalized_token(source_filter);
+          if (normalized_source_filter == "other") {
+            if (metadata.source == "steam" || metadata.source == "lutris" || metadata.source == "heroic") continue;
+          } else if (metadata.source != normalized_source_filter) {
+            continue;
+          }
         }
 
         // Pagination
@@ -4027,10 +4173,15 @@ namespace nvhttp {
         game["id"] = app.uuid;
         game["app_id"] = app.id;
         game["name"] = app.name;
-        game["source"] = app.steam_appid.empty() ? "other" : "steam";
+        game["source"] = metadata.source;
+        game["launcher_source"] = metadata.source;
+        game["launcher_detail"] = metadata.launcher_detail;
+        game["platform"] = metadata.platform;
+        game["runtime"] = metadata.runtime;
+        game["platform_label"] = infer_platform_label(metadata.platform);
+        game["runtime_label"] = infer_runtime_label(metadata.runtime);
         game["steam_appid"] = app.steam_appid;
         game["category"] = app.game_category;
-        game["source"] = app.source;
         game["installed"] = true;
         game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";

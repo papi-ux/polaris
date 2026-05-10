@@ -93,6 +93,9 @@ namespace proc {
     std::string steam_appid;
     std::string game_category;  // "fast_action", "cinematic", "desktop", "vr", or ""
     std::string source;         // "steam", "lutris", "heroic", or "manual"
+    std::string lutris_runner;
+    std::string platform;       // "linux", "windows", "unknown", or ""
+    std::string runtime;        // "native", "proton", "wine", "steam", "unknown", or ""
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
