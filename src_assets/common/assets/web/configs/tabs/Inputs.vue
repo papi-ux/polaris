@@ -184,14 +184,25 @@ const config = ref(props.config)
       ></Checkbox>
 
       <div v-if="config.mouse === 'enabled'" class="settings-toggle-row mb-3">
-        <Checkbox
-          id="mouse_cursor_visible"
-          locale-prefix="config"
-          v-model="config.mouse_cursor_visible"
-          :true-value="'enabled'"
-          :false-value="'disabled'"
-          default="disabled"
-        />
+      <div class="min-w-0">
+        <div>
+          <div class="settings-field-head !mb-0">
+            <div class="text-sm font-medium text-silver">Show host cursor</div>
+            <InfoHint size="sm" label="Show host cursor">
+              Controls whether Polaris draws the host cursor into the video stream. You can still toggle it at runtime with Ctrl+Alt+Shift+N.
+            </InfoHint>
+          </div>
+        </div>
+        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+          <input
+            type="checkbox"
+            class="sr-only peer"
+            :checked="config.mouse_cursor_visible === 'enabled'"
+            @change="config.mouse_cursor_visible = $event.target.checked ? 'enabled' : 'disabled'"
+          />
+          <div class="w-9 h-5 bg-storm/40 peer-focus:outline-none rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+        </label>
+      </div>
       </div>
 
       <Checkbox v-if="config.mouse === 'enabled'"

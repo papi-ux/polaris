@@ -93,9 +93,6 @@ namespace proc {
     std::string steam_appid;
     std::string game_category;  // "fast_action", "cinematic", "desktop", "vr", or ""
     std::string source;         // "steam", "lutris", "heroic", or "manual"
-    std::string lutris_runner;
-    std::string platform;       // "linux", "windows", "unknown", or ""
-    std::string runtime;        // "native", "proton", "wine", "steam", "unknown", or ""
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
@@ -193,6 +190,8 @@ namespace proc {
     std::vector<cmd_t>::const_iterator _app_prep_begin;
     bool _session_shutdown_requested = false;
     bool _client_session_report_recorded = false;
+    std::chrono::steady_clock::time_point _client_session_report_recorded_at {};
+    std::string _client_session_report_recorded_unique_id;
   };
 
   boost::filesystem::path

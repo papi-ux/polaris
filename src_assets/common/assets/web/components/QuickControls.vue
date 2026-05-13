@@ -92,6 +92,9 @@ async function toggle(key) {
 
     // Merge the toggle change
     existing[key] = newVal
+    if (key === 'ai_enabled') {
+      existing.adaptive_bitrate_enabled = newVal
+    }
     if (key === 'headless_mode' && platform === 'linux') {
       existing.linux_use_cage_compositor = newVal
       existing.linux_prefer_gpu_native_capture = 'disabled'
@@ -105,6 +108,9 @@ async function toggle(key) {
     })
     if (!response.ok) throw new Error('save-failed')
     syncKey(key, newVal)
+    if (key === 'ai_enabled') {
+      syncKey('adaptive_bitrate_enabled', newVal)
+    }
     if (key === 'headless_mode' && platform === 'linux') {
       syncKey('linux_use_cage_compositor', newVal)
       syncKey('linux_prefer_gpu_native_capture', 'disabled')
@@ -144,14 +150,13 @@ onUnmounted(() => {
 
 const toggles = [
   { key: 'headless_mode', requiresRestart: true },
-  { key: 'adaptive_bitrate_enabled', requiresRestart: false },
   { key: 'ai_enabled', requiresRestart: false },
   { key: 'stream_audio', requiresRestart: true },
   { key: 'enable_discovery', requiresRestart: false },
   { key: 'enable_pairing', requiresRestart: false },
 ]
 
-const compactToggleKeys = ['headless_mode', 'adaptive_bitrate_enabled', 'ai_enabled', 'stream_audio']
+const compactToggleKeys = ['headless_mode', 'ai_enabled', 'stream_audio']
 const visibleToggles = () => (
   props.compact
     ? toggles.filter((toggle) => compactToggleKeys.includes(toggle.key))

@@ -7,6 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.13
+
+Patch release focused on AI Auto Quality, Nova coordination, and Linux stream pacing diagnostics.
+
+- Added richer Nova/Polaris settings sync so launch optimization, applied stream settings, presentation state, adaptive bitrate status, and optimizer health are visible across both sides
+- Merged adaptive bitrate behavior into the AI Auto Quality path so recovery decisions can consider network pressure, host frame pacing, encode pressure, and session history together
+- Improved AI optimizer feedback handling so short low-confidence sessions do not incorrectly relax safe FPS caps or poison game profiles
+- Added safer history-based recovery profiles, including FPS fallback behavior and clearer host-render-limited session grading
+- Improved Linux headless stream reporting for DMA-BUF capture, CUDA conversion, encoder target, frame residency, and SHM/CPU fallback reasons
+- Added resumable disconnect handling and cleanup improvements for Steam and isolated cage sessions
+- Expanded optimizer, adaptive bitrate, stream stats, process migration, and web UI coverage for the new Auto Quality flow
+
 ## v1.0.12
 
 Patch release focused on corrected Fedora/Bazzite NVIDIA release assets.

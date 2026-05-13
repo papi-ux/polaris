@@ -84,6 +84,14 @@ namespace ai_optimizer {
     double last_packet_loss_pct = 0;
     std::string last_quality_grade;
     std::string last_codec;
+    int last_duration_s = 0;
+    int last_sample_count = 0;
+    double last_low_1_percent_fps = 0;
+    double last_min_fps = 0;
+    double last_frame_pacing_bad_pct = 0;
+    std::string last_end_reason;
+    std::string last_sample_confidence;
+    std::string last_feedback_ignored_reason;
     int poor_outcome_count = 0;
     int consecutive_poor_outcomes = 0;
     std::string last_optimization_source;
@@ -99,11 +107,54 @@ namespace ai_optimizer {
     int last_safe_bitrate_kbps = 0;
     std::string last_safe_codec;
     std::string last_safe_display_mode;
+    double last_safe_target_fps = 0;
     std::optional<bool> last_safe_hdr;
     bool last_relaunch_recommended = false;
     std::int64_t last_updated_at = 0;
     std::int64_t last_invalidated_at = 0;
   };
+
+  struct session_feedback_policy_t {
+    bool accepted = false;
+    bool counts_poor_outcome = false;
+    bool can_invalidate_cache = false;
+    std::string confidence;
+    std::string ignored_reason;
+    std::string end_reason;
+  };
+
+  session_feedback_policy_t classify_session_feedback(
+    const std::string &app_name,
+    const session_history_t &session);
+
+  /**
+   * @brief Derive the A/B/C/D/F quality grade for one reported session.
+   */
+  std::string grade_session_quality(const session_history_t &session);
+
+  /**
+   * @brief Normalize loaded or merged session history before it can drive Auto recovery.
+   */
+  session_history_t sanitize_session_history(session_history_t session);
+
+  /**
+   * @brief Derive a safe frame-rate target from recent pacing feedback.
+   */
+  double derive_safe_target_fps(double target_fps,
+                                double avg_fps,
+                                double low_1_percent_fps,
+                                double min_fps,
+                                double frame_pacing_bad_pct,
+                                bool mobile_client,
+                                bool degraded_history,
+                                bool pacing_risk);
+
+  /**
+   * @brief Return the FPS cap to apply from history after normalizing legacy
+   * safe-target values against the latest pacing model.
+   */
+  double effective_history_safe_target_fps(const std::string &device_name,
+                                           const session_history_t &session);
 
   /**
    * @brief Request an AI optimization asynchronously.
@@ -170,6 +221,28 @@ namespace ai_optimizer {
     const std::optional<session_history_t> &history = std::nullopt);
 
   /**
+   * @brief Return true when a history-safe FPS cap has already been trialed and
+   * should be relaxed so a smoother profile can be retried.
+   */
+  bool should_relax_history_safe_target_fps(const session_history_t &session);
+
+  /**
+   * @brief Return true when a successful higher-FPS retry should retire a
+   * stale history-safe FPS cap for this game/device pair.
+   */
+  bool should_graduate_history_safe_target_fps(
+    const session_history_t &session,
+    double previous_safe_target_fps);
+
+  /**
+   * @brief Return true when a clean low-FPS recovery trial should retire a
+   * stale cached recovery recommendation so the next launch can climb.
+   */
+  bool should_refresh_recovery_cache_after_stable_trial(
+    const session_history_t &session,
+    const device_db::optimization_t &optimization);
+
+  /**
    * @brief Get AI status as JSON string.
    */
   std::string get_status_json();
@@ -185,8 +258,28 @@ namespace ai_optimizer {
   std::string get_history_json();
 
   /**
+   * @brief Get merged cached optimization + session history profiles for one
+   * device, or all devices when device_name is empty.
+   */
+  std::string get_profiles_json(const std::string &device_name = "");
+
+  /**
    * @brief Clear the optimization cache.
    */
   void clear_cache();
+
+  /**
+   * @brief Clear cached AI optimization and session recovery state for one
+   * device+game pair. Returns true when any persisted state was removed.
+   */
+  bool clear_game_profile(const std::string &device_name,
+                          const std::string &app_name);
+
+  /**
+   * @brief Clear cached AI optimization and session recovery state for every
+   * game associated with one device. Returns true when any persisted state was
+   * removed.
+   */
+  bool clear_device_profiles(const std::string &device_name);
 
 }  // namespace ai_optimizer

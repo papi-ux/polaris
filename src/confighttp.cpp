@@ -288,7 +288,7 @@ namespace confighttp {
     }
 
 #ifdef __linux__
-    constexpr auto PREVIEW_FAILURE_LOG_BACKOFF = std::chrono::minutes(5);
+    constexpr auto PREVIEW_FAILURE_LOG_BACKOFF = std::chrono::seconds(60);
 
     struct preview_failure_log_state_t {
       std::chrono::steady_clock::time_point last_log {};
@@ -1801,18 +1801,6 @@ namespace confighttp {
         game["already_imported"] = already;
         if (!lutris_game.runner.empty()) {
           game["runner"] = lutris_game.runner;
-          if (boost::iequals(lutris_game.runner, "wine")) {
-            game["platform"] = "windows";
-            game["runtime"] = "wine";
-          } else if (boost::iequals(lutris_game.runner, "proton")) {
-            game["platform"] = "windows";
-            game["runtime"] = "proton";
-          } else if (boost::iequals(lutris_game.runner, "linux")) {
-            game["platform"] = "linux";
-            game["runtime"] = "native";
-          } else if (boost::iequals(lutris_game.runner, "steam")) {
-            game["runtime"] = "steam";
-          }
         }
         auto image_path = lutris_game.image_path.empty() ?
           game_library::find_lutris_image_path(lutris_game.slug, lutris_roots) :
@@ -2035,12 +2023,6 @@ namespace confighttp {
         }
 
         // Persist game classification metadata
-        if (game.contains("platform") && game["platform"].is_string()) {
-          app["platform"] = game["platform"];
-        }
-        if (game.contains("runtime") && game["runtime"].is_string()) {
-          app["runtime"] = game["runtime"];
-        }
         if (game.contains("game_category") && game["game_category"].is_string()) {
           app["game-category"] = game["game_category"];
         }
@@ -2547,6 +2529,8 @@ namespace confighttp {
         effective_mode = "windowed_stream";
       } else if (proc::proc.virtual_display) {
         effective_mode = "host_virtual_display";
+      } else if (configured_mode == "windowed_stream" && stats.runtime_effective_headless) {
+        effective_mode = "windowed_stream";
       } else if (stats.runtime_effective_headless) {
         effective_mode = "headless_stream";
       } else {
@@ -2610,6 +2594,7 @@ namespace confighttp {
     output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
     output_tree["has_api_key"] = output_tree.value("has_api_key", false);
+    output_tree["ai_auto_quality_enabled"] = bool_config_value(ai_optimizer::is_enabled());
     output_tree["adaptive_bitrate_enabled"] = bool_config_value(adaptive_bitrate::is_enabled());
     output_tree["ai_enabled"] = bool_config_value(ai_optimizer::is_enabled());
     send_response(response, output_tree);
@@ -2685,6 +2670,7 @@ namespace confighttp {
                key == "client_settings_effective_stream_display_mode_label"sv ||
                key == "client_settings_live_fields"sv ||
                key == "client_settings_restart_fields"sv ||
+               key == "ai_auto_quality_enabled"sv ||
                key == "stream_display_mode"sv;
       };
       std::string validation_error;
@@ -2694,6 +2680,18 @@ namespace confighttp {
         } else {
           ++it;
         }
+      }
+      if (input_tree.contains("ai_enabled") || input_tree.contains("adaptive_bitrate_enabled")) {
+        const bool has_ai_enabled = input_tree.contains("ai_enabled");
+        const bool has_adaptive_enabled = input_tree.contains("adaptive_bitrate_enabled");
+        const auto unified_value =
+          has_ai_enabled ? input_tree["ai_enabled"] : input_tree["adaptive_bitrate_enabled"];
+        if (has_ai_enabled && has_adaptive_enabled && input_tree["ai_enabled"] != input_tree["adaptive_bitrate_enabled"]) {
+          bad_request(response, request, "AI Optimizer and Adaptive Bitrate are controlled by AI Auto Quality and must match.");
+          return;
+        }
+        input_tree["ai_enabled"] = unified_value;
+        input_tree["adaptive_bitrate_enabled"] = unified_value;
       }
       if (!validation::validate_config_payload(input_tree, validation_error)) {
         bad_request(response, request, validation_error);

@@ -1699,6 +1699,8 @@ namespace proc {
     placebo = true;
     _launch_session = std::move(launch_session);
     _client_session_report_recorded = false;
+    _client_session_report_recorded_at = {};
+    _client_session_report_recorded_unique_id.clear();
     if (_launch_session && _launch_session->session_token.empty()) {
       _launch_session->session_token = generate_session_token();
     }
@@ -1722,6 +1724,8 @@ namespace proc {
     _app_name = app.name;
     _launch_session = launch_session;
     _client_session_report_recorded = false;
+    _client_session_report_recorded_at = {};
+    _client_session_report_recorded_unique_id.clear();
     if (_launch_session && _launch_session->session_token.empty()) {
       _launch_session->session_token = generate_session_token();
     }
@@ -1823,12 +1827,14 @@ namespace proc {
     auto device_optimization = device_db::get_optimization(launch_session->device_name, _app.name);
     apply_optimization_layer(resolved_optimization, optimization_locks, device_optimization, "device_db");
 
+    std::optional<ai_optimizer::session_history_t> history;
+
     // AI optimizer: cached results override device DB; unknown devices get a sync request.
     if (ai_optimizer::is_enabled()) {
       std::string gpu_info = config::video.adapter_name.empty()
         ? "NVIDIA GPU (NVENC)"s
         : config::video.adapter_name;
-      auto history = ai_optimizer::get_session_history(launch_session->device_name, _app.name);
+      history = ai_optimizer::get_session_history(launch_session->device_name, _app.name);
       auto device_info = device_db::get_device(launch_session->device_name);
       auto ai_opt = ai_optimizer::get_cached(launch_session->device_name, _app.name);
       if (ai_opt) {
@@ -1876,6 +1882,41 @@ namespace proc {
                           << "\" — fired async request for next session"sv;
         }
       }
+    }
+
+    const double effective_history_safe_target_fps =
+      history ? ai_optimizer::effective_history_safe_target_fps(launch_session->device_name, *history) : 0.0;
+    if (history && effective_history_safe_target_fps > 0.0 &&
+        !ai_optimizer::should_relax_history_safe_target_fps(*history)) {
+      const int safe_fps =
+        static_cast<int>(std::round(effective_history_safe_target_fps * 1000.0));
+      if (safe_fps > 0 && launch_session->fps > safe_fps) {
+        const parsed_display_mode_t safe_display_mode {
+          static_cast<int>(launch_session->width),
+          static_cast<int>(launch_session->height),
+          safe_fps,
+        };
+        BOOST_LOG(info) << "session_optimization: history-safe pacing target lowered FPS from "sv
+                        << format_session_fps(launch_session->fps) << " to "sv
+                        << format_session_fps(safe_fps)
+                        << " for \""sv << launch_session->device_name << "\" + \""sv << _app.name << '"';
+        resolved_optimization.display_mode = safe_display_mode;
+        resolved_optimization.display_mode_source = "history_safe";
+        note_layer(resolved_optimization, "history_safe");
+        note_reasoning(
+          resolved_optimization,
+          "Recent Nova pacing feedback lowered the next launch FPS target."
+        );
+        append_normalization_reason(
+          resolved_optimization,
+          "History-safe pacing overrode the paired display-mode FPS ceiling."
+        );
+      }
+    } else if (history && effective_history_safe_target_fps > 0.0) {
+      BOOST_LOG(info) << "session_optimization: relaxing history-safe "
+                      << static_cast<int>(std::round(effective_history_safe_target_fps))
+                      << " FPS cap for \""sv << launch_session->device_name << "\" + \""sv
+                      << _app.name << "\" after a completed safe-target trial";
     }
 
     if (!optimization_locks.display_mode && resolved_optimization.display_mode.has_value()) {
@@ -2503,14 +2544,42 @@ namespace proc {
         set_session_env_var(_env, _session_env_keys, "DXVK_FRAME_RATE", std::to_string(pacing_target_fps));
       }
 
+      const int requested_fps = launch_session->requested_fps >= 1000 ?
+        static_cast<int>(std::round(static_cast<double>(launch_session->requested_fps) / 1000.0)) :
+        launch_session->requested_fps;
+      bool auto_mangohud_cap = false;
+      if (pacing_target_fps > 0 &&
+          (requested_fps <= 0 || pacing_target_fps + 1 < requested_fps) &&
+          env_value(_app, _env, "MANGOHUD").empty()) {
+        set_session_env_var(_env, _session_env_keys, "MANGOHUD", "1");
+        set_session_env_var(_env, _session_env_keys, "MANGOHUD_DLSYM", "1");
+        auto_mangohud_cap = true;
+      }
+
       if (env_flag_enabled(_app, _env, "MANGOHUD")) {
+        if (env_value(_app, _env, "MANGOHUD_DLSYM").empty()) {
+          set_session_env_var(_env, _session_env_keys, "MANGOHUD_DLSYM", "1");
+        }
+
         auto mangohud_config = env_value(_app, _env, "MANGOHUD_CONFIG");
         if (mangohud_config.find("fps_limit=") == std::string::npos) {
           if (!mangohud_config.empty() && mangohud_config.back() != ',') {
             mangohud_config += ',';
           }
           mangohud_config += "fps_limit=" + std::to_string(pacing_target_fps);
+        }
+        if (auto_mangohud_cap && mangohud_config.find("no_display") == std::string::npos) {
+          if (!mangohud_config.empty() && mangohud_config.back() != ',') {
+            mangohud_config += ',';
+          }
+          mangohud_config += "no_display";
+        }
+        if (!mangohud_config.empty()) {
           set_session_env_var(_env, _session_env_keys, "MANGOHUD_CONFIG", mangohud_config);
+        }
+        if (auto_mangohud_cap) {
+          BOOST_LOG(info) << "session_pacing: auto-enabled hidden MangoHud FPS cap target_fps="sv
+                          << pacing_target_fps;
         }
       }
 
@@ -2993,6 +3062,8 @@ namespace proc {
   void proc_t::resume() {
     BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
     _client_session_report_recorded = false;
+    _client_session_report_recorded_at = {};
+    _client_session_report_recorded_unique_id.clear();
 
     if (!_app.state_cmds.empty()) {
       auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
@@ -3067,6 +3138,7 @@ namespace proc {
         session.last_bitrate_kbps = stats.bitrate_kbps;
         session.last_packet_loss_pct = stats.packet_loss;
         session.last_codec = stats.codec;
+        session.last_end_reason = "host_pause";
         session.session_count = 1;
         session.last_optimization_source = _launch_session->optimization_source;
         session.last_optimization_confidence = _launch_session->optimization_confidence;
@@ -3074,6 +3146,10 @@ namespace proc {
         session.last_quality_grade = grade_session_quality(stats, session.last_target_fps);
         session.quality_grade = session.last_quality_grade;
         session.codec = session.last_codec;
+        const auto device_profile = device_db::get_device(_launch_session->device_name);
+        const bool mobile_client =
+          device_profile &&
+          (device_profile->type == "handheld" || device_profile->type == "phone");
 
         const double fps_gap =
           session.last_target_fps > 0.0 ? std::max(0.0, session.last_target_fps - session.last_fps) : 0.0;
@@ -3092,6 +3168,23 @@ namespace proc {
         const bool av1_codec = codec_lower.find("av1") != std::string::npos;
         const bool decoder_risk = av1_codec && (pacing_risk || fps_gap >= 4.0) && !network_risk;
         const bool virtual_display_risk = _launch_session->virtual_display && (pacing_risk || capture_fallback || hdr_risk);
+        const double target_gap_threshold =
+          session.last_target_fps > 0.0 ? std::max(2.0, session.last_target_fps * 0.06) : 2.0;
+        const bool sustained_target_miss =
+          session.last_target_fps >= 24.0 &&
+          session.last_fps > 0.0 &&
+          fps_gap >= target_gap_threshold;
+        const bool host_render_limited =
+          pacing_risk &&
+          !network_risk &&
+          !capture_fallback &&
+          !encoder_risk &&
+          !hdr_risk &&
+          !decoder_risk &&
+          !virtual_display_risk &&
+          (sustained_target_miss ||
+           stats.duplicate_frame_ratio >= 0.08 ||
+           stats.dropped_frame_ratio >= 0.03);
 
         session.last_network_risk = network_risk ? "elevated" : "normal";
         session.last_decoder_risk = decoder_risk ? "elevated" : "normal";
@@ -3110,11 +3203,13 @@ namespace proc {
         else if (virtual_display_risk) session.last_primary_issue = "virtual_display_path";
         else if (decoder_risk) session.last_primary_issue = "decoder_path";
         else if (capture_fallback) session.last_primary_issue = "capture_fallback";
+        else if (host_render_limited) session.last_primary_issue = "host_render_limited";
         else if (pacing_risk) session.last_primary_issue = "frame_pacing";
         else if (encoder_risk) session.last_primary_issue = "encoder_load";
         else session.last_primary_issue = "steady";
         if (network_risk) session.last_issues.push_back("network_jitter");
-        if (pacing_risk) session.last_issues.push_back("frame_pacing");
+        if (host_render_limited) session.last_issues.push_back("host_render_limited");
+        else if (pacing_risk) session.last_issues.push_back("frame_pacing");
         if (capture_fallback) session.last_issues.push_back("capture_fallback");
         if (encoder_risk) session.last_issues.push_back("encoder_load");
         if (hdr_risk) session.last_issues.push_back("hdr_path");
@@ -3145,10 +3240,28 @@ namespace proc {
         session.last_safe_display_mode =
           (virtual_display_risk || config::video.linux_display.headless_mode) ? "headless" :
           (_launch_session->virtual_display ? "virtual_display" : "headless");
+        session.last_safe_target_fps = ai_optimizer::derive_safe_target_fps(
+          session.last_target_fps,
+          session.last_fps,
+          0.0,
+          0.0,
+          0.0,
+          mobile_client,
+          session.last_health_grade != "good",
+          pacing_risk || host_render_limited
+        );
         if (stats.dynamic_range > 0) {
           session.last_safe_hdr = !hdr_risk;
         }
-        session.last_relaunch_recommended = hdr_risk || decoder_risk || virtual_display_risk;
+        session.last_relaunch_recommended =
+          hdr_risk ||
+          decoder_risk ||
+          virtual_display_risk ||
+          (
+            session.last_safe_target_fps > 0.0 &&
+            session.last_target_fps > 0.0 &&
+            session.last_safe_target_fps < session.last_target_fps
+          );
 
         ai_optimizer::record_session(_launch_session->device_name, _app.name, session);
       }
@@ -3441,6 +3554,8 @@ namespace proc {
 
     if (unique_id.empty() || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id) {
       _client_session_report_recorded = true;
+      _client_session_report_recorded_at = std::chrono::steady_clock::now();
+      _client_session_report_recorded_unique_id = unique_id;
     }
   }
 
@@ -4182,9 +4297,6 @@ namespace proc {
           ctx.steam_appid = app_node.value("steam-appid", "");
           ctx.game_category = app_node.value("game-category", "");
           ctx.source = app_node.value("source", ctx.steam_appid.empty() ? "manual" : "steam");
-          ctx.lutris_runner = app_node.value("lutris-runner", "");
-          ctx.platform = app_node.value("platform", "");
-          ctx.runtime = app_node.value("runtime", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {
             for (const auto &g : app_node["genres"]) {
