@@ -55,6 +55,23 @@
           </div>
         </div>
 
+        <section class="rounded-xl border p-4" :class="autoQuality.panelClass">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div class="min-w-0">
+              <div class="section-kicker">Auto Quality</div>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <h3 class="text-xl font-semibold leading-tight text-silver">{{ autoQuality.label }}</h3>
+                <span class="meta-pill" :class="autoQuality.toneClass">{{ autoQuality.compactLabel }}</span>
+              </div>
+              <p class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ autoQuality.detail }}</p>
+            </div>
+            <div class="flex shrink-0 flex-wrap gap-2 lg:max-w-sm lg:justify-end">
+              <span v-if="autoQuality.targetSummary" class="data-pill">{{ autoQuality.targetSummary }}</span>
+              <span v-for="badge in autoQuality.badges" :key="badge" class="data-pill">{{ badge }}</span>
+            </div>
+          </div>
+        </section>
+
         <div v-if="streamPathNotices.length" class="grid gap-2 md:grid-cols-2">
           <div
             v-for="notice in streamPathNotices"
@@ -111,7 +128,7 @@
                     <span>{{ $t('dashboard.preview_capturing') }}</span>
                   </div>
                   <div v-if="previewError" class="dashboard-preview-overlay dashboard-preview-overlay-error">
-                    <div class="text-sm font-medium text-silver">{{ previewErrorText }}</div>
+                    <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_error') }}</div>
                     <button @click="retryPreviewNow" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
                       {{ $t('dashboard.preview_retry') }}
                     </button>
@@ -605,11 +622,7 @@ import GaugeArc from '../components/GaugeArc.vue'
 import QuickControls from '../components/QuickControls.vue'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
-import {
-  PREVIEW_REFRESH_MS,
-  nextPreviewBackoffMs,
-  shouldPausePreviewPolling,
-} from '../display-preview-state'
+import { AUTO_QUALITY_STATES, resolveAutoQualityState } from '../auto-quality-state'
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
@@ -629,6 +642,8 @@ const discoveryEnabled = ref(false)
 const pairingEnabled = ref(false)
 const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
+
+const autoQuality = computed(() => resolveAutoQualityState(stats.value || {}, clientSettingsSync.value || {}))
 
 const actionSummary = computed(() => {
   if (!statsLoaded.value) return t('dashboard.loading_summary')
@@ -779,7 +794,7 @@ const clientSettingsSyncCopy = computed(() => {
   if (clientSettingsSync.value.relaunchRequired) {
     return 'A requested display mode is saved and will become active after the stream relaunches.'
   }
-  return 'Nova-facing controls are available for live bitrate, Adaptive Bitrate, AI Optimizer, and next-stream display choices.'
+  return 'Nova-facing controls are available for live bitrate, AI Auto Quality, and next-stream display choices.'
 })
 
 const connectedClients = computed(() => {
@@ -1131,6 +1146,9 @@ function formatSessionDate(ts) {
 }
 
 // Display preview (polling screenshot endpoint)
+const PREVIEW_REFRESH_MS = 2000
+const PREVIEW_FAILURE_BACKOFF_MS = 15000
+const PREVIEW_MAX_BACKOFF_MS = 60000
 const streamingOutput = ref('')
 const showPreview = ref(false)
 const previewExpanded = ref(false)
@@ -1138,16 +1156,12 @@ const previewLoaded = ref(false)
 const previewError = ref(false)
 const previewUrl = ref('')
 const previewBackoffMs = ref(PREVIEW_REFRESH_MS)
-const previewFailureCount = ref(0)
 let previewTimer = null
-
-const previewPollingPaused = computed(() => shouldPausePreviewPolling(previewFailureCount.value))
 
 function startPreview() {
   previewLoaded.value = false
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
-  previewFailureCount.value = 0
   showPreview.value = true
   refreshPreview()
 }
@@ -1166,7 +1180,6 @@ function refreshPreview() {
     clearTimeout(previewTimer)
     previewTimer = null
   }
-  if (previewPollingPaused.value) return
   previewError.value = false
   // When streaming, crop to the streaming output; otherwise show full display
   const output = streamingOutput.value ? `&output=${encodeURIComponent(streamingOutput.value)}` : ''
@@ -1177,22 +1190,21 @@ function handlePreviewLoad() {
   previewLoaded.value = true
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
-  previewFailureCount.value = 0
   schedulePreviewRefresh(PREVIEW_REFRESH_MS)
 }
 
 function handlePreviewError() {
   previewLoaded.value = false
   previewError.value = true
-  previewFailureCount.value += 1
-  if (previewPollingPaused.value) return
-  previewBackoffMs.value = nextPreviewBackoffMs(previewBackoffMs.value)
+  previewBackoffMs.value = Math.min(
+    Math.max(PREVIEW_FAILURE_BACKOFF_MS, previewBackoffMs.value * 2),
+    PREVIEW_MAX_BACKOFF_MS,
+  )
   schedulePreviewRefresh(previewBackoffMs.value)
 }
 
 function retryPreviewNow() {
   previewBackoffMs.value = PREVIEW_REFRESH_MS
-  previewFailureCount.value = 0
   refreshPreview()
 }
 
@@ -1209,7 +1221,6 @@ function stopPreview() {
   previewLoaded.value = false
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
-  previewFailureCount.value = 0
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
 }
 
@@ -1285,17 +1296,10 @@ const previewSupportCopy = computed(() => (
 ))
 
 const previewStatusText = computed(() => {
-  if (previewPollingPaused.value) return t('dashboard.preview_paused_status')
   if (previewError.value) return t('dashboard.preview_unavailable_status')
   if (!previewLoaded.value) return t('dashboard.preview_capturing')
   return t('dashboard.preview_status')
 })
-
-const previewErrorText = computed(() => (
-  previewPollingPaused.value
-    ? t('dashboard.preview_paused')
-    : t('dashboard.preview_error')
-))
 
 const aiOptimizationSummary = computed(() => {
   const reasoning = aiOptimization.value?.reasoning
@@ -1369,13 +1373,11 @@ const recommendations = computed(() => {
   if (s.capture_cpu_copy)
     recs.push({ color: 'text-orange-300', message: captureReasonLabel.value })
 
-  // AI optimizer recommendations
-  if (!s.ai_enabled && s.streaming)
-    recs.push({ color: 'text-accent', message: `Enable AI Optimizer in settings for per-game encoding tuning — auto-adjusts resolution, bitrate, and codec.` })
-
-  // Adaptive bitrate recommendation
-  if (s.adaptive_target_bitrate_kbps === 0 && s.packet_loss > 0 && s.streaming)
-    recs.push({ color: 'text-accent', message: `Enable Adaptive Bitrate in Audio/Video settings — auto-adjusts bitrate when network quality drops.` })
+  if (!autoQuality.value.enabled && s.streaming) {
+    recs.push({ color: 'text-accent', message: 'Enable Auto Quality in Audio/Video settings so Polaris can balance bitrate, profile choice, and recovery behavior automatically.' })
+  } else if (autoQuality.value.state === AUTO_QUALITY_STATES.RECOVERING && autoQuality.value.detail) {
+    recs.push({ color: 'text-amber-300', message: autoQuality.value.detail })
+  }
 
   return recs
 })

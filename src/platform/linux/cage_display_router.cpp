@@ -564,9 +564,9 @@ namespace cage_display_router {
         // need to wait for DISPLAY to be available before launching Steam.
         startup_cmd = mode_retry_cmd +
           "for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done; "
-          "exec " + mangohud_prefix + game_cmd;
+          + mangohud_prefix + "exec " + game_cmd;
       } else {
-        startup_cmd = mode_retry_cmd + "exec " + mangohud_prefix + game_cmd;
+        startup_cmd = mode_retry_cmd + mangohud_prefix + "exec " + game_cmd;
       }
     } else {
       startup_cmd =

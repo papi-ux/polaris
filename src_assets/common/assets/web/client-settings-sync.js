@@ -11,6 +11,7 @@ export const CLIENT_SETTINGS_RESPONSE_ONLY_KEYS = [
   'client_settings_effective_stream_display_mode_label',
   'client_settings_live_fields',
   'client_settings_restart_fields',
+  'ai_auto_quality_enabled',
 ]
 
 export function isTruthySetting(value) {

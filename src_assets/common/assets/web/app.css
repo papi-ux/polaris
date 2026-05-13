@@ -121,20 +121,6 @@
 [data-theme="oled"] aside {
   border-color: transparent !important;
 }
-[data-theme="oled"] .checkbox-field {
-  background: rgba(168, 200, 255, 0.08);
-  border-color: rgba(168, 200, 255, 0.16);
-}
-[data-theme="oled"] .checkbox-field:hover {
-  background: rgba(168, 200, 255, 0.16);
-  border-color: rgba(168, 200, 255, 0.3);
-}
-[data-theme="oled"] .checkbox-field-input:checked {
-  background: rgb(168, 200, 255);
-}
-[data-theme="oled"] .checkbox-field-input:focus-visible {
-  outline: 2px solid rgba(59, 130, 246, 0.85);
-}
 [data-theme="oled"] aside .border-b,
 [data-theme="oled"] aside .border-t {
   border-color: rgba(255, 255, 255, 0.04) !important;
@@ -206,110 +192,6 @@ textarea {
 }
 .card-interactive:active {
   transform: translateY(0);
-}
-
-.checkbox-field {
-  position: relative;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: rgba(124, 115, 255, 0.08);
-  border: 1px solid rgba(124, 115, 255, 0.16);
-  transition: all 0.15s ease;
-}
-
-.checkbox-field::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 10%;
-  height: 80%;
-  width: 3px;
-  border-radius: 4px;
-  background: transparent;
-  transition: background 0.2s ease;
-}
-
-.checkbox-field:hover {
-  background: rgba(124, 115, 255, 0.16);
-  border-color: rgba(124, 115, 255, 0.3);
-  transform: translateY(-1px);
-}
-
-.checkbox-field-control {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.checkbox-field-toggle {
-  flex-shrink: 0;
-}
-
-.checkbox-field-copy {
-  flex: 1;
-  min-width: 0;
-}
-
-.checkbox-field-input {
-  appearance: none;
-  width: 42px;
-  height: 24px;
-  background: #2a2a2a;
-  border-radius: 999px;
-  position: relative;
-  cursor: pointer;
-  transition: background 0.2s ease;
-}
-
-.checkbox-field-input::after {
-  content: "";
-  position: absolute;
-  width: 18px;
-  height: 18px;
-  top: 3px;
-  left: 3px;
-  border-radius: 50%;
-  background: white;
-  transition: transform 0.2s ease;
-}
-
-.checkbox-field-input:focus-visible {
-  outline: 2px solid rgb(168, 164, 255);
-  outline-offset: 2px;
-}
-
-.checkbox-field-input:checked {
-  background: rgb(124, 115, 255);
-}
-
-.checkbox-field-input:checked::after {
-  transform: translateX(18px);
-}
-
-.checkbox-field-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.checkbox-field-label {
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.checkbox-field-desc {
-  margin-top: 4px;
-  opacity: 0.75;
-  line-height: 1.4;
-}
-
-.checkbox-field-default {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.7);
 }
 
 /* ── Gradient Accents ── */

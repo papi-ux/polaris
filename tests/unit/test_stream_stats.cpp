@@ -103,7 +103,11 @@ TEST(StreamStatsCapturePathTests, LabelsHeadlessExtcopyDmabufPath) {
   stats.encode_target_residency = platf::frame_residency_e::gpu;
 
   EXPECT_EQ(stream_stats::capture_path_summary(stats), "gpu_native");
+#ifdef __linux__
   EXPECT_EQ(stream_stats::capture_path_reason(stats), "headless_extcopy_dmabuf");
+#else
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "gpu_native");
+#endif
   EXPECT_FALSE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));
 }
@@ -119,7 +123,11 @@ TEST(StreamStatsCapturePathTests, LabelsWindowedDmabufOverridePath) {
   stats.encode_target_residency = platf::frame_residency_e::gpu;
 
   EXPECT_EQ(stream_stats::capture_path_summary(stats), "gpu_native");
+#ifdef __linux__
   EXPECT_EQ(stream_stats::capture_path_reason(stats), "windowed_dmabuf_override");
+#else
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "gpu_native");
+#endif
   EXPECT_FALSE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));
 }

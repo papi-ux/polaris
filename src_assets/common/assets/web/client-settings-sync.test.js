@@ -53,6 +53,7 @@ describe('client settings sync helpers', () => {
       headless_mode: 'enabled',
       client_settings_available: true,
       client_settings_endpoint: '/polaris/v1/client-settings',
+      ai_auto_quality_enabled: 'enabled',
     })
 
     expect(config).toEqual({ headless_mode: 'enabled' })

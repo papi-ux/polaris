@@ -143,18 +143,18 @@
     "address_family_both": "IPv4+IPv6",
     "address_family_desc": "Set the address family used by Polaris",
     "address_family_ipv4": "IPv4 only",
-    "adaptive_bitrate_enabled": "Adaptive Bitrate",
-    "adaptive_bitrate_enabled_desc": "Automatically adjust stream bitrate in response to changing network conditions.",
-    "adaptive_bitrate_max": "Adaptive Bitrate Ceiling",
-    "adaptive_bitrate_max_desc": "Maximum bitrate in Kbps when adaptive bitrate is enabled.",
-    "adaptive_bitrate_min": "Adaptive Bitrate Floor",
-    "adaptive_bitrate_min_desc": "Minimum bitrate in Kbps when adaptive bitrate is enabled.",
+    "adaptive_bitrate_enabled": "AI Auto Quality Bitrate Recovery",
+    "adaptive_bitrate_enabled_desc": "Live bitrate recovery is controlled by AI Auto Quality.",
+    "adaptive_bitrate_max": "Auto Quality Bitrate Ceiling",
+    "adaptive_bitrate_max_desc": "Maximum bitrate in Kbps when AI Auto Quality recovers stream quality.",
+    "adaptive_bitrate_min": "Auto Quality Bitrate Floor",
+    "adaptive_bitrate_min_desc": "Minimum bitrate in Kbps when AI Auto Quality lowers bitrate for recovery.",
     "ai_api_key": "AI Provider API Key",
     "ai_api_key_desc": "Provider API key used when AI optimization runs in direct API mode.",
     "ai_cache_ttl_hours": "AI Cache Duration",
     "ai_cache_ttl_hours_desc": "How long to cache AI optimization results before re-querying.",
-    "ai_enabled": "AI Optimization",
-    "ai_enabled_desc": "Enable AI-powered optimization recommendations for stream settings.",
+    "ai_enabled": "AI Auto Quality",
+    "ai_enabled_desc": "Let Polaris balance launch profile, bitrate recovery, and stream smoothness automatically.",
     "ai_provider": "AI Provider",
     "ai_provider_desc": "Choose the provider used for AI optimization: anthropic, openai, gemini, or local.",
     "ai_model": "AI Model",
@@ -702,7 +702,7 @@
     "sync_ready_badge": "Nova sync ready",
     "sync_pending_badge": "Sync pending",
     "sync_unavailable_badge": "Sync unavailable",
-    "sync_ready_desc": "Nova can update live bitrate, Adaptive Bitrate, and AI Optimizer settings here; display mode changes apply on the next stream.",
+    "sync_ready_desc": "Nova can update live bitrate, AI Auto Quality, and next-stream display choices here.",
     "sync_pending_desc": "Polaris saved the requested display mode and will apply it after the active stream relaunches.",
     "sync_unavailable_desc": "This host has not advertised the Nova client-settings endpoint yet.",
     "restart_badge": "Restart",
@@ -712,12 +712,12 @@
         "desc": "Start sessions on a hidden stream-only display."
       },
       "adaptive_bitrate_enabled": {
-        "label": "Adaptive Bitrate",
-        "desc": "Adjust bitrate when network quality changes."
+        "label": "AI Auto Quality Bitrate Recovery",
+        "desc": "Controlled by the AI Auto Quality toggle."
       },
       "ai_enabled": {
-        "label": "AI Optimizer",
-        "desc": "Use AI recommendations for per-game tuning."
+        "label": "AI Auto Quality",
+        "desc": "Balance FPS, bitrate, and per-game tuning automatically."
       },
       "stream_audio": {
         "label": "Stream Audio",
@@ -830,9 +830,7 @@
     "preview_capturing": "Capturing the live display…",
     "preview_retry": "Retry Preview",
     "preview_error": "Display preview is unavailable right now. The active stream may still be healthy.",
-    "preview_paused": "Display preview paused after repeated capture failures. The active stream may still be healthy.",
     "preview_unavailable_status": "Preview refresh is backing off after a failed capture.",
-    "preview_paused_status": "Preview refresh is paused until you retry it.",
     "preview_status": "Preview refreshes against the active streaming output every few seconds.",
     "preview_hidden_title": "Display preview is hidden.",
     "preview_hidden_desc": "Keep Mission Control compact until you need visual confirmation from the live output, then bring the display back inline.",

@@ -106,12 +106,68 @@ const clientSettingsRows = computed(() => [
   { label: 'Display mode', value: clientSettingsSync.value.desiredModeLabel, note: 'Next stream' },
   { label: 'Effective mode', value: clientSettingsSync.value.effectiveModeLabel, note: clientSettingsSync.value.relaunchRequired ? 'Pending' : 'Synced' },
   { label: 'Bitrate limit', value: 'Live', note: 'Client write' },
-  { label: 'Adaptive Bitrate', value: 'Live', note: 'Host + Nova' },
-  { label: 'AI Optimizer', value: 'Live', note: 'Host + Nova' },
+  { label: 'AI Auto Quality', value: 'Live', note: 'Host + Nova' },
+])
+
+const autoQualityEnabled = computed(() => (
+  config.value.adaptive_bitrate_enabled === 'enabled' &&
+  config.value.ai_enabled === 'enabled'
+))
+const autoQualityPartial = computed(() => (
+  config.value.adaptive_bitrate_enabled === 'enabled' ||
+  config.value.ai_enabled === 'enabled'
+))
+const autoQualityBadge = computed(() => {
+  if (autoQualityEnabled.value) return 'Enabled'
+  if (autoQualityPartial.value) return 'Partial'
+  return 'Manual'
+})
+const autoQualityTone = computed(() => {
+  if (autoQualityEnabled.value) return 'border-green-400/30 bg-green-400/10 text-green-300'
+  if (autoQualityPartial.value) return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+  return 'border-storm/40 bg-storm/10 text-storm'
+})
+const autoQualityCopy = computed(() => {
+  if (autoQualityEnabled.value) {
+    return 'Polaris will balance bitrate, per-game profile choice, and safer recovery targets without making the user choose a tuning layer.'
+  }
+  if (autoQualityPartial.value) {
+    return 'This host has an older split Auto Quality state. Turn it on here to keep profile selection and live bitrate recovery together.'
+  }
+  return 'Manual tuning is active. Polaris will keep the selected bitrate and profile controls under Advanced Tuning.'
+})
+const autoQualityRows = computed(() => [
+  {
+    label: 'Profile',
+    value: config.value.ai_enabled === 'enabled' ? 'Auto' : 'Manual',
+    note: config.value.ai_enabled === 'enabled' ? 'Per game and device' : 'No launch tuning',
+  },
+  {
+    label: 'Bitrate',
+    value: config.value.adaptive_bitrate_enabled === 'enabled' ? 'Adaptive' : 'Fixed',
+    note: config.value.adaptive_bitrate_enabled === 'enabled'
+      ? `${Number(config.value.adaptive_bitrate_min || 0) / 1000}-${Number(config.value.adaptive_bitrate_max || 0) / 1000} Mbps`
+      : `${Number(config.value.max_bitrate || 0) / 1000} Mbps cap`,
+  },
+  {
+    label: 'Runtime',
+    value: selectedStreamDisplayMode.value.title,
+    note: selectedStreamDisplayMode.value.badge,
+  },
+  {
+    label: 'Nova',
+    value: clientSettingsSyncBadge.value,
+    note: clientSettingsSync.value.relaunchRequired ? 'Relaunch to sync' : 'Push/pull ready',
+  },
 ])
 
 function setEnabledConfig(key, enabled) {
   config.value[key] = enabled ? 'enabled' : 'disabled'
+}
+
+function setAutoQuality(enabled) {
+  setEnabledConfig('adaptive_bitrate_enabled', enabled)
+  setEnabledConfig('ai_enabled', enabled)
 }
 
 function setStreamDisplayMode(mode) {
@@ -347,6 +403,44 @@ const validateFallbackMode = (event) => {
       </div>
     </section>
 
+    <section class="settings-section">
+      <div class="settings-section-header">
+        <div class="section-kicker">Auto Quality</div>
+        <h3 class="settings-section-title">Performance and quality balance</h3>
+        <div class="settings-summary-copy">One primary mode for bitrate, launch profile, and recovery behavior. Advanced controls stay available below.</div>
+      </div>
+
+      <div class="settings-subtle-surface space-y-4">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="text-base font-semibold text-silver">
+                {{ autoQualityEnabled ? 'Auto Quality is balancing this host' : autoQualityPartial ? 'Auto Quality is partially enabled' : 'Manual stream tuning' }}
+              </div>
+              <span class="meta-pill" :class="autoQualityTone">{{ autoQualityBadge }}</span>
+            </div>
+            <div class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ autoQualityCopy }}</div>
+          </div>
+          <button
+            type="button"
+            class="focus-ring dashboard-action-button"
+            :class="autoQualityEnabled ? 'dashboard-action-button-secondary' : 'dashboard-action-button-primary'"
+            @click="setAutoQuality(!autoQualityEnabled)"
+          >
+            {{ autoQualityEnabled ? 'Use Manual Tuning' : 'Enable Auto Quality' }}
+          </button>
+        </div>
+
+        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div v-for="row in autoQualityRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
+            <div class="text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ row.label }}</div>
+            <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
+            <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <details class="settings-section settings-disclosure" open>
       <summary class="settings-disclosure-summary">
         <div>
@@ -497,9 +591,9 @@ pactl info | grep Source</pre>
     <details class="settings-section settings-disclosure">
       <summary class="settings-disclosure-summary">
         <div>
-          <div class="section-kicker">Delivery</div>
-          <h3 class="settings-section-title mt-2">Bitrate and pacing</h3>
-          <div class="settings-summary-copy">Set the bitrate ceiling, pacing floor, and how the host reacts to network changes.</div>
+          <div class="section-kicker">Advanced Tuning</div>
+          <h3 class="settings-section-title mt-2">Manual bitrate and pacing</h3>
+          <div class="settings-summary-copy">Direct controls for bitrate ceilings, pacing floors, and Auto Quality bitrate range.</div>
         </div>
         <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
       </summary>
@@ -522,21 +616,13 @@ pactl info | grep Source</pre>
         <div class="settings-subtle-surface space-y-3">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <div class="text-sm font-medium text-silver">Adaptive Bitrate</div>
-              <div class="mt-1 text-sm text-storm">Reduce bitrate on loss or RTT spikes, then recover gradually.</div>
+              <div class="text-sm font-medium text-silver">AI Auto Quality bitrate range</div>
+              <div class="mt-1 text-sm text-storm">Used by Auto Quality when it needs to lower bitrate, then recover gradually.</div>
             </div>
-            <label class="relative inline-flex shrink-0 items-center cursor-pointer">
-              <input
-                type="checkbox"
-                class="sr-only peer"
-                :checked="config.adaptive_bitrate_enabled === 'enabled'"
-                @change="config.adaptive_bitrate_enabled = $event.target.checked ? 'enabled' : 'disabled'"
-              />
-              <div class="h-5 w-9 rounded-full bg-storm/40 transition-colors peer peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-            </label>
+            <div class="control-chip whitespace-nowrap" :class="autoQualityTone">{{ autoQualityBadge }}</div>
           </div>
 
-          <div v-if="config.adaptive_bitrate_enabled === 'enabled'" class="settings-form-grid">
+          <div v-if="autoQualityEnabled" class="settings-form-grid">
             <div>
               <label class="block text-sm font-medium text-storm mb-1">Min Bitrate (kbps)</label>
               <input
@@ -561,8 +647,11 @@ pactl info | grep Source</pre>
             </div>
           </div>
 
-          <div v-if="config.adaptive_bitrate_enabled === 'enabled'" class="text-sm text-storm">
+          <div v-if="autoQualityEnabled" class="text-sm text-storm">
             Floor: {{ config.adaptive_bitrate_min / 1000 }} Mbps. Ceiling: {{ config.adaptive_bitrate_max / 1000 }} Mbps.
+          </div>
+          <div v-else class="text-sm text-storm">
+            Enable AI Auto Quality above to use adaptive live bitrate recovery.
           </div>
         </div>
       </div>
