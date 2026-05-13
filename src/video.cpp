@@ -2905,6 +2905,7 @@ namespace video {
       static_cast<double>(config.encodingFramerate) / 1000.0 :
       static_cast<double>(config.encodingFramerate);
     const double target_frame_interval_ms = encode_target_fps > 0.0 ? 1000.0 / encode_target_fps : 0.0;
+    int applied_adaptive_bitrate = config.bitrate;
 
     while (true) {
       // Break out of the encoding loop if any of the following are true:
@@ -3044,24 +3045,49 @@ namespace video {
             current_fps = target_fps;
           }
 
+          const double duplicate_frame_ratio =
+            frames_encoded > 0 ? static_cast<double>(duplicate_frames) / static_cast<double>(frames_encoded) : 0.0;
+          const double dropped_frame_ratio =
+            (frames_encoded + dropped_frames) > 0 ?
+              static_cast<double>(dropped_frames) / static_cast<double>(frames_encoded + dropped_frames) :
+              0.0;
+          const double avg_frame_age_ms =
+            frames_with_age > 0 ? accumulated_frame_age_ms / static_cast<double>(frames_with_age) : 0.0;
+          const double frame_jitter_ms =
+            jitter_samples > 0 ? accumulated_jitter_ms / static_cast<double>(jitter_samples) : 0.0;
+          const double fps_ratio =
+            target_fps > 0.0 && current_fps > 0.0 ? std::clamp(current_fps / target_fps, 0.0, 1.5) : 0.0;
+
+          if (adaptive_bitrate::is_enabled()) {
+            adaptive_bitrate::update_stream_health(
+              fps_ratio,
+              dropped_frame_ratio,
+              duplicate_frame_ratio,
+              frame_jitter_ms,
+              encode_duration,
+              avg_frame_age_ms
+            );
+          }
+
           // Check adaptive bitrate and update encoder if target has changed
           int effective_bitrate = config.bitrate;
           if (adaptive_bitrate::is_enabled()) {
             int target = adaptive_bitrate::get_target_bitrate_kbps();
-            if (target > 0 && target != config.bitrate) {
+            if (target > 0 && target != applied_adaptive_bitrate) {
               if (session->update_bitrate(target)) {
+                applied_adaptive_bitrate = target;
                 effective_bitrate = target;
               }
+            } else if (target > 0) {
+              effective_bitrate = applied_adaptive_bitrate;
             }
           }
 
           stream_stats::update_frame_delivery(
-            frames_encoded > 0 ? static_cast<double>(duplicate_frames) / static_cast<double>(frames_encoded) : 0.0,
-            (frames_encoded + dropped_frames) > 0 ?
-              static_cast<double>(dropped_frames) / static_cast<double>(frames_encoded + dropped_frames) :
-              0.0,
-            frames_with_age > 0 ? accumulated_frame_age_ms / static_cast<double>(frames_with_age) : 0.0,
-            jitter_samples > 0 ? accumulated_jitter_ms / static_cast<double>(jitter_samples) : 0.0
+            duplicate_frame_ratio,
+            dropped_frame_ratio,
+            avg_frame_age_ms,
+            frame_jitter_ms
           );
 
           stream_stats::update_video_stats(

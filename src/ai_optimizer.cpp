@@ -59,7 +59,9 @@ namespace ai_optimizer {
     constexpr const char *DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
     constexpr const char *DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
 
-    constexpr int OPTIMIZATION_SCHEMA_VERSION = 2;
+    constexpr int OPTIMIZATION_SCHEMA_VERSION = 3;
+    constexpr int MAX_REASONABLE_SESSION_COUNT = 10000;
+    constexpr int MAX_REASONABLE_POOR_OUTCOME_COUNT = 10000;
     constexpr int LOW_CONFIDENCE_TTL_HOURS = 24;
     constexpr int MEDIUM_CONFIDENCE_TTL_HOURS = 72;
     constexpr int RECOVERY_TTL_HOURS = 12;
@@ -88,7 +90,7 @@ namespace ai_optimizer {
     std::int64_t cached_at = 0;
   };
 
-  static void load_history();
+  static bool load_history();
   static void save_history();
 
   struct http_response_t {
@@ -113,6 +115,18 @@ namespace ai_optimizer {
       ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     }
     return value;
+  }
+
+  static bool is_frame_or_host_pacing_issue(const std::string &issue) {
+    const auto normalized = to_lower_copy(issue);
+    return normalized == "frame_pacing" || normalized == "host_render_limited";
+  }
+
+  static bool has_frame_or_host_pacing_issue(const session_history_t &session) {
+    return is_frame_or_host_pacing_issue(session.last_primary_issue) ||
+      std::any_of(session.last_issues.begin(), session.last_issues.end(), [](const std::string &issue) {
+        return is_frame_or_host_pacing_issue(issue);
+      });
   }
 
   static std::string trim_trailing_slashes(std::string value) {
@@ -332,6 +346,131 @@ namespace ai_optimizer {
     return normalized == "d" || normalized == "f";
   }
 
+  static std::string normalize_end_reason(const std::string &reason) {
+    auto normalized = to_lower_copy(reason);
+    normalized.erase(normalized.begin(), std::find_if(normalized.begin(), normalized.end(), [](unsigned char ch) {
+      return !std::isspace(ch);
+    }));
+    normalized.erase(std::find_if(normalized.rbegin(), normalized.rend(), [](unsigned char ch) {
+      return !std::isspace(ch);
+    }).base(), normalized.end());
+    if (normalized.empty()) {
+      return "disconnect";
+    }
+    return normalized;
+  }
+
+  static bool is_explicit_end_reason(const std::string &reason) {
+    const auto normalized = normalize_end_reason(reason);
+    return normalized == "end" || normalized == "user_end" || normalized == "quit";
+  }
+
+  static bool is_soft_end_reason(const std::string &reason) {
+    const auto normalized = normalize_end_reason(reason);
+    return normalized == "host_pause" ||
+      normalized == "disconnect" ||
+      normalized == "cancelled";
+  }
+
+  static bool has_confirming_soft_end_recovery_signal(const session_history_t &session) {
+    return is_soft_end_reason(session.last_end_reason) &&
+      session.last_duration_s >= 60 &&
+      session.last_sample_count >= 30 &&
+      session.last_safe_target_fps > 0.0 &&
+      has_frame_or_host_pacing_issue(session);
+  }
+
+  static bool is_low_confidence_soft_end_without_confirming_signal(const session_history_t &session) {
+    const auto confidence = to_lower_copy(session.last_sample_confidence);
+    const bool soft_end = is_soft_end_reason(session.last_end_reason);
+    return confidence == "low" &&
+      soft_end &&
+      session.poor_outcome_count <= 0 &&
+      session.consecutive_poor_outcomes <= 0 &&
+      !has_confirming_soft_end_recovery_signal(session);
+  }
+
+  static bool is_unconfirmed_poor_recovery_feedback(const session_history_t &session) {
+    return is_poor_quality_grade(latest_quality_grade(session)) &&
+      is_low_confidence_soft_end_without_confirming_signal(session);
+  }
+
+  static bool has_session_observation(const session_history_t &session) {
+    return session.avg_fps > 0.0 ||
+      session.last_fps > 0.0 ||
+      session.last_target_fps > 0.0 ||
+      session.last_updated_at > 0 ||
+      !latest_quality_grade(session).empty();
+  }
+
+  static int sanitize_session_count(const session_history_t &session) {
+    if (session.session_count > 0 &&
+        session.session_count <= MAX_REASONABLE_SESSION_COUNT) {
+      return session.session_count;
+    }
+
+    return has_session_observation(session) ? 1 : 0;
+  }
+
+  static int sanitize_poor_outcome_count(int value, int session_count) {
+    if (value < 0 ||
+        value > MAX_REASONABLE_POOR_OUTCOME_COUNT ||
+        session_count <= 0 ||
+        value > session_count) {
+      return 0;
+    }
+
+    return value;
+  }
+
+  static int sanitize_consecutive_poor_outcome_count(int value, int poor_outcome_count) {
+    if (value < 0 ||
+        value > MAX_REASONABLE_POOR_OUTCOME_COUNT ||
+        poor_outcome_count <= 0 ||
+        value > poor_outcome_count) {
+      return 0;
+    }
+
+    return value;
+  }
+
+  session_history_t sanitize_session_history(session_history_t session) {
+    session.session_count = sanitize_session_count(session);
+    session.poor_outcome_count =
+      sanitize_poor_outcome_count(session.poor_outcome_count, session.session_count);
+    session.consecutive_poor_outcomes =
+      sanitize_consecutive_poor_outcome_count(
+        session.consecutive_poor_outcomes,
+        session.poor_outcome_count
+      );
+
+    if (session.last_safe_target_fps < 0.0 ||
+        session.last_safe_target_fps > 240.0 ||
+        !std::isfinite(session.last_safe_target_fps)) {
+      session.last_safe_target_fps = 0.0;
+    }
+
+    if (is_low_confidence_soft_end_without_confirming_signal(session)) {
+      session.last_safe_target_fps = 0.0;
+      session.last_relaunch_recommended = false;
+      if (to_lower_copy(session.last_health_grade) == "degraded") {
+        session.last_health_grade = "watch";
+      }
+    }
+
+    return session;
+  }
+
+  static bool history_repair_should_persist(const session_history_t &before,
+                                            const session_history_t &after) {
+    return before.session_count != after.session_count ||
+      before.poor_outcome_count != after.poor_outcome_count ||
+      before.consecutive_poor_outcomes != after.consecutive_poor_outcomes ||
+      before.last_safe_target_fps != after.last_safe_target_fps ||
+      before.last_relaunch_recommended != after.last_relaunch_recommended ||
+      before.last_health_grade != after.last_health_grade;
+  }
+
   static bool is_control_shell_app(const std::string &app_name) {
     const auto normalized = to_lower_copy(app_name);
     return normalized.empty() ||
@@ -343,9 +482,107 @@ namespace ai_optimizer {
            normalized.find("big picture") != std::string::npos;
   }
 
-  static bool should_invalidate_cache_for_poor_quality(const std::string &app_name,
-                                                       const session_history_t &session) {
-    return is_poor_quality_grade(session.quality_grade) && !is_control_shell_app(app_name);
+  session_feedback_policy_t classify_session_feedback(
+      const std::string &app_name,
+      const session_history_t &session) {
+    session_feedback_policy_t policy;
+    policy.end_reason = normalize_end_reason(session.last_end_reason);
+
+    const bool has_quality_metrics =
+      session.avg_fps > 0.0 &&
+      (session.last_target_fps > 0.0 || session.avg_fps > 0.0);
+    if (!has_quality_metrics) {
+      policy.confidence = "ignored";
+      policy.ignored_reason = "missing_quality_metrics";
+      return policy;
+    }
+
+    const bool explicit_end = is_explicit_end_reason(policy.end_reason);
+    const bool sampled_recovery_end = has_confirming_soft_end_recovery_signal(session);
+    const bool high_signal =
+      (explicit_end || sampled_recovery_end) &&
+      session.last_duration_s >= 30 &&
+      session.last_sample_count >= 10;
+
+    policy.accepted = true;
+    policy.confidence = high_signal ? "high" : "low";
+    policy.counts_poor_outcome = high_signal && !is_control_shell_app(app_name);
+    policy.can_invalidate_cache = policy.counts_poor_outcome;
+    return policy;
+  }
+
+  std::string grade_session_quality(const session_history_t &session) {
+    const double target_fps =
+      session.last_target_fps > 0.0 ? session.last_target_fps : session.avg_fps;
+    const double fps_ratio =
+      (target_fps > 0.0 && session.avg_fps > 0.0) ?
+        std::clamp(session.avg_fps / target_fps, 0.0, 1.5) :
+        0.0;
+    const double low_ratio =
+      (target_fps > 0.0 && session.last_low_1_percent_fps > 0.0) ?
+        std::clamp(session.last_low_1_percent_fps / target_fps, 0.0, 1.5) :
+        1.5;
+    const bool has_low_percentile = session.last_low_1_percent_fps > 0.0;
+    const bool isolated_min_drop =
+      session.last_min_fps > 0.0 &&
+      target_fps > 0.0 &&
+      session.last_min_fps < target_fps * 0.45;
+    const bool min_drop_confirms_severe_pacing =
+      isolated_min_drop &&
+      (
+        !has_low_percentile ||
+        low_ratio < 0.70 ||
+        fps_ratio < 0.85 ||
+        session.last_frame_pacing_bad_pct >= 5.0
+      );
+    const bool severe_pacing =
+      (has_low_percentile && low_ratio < 0.55) ||
+      min_drop_confirms_severe_pacing ||
+      session.last_frame_pacing_bad_pct >= 20.0;
+    const bool moderate_pacing =
+      (has_low_percentile && low_ratio < 0.75) ||
+      session.last_frame_pacing_bad_pct >= 10.0;
+    const bool mild_pacing =
+      (has_low_percentile && low_ratio < 0.85) ||
+      isolated_min_drop ||
+      session.last_frame_pacing_bad_pct >= 5.0;
+
+    if (session.avg_fps <= 0.0) {
+      return "F";
+    }
+    if (severe_pacing) {
+      return "D";
+    }
+    if (moderate_pacing) {
+      return "C";
+    }
+    if (mild_pacing) {
+      return "B";
+    }
+    if (fps_ratio >= 0.95 && session.packet_loss_pct < 0.5 && session.avg_latency_ms < 20.0) {
+      return "A";
+    }
+    if (fps_ratio >= 0.85 && session.packet_loss_pct < 2.0 && session.avg_latency_ms < 40.0) {
+      return "B";
+    }
+    if (fps_ratio >= 0.70 && session.packet_loss_pct < 5.0) {
+      return "C";
+    }
+    if (fps_ratio >= 0.50) {
+      return "D";
+    }
+    return "F";
+  }
+
+  static bool should_invalidate_cache_for_poor_quality(
+      const std::string &app_name,
+      const session_history_t &session,
+      const session_feedback_policy_t &policy,
+      int consecutive_poor_outcomes) {
+    return is_poor_quality_grade(session.quality_grade) &&
+           policy.can_invalidate_cache &&
+           consecutive_poor_outcomes >= 2 &&
+           !is_control_shell_app(app_name);
   }
 
   static std::string codec_family(const std::string &codec) {
@@ -391,6 +628,123 @@ namespace ai_optimizer {
     return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
   }
 
+  double derive_safe_target_fps(double target_fps,
+                                double avg_fps,
+                                double low_1_percent_fps,
+                                double min_fps,
+                                double frame_pacing_bad_pct,
+                                bool mobile_client,
+                                bool degraded_history,
+                                bool pacing_risk) {
+    if (target_fps <= 30.0) {
+      return 0.0;
+    }
+
+    const double low_signal =
+      low_1_percent_fps > 0.0 ? low_1_percent_fps :
+      min_fps > 0.0 ? min_fps :
+      avg_fps;
+    const bool severe_pacing =
+      (low_signal > 0.0 && low_signal < target_fps * 0.72) ||
+      frame_pacing_bad_pct >= 18.0 ||
+      (avg_fps > 0.0 && avg_fps < target_fps * 0.82);
+    const bool moderate_pacing =
+      (low_signal > 0.0 && low_signal < target_fps * 0.85) ||
+      frame_pacing_bad_pct >= 8.0 ||
+      (avg_fps > 0.0 && avg_fps < target_fps * 0.90);
+
+    if (target_fps >= 90.0 && (severe_pacing || moderate_pacing || pacing_risk || degraded_history)) {
+      const bool can_hold_sixty =
+        avg_fps >= 58.0 &&
+        low_signal >= 45.0 &&
+        frame_pacing_bad_pct < 18.0;
+      return can_hold_sixty ? 60.0 : 30.0;
+    }
+
+    if (severe_pacing) {
+      return 30.0;
+    }
+
+    if ((mobile_client && degraded_history && moderate_pacing) ||
+        (mobile_client && pacing_risk && moderate_pacing)) {
+      const bool can_hold_stable_40 =
+        target_fps >= 55.0 &&
+        target_fps <= 75.0 &&
+        avg_fps > 0.0 &&
+        avg_fps >= target_fps * 0.82 &&
+        low_signal > 0.0 &&
+        low_signal >= target_fps * 0.70;
+      if (can_hold_stable_40) {
+        return 40.0;
+      }
+
+      return 30.0;
+    }
+
+    return 0.0;
+  }
+
+  double effective_history_safe_target_fps(const std::string &device_name,
+                                           const session_history_t &raw_session) {
+    const auto session = sanitize_session_history(raw_session);
+    if (session.last_safe_target_fps <= 0.0) {
+      return 0.0;
+    }
+    if (is_unconfirmed_poor_recovery_feedback(session)) {
+      return 0.0;
+    }
+
+    const auto device_profile = device_db::get_device(device_name);
+    const bool mobile_client = is_mobile_client_type(device_profile);
+    const std::string quality_grade = latest_quality_grade(session);
+    const bool degraded_history =
+      session.consecutive_poor_outcomes > 0 ||
+      session.poor_outcome_count > 0 ||
+      is_poor_quality_grade(quality_grade) ||
+      to_lower_copy(session.last_health_grade) == "degraded";
+    const double target_fps = session.last_target_fps > 0.0 ? session.last_target_fps : session.last_fps;
+    const double history_fps =
+      session.avg_fps > 0.0 ? session.avg_fps : session.last_fps;
+    const double optimizer_fps =
+      history_fps > 0.0 && session.last_fps > 0.0 ? std::min(session.last_fps, history_fps) :
+      history_fps > 0.0 ? history_fps :
+      session.last_fps;
+    const double fps_gap = target_fps > 0.0 ? std::max(0.0, target_fps - session.last_fps) : 0.0;
+    const double fps_ratio =
+      (target_fps > 0.0 && session.last_fps > 0.0) ? std::clamp(session.last_fps / target_fps, 0.0, 1.5) : 0.0;
+    const bool prior_frame_pacing = has_frame_or_host_pacing_issue(session);
+    const bool client_pacing_risk =
+      (target_fps > 0.0 && session.last_low_1_percent_fps > 0.0 &&
+       session.last_low_1_percent_fps < target_fps * 0.85) ||
+      (target_fps > 0.0 && session.last_min_fps > 0.0 &&
+       session.last_min_fps < target_fps * 0.60) ||
+      session.last_frame_pacing_bad_pct >= 8.0;
+    const bool pacing_risk =
+      fps_gap >= 4.0 ||
+      (target_fps > 0.0 && fps_ratio < 0.88) ||
+      client_pacing_risk ||
+      prior_frame_pacing ||
+      is_poor_quality_grade(quality_grade);
+    const double revised_target = derive_safe_target_fps(
+      target_fps,
+      optimizer_fps,
+      session.last_low_1_percent_fps,
+      session.last_min_fps,
+      session.last_frame_pacing_bad_pct,
+      mobile_client,
+      degraded_history,
+      pacing_risk
+    );
+
+    if (session.last_safe_target_fps <= 30.5 &&
+        revised_target > session.last_safe_target_fps + 0.5 &&
+        target_fps > session.last_safe_target_fps + 0.5) {
+      return revised_target;
+    }
+
+    return session.last_safe_target_fps;
+  }
+
   static void enrich_session_reliability_context(const std::string &device_name,
                                                  const std::string &app_name,
                                                  session_history_t &session) {
@@ -404,13 +758,31 @@ namespace ai_optimizer {
       to_lower_copy(session.last_health_grade) == "degraded";
 
     const double target_fps = session.last_target_fps > 0.0 ? session.last_target_fps : session.last_fps;
+    const auto optimization_source = to_lower_copy(session.last_optimization_source);
+    const bool launched_with_history_safe =
+      optimization_source.find("history_safe") != std::string::npos;
     const double fps_gap = target_fps > 0.0 ? std::max(0.0, target_fps - session.last_fps) : 0.0;
     const double fps_ratio =
       (target_fps > 0.0 && session.last_fps > 0.0) ? std::clamp(session.last_fps / target_fps, 0.0, 1.5) : 0.0;
+    const double history_fps =
+      session.avg_fps > 0.0 ? session.avg_fps : session.last_fps;
+    const double optimizer_fps =
+      history_fps > 0.0 && session.last_fps > 0.0 ? std::min(session.last_fps, history_fps) :
+      history_fps > 0.0 ? history_fps :
+      session.last_fps;
+    const bool prior_frame_pacing = has_frame_or_host_pacing_issue(session);
     const bool network_risk = session.last_packet_loss_pct >= 0.35 || session.last_latency_ms >= 28.0;
+    const bool client_pacing_risk =
+      (target_fps > 0.0 && session.last_low_1_percent_fps > 0.0 &&
+       session.last_low_1_percent_fps < target_fps * 0.85) ||
+      (target_fps > 0.0 && session.last_min_fps > 0.0 &&
+       session.last_min_fps < target_fps * 0.60) ||
+      session.last_frame_pacing_bad_pct >= 8.0;
     const bool pacing_risk =
       fps_gap >= 4.0 ||
       (target_fps > 0.0 && fps_ratio < 0.88) ||
+      client_pacing_risk ||
+      prior_frame_pacing ||
       is_poor_quality_grade(quality_grade);
 
     const auto active_codec_family = codec_family(latest_codec(session));
@@ -435,6 +807,13 @@ namespace ai_optimizer {
     const bool hdr_risk =
       session.last_hdr_risk == "elevated" ||
       (session.last_safe_hdr.has_value() && !session.last_safe_hdr.value() && degraded_history);
+    const bool host_render_limited =
+      pacing_risk &&
+      !network_risk &&
+      !capture_fallback &&
+      !decoder_risk &&
+      !virtual_display_risk &&
+      !hdr_risk;
 
     if (session.last_network_risk.empty()) {
       session.last_network_risk = network_risk ? "elevated" : "normal";
@@ -455,13 +834,15 @@ namespace ai_optimizer {
       else if (virtual_display_risk) session.last_primary_issue = "virtual_display_path";
       else if (decoder_risk) session.last_primary_issue = "decoder_path";
       else if (capture_fallback) session.last_primary_issue = "capture_fallback";
+      else if (host_render_limited) session.last_primary_issue = "host_render_limited";
       else if (pacing_risk) session.last_primary_issue = "frame_pacing";
       else session.last_primary_issue = "steady";
     }
 
     if (session.last_issues.empty()) {
       if (network_risk) session.last_issues.push_back("network_jitter");
-      if (pacing_risk) session.last_issues.push_back("frame_pacing");
+      if (host_render_limited) session.last_issues.push_back("host_render_limited");
+      else if (pacing_risk) session.last_issues.push_back("frame_pacing");
       if (capture_fallback) session.last_issues.push_back("capture_fallback");
       if (hdr_risk) session.last_issues.push_back("hdr_path");
       if (decoder_risk) session.last_issues.push_back("decoder_path");
@@ -525,6 +906,26 @@ namespace ai_optimizer {
       }
     }
 
+    if (session.last_safe_target_fps <= 0.0 &&
+        launched_with_history_safe &&
+        target_fps > 0.0 &&
+        target_fps <= 30.0) {
+      session.last_safe_target_fps = target_fps;
+    }
+
+    if (session.last_safe_target_fps <= 0.0) {
+      session.last_safe_target_fps = derive_safe_target_fps(
+        target_fps,
+        optimizer_fps,
+        session.last_low_1_percent_fps,
+        session.last_min_fps,
+        session.last_frame_pacing_bad_pct,
+        mobile_client,
+        degraded_history,
+        pacing_risk
+      );
+    }
+
     if (!session.last_safe_hdr.has_value()) {
       if (hdr_risk) {
         session.last_safe_hdr = false;
@@ -537,7 +938,10 @@ namespace ai_optimizer {
       session.last_relaunch_recommended ||
       decoder_risk ||
       hdr_risk ||
-      virtual_display_risk;
+      virtual_display_risk ||
+      (session.last_safe_target_fps > 0.0 &&
+       target_fps > 0.0 &&
+       session.last_safe_target_fps < target_fps);
   }
 
   static config_t resolved_config(config_t config) {
@@ -568,7 +972,9 @@ namespace ai_optimizer {
     return platf::appdata() / "ai_optimization_cache.json";
   }
 
-  static session_history_t merge_history_entries(const session_history_t &lhs, const session_history_t &rhs) {
+  static session_history_t merge_history_entries(const session_history_t &raw_lhs, const session_history_t &raw_rhs) {
+    const auto lhs = sanitize_session_history(raw_lhs);
+    const auto rhs = sanitize_session_history(raw_rhs);
     if (lhs.session_count <= 0) {
       return rhs;
     }
@@ -599,6 +1005,14 @@ namespace ai_optimizer {
     merged.last_packet_loss_pct = latest.last_packet_loss_pct;
     merged.last_quality_grade = latest.last_quality_grade;
     merged.last_codec = latest.last_codec;
+    merged.last_duration_s = latest.last_duration_s;
+    merged.last_sample_count = latest.last_sample_count;
+    merged.last_low_1_percent_fps = latest.last_low_1_percent_fps;
+    merged.last_min_fps = latest.last_min_fps;
+    merged.last_frame_pacing_bad_pct = latest.last_frame_pacing_bad_pct;
+    merged.last_end_reason = latest.last_end_reason;
+    merged.last_sample_confidence = latest.last_sample_confidence;
+    merged.last_feedback_ignored_reason = latest.last_feedback_ignored_reason;
     merged.consecutive_poor_outcomes = latest.consecutive_poor_outcomes;
     merged.last_optimization_source = latest.last_optimization_source;
     merged.last_optimization_confidence = latest.last_optimization_confidence;
@@ -613,10 +1027,11 @@ namespace ai_optimizer {
     merged.last_safe_bitrate_kbps = latest.last_safe_bitrate_kbps > 0 ? latest.last_safe_bitrate_kbps : merged.last_safe_bitrate_kbps;
     merged.last_safe_codec = latest.last_safe_codec.empty() ? merged.last_safe_codec : latest.last_safe_codec;
     merged.last_safe_display_mode = latest.last_safe_display_mode.empty() ? merged.last_safe_display_mode : latest.last_safe_display_mode;
+    merged.last_safe_target_fps = latest.last_safe_target_fps > 0.0 ? latest.last_safe_target_fps : merged.last_safe_target_fps;
     merged.last_safe_hdr = latest.last_safe_hdr.has_value() ? latest.last_safe_hdr : merged.last_safe_hdr;
     merged.last_relaunch_recommended = latest.last_relaunch_recommended || merged.last_relaunch_recommended;
     merged.last_updated_at = latest.last_updated_at;
-    return merged;
+    return sanitize_session_history(merged);
   }
 
   static void load_cache() {
@@ -738,6 +1153,31 @@ namespace ai_optimizer {
     return fps > 0;
   }
 
+  static std::string display_mode_with_fps(const std::string &value, int target_fps) {
+    int width = 0;
+    int height = 0;
+    int fps = 0;
+    if (!parse_display_mode(value, width, height, fps)) {
+      return value;
+    }
+    target_fps = std::clamp(target_fps, 24, 240);
+    return std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(target_fps);
+  }
+
+  static bool display_mode_fps_at_or_below(const std::optional<std::string> &display_mode,
+                                           double target_fps,
+                                           double tolerance_fps = 0.5) {
+    if (!display_mode || target_fps <= 0.0) {
+      return false;
+    }
+
+    int width = 0;
+    int height = 0;
+    int fps = 0;
+    return parse_display_mode(*display_mode, width, height, fps) &&
+      static_cast<double>(fps) <= target_fps + tolerance_fps;
+  }
+
   template<typename T>
   static T clamp_value(T value, T min_value, T max_value) {
     return std::max(min_value, std::min(value, max_value));
@@ -780,23 +1220,27 @@ namespace ai_optimizer {
                                       bool normalized,
                                       bool from_cache) {
     auto confidence = fallback.source == "device_db" ? "high"s : "medium"s;
+    std::optional<session_history_t> sanitized_history;
+    if (history) {
+      sanitized_history = sanitize_session_history(*history);
+    }
     if (fallback.source != "device_db" && device_name.empty()) {
       confidence = "low";
     }
     if (!game_category.empty() && game_category != "unknown") {
       confidence = confidence == "low" ? "medium" : confidence;
     }
-    if (history) {
-      const auto health_grade = to_lower_copy(history->last_health_grade);
-      if (history->poor_outcome_count > 0 ||
-          history->consecutive_poor_outcomes > 0 ||
+    if (sanitized_history) {
+      const auto health_grade = to_lower_copy(sanitized_history->last_health_grade);
+      if (sanitized_history->poor_outcome_count > 0 ||
+          sanitized_history->consecutive_poor_outcomes > 0 ||
           health_grade == "degraded" ||
-          history->last_relaunch_recommended) {
+          sanitized_history->last_relaunch_recommended) {
         confidence = "low";
       } else if (health_grade == "watch" && confidence == "high") {
         confidence = "medium";
       } else {
-        const auto grade = latest_quality_grade(*history);
+        const auto grade = latest_quality_grade(*sanitized_history);
         if (grade == "A" || grade == "B") {
           confidence = from_cache ? "high" : confidence;
         }
@@ -817,6 +1261,10 @@ namespace ai_optimizer {
                                                           bool from_cache) {
     const auto fallback = fallback_optimization_for_device(device_name, app_name);
     const auto now = unix_time_now();
+    std::optional<session_history_t> sanitized_history;
+    if (history) {
+      sanitized_history = sanitize_session_history(*history);
+    }
     std::vector<std::string> normalization_notes;
     bool normalized = false;
 
@@ -848,6 +1296,24 @@ namespace ai_optimizer {
           normalization_notes.push_back("Clamped display mode to a supported range.");
           normalized = true;
         }
+      }
+    }
+    const double effective_safe_target_fps =
+      sanitized_history ? effective_history_safe_target_fps(device_name, *sanitized_history) : 0.0;
+    if (sanitized_history &&
+        effective_safe_target_fps > 0.0 &&
+        !should_relax_history_safe_target_fps(*sanitized_history) &&
+        optimization.display_mode) {
+      int width = 0;
+      int height = 0;
+      int fps = 0;
+      const int safe_fps = static_cast<int>(std::round(effective_safe_target_fps));
+      if (parse_display_mode(*optimization.display_mode, width, height, fps) &&
+          safe_fps > 0 &&
+          safe_fps < fps) {
+        optimization.display_mode = display_mode_with_fps(*optimization.display_mode, safe_fps);
+        normalization_notes.push_back("Lowered stream FPS from session pacing feedback.");
+        normalized = true;
       }
     }
 
@@ -907,7 +1373,7 @@ namespace ai_optimizer {
     optimization.confidence = infer_confidence(
       device_name,
       game_category,
-      history,
+      sanitized_history,
       fallback,
       normalized,
       from_cache
@@ -918,9 +1384,9 @@ namespace ai_optimizer {
     if (!game_category.empty() && game_category != "unknown") {
       push_signal(optimization.signals_used, "game_category");
     }
-    if (history && history->session_count > 0) {
+    if (sanitized_history && sanitized_history->session_count > 0) {
       push_signal(optimization.signals_used, "session_history");
-      if (!history->last_primary_issue.empty() || !history->last_health_grade.empty()) {
+      if (!sanitized_history->last_primary_issue.empty() || !sanitized_history->last_health_grade.empty()) {
         push_signal(optimization.signals_used, "reliability_feedback");
       }
     }
@@ -1045,7 +1511,8 @@ namespace ai_optimizer {
       "color_range: 0=client decides, 1=limited/MPEG, 2=full/JPEG. "
       "preferred_codec: 'hevc' for most devices (better quality/bitrate), 'h264' for legacy/low-power devices, 'av1' for newest devices with AV1 decode. "
       "If previous session data shows packet loss >2% or latency >30ms, reduce bitrate. "
-      "If previous session scored A, keep current settings. If B/C, adjust. If D/F, significantly reduce quality.";
+      "If previous session scored A, keep current settings. If B/C, adjust. "
+      "If confirmed or repeated previous session feedback scored D/F, significantly reduce quality; low-confidence soft-end observations should be treated as watch signals only.";
   }
 
   static std::string build_user_prompt(
@@ -1071,78 +1538,90 @@ namespace ai_optimizer {
 
     std::string history_line;
     if (history) {
+      const auto prompt_history = sanitize_session_history(*history);
       std::ostringstream history_stream;
       history_stream << "Previous session stats (feedback for improvement):\n";
-      if (history->last_fps > 0 || history->last_latency_ms > 0 || !latest_quality_grade(*history).empty()) {
+      if (prompt_history.last_fps > 0 || prompt_history.last_latency_ms > 0 || !latest_quality_grade(prompt_history).empty()) {
         history_stream << "  Latest session: target "
-                       << static_cast<int>(std::round(history->last_target_fps > 0 ? history->last_target_fps : history->last_fps))
-                       << " FPS, achieved " << static_cast<int>(std::round(history->last_fps))
-                       << " FPS, latency " << static_cast<int>(std::round(history->last_latency_ms))
-                       << "ms, bitrate " << history->last_bitrate_kbps
-                       << "kbps, packet loss " << history->last_packet_loss_pct
-                       << "%, grade " << latest_quality_grade(*history)
-                       << ", codec " << latest_codec(*history) << "\n";
+                       << static_cast<int>(std::round(prompt_history.last_target_fps > 0 ? prompt_history.last_target_fps : prompt_history.last_fps))
+                       << " FPS, achieved " << static_cast<int>(std::round(prompt_history.last_fps))
+                       << " FPS, 1% low " << static_cast<int>(std::round(prompt_history.last_low_1_percent_fps))
+                       << " FPS, min " << static_cast<int>(std::round(prompt_history.last_min_fps))
+                       << " FPS, bad pacing " << prompt_history.last_frame_pacing_bad_pct
+                       << "%, latency " << static_cast<int>(std::round(prompt_history.last_latency_ms))
+                       << "ms, bitrate " << prompt_history.last_bitrate_kbps
+                       << "kbps, packet loss " << prompt_history.last_packet_loss_pct
+                       << "%, grade " << latest_quality_grade(prompt_history)
+                       << ", codec " << latest_codec(prompt_history) << "\n";
       }
-      history_stream << "  Rolling history: " << history->session_count
-                     << " sessions, Avg FPS " << static_cast<int>(std::round(history->avg_fps))
-                     << ", Avg Latency " << static_cast<int>(std::round(history->avg_latency_ms))
-                     << "ms, Avg Bitrate " << history->avg_bitrate_kbps
-                     << "kbps, Avg Packet Loss " << history->packet_loss_pct
-                     << "%, Poor Outcomes " << history->poor_outcome_count
-                     << ", Last Confidence " << history->last_optimization_confidence << "\n";
+      history_stream << "  Rolling history: " << prompt_history.session_count
+                     << " sessions, Avg FPS " << static_cast<int>(std::round(prompt_history.avg_fps))
+                     << ", Avg Latency " << static_cast<int>(std::round(prompt_history.avg_latency_ms))
+                     << "ms, Avg Bitrate " << prompt_history.avg_bitrate_kbps
+                     << "kbps, Avg Packet Loss " << prompt_history.packet_loss_pct
+                     << "%, Poor Outcomes " << prompt_history.poor_outcome_count
+                     << ", Last Confidence " << prompt_history.last_optimization_confidence << "\n";
 
       const bool has_reliability_context =
-        !history->last_health_grade.empty() ||
-        !history->last_primary_issue.empty() ||
-        !history->last_issues.empty() ||
-        !history->last_safe_codec.empty() ||
-        history->last_safe_bitrate_kbps > 0 ||
-        !history->last_safe_display_mode.empty() ||
-        history->last_safe_hdr.has_value();
+        !prompt_history.last_health_grade.empty() ||
+        !prompt_history.last_primary_issue.empty() ||
+        !prompt_history.last_issues.empty() ||
+        !prompt_history.last_safe_codec.empty() ||
+        prompt_history.last_safe_bitrate_kbps > 0 ||
+        !prompt_history.last_safe_display_mode.empty() ||
+        prompt_history.last_safe_target_fps > 0.0 ||
+        prompt_history.last_safe_hdr.has_value();
 
       if (has_reliability_context) {
         history_stream << "  Reliability diagnosis: health="
-                       << (history->last_health_grade.empty() ? "unknown" : history->last_health_grade)
+                       << (prompt_history.last_health_grade.empty() ? "unknown" : prompt_history.last_health_grade)
                        << ", primary issue="
-                       << (history->last_primary_issue.empty() ? "steady" : history->last_primary_issue);
-        if (!history->last_issues.empty()) {
+                       << (prompt_history.last_primary_issue.empty() ? "steady" : prompt_history.last_primary_issue);
+        if (!prompt_history.last_issues.empty()) {
           history_stream << ", issue tags=";
-          for (std::size_t i = 0; i < history->last_issues.size(); ++i) {
+          for (std::size_t i = 0; i < prompt_history.last_issues.size(); ++i) {
             if (i > 0) {
               history_stream << "/";
             }
-            history_stream << history->last_issues[i];
+            history_stream << prompt_history.last_issues[i];
           }
         }
         history_stream << "\n";
 
         history_stream << "  Risk levels: network="
-                       << (history->last_network_risk.empty() ? "unknown" : history->last_network_risk)
+                       << (prompt_history.last_network_risk.empty() ? "unknown" : prompt_history.last_network_risk)
                        << ", decoder="
-                       << (history->last_decoder_risk.empty() ? "unknown" : history->last_decoder_risk)
+                       << (prompt_history.last_decoder_risk.empty() ? "unknown" : prompt_history.last_decoder_risk)
                        << ", hdr="
-                       << (history->last_hdr_risk.empty() ? "unknown" : history->last_hdr_risk)
+                       << (prompt_history.last_hdr_risk.empty() ? "unknown" : prompt_history.last_hdr_risk)
                        << ", capture="
-                       << (history->last_capture_path.empty() ? "unknown" : history->last_capture_path)
+                       << (prompt_history.last_capture_path.empty() ? "unknown" : prompt_history.last_capture_path)
                        << "\n";
 
         history_stream << "  Safe fallback bias: bitrate="
-                       << (history->last_safe_bitrate_kbps > 0 ?
-                             std::to_string(history->last_safe_bitrate_kbps) + "kbps" :
+                       << (prompt_history.last_safe_bitrate_kbps > 0 ?
+                             std::to_string(prompt_history.last_safe_bitrate_kbps) + "kbps" :
                              std::string {"unchanged"})
                        << ", codec="
-                       << (history->last_safe_codec.empty() ? "unchanged" : history->last_safe_codec)
+                       << (prompt_history.last_safe_codec.empty() ? "unchanged" : prompt_history.last_safe_codec)
                        << ", display="
-                       << (history->last_safe_display_mode.empty() ? "unchanged" : history->last_safe_display_mode)
+                       << (prompt_history.last_safe_display_mode.empty() ? "unchanged" : prompt_history.last_safe_display_mode)
+                       << ", target_fps="
+                       << (prompt_history.last_safe_target_fps > 0.0 ?
+                             std::to_string(static_cast<int>(std::round(prompt_history.last_safe_target_fps))) :
+                             std::string {"unchanged"})
                        << ", hdr=";
-        if (history->last_safe_hdr.has_value()) {
-          history_stream << (*history->last_safe_hdr ? "keep" : "off");
+        if (prompt_history.last_safe_hdr.has_value()) {
+          history_stream << (*prompt_history.last_safe_hdr ? "keep" : "off");
         } else {
           history_stream << "unchanged";
         }
         history_stream << ", relaunch="
-                       << (history->last_relaunch_recommended ? "yes" : "no")
+                       << (prompt_history.last_relaunch_recommended ? "yes" : "no")
                        << "\n";
+      }
+      if (is_low_confidence_soft_end_without_confirming_signal(prompt_history)) {
+        history_stream << "  Feedback confidence: low soft-end observation only; do not apply recovery, resolution, or FPS downgrades from this sample unless future confirmed poor outcomes repeat.\n";
       }
 
       history_line = history_stream.str();
@@ -1694,7 +2173,11 @@ namespace ai_optimizer {
   void init(const config_t &config) {
     cfg = resolved_config(config);
     load_cache();
-    load_history();
+    const bool history_repaired = load_history();
+    if (history_repaired) {
+      save_history();
+      BOOST_LOG(info) << "ai_optimizer: Repaired invalid session history values during load"sv;
+    }
     if (cfg.enabled) {
       BOOST_LOG(info) << "ai_optimizer: Enabled provider="sv << cfg.provider
                       << ", model="sv << cfg.model
@@ -1719,19 +2202,39 @@ namespace ai_optimizer {
 
   std::optional<device_db::optimization_t> get_cached(
       const std::string &device_name, const std::string &app_name) {
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    auto key = current_cache_key(device_name, app_name);
-    auto it = cache.find(key);
-    if (it == cache.end()) return std::nullopt;
+    const auto key = current_cache_key(device_name, app_name);
+    std::optional<cache_entry_t> entry;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      auto it = cache.find(key);
+      if (it == cache.end()) return std::nullopt;
 
-    const auto now = unix_time_now();
-    if (it->second.optimization.expires_at > 0 && now >= it->second.optimization.expires_at) {
-      cache.erase(it);
-      save_cache_locked();
+      const auto now = unix_time_now();
+      if (it->second.optimization.expires_at > 0 && now >= it->second.optimization.expires_at) {
+        cache.erase(it);
+        save_cache_locked();
+        return std::nullopt;
+      }
+      entry = it->second;
+    }
+
+    if (auto history = get_session_history(device_name, app_name);
+        history && should_refresh_recovery_cache_after_stable_trial(*history, entry->optimization)) {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      auto it = cache.find(key);
+      if (it != cache.end()) {
+        cache.erase(it);
+        save_cache_locked();
+      }
+      BOOST_LOG(info) << "ai_optimizer: Retired stale recovery cache for "sv
+                      << history_key(device_name, app_name)
+                      << " after stable "sv
+                      << static_cast<int>(std::round(history->last_target_fps))
+                      << " FPS trial; requesting a higher-quality recommendation"sv;
       return std::nullopt;
     }
 
-    auto optimization = it->second.optimization;
+    auto optimization = entry->optimization;
     optimization.source = "ai_cached";
     optimization.cache_status = "hit";
     return optimization;
@@ -1742,31 +2245,58 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::optional<session_history_t> &history) {
     const auto effective_history = history ? history : get_session_history(device_name, app_name);
-    if (!effective_history || effective_history->session_count <= 0) {
+    if (!effective_history) {
       return std::nullopt;
     }
 
-    const auto &session = *effective_history;
+    const auto session = sanitize_session_history(*effective_history);
+    if (session.session_count <= 0) {
+      return std::nullopt;
+    }
     const auto latest_grade = latest_quality_grade(session);
     const auto last_health_grade = to_lower_copy(session.last_health_grade);
+    if (is_unconfirmed_poor_recovery_feedback(session)) {
+      return std::nullopt;
+    }
+
     const bool has_safe_bias =
       session.last_safe_bitrate_kbps > 0 ||
       !session.last_safe_codec.empty() ||
       session.last_safe_hdr.has_value() ||
-      !session.last_safe_display_mode.empty();
+      !session.last_safe_display_mode.empty() ||
+      session.last_safe_target_fps > 0.0;
 
+    const auto primary_issue = to_lower_copy(session.last_primary_issue);
+    const bool meaningful_primary_issue =
+      !primary_issue.empty() && primary_issue != "steady";
+    const bool high_confidence_sample =
+      to_lower_copy(session.last_sample_confidence) == "high" ||
+      has_confirming_soft_end_recovery_signal(session);
+    const bool host_render_only_relaunch =
+      session.last_relaunch_recommended &&
+      (primary_issue == "host_render_limited" || primary_issue == "host_render") &&
+      session.poor_outcome_count <= 0 &&
+      session.consecutive_poor_outcomes <= 0 &&
+      !high_confidence_sample;
     const bool reliability_pressure =
       session.poor_outcome_count > 0 ||
       session.consecutive_poor_outcomes > 0 ||
-      last_health_grade == "watch" ||
-      last_health_grade == "degraded" ||
-      !session.last_primary_issue.empty();
+      (session.last_relaunch_recommended && !host_render_only_relaunch) ||
+      (
+        high_confidence_sample &&
+        (
+          last_health_grade == "watch" ||
+          last_health_grade == "degraded" ||
+          meaningful_primary_issue
+        )
+      );
 
     const bool reuse_recent_success =
       (latest_grade == "A" || latest_grade == "B") &&
       (session.last_bitrate_kbps > 0 || !session.last_codec.empty());
 
-    if (!has_safe_bias && !reuse_recent_success) {
+    if ((!has_safe_bias && !reuse_recent_success) ||
+        (!reliability_pressure && !reuse_recent_success)) {
       return std::nullopt;
     }
 
@@ -1800,6 +2330,17 @@ namespace ai_optimizer {
       optimization.virtual_display = true;
     }
 
+    const bool relax_safe_target_fps = should_relax_history_safe_target_fps(session);
+    const double effective_safe_target_fps = effective_history_safe_target_fps(device_name, session);
+    if (effective_safe_target_fps > 0.0 && !relax_safe_target_fps) {
+      const auto base_display_mode =
+        optimization.display_mode.value_or(fallback.display_mode.value_or("1280x720x60"));
+      optimization.display_mode = display_mode_with_fps(
+        base_display_mode,
+        static_cast<int>(std::round(effective_safe_target_fps))
+      );
+    }
+
     optimization.confidence =
       (latest_grade == "A" || latest_grade == "B") && !reliability_pressure ? "medium" : "low";
 
@@ -1818,6 +2359,16 @@ namespace ai_optimizer {
     if (optimization.target_bitrate_kbps) {
       reasoning << " Hold bitrate near " << *optimization.target_bitrate_kbps << "kbps.";
     }
+    if (effective_safe_target_fps > 0.0) {
+      if (relax_safe_target_fps) {
+        reasoning << " Relax the prior "
+                  << static_cast<int>(std::round(effective_safe_target_fps))
+                  << " FPS cap because that safe-target trial already ran; retry a smoother profile.";
+      } else {
+        reasoning << " Target " << static_cast<int>(std::round(effective_safe_target_fps))
+                  << " FPS on the next launch to avoid visible frame pacing drops.";
+      }
+    }
     optimization.reasoning = reasoning.str();
 
     optimization = normalize_optimization(
@@ -1832,6 +2383,169 @@ namespace ai_optimizer {
     optimization.source = "history_safe";
     optimization.cache_status = "fallback";
     return optimization;
+  }
+
+  bool should_relax_history_safe_target_fps(const session_history_t &raw_session) {
+    const auto session = sanitize_session_history(raw_session);
+    if (session.last_safe_target_fps <= 0.0 ||
+        session.last_target_fps <= 0.0) {
+      return false;
+    }
+
+    const auto confidence = to_lower_copy(session.last_sample_confidence);
+    const auto end_reason = normalize_end_reason(session.last_end_reason);
+    const bool soft_end_has_enough_signal =
+      session.last_duration_s >= 60 &&
+      session.last_sample_count >= 30;
+    const bool explicit_completed_end =
+      end_reason == "end" ||
+      end_reason == "user_end" ||
+      end_reason == "quit";
+    const bool completed_safe_trial =
+      explicit_completed_end ||
+      soft_end_has_enough_signal;
+    const bool low_confidence_soft_end =
+      confidence == "low" &&
+      (end_reason == "host_pause" || end_reason == "disconnect" || end_reason == "cancelled") &&
+      !soft_end_has_enough_signal;
+    const auto grade = latest_quality_grade(session);
+    const auto normalized_grade = to_lower_copy(grade);
+    const bool poor_grade_signal = normalized_grade == "d" || normalized_grade == "f";
+    const bool frame_pacing_issue = has_frame_or_host_pacing_issue(session);
+    if (session.last_target_fps > session.last_safe_target_fps + 0.5) {
+      if (low_confidence_soft_end && (poor_grade_signal || frame_pacing_issue)) {
+        return false;
+      }
+      return low_confidence_soft_end && session.consecutive_poor_outcomes <= 0;
+    }
+
+    if (!completed_safe_trial) {
+      return false;
+    }
+
+    const bool severe_grade =
+      !low_confidence_soft_end &&
+      poor_grade_signal;
+    const double fps_ratio =
+      session.last_fps > 0.0 ? std::clamp(session.last_fps / session.last_target_fps, 0.0, 1.5) : 0.0;
+    const bool severe_fps_miss = !low_confidence_soft_end && fps_ratio > 0.0 && fps_ratio < 0.82;
+    const bool severe_low =
+      !low_confidence_soft_end &&
+      session.last_low_1_percent_fps > 0.0 &&
+      session.last_low_1_percent_fps < session.last_target_fps * 0.65;
+    const bool severe_pacing = !low_confidence_soft_end && session.last_frame_pacing_bad_pct >= 18.0;
+
+    return !(severe_grade ||
+             severe_fps_miss ||
+             severe_low ||
+             severe_pacing ||
+             session.consecutive_poor_outcomes > 0);
+  }
+
+  bool should_graduate_history_safe_target_fps(
+      const session_history_t &raw_session,
+      double previous_safe_target_fps) {
+    const auto session = sanitize_session_history(raw_session);
+    if (previous_safe_target_fps <= 0.0 ||
+        session.last_target_fps < 55.0 ||
+        session.last_target_fps <= previous_safe_target_fps + 15.0) {
+      return false;
+    }
+    if (session.last_duration_s < 60 || session.last_sample_count < 30) {
+      return false;
+    }
+
+    const double delivered_fps =
+      session.last_fps > 0.0 ? session.last_fps : session.avg_fps;
+    if (delivered_fps <= 0.0 ||
+        delivered_fps < session.last_target_fps * 0.90) {
+      return false;
+    }
+    if (session.avg_fps > 0.0 &&
+        session.avg_fps < session.last_target_fps * 0.90) {
+      return false;
+    }
+    if (session.last_low_1_percent_fps > 0.0 &&
+        session.last_low_1_percent_fps < session.last_target_fps * 0.65) {
+      return false;
+    }
+    if (session.last_min_fps > 0.0 &&
+        session.last_min_fps < session.last_target_fps * 0.45) {
+      return false;
+    }
+    if (session.last_frame_pacing_bad_pct >= 25.0 ||
+        session.last_packet_loss_pct >= 0.35 ||
+        session.last_latency_ms >= 28.0) {
+      return false;
+    }
+
+    const auto elevated = [](const std::string &risk) {
+      return to_lower_copy(risk) == "elevated";
+    };
+    if (elevated(session.last_network_risk) ||
+        elevated(session.last_decoder_risk) ||
+        elevated(session.last_hdr_risk)) {
+      return false;
+    }
+
+    const auto capture_path = to_lower_copy(session.last_capture_path);
+    if (capture_path.find("cpu") != std::string::npos ||
+        capture_path.find("shm") != std::string::npos ||
+        capture_path.find("fallback") != std::string::npos) {
+      return false;
+    }
+
+    return true;
+  }
+
+  bool should_refresh_recovery_cache_after_stable_trial(
+      const session_history_t &raw_session,
+      const device_db::optimization_t &optimization) {
+    const auto session = sanitize_session_history(raw_session);
+    if (session.last_target_fps <= 0.0 || session.last_target_fps > 45.0) {
+      return false;
+    }
+
+    const auto grade = to_lower_copy(latest_quality_grade(session));
+    if (grade != "a" && grade != "b") {
+      return false;
+    }
+    if (session.last_duration_s < 120 || session.last_sample_count < 60) {
+      return false;
+    }
+    if (session.last_fps <= 0.0 || session.last_fps < session.last_target_fps * 0.95) {
+      return false;
+    }
+    if (session.last_low_1_percent_fps > 0.0 &&
+        session.last_low_1_percent_fps < session.last_target_fps * 0.90) {
+      return false;
+    }
+    if (session.last_min_fps > 0.0 &&
+        session.last_min_fps < session.last_target_fps * 0.85) {
+      return false;
+    }
+    if (session.last_frame_pacing_bad_pct >= 3.0 ||
+        session.last_packet_loss_pct >= 0.35 ||
+        session.last_latency_ms >= 28.0 ||
+        session.consecutive_poor_outcomes > 0) {
+      return false;
+    }
+    if (!display_mode_fps_at_or_below(optimization.display_mode, session.last_target_fps)) {
+      return false;
+    }
+
+    const auto confidence = to_lower_copy(optimization.confidence);
+    const auto reasoning = to_lower_copy(optimization.reasoning);
+    const auto normalization = to_lower_copy(optimization.normalization_reason);
+    const bool recovery_capped =
+      confidence == "low" ||
+      normalization.find("lowered stream fps") != std::string::npos ||
+      reasoning.find("pacing feedback") != std::string::npos ||
+      reasoning.find("safe-target") != std::string::npos ||
+      reasoning.find("safe target") != std::string::npos ||
+      reasoning.find("recovery") != std::string::npos;
+
+    return recovery_capped;
   }
 
   void request_async(const std::string &device_name,
@@ -2085,10 +2799,11 @@ namespace ai_optimizer {
     return platf::appdata() / "ai_session_history.json";
   }
 
-  static void load_history() {
+  static bool load_history() {
     std::lock_guard<std::mutex> lock(history_mutex);
     std::ifstream file(history_path());
-    if (!file.is_open()) return;
+    if (!file.is_open()) return false;
+    bool repaired_history = false;
     try {
       auto root = nlohmann::json::parse(file);
       for (auto &[key, val] : root.items()) {
@@ -2107,6 +2822,14 @@ namespace ai_optimizer {
         h.last_packet_loss_pct = val.value("last_packet_loss_pct", h.packet_loss_pct);
         h.last_quality_grade = val.value("last_quality_grade", h.quality_grade);
         h.last_codec = val.value("last_codec", h.codec);
+        h.last_duration_s = val.value("last_duration_s", 0);
+        h.last_sample_count = val.value("last_sample_count", 0);
+        h.last_low_1_percent_fps = val.value("last_low_1_percent_fps", 0.0);
+        h.last_min_fps = val.value("last_min_fps", 0.0);
+        h.last_frame_pacing_bad_pct = val.value("last_frame_pacing_bad_pct", 0.0);
+        h.last_end_reason = val.value("last_end_reason", "");
+        h.last_sample_confidence = val.value("last_sample_confidence", "");
+        h.last_feedback_ignored_reason = val.value("last_feedback_ignored_reason", "");
         h.poor_outcome_count = val.value("poor_outcome_count", 0);
         h.consecutive_poor_outcomes = val.value("consecutive_poor_outcomes", 0);
         h.last_optimization_source = val.value("last_optimization_source", "");
@@ -2122,6 +2845,7 @@ namespace ai_optimizer {
         h.last_safe_bitrate_kbps = val.value("last_safe_bitrate_kbps", 0);
         h.last_safe_codec = val.value("last_safe_codec", "");
         h.last_safe_display_mode = val.value("last_safe_display_mode", "");
+        h.last_safe_target_fps = val.value("last_safe_target_fps", 0.0);
         if (val.contains("last_safe_hdr") && val["last_safe_hdr"].is_boolean()) {
           h.last_safe_hdr = val["last_safe_hdr"].get<bool>();
         }
@@ -2131,7 +2855,13 @@ namespace ai_optimizer {
         auto pos = key.find(':');
         const auto device_name = pos == std::string::npos ? key : key.substr(0, pos);
         const auto app_name = pos == std::string::npos ? std::string {} : key.substr(pos + 1);
+        auto before_repair = h;
+        h = sanitize_session_history(h);
+        repaired_history = repaired_history || history_repair_should_persist(before_repair, h);
+        before_repair = h;
         enrich_session_reliability_context(device_name, app_name, h);
+        h = sanitize_session_history(h);
+        repaired_history = repaired_history || history_repair_should_persist(before_repair, h);
         const auto normalized_key = history_key(device_name, app_name);
         auto existing = session_history.find(normalized_key);
         if (existing == session_history.end()) {
@@ -2140,7 +2870,10 @@ namespace ai_optimizer {
           existing->second = merge_history_entries(existing->second, h);
         }
       }
-    } catch (...) {}
+    } catch (...) {
+      return false;
+    }
+    return repaired_history;
   }
 
   static void save_history() {
@@ -2162,6 +2895,14 @@ namespace ai_optimizer {
         {"last_packet_loss_pct", h.last_packet_loss_pct},
         {"last_quality_grade", h.last_quality_grade},
         {"last_codec", h.last_codec},
+        {"last_duration_s", h.last_duration_s},
+        {"last_sample_count", h.last_sample_count},
+        {"last_low_1_percent_fps", h.last_low_1_percent_fps},
+        {"last_min_fps", h.last_min_fps},
+        {"last_frame_pacing_bad_pct", h.last_frame_pacing_bad_pct},
+        {"last_end_reason", h.last_end_reason},
+        {"last_sample_confidence", h.last_sample_confidence},
+        {"last_feedback_ignored_reason", h.last_feedback_ignored_reason},
         {"poor_outcome_count", h.poor_outcome_count},
         {"consecutive_poor_outcomes", h.consecutive_poor_outcomes},
         {"last_optimization_source", h.last_optimization_source},
@@ -2177,6 +2918,7 @@ namespace ai_optimizer {
         {"last_safe_bitrate_kbps", h.last_safe_bitrate_kbps},
         {"last_safe_codec", h.last_safe_codec},
         {"last_safe_display_mode", h.last_safe_display_mode},
+        {"last_safe_target_fps", h.last_safe_target_fps},
         {"last_relaunch_recommended", h.last_relaunch_recommended},
         {"last_updated_at", h.last_updated_at},
         {"last_invalidated_at", h.last_invalidated_at}
@@ -2193,72 +2935,153 @@ namespace ai_optimizer {
   void record_session(const std::string &device_name,
                       const std::string &app_name,
                       const session_history_t &session) {
+    auto normalized_session = session;
+    if (normalized_session.last_target_fps <= 0.0 && normalized_session.avg_fps > 0.0) {
+      normalized_session.last_target_fps = normalized_session.avg_fps;
+    }
     const auto canonical_device = canonical_device_name(device_name);
+    enrich_session_reliability_context(canonical_device, app_name, normalized_session);
+    auto feedback_policy = classify_session_feedback(app_name, normalized_session);
+    normalized_session.last_end_reason = feedback_policy.end_reason;
+    normalized_session.last_sample_confidence = feedback_policy.confidence;
+    normalized_session.last_feedback_ignored_reason = feedback_policy.ignored_reason;
+    normalized_session = sanitize_session_history(normalized_session);
+
     auto key = history_key(canonical_device, app_name);
-    const bool poor_quality = is_poor_quality_grade(session.quality_grade);
-    const bool invalidate_cache = should_invalidate_cache_for_poor_quality(app_name, session);
+    if (!feedback_policy.accepted) {
+      BOOST_LOG(info) << "ai_optimizer: Ignoring low-signal session report for "sv << key
+                      << " end_reason="sv << normalized_session.last_end_reason
+                      << " reason="sv << feedback_policy.ignored_reason;
+      return;
+    }
+
+    const bool poor_quality = is_poor_quality_grade(normalized_session.quality_grade);
+    const bool recovery_feedback_allowed = !poor_quality || feedback_policy.counts_poor_outcome;
     int session_count_total = 0;
+    bool invalidate_cache = false;
+    bool graduated_safe_target = false;
+    double graduated_previous_safe_target_fps = 0.0;
     {
       std::lock_guard<std::mutex> lock(history_mutex);
       auto &existing = session_history[key];
+      existing = sanitize_session_history(existing);
+      const bool had_existing = existing.session_count > 0;
+      const int preserved_safe_bitrate_kbps = existing.last_safe_bitrate_kbps;
+      const std::string preserved_safe_codec = existing.last_safe_codec;
+      const std::string preserved_safe_display_mode = existing.last_safe_display_mode;
+      const double preserved_safe_target_fps = existing.last_safe_target_fps;
+      const std::optional<bool> preserved_safe_hdr = existing.last_safe_hdr;
+      const bool preserved_relaunch_recommended = existing.last_relaunch_recommended;
+      graduated_safe_target =
+        had_existing &&
+        should_graduate_history_safe_target_fps(
+          normalized_session,
+          preserved_safe_target_fps
+        );
+      if (graduated_safe_target) {
+        graduated_previous_safe_target_fps = preserved_safe_target_fps;
+      }
 
       // Rolling average with the new session
-      if (existing.session_count > 0) {
+      if (had_existing) {
         double n = existing.session_count;
-        existing.avg_fps = (existing.avg_fps * n + session.avg_fps) / (n + 1);
-        existing.avg_latency_ms = (existing.avg_latency_ms * n + session.avg_latency_ms) / (n + 1);
-        existing.avg_bitrate_kbps = static_cast<int>((existing.avg_bitrate_kbps * n + session.avg_bitrate_kbps) / (n + 1));
-        existing.packet_loss_pct = (existing.packet_loss_pct * n + session.packet_loss_pct) / (n + 1);
+        existing.avg_fps = (existing.avg_fps * n + normalized_session.avg_fps) / (n + 1);
+        existing.avg_latency_ms = (existing.avg_latency_ms * n + normalized_session.avg_latency_ms) / (n + 1);
+        existing.avg_bitrate_kbps = static_cast<int>((existing.avg_bitrate_kbps * n + normalized_session.avg_bitrate_kbps) / (n + 1));
+        existing.packet_loss_pct = (existing.packet_loss_pct * n + normalized_session.packet_loss_pct) / (n + 1);
         existing.session_count++;
       } else {
-        existing = session;
+        existing = normalized_session;
         existing.session_count = 1;
       }
-      existing.quality_grade = session.quality_grade;
-      existing.codec = session.codec;
-      existing.last_fps = session.last_fps;
-      existing.last_target_fps = session.last_target_fps;
-      existing.last_latency_ms = session.last_latency_ms;
-      existing.last_bitrate_kbps = session.last_bitrate_kbps;
-      existing.last_packet_loss_pct = session.last_packet_loss_pct;
-      existing.last_quality_grade = session.last_quality_grade;
-      existing.last_codec = session.last_codec;
+      existing.quality_grade = normalized_session.quality_grade;
+      existing.codec = normalized_session.codec;
+      existing.last_fps = normalized_session.last_fps;
+      existing.last_target_fps = normalized_session.last_target_fps;
+      existing.last_latency_ms = normalized_session.last_latency_ms;
+      existing.last_bitrate_kbps = normalized_session.last_bitrate_kbps;
+      existing.last_packet_loss_pct = normalized_session.last_packet_loss_pct;
+      existing.last_quality_grade = normalized_session.last_quality_grade;
+      existing.last_codec = normalized_session.last_codec;
+      existing.last_duration_s = normalized_session.last_duration_s;
+      existing.last_sample_count = normalized_session.last_sample_count;
+      existing.last_low_1_percent_fps = normalized_session.last_low_1_percent_fps;
+      existing.last_min_fps = normalized_session.last_min_fps;
+      existing.last_frame_pacing_bad_pct = normalized_session.last_frame_pacing_bad_pct;
+      existing.last_end_reason = normalized_session.last_end_reason;
+      existing.last_sample_confidence = normalized_session.last_sample_confidence;
+      existing.last_feedback_ignored_reason = normalized_session.last_feedback_ignored_reason;
       existing.last_updated_at = unix_time_now();
-      existing.last_optimization_source = session.last_optimization_source;
-      existing.last_optimization_confidence = session.last_optimization_confidence;
-      existing.last_recommendation_version = session.last_recommendation_version;
-      existing.last_health_grade = session.last_health_grade;
-      existing.last_primary_issue = session.last_primary_issue;
-      existing.last_issues = session.last_issues;
-      existing.last_decoder_risk = session.last_decoder_risk;
-      existing.last_hdr_risk = session.last_hdr_risk;
-      existing.last_network_risk = session.last_network_risk;
-      existing.last_capture_path = session.last_capture_path;
-      existing.last_safe_bitrate_kbps = session.last_safe_bitrate_kbps;
-      existing.last_safe_codec = session.last_safe_codec;
-      existing.last_safe_display_mode = session.last_safe_display_mode;
-      existing.last_safe_hdr = session.last_safe_hdr;
-      existing.last_relaunch_recommended = session.last_relaunch_recommended;
+      existing.last_optimization_source = normalized_session.last_optimization_source;
+      existing.last_optimization_confidence = normalized_session.last_optimization_confidence;
+      existing.last_recommendation_version = normalized_session.last_recommendation_version;
+      existing.last_health_grade = normalized_session.last_health_grade;
+      existing.last_primary_issue = normalized_session.last_primary_issue;
+      existing.last_issues = normalized_session.last_issues;
+      existing.last_decoder_risk = normalized_session.last_decoder_risk;
+      existing.last_hdr_risk = normalized_session.last_hdr_risk;
+      existing.last_network_risk = normalized_session.last_network_risk;
+      existing.last_capture_path = normalized_session.last_capture_path;
+      if (recovery_feedback_allowed) {
+        existing.last_safe_bitrate_kbps = normalized_session.last_safe_bitrate_kbps;
+        existing.last_safe_codec = normalized_session.last_safe_codec;
+        existing.last_safe_display_mode = normalized_session.last_safe_display_mode;
+        existing.last_safe_target_fps = normalized_session.last_safe_target_fps;
+        existing.last_safe_hdr = normalized_session.last_safe_hdr;
+        existing.last_relaunch_recommended = normalized_session.last_relaunch_recommended;
+      } else if (had_existing) {
+        existing.last_safe_bitrate_kbps = preserved_safe_bitrate_kbps;
+        existing.last_safe_codec = preserved_safe_codec;
+        existing.last_safe_display_mode = preserved_safe_display_mode;
+        existing.last_safe_target_fps = preserved_safe_target_fps;
+        existing.last_safe_hdr = preserved_safe_hdr;
+        existing.last_relaunch_recommended = preserved_relaunch_recommended;
+      } else {
+        existing.last_safe_bitrate_kbps = 0;
+        existing.last_safe_codec.clear();
+        existing.last_safe_display_mode.clear();
+        existing.last_safe_target_fps = 0.0;
+        existing.last_safe_hdr.reset();
+        existing.last_relaunch_recommended = false;
+      }
 
-      if (poor_quality) {
+      if (graduated_safe_target) {
+        existing.poor_outcome_count = 0;
+        existing.consecutive_poor_outcomes = 0;
+      } else if (poor_quality && feedback_policy.counts_poor_outcome) {
         existing.poor_outcome_count++;
         existing.consecutive_poor_outcomes++;
+        invalidate_cache = should_invalidate_cache_for_poor_quality(
+          app_name,
+          normalized_session,
+          feedback_policy,
+          existing.consecutive_poor_outcomes
+        );
         if (invalidate_cache) {
           existing.last_invalidated_at = unix_time_now();
         }
-      } else {
+      } else if (!poor_quality) {
         existing.consecutive_poor_outcomes = 0;
       }
 
-      enrich_session_reliability_context(canonical_device, app_name, existing);
+      if (recovery_feedback_allowed) {
+        enrich_session_reliability_context(canonical_device, app_name, existing);
+      }
+      if (graduated_safe_target) {
+        existing.last_safe_target_fps = 0.0;
+        existing.last_relaunch_recommended = false;
+      }
+      existing = sanitize_session_history(existing);
       session_count_total = existing.session_count;
     }
 
     save_history();
     BOOST_LOG(info) << "ai_optimizer: Recorded session for "sv << key
-                    << " — grade "sv << session.quality_grade
-                    << " against target "sv << session.last_target_fps
-                    << "fps, "sv << session_count_total << " sessions total"sv;
+                    << " — grade "sv << normalized_session.quality_grade
+                    << " against target "sv << normalized_session.last_target_fps
+                    << "fps, confidence="sv << normalized_session.last_sample_confidence
+                    << ", end_reason="sv << normalized_session.last_end_reason
+                    << ", "sv << session_count_total << " sessions total"sv;
 
     // Poor game sessions should force re-optimization, but low-signal control shells
     // like Desktop or Steam Big Picture should keep their existing cache entry.
@@ -2267,8 +3090,31 @@ namespace ai_optimizer {
       cache.erase(current_cache_key(canonical_device, app_name));
       save_cache_locked();
       BOOST_LOG(info) << "ai_optimizer: Poor quality — invalidated cache for "sv << key;
-    } else if (poor_quality && is_control_shell_app(app_name)) {
-      BOOST_LOG(info) << "ai_optimizer: Poor quality on control-shell session — keeping cache for "sv << key;
+    } else if (graduated_safe_target) {
+      bool removed_stale_cache = false;
+      {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = cache.find(current_cache_key(canonical_device, app_name));
+        if (it != cache.end() &&
+            display_mode_fps_at_or_below(
+              it->second.optimization.display_mode,
+              graduated_previous_safe_target_fps
+            )) {
+          cache.erase(it);
+          save_cache_locked();
+          removed_stale_cache = true;
+        }
+      }
+      BOOST_LOG(info) << "ai_optimizer: Graduated history-safe FPS cap for "sv << key
+                      << " after stable "sv
+                      << static_cast<int>(std::round(normalized_session.last_target_fps))
+                      << " FPS retry"
+                      << (removed_stale_cache ? "; cleared stale cache" : "");
+    } else if (poor_quality) {
+      BOOST_LOG(info) << "ai_optimizer: Poor quality sample preserved without cache invalidation for "sv << key
+                      << " confidence="sv << normalized_session.last_sample_confidence
+                      << " end_reason="sv << normalized_session.last_end_reason
+                      << (feedback_policy.counts_poor_outcome ? " awaiting_confirming_sample" : " low_signal_or_soft_end");
     }
   }
 
@@ -2282,6 +3128,53 @@ namespace ai_optimizer {
     auto it = session_history.find(key);
     if (it == session_history.end()) return std::nullopt;
     return it->second;
+  }
+
+  bool clear_game_profile(const std::string &device_name,
+                          const std::string &app_name) {
+    if (device_name.empty() || app_name.empty()) {
+      return false;
+    }
+
+    static std::once_flag history_load_flag;
+    std::call_once(history_load_flag, load_history);
+
+    const auto canonical_device = canonical_device_name(device_name);
+    const auto session_key = history_key(canonical_device, app_name);
+    bool removed_history = false;
+    {
+      std::lock_guard<std::mutex> lock(history_mutex);
+      removed_history = session_history.erase(session_key) > 0;
+    }
+    if (removed_history) {
+      save_history();
+    }
+
+    bool removed_cache = false;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      for (auto it = cache.begin(); it != cache.end();) {
+        if (canonical_device_name(it->second.device_name) == canonical_device &&
+            it->second.app_name == app_name) {
+          it = cache.erase(it);
+          removed_cache = true;
+        } else {
+          ++it;
+        }
+      }
+      if (removed_cache) {
+        save_cache_locked();
+      }
+    }
+
+    if (removed_history || removed_cache) {
+      BOOST_LOG(info) << "ai_optimizer: Cleared game profile for "sv
+                      << session_key
+                      << " history="sv << (removed_history ? "yes" : "no")
+                      << " cache="sv << (removed_cache ? "yes" : "no");
+    }
+
+    return removed_history || removed_cache;
   }
 
   std::string get_history_json() {
@@ -2307,6 +3200,14 @@ namespace ai_optimizer {
       entry["last_packet_loss_pct"] = h.last_packet_loss_pct;
       entry["last_quality_grade"] = h.last_quality_grade;
       entry["last_codec"] = h.last_codec;
+      entry["last_duration_s"] = h.last_duration_s;
+      entry["last_sample_count"] = h.last_sample_count;
+      entry["last_low_1_percent_fps"] = h.last_low_1_percent_fps;
+      entry["last_min_fps"] = h.last_min_fps;
+      entry["last_frame_pacing_bad_pct"] = h.last_frame_pacing_bad_pct;
+      entry["last_end_reason"] = h.last_end_reason;
+      entry["last_sample_confidence"] = h.last_sample_confidence;
+      entry["last_feedback_ignored_reason"] = h.last_feedback_ignored_reason;
       entry["poor_outcome_count"] = h.poor_outcome_count;
       entry["consecutive_poor_outcomes"] = h.consecutive_poor_outcomes;
       entry["last_optimization_source"] = h.last_optimization_source;
@@ -2322,6 +3223,7 @@ namespace ai_optimizer {
       entry["last_safe_bitrate_kbps"] = h.last_safe_bitrate_kbps;
       entry["last_safe_codec"] = h.last_safe_codec;
       entry["last_safe_display_mode"] = h.last_safe_display_mode;
+      entry["last_safe_target_fps"] = h.last_safe_target_fps;
       if (h.last_safe_hdr.has_value()) {
         entry["last_safe_hdr"] = h.last_safe_hdr.value();
       }
@@ -2331,6 +3233,180 @@ namespace ai_optimizer {
       arr.push_back(entry);
     }
     return arr.dump();
+  }
+
+  std::string get_profiles_json(const std::string &device_name) {
+    static std::once_flag history_load_flag;
+    std::call_once(history_load_flag, load_history);
+
+    const auto requested_device = canonical_device_name(device_name);
+    std::unordered_map<std::string, nlohmann::json> profiles_by_key;
+
+    {
+      std::lock_guard<std::mutex> lock(history_mutex);
+      for (const auto &[key, h] : session_history) {
+        const auto separator = key.find(':');
+        const auto profile_device = separator == std::string::npos ? key : key.substr(0, separator);
+        const auto app_name = separator == std::string::npos ? std::string {} : key.substr(separator + 1);
+        const auto canonical_device = canonical_device_name(profile_device);
+        if (!requested_device.empty() && canonical_device != requested_device) {
+          continue;
+        }
+
+        auto &entry = profiles_by_key[history_key(canonical_device, app_name)];
+        entry["device"] = canonical_device;
+        entry["game"] = app_name;
+        entry["has_history"] = true;
+        entry["can_reset"] = true;
+        entry["session_count"] = h.session_count;
+        entry["quality_grade"] = latest_quality_grade(h);
+        entry["avg_fps"] = h.avg_fps;
+        entry["avg_latency_ms"] = h.avg_latency_ms;
+        entry["avg_bitrate_kbps"] = h.avg_bitrate_kbps;
+        entry["last_fps"] = h.last_fps;
+        entry["last_target_fps"] = h.last_target_fps;
+        entry["last_low_1_percent_fps"] = h.last_low_1_percent_fps;
+        entry["last_min_fps"] = h.last_min_fps;
+        entry["last_frame_pacing_bad_pct"] = h.last_frame_pacing_bad_pct;
+        entry["last_end_reason"] = h.last_end_reason;
+        entry["last_sample_confidence"] = h.last_sample_confidence;
+        entry["last_health_grade"] = h.last_health_grade;
+        entry["last_primary_issue"] = h.last_primary_issue;
+        entry["last_issues"] = h.last_issues;
+        entry["poor_outcome_count"] = h.poor_outcome_count;
+        entry["consecutive_poor_outcomes"] = h.consecutive_poor_outcomes;
+        entry["last_safe_bitrate_kbps"] = h.last_safe_bitrate_kbps;
+        entry["last_safe_codec"] = h.last_safe_codec;
+        entry["last_safe_display_mode"] = h.last_safe_display_mode;
+        entry["last_safe_target_fps"] = h.last_safe_target_fps;
+        if (h.last_safe_hdr.has_value()) {
+          entry["last_safe_hdr"] = h.last_safe_hdr.value();
+        }
+        entry["last_relaunch_recommended"] = h.last_relaunch_recommended;
+        entry["last_updated_at"] = h.last_updated_at;
+        entry["last_invalidated_at"] = h.last_invalidated_at;
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      for (const auto &[key, entry] : cache) {
+        if (entry.provider != cfg.provider || entry.model != cfg.model || entry.base_url != cfg.base_url) {
+          continue;
+        }
+        const auto canonical_device = canonical_device_name(entry.device_name);
+        if (!requested_device.empty() && canonical_device != requested_device) {
+          continue;
+        }
+
+        auto &profile = profiles_by_key[history_key(canonical_device, entry.app_name)];
+        profile["device"] = canonical_device;
+        profile["game"] = entry.app_name;
+        profile["has_cache"] = true;
+        profile["can_reset"] = true;
+        profile["provider"] = entry.provider;
+        profile["model"] = entry.model;
+        profile["timestamp"] = entry.timestamp;
+        const auto &optimization = entry.optimization;
+        profile["source"] = optimization.source;
+        profile["cache_status"] = optimization.cache_status;
+        profile["confidence"] = optimization.confidence;
+        profile["reasoning"] = optimization.reasoning;
+        profile["normalization_reason"] = optimization.normalization_reason;
+        profile["signals_used"] = optimization.signals_used;
+        profile["recommendation_version"] = optimization.recommendation_version;
+        profile["generated_at"] = optimization.generated_at;
+        profile["expires_at"] = optimization.expires_at;
+        if (optimization.display_mode) {
+          profile["display_mode"] = *optimization.display_mode;
+        }
+        if (optimization.target_bitrate_kbps) {
+          profile["target_bitrate_kbps"] = *optimization.target_bitrate_kbps;
+        }
+        if (optimization.preferred_codec) {
+          profile["preferred_codec"] = *optimization.preferred_codec;
+        }
+        if (optimization.hdr.has_value()) {
+          profile["hdr"] = *optimization.hdr;
+        }
+      }
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(profiles_by_key.size());
+    for (const auto &[key, _] : profiles_by_key) {
+      keys.push_back(key);
+    }
+    std::sort(keys.begin(), keys.end());
+
+    nlohmann::json profiles = nlohmann::json::array();
+    for (const auto &key : keys) {
+      auto profile = profiles_by_key[key];
+      profile["key"] = key;
+      profile["has_history"] = profile.value("has_history", false);
+      profile["has_cache"] = profile.value("has_cache", false);
+      profiles.push_back(std::move(profile));
+    }
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["device"] = requested_device;
+    output["count"] = profiles.size();
+    output["profiles"] = std::move(profiles);
+    return output.dump();
+  }
+
+  bool clear_device_profiles(const std::string &device_name) {
+    if (device_name.empty()) {
+      return false;
+    }
+
+    static std::once_flag history_load_flag;
+    std::call_once(history_load_flag, load_history);
+
+    const auto canonical_device = canonical_device_name(device_name);
+    bool removed_history = false;
+    {
+      std::lock_guard<std::mutex> lock(history_mutex);
+      for (auto it = session_history.begin(); it != session_history.end();) {
+        const auto separator = it->first.find(':');
+        const auto profile_device = separator == std::string::npos ? it->first : it->first.substr(0, separator);
+        if (canonical_device_name(profile_device) == canonical_device) {
+          it = session_history.erase(it);
+          removed_history = true;
+        } else {
+          ++it;
+        }
+      }
+    }
+    if (removed_history) {
+      save_history();
+    }
+
+    bool removed_cache = false;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      for (auto it = cache.begin(); it != cache.end();) {
+        if (canonical_device_name(it->second.device_name) == canonical_device) {
+          it = cache.erase(it);
+          removed_cache = true;
+        } else {
+          ++it;
+        }
+      }
+      if (removed_cache) {
+        save_cache_locked();
+      }
+    }
+
+    if (removed_history || removed_cache) {
+      BOOST_LOG(info) << "ai_optimizer: Cleared all optimizer profiles for "sv
+                      << canonical_device
+                      << " history="sv << (removed_history ? "yes" : "no")
+                      << " cache="sv << (removed_cache ? "yes" : "no");
+    }
+
+    return removed_history || removed_cache;
   }
 
 }  // namespace ai_optimizer

@@ -198,10 +198,21 @@ const canTestDraft = computed(() => {
   return !!config.value.ai_api_key || hasStoredApiKey.value
 })
 
+const autoQualityEnabled = computed(() => (
+  config.value.ai_enabled === 'enabled' &&
+  config.value.adaptive_bitrate_enabled === 'enabled'
+))
+
+function setAutoQualityEnabled(enabled) {
+  const value = enabled ? 'enabled' : 'disabled'
+  config.value.ai_enabled = value
+  config.value.adaptive_bitrate_enabled = value
+}
+
 const draftMatchesRuntime = computed(() => {
   if (!aiStatus.value) return false
 
-  return aiStatus.value.enabled === (config.value.ai_enabled === 'enabled')
+  return aiStatus.value.enabled === autoQualityEnabled.value
     && aiStatus.value.provider === config.value.ai_provider
     && aiStatus.value.model === config.value.ai_model
     && aiStatus.value.auth_mode === config.value.ai_auth_mode
@@ -607,18 +618,18 @@ onBeforeUnmount(() => {
 
         <div class="flex items-center gap-3 rounded-2xl border border-storm/40 bg-void/30 px-4 py-3">
           <div>
-            <div class="text-xs uppercase tracking-wider text-storm">AI runtime</div>
+            <div class="text-xs uppercase tracking-wider text-storm">AI Auto Quality</div>
             <div class="text-sm font-medium text-silver mt-1">
-              {{ config.ai_enabled === 'enabled' ? 'Enabled' : 'Disabled' }}
+              {{ autoQualityEnabled ? 'Enabled' : 'Disabled' }}
             </div>
           </div>
           <button
-            @click="config.ai_enabled = config.ai_enabled === 'enabled' ? 'disabled' : 'enabled'"
+            @click="setAutoQualityEnabled(!autoQualityEnabled)"
             class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors duration-200"
-            :class="config.ai_enabled === 'enabled' ? 'bg-ice' : 'bg-storm/50'">
+            :class="autoQualityEnabled ? 'bg-ice' : 'bg-storm/50'">
             <span
               class="inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-200 mt-0.5"
-              :class="config.ai_enabled === 'enabled' ? 'translate-x-[22px]' : 'translate-x-0.5'"></span>
+              :class="autoQualityEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'"></span>
           </button>
         </div>
       </div>
