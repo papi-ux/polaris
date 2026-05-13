@@ -69,14 +69,16 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.12
+## What's New in v1.0.13
 
-Polaris `v1.0.12` focuses on corrected Fedora/Bazzite NVIDIA release assets.
+Polaris `v1.0.13` is the Auto Quality release: the host and Nova now work together to choose a stream profile, watch how the session behaves, and recover toward the best playable balance of smoothness and image quality.
 
-- Fedora/Bazzite RPM assets are rebuilt with CUDA enabled so NVIDIA/NVENC hosts can use the validated GPU-native upload path.
-- Tagged Fedora RPM release builds now fail validation if `polaris --version` reports `Build features: cuda=disabled`.
-- Fedora CUDA header patching is normalized for CUDA 13.2 and Fedora 42/43/44 release builds.
-- Browser Stream, Linux stream-runtime diagnostics, and Headless Stream behavior remain aligned with `v1.0.11`.
+- **Auto Quality replaces guesswork**: AI Optimizer and Adaptive Bitrate now feed the same decision path, so Polaris can reason about bitrate, FPS, resolution, codec, and stream health together.
+- **Smarter game recovery**: poor frame pacing can trigger safer follow-up profiles, while strong sessions can climb back toward higher FPS and quality instead of staying stuck in a conservative mode.
+- **Nova sync awareness**: Polaris exposes client capabilities, applied stream settings, presentation state, sync status, and launch recommendations so Nova can show what is actually happening.
+- **Cleaner handheld launches**: Polaris can normalize AI recommendations against the explicit client request, keeping launch FPS, resolution, and bitrate aligned with the device and the selected quality preference.
+- **Better Linux runtime truth**: logs and session state now call out capture transport, frame residency, encoder target, and GPU-native fallback behavior more clearly.
+- **More coverage**: new tests cover optimizer decisions, adaptive bitrate behavior, stream stats, launch validation, and runtime/process handling.
 
 See the [changelog](docs/changelog.md) for the full release history.
 
@@ -146,8 +148,8 @@ Polaris takes a different route:
 | Headless vs Virtual Display | Nova can present both choices directly in the library instead of silently guessing |
 | 10-bit SDR | Nova can explicitly request a Main10 stream even on SDR handheld panels when the host supports it |
 | Watch Stream | A second device can join as a viewer without taking over the owner session |
-| AI recommendations | Nova can distinguish baseline device tuning, live AI, cached AI, recovery tuning, and host-adjusted runtime notes |
-| Live tuning | Adaptive Bitrate, AI Optimizer, and MangoHud can be surfaced directly in Nova’s quick menu |
+| Auto Quality | Nova can show AI recommendations, adaptive bitrate state, cached/recovery tuning, host-render limits, and the current target profile in one place |
+| Live tuning | Auto Quality and MangoHud controls can be surfaced directly in Nova’s quick menu |
 | Session truth | HUD and quick menu can show live server-backed mode, role, shutdown state, and tuning state |
 
 <div align="center">
