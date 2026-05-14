@@ -315,10 +315,10 @@
                   <div class="dashboard-metric-value text-fuchsia-300">{{ gpu.utilization_pct }}%</div>
                   <div class="mt-1 text-xs text-storm">{{ gpu.clock_mhz || gpu.clock_gpu_mhz || '--' }} MHz</div>
                 </div>
-                <div class="dashboard-metric-tile">
+                <div class="dashboard-metric-tile" v-if="gpu.encoder_pct != null">
                   <div class="dashboard-metric-label">Encoder</div>
                   <div class="dashboard-metric-value text-sky-300">{{ gpu.encoder_pct }}%</div>
-                  <div class="mt-1 text-xs text-storm">NVENC workload</div>
+                  <div class="mt-1 text-xs text-storm">{{ gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN' }} workload</div>
                 </div>
                 <div class="dashboard-metric-tile">
                   <div class="dashboard-metric-label">VRAM</div>
@@ -470,7 +470,7 @@
               <GaugeArc :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
                         :thresholds="[{ at: 0, color: '#22c55e' }, { at: 70, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
               <GaugeArc :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
-              <GaugeArc :value="gpu.encoder_pct" :max="100" unit="%" label="NVENC" :size="112"
+              <GaugeArc v-if="gpu.encoder_pct != null" :value="gpu.encoder_pct" :max="100" unit="%" :label="gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN'" :size="112"
                         :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 60, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
               <GaugeArc :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
                         :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 70, color: '#eab308' }, { at: 90, color: '#ef4444' }]" />
