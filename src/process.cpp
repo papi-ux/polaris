@@ -478,6 +478,49 @@ namespace proc {
       return buffer.str();
     }
 
+    std::string proc_text_summary(std::string text, std::size_t limit = 180) {
+      std::replace(text.begin(), text.end(), '\0', ' ');
+      boost::trim(text);
+      if (text.size() > limit) {
+        text.resize(limit);
+        text += "...";
+      }
+      return text;
+    }
+
+    std::string proc_debug_summary(pid_t pid) {
+      auto comm = proc_text_summary(read_proc_text(pid, "comm"), 80);
+      auto cmdline = proc_text_summary(read_proc_text(pid, "cmdline"));
+      if (cmdline.empty()) {
+        cmdline = comm.empty() ? "(unknown)" : comm;
+      }
+
+      std::ostringstream summary;
+      summary << "pid=" << pid;
+      if (const auto pgid = getpgid(pid); pgid > 0) {
+        summary << " pgid=" << pgid;
+      }
+      if (!comm.empty()) {
+        summary << " comm=" << comm;
+      }
+      summary << " cmd=[" << cmdline << ']';
+      return summary.str();
+    }
+
+    std::string proc_debug_summaries(const std::vector<pid_t> &pids, std::size_t limit = 8) {
+      std::ostringstream summaries;
+      for (std::size_t i = 0; i < pids.size() && i < limit; ++i) {
+        if (i > 0) {
+          summaries << "; ";
+        }
+        summaries << proc_debug_summary(pids[i]);
+      }
+      if (pids.size() > limit) {
+        summaries << "; +" << (pids.size() - limit) << " more";
+      }
+      return summaries.str();
+    }
+
     std::mutex isolated_browser_stream_steam_cleanup_mutex;
     std::chrono::steady_clock::time_point isolated_browser_stream_steam_settle_until {};
 
@@ -758,7 +801,8 @@ namespace proc {
 
       BOOST_LOG(warning) << "process: "sv << pids.size()
                          << " isolated session process(es) still running "sv
-                         << reason << "; sending SIGKILL"sv;
+                         << reason << "; sending SIGKILL survivors=["sv
+                         << proc_debug_summaries(pids) << ']';
 
       groups.clear();
       for (auto pid : pids) {
@@ -834,7 +878,8 @@ namespace proc {
       pids = steam_app_pids(appid);
       if (!pids.empty()) {
         BOOST_LOG(warning) << "process: Steam app ["sv << appid
-                           << "] did not exit after SIGTERM; sending SIGKILL"sv;
+                           << "] did not exit after SIGTERM; sending SIGKILL survivors=["sv
+                           << proc_debug_summaries(pids) << ']';
       }
 
       groups.clear();
@@ -3727,7 +3772,7 @@ namespace proc {
     if (!std::filesystem::exists(app_image_path, code)) {
       // return default box image if image does not exist
       if (should_log_invalid_app_image_once(app_image_path)) {
-        BOOST_LOG(warning) << "Couldn't find app image at path ["sv << app_image_path << ']';
+        BOOST_LOG(info) << "Couldn't find app image at path ["sv << app_image_path << "]; using default box art"sv;
       }
       return resolve_bundled_asset("box.png");
     }
