@@ -389,7 +389,7 @@ namespace confighttp {
         message << " (" << suppressed_count << " repeat"
                 << (suppressed_count == 1 ? "" : "s") << " suppressed)";
       }
-      BOOST_LOG(warning) << message.str();
+      BOOST_LOG(info) << message.str();
     }
 #endif
 
