@@ -123,6 +123,7 @@ namespace proc {
     int initial_nvenc_tune = 0;
     int initial_max_bitrate = 0;
     int initial_adaptive_max_bitrate = 0;
+    bool initial_video_config_saved = false;
 
     proc_t(
       boost::process::v1::environment &&env,
