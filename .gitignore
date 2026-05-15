@@ -37,10 +37,19 @@
 .vscode/
 .codex
 .claude/
+.superpowers/
 .private/
-CLAUDE.md
 AGENTS.md
+CLAUDE.md
+.githooks/
 *.code-workspace
+
+# Sync metadata and conflict copies
+.stfolder/
+.stversions/
+.stignore
+*.sync-conflict-*
+*sync-conflict*
 
 # build directories
 build/
@@ -54,6 +63,7 @@ playwright-report/
 .envrc
 .direnv/
 docs/.claude/
+docs/superpowers/
 docs/session-notes-*.md
 arch-pkgbuild/
 compile_commands.json
