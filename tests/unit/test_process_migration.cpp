@@ -11,16 +11,35 @@
 namespace {
   struct linux_cage_compositor_guard_t {
     linux_cage_compositor_guard_t():
+        auto_manage_displays(config::video.linux_display.auto_manage_displays),
         use_cage_compositor(config::video.linux_display.use_cage_compositor) {}
 
     ~linux_cage_compositor_guard_t() {
+      config::video.linux_display.auto_manage_displays = auto_manage_displays;
       config::video.linux_display.use_cage_compositor = use_cage_compositor;
     }
 
+    bool auto_manage_displays;
     bool use_cage_compositor;
   };
 }  // namespace
 #endif
+
+TEST(ProcessRuntimeConfigTests, InitialTerminateDoesNotResetAdaptiveBitrateMax) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t linux_guard;
+  config::video.linux_display.auto_manage_displays = false;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+  const auto original_max = config::video.adaptive_bitrate.max_bitrate_kbps;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+
+  proc::proc_t process {boost::process::v1::environment {}, {}};
+  process.terminate(false, false);
+
+  EXPECT_EQ(100000, config::video.adaptive_bitrate.max_bitrate_kbps);
+  config::video.adaptive_bitrate.max_bitrate_kbps = original_max;
+}
 
 TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
   const auto file_path = test_paths::root() / "legacy_apps_migration.json";
