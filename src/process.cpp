@@ -1788,6 +1788,7 @@ namespace proc {
     this->initial_nvenc_tune = config::video.nvenc_tune;
     this->initial_max_bitrate = config::video.max_bitrate;
     this->initial_adaptive_max_bitrate = config::video.adaptive_bitrate.max_bitrate_kbps;
+    this->initial_video_config_saved = true;
 
     launch_session->width = launch_session->requested_width;
     launch_session->height = launch_session->requested_height;
@@ -2151,7 +2152,9 @@ namespace proc {
       config::video.color_range = this->initial_color_range;
       config::video.nvenc_tune = this->initial_nvenc_tune;
       config::video.max_bitrate = this->initial_max_bitrate;
-      config::video.adaptive_bitrate.max_bitrate_kbps = this->initial_adaptive_max_bitrate;
+      if (this->initial_video_config_saved) {
+        config::video.adaptive_bitrate.max_bitrate_kbps = this->initial_adaptive_max_bitrate;
+      }
       terminate();
       display_device::revert_configuration();
 #ifdef __linux__
@@ -3515,10 +3518,12 @@ namespace proc {
       // Restore output name to its original value
       config::video.output_name = initial_display;
     }
-    config::video.color_range = initial_color_range;
-    config::video.nvenc_tune = initial_nvenc_tune;
-    config::video.max_bitrate = initial_max_bitrate;
-    config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
+    if (initial_video_config_saved) {
+      config::video.color_range = initial_color_range;
+      config::video.nvenc_tune = initial_nvenc_tune;
+      config::video.max_bitrate = initial_max_bitrate;
+      config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
+    }
 
     _app_id = -1;
     _app_name.clear();
@@ -3529,6 +3534,7 @@ namespace proc {
     initial_nvenc_tune = 0;
     initial_max_bitrate = 0;
     initial_adaptive_max_bitrate = 0;
+    initial_video_config_saved = false;
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;

@@ -47,6 +47,17 @@ namespace adaptive_bitrate {
     controller_reason = reason;
   }
 
+  static void normalize_config_bounds(config_t &config) {
+    if (config.max_bitrate_kbps >= config.min_bitrate_kbps) {
+      return;
+    }
+
+    BOOST_LOG(warning) << "Adaptive bitrate: max bitrate "
+                       << config.max_bitrate_kbps << " kbps is below min bitrate "
+                       << config.min_bitrate_kbps << " kbps; using min as max";
+    config.max_bitrate_kbps = config.min_bitrate_kbps;
+  }
+
   static int clamp_target(int target, int base) {
     target = std::clamp(target, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
     return std::min(target, base);
@@ -276,6 +287,8 @@ namespace adaptive_bitrate {
     current_config.enabled = config::video.adaptive_bitrate.enabled;
     current_config.min_bitrate_kbps = config::video.adaptive_bitrate.min_bitrate_kbps;
     current_config.max_bitrate_kbps = config::video.adaptive_bitrate.max_bitrate_kbps;
+    normalize_config_bounds(current_config);
+    config::video.adaptive_bitrate.max_bitrate_kbps = current_config.max_bitrate_kbps;
 
     enabled.store(current_config.enabled, std::memory_order_relaxed);
 
