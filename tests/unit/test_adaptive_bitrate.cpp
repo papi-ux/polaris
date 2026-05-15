@@ -70,3 +70,18 @@ TEST(AdaptiveBitrateController, ClampsBaseToConfiguredBounds) {
   EXPECT_EQ(50000, state.base_bitrate_kbps);
   EXPECT_EQ(50000, state.target_bitrate_kbps);
 }
+
+TEST(AdaptiveBitrateController, NormalizesMaxBelowMinBeforeClampingBase) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 0;
+
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_base_bitrate(30000);
+
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_GE(state.max_bitrate_kbps, state.min_bitrate_kbps);
+  EXPECT_EQ(state.min_bitrate_kbps, state.base_bitrate_kbps);
+  EXPECT_EQ(0, state.target_bitrate_kbps);
+}
