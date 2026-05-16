@@ -1384,11 +1384,22 @@ namespace nvhttp {
       }
       if (device_profile && is_mobile_client_type(device_profile) &&
           policy_width > 1920 && policy_height > 1080 && policy_fps >= 100.0) {
-        append_stream_policy_warning(
-          warnings,
-          "high_resolution_120_mobile",
-          "This handheld/phone policy is above 1080p at 100+ FPS; 1080p120 is the safer target for steady true-headless testing."
-        );
+        // Suppress the warning when the device_db profile itself targets this
+        // resolution — the profile is the authoritative signal that the device
+        // can handle it; emitting the warning would push the AI toward a cap.
+        int db_w = 0, db_h = 0;
+        double db_fps = 0.0;
+        const bool profile_targets_this_mode =
+          !device_profile->display_mode.empty() &&
+          parse_stream_policy_display_mode(device_profile->display_mode, db_w, db_h, db_fps) &&
+          db_w >= policy_width && db_h >= policy_height && db_fps >= policy_fps;
+        if (!profile_targets_this_mode) {
+          append_stream_policy_warning(
+            warnings,
+            "high_resolution_120_mobile",
+            "This handheld/phone policy is above 1080p at 100+ FPS; 1080p120 is the safer target for steady true-headless testing."
+          );
+        }
       }
       const auto health_primary_issue = health.value("primary_issue", std::string {"steady"});
       if (health_primary_issue != "steady" && health_primary_issue != capture_reason) {
