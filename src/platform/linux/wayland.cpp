@@ -1414,7 +1414,27 @@ namespace wl {
     target.destroy();
 
     bool used_implicit_modifier = false;
-    if (!chosen_format.modifiers.empty()) {
+
+    // Prefer linear modifier if the compositor advertised it. Headless compositor
+    // backends using a software renderer (e.g. wlroots pixman) can't blit into
+    // tiled DMA-BUF buffers and will return frame_failed(reason=0) for any
+    // tiling modifier, even ones they advertised.
+    auto linear_it = std::find(chosen_format.modifiers.begin(), chosen_format.modifiers.end(),
+                               (std::uint64_t)DRM_FORMAT_MOD_LINEAR);
+    if (linear_it != chosen_format.modifiers.end()) {
+      std::uint64_t linear_mod = DRM_FORMAT_MOD_LINEAR;
+      target.bo = gbm_bo_create_with_modifiers2(
+        gbm_device,
+        frame_width,
+        frame_height,
+        chosen_format.format,
+        &linear_mod,
+        1,
+        GBM_BO_USE_RENDERING
+      );
+    }
+
+    if (!target.bo && !chosen_format.modifiers.empty()) {
       target.bo = gbm_bo_create_with_modifiers2(
         gbm_device,
         frame_width,
@@ -1531,6 +1551,33 @@ namespace wl {
     }
 
     capture(display);
+
+    // reason=0 means the compositor's renderer couldn't process the buffer
+    // (e.g. wlroots pixman renderer with a tiled AMD modifier). Try again
+    // forcing a linear modifier — even if not explicitly advertised, most
+    // compositors accept DRM_FORMAT_MOD_LINEAR via zwp_linux_dmabuf_v1.
+    if (status == REINIT && probe_failed_unknown_) {
+      probe_failed_unknown_ = false;
+      BOOST_LOG(info) << "Extcopy DMA-BUF: retrying probe with linear modifier after reason=0 failure"sv;
+      for (auto &f : frames) f.destroy();
+
+      // Inject linear into the modifier list so allocate_buffer prefers it,
+      // even if the compositor did not advertise it in the session constraints.
+      bool injected_linear = false;
+      if (std::find(chosen_format.modifiers.begin(), chosen_format.modifiers.end(),
+                    (std::uint64_t)DRM_FORMAT_MOD_LINEAR) == chosen_format.modifiers.end()) {
+        chosen_format.modifiers.insert(chosen_format.modifiers.begin(), DRM_FORMAT_MOD_LINEAR);
+        injected_linear = true;
+      }
+
+      status = WAITING;
+      capture(display);
+
+      if (injected_linear) {
+        chosen_format.modifiers.erase(chosen_format.modifiers.begin());
+      }
+    }
+
     return status == READY ? 0 : -1;
   }
 
@@ -1734,6 +1781,7 @@ namespace wl {
 
   void extcopy_t::frame_failed(ext_image_copy_capture_frame_v1 *frame, std::uint32_t reason) {
     BOOST_LOG(error) << "Extcopy DMA-BUF frame capture failed: reason="sv << reason;
+    if (reason == 0) probe_failed_unknown_ = true;
     destroy_capture_frame();
     status = REINIT;
   }

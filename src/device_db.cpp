@@ -151,6 +151,19 @@ namespace device_db {
       "Google Pixel 9 — 1080p, 120Hz, HEVC, WiFi 6E"
     };
 
+    devices["OnePlus 12R"] = {
+      "phone", "2780x1264x120", "av1", 35000, 2, true, true, 3,
+      "OnePlus 12R (CPH2609) — 2780x1264@120Hz, Snapdragon 8 Gen 2, AV1/HEVC, HDR10+, WiFi 6E"
+    };
+    register_canonical_alias("OnePlus 12R", "OnePlus 12R");
+    register_canonical_alias("OnePlus 12r", "OnePlus 12R");
+    register_canonical_alias("OnePlus12R", "OnePlus 12R");
+    register_canonical_alias("CPH2609", "OnePlus 12R");
+    register_friendly_alias("OnePlus 12R", "OnePlus 12R");
+    register_friendly_alias("OnePlus 12r", "OnePlus 12R");
+    register_friendly_alias("OnePlus12R", "OnePlus 12R");
+    register_friendly_alias("CPH2609", "OnePlus 12R");
+
     devices["Galaxy S24"] = {
       "phone", "2340x1080x120", "hevc", 25000, 2, true, true, 3,
       "Samsung Galaxy S24 — 1080p, 120Hz, HEVC/AV1, WiFi 6E"
