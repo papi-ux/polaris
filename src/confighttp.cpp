@@ -4311,7 +4311,7 @@ namespace confighttp {
     // Query audio via pactl (PipeWire/PulseAudio)
     {
       nlohmann::json audio;
-      FILE *apipe = popen("pactl info 2>/dev/null", "r");
+      FILE *apipe = popen("LC_ALL=C pactl info 2>/dev/null", "r");
       if (apipe) {
         char buf[512];
         while (fgets(buf, sizeof(buf), apipe)) {
