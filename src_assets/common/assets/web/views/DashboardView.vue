@@ -305,14 +305,14 @@
               <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div class="dashboard-metric-tile">
                   <div class="dashboard-metric-label">GPU Temp</div>
-                  <div class="dashboard-metric-value" :class="gpu.temperature_c > 80 ? 'text-red-400' : gpu.temperature_c > 65 ? 'text-yellow-400' : 'text-green-400'">
-                    {{ gpu.temperature_c }}°
+                  <div class="dashboard-metric-value" :class="gpu.temperature_c != null ? (gpu.temperature_c > 80 ? 'text-red-400' : gpu.temperature_c > 65 ? 'text-yellow-400' : 'text-green-400') : 'text-storm'">
+                    {{ gpu.temperature_c != null ? gpu.temperature_c + '°' : '--' }}
                   </div>
                   <div class="mt-1 text-xs text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W draw</div>
                 </div>
                 <div class="dashboard-metric-tile">
                   <div class="dashboard-metric-label">GPU Load</div>
-                  <div class="dashboard-metric-value text-fuchsia-300">{{ gpu.utilization_pct }}%</div>
+                  <div class="dashboard-metric-value text-fuchsia-300">{{ gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '--' }}</div>
                   <div class="mt-1 text-xs text-storm">{{ gpu.clock_mhz || gpu.clock_gpu_mhz || '--' }} MHz</div>
                 </div>
                 <div class="dashboard-metric-tile" v-if="gpu.encoder_pct != null">
@@ -322,8 +322,8 @@
                 </div>
                 <div class="dashboard-metric-tile">
                   <div class="dashboard-metric-label">VRAM</div>
-                  <div class="dashboard-metric-value text-silver">{{ (gpu.vram_used_mb / 1024).toFixed(1) }} GB</div>
-                  <div class="mt-1 text-xs text-storm">/ {{ (gpu.vram_total_mb / 1024).toFixed(0) }} GB</div>
+                  <div class="dashboard-metric-value text-silver">{{ gpu.vram_used_mb != null ? (gpu.vram_used_mb / 1024).toFixed(1) + ' GB' : '--' }}</div>
+                  <div class="mt-1 text-xs text-storm">{{ gpu.vram_total_mb != null ? '/ ' + (gpu.vram_total_mb / 1024).toFixed(0) + ' GB' : '' }}</div>
                 </div>
               </div>
             </section>
@@ -467,12 +467,12 @@
               <div class="text-[11px] text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W · {{ gpu.clock_gpu_mhz || gpu.clock_mhz || '--' }} MHz</div>
             </div>
             <div class="grid grid-cols-2 gap-4 place-items-center xl:grid-cols-4">
-              <GaugeArc :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
+              <GaugeArc v-if="gpu.temperature_c != null" :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
                         :thresholds="[{ at: 0, color: '#22c55e' }, { at: 70, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
-              <GaugeArc :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
+              <GaugeArc v-if="gpu.utilization_pct != null" :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
               <GaugeArc v-if="gpu.encoder_pct != null" :value="gpu.encoder_pct" :max="100" unit="%" :label="gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN'" :size="112"
                         :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 60, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
-              <GaugeArc :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
+              <GaugeArc v-if="gpu.vram_used_mb != null && gpu.vram_total_mb != null" :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
                         :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 70, color: '#eab308' }, { at: 90, color: '#ef4444' }]" />
             </div>
           </div>
