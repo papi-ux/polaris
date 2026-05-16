@@ -23,6 +23,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#ifdef POLARIS_TESTS
+  #include <functional>
+#endif
 #include <string>
 #include <string_view>
 #include <thread>
@@ -38,11 +41,21 @@ namespace session_manager {
   static std::atomic<bool> g_watchdog_running{false};
   static std::thread g_watchdog_thread;
 
+#ifdef POLARIS_TESTS
+  static std::function<std::string(const std::string &)> g_exec_hook;
+  static std::function<bool(const std::string &)> g_run_hook;
+#endif
+
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------
 
   static std::string exec(const std::string &cmd) {
+#ifdef POLARIS_TESTS
+    if (g_exec_hook) {
+      return g_exec_hook(cmd);
+    }
+#endif
     FILE *pipe = popen(cmd.c_str(), "r");
     if (!pipe) return "";
     char buf[512];
@@ -56,7 +69,62 @@ namespace session_manager {
 
   static bool run(const std::string &cmd) {
     BOOST_LOG(debug) << "session_manager: "sv << cmd;
+#ifdef POLARIS_TESTS
+    if (g_run_hook) {
+      return g_run_hook(cmd);
+    }
+#endif
     return std::system(cmd.c_str()) == 0;
+  }
+
+  static std::string shell_quote(std::string_view value) {
+    std::string quoted = "'";
+    for (const char c : value) {
+      if (c == '\'') {
+        quoted += "'\\''";
+      } else {
+        quoted += c;
+      }
+    }
+    quoted += "'";
+    return quoted;
+  }
+
+  static bool wait_for_unlock(std::chrono::milliseconds timeout) {
+#ifdef POLARIS_TESTS
+    if (g_exec_hook || g_run_hook) {
+      return !is_screen_locked();
+    }
+#endif
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    do {
+      if (!is_screen_locked()) {
+        return true;
+      }
+      std::this_thread::sleep_for(100ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    return !is_screen_locked();
+  }
+
+  static bool unlock_with_loginctl() {
+    const char *session_id = std::getenv("XDG_SESSION_ID");
+    std::string cmd;
+    if (session_id && session_id[0] != '\0') {
+      BOOST_LOG(info) << "session_manager: Attempting loginctl unlock for session "sv << session_id;
+      cmd = "loginctl unlock-session " + shell_quote(session_id) + " 2>/dev/null";
+    } else {
+      BOOST_LOG(info) << "session_manager: XDG_SESSION_ID is not set; attempting loginctl unlock-sessions"sv;
+      cmd = "loginctl unlock-sessions 2>/dev/null";
+    }
+
+    if (!run(cmd)) {
+      BOOST_LOG(warning) << "session_manager: loginctl unlock command failed"sv;
+      return false;
+    }
+
+    return wait_for_unlock(2s);
   }
 
   // -----------------------------------------------------------------------
@@ -224,18 +292,45 @@ namespace session_manager {
     }
 
     BOOST_LOG(info) << "session_manager: Attempting to dismiss lock screen"sv;
-    bool ok = run(
+    const bool dbus_ok = run(
       "dbus-send --session --print-reply --dest=org.freedesktop.ScreenSaver "
       "/org/freedesktop/ScreenSaver org.freedesktop.ScreenSaver.SetActive "
       "boolean:false 2>/dev/null"
     );
 
-    if (ok) {
+    if (dbus_ok && wait_for_unlock(500ms)) {
       BOOST_LOG(info) << "session_manager: Lock screen dismissed"sv;
+      return true;
+    }
+
+    if (dbus_ok) {
+      BOOST_LOG(warning) << "session_manager: D-Bus unlock command completed, but lock screen is still active"sv;
     } else {
       BOOST_LOG(warning) << "session_manager: Failed to dismiss lock screen"sv;
     }
-    return ok;
+
+    if (unlock_with_loginctl()) {
+      BOOST_LOG(info) << "session_manager: Lock screen dismissed via loginctl"sv;
+      return true;
+    }
+
+    BOOST_LOG(warning) << "session_manager: Lock screen remains active after unlock attempts"sv;
+    return false;
   }
+
+#ifdef POLARIS_TESTS
+  void set_command_hooks_for_tests(
+    std::function<std::string(const std::string &)> exec_hook,
+    std::function<bool(const std::string &)> run_hook
+  ) {
+    g_exec_hook = std::move(exec_hook);
+    g_run_hook = std::move(run_hook);
+  }
+
+  void reset_command_hooks_for_tests() {
+    g_exec_hook = nullptr;
+    g_run_hook = nullptr;
+  }
+#endif
 
 }  // namespace session_manager

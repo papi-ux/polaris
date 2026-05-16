@@ -15,6 +15,9 @@
  */
 #pragma once
 
+#ifdef POLARIS_TESTS
+  #include <functional>
+#endif
 #include <string>
 #include <vector>
 
@@ -83,9 +86,17 @@ namespace session_manager {
   bool is_screen_locked();
 
   /**
-   * @brief Attempt to dismiss the lock screen via D-Bus.
+   * @brief Attempt to dismiss the lock screen.
    * @return true if unlock was successful
    */
   bool unlock_screen();
+
+#ifdef POLARIS_TESTS
+  void set_command_hooks_for_tests(
+    std::function<std::string(const std::string &)> exec_hook,
+    std::function<bool(const std::string &)> run_hook
+  );
+  void reset_command_hooks_for_tests();
+#endif
 
 }  // namespace session_manager
