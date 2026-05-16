@@ -54,6 +54,7 @@ CLAUDE.md
 # build directories
 build/
 build-local/
+build-debug/
 build-test/
 build-tests/
 cmake-*/
