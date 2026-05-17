@@ -53,6 +53,7 @@ CLAUDE.md
 
 # build directories
 build/
+build-debug/
 build-local/
 build-test/
 build-tests/

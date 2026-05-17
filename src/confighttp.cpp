@@ -4114,16 +4114,233 @@ namespace confighttp {
     send_response(response, tree);
   }
 
+
+#ifdef __linux__
+  /**
+   * @brief Detect the active GPU vendor.
+   *
+   * Prefers @c video::active_encoder_mem_type() as the primary signal since it reflects
+   * what the system actually uses for encoding. Falls back to driver/sysfs presence checks
+   * when no encoder has been chosen yet (i.e. before the first stream is started).
+   * @return "nvidia", "amd", or "" if the vendor cannot be determined.
+   */
+  static std::string detect_gpu_vendor() {
+    // amdgpu sysfs marker — used both for AMD detection and to distinguish AMD from Intel within vaapi
+    auto has_amdgpu = []() {
+      try {
+        for (auto &e : fs::directory_iterator("/sys/class/drm")) {
+          auto n = e.path().filename().string();
+          if (n.size() < 5 || n.substr(0, 4) != "card" || n.find('-') != std::string::npos) continue;
+          if (fs::exists(e.path() / "device" / "gpu_busy_percent")) return true;
+        }
+      } catch (...) {}
+      return false;
+    };
+
+    // Prefer the active encoder type — it reflects what the system actually uses.
+    switch (video::active_encoder_mem_type()) {
+      case platf::mem_type_e::cuda:  return "nvidia";
+      case platf::mem_type_e::vaapi: return has_amdgpu() ? "amd" : "intel";
+      default: break;
+    }
+
+    // Encoder not chosen yet (no stream started) — fall back to driver presence.
+    if (fs::exists("/proc/driver/nvidia")) return "nvidia";
+    if (has_amdgpu())                      return "amd";
+    return "";
+  }
+
+  /**
+   * @brief Query NVIDIA GPU telemetry via nvidia-smi.
+   * @return JSON object with GPU metrics, or null if nvidia-smi is unavailable or returns no data.
+   */
+  static nlohmann::json query_nvidia_gpu() {
+    FILE *pipe = popen(
+      "nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,utilization.encoder,"
+      "memory.used,memory.total,fan.speed,power.draw,clocks.gr,clocks.mem "
+      "--format=csv,noheader,nounits 2>/dev/null",
+      "r"
+    );
+    if (!pipe) return nullptr;
+
+    nlohmann::json gpu = nullptr;
+    char buf[512];
+    if (fgets(buf, sizeof(buf), pipe)) {
+      std::string line(buf);
+        // Remove trailing newline
+      if (!line.empty() && line.back() == '\n') line.pop_back();
+
+        // Parse CSV: name,temp,gpu_util,enc_util,vram_used,vram_total,fan,power,clock_gpu,clock_mem
+      std::vector<std::string> fields;
+      std::stringstream ss(line);
+      std::string field;
+      while (std::getline(ss, field, ',')) {
+          // Trim leading/trailing whitespace
+        auto start = field.find_first_not_of(" \t");
+        auto end = field.find_last_not_of(" \t");
+        fields.push_back(start != std::string::npos ? field.substr(start, end - start + 1) : "");
+      }
+
+      if (fields.size() >= 10) {
+        gpu = nlohmann::json::object();
+        gpu["name"] = fields[0];
+        gpu["vendor"] = "nvidia";
+        try {
+          gpu["temperature_c"] = std::stoi(fields[1]);
+          gpu["utilization_pct"] = std::stoi(fields[2]);
+          gpu["encoder_pct"] = std::stoi(fields[3]);
+          gpu["vram_used_mb"] = std::stoi(fields[4]);
+          gpu["vram_total_mb"] = std::stoi(fields[5]);
+          gpu["fan_speed_pct"] = std::stoi(fields[6]);
+          gpu["power_draw_w"] = std::stof(fields[7]);
+          gpu["clock_gpu_mhz"] = std::stoi(fields[8]);
+          gpu["clock_mem_mhz"] = std::stoi(fields[9]);
+          } catch (...) {
+            // If any field fails to parse, return what we have
+          }
+      }
+    }
+    pclose(pipe);
+    return gpu;
+  }
+
+  /**
+   * @brief Query AMD GPU telemetry via the amdgpu kernel sysfs interface.
+   *
+   * Does not require ROCm. GPU name is resolved via lspci -vmm, with rocm-smi / amd-smi
+   * as fallbacks when the local pci.ids database is outdated.
+   * Encoder utilization (VCN) is only available on RDNA2+ hardware.
+   * @return JSON object with GPU metrics, or null if no amdgpu device is found.
+   */
+  static nlohmann::json query_amd_gpu() {
+    std::string dev;
+    try {
+      for (auto &e : fs::directory_iterator("/sys/class/drm")) {
+        auto n = e.path().filename().string();
+        if (n.size() < 5 || n.substr(0, 4) != "card" || n.find('-') != std::string::npos) continue;
+        if (fs::exists(e.path() / "device" / "gpu_busy_percent")) {
+          dev = (e.path() / "device").string();
+          break;
+        }
+      }
+    } catch (...) {}
+
+    if (dev.empty()) return nullptr;
+
+    auto read_sysfs = [](const std::string &path) -> std::string {
+      std::ifstream f(path);
+      if (!f) return {};
+      std::string s;
+      std::getline(f, s);
+      return s;
+    };
+
+    std::string hwmon;
+    try {
+      for (auto &e : fs::directory_iterator(dev + "/hwmon"))
+        { hwmon = e.path().string(); break; }
+    } catch (...) {}
+
+    auto active_mhz = [](const std::string &path) -> int {
+      std::ifstream f(path);
+      std::string line;
+      while (std::getline(f, line)) {
+        if (line.find('*') == std::string::npos) continue;
+        auto mhz = line.find("Mhz");
+        if (mhz == std::string::npos) continue;
+        auto sp = line.rfind(' ', mhz);
+        try { return std::stoi(line.substr(sp + 1, mhz - sp - 1)); } catch (...) {}
+      }
+      return 0;
+    };
+
+    nlohmann::json gpu = nlohmann::json::object();
+
+    // Name: lspci -vmm first; if pci.ids is stale it returns a bare hex ID,
+    // so fall back to rocm-smi (ROCm 5.x) then amd-smi (ROCm 6.x).
+    {
+      std::string name;
+
+      std::ifstream ue(dev + "/uevent");
+      std::string ln;
+      while (std::getline(ue, ln)) {
+        if (ln.substr(0, 14) != "PCI_SLOT_NAME=") continue;
+        FILE *lp = popen(("lspci -vmm -s " + ln.substr(14) + " 2>/dev/null").c_str(), "r");
+        if (lp) {
+          char buf[256] = {};
+          std::string dev_name, sdev_name;
+          while (fgets(buf, sizeof(buf), lp)) {
+            std::string f(buf);
+            auto tab = f.find('\t');
+            if (tab == std::string::npos) continue;
+            std::string key = f.substr(0, tab);
+            std::string val = f.substr(tab + 1);
+            while (!val.empty() && (val.back() == '\n' || val.back() == '\r')) val.pop_back();
+            if (key == "Device:") dev_name = val;
+            else if (key == "SDevice:") sdev_name = val;
+          }
+          pclose(lp);
+          name = dev_name.empty() ? sdev_name : dev_name;
+        }
+        break;
+      }
+
+      // A bare hex string (e.g. "5327") means the device isn't in pci.ids — discard it.
+      if (!name.empty() && name.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos)
+        name.clear();
+
+      
+      // pci.ids was stale — try ROCm tooling which ships its own device database.
+      if (name.empty()) {
+        auto extract = [&name](const char *cmd, const char *marker, std::size_t mlen) {
+          FILE *p = popen(cmd, "r");
+          if (!p) return;
+          char buf[256] = {};
+          while (fgets(buf, sizeof(buf), p)) {
+            std::string line(buf);
+            auto pos = line.find(marker);
+            if (pos == std::string::npos) continue;
+            auto vs = line.find_first_not_of(" \t", pos + mlen);
+            if (vs == std::string::npos) continue;
+            std::string n = line.substr(vs);
+            while (!n.empty() && (n.back() == '\n' || n.back() == '\r' || n.back() == ' ')) n.pop_back();
+            if (!n.empty() && n != "N/A") { name = n; break; }
+          }
+          pclose(p);
+        };
+
+        extract("rocm-smi --showproductname 2>/dev/null", "Card series:", 12);
+        if (name.empty())
+          extract("amd-smi static --asic 2>/dev/null",    "MARKET_NAME:", 12);
+      }
+
+      gpu["name"] = name.empty() ? "AMD GPU" : name;
+      gpu["vendor"] = "amd";
+    }
+
+    try { gpu["temperature_c"] = std::stoi(read_sysfs(hwmon + "/temp1_input")) / 1000; } catch (...) {}
+    try { gpu["utilization_pct"] = std::stoi(read_sysfs(dev + "/gpu_busy_percent")); } catch (...) {}
+    try { gpu["encoder_pct"] = std::stoi(read_sysfs(dev + "/vcn_busy_percent")); } catch (...) {}
+    try { gpu["vram_used_mb"] = std::stoll(read_sysfs(dev + "/mem_info_vram_used")) / (1024 * 1024); } catch (...) {}
+    try { gpu["vram_total_mb"] = std::stoll(read_sysfs(dev + "/mem_info_vram_total")) / (1024 * 1024); } catch (...) {}
+    try { gpu["fan_speed_pct"] = std::stoi(read_sysfs(hwmon + "/pwm1")) * 100 / 255; } catch (...) {}
+    try { gpu["power_draw_w"] = std::stof(read_sysfs(hwmon + "/power1_average")) / 1e6f; } catch (...) {}
+
+    int sclk = active_mhz(dev + "/pp_dpm_sclk");
+    int mclk = active_mhz(dev + "/pp_dpm_mclk");
+    if (sclk) gpu["clock_gpu_mhz"] = sclk;
+    if (mclk) gpu["clock_mem_mhz"] = mclk;
+
+    return gpu;
+  }
+#endif
+
   /**
    * @brief Get current stream statistics as JSON.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
-   */
-  /**
-   * @brief Get system hardware stats (GPU telemetry via nvidia-smi).
-   *
-   * Returns JSON with GPU name, temperature, utilization, VRAM, encoder load,
-   * power draw, and clock speeds. Linux/NVIDIA only.
+   * 
+   * @brief Get system hardware stats (GPU telemetry, display, and audio info).
    */
   void getSystemStats(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request))
@@ -4145,52 +4362,9 @@ namespace confighttp {
 #endif
 
 #ifdef __linux__
-    // Query nvidia-smi for GPU telemetry
-    FILE *pipe = popen(
-      "nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,utilization.encoder,"
-      "memory.used,memory.total,fan.speed,power.draw,clocks.gr,clocks.mem "
-      "--format=csv,noheader,nounits 2>/dev/null",
-      "r"
-    );
-    if (pipe) {
-      char buf[512];
-      if (fgets(buf, sizeof(buf), pipe)) {
-        std::string line(buf);
-        // Remove trailing newline
-        if (!line.empty() && line.back() == '\n') line.pop_back();
-
-        // Parse CSV: name,temp,gpu_util,enc_util,vram_used,vram_total,fan,power,clock_gpu,clock_mem
-        std::vector<std::string> fields;
-        std::stringstream ss(line);
-        std::string field;
-        while (std::getline(ss, field, ',')) {
-          // Trim leading/trailing whitespace
-          auto start = field.find_first_not_of(" \t");
-          auto end = field.find_last_not_of(" \t");
-          fields.push_back(start != std::string::npos ? field.substr(start, end - start + 1) : "");
-        }
-
-        if (fields.size() >= 10) {
-          nlohmann::json gpu;
-          gpu["name"] = fields[0];
-          try {
-            gpu["temperature_c"] = std::stoi(fields[1]);
-            gpu["utilization_pct"] = std::stoi(fields[2]);
-            gpu["encoder_pct"] = std::stoi(fields[3]);
-            gpu["vram_used_mb"] = std::stoi(fields[4]);
-            gpu["vram_total_mb"] = std::stoi(fields[5]);
-            gpu["fan_speed_pct"] = std::stoi(fields[6]);
-            gpu["power_draw_w"] = std::stof(fields[7]);
-            gpu["clock_gpu_mhz"] = std::stoi(fields[8]);
-            gpu["clock_mem_mhz"] = std::stoi(fields[9]);
-          } catch (...) {
-            // If any field fails to parse, return what we have
-          }
-          output["gpu"] = gpu;
-        }
-      }
-      pclose(pipe);
-    }
+    auto vendor = detect_gpu_vendor();
+    if (vendor == "nvidia")      output["gpu"] = query_nvidia_gpu();
+    else if (vendor == "amd")    output["gpu"] = query_amd_gpu();
 
     // Prefer live Wayland monitor telemetry from the active runtime.
     {
