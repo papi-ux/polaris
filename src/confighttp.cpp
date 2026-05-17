@@ -1546,6 +1546,47 @@ namespace confighttp {
   }
 
   /**
+   * @brief Parse libraryfolders.vdf to discover all configured Steam library paths.
+   *
+   * Returns a list of <library_root>/steamapps paths for every entry in the VDF.
+   * The "path" key sits at depth==2 (inside a numbered section inside "libraryfolders").
+   */
+  static std::vector<std::string> parse_steam_library_folders(const std::string &vdf_path) {
+    std::vector<std::string> paths;
+    std::ifstream file(vdf_path);
+    if (!file.is_open()) return paths;
+
+    std::string line;
+    int depth = 0;
+    while (std::getline(file, line)) {
+      auto start = line.find_first_not_of(" \t");
+      if (start == std::string::npos) continue;
+      line = line.substr(start);
+
+      if (line == "{") { depth++; continue; }
+      if (line == "}") { depth--; continue; }
+
+      // "path" is at depth==2 (inside a numbered section inside "libraryfolders")
+      if (depth != 2) continue;
+      if (line.size() < 5 || line[0] != '"') continue;
+
+      auto end_key = line.find('"', 1);
+      if (end_key == std::string::npos) continue;
+      std::string key = line.substr(1, end_key - 1);
+      if (key != "path") continue;
+
+      auto start_val = line.find('"', end_key + 1);
+      if (start_val == std::string::npos) continue;
+      auto end_val = line.find('"', start_val + 1);
+      if (end_val == std::string::npos) continue;
+      std::string val = line.substr(start_val + 1, end_val - start_val - 1);
+
+      if (!val.empty()) paths.push_back(val + "/steamapps");
+    }
+    return paths;
+  }
+
+  /**
    * @brief Scan for installed Steam, Lutris, and Heroic games.
    */
   std::vector<fs::path> lutris_game_config_dirs() {
@@ -1719,6 +1760,21 @@ namespace confighttp {
     if (home) {
       steam_paths.push_back(std::string(home) + "/.steam/steam/steamapps");
       steam_paths.push_back(std::string(home) + "/.local/share/Steam/steamapps");
+
+      // Discover additional library locations from libraryfolders.vdf
+      std::set<std::string> seen_steam_paths(steam_paths.begin(), steam_paths.end());
+      const std::vector<std::string> vdf_candidates = {
+        std::string(home) + "/.steam/steam/steamapps/libraryfolders.vdf",
+        std::string(home) + "/.local/share/Steam/steamapps/libraryfolders.vdf",
+        std::string(home) + "/.local/share/Steam/config/libraryfolders.vdf",
+      };
+      for (const auto &vdf : vdf_candidates) {
+        for (const auto &lib_path : parse_steam_library_folders(vdf)) {
+          if (seen_steam_paths.insert(lib_path).second) {
+            steam_paths.push_back(lib_path);
+          }
+        }
+      }
     }
 
     for (const auto &steam_path : steam_paths) {
