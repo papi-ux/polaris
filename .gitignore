@@ -55,6 +55,7 @@ CLAUDE.md
 build/
 build-debug/
 build-local/
+build-debug/
 build-test/
 build-tests/
 cmake-*/

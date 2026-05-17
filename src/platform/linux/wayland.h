@@ -251,6 +251,7 @@ namespace wl {
     bool chosen_format_valid {false};
     bool buffer_create_done {false};
     bool buffer_create_success {false};
+    bool probe_failed_unknown_ {false};  ///< frame_failed(reason=0) fired during init probe
     std::uint32_t frame_width {0};
     std::uint32_t frame_height {0};
     dev_t device_id {};
