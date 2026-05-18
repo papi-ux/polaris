@@ -5,6 +5,8 @@
 
 #include "../tests_common.h"
 
+#include <src/config.h>
+#include <src/httpcommon.h>
 #include <src/nvhttp.h>
 
 using namespace nvhttp;
@@ -76,7 +78,22 @@ X4wnh1bwdiidqpcgyuKossLOPxbS786WmsesaAWPnpoY6M8aija+ALwNNuWWmyMg
 9SVDV76xJzM36Uq7Kg3QJYTlY04WmPIdJHkCtXWf9g==
 -----END CERTIFICATE-----)";
 
-struct PairingTest: testing::TestWithParam<std::tuple<pairing_input, pairing_output>> {};
+struct PairingTest: testing::TestWithParam<std::tuple<pairing_input, pairing_output>> {
+  void SetUp() override {
+    previous_fresh_state = config::sunshine.flags.test(config::flag::FRESH_STATE);
+    config::sunshine.flags.set(config::flag::FRESH_STATE);
+
+    std::string host_uuid = "12345678-1234-1234-1234-1234567890ab";
+    http::uuid = uuid_util::uuid_t::parse(host_uuid);
+    http::unique_id = http::uuid.string();
+  }
+
+  void TearDown() override {
+    config::sunshine.flags.set(config::flag::FRESH_STATE, previous_fresh_state);
+  }
+
+  bool previous_fresh_state = false;
+};
 
 TEST_P(PairingTest, Run) {
   auto [input, expected] = GetParam();

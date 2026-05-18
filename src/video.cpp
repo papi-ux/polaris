@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <list>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -82,6 +83,127 @@ namespace video {
         .format = platf::frame_format_e::bgra8,
       };
       return img;
+    }
+
+    int nvenc_split_encode_mode_value(nvenc::nvenc_split_encode_mode mode) {
+      switch (mode) {
+        case nvenc::nvenc_split_encode_mode::disabled:
+          return 15;
+        case nvenc::nvenc_split_encode_mode::auto_mode:
+          return 0;
+        case nvenc::nvenc_split_encode_mode::forced:
+          return 1;
+        case nvenc::nvenc_split_encode_mode::two_way:
+          return 2;
+        case nvenc::nvenc_split_encode_mode::three_way:
+          return 3;
+      }
+
+      return 15;
+    }
+
+    bool should_apply_nvenc_split_encode_mode(std::string_view encoder_name, std::string_view codec_name) {
+#ifdef __linux__
+      return encoder_name == "nvenc"sv &&
+             (codec_name == "hevc_nvenc"sv || codec_name == "av1_nvenc"sv);
+#else
+      return false;
+#endif
+    }
+
+    std::optional<int> nvenc_split_encode_mode_option_value(
+      std::string_view encoder_name,
+      std::string_view codec_name,
+      nvenc::nvenc_split_encode_mode mode
+    ) {
+      if (!should_apply_nvenc_split_encode_mode(encoder_name, codec_name) ||
+          mode == nvenc::nvenc_split_encode_mode::disabled) {
+        return std::nullopt;
+      }
+
+      return nvenc_split_encode_mode_value(mode);
+    }
+
+    enum class split_encode_action_e {
+      unsupported_encoder_or_codec,
+      disabled,
+      missing_ffmpeg_option,
+      apply
+    };
+
+    struct split_encode_decision_t {
+      split_encode_action_e decision;
+      std::optional<int> ffmpeg_value;
+      bool should_warn;
+    };
+
+    split_encode_decision_t decide_nvenc_split_encode_mode(
+      std::string_view encoder_name,
+      std::string_view codec_name,
+      nvenc::nvenc_split_encode_mode mode,
+      bool has_private_option
+    ) {
+      if (!should_apply_nvenc_split_encode_mode(encoder_name, codec_name)) {
+        return {
+          split_encode_action_e::unsupported_encoder_or_codec,
+          std::nullopt,
+          false
+        };
+      }
+
+      if (mode == nvenc::nvenc_split_encode_mode::disabled) {
+        return {
+          split_encode_action_e::disabled,
+          std::nullopt,
+          false
+        };
+      }
+
+      if (!has_private_option) {
+        return {
+          split_encode_action_e::missing_ffmpeg_option,
+          std::nullopt,
+          true
+        };
+      }
+
+      return {
+        split_encode_action_e::apply,
+        nvenc_split_encode_mode_option_value(encoder_name, codec_name, mode),
+        false
+      };
+    }
+
+    bool avcodec_context_has_private_option(AVCodecContext *ctx, const char *name) {
+      return ctx && av_opt_find(ctx, name, nullptr, 0, AV_OPT_SEARCH_CHILDREN) != nullptr;
+    }
+
+    void apply_nvenc_split_encode_mode(
+      AVCodecContext *ctx,
+      const encoder_t &encoder,
+      const encoder_t::codec_t &video_format,
+      AVDictionary **options
+    ) {
+      const auto decision = decide_nvenc_split_encode_mode(
+        encoder.name,
+        video_format.name,
+        config::video.nv.split_encode_mode,
+        avcodec_context_has_private_option(ctx, "split_encode_mode")
+      );
+
+      if (decision.decision != split_encode_action_e::apply) {
+        if (decision.should_warn) {
+          BOOST_LOG(warning)
+            << "NVENC split-frame encoding was requested, but FFmpeg encoder ["
+            << video_format.name << "] does not expose split_encode_mode";
+        }
+        return;
+      }
+
+      av_dict_set_int(options, "split_encode_mode", *decision.ffmpeg_value, 0);
+      BOOST_LOG(info)
+        << "NVENC split-frame encoding: applying split_encode_mode=" << *decision.ffmpeg_value
+        << " for [" << video_format.name << "]";
     }
 
 #ifdef __linux__
@@ -2579,8 +2701,9 @@ namespace video {
         }
       }
 
-      // Allow the encoding device a final opportunity to set/unset or override any options
+      // Allow platform options first, then apply user-level NVENC overrides.
       encode_device->init_codec_options(ctx.get(), &options);
+      apply_nvenc_split_encode_mode(ctx.get(), encoder, video_format, &options);
 
       if (auto status = avcodec_open2(ctx.get(), codec, &options)) {
         char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
@@ -4570,6 +4693,67 @@ namespace video {
     frame.format = av_pixel_format;
 
     return software_frame_input_linesize(img, &frame);
+  }
+
+  bool should_apply_nvenc_split_encode_mode_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name
+  ) {
+    return should_apply_nvenc_split_encode_mode(encoder_name, codec_name);
+  }
+
+  int nvenc_split_encode_mode_value_for_tests(nvenc::nvenc_split_encode_mode mode) {
+    return nvenc_split_encode_mode_value(mode);
+  }
+
+  std::optional<int> nvenc_split_encode_mode_option_value_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name,
+    nvenc::nvenc_split_encode_mode mode
+  ) {
+    return nvenc_split_encode_mode_option_value(encoder_name, codec_name, mode);
+  }
+
+  nvenc_split_encode_mode_decision_t nvenc_split_encode_mode_decision_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name,
+    nvenc::nvenc_split_encode_mode mode,
+    bool has_private_option
+  ) {
+    const auto decision = decide_nvenc_split_encode_mode(encoder_name, codec_name, mode, has_private_option);
+
+    switch (decision.decision) {
+      case split_encode_action_e::unsupported_encoder_or_codec:
+        return {
+          nvenc_split_encode_mode_decision_e::unsupported_encoder_or_codec,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+      case split_encode_action_e::disabled:
+        return {
+          nvenc_split_encode_mode_decision_e::disabled,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+      case split_encode_action_e::missing_ffmpeg_option:
+        return {
+          nvenc_split_encode_mode_decision_e::missing_ffmpeg_option,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+      case split_encode_action_e::apply:
+        return {
+          nvenc_split_encode_mode_decision_e::apply,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+    }
+
+    return {
+      nvenc_split_encode_mode_decision_e::disabled,
+      std::nullopt,
+      false
+    };
   }
 #endif
 

@@ -21,6 +21,7 @@ linux_use_cage_compositor = enabled
 linux_prefer_gpu_native_capture = disabled
 trusted_subnets = ["10.0.0.0/24"]
 encoder = nvenc
+nvenc_split_encode_mode = disabled
 adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
@@ -45,7 +46,9 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | `linux_prefer_gpu_native_capture` | `disabled` | Keep Headless Stream as the first validation path; enable only after testing GPU-native capture on your stack |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
+| `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
+| `disconnect_resume_timeout_seconds` | `300` | Seconds to keep an app paused after client disconnect for resume |
 | `max_sessions` | `2` | Number of simultaneous sessions or viewers |
 | `enable_pairing` | `enabled` | Accept new clients |
 | `enable_discovery` | `enabled` | Advertise Polaris over mDNS |
@@ -87,6 +90,23 @@ color_range = 1
 ```
 
 Then test HEVC Main 8-bit before enabling Main10 or client HDR requests.
+
+## NVIDIA NVENC Encoder
+
+### nvenc_split_encode_mode
+
+Controls FFmpeg's `split_encode_mode` private option for Linux NVENC HEVC and AV1 encoders. Polaris only
+passes this option when the selected FFmpeg encoder exposes it; H.264 and native Windows NVENC ignore it.
+
+Recommended values:
+
+| Value | FFmpeg value | Recommendation |
+| --- | ---: | --- |
+| `disabled` | `15` | Default. Preserves legacy behavior after FFmpeg updates. |
+| `auto` | `0` | Let NVIDIA's driver and FFmpeg decide after validating your GPU/driver stack. |
+| `2` | `2` | Useful first manual test on multi-NVENC GPUs, especially for 4K120 HEVC/AV1. |
+| `forced` | `1` | Experimental. Use only when comparing against `auto` and explicit engine counts. |
+| `3` | `3` | Experimental. Use only on GPUs known to expose three usable NVENC engines. |
 
 ## AI provider settings
 

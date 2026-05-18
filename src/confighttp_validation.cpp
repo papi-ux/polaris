@@ -174,6 +174,7 @@ namespace confighttp::validation {
       "nvenc_opengl_vulkan_on_dxgi"sv,
       "nvenc_preset"sv,
       "nvenc_realtime_hags"sv,
+      "nvenc_split_encode_mode"sv,
       "nvenc_spatial_aq"sv,
       "nvenc_tune"sv,
       "nvenc_twopass"sv,

@@ -188,6 +188,10 @@ include_directories(
         ${Boost_INCLUDE_DIRS}  # has to be the last, or we get runtime error on macOS ffmpeg encoder
 )
 
+# Keep the native NVENC path on Polaris' pinned Video Codec SDK headers even when
+# prepared FFmpeg binaries bundle their own ffnvcodec headers.
+include_directories(BEFORE SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nv-codec-headers/include")
+
 list(APPEND POLARIS_EXTERNAL_LIBRARIES
         ${MINIUPNP_LIBRARIES}
         ${CMAKE_THREAD_LIBS_INIT}

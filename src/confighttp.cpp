@@ -245,14 +245,7 @@ namespace confighttp {
     }
 
     std::vector<std::string> steam_library_launch_commands(const std::string &appid) {
-#ifdef __linux__
-      return {
-        "setsid steam -gamepadui",
-        "setsid bash -lc \"sleep 6; steam steam://rungameid/" + appid + " >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch " + appid + " >/dev/null 2>&1 || true\""
-      };
-#else
       return { "setsid steam steam://rungameid/" + appid };
-#endif
     }
 
     std::string safe_cover_extension_from_url(const std::string &url) {

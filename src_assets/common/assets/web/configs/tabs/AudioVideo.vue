@@ -611,6 +611,12 @@ pactl info | grep Source</pre>
             <input id="minimum_fps_target" v-model="config.minimum_fps_target" type="number" min="0" max="1000" placeholder="0" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" />
             <div class="text-sm text-storm mt-1">{{ $t("config.minimum_fps_target_desc") }}</div>
           </div>
+
+          <div>
+            <label for="disconnect_resume_timeout_seconds" class="block text-sm font-medium text-storm mb-1">{{ $t("config.disconnect_resume_timeout_seconds") }}</label>
+            <input id="disconnect_resume_timeout_seconds" v-model.number="config.disconnect_resume_timeout_seconds" type="number" min="0" max="86400" step="30" placeholder="300" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" />
+            <div class="text-sm text-storm mt-1">{{ $t("config.disconnect_resume_timeout_seconds_desc") }}</div>
+          </div>
         </div>
 
         <div class="settings-subtle-surface space-y-3">

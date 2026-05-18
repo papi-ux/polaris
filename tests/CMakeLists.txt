@@ -71,6 +71,12 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/rswrapper.c
 )
 
+if(NOT WIN32 AND NOT APPLE AND NOT POLARIS_HAVE_LIBVA_MAP_BUFFER2)
+    list(APPEND TEST_SUPPORT_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/libva_compat.cpp
+    )
+endif()
+
 set(TEST_AUDIT_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
@@ -84,6 +90,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_prepared_ffmpeg.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
 )
 
@@ -112,6 +119,7 @@ set(TEST_INPUT_SOURCES
 )
 
 set(TEST_CONFIG_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_config_parser.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_device_db.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_entry_handler.cpp

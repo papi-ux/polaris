@@ -316,6 +316,7 @@ endif ()
 
 list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/publish.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/libva_compat.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/graphics.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/graphics.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/misc.h"
@@ -335,6 +336,10 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/third-party/glad/include/KHR/khrplatform.h"
         "${CMAKE_SOURCE_DIR}/third-party/glad/include/glad/gl.h"
         "${CMAKE_SOURCE_DIR}/third-party/glad/include/glad/egl.h")
+
+if(POLARIS_HAVE_LIBVA_MAP_BUFFER2)
+    list(REMOVE_ITEM PLATFORM_TARGET_FILES "${CMAKE_SOURCE_DIR}/src/platform/linux/libva_compat.cpp")
+endif()
 
 list(APPEND PLATFORM_LIBRARIES
         dl
