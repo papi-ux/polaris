@@ -91,6 +91,23 @@ assert_contains "$status_output" "build/"
 assert_contains "$status_output" "stash@{0}"
 assert_contains "$status_output" "feature/dev-clean-test"
 
+du_bin="$(command -v du)"
+mkdir -p "$tmp_dir/bin"
+cat > "$tmp_dir/bin/du" <<FAKE_DU
+#!/usr/bin/env bash
+if [[ "\$*" == *".git"* ]]; then
+  echo "du: simulated transient failure" >&2
+  exit 1
+fi
+exec "$du_bin" "\$@"
+FAKE_DU
+chmod +x "$tmp_dir/bin/du"
+
+status_with_du_failure="$(PATH="$tmp_dir/bin:$PATH" run_clean status)"
+assert_contains "$status_with_du_failure" "Sizes"
+assert_contains "$status_with_du_failure" "unavailable"
+assert_contains "$status_with_du_failure" "Git objects"
+
 dry_run_output="$(run_clean prune)"
 assert_contains "$dry_run_output" "Dry run"
 assert_contains "$dry_run_output" "build/"

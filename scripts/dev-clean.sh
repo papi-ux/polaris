@@ -51,6 +51,13 @@ print_section() {
   printf '\n== %s ==\n' "$1"
 }
 
+print_size() {
+  local path="$1"
+  if ! du -sh "$path" 2>/dev/null; then
+    printf 'unavailable\t%s\n' "$path"
+  fi
+}
+
 path_exists() {
   [[ -e "$1" || -L "$1" ]]
 }
@@ -190,7 +197,7 @@ run_status() {
   print_section "Sizes"
   for path in . .git node_modules third-party; do
     if path_exists "$path"; then
-      du -sh "$path"
+      print_size "$path"
     fi
   done
 
