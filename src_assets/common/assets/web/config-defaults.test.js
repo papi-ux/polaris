@@ -14,4 +14,10 @@ describe('config defaults', () => {
     expect(source).toContain('"browser_streaming": "disabled"')
     expect(source).not.toContain('"webrtc_browser_streaming": "disabled"')
   })
+
+  it('keeps NVENC split-frame encoding disabled by default', () => {
+    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/ConfigView.vue'), 'utf8')
+
+    expect(source).toContain('"nvenc_split_encode_mode": "disabled"')
+  })
 })

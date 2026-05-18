@@ -12,6 +12,14 @@ namespace nvenc {
     full_resolution,  ///< Better overall statistics, slower and uses more extra vram
   };
 
+  enum class nvenc_split_encode_mode {
+    disabled,  ///< Disable FFmpeg NVENC split-frame encoding.
+    auto_mode,  ///< Let FFmpeg/NVENC select split-frame behavior.
+    forced,  ///< Force split-frame encoding when FFmpeg/NVENC supports it.
+    two_way,  ///< Use two NVENC engines.
+    three_way,  ///< Use three NVENC engines.
+  };
+
   /**
    * @brief NVENC encoder configuration.
    */
@@ -21,6 +29,9 @@ namespace nvenc {
 
     // Use optional preliminary pass for better motion vectors, bitrate distribution and stricter VBV(HRD), uses CUDA cores
     nvenc_two_pass two_pass = nvenc_two_pass::quarter_resolution;
+
+    // FFmpeg NVENC split-frame encoding mode for HEVC/AV1 on multi-NVENC Linux GPUs
+    nvenc_split_encode_mode split_encode_mode = nvenc_split_encode_mode::disabled;
 
     // Percentage increase of VBV/HRD from the default single frame, allows low-latency variable bitrate
     int vbv_percentage_increase = 0;

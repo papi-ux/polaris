@@ -43,6 +43,18 @@ const config = ref(props.config)
         <div class="text-sm text-storm mt-1">{{ $t('config.nvenc_twopass_desc') }}</div>
       </div>
 
+      <div v-if="platform === 'linux'" class="mb-3">
+        <label for="nvenc_split_encode_mode" class="block text-sm font-medium text-storm mb-1">{{ $t('config.nvenc_split_encode_mode') }}</label>
+        <select id="nvenc_split_encode_mode" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.nvenc_split_encode_mode">
+          <option value="disabled">{{ $t('config.nvenc_split_encode_mode_disabled') }}</option>
+          <option value="auto">{{ $t('config.nvenc_split_encode_mode_auto') }}</option>
+          <option value="forced">{{ $t('config.nvenc_split_encode_mode_forced') }}</option>
+          <option value="2">{{ $t('config.nvenc_split_encode_mode_2') }}</option>
+          <option value="3">{{ $t('config.nvenc_split_encode_mode_3') }}</option>
+        </select>
+        <div class="text-sm text-storm mt-1">{{ $t('config.nvenc_split_encode_mode_desc') }}</div>
+      </div>
+
       <Checkbox class="mb-3"
                 id="nvenc_spatial_aq"
                 locale-prefix="config"

@@ -6,9 +6,12 @@
 
 // local includes
 #include "input.h"
+#include "nvenc/nvenc_config.h"
 #include "platform/common.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
+
+#include <optional>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -570,6 +573,39 @@ namespace video {
     int image_width,
     int frame_width,
     int av_pixel_format
+  );
+
+  bool should_apply_nvenc_split_encode_mode_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name
+  );
+
+  int nvenc_split_encode_mode_value_for_tests(nvenc::nvenc_split_encode_mode mode);
+
+  std::optional<int> nvenc_split_encode_mode_option_value_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name,
+    nvenc::nvenc_split_encode_mode mode
+  );
+
+  enum class nvenc_split_encode_mode_decision_e {
+    unsupported_encoder_or_codec,
+    disabled,
+    missing_ffmpeg_option,
+    apply
+  };
+
+  struct nvenc_split_encode_mode_decision_t {
+    nvenc_split_encode_mode_decision_e decision;
+    std::optional<int> ffmpeg_value;
+    bool should_warn;
+  };
+
+  nvenc_split_encode_mode_decision_t nvenc_split_encode_mode_decision_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name,
+    nvenc::nvenc_split_encode_mode mode,
+    bool has_private_option
   );
 #endif
 }  // namespace video

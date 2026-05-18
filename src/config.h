@@ -352,6 +352,10 @@ namespace config {
   bool is_sensitive_config_key(std::string_view name);
   std::string redact_config_value(std::string_view name, std::string_view value);
 
+  namespace nv {
+    nvenc::nvenc_split_encode_mode split_encode_mode_from_view(const std::string_view &mode);
+  }
+
   int parse(int argc, char *argv[]);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
 }  // namespace config

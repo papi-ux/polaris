@@ -7,8 +7,8 @@
 #include <src/file_handler.h>
 #include <src/process.h>
 
-#ifdef __linux__
 namespace {
+#ifdef __linux__
   struct linux_cage_compositor_guard_t {
     linux_cage_compositor_guard_t():
         auto_manage_displays(config::video.linux_display.auto_manage_displays),
@@ -22,8 +22,16 @@ namespace {
     bool auto_manage_displays;
     bool use_cage_compositor;
   };
-}  // namespace
 #endif
+
+  constexpr const char *expected_steam_shutdown_command() {
+#ifdef __linux__
+    return "setsid -f steam -shutdown";
+#else
+    return "setsid steam -shutdown";
+#endif
+  }
+}  // namespace
 
 TEST(ProcessRuntimeConfigTests, InitialTerminateDoesNotResetAdaptiveBitrateMax) {
 #ifdef __linux__
@@ -155,7 +163,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamBigPictureLaunchAndAddsCleanupUn
   EXPECT_EQ(steam_ctx->detached.front(), "setsid steam -gamepadui");
   EXPECT_TRUE(steam_ctx->cmd.empty());
   ASSERT_FALSE(steam_ctx->prep_cmds.empty());
-  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, "setsid steam -shutdown");
+  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, expected_steam_shutdown_command());
   EXPECT_TRUE(steam_ctx->env_vars.empty());
 
   std::filesystem::remove(file_path);
@@ -195,7 +203,7 @@ TEST(ProcessMigrationTests, ParseDoesNotAddSteamBigPicturePrelaunchShutdownForLi
   ASSERT_NE(steam_ctx, parsed_apps.end());
   ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
   EXPECT_TRUE(steam_ctx->prep_cmds.front().do_cmd.empty());
-  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   std::filesystem::remove(file_path);
 }
@@ -242,7 +250,7 @@ TEST(ProcessMigrationTests, ParseStripsSteamBigPictureMangoHudEvenWithExistingCl
 
   ASSERT_NE(steam_ctx, parsed_apps.end());
   ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
-  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
   EXPECT_TRUE(steam_ctx->env_vars.empty());
 
   std::filesystem::remove(file_path);
@@ -283,21 +291,66 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   });
 
   ASSERT_NE(steam_ctx, parsed_apps.end());
-#ifdef __linux__
-  ASSERT_EQ(steam_ctx->detached.size(), 2);
-  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam -gamepadui");
-  EXPECT_EQ(steam_ctx->detached[1], "setsid bash -lc \"sleep 6; steam steam://rungameid/2677660 >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch 2677660 >/dev/null 2>&1 || true\"");
-#else
   ASSERT_EQ(steam_ctx->detached.size(), 1);
   EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://rungameid/2677660");
-#endif
   ASSERT_FALSE(steam_ctx->prep_cmds.empty());
-  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, "setsid steam -shutdown");
+  EXPECT_EQ(steam_ctx->prep_cmds.back().undo_cmd, expected_steam_shutdown_command());
   EXPECT_EQ(steam_ctx->steam_appid, "2677660");
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   EXPECT_EQ(migrated_tree["version"], 8);
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPicture) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
+  const auto file_path = test_paths::root() / "steam_library_current_launch_normalization.json";
+
+  const nlohmann::json apps = {
+    {"version", 8},
+    {"apps", {
+      {
+        {"name", "Resident Evil 2"},
+        {"uuid", "steam-library-current-normalization-test"},
+        {"cmd", ""},
+        {"detached", {
+          "setsid steam -gamepadui",
+          "setsid bash -lc \"sleep 6; steam steam://rungameid/883710 >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch 883710 >/dev/null 2>&1 || true\""
+        }},
+        {"prep-cmd", {{
+          {"undo", "setsid steam -shutdown"}
+        }}},
+        {"source", "steam"},
+        {"steam-appid", "883710"},
+        {"image-path", "./assets/resident-evil-2.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Resident Evil 2";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+  ASSERT_EQ(steam_ctx->detached.size(), 1);
+  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://rungameid/883710");
+  ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
+
+  const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  EXPECT_EQ(parsed_tree["version"], 8);
 
   std::filesystem::remove(file_path);
 }
@@ -336,9 +389,11 @@ TEST(ProcessMigrationTests, ParseDoesNotAddSteamLibraryPrelaunchShutdownForLinux
   });
 
   ASSERT_NE(steam_ctx, parsed_apps.end());
+  ASSERT_EQ(steam_ctx->detached.size(), 1);
+  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://rungameid/2677660");
   ASSERT_EQ(steam_ctx->prep_cmds.size(), 1);
   EXPECT_TRUE(steam_ctx->prep_cmds.front().do_cmd.empty());
-  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, "setsid steam -shutdown");
+  EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   std::filesystem::remove(file_path);
 }

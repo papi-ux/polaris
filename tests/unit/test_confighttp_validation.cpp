@@ -47,6 +47,15 @@ TEST(ConfigValidationTests, AcceptsBrowserStreamPrimaryAndDeprecatedAliasKeys) {
   EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
 }
 
+TEST(ConfigValidationTests, AcceptsNvencSplitEncodeModeConfigKey) {
+  nlohmann::json payload = {
+    {"nvenc_split_encode_mode", "disabled"}
+  };
+
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+}
+
 TEST(AppValidationTests, AcceptsAWellFormedAppPayload) {
   nlohmann::json payload = {
     {"name", "Nova"},
