@@ -59,7 +59,7 @@ git add README.md scripts/dev-clean.sh
 git commit -q -m "initial"
 git remote add origin "$tmp_dir/remote.git"
 
-mkdir -p build build-cuda cmake-scratch arch-pkgbuild test-results playwright-report node_modules .codex .claude .private docs/.claude .stfolder
+mkdir -p build build-cuda cmake-scratch arch-pkgbuild test-results playwright-report node_modules .claude .private docs/.claude .stfolder
 printf 'generated\n' > build/output.txt
 printf 'generated\n' > build-cuda/output.txt
 printf 'generated\n' > cmake-scratch/output.txt
