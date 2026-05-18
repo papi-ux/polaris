@@ -143,6 +143,21 @@ namespace nvhttp {
       return value;
     }
 
+    std::optional<int> select_paired_client_launch_bitrate(
+        const std::optional<int> &target_bitrate_kbps,
+        int paired_bitrate_kbps,
+        bool applied_history_safe) {
+      if (paired_bitrate_kbps <= 0) {
+        return target_bitrate_kbps;
+      }
+
+      if (applied_history_safe && target_bitrate_kbps) {
+        return std::min(*target_bitrate_kbps, paired_bitrate_kbps);
+      }
+
+      return paired_bitrate_kbps;
+    }
+
     bool ai_auto_quality_enabled() {
       return ai_optimizer::is_enabled();
     }
@@ -1991,6 +2006,19 @@ namespace nvhttp {
       return health;
     }
   }  // namespace
+
+#ifdef POLARIS_TESTS
+  std::optional<int> select_paired_client_launch_bitrate_for_tests(
+      const std::optional<int> &target_bitrate_kbps,
+      int paired_bitrate_kbps,
+      bool applied_history_safe) {
+    return select_paired_client_launch_bitrate(
+      target_bitrate_kbps,
+      paired_bitrate_kbps,
+      applied_history_safe
+    );
+  }
+#endif
 
 #ifdef __linux__
   namespace {
@@ -5827,18 +5855,15 @@ namespace nvhttp {
 
       if (named_cert_p->target_bitrate_kbps > 0) {
         const int paired_bitrate = named_cert_p->target_bitrate_kbps;
-        const auto optimization_confidence = lower_copy(output.value("confidence", std::string {}));
-        const auto optimization_source = lower_copy(output.value("source", std::string {}));
-        const bool optimizer_can_raise_bitrate =
-          optimization_confidence == "high" &&
-          optimization_source.find("history_safe") == std::string::npos;
-        const int selected_bitrate = target_bitrate_kbps ?
-          (optimizer_can_raise_bitrate ? *target_bitrate_kbps : std::min(*target_bitrate_kbps, paired_bitrate)) :
-          paired_bitrate;
-        if (!target_bitrate_kbps || *target_bitrate_kbps != selected_bitrate) {
+        const auto selected_bitrate = select_paired_client_launch_bitrate(
+          target_bitrate_kbps,
+          paired_bitrate,
+          applied_history_safe
+        );
+        if (selected_bitrate && (!target_bitrate_kbps || *target_bitrate_kbps != *selected_bitrate)) {
           target_bitrate_kbps = selected_bitrate;
-          effective_optimization.target_bitrate_kbps = selected_bitrate;
-          output["target_bitrate_kbps"] = selected_bitrate;
+          effective_optimization.target_bitrate_kbps = *selected_bitrate;
+          output["target_bitrate_kbps"] = *selected_bitrate;
           append_normalization_reason(
             "Aligned launch optimization bitrate to the paired client profile."
           );
