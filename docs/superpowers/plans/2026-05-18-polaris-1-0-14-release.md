@@ -17,7 +17,7 @@
 - Modify `tests/unit/test_video.cpp`: keep focused tests for empty and out-of-range display selection.
 - Modify `CMakeLists.txt`: bump `project(Polaris VERSION 1.0.14 ...)`.
 - Modify `README.md`: replace the stale `v1.0.12` "What's New" content with a concise `v1.0.14` public summary.
-- Modify `docs/changelog.md`: add the `v1.0.14` release section above `v1.0.12`.
+- Modify `docs/changelog.md`: add the `v1.0.14` release section and restore the published `v1.0.13` section before `v1.0.12`.
 
 ### Task 1: Display-Selection Hardening
 
@@ -134,6 +134,22 @@ Patch release focused on Steam launch reliability, encoder/runtime polish, and s
 - Improved Linux unlock fallback, session cleanup, AMD headless DMA-BUF handling, and runtime diagnostics
 - Added safe local development cleanup tooling with script coverage and building-guide documentation
 - Hardened display selection so capture setup handles empty display lists without clamping against an invalid range
+```
+
+Then ensure the already-published `v1.0.13` section remains between `v1.0.14` and `v1.0.12`:
+
+```markdown
+## v1.0.13
+
+Patch release focused on AI Auto Quality, Nova coordination, and Linux stream pacing diagnostics.
+
+- Added richer Nova/Polaris settings sync so launch optimization, applied stream settings, presentation state, adaptive bitrate status, and optimizer health are visible across both sides
+- Merged adaptive bitrate behavior into the AI Auto Quality path so recovery decisions can consider network pressure, host frame pacing, encode pressure, and session history together
+- Improved AI optimizer feedback handling so short low-confidence sessions do not incorrectly relax safe FPS caps or poison game profiles
+- Added safer history-based recovery profiles, including FPS fallback behavior and clearer host-render-limited session grading
+- Improved Linux headless stream reporting for DMA-BUF capture, CUDA conversion, encoder target, frame residency, and SHM/CPU fallback reasons
+- Added resumable disconnect handling and cleanup improvements for Steam and isolated cage sessions
+- Expanded optimizer, adaptive bitrate, stream stats, process migration, and web UI coverage for the new Auto Quality flow
 ```
 
 - [ ] **Step 4: Run docs reference checks**
