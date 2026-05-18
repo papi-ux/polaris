@@ -5,6 +5,11 @@
 
 #include "../tests_common.h"
 
+#include <atomic>
+#include <thread>
+#include <vector>
+
+#include <src/crypto.h>
 #include <src/config.h>
 #include <src/httpcommon.h>
 #include <src/nvhttp.h>
@@ -264,4 +269,43 @@ TEST(PairingTest, OutOfOrderCalls) {
   // Calling it again should fail
   getservercert(sess, tree, "test");
   ASSERT_FALSE(tree.get<int>("root.paired") == 1);
+}
+
+TEST(CertChainTest, ConcurrentVerifyUsesIndependentOpenSslContexts) {
+  crypto::cert_chain_t chain;
+  auto named_cert = std::make_shared<crypto::named_cert_t>();
+  named_cert->cert = PUBLIC_CERT;
+  named_cert->name = "test";
+  chain.add(named_cert);
+
+  constexpr auto thread_count = 8;
+  constexpr auto iterations = 200;
+  std::atomic<bool> start {false};
+  std::atomic<int> failures {0};
+  std::vector<std::thread> threads;
+
+  for (auto i = 0; i < thread_count; ++i) {
+    threads.emplace_back([&]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+
+      for (auto iteration = 0; iteration < iterations; ++iteration) {
+        auto cert = crypto::x509(PUBLIC_CERT);
+        crypto::p_named_cert_t verified;
+        auto err = chain.verify(cert.get(), verified);
+
+        if (err != nullptr || verified.get() != named_cert.get()) {
+          failures.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  EXPECT_EQ(failures.load(std::memory_order_relaxed), 0);
 }
