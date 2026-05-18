@@ -5,11 +5,20 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace stream {
   void concat_and_insert_into(std::vector<uint8_t> &result, uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2);
+}
+
+namespace nvhttp {
+  std::optional<int> select_paired_client_launch_bitrate_for_tests(
+    const std::optional<int> &target_bitrate_kbps,
+    int paired_bitrate_kbps,
+    bool applied_history_safe
+  );
 }
 
 namespace {
@@ -44,4 +53,26 @@ TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
   auto res = concat_and_insert(1, 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
   auto expected = std::vector<uint8_t> {0, 'a', 0, 'b', 0, 'c', 0, 'd', 0, 'e'};
   ASSERT_EQ(res, expected);
+}
+
+TEST(NvhttpOptimizerTests, PairedClientLaunchBitrateOverridesCachedLowerOptimizerTarget) {
+  const auto selected = nvhttp::select_paired_client_launch_bitrate_for_tests(
+    25000,
+    80000,
+    false
+  );
+
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(*selected, 80000);
+}
+
+TEST(NvhttpOptimizerTests, PairedClientLaunchBitrateKeepsHistorySafeRecoveryCap) {
+  const auto selected = nvhttp::select_paired_client_launch_bitrate_for_tests(
+    25000,
+    80000,
+    true
+  );
+
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(*selected, 25000);
 }
