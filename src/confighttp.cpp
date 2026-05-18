@@ -244,7 +244,18 @@ namespace confighttp {
       return false;
     }
 
-    std::vector<std::string> steam_library_launch_commands(const std::string &appid) {
+    std::vector<std::string> steam_library_launch_commands(
+      const std::string &appid,
+      const std::string &mode = std::string {proc::STEAM_LAUNCH_MODE_DIRECT}
+    ) {
+      if (proc::steam_launch_mode_is_big_picture(mode)) {
+        return {
+          "setsid steam -gamepadui",
+          "setsid bash -lc \"sleep 6; steam steam://rungameid/" + appid +
+            " >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch " + appid +
+            " >/dev/null 2>&1 || true\""
+        };
+      }
       return { "setsid steam steam://rungameid/" + appid };
     }
 
@@ -2031,6 +2042,7 @@ namespace confighttp {
             }
           });
           app["steam-appid"] = appid;
+          app["steam-launch-mode"] = std::string {proc::STEAM_LAUNCH_MODE_DIRECT};
 
           // Download cover art from Steam CDN to local covers directory
           const std::string coverdir = platf::appdata().string() + "/covers/";

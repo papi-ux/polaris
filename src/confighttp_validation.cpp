@@ -419,6 +419,19 @@ namespace confighttp::validation {
       }
 
       const auto key_view = std::string_view {key};
+      if (key == "steam-launch-mode") {
+        if (!validate_safe_string(key, value, error)) {
+          return false;
+        }
+
+        const auto mode = value.get<std::string>();
+        if (mode != "direct" && mode != "big-picture") {
+          error = "steam-launch-mode must be direct or big-picture";
+          return false;
+        }
+        continue;
+      }
+
       if (contains(string_keys, key_view)) {
         if (!validate_safe_string(key, value, error)) {
           return false;

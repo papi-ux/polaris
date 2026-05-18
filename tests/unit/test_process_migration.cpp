@@ -355,6 +355,102 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   std::filesystem::remove(file_path);
 }
 
+TEST(ProcessMigrationTests, ParseDefaultsSteamLibraryLaunchModeToDirect) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
+  const auto file_path = test_paths::root() / "steam_library_default_direct_launch_mode.json";
+
+  const nlohmann::json apps = {
+    {"version", 8},
+    {"apps", {
+      {
+        {"name", "Portal"},
+        {"uuid", "steam-library-default-direct-launch-mode"},
+        {"cmd", ""},
+        {"detached", {
+          "setsid steam -gamepadui",
+          "setsid bash -lc \"sleep 6; steam steam://rungameid/400 >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch 400 >/dev/null 2>&1 || true\""
+        }},
+        {"prep-cmd", {{
+          {"undo", "setsid steam -shutdown"}
+        }}},
+        {"source", "steam"},
+        {"steam-appid", "400"},
+        {"image-path", "./assets/portal.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Portal";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+  EXPECT_EQ(steam_ctx->steam_launch_mode, "direct");
+  ASSERT_EQ(steam_ctx->detached.size(), 1);
+  EXPECT_EQ(steam_ctx->detached.front(), "setsid steam steam://rungameid/400");
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, ParseHonorsExplicitSteamLibraryBigPictureLaunchMode) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
+  const auto file_path = test_paths::root() / "steam_library_big_picture_launch_mode.json";
+
+  const nlohmann::json apps = {
+    {"version", 8},
+    {"apps", {
+      {
+        {"name", "Resident Evil 2"},
+        {"uuid", "steam-library-big-picture-launch-mode"},
+        {"cmd", ""},
+        {"detached", {"setsid steam steam://rungameid/883710"}},
+        {"prep-cmd", {{
+          {"undo", "setsid steam -shutdown"}
+        }}},
+        {"source", "steam"},
+        {"steam-appid", "883710"},
+        {"steam-launch-mode", "big-picture"},
+        {"image-path", "./assets/resident-evil-2.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto steam_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Resident Evil 2";
+  });
+
+  ASSERT_NE(steam_ctx, parsed_apps.end());
+  EXPECT_EQ(steam_ctx->steam_launch_mode, "big-picture");
+  ASSERT_EQ(steam_ctx->detached.size(), 2);
+  EXPECT_EQ(steam_ctx->detached[0], "setsid steam -gamepadui");
+  EXPECT_EQ(
+    steam_ctx->detached[1],
+    "setsid bash -lc \"sleep 6; steam steam://rungameid/883710 >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch 883710 >/dev/null 2>&1 || true\""
+  );
+
+  std::filesystem::remove(file_path);
+}
+
 #ifdef __linux__
 TEST(ProcessMigrationTests, ParseDoesNotAddSteamLibraryPrelaunchShutdownForLinuxCage) {
   linux_cage_compositor_guard_t guard;

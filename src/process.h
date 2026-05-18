@@ -15,6 +15,7 @@
 // standard includes
 #include <map>
 #include <optional>
+#include <string_view>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -48,6 +49,13 @@ namespace proc {
 #ifdef _WIN32
   extern VDISPLAY::DRIVER_STATUS vDisplayDriverStatus;
 #endif
+
+  inline constexpr std::string_view STEAM_LAUNCH_MODE_DIRECT = "direct";
+  inline constexpr std::string_view STEAM_LAUNCH_MODE_BIG_PICTURE = "big-picture";
+
+  std::string normalize_steam_launch_mode(std::string mode);
+  bool is_valid_steam_launch_mode(std::string_view mode);
+  bool steam_launch_mode_is_big_picture(std::string_view mode);
 
   typedef config::prep_cmd_t cmd_t;
 
@@ -91,6 +99,7 @@ namespace proc {
     std::string id;
     std::string gamepad;
     std::string steam_appid;
+    std::string steam_launch_mode = std::string {STEAM_LAUNCH_MODE_DIRECT};
     std::string game_category;  // "fast_action", "cinematic", "desktop", "vr", or ""
     std::string source;         // "steam", "lutris", "heroic", or "manual"
     std::vector<std::string> genres;
@@ -158,6 +167,7 @@ namespace proc {
     bool session_display_mode_is_explicit() const;
     bool current_app_has_mangohud() const;
     void set_app_mangohud_configured(const std::string &uuid, bool enabled);
+    void set_app_steam_launch_mode_configured(const std::string &uuid, const std::string &mode);
     void set_session_shutdown_requested(bool requested);
     bool session_shutdown_requested() const;
     boost::process::v1::environment get_env();

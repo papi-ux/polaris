@@ -92,6 +92,28 @@ namespace proc {
   int terminate_app_id = -1;
   std::string terminate_app_id_str;
 
+  std::string normalize_steam_launch_mode(std::string mode) {
+    boost::trim(mode);
+    boost::to_lower(mode);
+    if (mode == "big-picture" || mode == "big_picture" || mode == "bigpicture" || mode == "gamepadui") {
+      return std::string {STEAM_LAUNCH_MODE_BIG_PICTURE};
+    }
+    return std::string {STEAM_LAUNCH_MODE_DIRECT};
+  }
+
+  bool is_valid_steam_launch_mode(std::string_view mode) {
+    const auto raw = boost::to_lower_copy(boost::trim_copy(std::string {mode}));
+    return raw == "direct" ||
+           raw == "big-picture" ||
+           raw == "big_picture" ||
+           raw == "bigpicture" ||
+           raw == "gamepadui";
+  }
+
+  bool steam_launch_mode_is_big_picture(std::string_view mode) {
+    return normalize_steam_launch_mode(std::string {mode}) == STEAM_LAUNCH_MODE_BIG_PICTURE;
+  }
+
   namespace {
     std::string generate_session_token() {
       std::array<unsigned char, 16> raw {};
@@ -391,7 +413,25 @@ namespace proc {
       return std::nullopt;
     }
 
-    std::vector<std::string> canonical_steam_library_launch_commands(const std::string &reference_cmd, const std::string &appid) {
+    std::string canonical_steam_library_big_picture_followup_command(const std::string &reference_cmd, const std::string &appid) {
+      return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
+        "bash -lc \"sleep 6; steam steam://rungameid/" + appid +
+        " >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch " + appid +
+        " >/dev/null 2>&1 || true\"";
+    }
+
+    std::vector<std::string> canonical_steam_library_launch_commands(
+      const std::string &reference_cmd,
+      const std::string &appid,
+      const std::string &mode = std::string {proc::STEAM_LAUNCH_MODE_DIRECT}
+    ) {
+      if (proc::steam_launch_mode_is_big_picture(mode)) {
+        return {
+          canonical_steam_library_bootstrap_command(reference_cmd),
+          canonical_steam_library_big_picture_followup_command(reference_cmd, appid)
+        };
+      }
+
       return {
         steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
           "steam steam://rungameid/" + appid
@@ -1064,6 +1104,7 @@ namespace proc {
 
       ctx.steam_appid = appid;
       ctx.source = "steam";
+      ctx.steam_launch_mode = proc::normalize_steam_launch_mode(ctx.steam_launch_mode);
 
       std::string reference_cmd = ctx.cmd;
       std::vector<nlohmann::json> preserved_detached;
@@ -1084,7 +1125,7 @@ namespace proc {
         ctx.cmd.clear();
       }
 
-      const auto canonical_commands = canonical_steam_library_launch_commands(reference_cmd, appid);
+      const auto canonical_commands = canonical_steam_library_launch_commands(reference_cmd, appid, ctx.steam_launch_mode);
       ctx.detached.clear();
       ctx.detached.reserve(canonical_commands.size() + preserved_detached.size());
       for (const auto &cmd : canonical_commands) {
@@ -3631,6 +3672,24 @@ namespace proc {
     }
   }
 
+  void proc_t::set_app_steam_launch_mode_configured(const std::string &uuid, const std::string &mode) {
+    const auto normalized = normalize_steam_launch_mode(mode);
+    auto apply = [&normalized](ctx_t &app) {
+      app.steam_launch_mode = normalized;
+      normalize_steam_library_app(app);
+    };
+
+    for (auto &app : _apps) {
+      if (app.uuid == uuid) {
+        apply(app);
+      }
+    }
+
+    if (_app.uuid == uuid) {
+      _app.steam_launch_mode = normalized;
+    }
+  }
+
   void proc_t::set_session_shutdown_requested(bool requested) {
     _session_shutdown_requested = requested;
   }
@@ -4091,7 +4150,9 @@ namespace proc {
         }
       }
 
-      const auto canonical_commands = canonical_steam_library_launch_commands(reference_cmd, steam_appid);
+      const auto steam_launch_mode = proc::normalize_steam_launch_mode(json_string_member_or(app, "steam-launch-mode", "direct"));
+      app["steam-launch-mode"] = steam_launch_mode;
+      const auto canonical_commands = canonical_steam_library_launch_commands(reference_cmd, steam_appid, steam_launch_mode);
       nlohmann::json detached_commands = nlohmann::json::array();
       for (const auto &cmd : canonical_commands) {
         BOOST_LOG(info) << "Migrating Steam library launch command for [" << json_app_label(app)
@@ -4331,6 +4392,7 @@ namespace proc {
           ctx.terminate_on_pause = app_node.value("terminate-on-pause", false);
           ctx.gamepad = app_node.value("gamepad", "");
           ctx.steam_appid = app_node.value("steam-appid", "");
+          ctx.steam_launch_mode = proc::normalize_steam_launch_mode(app_node.value("steam-launch-mode", "direct"));
           ctx.game_category = app_node.value("game-category", "");
           ctx.source = app_node.value("source", ctx.steam_appid.empty() ? "manual" : "steam");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);

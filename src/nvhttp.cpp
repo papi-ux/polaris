@@ -2316,6 +2316,32 @@ namespace nvhttp {
       launch_mode["mode_reason"] = mode_reason;
       return launch_mode;
     }
+
+    nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {
+      nlohmann::json contract;
+      const bool is_steam = !app.steam_appid.empty() || boost::iequals(app.source, "steam");
+      contract["available"] = is_steam;
+
+      if (!is_steam) {
+        contract["mode"] = "";
+        contract["recommended_mode"] = "";
+        contract["allowed_modes"] = nlohmann::json::array();
+        contract["mode_reason"] = "";
+        return contract;
+      }
+
+      const auto mode = proc::normalize_steam_launch_mode(app.steam_launch_mode);
+      contract["mode"] = mode;
+      contract["recommended_mode"] = std::string {proc::STEAM_LAUNCH_MODE_DIRECT};
+      contract["allowed_modes"] = nlohmann::json::array({
+        std::string {proc::STEAM_LAUNCH_MODE_DIRECT},
+        std::string {proc::STEAM_LAUNCH_MODE_BIG_PICTURE}
+      });
+      contract["mode_reason"] = mode == proc::STEAM_LAUNCH_MODE_BIG_PICTURE ?
+        "Steam Big Picture compatibility mode may also receive controller input." :
+        "Direct launch avoids opening Steam Big Picture.";
+      return contract;
+    }
   }  // namespace
 
   using p_named_cert_t = crypto::p_named_cert_t;
@@ -5024,6 +5050,7 @@ namespace nvhttp {
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
         game["last_launched"] = app.last_launched;
         game["launch_mode"] = launch_mode_contract_for_app(app);
+        game["steam_launch"] = steam_launch_contract_for_app(app);
 
         nlohmann::json genre_arr = nlohmann::json::array();
         for (const auto &g : app.genres) genre_arr.push_back(g);
@@ -5274,6 +5301,83 @@ namespace nvhttp {
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
+      }
+    };
+
+    auto polarisSetSteamLaunchMode = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      auto write_json = [&](const nlohmann::json &body, SimpleWeb::StatusCode code = SimpleWeb::StatusCode::success_ok) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(code, body.dump(), headers);
+      };
+
+      try {
+        std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+        auto body = nlohmann::json::parse(body_str);
+
+        const std::string game_id = body.value("game_id", "");
+        const std::string requested_mode = body.value("mode", "");
+
+        if (game_id.empty()) {
+          write_json({{"error", "game_id required"}}, SimpleWeb::StatusCode::client_error_bad_request);
+          return;
+        }
+
+        if (requested_mode != "direct" && requested_mode != "big-picture") {
+          write_json({{"error", "mode must be direct or big-picture"}}, SimpleWeb::StatusCode::client_error_bad_request);
+          return;
+        }
+
+        const auto mode = proc::normalize_steam_launch_mode(requested_mode);
+        std::string content = file_handler::read_file(config::stream.file_apps.c_str());
+        auto file_tree = nlohmann::json::parse(content);
+        bool matched = false;
+        bool is_steam = false;
+
+        if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
+          for (auto &app_node : file_tree["apps"]) {
+            if (app_node.value("uuid", "") != game_id) {
+              continue;
+            }
+
+            matched = true;
+            const auto steam_appid = app_node.value("steam-appid", "");
+            const auto source = app_node.value("source", steam_appid.empty() ? "manual" : "steam");
+            is_steam = !steam_appid.empty() || boost::iequals(source, "steam");
+            if (!is_steam) {
+              break;
+            }
+
+            app_node["steam-launch-mode"] = mode;
+            break;
+          }
+        }
+
+        if (!matched) {
+          write_json({{"error", "Game not found"}}, SimpleWeb::StatusCode::client_error_not_found);
+          return;
+        }
+
+        if (!is_steam) {
+          write_json({{"error", "Steam launch mode is only available for Steam games"}}, SimpleWeb::StatusCode::client_error_bad_request);
+          return;
+        }
+
+        file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+        proc::proc.set_app_steam_launch_mode_configured(game_id, mode);
+
+        nlohmann::json output;
+        output["status"] = true;
+        output["mode"] = mode;
+        write_json(output);
+      } catch (std::exception &e) {
+        write_json({{"error", e.what()}}, SimpleWeb::StatusCode::server_error_internal_server_error);
       }
     };
 
@@ -5981,6 +6085,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/games$"]["GET"] = polarisGames;
     https_server.resource["^/polaris/v1/games/.+/cover$"]["GET"] = polarisGameCover;
     https_server.resource["^/polaris/v1/games/.+/mangohud$"]["POST"] = polarisToggleMangoHud;
+    https_server.resource["^/polaris/v1/games/.+/steam-launch-mode$"]["POST"] = polarisSetSteamLaunchMode;
     https_server.resource["^/polaris/v1/session/launch$"]["POST"] = polarisLaunchGame;
 
     https_server.config.reuse_address = true;
