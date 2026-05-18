@@ -19,16 +19,18 @@ namespace crypto {
   }  // namespace
 
   cert_chain_t::cert_chain_t():
-      _certs {}, _cert_ctx { X509_STORE_CTX_new() } {
+      _certs_mutex {}, _certs {} {
   }
   void cert_chain_t::add(p_named_cert_t& named_cert_p) {
     x509_store_t x509_store { X509_STORE_new() };
 
     X509_STORE_add_cert(x509_store.get(), x509(named_cert_p->cert).get());
+    std::lock_guard lock {_certs_mutex};
     _certs.emplace_back(std::make_pair(named_cert_p, std::move(x509_store)));
   }
 
   void cert_chain_t::clear() {
+    std::lock_guard lock {_certs_mutex};
     _certs.clear();
   }
 
@@ -62,27 +64,35 @@ namespace crypto {
    */
   const char * cert_chain_t::verify(x509_t::element_type *cert, p_named_cert_t& named_cert_out) {
     int err_code = 0;
+    std::lock_guard lock {_certs_mutex};
     for (auto &[named_cert_p, x509_store] : _certs) {
-      auto fg = util::fail_guard([this]() {
-        X509_STORE_CTX_cleanup(_cert_ctx.get());
+      x509_store_ctx_t cert_ctx { X509_STORE_CTX_new() };
+      if (!cert_ctx) {
+        return "Unable to allocate certificate verification context";
+      }
+
+      auto fg = util::fail_guard([&cert_ctx]() {
+        X509_STORE_CTX_cleanup(cert_ctx.get());
       });
 
-      X509_STORE_CTX_init(_cert_ctx.get(), x509_store.get(), cert, nullptr);
-      X509_STORE_CTX_set_verify_cb(_cert_ctx.get(), openssl_verify_cb);
+      if (X509_STORE_CTX_init(cert_ctx.get(), x509_store.get(), cert, nullptr) != 1) {
+        return "Unable to initialize certificate verification context";
+      }
+      X509_STORE_CTX_set_verify_cb(cert_ctx.get(), openssl_verify_cb);
 
       // We don't care to validate the entire chain for the purposes of client auth.
       // Some versions of clients forked from Moonlight Embedded produce client certs
       // that OpenSSL doesn't detect as self-signed due to some X509v3 extensions.
-      X509_STORE_CTX_set_flags(_cert_ctx.get(), X509_V_FLAG_PARTIAL_CHAIN);
+      X509_STORE_CTX_set_flags(cert_ctx.get(), X509_V_FLAG_PARTIAL_CHAIN);
 
-      auto err = X509_verify_cert(_cert_ctx.get());
+      auto err = X509_verify_cert(cert_ctx.get());
 
       if (err == 1) {
         named_cert_out = named_cert_p;
         return nullptr;
       }
 
-      err_code = X509_STORE_CTX_get_error(_cert_ctx.get());
+      err_code = X509_STORE_CTX_get_error(cert_ctx.get());
 
       if (err_code != X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT && err_code != X509_V_ERR_INVALID_CA) {
         return X509_verify_cert_error_string(err_code);

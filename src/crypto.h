@@ -6,6 +6,7 @@
 
 // standard includes
 #include <array>
+#include <mutex>
 
 // lib includes
 #include <list>
@@ -142,7 +143,11 @@ namespace crypto {
 
   class cert_chain_t {
   public:
-    KITTY_DECL_CONSTR(cert_chain_t)
+    cert_chain_t();
+    cert_chain_t(const cert_chain_t &) = delete;
+    cert_chain_t &operator=(const cert_chain_t &) = delete;
+    cert_chain_t(cert_chain_t &&) = delete;
+    cert_chain_t &operator=(cert_chain_t &&) = delete;
 
     void add(p_named_cert_t& named_cert_p);
 
@@ -151,8 +156,8 @@ namespace crypto {
     const char *verify(x509_t::element_type *cert, p_named_cert_t& named_cert_out);
 
   private:
+    std::mutex _certs_mutex;
     std::vector<std::pair<p_named_cert_t, x509_store_t>> _certs;
-    x509_store_ctx_t _cert_ctx;
   };
 
   namespace cipher {

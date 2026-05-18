@@ -7,6 +7,16 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.16
+
+Stability hotfix release focused on client certificate verification during reconnect and disconnect flows.
+
+- Fixed a crash in HTTPS client certificate verification by giving each verification request its own OpenSSL `X509_STORE_CTX`
+- Protected paired-client certificate state while concurrent HTTPS threads verify Nova/Moonlight clients
+- Added regression coverage for concurrent certificate verification against the pairing certificate chain
+- Rebuilt local master with CUDA enabled and smoke-tested a Retroid Pocket 6 direct Steam launch through headless labwc, DMA-BUF GPU capture, CUDA conversion, and NVENC
+- Confirmed the direct Retroid launch path stayed clear of inherited MangoHud and cleaned up the isolated session without a new coredump
+
 ## v1.0.15
 
 Hotfix release focused on keeping MangoHud out of Linux headless stream runtimes unless a game explicitly opts in.

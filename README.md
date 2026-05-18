@@ -69,14 +69,14 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.15
+## What's New in v1.0.16
 
-Polaris `v1.0.15` is a hotfix for MangoHud leaking into Linux headless streams.
+Polaris `v1.0.16` is a stability hotfix for client reconnect and disconnect handling.
 
-- Headless Steam Big Picture streams no longer inherit or inject MangoHud into Steam helper processes.
-- Direct headless Steam game launches suppress inherited or auto-added MangoHud unless the game explicitly enables it.
-- The isolated `labwc` and XWayland runtime now clears `MANGOHUD_CONFIG` as well as `MANGOHUD` and `MANGOHUD_DLSYM`.
-- Retroid Pocket 6 direct-launch smoke testing covered a forced parent MangoHud environment and confirmed stream child processes stayed clean.
+- Client certificate verification now uses an independent OpenSSL verification context per request, preventing a crash seen after stream disconnects.
+- Paired-client certificate state is protected while HTTPS requests verify clients, keeping concurrent Nova/Moonlight reconnects safe.
+- Regression coverage now exercises concurrent certificate verification against the pairing certificate chain.
+- Retroid Pocket 6 direct-launch smoke testing confirmed CUDA/NVENC, DMA-BUF GPU capture, MangoHud suppression, and clean session teardown.
 
 See the [changelog](docs/changelog.md) for the full release history.
 
