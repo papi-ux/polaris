@@ -360,14 +360,6 @@ namespace proc {
       return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) + "steam -gamepadui";
     }
 
-    std::string canonical_steam_library_followup_command(const std::string &reference_cmd, const std::string &appid) {
-      return steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
-             "bash -lc \"sleep 6; "
-             "steam steam://rungameid/" + appid + " >/dev/null 2>&1 || true; "
-             "sleep 4; "
-             "exec steam -applaunch " + appid + " >/dev/null 2>&1 || true\"";
-    }
-
     std::optional<std::string> extract_steam_appid_from_command(const std::string &cmd) {
       auto extract_digits = [&](size_t pos) -> std::optional<std::string> {
         while (pos < cmd.size() && std::isspace(static_cast<unsigned char>(cmd[pos]))) {
@@ -400,17 +392,10 @@ namespace proc {
     }
 
     std::vector<std::string> canonical_steam_library_launch_commands(const std::string &reference_cmd, const std::string &appid) {
-#ifdef __linux__
-      return {
-        canonical_steam_library_bootstrap_command(reference_cmd),
-        canonical_steam_library_followup_command(reference_cmd, appid),
-      };
-#else
       return {
         steam_big_picture_command_prefix(reference_cmd.empty() ? "steam" : reference_cmd) +
           "steam steam://rungameid/" + appid
       };
-#endif
     }
 
     bool command_is_steam_library_launch_component(const std::string &cmd) {

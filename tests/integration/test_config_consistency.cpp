@@ -6,6 +6,7 @@
 
 // standard includes
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <fstream>
 #include <map>
@@ -183,14 +184,35 @@ protected:
     str.erase(str.find_last_not_of(" \t\r\n") + 1);
   }
 
-  // Helper function to extract option name from the Markdown line
-  static std::string extractOptionFromMarkdownLine(const std::string &line) {
+  static bool isConfigKeyLike(std::string_view option) {
+    return !option.empty() &&
+           std::ranges::all_of(option, [](const char ch) {
+             return std::islower(static_cast<unsigned char>(ch)) ||
+                    std::isdigit(static_cast<unsigned char>(ch)) ||
+                    ch == '_';
+           });
+  }
+
+  // Helper function to extract option name from a Markdown heading or table row.
+  static std::string extractOptionFromMarkdownLine(const std::string &line, const bool includeTableRows) {
     const std::regex optionPattern(R"(^### ([^#\r\n]+))");
     if (std::smatch optionMatch; std::regex_search(line, optionMatch, optionPattern)) {
       std::string optionName = optionMatch[1].str();
       trimWhitespace(optionName);
-      return optionName;
+      return isConfigKeyLike(optionName) ? optionName : "";
     }
+
+    if (!includeTableRows) {
+      return "";
+    }
+
+    const std::regex tableOptionPattern(R"(^\|\s*`([^`]+)`\s*\|)");
+    if (std::smatch optionMatch; std::regex_search(line, optionMatch, tableOptionPattern)) {
+      std::string optionName = optionMatch[1].str();
+      trimWhitespace(optionName);
+      return isConfigKeyLike(optionName) ? optionName : "";
+    }
+
     return "";
   }
 
@@ -246,7 +268,8 @@ protected:
       return false;
     }
 
-    if (const std::string optionName = extractOptionFromMarkdownLine(line); !optionName.empty()) {
+    const bool includeTableRows = currentSection == "Common options";
+    if (const std::string optionName = extractOptionFromMarkdownLine(line, includeTableRows); !optionName.empty()) {
       options[optionName] = currentSection;
       return true;
     }
@@ -280,7 +303,8 @@ protected:
       return;
     }
 
-    if (const std::string optionName = extractOptionFromMarkdownLine(line); !optionName.empty()) {
+    const bool includeTableRows = currentSection == "Common options";
+    if (const std::string optionName = extractOptionFromMarkdownLine(line, includeTableRows); !optionName.empty()) {
       optionsBySection[currentSection].push_back(optionName);
     }
   }
@@ -364,19 +388,10 @@ protected:
     return htmlOptions.contains(option);
   }
 
-  // Helper function to check if an option exists in MD options
-  static bool isOptionInMd(const std::string &option, const std::map<std::string, std::string, std::less<>> &mdOptions) {
-    return mdOptions.contains(option);
-  }
-
-  // Helper function to validate option existence across files
-  static void validateOptionExistence(const std::string &option, const std::map<std::string, std::string, std::less<>> &htmlOptions, const std::map<std::string, std::string, std::less<>> &mdOptions, const std::set<std::string, std::less<>> &jsonOptions, std::vector<std::string> &missingFromFiles) {
+  // Helper function to validate option existence across UI config files
+  static void validateUiOptionExistence(const std::string &option, const std::map<std::string, std::string, std::less<>> &htmlOptions, const std::set<std::string, std::less<>> &jsonOptions, std::vector<std::string> &missingFromFiles) {
     if (!isOptionInHtml(option, htmlOptions)) {
       missingFromFiles.push_back(std::format("ConfigView.vue missing: {}", option));
-    }
-
-    if (!isOptionInMd(option, mdOptions)) {
-      missingFromFiles.push_back(std::format("configuration.md missing: {}", option));
     }
 
     if (!jsonOptions.contains(option)) {
@@ -384,29 +399,8 @@ protected:
     }
   }
 
-  // Helper function to check tab correspondence with documentation sections
-  static void checkTabCorrespondence(const std::string &tab, const std::map<std::string, std::string, std::less<>> &expectedDocToTabMapping, const std::set<std::string, std::less<>> &mdSections, std::vector<std::string> &inconsistencies) {
-    bool found = false;
-
-    for (const auto &[docSection, expectedTab] : expectedDocToTabMapping) {
-      if (expectedTab != tab) {
-        continue;
-      }
-
-      if (!mdSections.contains(docSection)) {
-        inconsistencies.push_back(std::format("Tab '{}' maps to doc section '{}' but section not found", tab, docSection));
-      }
-      found = true;
-      break;
-    }
-
-    if (!found) {
-      inconsistencies.push_back(std::format("Tab '{}' has no corresponding documentation section", tab));
-    }
-  }
-
   // Helper function to check if a test fake option is found in missing files
-  static void checkTestDummyDetection(const std::vector<std::string> &missingFromFiles, const std::string &testDummyOption, bool &foundMissingDummyInHtml, bool &foundMissingDummyInMd, bool &foundMissingDummyInJson) {
+  static void checkTestDummyDetection(const std::vector<std::string> &missingFromFiles, const std::string &testDummyOption, bool &foundMissingDummyInHtml, bool &foundMissingDummyInJson) {
     for (const auto &missing : missingFromFiles) {
       if (!missing.contains(testDummyOption)) {
         continue;
@@ -414,9 +408,6 @@ protected:
 
       if (missing.contains("ConfigView.vue")) {
         foundMissingDummyInHtml = true;
-      }
-      if (missing.contains("configuration.md")) {
-        foundMissingDummyInMd = true;
       }
       if (missing.contains("en.json")) {
         foundMissingDummyInJson = true;
@@ -440,7 +431,6 @@ protected:
 TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   const auto cppOptions = extractConfigCppOptions();
   const auto htmlOptions = extractConfigHtmlOptions();
-  const auto mdOptions = extractConfigMdOptions();
   const auto jsonOptions = extractEnJsonConfigOptions();
 
   // Options that are internal/special and shouldn't be in UI/docs
@@ -471,7 +461,7 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
       continue;  // Skip internal options
     }
 
-    validateOptionExistence(option, htmlOptions, mdOptions, jsonOptions, missingFromFiles);
+    validateUiOptionExistence(option, htmlOptions, jsonOptions, missingFromFiles);
   }
 
   if (!missingFromFiles.empty()) {
@@ -483,40 +473,21 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   }
 }
 
-TEST_F(ConfigConsistencyTest, ConfigTabsMatchDocumentationSections) {
-  auto htmlOptions = extractConfigHtmlOptions();
+TEST_F(ConfigConsistencyTest, DocumentedConfigOptionsExistInBackendConfig) {
+  const auto cppOptions = extractConfigCppOptions();
   auto mdOptions = extractConfigMdOptions();
 
-  // Get unique tabs and sections
-  std::set<std::string, std::less<>> htmlTabs;
-  std::set<std::string, std::less<>> mdSections;
-
-  for (const auto &tab : htmlOptions | std::views::values) {
-    htmlTabs.insert(tab);
-  }
-
-  for (const auto &section : mdOptions | std::views::values) {
-    mdSections.insert(section);
-  }
-
-  std::vector<std::string> inconsistencies;
-
-  // Check that each HTML tab has a corresponding documentation section
-  for (const auto &tab : htmlTabs) {
-    checkTabCorrespondence(tab, expectedDocToTabMapping, mdSections, inconsistencies);
-  }
-
-  // Check that each documentation section has a corresponding HTML tab
-  for (const auto &section : mdSections) {
-    if (!expectedDocToTabMapping.contains(section)) {
-      inconsistencies.push_back(std::format("Documentation section '{}' has no corresponding UI tab", section));
+  std::vector<std::string> unknownOptions;
+  for (const auto &[option, section] : mdOptions) {
+    if (!cppOptions.contains(option)) {
+      unknownOptions.push_back(std::format("{} documented in section '{}'", option, section));
     }
   }
 
-  if (!inconsistencies.empty()) {
-    std::string errorMsg = "Tab/Section mapping inconsistencies:\n";
-    for (const auto &inconsistency : inconsistencies) {
-      errorMsg += std::format("  {}\n", inconsistency);
+  if (!unknownOptions.empty()) {
+    std::string errorMsg = "Documented config options missing from config.cpp:\n";
+    for (const auto &unknown : unknownOptions) {
+      errorMsg += std::format("  {}\n", unknown);
     }
     FAIL() << errorMsg;
   }
@@ -632,7 +603,6 @@ TEST_F(ConfigConsistencyTest, DummyConfigOptionsDoNotExist) {
 TEST_F(ConfigConsistencyTest, TestFrameworkDetectsMissingOptions) {
   const auto cppOptions = extractConfigCppOptions();
   const auto htmlOptions = extractConfigHtmlOptions();
-  const auto mdOptions = extractConfigMdOptions();
   const auto jsonOptions = extractEnJsonConfigOptions();
 
   // Add a fake option to the cpp options to simulate a missing option scenario
@@ -657,10 +627,6 @@ TEST_F(ConfigConsistencyTest, TestFrameworkDetectsMissingOptions) {
       missingFromFiles.push_back(std::format("ConfigView.vue missing: {}", option));
     }
 
-    if (!mdOptions.contains(option)) {
-      missingFromFiles.push_back(std::format("configuration.md missing: {}", option));
-    }
-
     if (!jsonOptions.contains(option)) {
       missingFromFiles.push_back(std::format("en.json missing: {}", option));
     }
@@ -668,16 +634,14 @@ TEST_F(ConfigConsistencyTest, TestFrameworkDetectsMissingOptions) {
 
   // Verify that the test framework detected the missing fake option
   bool foundMissingDummyInHtml = false;
-  bool foundMissingDummyInMd = false;
   bool foundMissingDummyInJson = false;
 
-  checkTestDummyDetection(missingFromFiles, testDummyOption, foundMissingDummyInHtml, foundMissingDummyInMd, foundMissingDummyInJson);
+  checkTestDummyDetection(missingFromFiles, testDummyOption, foundMissingDummyInHtml, foundMissingDummyInJson);
 
-  // The test framework should have detected the fake option as missing from all files
+  // The test framework should have detected the fake option as missing from UI config files
   EXPECT_TRUE(foundMissingDummyInHtml) << "Test framework failed to detect missing option in ConfigView.vue";
-  EXPECT_TRUE(foundMissingDummyInMd) << "Test framework failed to detect missing option in configuration.md";
   EXPECT_TRUE(foundMissingDummyInJson) << "Test framework failed to detect missing option in en.json";
 
-  // Verify we have at least 3 missing entries (one for each file type)
-  EXPECT_GE(missingFromFiles.size(), 3) << "Test framework should detect missing dummy option in all three file types";
+  // Verify we have at least 2 missing entries (one for each UI config file type)
+  EXPECT_GE(missingFromFiles.size(), 2) << "Test framework should detect missing dummy option in both UI config file types";
 }

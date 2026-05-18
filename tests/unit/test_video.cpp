@@ -163,6 +163,60 @@ TEST(VideoFrameConversionTests, PrefersCaptureProvidedRowPitch) {
   EXPECT_EQ(video::software_frame_input_linesize_for_tests(8192, 4, 1920, 1920, AV_PIX_FMT_BGR0), 8192);
 }
 
+#ifdef __linux__
+TEST(VideoNvencSplitEncodeModeTests, AppliesOnlyToLinuxFfmpegNvencHevcAndAv1) {
+  EXPECT_TRUE(video::should_apply_nvenc_split_encode_mode_for_tests("nvenc", "hevc_nvenc"));
+  EXPECT_TRUE(video::should_apply_nvenc_split_encode_mode_for_tests("nvenc", "av1_nvenc"));
+  EXPECT_FALSE(video::should_apply_nvenc_split_encode_mode_for_tests("nvenc", "h264_nvenc"));
+  EXPECT_FALSE(video::should_apply_nvenc_split_encode_mode_for_tests("vaapi", "hevc_vaapi"));
+}
+#endif
+
+TEST(VideoNvencSplitEncodeModeTests, MapsConfigModesToFfmpegValues) {
+  EXPECT_EQ(video::nvenc_split_encode_mode_value_for_tests(nvenc::nvenc_split_encode_mode::disabled), 15);
+  EXPECT_EQ(video::nvenc_split_encode_mode_value_for_tests(nvenc::nvenc_split_encode_mode::auto_mode), 0);
+  EXPECT_EQ(video::nvenc_split_encode_mode_value_for_tests(nvenc::nvenc_split_encode_mode::forced), 1);
+  EXPECT_EQ(video::nvenc_split_encode_mode_value_for_tests(nvenc::nvenc_split_encode_mode::two_way), 2);
+  EXPECT_EQ(video::nvenc_split_encode_mode_value_for_tests(nvenc::nvenc_split_encode_mode::three_way), 3);
+}
+
+#ifdef __linux__
+TEST(VideoNvencSplitEncodeModeTests, SelectsFfmpegOptionOnlyForSupportedNvencCodecs) {
+  EXPECT_EQ(
+    video::nvenc_split_encode_mode_option_value_for_tests(
+      "nvenc",
+      "hevc_nvenc",
+      nvenc::nvenc_split_encode_mode::two_way
+    ),
+    2
+  );
+  EXPECT_EQ(
+    video::nvenc_split_encode_mode_option_value_for_tests(
+      "nvenc",
+      "av1_nvenc",
+      nvenc::nvenc_split_encode_mode::three_way
+    ),
+    3
+  );
+  EXPECT_EQ(
+    video::nvenc_split_encode_mode_option_value_for_tests(
+      "nvenc",
+      "h264_nvenc",
+      nvenc::nvenc_split_encode_mode::two_way
+    ),
+    std::nullopt
+  );
+  EXPECT_EQ(
+    video::nvenc_split_encode_mode_option_value_for_tests(
+      "vaapi",
+      "hevc_vaapi",
+      nvenc::nvenc_split_encode_mode::two_way
+    ),
+    std::nullopt
+  );
+}
+#endif
+
 TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopologyMismatch) {
   const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-encoder-cache-tests";
   const auto cache_path = cache_dir / "encoder_cache.txt";

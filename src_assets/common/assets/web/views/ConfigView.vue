@@ -336,6 +336,7 @@ const tabs = ref([
       "double_refreshrate": "disabled",
       "max_bitrate": 0,
       "minimum_fps_target": 0,
+      "disconnect_resume_timeout_seconds": 300,
       "adaptive_bitrate_enabled": "disabled",
       "adaptive_bitrate_min": 2000,
       "adaptive_bitrate_max": 100000,
@@ -422,6 +423,7 @@ const tabs = ref([
     options: {
       "nvenc_preset": 1,
       "nvenc_twopass": "quarter_res",
+      "nvenc_split_encode_mode": "disabled",
       "nvenc_spatial_aq": "disabled",
       "nvenc_vbv_increase": 0,
       "nvenc_realtime_hags": "enabled",
