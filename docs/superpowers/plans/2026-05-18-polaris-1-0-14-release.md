@@ -71,15 +71,15 @@ std::optional<int> clamp_display_index(int requested_index, std::size_t display_
 Run:
 
 ```bash
-ctest --test-dir build --output-on-failure -R test_video
+ctest --test-dir build --output-on-failure -R test_polaris_video
 ```
 
 Expected: the `test_video` target passes. If `build` does not exist, configure/build the test target first:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --target test_video -j"$(nproc)"
-ctest --test-dir build --output-on-failure -R test_video
+cmake --build build --target test_polaris_video -j"$(nproc)"
+ctest --test-dir build --output-on-failure -R test_polaris_video
 ```
 
 ### Task 2: Release Version and Public Docs
@@ -177,13 +177,13 @@ Expected: no stale README/CMake `1.0.12` release headline/version matches, and `
 Run:
 
 ```bash
-ctest --test-dir build --output-on-failure -R 'test_video|test_adaptive_bitrate|test_process_migration|test_stream'
+ctest --test-dir build --output-on-failure -R 'test_polaris_video|test_polaris_stream|test_polaris_config'
 ```
 
 Expected: all selected tests pass. If a test binary is missing, build it first with:
 
 ```bash
-cmake --build build --target test_video test_adaptive_bitrate test_process_migration test_stream -j"$(nproc)"
+cmake --build build --target test_polaris_video test_polaris_stream test_polaris_config -j"$(nproc)"
 ```
 
 - [ ] **Step 2: Inspect the final diff**
