@@ -31,6 +31,8 @@ pkg_check_modules(MINIUPNP miniupnpc REQUIRED)
 include_directories(SYSTEM ${MINIUPNP_INCLUDE_DIRS})
 
 # ffmpeg pre-compiled binaries
+include("${CMAKE_MODULE_PATH}/dependencies/prepared_ffmpeg.cmake")
+
 if(WIN32)
     set(FFMPEG_PLATFORM_LIBRARIES mfplat ole32 strmiids mfuuid vpl)
 elseif(UNIX AND NOT APPLE)
@@ -40,19 +42,7 @@ elseif(UNIX AND NOT APPLE)
     endif()
 endif()
 
-if(NOT DEFINED FFMPEG_PREPARED_BINARIES)
-    set(FFMPEG_PREPARED_BINARIES
-            "${CMAKE_SOURCE_DIR}/third-party/build-deps/dist/${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
-
-    # check if the directory exists
-    if(NOT EXISTS "${FFMPEG_PREPARED_BINARIES}")
-        message(FATAL_ERROR
-                "FFmpeg pre-compiled binaries not found at ${FFMPEG_PREPARED_BINARIES}. \
-                Please consider contributing to the LizardByte/build-deps repository. \
-                Optionally, you can use the FFMPEG_PREPARED_BINARIES option to specify the path to the \
-                system-installed FFmpeg libraries")
-    endif()
-endif()
+polaris_resolve_prepared_ffmpeg(FFMPEG_PREPARED_BINARIES)
 
 set(FFMPEG_LIBRARIES
         "${FFMPEG_PREPARED_BINARIES}/lib/libavcodec.a"
