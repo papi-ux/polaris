@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <list>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -743,6 +744,18 @@ namespace video {
     std::chrono::milliseconds reset_display_retry_delay(int attempt) {
       const auto shift = std::clamp(attempt, 0, 2);
       return std::min(50ms * (1 << shift), 200ms);
+    }
+
+    std::optional<int> clamp_display_index(int requested_index, std::size_t display_count) {
+      if (display_count == 0) {
+        return std::nullopt;
+      }
+
+      const auto max_index = static_cast<int>(std::min(
+        display_count - 1,
+        static_cast<std::size_t>(std::numeric_limits<int>::max())
+      ));
+      return std::clamp(requested_index, 0, max_index);
     }
 
   }  // namespace
@@ -2075,6 +2088,10 @@ namespace video {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
       refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      if (display_names.empty()) {
+        BOOST_LOG(error) << "No displays were found for initial capture setup"sv;
+        return;
+      }
       disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
       if (disp) {
         proc::proc.display_name = display_names[display_p];
@@ -2271,7 +2288,18 @@ namespace video {
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
-                display_p = std::clamp(*switch_display_event->pop(), 0, (int) display_names.size() - 1);
+                const auto requested_display = *switch_display_event->pop();
+                if (auto clamped_display = clamp_display_index(requested_display, display_names.size())) {
+                  display_p = *clamped_display;
+                } else {
+                  BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                                     << requested_display << "] because no displays are available"sv;
+                }
+              }
+
+              if (display_names.empty()) {
+                BOOST_LOG(error) << "No displays were found after reenumeration"sv;
+                return;
               }
 
               // reset_display() will sleep between retries
@@ -3392,7 +3420,18 @@ namespace video {
 
       // Process any pending display switch with the new list of displays
       if (switch_display_event->peek()) {
-        display_p = std::clamp(*switch_display_event->pop(), 0, (int) display_names.size() - 1);
+        const auto requested_display = *switch_display_event->pop();
+        if (auto clamped_display = clamp_display_index(requested_display, display_names.size())) {
+          display_p = *clamped_display;
+        } else {
+          BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                             << requested_display << "] because no displays are available"sv;
+        }
+      }
+
+      if (display_names.empty()) {
+        BOOST_LOG(error) << "No displays were found for synchronous capture setup"sv;
+        return encode_e::error;
       }
 
       // reset_display() will sleep between retries
@@ -4670,6 +4709,10 @@ namespace video {
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {
     return reset_display_retry_delay(attempt);
+  }
+
+  std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count) {
+    return clamp_display_index(requested_index, display_count);
   }
 
   bool hdr_metadata_is_usable_for_tests(const SS_HDR_METADATA &metadata) {

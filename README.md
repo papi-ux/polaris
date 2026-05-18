@@ -69,14 +69,16 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.12
+## What's New in v1.0.14
 
-Polaris `v1.0.12` focuses on corrected Fedora/Bazzite NVIDIA release assets.
+Polaris `v1.0.14` focuses on Steam launch reliability, encoder/runtime polish, and safer Linux capture setup.
 
-- Fedora/Bazzite RPM assets are rebuilt with CUDA enabled so NVIDIA/NVENC hosts can use the validated GPU-native upload path.
-- Tagged Fedora RPM release builds now fail validation if `polaris --version` reports `Build features: cuda=disabled`.
-- Fedora CUDA header patching is normalized for CUDA 13.2 and Fedora 42/43/44 release builds.
-- Browser Stream, Linux stream-runtime diagnostics, and Headless Stream behavior remain aligned with `v1.0.11`.
+- Steam library launches are more reliable, including direct Steam launch handling and non-default Steam library discovery.
+- NVIDIA hosts get NVENC split-frame encoding controls and clearer configuration docs for the prepared FFmpeg path.
+- Auto Quality and Adaptive Bitrate respect paired-client bitrate more consistently and avoid unsafe recovery/clamp edge cases.
+- AMD telemetry, Linux session fallback behavior, and runtime diagnostics are clearer across the dashboard, logs, and support data.
+- Display selection now handles empty display lists safely instead of clamping against an invalid range during capture setup.
+- Maintainers get a safer `scripts/dev-clean.sh` workflow for local build and runtime artifact cleanup.
 
 See the [changelog](docs/changelog.md) for the full release history.
 

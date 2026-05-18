@@ -11,6 +11,7 @@
 #include "thread_safe.h"
 #include "video_colorspace.h"
 
+#include <cstddef>
 #include <optional>
 
 extern "C" {
@@ -564,6 +565,8 @@ namespace video {
   std::string current_encoder_topology_key_for_tests();
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
+
+  std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count);
 
   bool hdr_metadata_is_usable_for_tests(const SS_HDR_METADATA &metadata);
 

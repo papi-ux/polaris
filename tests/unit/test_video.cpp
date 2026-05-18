@@ -155,6 +155,16 @@ TEST(VideoCacheTests, ResetDisplayRetryDelayBackoffCapsAtTwoHundredMilliseconds)
   EXPECT_EQ(video::reset_display_retry_delay_for_tests(3), std::chrono::milliseconds(200));
 }
 
+TEST(VideoDisplaySelectionTests, RejectsDisplaySwitchWhenDisplayListIsEmpty) {
+  EXPECT_EQ(video::clamp_display_index_for_tests(1, 0), std::nullopt);
+}
+
+TEST(VideoDisplaySelectionTests, ClampsDisplaySwitchToAvailableDisplayRange) {
+  EXPECT_EQ(video::clamp_display_index_for_tests(-1, 3), 0);
+  EXPECT_EQ(video::clamp_display_index_for_tests(1, 3), 1);
+  EXPECT_EQ(video::clamp_display_index_for_tests(8, 3), 2);
+}
+
 TEST(VideoFrameConversionTests, InfersPackedBgr0InputStrideWhenRowPitchIsMissing) {
   EXPECT_EQ(video::software_frame_input_linesize_for_tests(0, 0, 0, 2560, AV_PIX_FMT_BGR0), 10240);
 }
