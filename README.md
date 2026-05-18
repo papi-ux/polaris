@@ -69,16 +69,14 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.14
+## What's New in v1.0.15
 
-Polaris `v1.0.14` focuses on Steam launch reliability, encoder/runtime polish, and safer Linux capture setup.
+Polaris `v1.0.15` is a hotfix for MangoHud leaking into Linux headless streams.
 
-- Steam library launches are more reliable, including direct Steam launch handling and non-default Steam library discovery.
-- NVIDIA hosts get NVENC split-frame encoding controls and clearer configuration docs for the prepared FFmpeg path.
-- Auto Quality and Adaptive Bitrate respect paired-client bitrate more consistently and avoid unsafe recovery/clamp edge cases.
-- AMD telemetry, Linux session fallback behavior, and runtime diagnostics are clearer across the dashboard, logs, and support data.
-- Display selection now handles empty display lists safely instead of clamping against an invalid range during capture setup.
-- Maintainers get a safer `scripts/dev-clean.sh` workflow for local build and runtime artifact cleanup.
+- Headless Steam Big Picture streams no longer inherit or inject MangoHud into Steam helper processes.
+- Direct headless Steam game launches suppress inherited or auto-added MangoHud unless the game explicitly enables it.
+- The isolated `labwc` and XWayland runtime now clears `MANGOHUD_CONFIG` as well as `MANGOHUD` and `MANGOHUD_DLSYM`.
+- Retroid Pocket 6 direct-launch smoke testing covered a forced parent MangoHud environment and confirmed stream child processes stayed clean.
 
 See the [changelog](docs/changelog.md) for the full release history.
 

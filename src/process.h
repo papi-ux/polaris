@@ -57,6 +57,12 @@ namespace proc {
   bool is_valid_steam_launch_mode(std::string_view mode);
   bool steam_launch_mode_is_big_picture(std::string_view mode);
 
+#if defined(POLARIS_TESTS) && defined(__linux__)
+  bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
+                                                   bool use_cage_compositor,
+                                                   bool requested_headless);
+#endif
+
   typedef config::prep_cmd_t cmd_t;
 
   /**

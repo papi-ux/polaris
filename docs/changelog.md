@@ -7,6 +7,16 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.15
+
+Hotfix release focused on keeping MangoHud out of Linux headless stream runtimes unless a game explicitly opts in.
+
+- Suppressed inherited and session-pacing MangoHud injection for direct Steam game launches inside the headless cage compositor
+- Kept explicit per-game MangoHud support available for direct game launches while continuing to block MangoHud for Steam Big Picture sessions
+- Cleared `MANGOHUD_CONFIG` from the isolated `labwc` and XWayland runtime so compositor/helper processes do not inherit stale FPS-cap configuration
+- Added policy coverage for direct headless cage launches and Steam Big Picture suppression
+- Smoke-tested a direct Retroid Pocket 6 launch under a forced parent `MANGOHUD=1` environment and verified stream child processes did not retain `MANGOHUD*`
+
 ## v1.0.14
 
 Patch release focused on Steam launch reliability, encoder/runtime polish, and safer Linux capture setup.

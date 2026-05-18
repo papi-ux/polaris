@@ -49,6 +49,30 @@ TEST(ProcessRuntimeConfigTests, InitialTerminateDoesNotResetAdaptiveBitrateMax) 
   config::video.adaptive_bitrate.max_bitrate_kbps = original_max;
 }
 
+#ifdef __linux__
+TEST(ProcessRuntimeConfigTests, DirectHeadlessCageSuppressesInheritedMangoHud) {
+  proc::ctx_t app {};
+  app.name = "Portal";
+  app.source = "steam";
+  app.steam_appid = "400";
+  app.detached = {"setsid steam steam://rungameid/400"};
+
+  EXPECT_FALSE(proc::cage_mangohud_allowed_for_session_for_tests(app, true, true));
+
+  app.env_vars["MANGOHUD"] = "1";
+  EXPECT_TRUE(proc::cage_mangohud_allowed_for_session_for_tests(app, true, true));
+}
+
+TEST(ProcessRuntimeConfigTests, SteamBigPictureNeverAllowsCageMangoHud) {
+  proc::ctx_t app {};
+  app.name = "Steam Big Picture";
+  app.detached = {"setsid steam -gamepadui"};
+  app.env_vars["MANGOHUD"] = "1";
+
+  EXPECT_FALSE(proc::cage_mangohud_allowed_for_session_for_tests(app, true, true));
+}
+#endif
+
 TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
   const auto file_path = test_paths::root() / "legacy_apps_migration.json";
 

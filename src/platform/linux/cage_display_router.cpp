@@ -19,6 +19,7 @@
 #include "cage_display_router.h"
 #include "../../logging.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cctype>
@@ -81,6 +82,60 @@ namespace cage_display_router {
 
   static std::string socket_path(const std::string &socket_name) {
     return runtime_dir() + "/" + socket_name;
+  }
+
+  std::string trimmed(std::string_view value) {
+    auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string_view::npos) {
+      return {};
+    }
+
+    auto end = value.find_last_not_of(" \t\r\n");
+    return std::string {value.substr(begin, end - begin + 1)};
+  }
+
+  std::string lowercase_trimmed(std::string_view value) {
+    std::string result = trimmed(value);
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
+    });
+    return result;
+  }
+
+  bool command_targets_steam_big_picture(std::string_view cmd) {
+    const auto normalized = lowercase_trimmed(cmd);
+    if (normalized.empty()) {
+      return false;
+    }
+
+    if (normalized.find("steam://open/bigpicture") != std::string::npos ||
+        normalized.find("steam://close/bigpicture") != std::string::npos) {
+      return true;
+    }
+
+    return normalized.find("steam -gamepadui") != std::string::npos &&
+           normalized.find("-applaunch") == std::string::npos &&
+           normalized.find("steam://rungameid/") == std::string::npos;
+  }
+
+  std::string mangohud_prefix_for_command(std::string_view game_cmd,
+                                          bool allow_mangohud,
+                                          std::string_view mangohud_value,
+                                          std::string_view mangohud_config) {
+    if (!allow_mangohud || command_targets_steam_big_picture(game_cmd)) {
+      return {};
+    }
+
+    if (lowercase_trimmed(mangohud_value) != "1") {
+      return {};
+    }
+
+    std::string prefix = "MANGOHUD=1 MANGOHUD_DLSYM=1 ";
+    const auto config = trimmed(mangohud_config);
+    if (!config.empty()) {
+      prefix += "MANGOHUD_CONFIG=" + config + " ";
+    }
+    return prefix;
   }
 
   static bool executable_accessible(const std::string &path) {
@@ -476,13 +531,22 @@ namespace cage_display_router {
   bool is_wayland_socket_name_for_tests(std::string_view name) {
     return is_wayland_socket_name(name);
   }
+
+  std::string mangohud_prefix_for_command_for_tests(
+    std::string_view game_cmd,
+    bool allow_mangohud,
+    std::string_view mangohud_value,
+    std::string_view mangohud_config
+  ) {
+    return mangohud_prefix_for_command(game_cmd, allow_mangohud, mangohud_value, mangohud_config);
+  }
 #endif
 
   // -----------------------------------------------------------------------
   // Public API
   // -----------------------------------------------------------------------
 
-  bool start(int width, int height, int refresh_hz, const std::string &game_cmd, bool force_windowed) {
+  bool start(int width, int height, int refresh_hz, const std::string &game_cmd, bool force_windowed, bool allow_mangohud) {
     const auto startup_begin = std::chrono::steady_clock::now();
 
     if (cage_pid > 0 && is_running()) {
@@ -544,12 +608,15 @@ namespace cage_display_router {
     // In headless mode, the output name is HEADLESS-1 instead of WL-1
     std::string output_name = headless ? "HEADLESS-1" : "WL-1";
     std::string startup_cmd;
-    // MangoHud env will be re-injected into the game command (not labwc itself)
+    // MangoHud env will be re-injected into the game command (not labwc itself).
+    // Steam Big Picture is deliberately excluded because MangoHud is unstable
+    // in Steam helper processes during headless sessions.
     std::string mangohud_prefix;
     {
       const char *mh = getenv("MANGOHUD");
-      if (mh && std::string(mh) == "1") {
-        mangohud_prefix = "MANGOHUD=1 MANGOHUD_DLSYM=1 ";
+      const char *mhc = getenv("MANGOHUD_CONFIG");
+      if (mh) {
+        mangohud_prefix = mangohud_prefix_for_command(game_cmd, allow_mangohud, mh, mhc ? mhc : "");
       }
     }
     if (!game_cmd.empty()) {
@@ -587,10 +654,13 @@ namespace cage_display_router {
     // if injected into the compositor. Will be re-set for the game via startup cmd.
     std::string saved_mangohud;
     std::string saved_mangohud_dlsym;
+    std::string saved_mangohud_config;
     const char *mh = getenv("MANGOHUD");
     const char *mhd = getenv("MANGOHUD_DLSYM");
+    const char *mhc = getenv("MANGOHUD_CONFIG");
     if (mh) { saved_mangohud = mh; unsetenv("MANGOHUD"); }
     if (mhd) { saved_mangohud_dlsym = mhd; unsetenv("MANGOHUD_DLSYM"); }
+    if (mhc) { saved_mangohud_config = mhc; unsetenv("MANGOHUD_CONFIG"); }
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -652,6 +722,7 @@ namespace cage_display_router {
       // Restore MangoHud in parent (was cleared to prevent labwc crash)
       if (!saved_mangohud.empty()) setenv("MANGOHUD", saved_mangohud.c_str(), 1);
       if (!saved_mangohud_dlsym.empty()) setenv("MANGOHUD_DLSYM", saved_mangohud_dlsym.c_str(), 1);
+      if (!saved_mangohud_config.empty()) setenv("MANGOHUD_CONFIG", saved_mangohud_config.c_str(), 1);
       BOOST_LOG(info) << "labwc: Spawned (pid="sv << pid << ")"sv;
     } else {
       BOOST_LOG(error) << "labwc: fork() failed"sv;

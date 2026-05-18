@@ -52,7 +52,14 @@ namespace cage_display_router {
    *                       take priority over invisibility.
    * @return true if cage started successfully and wayland socket is available
    */
-  bool start(int width = 1920, int height = 1080, int refresh_hz = 60, const std::string &game_cmd = "", bool force_windowed = false);
+  bool start(
+    int width = 1920,
+    int height = 1080,
+    int refresh_hz = 60,
+    const std::string &game_cmd = "",
+    bool force_windowed = false,
+    bool allow_mangohud = true
+  );
 
   /**
    * @brief Wrap a command to run inside the cage compositor.
@@ -201,6 +208,16 @@ namespace cage_display_router {
    * @brief Test helper for Wayland socket file name filtering.
    */
   bool is_wayland_socket_name_for_tests(std::string_view name);
+
+  /**
+   * @brief Test helper for MangoHud command prefix policy.
+   */
+  std::string mangohud_prefix_for_command_for_tests(
+    std::string_view game_cmd,
+    bool allow_mangohud,
+    std::string_view mangohud_value,
+    std::string_view mangohud_config
+  );
 #endif
 
 }  // namespace cage_display_router

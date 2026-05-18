@@ -1572,6 +1572,46 @@ namespace proc {
       return value != "0" && value != "false" && value != "off" && value != "no";
     }
 
+    bool app_env_flag_enabled(const proc::ctx_t &app, const std::string &key) {
+      const auto it = app.env_vars.find(key);
+      if (it == app.env_vars.end()) {
+        return false;
+      }
+
+      const auto value = normalized_json_string(it->second);
+      if (value.empty()) {
+        return false;
+      }
+
+      return value != "0" && value != "false" && value != "off" && value != "no";
+    }
+
+#ifdef __linux__
+    bool cage_mangohud_allowed_for_session(const proc::ctx_t &app,
+                                           bool use_cage_compositor,
+                                           bool requested_headless) {
+      if (!use_cage_compositor) {
+        return true;
+      }
+
+      if (is_steam_big_picture_app(app)) {
+        return false;
+      }
+
+      if (requested_headless) {
+        return app_env_flag_enabled(app, "MANGOHUD");
+      }
+
+      return true;
+    }
+
+    void strip_mangohud_env(boost::process::v1::environment &env) {
+      for (const char *key : {"MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG"}) {
+        env.erase(key);
+      }
+    }
+#endif
+
     bool app_gamepad_override_is_supported(const std::string &value) {
       if (value == "disabled"sv) {
         return true;
@@ -1583,6 +1623,14 @@ namespace proc {
       });
     }
   }  // namespace
+
+#if defined(POLARIS_TESTS) && defined(__linux__)
+  bool cage_mangohud_allowed_for_session_for_tests(const proc::ctx_t &app,
+                                                   bool use_cage_compositor,
+                                                   bool requested_headless) {
+    return cage_mangohud_allowed_for_session(app, use_cage_compositor, requested_headless);
+  }
+#endif
 
 #ifdef _WIN32
   VDISPLAY::DRIVER_STATUS vDisplayDriverStatus = VDISPLAY::DRIVER_STATUS::UNKNOWN;
@@ -2605,6 +2653,15 @@ namespace proc {
     const int pacing_target_fps = launch_session->fps >= 1000 ?
       static_cast<int>(std::round(static_cast<double>(launch_session->fps) / 1000.0)) :
       launch_session->fps;
+#ifdef __linux__
+    const bool allow_cage_mangohud = cage_mangohud_allowed_for_session(
+      _app,
+      config::video.linux_display.use_cage_compositor,
+      config::video.linux_display.headless_mode
+    );
+#else
+    constexpr bool allow_cage_mangohud = true;
+#endif
     launch_session->pacing_policy = enable_session_pacing ? "client_fps_limit" : "none";
     set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_PACING_POLICY", launch_session->pacing_policy);
 
@@ -2622,7 +2679,8 @@ namespace proc {
         static_cast<int>(std::round(static_cast<double>(launch_session->requested_fps) / 1000.0)) :
         launch_session->requested_fps;
       bool auto_mangohud_cap = false;
-      if (pacing_target_fps > 0 &&
+      if (allow_cage_mangohud &&
+          pacing_target_fps > 0 &&
           (requested_fps <= 0 || pacing_target_fps + 1 < requested_fps) &&
           env_value(_app, _env, "MANGOHUD").empty()) {
         set_session_env_var(_env, _session_env_keys, "MANGOHUD", "1");
@@ -2630,7 +2688,7 @@ namespace proc {
         auto_mangohud_cap = true;
       }
 
-      if (env_flag_enabled(_app, _env, "MANGOHUD")) {
+      if (allow_cage_mangohud && env_flag_enabled(_app, _env, "MANGOHUD")) {
         if (env_value(_app, _env, "MANGOHUD_DLSYM").empty()) {
           set_session_env_var(_env, _session_env_keys, "MANGOHUD_DLSYM", "1");
         }
@@ -2759,7 +2817,7 @@ namespace proc {
         cage_display_router::stop();
       }
 
-      if (!cage_display_router::start(render_width, render_height, cage_refresh_hz, startup_cmd, force_windowed)) {
+      if (!cage_display_router::start(render_width, render_height, cage_refresh_hz, startup_cmd, force_windowed, allow_cage_mangohud)) {
         return false;
       }
 
@@ -2930,6 +2988,9 @@ namespace proc {
       for (size_t i = 1; i < _app.detached.size(); ++i) {
         auto cmd = cage_runtime_command(_app.detached[i]);
         auto cmd_env = _env;
+        if (!allow_cage_mangohud) {
+          strip_mangohud_env(cmd_env);
+        }
         auto cage_socket = cage_display_router::get_wayland_socket();
         if (!cage_socket.empty()) {
           cmd_env["WAYLAND_DISPLAY"] = cage_socket;
@@ -2982,6 +3043,9 @@ namespace proc {
     auto launch_env = _env;
     if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running() && !_app.cmd.empty()) {
       effective_cmd = cage_runtime_command(_app.cmd);
+      if (!allow_cage_mangohud) {
+        strip_mangohud_env(launch_env);
+      }
       auto cage_socket = cage_display_router::get_wayland_socket();
       if (!cage_socket.empty()) {
         launch_env["WAYLAND_DISPLAY"] = cage_socket;

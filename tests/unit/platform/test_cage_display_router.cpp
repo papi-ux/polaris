@@ -180,6 +180,34 @@ TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeResultCachesSuccess
   EXPECT_EQ(cage_display_router::cached_headless_extcopy_dmabuf_probe_result(), std::optional<bool> {true});
 }
 
+TEST(CageDisplayRouterPolicyTests, MangoHudPrefixIsSuppressedForSteamBigPicture) {
+  EXPECT_TRUE(cage_display_router::mangohud_prefix_for_command_for_tests(
+    "steam -gamepadui",
+    true,
+    "1",
+    "fps_limit=60"
+  ).empty());
+
+  EXPECT_TRUE(cage_display_router::mangohud_prefix_for_command_for_tests(
+    "setsid steam steam://open/bigpicture",
+    true,
+    "1",
+    "fps_limit=60"
+  ).empty());
+}
+
+TEST(CageDisplayRouterPolicyTests, MangoHudPrefixStillAppliesToRegularGames) {
+  EXPECT_EQ(
+    cage_display_router::mangohud_prefix_for_command_for_tests(
+      "steam steam://rungameid/12345",
+      true,
+      "1",
+      "fps_limit=60"
+    ),
+    "MANGOHUD=1 MANGOHUD_DLSYM=1 MANGOHUD_CONFIG=fps_limit=60 "
+  );
+}
+
 TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentMode) {
   constexpr std::string_view output = R"(HEADLESS-1 "Headless output 1"
   Enabled: yes
