@@ -181,6 +181,58 @@ TEST(VideoNvencSplitEncodeModeTests, MapsConfigModesToFfmpegValues) {
 }
 
 #ifdef __linux__
+TEST(VideoNvencSplitEncodeModeTests, DecidesToApplySupportedRequestedModeWhenFfmpegOptionExists) {
+  const auto decision = video::nvenc_split_encode_mode_decision_for_tests(
+    "nvenc",
+    "hevc_nvenc",
+    nvenc::nvenc_split_encode_mode::two_way,
+    true
+  );
+
+  EXPECT_EQ(decision.decision, video::nvenc_split_encode_mode_decision_e::apply);
+  EXPECT_EQ(decision.ffmpeg_value, 2);
+  EXPECT_FALSE(decision.should_warn);
+}
+
+TEST(VideoNvencSplitEncodeModeTests, DecidesDisabledModeSkipsWithoutWarning) {
+  const auto decision = video::nvenc_split_encode_mode_decision_for_tests(
+    "nvenc",
+    "hevc_nvenc",
+    nvenc::nvenc_split_encode_mode::disabled,
+    true
+  );
+
+  EXPECT_EQ(decision.decision, video::nvenc_split_encode_mode_decision_e::disabled);
+  EXPECT_EQ(decision.ffmpeg_value, std::nullopt);
+  EXPECT_FALSE(decision.should_warn);
+}
+
+TEST(VideoNvencSplitEncodeModeTests, DecidesIneligibleCodecSkipsWithoutWarning) {
+  const auto decision = video::nvenc_split_encode_mode_decision_for_tests(
+    "nvenc",
+    "h264_nvenc",
+    nvenc::nvenc_split_encode_mode::two_way,
+    true
+  );
+
+  EXPECT_EQ(decision.decision, video::nvenc_split_encode_mode_decision_e::unsupported_encoder_or_codec);
+  EXPECT_EQ(decision.ffmpeg_value, std::nullopt);
+  EXPECT_FALSE(decision.should_warn);
+}
+
+TEST(VideoNvencSplitEncodeModeTests, DecidesMissingFfmpegOptionWarnsForRequestedMode) {
+  const auto decision = video::nvenc_split_encode_mode_decision_for_tests(
+    "nvenc",
+    "av1_nvenc",
+    nvenc::nvenc_split_encode_mode::three_way,
+    false
+  );
+
+  EXPECT_EQ(decision.decision, video::nvenc_split_encode_mode_decision_e::missing_ffmpeg_option);
+  EXPECT_EQ(decision.ffmpeg_value, std::nullopt);
+  EXPECT_TRUE(decision.should_warn);
+}
+
 TEST(VideoNvencSplitEncodeModeTests, SelectsFfmpegOptionOnlyForSupportedNvencCodecs) {
   EXPECT_EQ(
     video::nvenc_split_encode_mode_option_value_for_tests(

@@ -587,5 +587,25 @@ namespace video {
     std::string_view codec_name,
     nvenc::nvenc_split_encode_mode mode
   );
+
+  enum class nvenc_split_encode_mode_decision_e {
+    unsupported_encoder_or_codec,
+    disabled,
+    missing_ffmpeg_option,
+    apply
+  };
+
+  struct nvenc_split_encode_mode_decision_t {
+    nvenc_split_encode_mode_decision_e decision;
+    std::optional<int> ffmpeg_value;
+    bool should_warn;
+  };
+
+  nvenc_split_encode_mode_decision_t nvenc_split_encode_mode_decision_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name,
+    nvenc::nvenc_split_encode_mode mode,
+    bool has_private_option
+  );
 #endif
 }  // namespace video

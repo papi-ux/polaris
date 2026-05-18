@@ -116,11 +116,62 @@ namespace video {
       std::string_view codec_name,
       nvenc::nvenc_split_encode_mode mode
     ) {
-      if (!should_apply_nvenc_split_encode_mode(encoder_name, codec_name)) {
+      if (!should_apply_nvenc_split_encode_mode(encoder_name, codec_name) ||
+          mode == nvenc::nvenc_split_encode_mode::disabled) {
         return std::nullopt;
       }
 
       return nvenc_split_encode_mode_value(mode);
+    }
+
+    enum class split_encode_action_e {
+      unsupported_encoder_or_codec,
+      disabled,
+      missing_ffmpeg_option,
+      apply
+    };
+
+    struct split_encode_decision_t {
+      split_encode_action_e decision;
+      std::optional<int> ffmpeg_value;
+      bool should_warn;
+    };
+
+    split_encode_decision_t decide_nvenc_split_encode_mode(
+      std::string_view encoder_name,
+      std::string_view codec_name,
+      nvenc::nvenc_split_encode_mode mode,
+      bool has_private_option
+    ) {
+      if (!should_apply_nvenc_split_encode_mode(encoder_name, codec_name)) {
+        return {
+          split_encode_action_e::unsupported_encoder_or_codec,
+          std::nullopt,
+          false
+        };
+      }
+
+      if (mode == nvenc::nvenc_split_encode_mode::disabled) {
+        return {
+          split_encode_action_e::disabled,
+          std::nullopt,
+          false
+        };
+      }
+
+      if (!has_private_option) {
+        return {
+          split_encode_action_e::missing_ffmpeg_option,
+          std::nullopt,
+          true
+        };
+      }
+
+      return {
+        split_encode_action_e::apply,
+        nvenc_split_encode_mode_option_value(encoder_name, codec_name, mode),
+        false
+      };
     }
 
     bool avcodec_context_has_private_option(AVCodecContext *ctx, const char *name) {
@@ -133,18 +184,15 @@ namespace video {
       const encoder_t::codec_t &video_format,
       AVDictionary **options
     ) {
-      const auto split_encode_mode = nvenc_split_encode_mode_option_value(
+      const auto decision = decide_nvenc_split_encode_mode(
         encoder.name,
         video_format.name,
-        config::video.nv.split_encode_mode
+        config::video.nv.split_encode_mode,
+        avcodec_context_has_private_option(ctx, "split_encode_mode")
       );
-      if (!split_encode_mode) {
-        return;
-      }
 
-      const auto mode = config::video.nv.split_encode_mode;
-      if (!avcodec_context_has_private_option(ctx, "split_encode_mode")) {
-        if (mode != nvenc::nvenc_split_encode_mode::disabled) {
+      if (decision.decision != split_encode_action_e::apply) {
+        if (decision.should_warn) {
           BOOST_LOG(warning)
             << "NVENC split-frame encoding was requested, but FFmpeg encoder ["
             << video_format.name << "] does not expose split_encode_mode";
@@ -152,9 +200,9 @@ namespace video {
         return;
       }
 
-      av_dict_set_int(options, "split_encode_mode", *split_encode_mode, 0);
+      av_dict_set_int(options, "split_encode_mode", *decision.ffmpeg_value, 0);
       BOOST_LOG(info)
-        << "NVENC split-frame encoding: applying split_encode_mode=" << *split_encode_mode
+        << "NVENC split-frame encoding: applying split_encode_mode=" << *decision.ffmpeg_value
         << " for [" << video_format.name << "]";
     }
 
@@ -4664,6 +4712,48 @@ namespace video {
     nvenc::nvenc_split_encode_mode mode
   ) {
     return nvenc_split_encode_mode_option_value(encoder_name, codec_name, mode);
+  }
+
+  nvenc_split_encode_mode_decision_t nvenc_split_encode_mode_decision_for_tests(
+    std::string_view encoder_name,
+    std::string_view codec_name,
+    nvenc::nvenc_split_encode_mode mode,
+    bool has_private_option
+  ) {
+    const auto decision = decide_nvenc_split_encode_mode(encoder_name, codec_name, mode, has_private_option);
+
+    switch (decision.decision) {
+      case split_encode_action_e::unsupported_encoder_or_codec:
+        return {
+          nvenc_split_encode_mode_decision_e::unsupported_encoder_or_codec,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+      case split_encode_action_e::disabled:
+        return {
+          nvenc_split_encode_mode_decision_e::disabled,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+      case split_encode_action_e::missing_ffmpeg_option:
+        return {
+          nvenc_split_encode_mode_decision_e::missing_ffmpeg_option,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+      case split_encode_action_e::apply:
+        return {
+          nvenc_split_encode_mode_decision_e::apply,
+          decision.ffmpeg_value,
+          decision.should_warn
+        };
+    }
+
+    return {
+      nvenc_split_encode_mode_decision_e::disabled,
+      std::nullopt,
+      false
+    };
   }
 #endif
 
