@@ -8,6 +8,11 @@ source_script="$repo_root/scripts/dev-clean.sh"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+if [[ ! -x "$source_script" ]]; then
+  echo "expected scripts/dev-clean.sh to be executable" >&2
+  exit 1
+fi
+
 assert_exists() {
   if [[ ! -e "$1" ]]; then
     echo "expected path to exist: $1" >&2
