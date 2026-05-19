@@ -2066,6 +2066,10 @@ namespace stream {
   namespace session {
     std::atomic_uint running_sessions;
 
+    unsigned active_count() {
+      return running_sessions.load(std::memory_order_relaxed);
+    }
+
     session_profile_t profile(const session_t &session) {
       return session_profile_t {
         .device_name = session.device_name,

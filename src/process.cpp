@@ -50,6 +50,7 @@
 #include "httpcommon.h"
 #include "input.h"
 #include "system_tray.h"
+#include "stream.h"
 #include "utility.h"
 #include "video.h"
 #include "uuid.h"
@@ -115,6 +116,21 @@ namespace proc {
   }
 
   namespace {
+    bool should_publish_stream_ended_after_terminate(bool had_running_app, int active_sessions, std::string_view session_state) {
+      return had_running_app &&
+             active_sessions == 0 &&
+             session_state == "paused"sv;
+    }
+
+    void publish_stream_ended_after_terminate_if_needed(bool had_running_app) {
+      if (!should_publish_stream_ended_after_terminate(had_running_app, stream::session::active_count(), confighttp::get_session_state())) {
+        return;
+      }
+
+      confighttp::set_session_state(confighttp::session_state_e::idle);
+      confighttp::emit_session_event("stream_ended", "All sessions ended");
+    }
+
     std::string generate_session_token() {
       std::array<unsigned char, 16> raw {};
       RAND_bytes(raw.data(), raw.size());
@@ -1623,6 +1639,12 @@ namespace proc {
       });
     }
   }  // namespace
+
+#if defined(POLARIS_TESTS)
+  bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state) {
+    return should_publish_stream_ended_after_terminate(had_running_app, active_sessions, session_state);
+  }
+#endif
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
   bool cage_mangohud_allowed_for_session_for_tests(const proc::ctx_t &app,
@@ -3628,7 +3650,7 @@ namespace proc {
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;
-    _session_shutdown_requested = false;
+    _session_shutdown_requested->store(false, std::memory_order_relaxed);
     allow_client_commands = false;
 
     if (_saved_input_config) {
@@ -3637,6 +3659,8 @@ namespace proc {
     }
 
     cursor::set_visible(config::input.mouse_cursor_visible);
+
+    publish_stream_ended_after_terminate_if_needed(has_run);
 
     if (needs_refresh) {
       refresh(config::stream.file_apps, false);
@@ -3755,11 +3779,11 @@ namespace proc {
   }
 
   void proc_t::set_session_shutdown_requested(bool requested) {
-    _session_shutdown_requested = requested;
+    _session_shutdown_requested->store(requested, std::memory_order_relaxed);
   }
 
   bool proc_t::session_shutdown_requested() const {
-    return _session_shutdown_requested;
+    return _session_shutdown_requested->load(std::memory_order_relaxed);
   }
 
   boost::process::environment proc_t::get_env() {

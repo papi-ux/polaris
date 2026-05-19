@@ -7,6 +7,15 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.17
+
+Hotfix release focused on session lifecycle cleanup after client End and terminate flows.
+
+- Cleared stale paused/resumable session state when an app is explicitly terminated after the last stream client disconnects
+- Emitted a terminal `stream_ended` lifecycle event from the terminate cleanup path so Nova can remove stale Active Session/Resume UI
+- Made the session shutdown-request flag thread-safe between HTTPS controls and stream cleanup
+- Added regression coverage for paused app termination, connected-client guards, duplicate idle suppression, and streaming cleanup handoff
+
 ## v1.0.16
 
 Stability hotfix release focused on client certificate verification during reconnect and disconnect flows.

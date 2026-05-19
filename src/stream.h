@@ -70,6 +70,7 @@ namespace stream {
     void graceful_stop(session_t& session);
     void join(session_t &session);
     state_e state(session_t &session);
+    unsigned active_count();
     inline bool send(session_t& session, const std::string_view &payload);
   }  // namespace session
 }  // namespace stream
