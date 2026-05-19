@@ -69,14 +69,14 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.16
+## What's New in v1.0.17
 
-Polaris `v1.0.16` is a stability hotfix for client reconnect and disconnect handling.
+Polaris `v1.0.17` is a session lifecycle hotfix for explicit End and terminate flows.
 
-- Client certificate verification now uses an independent OpenSSL verification context per request, preventing a crash seen after stream disconnects.
-- Paired-client certificate state is protected while HTTPS requests verify clients, keeping concurrent Nova/Moonlight reconnects safe.
-- Regression coverage now exercises concurrent certificate verification against the pairing certificate chain.
-- Retroid Pocket 6 direct-launch smoke testing confirmed CUDA/NVENC, DMA-BUF GPU capture, MangoHud suppression, and clean session teardown.
+- Explicit app termination now clears stale paused/resumable session state once no stream clients remain.
+- Polaris now emits a terminal `stream_ended` lifecycle event after a paused app is ended, so Nova can drop the Active Session panel instead of offering a stale resume.
+- The shutdown-request flag shared by HTTPS controls and stream cleanup is now thread-safe.
+- Regression coverage now exercises paused termination, connected-client guards, duplicate idle suppression, and streaming cleanup handoff.
 
 See the [changelog](docs/changelog.md) for the full release history.
 

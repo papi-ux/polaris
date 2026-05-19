@@ -13,7 +13,9 @@
 #endif
 
 // standard includes
+#include <atomic>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <unordered_set>
@@ -205,7 +207,7 @@ namespace proc {
     std::unordered_set<std::string> _session_env_keys;
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
-    bool _session_shutdown_requested = false;
+    std::shared_ptr<std::atomic_bool> _session_shutdown_requested {std::make_shared<std::atomic_bool>(false)};
     bool _client_session_report_recorded = false;
     std::chrono::steady_clock::time_point _client_session_report_recorded_at {};
     std::string _client_session_report_recorded_unique_id;
