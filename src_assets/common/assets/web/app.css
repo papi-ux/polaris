@@ -292,6 +292,22 @@ textarea {
   @apply xl:justify-end;
 }
 
+.section-title-row {
+  @apply flex min-w-0 items-center gap-2;
+}
+
+.settings-field-head {
+  @apply mb-1 flex items-center gap-2;
+}
+
+.settings-field-label {
+  @apply block text-sm font-medium text-storm;
+}
+
+.settings-toggle-row {
+  @apply rounded-lg border border-storm/20 bg-deep/30 p-3;
+}
+
 .meta-pill {
   @apply rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-storm;
 }
@@ -386,6 +402,133 @@ textarea {
 
 .focus-ring {
   @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ice/50 focus-visible:ring-offset-2 focus-visible:ring-offset-deep;
+}
+
+.info-hint {
+  @apply relative inline-flex shrink-0 align-middle;
+}
+
+.info-hint-trigger {
+  @apply inline-flex h-5 w-5 items-center justify-center rounded-lg border border-storm/25 bg-deep/50 text-storm transition-[background-color,border-color,color,box-shadow] duration-150 hover:border-ice/40 hover:bg-ice/10 hover:text-ice;
+}
+
+.info-hint-trigger--sm {
+  @apply h-[18px] w-[18px] rounded-md;
+}
+
+.info-hint-panel {
+  @apply fixed z-[100] max-w-[min(22rem,calc(100vw-1.5rem))] rounded-lg border border-ice/15 bg-void/95 px-3 py-2 text-xs leading-relaxed text-silver shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur-md;
+}
+
+.info-hint-fade-enter-active,
+.info-hint-fade-leave-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.info-hint-fade-enter-from,
+.info-hint-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-2px);
+}
+
+@media (max-width: 47.99rem) {
+  .info-hint-panel {
+    left: 0.75rem !important;
+    right: 0.75rem !important;
+    bottom: 1rem;
+    top: auto !important;
+    max-width: none;
+  }
+}
+
+.operator-console {
+  --console-border: rgba(200, 214, 229, 0.08);
+  --console-surface: rgba(42, 40, 64, 0.44);
+  --console-surface-strong: rgba(42, 40, 64, 0.62);
+  --console-muted: rgba(104, 123, 129, 0.74);
+}
+
+.operator-console.page-shell,
+.operator-console .page-shell {
+  @apply space-y-4;
+}
+
+.operator-console .page-title {
+  @apply text-[clamp(1.55rem,1.8vw,2rem)];
+}
+
+.operator-console .page-subtitle {
+  @apply mt-1 max-w-2xl text-[13px] leading-normal;
+}
+
+.operator-console .section-card,
+.operator-console .surface-subtle,
+.operator-console .stat-tile,
+.operator-console .action-tile,
+.operator-console .card {
+  border-radius: 0.5rem;
+}
+
+.operator-console .section-card {
+  @apply p-4;
+}
+
+.operator-console .surface-subtle,
+.operator-console .stat-tile,
+.operator-console .action-tile {
+  background: var(--console-surface);
+  border-color: var(--console-border);
+}
+
+.operator-console .section-title {
+  @apply mt-1 text-lg;
+}
+
+.operator-console .section-copy,
+.operator-console .stat-copy {
+  @apply text-xs leading-normal;
+}
+
+.operator-console .stat-tile {
+  @apply p-3;
+}
+
+.operator-console .stat-value {
+  @apply mt-2 text-2xl;
+}
+
+.operator-console .meta-pill,
+.operator-console .data-pill,
+.operator-console .control-chip {
+  border-radius: 0.5rem;
+}
+
+.operator-console .console-toolbar {
+  @apply flex flex-col gap-3 rounded-lg border border-storm/15 bg-deep/35 px-3 py-3 text-sm text-storm sm:flex-row sm:items-center sm:justify-between;
+}
+
+.operator-console .console-inline-note {
+  @apply inline-flex items-center gap-2 rounded-lg border border-storm/15 bg-deep/35 px-2.5 py-1.5 text-xs text-storm;
+}
+
+.operator-console .console-list-row {
+  @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-2;
+}
+
+.operator-console .dashboard-preview-panel,
+.operator-console .dashboard-preview-frame,
+.operator-console .dashboard-preview-empty,
+.operator-console .dashboard-metric-tile,
+.operator-console .dashboard-list-row,
+.operator-console .dashboard-client-row,
+.operator-console .dashboard-empty-state,
+.operator-console .dashboard-telemetry-card,
+.operator-console .settings-subtle-surface {
+  border-radius: 0.5rem;
+}
+
+.operator-console .dashboard-action-button {
+  @apply rounded-lg;
 }
 
 .settings-command-bar {

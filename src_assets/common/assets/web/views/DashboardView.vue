@@ -1,9 +1,14 @@
 <template>
-  <div class="page-shell relative">
+  <div class="page-shell operator-console mission-control-view relative">
 
     <section class="page-header">
       <div class="page-heading">
-        <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
+        <div class="section-title-row">
+          <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
+          <InfoHint size="sm" label="Mission Control summary">
+            {{ actionSummary }}
+          </InfoHint>
+        </div>
         <div class="page-subtitle">{{ actionSummary }}</div>
       </div>
       <div class="page-meta">
@@ -16,19 +21,25 @@
 
     <div v-if="statsLoaded && !stats?.streaming" class="grid grid-cols-1 gap-3 lg:grid-cols-3">
       <div class="surface-subtle p-4">
-        <div class="eyebrow-label">{{ $t('dashboard.primary_focus') }}</div>
+        <div class="section-title-row">
+          <div class="eyebrow-label">{{ $t('dashboard.primary_focus') }}</div>
+          <InfoHint size="sm" :label="$t('dashboard.primary_focus')">{{ primaryFocus.desc }}</InfoHint>
+        </div>
         <div class="mt-2 text-base font-semibold text-silver">{{ primaryFocus.title }}</div>
-        <div class="mt-2 text-sm leading-relaxed text-storm">{{ primaryFocus.desc }}</div>
       </div>
       <div class="surface-subtle p-4">
-        <div class="eyebrow-label">{{ $t('dashboard.stream_readiness') }}</div>
+        <div class="section-title-row">
+          <div class="eyebrow-label">{{ $t('dashboard.stream_readiness') }}</div>
+          <InfoHint size="sm" :label="$t('dashboard.stream_readiness')">{{ readinessDetail }}</InfoHint>
+        </div>
         <div class="mt-2 text-base font-semibold" :class="readinessTone">{{ readinessLabel }}</div>
-        <div class="mt-2 text-sm leading-relaxed text-storm">{{ readinessDetail }}</div>
       </div>
       <div class="surface-subtle p-4">
-        <div class="eyebrow-label">{{ $t('dashboard.next_step') }}</div>
+        <div class="section-title-row">
+          <div class="eyebrow-label">{{ $t('dashboard.next_step') }}</div>
+          <InfoHint size="sm" :label="$t('dashboard.next_step')">{{ nextStep.desc }}</InfoHint>
+        </div>
         <div class="mt-2 text-base font-semibold text-silver">{{ nextStep.title }}</div>
-        <div class="mt-2 text-sm leading-relaxed text-storm">{{ nextStep.desc }}</div>
       </div>
     </div>
 
@@ -44,8 +55,10 @@
         <div class="dashboard-live-header">
           <div class="dashboard-live-header-copy">
             <div class="section-kicker">{{ $t('dashboard.live_session') }}</div>
-            <h2 class="section-title">{{ liveSessionTitle }}</h2>
-            <p class="section-copy">{{ liveSessionSummary }}</p>
+            <div class="section-title-row">
+              <h2 class="section-title">{{ liveSessionTitle }}</h2>
+              <InfoHint size="sm" :label="$t('dashboard.live_session')">{{ liveSessionSummary }}</InfoHint>
+            </div>
           </div>
           <div class="dashboard-live-header-meta">
             <span class="meta-pill">{{ viewerCountLabel }}</span>
@@ -62,8 +75,8 @@
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <h3 class="text-xl font-semibold leading-tight text-silver">{{ autoQuality.label }}</h3>
                 <span class="meta-pill" :class="autoQuality.toneClass">{{ autoQuality.compactLabel }}</span>
+                <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
               </div>
-              <p class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ autoQuality.detail }}</p>
             </div>
             <div class="flex shrink-0 flex-wrap gap-2 lg:max-w-sm lg:justify-end">
               <span v-if="autoQuality.targetSummary" class="data-pill">{{ autoQuality.targetSummary }}</span>
@@ -92,8 +105,10 @@
               <div class="dashboard-preview-header">
                 <div class="min-w-0">
                   <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
-                  <div class="mt-2 text-base font-semibold text-silver">{{ previewHeadline }}</div>
-                  <div class="mt-2 text-sm leading-relaxed text-storm">{{ previewSupportCopy }}</div>
+                  <div class="mt-2 flex items-center gap-2">
+                    <div class="text-base font-semibold text-silver">{{ previewHeadline }}</div>
+                    <InfoHint size="sm" :label="$t('dashboard.display_preview')">{{ previewSupportCopy }}</InfoHint>
+                  </div>
                 </div>
                 <div class="dashboard-preview-actions">
                   <button v-if="!showPreview" @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary">
@@ -162,7 +177,12 @@
                 <div class="flex items-start justify-between gap-3">
                   <div>
                     <div class="eyebrow-label">{{ $t('dashboard.recommendations') }}</div>
-                    <div class="mt-2 text-base font-semibold text-silver">Priority guidance for the live stream.</div>
+                    <div class="mt-2 flex items-center gap-2">
+                      <div class="text-base font-semibold text-silver">Priority guidance</div>
+                      <InfoHint size="sm" :label="$t('dashboard.recommendations')">
+                        {{ $t('dashboard.recommendations_desc') }}
+                      </InfoHint>
+                    </div>
                   </div>
                   <span class="meta-pill">{{ primaryRecommendations.length || 0 }} live cues</span>
                 </div>
@@ -199,15 +219,20 @@
                 <div class="flex items-start justify-between gap-3">
                   <div>
                     <div class="eyebrow-label">Session tools</div>
-                    <div class="mt-2 text-base font-semibold text-silver">Capture what matters and keep recent context nearby.</div>
+                    <div class="mt-2 flex items-center gap-2">
+                      <div class="text-base font-semibold text-silver">Capture and replay</div>
+                      <InfoHint size="sm" label="Session tools">{{ $t('dashboard.recording_desc') }}</InfoHint>
+                    </div>
                   </div>
                   <span class="meta-pill" :class="recording.active ? 'border-red-500/35 bg-red-500/10 text-red-300' : ''">
                     {{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}
                   </span>
                 </div>
                 <div class="dashboard-support-subsection">
-                  <div class="dashboard-support-subtitle">{{ $t('dashboard.recording') }}</div>
-                  <div class="text-sm text-storm">Keep a clip or save an instant replay without leaving Mission Control.</div>
+                  <div class="section-title-row">
+                    <div class="dashboard-support-subtitle">{{ $t('dashboard.recording') }}</div>
+                    <InfoHint size="sm" :label="$t('dashboard.recording')">{{ $t('dashboard.recording_desc') }}</InfoHint>
+                  </div>
                 </div>
                 <div class="mt-4 flex flex-wrap items-center gap-2">
                   <button
@@ -264,8 +289,10 @@
               <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
                 <div>
                   <div class="section-kicker">{{ $t('dashboard.telemetry') }}</div>
-                  <h3 class="section-title">{{ $t('dashboard.telemetry_title') }}</h3>
-                  <p class="section-copy">{{ $t('dashboard.telemetry_desc') }}</p>
+                  <div class="section-title-row">
+                    <h3 class="section-title">{{ $t('dashboard.telemetry_title') }}</h3>
+                    <InfoHint size="sm" :label="$t('dashboard.telemetry')">{{ $t('dashboard.telemetry_desc') }}</InfoHint>
+                  </div>
                 </div>
                 <div class="flex flex-wrap gap-2 text-[11px] text-silver">
                   <span class="data-pill">{{ stats.fps?.toFixed(1) || '--' }} fps</span>
@@ -403,7 +430,10 @@
               <div class="flex items-center justify-between gap-3">
                 <div>
                   <div class="eyebrow-label">{{ $t('dashboard.quick_controls') }}</div>
-                  <div class="mt-2 text-sm leading-relaxed text-storm">{{ clientSettingsSyncCopy }}</div>
+                  <div class="mt-2 flex items-center gap-2">
+                    <div class="text-sm font-medium text-silver">{{ clientSettingsSyncLabel }}</div>
+                    <InfoHint size="sm" :label="$t('dashboard.quick_controls')">{{ clientSettingsSyncCopy }}</InfoHint>
+                  </div>
                 </div>
                 <div class="flex shrink-0 items-center gap-2">
                   <span class="meta-pill whitespace-nowrap" :class="clientSettingsSyncTone">{{ clientSettingsSyncLabel }}</span>
@@ -453,8 +483,12 @@
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
-              <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
-              <p class="section-copy">{{ headlessEnabled ? $t('dashboard.primary_ready_desc') : $t('dashboard.windowed_desc') }}</p>
+              <div class="section-title-row">
+                <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
+                <InfoHint size="sm" :label="$t('dashboard.stream_readiness')">
+                  {{ headlessEnabled ? $t('dashboard.primary_ready_desc') : $t('dashboard.windowed_desc') }}
+                </InfoHint>
+              </div>
             </div>
             <span class="meta-pill">
               {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
@@ -481,7 +515,10 @@
             <div class="flex items-start justify-between gap-3">
               <div>
                 <div class="section-kicker">{{ $t('dashboard.ready_checks') }}</div>
-                <div class="mt-2 text-sm text-storm">{{ $t('dashboard.ready_checks_desc') }}</div>
+                <div class="mt-2 flex items-center gap-2">
+                  <div class="text-sm font-medium text-silver">{{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}</div>
+                  <InfoHint size="sm" :label="$t('dashboard.ready_checks')">{{ $t('dashboard.ready_checks_desc') }}</InfoHint>
+                </div>
               </div>
               <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium"
                     :class="readyChecksPassing === readyChecks.length ? 'border-green-500/30 bg-green-500/10 text-green-300' : 'border-amber-300/30 bg-amber-300/10 text-amber-200'">
@@ -542,7 +579,10 @@
           <div class="flex items-start justify-between gap-3 mb-4">
             <div>
               <div class="section-kicker">{{ $t('dashboard.launch_deck') }}</div>
-              <div class="mt-2 text-sm text-storm max-w-md">{{ $t('dashboard.launch_deck_desc') }}</div>
+              <div class="mt-2 flex items-center gap-2">
+                <div class="text-sm font-medium text-silver">Stream shortcuts</div>
+                <InfoHint size="sm" :label="$t('dashboard.launch_deck')">{{ $t('dashboard.launch_deck_desc') }}</InfoHint>
+              </div>
             </div>
             <span class="px-2 py-1 rounded-full text-[10px] font-medium whitespace-nowrap" :class="headlessEnabled ? 'bg-accent/15 text-accent' : 'bg-storm/20 text-storm'">
               {{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}
@@ -620,6 +660,7 @@ import { useFavicon } from '../composables/useFavicon'
 import Skeleton from '../components/Skeleton.vue'
 import GaugeArc from '../components/GaugeArc.vue'
 import QuickControls from '../components/QuickControls.vue'
+import InfoHint from '../components/InfoHint.vue'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
 import { AUTO_QUALITY_STATES, resolveAutoQualityState } from '../auto-quality-state'

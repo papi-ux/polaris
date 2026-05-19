@@ -1,4 +1,6 @@
 <script setup>
+import InfoHint from './components/InfoHint.vue'
+
 const model = defineModel({ required: true });
 const slots = defineSlots();
 const props = defineProps({
@@ -37,6 +39,10 @@ const props = defineProps({
   showDefault: {
     type: Boolean,
     default: true,
+  },
+  descAsHint: {
+    type: Boolean,
+    default: false,
   }
 });
 
@@ -99,6 +105,8 @@ const parsedDefaultPropValue = (() => {
 const labelField = props.label ?? `${props.localePrefix}.${props.id}`;
 const descField = props.desc ?? `${props.localePrefix}.${props.id}_desc`;
 const showDesc = props.desc !== "" || Object.entries(slots).length > 0;
+const showInlineDesc = showDesc && !props.descAsHint;
+const showHintDesc = showDesc && props.descAsHint;
 const showDefValue = props.showDefault && parsedDefaultPropValue !== null;
 const defValue = parsedDefaultPropValue ? "_common.enabled_def_cbox" : "_common.disabled_def_cbox";
 </script>
@@ -117,11 +125,15 @@ const defValue = parsedDefaultPropValue ? "_common.enabled_def_cbox" : "_common.
           <span class="text-silver cursor-pointer checkbox-field-label leading-snug">
             {{ $t(labelField) }}
           </span>
+          <InfoHint v-if="showHintDesc" size="sm" :label="`${$t(labelField)} details`">
+            {{ $t(descField) }}
+            <slot></slot>
+          </InfoHint>
           <span class="text-xs leading-snug text-storm checkbox-field-default" v-if="showDefValue">
             {{ $t(defValue) }}
           </span>
         </span>
-        <span class="text-sm leading-relaxed text-storm checkbox-field-desc" v-if="showDesc">
+        <span class="text-sm leading-relaxed text-storm checkbox-field-desc" v-if="showInlineDesc">
           {{ $t(descField) }}
           <slot></slot>
         </span>
