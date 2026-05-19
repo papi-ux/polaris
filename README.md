@@ -69,14 +69,14 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.17
+## What's New in v1.0.18
 
-Polaris `v1.0.17` is a session lifecycle hotfix for explicit End and terminate flows.
+Polaris `v1.0.18` is a Shield, Retroid, and Android TV resolution hotfix for Polaris-backed launches.
 
-- Explicit app termination now clears stale paused/resumable session state once no stream clients remain.
-- Polaris now emits a terminal `stream_ended` lifecycle event after a paused app is ended, so Nova can drop the Active Session panel instead of offering a stale resume.
-- The shutdown-request flag shared by HTTPS controls and stream cleanup is now thread-safe.
-- Regression coverage now exercises paused termination, connected-client guards, duplicate idle suppression, and streaming cleanup handoff.
+- Cached AI launch profiles are now bounded by the explicit client display request, so a stale 720p cache cannot force a 1080p-capable client back to 720p.
+- Confirmed history-safe recovery profiles can still lower resolution or FPS when a recent session needs a safer target.
+- Nova `v1.0.10` pairs with this fix by migrating upgraded Android installs to Balanced 1080p and keeping cached Auto Safe profiles above a 1080p floor.
+- Shield direct-launch smoke now confirms `1920x1080x60` at the Nova request, Polaris-selected mode, labwc headless runtime, and Android decoder.
 
 See the [changelog](docs/changelog.md) for the full release history.
 

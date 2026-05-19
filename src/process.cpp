@@ -1333,7 +1333,8 @@ namespace proc {
     }
 
     parsed_display_mode_t clamp_optimized_display_mode_to_client_request(const parsed_display_mode_t &candidate,
-                                                                         const parsed_display_mode_t &requested) {
+                                                                         const parsed_display_mode_t &requested,
+                                                                         std::string_view source) {
       auto clamped = candidate;
 
       if (requested.fps > 0 && clamped.fps > requested.fps) {
@@ -1344,6 +1345,17 @@ namespace proc {
           (clamped.width > requested.width || clamped.height > requested.height)) {
         clamped.width = requested.width;
         clamped.height = requested.height;
+      }
+
+      constexpr int balanced_floor_width = 1920;
+      constexpr int balanced_floor_height = 1080;
+      const bool recovery_profile = source.find("history_safe") != std::string_view::npos;
+      if (!recovery_profile &&
+          requested.width >= balanced_floor_width &&
+          requested.height >= balanced_floor_height &&
+          clamped.height < balanced_floor_height) {
+        clamped.width = balanced_floor_width;
+        clamped.height = balanced_floor_height;
       }
 
       return clamped;
@@ -2068,7 +2080,11 @@ namespace proc {
         launch_session->requested_fps,
       };
       const auto normalized_display_mode =
-        clamp_optimized_display_mode_to_client_request(*resolved_optimization.display_mode, requested_display_mode);
+        clamp_optimized_display_mode_to_client_request(
+          *resolved_optimization.display_mode,
+          requested_display_mode,
+          resolved_optimization.display_mode_source
+        );
 
       if (!display_modes_equal(normalized_display_mode, *resolved_optimization.display_mode)) {
         BOOST_LOG(info) << "session_optimization: normalized display_mode from "sv
@@ -2080,11 +2096,11 @@ namespace proc {
         note_layer(resolved_optimization, "runtime_policy");
         note_reasoning(
           resolved_optimization,
-          "Explicit client display mode acts as a ceiling; optimization stayed within the requested resolution and frame rate."
+          "Explicit client display mode bounds cached optimization so launch resolution stays within a sane client range."
         );
         append_normalization_reason(
           resolved_optimization,
-          "Runtime policy capped optimized display mode to the explicit client request."
+          "Runtime policy bounded optimized display mode to the explicit client request."
         );
       }
     }

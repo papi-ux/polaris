@@ -7,6 +7,14 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.0.18
+
+Hotfix release focused on keeping cached AI launch profiles from forcing capable clients back to 720p.
+
+- Bounded cached AI display-mode optimization by the explicit client request so Shield, Retroid, and Android TV launches that request 1080p keep a 1080p headless compositor
+- Preserved history-safe recovery behavior so confirmed recovery profiles can still lower resolution or FPS when a recent session needs it
+- Smoke-tested a Shield direct Steam launch with Nova `v1.0.10`, confirming the client request, Polaris-selected mode, labwc headless runtime, and Android decoder all used `1920x1080x60`
+
 ## v1.0.17
 
 Hotfix release focused on session lifecycle cleanup after client End and terminate flows.
