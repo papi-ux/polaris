@@ -510,6 +510,15 @@
                         :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 70, color: '#eab308' }, { at: 90, color: '#ef4444' }]" />
             </div>
           </div>
+          <div v-else class="dashboard-degraded-state">
+            <div class="min-w-0">
+              <div class="text-sm font-semibold text-silver">Host telemetry is warming up</div>
+              <div class="mt-1 text-xs leading-relaxed text-storm">GPU temperature, encoder load, and VRAM gauges will appear after the host reports system stats.</div>
+            </div>
+            <router-link to="/troubleshooting" class="dashboard-degraded-action">
+              Troubleshoot
+            </router-link>
+          </div>
 
           <div>
             <div class="flex items-start justify-between gap-3">
@@ -534,23 +543,40 @@
                 {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
-            <div v-else class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              <router-link
-                v-for="check in visibleReadyChecks"
-                :key="check.key"
-                :to="check.to"
-                class="focus-ring rounded-xl border px-3 py-3 no-underline transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5"
-                :class="check.cardClass"
-              >
-                <div class="flex items-center justify-between gap-3">
-                  <div class="text-sm font-medium text-silver">{{ check.label }}</div>
-                  <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="check.badgeClass">
-                    {{ check.state }}
-                  </span>
+            <div v-else class="mt-4 space-y-3">
+              <div class="ready-check-summary ready-check-summary-attention">
+                <div>
+                  <div class="text-sm font-semibold text-amber-200">{{ readyChecksAttentionCount }} launch checks need attention</div>
+                  <div class="mt-1 text-xs text-storm">
+                    Start with {{ readyChecksPrimaryIssue?.label || 'the first missing check' }} to get this host stream-ready.
+                  </div>
                 </div>
-                <div class="mt-2 text-[11px] text-storm">{{ check.detail }}</div>
-                <div class="mt-3 text-[11px] font-medium text-ice/80">{{ $t('dashboard.open_fix') }}</div>
-              </router-link>
+                <router-link
+                  v-if="readyChecksPrimaryIssue"
+                  :to="readyChecksPrimaryIssue.to"
+                  class="focus-ring dashboard-degraded-action"
+                >
+                  Open priority fix
+                </router-link>
+              </div>
+              <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <router-link
+                  v-for="check in visibleReadyChecks"
+                  :key="check.key"
+                  :to="check.to"
+                  class="focus-ring rounded-xl border px-3 py-3 no-underline transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5"
+                  :class="check.cardClass"
+                >
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="text-sm font-medium text-silver">{{ check.label }}</div>
+                    <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="check.badgeClass">
+                      {{ check.state }}
+                    </span>
+                  </div>
+                  <div class="mt-2 text-[11px] text-storm">{{ check.detail }}</div>
+                  <div class="mt-3 text-[11px] font-medium text-ice/80">{{ $t('dashboard.open_fix') }}</div>
+                </router-link>
+              </div>
             </div>
           </div>
         </div>
@@ -807,6 +833,8 @@ const readyCheckDisplay = computed(() => buildReadyCheckDisplay(readyChecks.valu
 const readyChecksPassing = computed(() => readyCheckDisplay.value.passing)
 const readyChecksAllPassing = computed(() => readyCheckDisplay.value.allPassing)
 const visibleReadyChecks = computed(() => readyCheckDisplay.value.visibleChecks)
+const readyChecksAttentionCount = computed(() => readyCheckDisplay.value.attention)
+const readyChecksPrimaryIssue = computed(() => readyCheckDisplay.value.primaryIssue)
 
 function handleQuickControlChange({ key, enabled }) {
   switch (key) {

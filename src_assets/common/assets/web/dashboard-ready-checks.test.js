@@ -14,6 +14,8 @@ describe('Mission Control ready check display', () => {
     expect(display.total).toBe(3)
     expect(display.passing).toBe(3)
     expect(display.allPassing).toBe(true)
+    expect(display.attention).toBe(0)
+    expect(display.primaryIssue).toBe(null)
     expect(display.visibleChecks).toEqual([])
   })
 
@@ -26,6 +28,8 @@ describe('Mission Control ready check display', () => {
 
     expect(display.passing).toBe(1)
     expect(display.allPassing).toBe(false)
+    expect(display.attention).toBe(2)
+    expect(display.primaryIssue.key).toBe('library')
     expect(display.visibleChecks.map((check) => check.key)).toEqual(['library', 'audio'])
   })
 })
