@@ -520,6 +520,39 @@ namespace input {
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
+  std::optional<std::pair<float, float>> map_client_to_touchport(
+    const touch_port_t &touch_port,
+    const std::pair<float, float> &val,
+    const std::pair<float, float> &size
+  ) {
+    if (!touch_port || size.first <= 0.0f || size.second <= 0.0f || touch_port.scalar_inv <= 0.0f) {
+      return std::nullopt;
+    }
+
+    const auto scalarX = touch_port.width / size.first;
+    const auto scalarY = touch_port.height / size.second;
+    if (!std::isfinite(scalarX) || !std::isfinite(scalarY) || scalarX <= 0.0f || scalarY <= 0.0f) {
+      return std::nullopt;
+    }
+
+    const auto offsetX = touch_port.client_offsetX;
+    const auto offsetY = touch_port.client_offsetY;
+    const auto upperX = touch_port.width - offsetX;
+    const auto upperY = touch_port.height - offsetY;
+    if (!std::isfinite(offsetX) || !std::isfinite(offsetY) || !std::isfinite(upperX) || !std::isfinite(upperY) ||
+        offsetX < 0.0f || offsetY < 0.0f || offsetX > upperX || offsetY > upperY) {
+      return std::nullopt;
+    }
+
+    float x = std::clamp(val.first, 0.0f, size.first) * scalarX;
+    float y = std::clamp(val.second, 0.0f, size.second) * scalarY;
+
+    x = std::clamp(x, offsetX, upperX);
+    y = std::clamp(y, offsetY, upperY);
+
+    return std::pair {(x - offsetX) * touch_port.scalar_inv, (y - offsetY) * touch_port.scalar_inv};
+  }
+
   /**
    * @brief Converts client coordinates on the specified surface into screen coordinates.
    * @param input The input context.
@@ -538,19 +571,11 @@ namespace input {
       return std::nullopt;
     }
 
-    auto scalarX = touch_port.width / size.first;
-    auto scalarY = touch_port.height / size.second;
-
-    float x = std::clamp(val.first, 0.0f, size.first) * scalarX;
-    float y = std::clamp(val.second, 0.0f, size.second) * scalarY;
-
-    auto offsetX = touch_port.client_offsetX;
-    auto offsetY = touch_port.client_offsetY;
-
-    x = std::clamp(x, offsetX, (size.first * scalarX) - offsetX);
-    y = std::clamp(y, offsetY, (size.second * scalarY) - offsetY);
-
-    return std::pair {(x - offsetX) * touch_port.scalar_inv, (y - offsetY) * touch_port.scalar_inv};
+    auto mapped = map_client_to_touchport(touch_port, val, size);
+    if (!mapped) {
+      BOOST_LOG(warning) << "Ignoring absolute input with invalid touch port bounds"sv;
+    }
+    return mapped;
   }
 
   /**

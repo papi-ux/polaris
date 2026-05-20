@@ -6,6 +6,7 @@
 
 // standard includes
 #include <functional>
+#include <optional>
 
 // local includes
 #include "platform/common.h"
@@ -38,6 +39,19 @@ namespace input {
       return width != 0 && height != 0 && env_width != 0 && env_height != 0;
     }
   };
+
+  /**
+   * @brief Convert client coordinates on the specified surface into touchport coordinates.
+   * @param touch_port The active touchport mapping.
+   * @param val The cartesian coordinate pair to convert.
+   * @param size The size of the client's surface containing the value.
+   * @return The host-relative coordinate pair if the mapping bounds are valid.
+   */
+  std::optional<std::pair<float, float>> map_client_to_touchport(
+    const touch_port_t &touch_port,
+    const std::pair<float, float> &val,
+    const std::pair<float, float> &size
+  );
 
   /**
    * @brief Scale the ellipse axes according to the provided size.
