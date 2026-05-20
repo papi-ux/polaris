@@ -13,9 +13,13 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/locale.hpp>
@@ -88,60 +92,172 @@ namespace platf {
       return true;
     }
 
-    int create_keymap_fd(std::uint32_t &size) {
-      auto *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-      if (!ctx) {
+    xkb_keycode_t evdev_to_xkb_keycode(int evdev_keycode) {
+      return static_cast<xkb_keycode_t>(evdev_keycode + 8);
+    }
+
+    xkb_rule_names current_xkb_rule_names() {
+      return xkb_rule_names {
+        .rules = std::getenv("XKB_DEFAULT_RULES"),
+        .model = std::getenv("XKB_DEFAULT_MODEL"),
+        .layout = std::getenv("XKB_DEFAULT_LAYOUT"),
+        .variant = std::getenv("XKB_DEFAULT_VARIANT"),
+        .options = std::getenv("XKB_DEFAULT_OPTIONS"),
+      };
+    }
+
+    wayland_virtual_input::modifier_state_t serialize_modifier_state(xkb_state *state) {
+      return wayland_virtual_input::modifier_state_t {
+        .depressed = xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
+        .latched = xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED),
+        .locked = xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED),
+        .group = xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE),
+      };
+    }
+
+    xkb_state_component update_modifier_state(xkb_state *state, int evdev_keycode, bool release) {
+      return xkb_state_update_key(
+        state,
+        evdev_to_xkb_keycode(evdev_keycode),
+        release ? XKB_KEY_UP : XKB_KEY_DOWN
+      );
+    }
+
+    struct keymap_resources_t {
+      int fd {-1};
+      std::uint32_t size {0};
+      xkb_context *ctx {nullptr};
+      xkb_keymap *keymap {nullptr};
+      xkb_state *state {nullptr};
+
+      keymap_resources_t() = default;
+
+      keymap_resources_t(keymap_resources_t &&other) noexcept {
+        *this = std::move(other);
+      }
+
+      keymap_resources_t &operator=(keymap_resources_t &&other) noexcept {
+        if (this == &other) {
+          return *this;
+        }
+
+        reset();
+        fd = std::exchange(other.fd, -1);
+        size = std::exchange(other.size, 0);
+        ctx = std::exchange(other.ctx, nullptr);
+        keymap = std::exchange(other.keymap, nullptr);
+        state = std::exchange(other.state, nullptr);
+        return *this;
+      }
+
+      keymap_resources_t(const keymap_resources_t &) = delete;
+      keymap_resources_t &operator=(const keymap_resources_t &) = delete;
+
+      ~keymap_resources_t() {
+        reset();
+      }
+
+      void reset() {
+        if (fd >= 0) {
+          close(fd);
+          fd = -1;
+        }
+        if (state) {
+          xkb_state_unref(state);
+          state = nullptr;
+        }
+        if (keymap) {
+          xkb_keymap_unref(keymap);
+          keymap = nullptr;
+        }
+        if (ctx) {
+          xkb_context_unref(ctx);
+          ctx = nullptr;
+        }
+        size = 0;
+      }
+
+      int release_fd() {
+        return std::exchange(fd, -1);
+      }
+
+      xkb_state *release_state() {
+        return std::exchange(state, nullptr);
+      }
+    };
+
+    std::unique_ptr<keymap_resources_t> create_keymap_resources(const xkb_rule_names &names) {
+      auto resources = std::make_unique<keymap_resources_t>();
+
+      resources->ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+      if (!resources->ctx) {
         BOOST_LOG(error) << "Wayland virtual input: unable to create xkb context"sv;
-        return -1;
+        return nullptr;
       }
 
-      xkb_rule_names names {};
-      names.rules = std::getenv("XKB_DEFAULT_RULES");
-      names.model = std::getenv("XKB_DEFAULT_MODEL");
-      names.layout = std::getenv("XKB_DEFAULT_LAYOUT");
-      names.variant = std::getenv("XKB_DEFAULT_VARIANT");
-      names.options = std::getenv("XKB_DEFAULT_OPTIONS");
-
-      auto *keymap = xkb_keymap_new_from_names(ctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
-      if (!keymap) {
+      resources->keymap = xkb_keymap_new_from_names(resources->ctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+      if (!resources->keymap) {
         BOOST_LOG(error) << "Wayland virtual input: unable to create xkb keymap"sv;
-        xkb_context_unref(ctx);
-        return -1;
+        return nullptr;
       }
 
-      auto *keymap_text = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+      resources->state = xkb_state_new(resources->keymap);
+      if (!resources->state) {
+        BOOST_LOG(error) << "Wayland virtual input: unable to create xkb state"sv;
+        return nullptr;
+      }
+
+      auto *keymap_text = xkb_keymap_get_as_string(resources->keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
       if (!keymap_text) {
         BOOST_LOG(error) << "Wayland virtual input: unable to serialize xkb keymap"sv;
-        xkb_keymap_unref(keymap);
-        xkb_context_unref(ctx);
-        return -1;
+        return nullptr;
       }
 
       const auto keymap_size = std::strlen(keymap_text) + 1;
-      auto fd = memfd_create("polaris-virtual-keyboard", MFD_CLOEXEC);
-      if (fd < 0) {
+      resources->fd = memfd_create("polaris-virtual-keyboard", MFD_CLOEXEC);
+      if (resources->fd < 0) {
         BOOST_LOG(error) << "Wayland virtual input: unable to create keymap memfd"sv;
         std::free(keymap_text);
-        xkb_keymap_unref(keymap);
-        xkb_context_unref(ctx);
-        return -1;
+        return nullptr;
       }
 
-      if (ftruncate(fd, static_cast<off_t>(keymap_size)) < 0 || !write_all(fd, keymap_text, keymap_size)) {
+      if (ftruncate(resources->fd, static_cast<off_t>(keymap_size)) < 0 || !write_all(resources->fd, keymap_text, keymap_size)) {
         BOOST_LOG(error) << "Wayland virtual input: unable to write keymap memfd"sv;
-        close(fd);
-        fd = -1;
+        close(resources->fd);
+        resources->fd = -1;
       } else {
-        lseek(fd, 0, SEEK_SET);
-        size = static_cast<std::uint32_t>(keymap_size);
+        lseek(resources->fd, 0, SEEK_SET);
+        resources->size = static_cast<std::uint32_t>(keymap_size);
       }
 
       std::free(keymap_text);
-      xkb_keymap_unref(keymap);
-      xkb_context_unref(ctx);
-      return fd;
+      return resources->fd >= 0 ? std::move(resources) : nullptr;
     }
   }  // namespace
+
+#ifdef POLARIS_TESTS
+  namespace wayland_virtual_input {
+    std::optional<modifier_state_t> modifier_state_after_key_events_for_tests(
+      const std::vector<std::pair<int, bool>> &evdev_key_events,
+      std::string_view layout
+    ) {
+      std::string layout_value {layout};
+      xkb_rule_names names {};
+      names.layout = layout_value.empty() ? nullptr : layout_value.c_str();
+
+      auto resources = create_keymap_resources(names);
+      if (!resources || !resources->state) {
+        return std::nullopt;
+      }
+
+      for (const auto &[evdev_keycode, release] : evdev_key_events) {
+        update_modifier_state(resources->state, evdev_keycode, release);
+      }
+
+      return serialize_modifier_state(resources->state);
+    }
+  }  // namespace wayland_virtual_input
+#endif
 
   struct wayland_virtual_input_t::impl_t {
     std::mutex mutex;
@@ -152,6 +268,7 @@ namespace platf {
     zwlr_virtual_pointer_v1 *pointer {nullptr};
     zwp_virtual_keyboard_manager_v1 *keyboard_manager {nullptr};
     zwp_virtual_keyboard_v1 *keyboard {nullptr};
+    xkb_state *keyboard_state {nullptr};
     std::string socket_name;
     pid_t connected_pid {0};
     bool logged_ready {false};
@@ -213,11 +330,19 @@ namespace platf {
       return cage_runtime_active() ? "host uinput fallback blocked for headless labwc"sv : "falling back to host uinput"sv;
     }
 
-    void disconnect() {
+    void destroy_keyboard() {
       if (keyboard) {
         zwp_virtual_keyboard_v1_destroy(keyboard);
         keyboard = nullptr;
       }
+      if (keyboard_state) {
+        xkb_state_unref(keyboard_state);
+        keyboard_state = nullptr;
+      }
+    }
+
+    void disconnect() {
+      destroy_keyboard();
       if (pointer) {
         zwlr_virtual_pointer_v1_destroy(pointer);
         pointer = nullptr;
@@ -361,18 +486,33 @@ namespace platf {
         return false;
       }
 
-      std::uint32_t keymap_size = 0;
-      auto keymap_fd = create_keymap_fd(keymap_size);
-      if (keymap_fd < 0) {
-        zwp_virtual_keyboard_v1_destroy(keyboard);
-        keyboard = nullptr;
+      auto keymap = create_keymap_resources(current_xkb_rule_names());
+      if (!keymap) {
+        destroy_keyboard();
         return false;
       }
 
-      zwp_virtual_keyboard_v1_keymap(keyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, keymap_fd, keymap_size);
+      auto keymap_fd = keymap->release_fd();
+      zwp_virtual_keyboard_v1_keymap(keyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, keymap_fd, keymap->size);
       close(keymap_fd);
+      keyboard_state = keymap->release_state();
       wl_display_roundtrip(display);
       return flush();
+    }
+
+    void send_modifier_state() {
+      if (!keyboard_state) {
+        return;
+      }
+
+      const auto state = serialize_modifier_state(keyboard_state);
+      zwp_virtual_keyboard_v1_modifiers(
+        keyboard,
+        state.depressed,
+        state.latched,
+        state.locked,
+        state.group
+      );
     }
 
     bool send_keycode(int evdev_keycode, bool release) {
@@ -386,6 +526,10 @@ namespace platf {
         static_cast<std::uint32_t>(evdev_keycode),
         release ? WL_KEYBOARD_KEY_STATE_RELEASED : WL_KEYBOARD_KEY_STATE_PRESSED
       );
+
+      if (keyboard_state && update_modifier_state(keyboard_state, evdev_keycode, release) != 0) {
+        send_modifier_state();
+      }
 
       return flush();
     }

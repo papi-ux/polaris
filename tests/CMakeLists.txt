@@ -115,6 +115,12 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
 )
 
+if (NOT WIN32 AND NOT APPLE)
+    list(APPEND TEST_PLATFORM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_virtual_input.cpp
+    )
+endif()
+
 set(TEST_INPUT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_mouse.cpp
 )
