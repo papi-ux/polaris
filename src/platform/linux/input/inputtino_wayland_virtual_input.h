@@ -7,12 +7,33 @@
 // standard includes
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 // local includes
 #include "src/platform/common.h"
 
 namespace platf {
+
+#if defined(POLARIS_BUILD_WAYLAND_VIRTUAL_INPUT)
+  namespace wayland_virtual_input {
+    struct modifier_state_t {
+      std::uint32_t depressed;
+      std::uint32_t latched;
+      std::uint32_t locked;
+      std::uint32_t group;
+    };
+
+#ifdef POLARIS_TESTS
+    std::optional<modifier_state_t> modifier_state_after_key_events_for_tests(
+      const std::vector<std::pair<int, bool>> &evdev_key_events,
+      std::string_view layout
+    );
+#endif
+  }  // namespace wayland_virtual_input
+#endif
 
   class wayland_virtual_input_t {
   public:
