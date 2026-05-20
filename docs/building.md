@@ -152,6 +152,27 @@ checkout yourself.
 - Use `scripts/dev-clean.sh git-prune --apply` after deleting branches, stashes, or worktrees to prune stale remote refs, worktree metadata, and unreachable Git objects.
 - Use `scripts/dev-clean.sh nuke-local-builds --apply` when you intentionally want to reset generated build outputs plus `node_modules/`.
 
+### C++ sanitizer check
+
+The `C++ sanitizer tests` CI job runs the fast C++ unit-test target under AddressSanitizer and
+UndefinedBehaviorSanitizer. To mirror it locally, use a throwaway Debug build tree:
+
+```bash
+cmake -B build-sanitize -G Ninja \
+  -DBUILD_TESTS=ON \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all' \
+  -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all' \
+  -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined' \
+  -DPOLARIS_ENABLE_CUDA=OFF \
+  -DPOLARIS_ENABLE_BROWSER_STREAM=OFF \
+  -DCUDA_FAIL_ON_MISSING=OFF
+cmake --build build-sanitize --target test_polaris -j"$(nproc)"
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:strict_string_checks=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ctest --test-dir build-sanitize/tests --output-on-failure -R '^test_polaris$'
+```
+
 ## Packaging
 
 The public release assets are currently:
