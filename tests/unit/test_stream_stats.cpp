@@ -7,6 +7,7 @@
 #include <src/config.h>
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 namespace {
   struct LinuxDisplayConfigGuard {
@@ -49,6 +50,44 @@ TEST(StreamStatsCapturePathTests, DetectsShmCpuCapture) {
   EXPECT_EQ(stream_stats::capture_path_reason(stats), "headless_shm_fallback");
   EXPECT_TRUE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
+  EXPECT_EQ(
+    stream_stats::capture_path_reason_message(stream_stats::capture_path_reason(stats)),
+    "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but high-FPS NVIDIA testing should use a CUDA-enabled GPU-native path."
+  );
+}
+
+TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
+  LinuxDisplayConfigGuard guard;
+  config::video.linux_display.use_cage_compositor = true;
+
+  stream_stats::stats_t stats {};
+  stats.runtime_backend = "labwc";
+  stats.runtime_requested_headless = true;
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.capture_format = platf::frame_format_e::bgra8;
+  stats.encode_target_residency = platf::frame_residency_e::cpu;
+
+  const auto json = nlohmann::json::parse(stats.to_json());
+
+  EXPECT_EQ(json.at("capture_path"), "shm_cpu_capture");
+  EXPECT_EQ(json.at("capture_path_reason"), "headless_shm_fallback");
+  EXPECT_FALSE(json.at("capture_path_reason_message").get<std::string>().empty());
+  ASSERT_TRUE(json.contains("capture_decision"));
+  const auto &decision = json.at("capture_decision");
+  EXPECT_EQ(decision.at("path"), json.at("capture_path"));
+  EXPECT_EQ(decision.at("reason"), json.at("capture_path_reason"));
+  EXPECT_EQ(decision.at("reason_message"), json.at("capture_path_reason_message"));
+  EXPECT_EQ(decision.at("transport"), "shm");
+  EXPECT_EQ(decision.at("residency"), "cpu");
+  EXPECT_EQ(decision.at("format"), "bgra8");
+  EXPECT_TRUE(decision.at("cpu_copy"));
+  EXPECT_FALSE(decision.at("gpu_native"));
+  EXPECT_EQ(decision.at("runtime_backend"), "labwc");
+  EXPECT_TRUE(decision.at("requested_headless"));
+  EXPECT_TRUE(decision.at("effective_headless"));
+  EXPECT_FALSE(decision.at("gpu_native_override_active"));
 }
 
 TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {

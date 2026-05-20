@@ -59,6 +59,26 @@ Important runtime fields:
 
 Deferred headless encoder capabilities are primed before first launch negotiation so Main10 support is advertised correctly on the first real launch. On Linux, Polaris uses RealtimeKit when available so thread-priority elevation can still succeed when the user service inherits conservative limits.
 
+## Linux LTS Headless Fallback Matrix
+
+The 1.1.x validation target is the existing labwc Headless Stream architecture, not an Xvfb or gamescope replacement. Use Xvfb/gamescope only as investigation tools if this matrix exposes a real target environment that the current path cannot cover.
+
+| Environment | Expected runtime | Expected capture decision | Required packages / caveats |
+|---|---|---|---|
+| Ubuntu 24.04 LTS | `labwc` private Wayland session, `HEADLESS-1`, `requested_headless=true`, `effective_headless=true` | Prefer `headless_extcopy_dmabuf` when wlroots/ext-image-copy and the encoder import path expose DMA-BUF; otherwise `headless_shm_fallback` is supported | Install Polaris runtime dependencies plus `labwc`, `xwayland`, `wayland-protocols`, Mesa/Vulkan drivers, PipeWire/WirePlumber, and `grim` for dashboard previews. NVIDIA high-FPS tests should use a CUDA-enabled package. |
+| Debian 12 Stable | Same headless labwc session and `HEADLESS-1` routing | `headless_shm_fallback` is the conservative baseline; DMA-BUF may be unavailable on older wlroots/protocol combinations | Ensure backported/new-enough `labwc`/wlroots where possible, `xwayland`, GPU userspace drivers, PipeWire/WirePlumber, and user access to render/input devices. Treat SHM as a compatibility path, not a startup failure. |
+| Ubuntu 22.04 LTS | Headless labwc can run when dependencies are available, but distro packages are older | Expect SHM/RAM fallback unless the compositor/protocol/driver stack has been updated | Older wlroots/labwc packages may miss headless-output or ext-image-copy behavior needed for DMA-BUF. Validate with logs before filing a runtime replacement issue. |
+| Parent Wayland desktop with GPU-native override | Windowed private compositor under the existing desktop, not true headless | `windowed_dmabuf_override` when `linux_prefer_gpu_native_capture`/override is active and frames stay GPU-resident | Requires a working parent `WAYLAND_DISPLAY`. Use only after normal Headless Stream has been validated. |
+
+Capture decision meanings:
+
+- `headless_extcopy_dmabuf`: true-headless labwc capture selected DMA-BUF and frames remain GPU-resident through encoder conversion.
+- `headless_shm_fallback`: true-headless labwc capture fell back to SHM/system memory. This is a supported RAM-capture fallback and can still be healthy, especially for compatibility validation.
+- `gpu_native_requested_shm_fallback`: a GPU-native path was requested, but Wayland capture still produced SHM frames.
+- `windowed_dmabuf_override`: Polaris intentionally used a windowed private compositor under a parent Wayland session to keep capture GPU-native.
+
+Check `/polaris/v1/session/status`, `/polaris/v1/stream-policy`, or a support bundle for `capture.path`, `capture.reason`, `capture.reason_message`, `capture.cpu_copy`, `capture.gpu_native`, and the nested `capture.decision` / `capture_decision` object. The nested decision repeats transport, residency, frame format, selected reason, runtime backend, requested/effective headless state, and GPU-native override state so a bundle shows both what path was selected and why.
+
 ## Session Lifecycle
 
 Polaris tracks owner and viewer roles explicitly. The owner controls the active session. Viewers can join in watch mode without taking over the running stream, and passive watch mode uses the active owner profile instead of silently renegotiating a different stream.

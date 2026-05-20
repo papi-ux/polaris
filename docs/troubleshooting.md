@@ -177,12 +177,19 @@ stream capture path. Repeated failures are rate-limited in the log, and the dash
 preview refreshes after failed captures. If the preview is missing, confirm `grim` is installed with
 `command -v grim`.
 
-For capture performance, check `/polaris/v1/session/status` or `/polaris/v1/stream-policy` and look
-at `capture.path`, `capture.reason`, `capture.reason_message`, `capture.cpu_copy`, and
-`capture.gpu_native`. A reason such as `headless_shm_fallback` means Headless Stream is healthy
-enough to run but still using the conservative SHM/system-memory path. `headless_extcopy_dmabuf`
-is the true-headless DMA-BUF path, and `gpu_native_requested_shm_fallback` means GPU-native capture
-was requested but the Wayland capture path still fell back to SHM.
+For capture performance, check `/polaris/v1/session/status`; its `capture` object includes
+`path`, `reason`, `reason_message`, `cpu_copy`, `gpu_native`, and nested `decision` fields.
+`/polaris/v1/stream-policy` exposes the same data as `capture_path`, `capture_path_reason`,
+`capture_path_reason_message`, `capture_cpu_copy`, `capture_gpu_native`, and `capture_decision`.
+A reason such as `headless_shm_fallback` means Headless Stream is healthy enough to run but still
+using the conservative SHM/system-memory path. `headless_extcopy_dmabuf` is the true-headless
+DMA-BUF path, and `gpu_native_requested_shm_fallback` means GPU-native capture was requested but
+the Wayland capture path still fell back to SHM. Support bundles include the same normalized
+decision data under `capture.decision` and stream stats `capture_decision` so a report captures
+the selected path, reason message, transport, residency, runtime backend, effective headless
+state, and GPU-native override state.
+
+For LTS distro expectations and package caveats, see the [Linux LTS Headless Fallback Matrix](runtime.md#linux-lts-headless-fallback-matrix). Xvfb or gamescope should be treated as investigation-only unless this supported labwc path cannot cover a confirmed target environment.
 
 ## VAAPI or software encode fallback
 
