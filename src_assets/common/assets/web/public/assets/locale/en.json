@@ -711,7 +711,7 @@
     "sync_ready_badge": "Nova sync ready",
     "sync_pending_badge": "Sync pending",
     "sync_unavailable_badge": "Sync unavailable",
-    "sync_ready_desc": "Nova can update live bitrate, AI Auto Quality, and next-stream display choices here.",
+    "sync_ready_desc": "Nova can update live bitrate, Auto Quality, and next-stream display choices here.",
     "sync_pending_desc": "Polaris saved the requested display mode and will apply it after the active stream relaunches.",
     "sync_unavailable_desc": "This host has not advertised the Nova client-settings endpoint yet.",
     "restart_badge": "Restart",
@@ -721,11 +721,11 @@
         "desc": "Start sessions on a hidden stream-only display."
       },
       "adaptive_bitrate_enabled": {
-        "label": "AI Auto Quality Bitrate Recovery",
-        "desc": "Controlled by the AI Auto Quality toggle."
+        "label": "Auto Quality Bitrate Recovery",
+        "desc": "Controlled by the Auto Quality toggle."
       },
       "ai_enabled": {
-        "label": "AI Auto Quality",
+        "label": "Auto Quality",
         "desc": "Balance FPS, bitrate, and per-game tuning automatically."
       },
       "stream_audio": {

@@ -187,7 +187,7 @@ export function resolveAutoQualityState(stats = {}, sync = {}) {
     syncState === 'applying'
   const targetSummary = buildTargetSummary(stats, adaptiveTarget)
   const badges = [
-    autoEnabled ? 'AI Auto Quality' : '',
+    autoEnabled ? 'Auto Quality' : '',
     adaptiveLowered ? 'Bitrate recovery' : '',
     stats?.capture_gpu_native || capture?.gpu_native ? 'GPU-native path' : '',
   ].filter(Boolean)
