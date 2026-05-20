@@ -4,7 +4,36 @@
  */
 #include "../tests_common.h"
 
+#include <optional>
+
 #include <src/input.h>
+
+TEST(InputTouchPortMapping, RejectsNonPositiveClientSurfaceDimensions) {
+  input::touch_port_t touch_port {
+    {0, 0, 1920, 1080},
+    1920,
+    1080,
+    0.0f,
+    0.0f,
+    1.0f
+  };
+
+  EXPECT_EQ(std::nullopt, input::map_client_to_touchport(touch_port, {50.0f, 50.0f}, {0.0f, 100.0f}));
+  EXPECT_EQ(std::nullopt, input::map_client_to_touchport(touch_port, {50.0f, 50.0f}, {100.0f, -1.0f}));
+}
+
+TEST(InputTouchPortMapping, RejectsInvertedLetterboxBounds) {
+  input::touch_port_t touch_port {
+    {0, 0, 100, 100},
+    100,
+    100,
+    80.0f,
+    0.0f,
+    1.0f
+  };
+
+  EXPECT_EQ(std::nullopt, input::map_client_to_touchport(touch_port, {50.0f, 50.0f}, {100.0f, 100.0f}));
+}
 
 struct MouseHIDTest: PlatformTestSuite, testing::WithParamInterface<util::point_t> {
   void SetUp() override {
