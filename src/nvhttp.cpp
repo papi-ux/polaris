@@ -1273,43 +1273,6 @@ namespace nvhttp {
       });
     }
 
-    std::string capture_path_reason_message(const std::string &reason) {
-      if (reason == "gpu_native") {
-        return "Capture and encoder conversion are GPU-resident.";
-      }
-      if (reason == "headless_extcopy_dmabuf") {
-        return "True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.";
-      }
-      if (reason == "windowed_dmabuf_override") {
-        return "Polaris is using a windowed private compositor so DMA-BUF/CUDA capture can stay GPU-resident.";
-      }
-      if (reason == "gpu_native_requested_shm_fallback") {
-        return "GPU-native capture was requested, but the active Wayland capture fell back to SHM/system-memory frames.";
-      }
-      if (reason == "gpu_native_requested_cpu_capture") {
-        return "GPU-native capture was requested, but the active capture frames are CPU-resident.";
-      }
-      if (reason == "gpu_native_requested_cpu_encode_upload") {
-        return "GPU-native capture was requested, but encoder upload/conversion is still CPU-resident.";
-      }
-      if (reason == "headless_shm_fallback" || reason == "headless_shm_default") {
-        return "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but high-FPS NVIDIA testing should use a CUDA-enabled GPU-native path.";
-      }
-      if (reason == "encoder_upload_cpu") {
-        return "Capture is GPU-resident, but encoder upload/conversion crosses system memory.";
-      }
-      if (reason == "cpu_capture" || reason == "shm_capture") {
-        return "The active capture path is CPU-resident.";
-      }
-      if (reason == "dmabuf_gpu_capture") {
-        return "Capture is using DMA-BUF/GPU frames, but the encoder path is not fully GPU-native.";
-      }
-      if (reason == "no_capture_metadata") {
-        return "No capture metadata has been reported yet.";
-      }
-      return "The active capture and encoder path is mixed or not fully classified.";
-    }
-
     nlohmann::json build_client_presentation_policy_json(double policy_fps) {
       const bool prefer_stable_multiple =
         policy_fps > 0.0 &&
@@ -1387,7 +1350,7 @@ namespace nvhttp {
         append_stream_policy_warning(
           warnings,
           capture_reason,
-          capture_path_reason_message(capture_reason)
+          stream_stats::capture_path_reason_message(capture_reason)
         );
       }
       if (stats.dynamic_range > 0 && !stats.stream_hdr_enabled) {
@@ -1450,14 +1413,29 @@ namespace nvhttp {
       policy["hdr_requested"] = stats.dynamic_range > 0;
       policy["hdr_active"] = stats.stream_hdr_enabled;
       policy["hdr_metadata_available"] = stats.hdr_metadata_available;
+      const auto capture_reason_message = stream_stats::capture_path_reason_message(capture_reason);
       policy["capture_path"] = capture_path;
       policy["capture_path_reason"] = capture_reason;
-      policy["capture_path_reason_message"] = capture_path_reason_message(capture_reason);
+      policy["capture_path_reason_message"] = capture_reason_message;
       policy["capture_cpu_copy"] = capture_cpu_copy;
       policy["capture_gpu_native"] = capture_gpu_native;
       policy["capture_transport"] = platf::from_frame_transport(stats.capture_transport);
       policy["capture_residency"] = platf::from_frame_residency(stats.capture_residency);
       policy["capture_format"] = platf::from_frame_format(stats.capture_format);
+      policy["capture_decision"] = {
+        {"path", capture_path},
+        {"reason", capture_reason},
+        {"reason_message", capture_reason_message},
+        {"transport", policy["capture_transport"]},
+        {"residency", policy["capture_residency"]},
+        {"format", policy["capture_format"]},
+        {"cpu_copy", capture_cpu_copy},
+        {"gpu_native", capture_gpu_native},
+        {"runtime_backend", stats.runtime_backend},
+        {"requested_headless", stats.runtime_requested_headless},
+        {"effective_headless", stats.runtime_effective_headless},
+        {"gpu_native_override_active", stats.runtime_gpu_native_override_active}
+      };
       policy["presentation_policy"] = build_client_presentation_policy_json(policy_fps);
       policy["warnings"] = std::move(warnings);
       policy["has_warnings"] = !policy["warnings"].empty();
@@ -1844,7 +1822,7 @@ namespace nvhttp {
       }
       if (capture_fallback) {
         issues.push_back(capture_reason);
-        recommendations.push_back(capture_path_reason_message(capture_reason));
+        recommendations.push_back(stream_stats::capture_path_reason_message(capture_reason));
       }
       if (nvenc_cuda_disabled_path) {
         issues.push_back("nvenc_cuda_disabled");
@@ -1964,7 +1942,7 @@ namespace nvhttp {
         virtual_display_risk ? "The virtual display path is likely adding pacing overhead." :
         decoder_risk ? "The current codec path looks harder on this client than expected." :
         nvenc_cuda_disabled_path ? "The NVIDIA path is using a CUDA-disabled CPU copy fallback." :
-        capture_fallback ? capture_path_reason_message(capture_reason) :
+        capture_fallback ? stream_stats::capture_path_reason_message(capture_reason) :
         host_render_limited ? "Host render is missing the stream FPS target; lower game render settings or stream FPS before tuning bitrate." :
         "The stream needs a safer pacing or encode path.";
       health["issues"] = std::move(issues);
@@ -1988,7 +1966,7 @@ namespace nvhttp {
       }
       health["capture_path"] = capture_path;
       health["capture_path_reason"] = capture_reason;
-      health["capture_path_reason_message"] = capture_path_reason_message(capture_reason);
+      health["capture_path_reason_message"] = stream_stats::capture_path_reason_message(capture_reason);
       health["capture_cpu_copy"] = capture_fallback;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
@@ -4690,9 +4668,23 @@ namespace nvhttp {
       capture_info["path"] = stream_stats::capture_path_summary(stats);
       const auto capture_reason = stream_stats::capture_path_reason(stats);
       capture_info["reason"] = capture_reason;
-      capture_info["reason_message"] = capture_path_reason_message(capture_reason);
+      capture_info["reason_message"] = stream_stats::capture_path_reason_message(capture_reason);
       capture_info["cpu_copy"] = stream_stats::capture_path_uses_cpu_copy(stats);
       capture_info["gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
+      capture_info["decision"] = {
+        {"path", capture_info["path"]},
+        {"reason", capture_info["reason"]},
+        {"reason_message", capture_info["reason_message"]},
+        {"transport", capture_info["transport"]},
+        {"residency", capture_info["residency"]},
+        {"format", capture_info["format"]},
+        {"cpu_copy", capture_info["cpu_copy"]},
+        {"gpu_native", capture_info["gpu_native"]},
+        {"runtime_backend", stats.runtime_backend.empty() ? "screencopy" : stats.runtime_backend},
+        {"requested_headless", stats.runtime_requested_headless},
+        {"effective_headless", stats.runtime_effective_headless},
+        {"gpu_native_override_active", stats.runtime_gpu_native_override_active}
+      };
 
       // Encoder info
       auto &encoder = output["encoder"];

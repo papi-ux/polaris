@@ -107,10 +107,30 @@ namespace stream_stats {
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
-    j["capture_path"] = capture_path_summary(*this);
-    j["capture_path_reason"] = capture_path_reason(*this);
-    j["capture_cpu_copy"] = capture_path_uses_cpu_copy(*this);
-    j["capture_gpu_native"] = capture_path_is_gpu_native(*this);
+    const auto capture_path = capture_path_summary(*this);
+    const auto capture_reason = capture_path_reason(*this);
+    const auto capture_reason_message = capture_path_reason_message(capture_reason);
+    const bool capture_cpu_copy = capture_path_uses_cpu_copy(*this);
+    const bool capture_gpu_native = capture_path_is_gpu_native(*this);
+    j["capture_path"] = capture_path;
+    j["capture_path_reason"] = capture_reason;
+    j["capture_path_reason_message"] = capture_reason_message;
+    j["capture_cpu_copy"] = capture_cpu_copy;
+    j["capture_gpu_native"] = capture_gpu_native;
+    j["capture_decision"] = {
+      {"path", capture_path},
+      {"reason", capture_reason},
+      {"reason_message", capture_reason_message},
+      {"transport", platf::from_frame_transport(capture_transport)},
+      {"residency", platf::from_frame_residency(capture_residency)},
+      {"format", platf::from_frame_format(capture_format)},
+      {"cpu_copy", capture_cpu_copy},
+      {"gpu_native", capture_gpu_native},
+      {"runtime_backend", runtime_backend},
+      {"requested_headless", runtime_requested_headless},
+      {"effective_headless", runtime_effective_headless},
+      {"gpu_native_override_active", runtime_gpu_native_override_active}
+    };
     j["encode_target_device"] = encode_target_device;
     j["encode_target_residency"] = platf::from_frame_residency(encode_target_residency);
     j["encode_target_format"] = platf::from_frame_format(encode_target_format);
@@ -263,6 +283,43 @@ namespace stream_stats {
     }
 
     return "mixed_or_unknown";
+  }
+
+  std::string capture_path_reason_message(const std::string &reason) {
+    if (reason == "gpu_native") {
+      return "Capture and encoder conversion are GPU-resident.";
+    }
+    if (reason == "headless_extcopy_dmabuf") {
+      return "True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.";
+    }
+    if (reason == "windowed_dmabuf_override") {
+      return "Polaris is using a windowed private compositor so DMA-BUF/CUDA capture can stay GPU-resident.";
+    }
+    if (reason == "gpu_native_requested_shm_fallback") {
+      return "GPU-native capture was requested, but the active Wayland capture fell back to SHM/system-memory frames.";
+    }
+    if (reason == "gpu_native_requested_cpu_capture") {
+      return "GPU-native capture was requested, but the active capture frames are CPU-resident.";
+    }
+    if (reason == "gpu_native_requested_cpu_encode_upload") {
+      return "GPU-native capture was requested, but encoder upload/conversion is still CPU-resident.";
+    }
+    if (reason == "headless_shm_fallback" || reason == "headless_shm_default") {
+      return "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but high-FPS NVIDIA testing should use a CUDA-enabled GPU-native path.";
+    }
+    if (reason == "encoder_upload_cpu") {
+      return "Capture is GPU-resident, but encoder upload/conversion crosses system memory.";
+    }
+    if (reason == "cpu_capture" || reason == "shm_capture") {
+      return "The active capture path is CPU-resident.";
+    }
+    if (reason == "dmabuf_gpu_capture") {
+      return "Capture is using DMA-BUF/GPU frames, but the encoder path is not fully GPU-native.";
+    }
+    if (reason == "no_capture_metadata") {
+      return "No capture metadata has been reported yet.";
+    }
+    return "The active capture and encoder path is mixed or not fully classified.";
   }
 
   void update_stream_active(bool active, const std::string &client_name, const std::string &client_ip) {

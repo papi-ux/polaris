@@ -139,6 +139,12 @@ namespace stream_stats {
   std::string capture_path_reason(const stats_t &stats);
 
   /**
+   * @brief Human-readable explanation for a capture path reason.
+   * @param reason Machine-readable reason returned by capture_path_reason().
+   */
+  std::string capture_path_reason_message(const std::string &reason);
+
+  /**
    * @brief Update stream active state.
    * @param active Whether streaming is active.
    * @param client_name Name of the connected client.
