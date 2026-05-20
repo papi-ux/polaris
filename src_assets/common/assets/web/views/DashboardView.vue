@@ -835,7 +835,7 @@ const clientSettingsSyncCopy = computed(() => {
   if (clientSettingsSync.value.relaunchRequired) {
     return 'A requested display mode is saved and will become active after the stream relaunches.'
   }
-  return 'Nova-facing controls are available for live bitrate, AI Auto Quality, and next-stream display choices.'
+  return 'Nova-facing controls are available for live bitrate, Auto Quality, and next-stream display choices.'
 })
 
 const connectedClients = computed(() => {
