@@ -121,42 +121,67 @@
         </div>
 
         <div class="console-toolbar mt-5">
-          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <span class="font-medium text-silver">Ordering and export</span>
-              <InfoHint size="sm" label="Ordering and export">
-                Drag rows to reorder. Open an app to export its `.art` launcher file or change per-title behavior.
-              </InfoHint>
-            </div>
-            <span v-if="listReordered" class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-100">
-              Pending order save
-            </span>
+          <div class="library-search">
+            <svg class="h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35m1.85-5.15a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z"/></svg>
+            <input
+              v-model="librarySearch"
+              class="library-search-input"
+              type="search"
+              placeholder="Search apps, commands, sources"
+              aria-label="Search library apps"
+            />
           </div>
+          <div class="library-filter-strip" aria-label="Library filters">
+            <button
+              v-for="filter in libraryFilters"
+              :key="filter.key"
+              type="button"
+              class="focus-ring library-filter-button"
+              :class="{ 'is-active': libraryFilter === filter.key }"
+              @click="libraryFilter = filter.key"
+            >
+              <span>{{ filter.label }}</span>
+              <span>{{ filter.count }}</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="console-inline-note mt-3">
+          <span class="font-medium text-silver">Ordering and export</span>
+          <InfoHint size="sm" label="Ordering and export">
+            Drag rows to reorder. Open an app to export its `.art` launcher file or change per-title behavior.
+          </InfoHint>
+          <span v-if="libraryViewFiltered" class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-100">
+            Reorder disabled while filtered
+          </span>
+          <span v-else-if="listReordered" class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-100">
+            Pending order save
+          </span>
         </div>
 
         <div v-if="visibleApps.length" class="mt-5 space-y-3">
           <article
-            v-for="(app, i) in visibleApps"
+            v-for="app in visibleApps"
             :key="app.uuid"
-            class="rounded-lg border border-storm/20 bg-deep/35 p-3 transition-[border-color,background-color,box-shadow] duration-200"
+            class="library-row rounded-lg border border-storm/20 bg-deep/35 p-3 transition-[border-color,background-color,box-shadow] duration-200"
             :class="app.dragover ? 'border-ice/40 bg-twilight/35 shadow-[0_12px_30px_rgba(0,0,0,0.18)]' : 'hover:border-storm/35 hover:bg-deep/45'"
-            draggable="true"
-            @dragstart="onDragStart($event, i)"
+            :draggable="!libraryViewFiltered"
+            @dragstart="onLibraryDragStart($event, app)"
             @dragenter="onDragEnter($event, app)"
             @dragover="onDragOver($event)"
             @dragleave="onDragLeave(app)"
             @dragend="onDragEnd()"
-            @drop="onDrop($event, app, i)"
+            @drop="onLibraryDrop($event, app)"
           >
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div class="flex min-w-0 items-start gap-4">
                 <div
-                  class="mt-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-storm/25 bg-void/55 text-storm"
+                  class="mt-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-storm/20 bg-void/45 text-storm"
                   aria-hidden="true"
                 >
                   <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9h8M8 15h8M5 9h.01M5 15h.01M19 9h.01M19 15h.01"/></svg>
                 </div>
-                <div class="relative h-20 w-14 shrink-0 overflow-hidden rounded-xl border border-storm/20 bg-void/60">
+                <div class="relative h-20 w-14 shrink-0 overflow-hidden rounded-lg border border-storm/20 bg-void/60">
                   <img
                     v-if="app['image-path']"
                     :src="'./api/covers/image?name=' + encodeURIComponent(app.name)"
@@ -187,17 +212,17 @@
                     {{ currentApp === app.uuid ? 'Live for connected clients.' : 'Ready.' }}
                   </div>
                   <div class="mt-3 flex flex-wrap gap-2 text-[11px] text-storm">
-                    <span class="meta-pill">Position {{ i + 1 }}</span>
+                    <span class="meta-pill">Position {{ appPositionLabel(app) }}</span>
                     <span v-if="app['cmd']" class="meta-pill font-mono">{{ trimCommand(app['cmd']) }}</span>
                   </div>
                 </div>
               </div>
 
-              <div v-if="app.uuid" class="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                <button class="focus-ring icon-action-button" :disabled="actionDisabled" :aria-label="`Edit ${app.name}`" @click="editApp(app)">
+              <div v-if="app.uuid" class="library-row-actions flex shrink-0 flex-wrap items-center justify-end gap-2">
+                <button class="focus-ring icon-action-button library-row-secondary-action" :disabled="actionDisabled" :aria-label="`Edit ${app.name}`" :title="`Edit ${app.name}`" @click="editApp(app)">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
                 </button>
-                <button class="focus-ring icon-action-button icon-action-button-danger" :disabled="actionDisabled" :aria-label="`Delete ${app.name}`" @click="showDeleteForm(app)">
+                <button class="focus-ring icon-action-button icon-action-button-danger library-row-secondary-action" :disabled="actionDisabled" :aria-label="`Delete ${app.name}`" :title="`Delete ${app.name}`" @click="showDeleteForm(app)">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg>
                 </button>
                 <button
@@ -205,14 +230,16 @@
                   class="focus-ring icon-action-button icon-action-button-warning"
                   :disabled="actionDisabled"
                   :aria-label="`Terminate ${app.name}`"
+                  :title="`Terminate ${app.name}`"
                   @click="closeApp()"
                 >
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4z"/></svg>
                 </button>
                 <a
                   v-else
-                  class="focus-ring icon-action-button icon-action-button-success inline-flex items-center justify-center no-underline"
+                  class="focus-ring icon-action-button icon-action-button-success library-row-launch inline-flex items-center justify-center no-underline"
                   :aria-label="`Launch ${app.name}`"
+                  :title="`Launch ${app.name}`"
                   @click.prevent="launchApp($event, app)"
                   :href="launchHref(app)"
                 >
@@ -221,6 +248,21 @@
               </div>
             </div>
           </article>
+        </div>
+
+        <div v-else-if="appCount" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
+          <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-storm/20 bg-void/60 text-storm">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35m1.85-5.15a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z"/></svg>
+          </div>
+          <div class="mt-4 flex items-center justify-center gap-2">
+            <h3 class="text-lg font-semibold text-silver">No apps match this view</h3>
+            <InfoHint size="sm" label="Filtered library">
+              Clear the search field or switch back to All to restore the full published list.
+            </InfoHint>
+          </div>
+          <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-secondary mt-5" @click="clearLibraryFilters">
+            Clear filters
+          </button>
         </div>
 
         <div v-else class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
@@ -243,6 +285,21 @@
           <InfoHint size="sm" align="right" label="Library hygiene">
             Keep launcher entries short and recognizable, use per-app overrides only where needed, and export `.art` entries when you want favorite launches in frontends or automation.
           </InfoHint>
+        </div>
+
+        <div class="library-health-strip mt-4">
+          <div class="library-health-chip">
+            <span>Import ready</span>
+            <strong>{{ availableImportCount }}</strong>
+          </div>
+          <div class="library-health-chip">
+            <span>Platform</span>
+            <strong>{{ platform || 'Unknown' }}</strong>
+          </div>
+          <div class="library-health-chip">
+            <span>Published</span>
+            <strong>{{ appCount }}</strong>
+          </div>
         </div>
 
         <div class="mt-5 space-y-3">
@@ -272,8 +329,8 @@
             <div class="mt-3 text-sm text-storm">Keep the client-facing surface intentional.</div>
           </article>
 
-          <article class="surface-subtle p-4">
-            <div class="text-sm font-semibold text-silver">Host context</div>
+          <details class="library-health-details">
+            <summary class="focus-ring">Host context</summary>
             <div class="mt-3 space-y-2 text-sm text-storm">
               <div class="flex items-center justify-between gap-3">
                 <span>Host name</span>
@@ -288,7 +345,7 @@
                 <span class="font-medium capitalize text-silver">{{ platform || 'Unknown' }}</span>
               </div>
             </div>
-          </article>
+          </details>
         </div>
       </section>
     </div>
@@ -785,6 +842,7 @@ import Button from '../components/Button.vue'
 import InfoHint from '../components/InfoHint.vue'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
+import { filterLibraryApps } from '../library-filters'
 
 const { toast: showToast } = useToast()
 const {
@@ -848,10 +906,25 @@ const draggingApp = ref(-1)
 const hostName = ref("")
 const hostUUID = ref("")
 const listReordered = ref(false)
+const librarySearch = ref("")
+const libraryFilter = ref("all")
 
-const visibleApps = computed(() => apps.value.filter((app) => app.uuid))
-const appCount = computed(() => visibleApps.value.length)
+const publishedApps = computed(() => apps.value.filter((app) => app.uuid))
+const visibleApps = computed(() => filterLibraryApps(apps.value, {
+  query: librarySearch.value,
+  filter: libraryFilter.value,
+  currentApp: currentApp.value,
+}))
+const appCount = computed(() => publishedApps.value.length)
 const activeApp = computed(() => apps.value.find((app) => app.uuid === currentApp.value) || null)
+const libraryFilters = computed(() => ([
+  { key: 'all', label: 'All', count: filterLibraryApps(apps.value, { filter: 'all' }).length },
+  { key: 'steam', label: 'Steam', count: filterLibraryApps(apps.value, { filter: 'steam' }).length },
+  { key: 'manual', label: 'Manual', count: filterLibraryApps(apps.value, { filter: 'manual' }).length },
+  { key: 'fast_action', label: 'Fast Action', count: filterLibraryApps(apps.value, { filter: 'fast_action' }).length },
+  { key: 'running', label: 'Running', count: filterLibraryApps(apps.value, { filter: 'running', currentApp: currentApp.value }).length },
+]).filter((filter) => filter.key === 'all' || filter.count > 0))
+const libraryViewFiltered = computed(() => Boolean(librarySearch.value.trim()) || libraryFilter.value !== 'all')
 const importPools = computed(() => ({
   steam: steamGames.value,
   lutris: lutrisGames.value,
@@ -904,11 +977,40 @@ function trimCommand(command = '') {
   return `${command.slice(0, 41)}...`
 }
 
+function appOrderIndex(app) {
+  return apps.value.findIndex((item) => item.uuid === app?.uuid)
+}
+
+function appPositionLabel(app) {
+  const index = appOrderIndex(app)
+  return index >= 0 ? index + 1 : '--'
+}
+
+function clearLibraryFilters() {
+  librarySearch.value = ''
+  libraryFilter.value = 'all'
+}
+
 function launchHref(app) {
   return `art://launch?host_uuid=${hostUUID.value}&host_name=${hostName.value}&app_uuid=${app.uuid}&app_name=${app.name}`
 }
 
 // Methods
+function onLibraryDragStart(e, app) {
+  if (libraryViewFiltered.value) {
+    e.preventDefault()
+    return
+  }
+
+  const index = appOrderIndex(app)
+  if (index < 0) {
+    e.preventDefault()
+    return
+  }
+
+  onDragStart(e, index)
+}
+
 function onDragStart(e, idx) {
   if (showEditForm.value) {
     e.preventDefault()
@@ -950,6 +1052,10 @@ function onDrop(e, app, idx) {
   if (idx > draggingApp.value) idx -= 1
   apps.value.splice(idx, 0, draggedApp)
   listReordered.value = true
+}
+
+function onLibraryDrop(e, app) {
+  onDrop(e, app, appOrderIndex(app))
 }
 
 function alphabetizeApps() {

@@ -531,6 +531,73 @@ textarea {
   @apply rounded-lg;
 }
 
+.operator-console .ready-check-summary {
+  @apply flex flex-col gap-3 rounded-lg border border-green-500/20 bg-green-500/8 px-3 py-3 sm:flex-row sm:items-center sm:justify-between;
+}
+
+.operator-console .library-search {
+  @apply flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-storm/15 bg-void/40 px-3;
+}
+
+.operator-console .library-search-input {
+  @apply min-w-0 flex-1 bg-transparent text-sm text-silver placeholder:text-storm/75 focus:outline-none;
+}
+
+.operator-console .library-filter-strip {
+  @apply flex flex-wrap items-center gap-2;
+}
+
+.operator-console .library-filter-button {
+  @apply inline-flex h-9 items-center gap-2 rounded-lg border border-storm/15 bg-deep/35 px-2.5 text-xs font-medium text-storm transition-[background-color,border-color,color] duration-200 hover:border-storm/35 hover:text-silver;
+}
+
+.operator-console .library-filter-button.is-active {
+  @apply border-ice/35 bg-ice/10 text-ice;
+}
+
+.operator-console .library-row {
+  position: relative;
+}
+
+.operator-console .library-row-launch {
+  @apply border-green-400/25 bg-green-500/10 text-green-300;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .operator-console .library-row-secondary-action {
+    opacity: 0.58;
+  }
+
+  .operator-console .library-row:hover .library-row-secondary-action,
+  .operator-console .library-row:focus-within .library-row-secondary-action {
+    opacity: 1;
+  }
+}
+
+.operator-console .library-health-strip {
+  @apply grid gap-2 sm:grid-cols-3 xl:grid-cols-1;
+}
+
+.operator-console .library-health-chip {
+  @apply flex items-center justify-between rounded-lg border border-storm/15 bg-deep/35 px-3 py-2 text-xs text-storm;
+}
+
+.operator-console .library-health-chip strong {
+  @apply text-sm font-semibold capitalize text-silver;
+}
+
+.operator-console .library-health-details {
+  @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-3;
+}
+
+.operator-console .library-health-details summary {
+  @apply cursor-pointer list-none text-sm font-semibold text-silver;
+}
+
+.operator-console .library-health-details summary::-webkit-details-marker {
+  display: none;
+}
+
 .settings-command-bar {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,460px)];
 }

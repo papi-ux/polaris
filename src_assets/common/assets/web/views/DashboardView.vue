@@ -471,8 +471,8 @@
           <div class="mt-1 text-xs text-storm">{{ gpu?.utilization_pct || 0 }}% load · {{ gpu?.power_draw_w?.toFixed(0) || '--' }}W</div>
         </div>
         <div class="surface-subtle p-4">
-          <div class="eyebrow-label mb-1">AI</div>
-          <div class="text-lg font-bold" :class="aiStatus?.enabled ? 'text-accent' : 'text-storm'">{{ aiStatus?.enabled ? $t('dashboard.active') : $t('dashboard.off') }}</div>
+          <div class="eyebrow-label mb-1">Optimizer</div>
+          <div class="text-lg font-bold" :class="aiStatus?.enabled ? 'text-accent' : 'text-storm'">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }}</div>
           <div class="mt-1 text-xs text-storm">{{ aiStatus?.cache_count || 0 }} {{ $t('dashboard.cached') }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</div>
         </div>
       </div>
@@ -525,9 +525,18 @@
                 {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
-            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div v-if="readyChecksAllPassing" class="ready-check-summary mt-4">
+              <div>
+                <div class="text-sm font-semibold text-green-300">All launch checks are ready</div>
+                <div class="mt-1 text-xs text-storm">Pairing, library, discovery, displays, and audio are clear.</div>
+              </div>
+              <span class="rounded-full border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-green-300">
+                {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
+              </span>
+            </div>
+            <div v-else class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <router-link
-                v-for="check in readyChecks"
+                v-for="check in visibleReadyChecks"
                 :key="check.key"
                 :to="check.to"
                 class="focus-ring rounded-xl border px-3 py-3 no-underline transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5"
@@ -664,6 +673,7 @@ import InfoHint from '../components/InfoHint.vue'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
 import { AUTO_QUALITY_STATES, resolveAutoQualityState } from '../auto-quality-state'
+import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
@@ -793,7 +803,10 @@ const readyChecks = computed(() => {
   }))
 })
 
-const readyChecksPassing = computed(() => readyChecks.value.filter((item) => item.ok).length)
+const readyCheckDisplay = computed(() => buildReadyCheckDisplay(readyChecks.value))
+const readyChecksPassing = computed(() => readyCheckDisplay.value.passing)
+const readyChecksAllPassing = computed(() => readyCheckDisplay.value.allPassing)
+const visibleReadyChecks = computed(() => readyCheckDisplay.value.visibleChecks)
 
 function handleQuickControlChange({ key, enabled }) {
   switch (key) {
