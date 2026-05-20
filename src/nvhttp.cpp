@@ -2347,6 +2347,43 @@ namespace nvhttp {
   using p_named_cert_t = crypto::p_named_cert_t;
   using PERM = crypto::PERM;
 
+  std::optional<pairing_access_preset_t> pairing_access_preset_from_view(std::string_view preset) {
+    if (preset == "standard"sv) {
+      return pairing_access_preset_t::standard;
+    }
+    if (preset == "game_control"sv) {
+      return pairing_access_preset_t::game_control;
+    }
+    if (preset == "full"sv) {
+      return pairing_access_preset_t::full;
+    }
+    return std::nullopt;
+  }
+
+  PERM pairing_access_preset_perm(pairing_access_preset_t preset) {
+    switch (preset) {
+      case pairing_access_preset_t::standard:
+        return PERM::_default;
+      case pairing_access_preset_t::game_control:
+        return PERM::_game_control;
+      case pairing_access_preset_t::full:
+        return PERM::_all;
+    }
+    return PERM::_default;
+  }
+
+  std::string_view pairing_access_preset_name(pairing_access_preset_t preset) {
+    switch (preset) {
+      case pairing_access_preset_t::standard:
+        return "standard"sv;
+      case pairing_access_preset_t::game_control:
+        return "game_control"sv;
+      case pairing_access_preset_t::full:
+        return "full"sv;
+    }
+    return "standard"sv;
+  }
+
   struct client_t {
     std::vector<p_named_cert_t> named_devices;
   };
@@ -2357,6 +2394,7 @@ namespace nvhttp {
   static std::string one_time_pin;
   static std::string otp_passphrase;
   static std::string otp_device_name;
+  static std::optional<PERM> otp_pairing_perm;
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
 
   class PolarisHTTPSServer: public SimpleWeb::ServerBase<PolarisHTTPS> {
@@ -3038,8 +3076,11 @@ namespace nvhttp {
       named_cert_p->cert = std::move(client.cert);
       named_cert_p->uuid = uuid_util::uuid_t::generate().string();
       named_cert_p->client_family = client.family_hint;
+      if (sess.pairing_perm) {
+        named_cert_p->perm = *sess.pairing_perm;
+      }
       // If the device is the first one paired with the server, assign full permission.
-      if (client_root.named_devices.empty()) {
+      else if (client_root.named_devices.empty()) {
         named_cert_p->perm = PERM::_all;
       } else {
         named_cert_p->perm = PERM::_default;
@@ -3277,6 +3318,7 @@ namespace nvhttp {
             one_time_pin.clear();
             otp_passphrase.clear();
             otp_device_name.clear();
+            otp_pairing_perm.reset();
             tree.put("root.<xmlattr>.status_code", 503);
             tree.put("root.<xmlattr>.status_message", "OTP auth not available.");
           } else {
@@ -3287,12 +3329,14 @@ namespace nvhttp {
               if (!otp_device_name.empty()) {
                 ptr->second.client.name = std::move(otp_device_name);
               }
+              ptr->second.pairing_perm = otp_pairing_perm;
 
               getservercert(ptr->second, tree, one_time_pin);
 
               one_time_pin.clear();
               otp_passphrase.clear();
               otp_device_name.clear();
+              otp_pairing_perm.reset();
               return;
             }
           }
@@ -3371,7 +3415,7 @@ namespace nvhttp {
     }
   }
 
-  bool pin(std::string pin, std::string name) {
+  bool pin(std::string pin, std::string name, std::optional<PERM> pairing_perm) {
     pt::ptree tree;
     if (map_id_sess.empty()) {
       return false;
@@ -3397,6 +3441,9 @@ namespace nvhttp {
     }
 
     auto &sess = std::begin(map_id_sess)->second;
+    if (pairing_perm) {
+      sess.pairing_perm = *pairing_perm;
+    }
     getservercert(sess, tree, pin);
 
     if (!name.empty()) {
@@ -6130,7 +6177,11 @@ namespace nvhttp {
     tcp.join();
   }
 
-  std::string request_otp(const std::string& passphrase, const std::string& deviceName) {
+  std::string request_otp(
+    const std::string& passphrase,
+    const std::string& deviceName,
+    std::optional<PERM> pairing_perm
+  ) {
     if (passphrase.size() < 4) {
       return "";
     }
@@ -6138,10 +6189,24 @@ namespace nvhttp {
     one_time_pin = crypto::rand_alphabet(4, "0123456789"sv);
     otp_passphrase = passphrase;
     otp_device_name = deviceName;
+    otp_pairing_perm = pairing_perm;
     otp_creation_time = std::chrono::steady_clock::now();
 
     return one_time_pin;
   }
+
+#ifdef POLARIS_TESTS
+  void reset_pairing_state_for_tests() {
+    map_id_sess.clear();
+    client_root.named_devices.clear();
+    cert_chain.clear();
+    one_time_pin.clear();
+    otp_passphrase.clear();
+    otp_device_name.clear();
+    otp_pairing_perm.reset();
+    otp_creation_time = {};
+  }
+#endif
 
   void
   erase_all_clients() {

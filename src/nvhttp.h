@@ -9,6 +9,8 @@
 #include <string>
 #include <chrono>
 #include <list>
+#include <optional>
+#include <string_view>
 
 // lib includes
 #include <boost/property_tree/ptree.hpp>
@@ -108,6 +110,16 @@ namespace nvhttp {
     CLIENTPAIRINGSECRET  ///< Polaris is in the client pairing secret phase
   };
 
+  enum class pairing_access_preset_t {
+    standard,
+    game_control,
+    full
+  };
+
+  std::optional<pairing_access_preset_t> pairing_access_preset_from_view(std::string_view preset);
+  crypto::PERM pairing_access_preset_perm(pairing_access_preset_t preset);
+  std::string_view pairing_access_preset_name(pairing_access_preset_t preset);
+
   struct pair_session_t {
     struct {
       std::string uniqueID = {};
@@ -129,6 +141,8 @@ namespace nvhttp {
         response;
       std::string salt = {};
     } async_insert_pin;
+
+    std::optional<crypto::PERM> pairing_perm = {};
 
     /**
      * @brief used as a security measure to prevent out of order calls
@@ -202,9 +216,13 @@ namespace nvhttp {
    * bool pin_status = nvhttp::pin("1234", "laptop");
    * @examples_end
    */
-  bool pin(std::string pin, std::string name);
+  bool pin(std::string pin, std::string name, std::optional<crypto::PERM> pairing_perm = std::nullopt);
 
-  std::string request_otp(const std::string& passphrase, const std::string& deviceName);
+  std::string request_otp(
+    const std::string& passphrase,
+    const std::string& deviceName,
+    std::optional<crypto::PERM> pairing_perm = std::nullopt
+  );
 
   /**
    * @brief Remove single client.
@@ -294,4 +312,8 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display
   );
+
+#ifdef POLARIS_TESTS
+  void reset_pairing_state_for_tests();
+#endif
 }  // namespace nvhttp

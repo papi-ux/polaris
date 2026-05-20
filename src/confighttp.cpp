@@ -3242,9 +3242,21 @@ namespace confighttp {
         throw std::runtime_error("Passphrase too short!");
 
       std::string deviceName = input_tree.value("deviceName", "");
-      output_tree["otp"] = nvhttp::request_otp(passphrase, deviceName);
+      const auto access_preset_name = input_tree.value("access_preset", std::string {"standard"});
+      const auto access_preset = nvhttp::pairing_access_preset_from_view(access_preset_name);
+      if (!access_preset) {
+        bad_request(response, request, "Invalid access_preset");
+        return;
+      }
+
+      output_tree["otp"] = nvhttp::request_otp(
+        passphrase,
+        deviceName,
+        nvhttp::pairing_access_preset_perm(*access_preset)
+      );
       output_tree["ip"] = platf::get_local_ip_for_gateway();
       output_tree["name"] = config::nvhttp.sunshine_name;
+      output_tree["access_preset"] = std::string {nvhttp::pairing_access_preset_name(*access_preset)};
       output_tree["status"] = true;
       output_tree["message"] = "OTP created, effective within 3 minutes.";
       send_response(response, output_tree);
@@ -3283,7 +3295,19 @@ namespace confighttp {
       nlohmann::json output_tree;
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
-      output_tree["status"] = nvhttp::pin(pin, name);
+      const auto access_preset_name = input_tree.value("access_preset", std::string {"standard"});
+      const auto access_preset = nvhttp::pairing_access_preset_from_view(access_preset_name);
+      if (!access_preset) {
+        bad_request(response, request, "Invalid access_preset");
+        return;
+      }
+
+      output_tree["status"] = nvhttp::pin(
+        pin,
+        name,
+        nvhttp::pairing_access_preset_perm(*access_preset)
+      );
+      output_tree["access_preset"] = std::string {nvhttp::pairing_access_preset_name(*access_preset)};
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SavePin: "sv << e.what();
