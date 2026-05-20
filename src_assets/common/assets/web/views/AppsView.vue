@@ -350,12 +350,12 @@
       </section>
     </div>
 
-    <section v-if="!showEditForm && showImport" class="section-card">
+    <section v-if="!showEditForm && showImport" class="section-card library-import-console">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">Import Console</div>
           <div class="section-title-row">
-            <h2 class="section-title">Scan and stage entries</h2>
+            <h2 class="section-title">Import games</h2>
             <InfoHint size="sm" label="Import console">
               Polaris can import games from supported sources, keep track of what is already published, and stage multiple entries before one import pass.
             </InfoHint>
@@ -368,9 +368,32 @@
           </Button>
           <Button variant="outline" :disabled="gameScanning" @click="scanGames">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
-            {{ gameScanning ? 'Scanning…' : 'Rescan Sources' }}
+            {{ gameScanning ? 'Scanning...' : 'Rescan Sources' }}
           </Button>
         </div>
+      </div>
+
+      <div v-if="hasImportSources" class="library-import-overview">
+        <div class="library-import-metric">
+          <span>New</span>
+          <strong>{{ availableImportCount }}</strong>
+        </div>
+        <div class="library-import-metric">
+          <span>Staged</span>
+          <strong>{{ selectedImportCount }}</strong>
+        </div>
+        <div class="library-import-metric">
+          <span>Imported</span>
+          <strong>{{ importedImportCount }}</strong>
+        </div>
+      </div>
+
+      <div v-if="gameScanError" class="library-import-alert">
+        <div class="min-w-0">
+          <div class="text-sm font-semibold text-amber-100">Import scanner needs attention</div>
+          <div class="mt-1 text-xs text-storm">{{ gameScanError }}</div>
+        </div>
+        <Button variant="outline" size="sm" :disabled="gameScanning" @click="scanGames">Retry scan</Button>
       </div>
 
       <div v-if="!hasImportSources && !gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
@@ -396,54 +419,100 @@
         <h3 class="mt-4 text-lg font-semibold text-silver">Scanning installed libraries</h3>
       </div>
 
-      <div v-else class="mt-5 space-y-4">
-        <div class="flex flex-wrap gap-2">
+      <div v-else class="library-import-workspace">
+        <div class="library-import-source-list">
           <button
             v-for="source in importSources"
             :key="source.key"
             type="button"
-            class="focus-ring rounded-full border px-3 py-1.5 text-sm transition-[background-color,border-color,color] duration-200"
-            :class="importTab === source.key ? source.activeClass : 'border-storm/20 bg-deep/35 text-storm hover:border-storm/40 hover:text-silver'"
-            @click="importTab = source.key"
+            class="focus-ring library-import-source-button"
+            :class="activeImportSourceKey === source.key ? source.activeClass : 'border-storm/15 bg-deep/30 text-storm hover:border-storm/35 hover:text-silver'"
+            @click="selectImportSource(source.key)"
           >
-            {{ source.label }} ({{ source.available }})
+            <span class="library-import-source-head">
+              <span>{{ source.label }}</span>
+              <strong>{{ source.available }}</strong>
+            </span>
+            <span class="library-import-source-meta">
+              {{ source.selected }} staged / {{ source.imported }} imported
+            </span>
           </button>
         </div>
 
-        <div class="console-toolbar">
-          <div class="text-sm text-silver">
-            {{ activeImportAvailableCount }} available · {{ activeImportSelectedCount }} selected
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <Button variant="ghost" size="sm" @click="gameToggleAll(true, importTab)">Select All</Button>
-            <Button variant="ghost" size="sm" @click="gameToggleAll(false, importTab)">Deselect All</Button>
-            <Button variant="primary" :disabled="gameImporting || selectedImportCount === 0" @click="doImport">
-              Import Selected
-            </Button>
-          </div>
-        </div>
-
-        <div class="grid max-h-96 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3">
-          <label
-            v-for="game in activeImportGames"
-            :key="game.appid || game.slug || game.name"
-            class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-[border-color,background-color,color,opacity] duration-150"
-            :class="game.already_imported ? 'border-storm/20 bg-deep/20 opacity-60 cursor-default' : game.selected ? 'border-ice/40 bg-ice/5' : 'border-storm/25 bg-deep/30 hover:border-storm/45 hover:bg-deep/40'"
-          >
-            <input type="checkbox" v-model="game.selected" :disabled="game.already_imported" class="mt-1 h-4 w-4 rounded accent-ice" />
-            <div class="min-w-0 flex-1">
-              <div class="truncate text-sm font-medium text-silver">{{ game.name }}</div>
-              <div v-if="game.already_imported" class="mt-1 text-xs text-storm">Already imported</div>
-              <div v-else class="mt-1 text-xs text-storm">Ready to import into Polaris.</div>
-              <div v-if="game.source === 'lutris' && (game.runner || game.slug)" class="mt-2 flex flex-wrap gap-1.5 text-[11px] text-storm">
-                <span v-if="game.runner" class="control-chip">{{ game.runner }}</span>
-                <span v-if="game.slug" class="control-chip">{{ game.slug }}</span>
-              </div>
-              <div v-if="game.game_category && game.game_category !== 'unknown'" class="mt-2">
-                <span class="control-chip">{{ formatCategory(game.game_category) }}</span>
+        <div class="library-import-stage">
+          <div class="library-import-stage-head">
+            <div class="min-w-0">
+              <div class="section-kicker">Stage entries</div>
+              <div class="mt-1 text-sm text-silver">
+                {{ activeImportSource?.label || 'Source' }} / {{ visibleImportGames.length }} shown
               </div>
             </div>
-          </label>
+            <Button variant="primary" :disabled="gameImporting || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
+              {{ importSelectedButtonLabel }}
+            </Button>
+          </div>
+
+          <div class="library-import-toolbar">
+            <label class="library-search">
+              <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
+              <input
+                v-model="importSearch"
+                class="library-search-input"
+                type="search"
+                aria-label="Search import candidates"
+                placeholder="Search candidates"
+              />
+            </label>
+            <div class="library-filter-strip">
+              <button
+                v-for="filter in importStatusFilters"
+                :key="filter.key"
+                type="button"
+                class="focus-ring library-filter-button"
+                :class="{ 'is-active': importStatus === filter.key }"
+                @click="importStatus = filter.key"
+              >
+                <span>{{ filter.label }}</span>
+                <span>{{ filter.count }}</span>
+              </button>
+            </div>
+            <div class="library-import-toolbar-actions">
+              <Button variant="ghost" size="sm" :disabled="visibleImportSelectableCount === 0" @click="selectVisibleImportGames(true)">Select shown</Button>
+              <Button variant="ghost" size="sm" :disabled="activeImportSelectedCount === 0" @click="clearActiveImportSource">Clear source</Button>
+            </div>
+          </div>
+
+          <div v-if="visibleImportGames.length === 0" class="library-import-empty">
+            <div class="text-sm font-semibold text-silver">No candidates match this view</div>
+            <div class="mt-1 text-xs text-storm">Clear the search or switch filters to see more import candidates.</div>
+            <Button v-if="importViewFiltered" class="mt-4" variant="outline" size="sm" @click="clearImportFilters">Clear filters</Button>
+          </div>
+
+          <div v-else class="library-import-game-grid">
+            <label
+              v-for="game in visibleImportGames"
+              :key="game.appid || game.slug || game.name"
+              class="library-import-game-card"
+              :class="game.already_imported ? 'is-imported' : game.selected ? 'is-selected' : ''"
+            >
+              <input type="checkbox" v-model="game.selected" :disabled="game.already_imported" class="mt-1 h-4 w-4 rounded accent-ice" />
+              <div class="min-w-0 flex-1">
+                <div class="flex min-w-0 items-start justify-between gap-2">
+                  <div class="truncate text-sm font-medium text-silver">{{ game.name }}</div>
+                  <span class="control-chip">{{ game.already_imported ? 'Imported' : game.selected ? 'Staged' : 'New' }}</span>
+                </div>
+                <div class="mt-1 text-xs text-storm">
+                  {{ game.already_imported ? 'Already in Polaris.' : game.selected ? 'Queued for import.' : 'Ready to stage.' }}
+                </div>
+                <div class="mt-2 flex flex-wrap gap-1.5 text-[11px] text-storm">
+                  <span v-if="game.appid" class="control-chip">{{ game.appid }}</span>
+                  <span v-if="game.runner" class="control-chip">{{ game.runner }}</span>
+                  <span v-if="game.slug" class="control-chip">{{ game.slug }}</span>
+                  <span v-if="game.game_category && game.game_category !== 'unknown'" class="control-chip">{{ formatCategory(game.game_category) }}</span>
+                </div>
+              </div>
+            </label>
+          </div>
         </div>
       </div>
     </section>
@@ -906,15 +975,19 @@ import InfoHint from '../components/InfoHint.vue'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
+import { filterImportGames, summarizeImportGames } from '../library-imports'
 
 const { toast: showToast } = useToast()
 const {
   scanning: gameScanning, importing: gameImporting,
   steamGames, lutrisGames, heroicGames,
+  error: gameScanError,
   scan: scanGames, importSelected, toggleAll: gameToggleAll
 } = useGameScanner()
 const showImport = ref(false)
 const importTab = ref('steam')
+const importSearch = ref('')
+const importStatus = ref('new')
 async function doImport() {
   const count = await importSelected()
   if (count > 0) {
@@ -997,19 +1070,19 @@ const importSources = computed(() => ([
   {
     key: 'steam',
     label: 'Steam',
-    available: steamGames.value.filter((game) => !game.already_imported).length,
+    ...summarizeImportGames(steamGames.value),
     activeClass: 'border-ice/30 bg-ice/10 text-ice',
   },
   {
     key: 'lutris',
     label: 'Lutris',
-    available: lutrisGames.value.filter((game) => !game.already_imported).length,
+    ...summarizeImportGames(lutrisGames.value),
     activeClass: 'border-orange-400/30 bg-orange-500/10 text-orange-300',
   },
   {
     key: 'heroic',
     label: 'Heroic',
-    available: heroicGames.value.filter((game) => !game.already_imported).length,
+    ...summarizeImportGames(heroicGames.value),
     activeClass: 'border-purple-400/30 bg-purple-500/10 text-purple-200',
   },
 ]).filter((source) => importPools.value[source.key]?.length > 0))
@@ -1017,9 +1090,25 @@ const hasImportSources = computed(() => importSources.value.length > 0)
 const allImportGames = computed(() => [...steamGames.value, ...lutrisGames.value, ...heroicGames.value])
 const availableImportCount = computed(() => allImportGames.value.filter((game) => !game.already_imported).length)
 const selectedImportCount = computed(() => allImportGames.value.filter((game) => game.selected && !game.already_imported).length)
-const activeImportGames = computed(() => importPools.value[importTab.value] || [])
-const activeImportAvailableCount = computed(() => activeImportGames.value.filter((game) => !game.already_imported).length)
-const activeImportSelectedCount = computed(() => activeImportGames.value.filter((game) => game.selected && !game.already_imported).length)
+const importedImportCount = computed(() => allImportGames.value.filter((game) => game.already_imported).length)
+const activeImportSource = computed(() => importSources.value.find((source) => source.key === importTab.value) || importSources.value[0] || null)
+const activeImportSourceKey = computed(() => activeImportSource.value?.key || importTab.value)
+const activeImportGames = computed(() => importPools.value[activeImportSourceKey.value] || [])
+const activeImportSummary = computed(() => summarizeImportGames(activeImportGames.value))
+const activeImportSelectedCount = computed(() => activeImportSummary.value.selected)
+const importSelectedButtonLabel = computed(() => selectedImportCount.value > 0 ? `Import ${selectedImportCount.value} Selected` : 'Import Selected')
+const visibleImportGames = computed(() => filterImportGames(activeImportGames.value, {
+  query: importSearch.value,
+  status: importStatus.value,
+}))
+const visibleImportSelectableCount = computed(() => visibleImportGames.value.filter((game) => !game.already_imported).length)
+const importStatusFilters = computed(() => ([
+  { key: 'new', label: 'New', count: activeImportSummary.value.available },
+  { key: 'selected', label: 'Selected', count: activeImportSummary.value.selected },
+  { key: 'imported', label: 'Imported', count: activeImportSummary.value.imported },
+  { key: 'all', label: 'All', count: activeImportSummary.value.total },
+]).filter((filter) => filter.key === 'new' || filter.key === 'all' || filter.count > 0))
+const importViewFiltered = computed(() => Boolean(importSearch.value.trim()) || importStatus.value !== 'new')
 const canSaveEdit = computed(() => Boolean(editForm.value?.name?.trim()))
 const canExportEdit = computed(() => Boolean(editForm.value?.uuid))
 
@@ -1052,6 +1141,26 @@ function appPositionLabel(app) {
 function clearLibraryFilters() {
   librarySearch.value = ''
   libraryFilter.value = 'all'
+}
+
+function clearImportFilters() {
+  importSearch.value = ''
+  importStatus.value = 'new'
+}
+
+function selectImportSource(sourceKey) {
+  importTab.value = sourceKey
+  clearImportFilters()
+}
+
+function selectVisibleImportGames(selected) {
+  visibleImportGames.value.forEach((game) => {
+    if (!game.already_imported) game.selected = selected
+  })
+}
+
+function clearActiveImportSource() {
+  gameToggleAll(false, activeImportSourceKey.value)
 }
 
 function launchHref(app) {

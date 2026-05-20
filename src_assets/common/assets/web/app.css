@@ -610,6 +610,86 @@ textarea {
   display: none;
 }
 
+.operator-console .library-import-console {
+  @apply space-y-4;
+}
+
+.operator-console .library-import-overview {
+  @apply grid gap-2 sm:grid-cols-3;
+}
+
+.operator-console .library-import-metric {
+  @apply flex items-center justify-between rounded-lg border border-storm/15 bg-deep/35 px-3 py-2 text-xs text-storm;
+}
+
+.operator-console .library-import-metric strong {
+  @apply text-base font-semibold text-silver;
+}
+
+.operator-console .library-import-alert {
+  @apply flex flex-col gap-3 rounded-lg border border-amber-300/25 bg-amber-300/8 px-4 py-3 sm:flex-row sm:items-center sm:justify-between;
+}
+
+.operator-console .library-import-workspace {
+  @apply grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)];
+}
+
+.operator-console .library-import-source-list {
+  @apply grid gap-2 sm:grid-cols-3 xl:grid-cols-1;
+}
+
+.operator-console .library-import-source-button {
+  @apply flex min-w-0 flex-col gap-2 rounded-lg border px-3 py-3 text-left transition-[background-color,border-color,color] duration-150;
+}
+
+.operator-console .library-import-source-head {
+  @apply flex items-center justify-between gap-3 text-sm font-semibold;
+}
+
+.operator-console .library-import-source-head strong {
+  @apply text-lg;
+}
+
+.operator-console .library-import-source-meta {
+  @apply text-[11px] text-storm;
+}
+
+.operator-console .library-import-stage {
+  @apply min-w-0 rounded-lg border border-storm/15 bg-deep/30 p-3;
+}
+
+.operator-console .library-import-stage-head {
+  @apply flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between;
+}
+
+.operator-console .library-import-toolbar {
+  @apply mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto] lg:items-center;
+}
+
+.operator-console .library-import-toolbar-actions {
+  @apply flex flex-wrap items-center gap-2 lg:justify-end;
+}
+
+.operator-console .library-import-empty {
+  @apply mt-4 rounded-lg border border-dashed border-storm/25 bg-void/35 px-4 py-8 text-center;
+}
+
+.operator-console .library-import-game-grid {
+  @apply mt-4 grid max-h-[28rem] grid-cols-1 gap-2 overflow-y-auto pr-1 md:grid-cols-2 2xl:grid-cols-3;
+}
+
+.operator-console .library-import-game-card {
+  @apply flex cursor-pointer items-start gap-3 rounded-lg border border-storm/15 bg-deep/35 p-3 transition-[background-color,border-color,color,opacity] duration-150 hover:border-storm/35 hover:bg-deep/45;
+}
+
+.operator-console .library-import-game-card.is-selected {
+  @apply border-ice/35 bg-ice/10;
+}
+
+.operator-console .library-import-game-card.is-imported {
+  @apply cursor-default border-storm/15 bg-deep/20 opacity-60;
+}
+
 .operator-console .app-editor-layout {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,340px)] xl:items-start;
 }
