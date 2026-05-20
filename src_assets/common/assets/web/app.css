@@ -598,6 +598,131 @@ textarea {
   display: none;
 }
 
+.operator-console .app-editor-layout {
+  @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,340px)] xl:items-start;
+}
+
+.operator-console .app-editor-main {
+  @apply min-w-0 space-y-4;
+}
+
+.operator-console .app-editor-rail {
+  @apply min-w-0 xl:sticky xl:top-24;
+}
+
+.operator-console .app-editor-section,
+.operator-console .app-editor-summary-card {
+  @apply space-y-4;
+}
+
+.operator-console .app-editor-section-head,
+.operator-console .app-editor-disclosure > summary {
+  @apply flex min-w-0 items-start justify-between gap-3;
+}
+
+.operator-console .app-editor-grid {
+  @apply grid gap-3 md:grid-cols-2;
+}
+
+.operator-console .app-editor-field {
+  @apply min-w-0;
+}
+
+.operator-console .app-editor-field-wide {
+  @apply md:col-span-2;
+}
+
+.operator-console .app-editor-inline-control {
+  @apply flex flex-col gap-2 sm:flex-row sm:items-center;
+}
+
+.operator-console .app-editor-input {
+  @apply min-h-10 w-full min-w-0 rounded-lg border border-storm/25 bg-void/45 px-3 py-2 text-sm text-silver transition-[border-color,box-shadow,background-color] duration-150 placeholder:text-storm/70 focus:border-ice/55 focus:bg-void/65 focus:outline-none focus:ring-2 focus:ring-ice/10;
+}
+
+.operator-console .app-editor-input-mono {
+  @apply font-mono text-xs;
+}
+
+.operator-console .app-editor-secondary-button {
+  @apply inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-storm/20 bg-deep/45 px-3 text-sm font-medium text-silver transition-[background-color,border-color,color] duration-150 hover:border-ice/35 hover:bg-twilight/35 hover:text-ice;
+}
+
+.operator-console .app-editor-toggle-row {
+  @apply flex items-center justify-between gap-3 rounded-lg border border-storm/15 bg-deep/35 px-3 py-3;
+}
+
+.operator-console .app-editor-toggle-card {
+  @apply rounded-lg border border-storm/15 bg-deep/30 p-3;
+}
+
+.operator-console .app-editor-inline-disclosure,
+.operator-console .app-editor-disclosure {
+  @apply rounded-lg border border-storm/15 bg-deep/35 text-silver;
+}
+
+.operator-console .app-editor-inline-disclosure > summary,
+.operator-console .app-editor-disclosure > summary {
+  @apply cursor-pointer list-none px-3 py-3 text-sm font-semibold text-silver transition-colors hover:text-ice;
+}
+
+.operator-console .app-editor-inline-disclosure > summary::-webkit-details-marker,
+.operator-console .app-editor-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.operator-console .app-editor-disclosure-body {
+  @apply space-y-3 border-t border-storm/15 px-3 py-3;
+}
+
+.operator-console .app-editor-command-row {
+  @apply grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center;
+}
+
+.operator-console .app-editor-env-row {
+  @apply grid gap-2 sm:grid-cols-[minmax(8rem,0.35fr)_auto_minmax(0,1fr)_auto] sm:items-center;
+}
+
+.operator-console .app-editor-table-wrap {
+  @apply overflow-x-auto rounded-lg border border-storm/15 bg-void/30;
+}
+
+.operator-console .app-editor-command-table {
+  @apply min-w-[680px] w-full text-left text-sm;
+}
+
+.operator-console .app-editor-command-table th {
+  @apply border-b border-storm/20 px-3 py-2 text-sm text-storm;
+}
+
+.operator-console .app-editor-command-table td {
+  @apply border-b border-storm/10 px-3 py-2 align-middle;
+}
+
+.operator-console .app-editor-command-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.operator-console .app-editor-automation-stack {
+  @apply space-y-3;
+}
+
+.operator-console .app-editor-compat-note {
+  @apply flex items-center gap-2 rounded-lg border border-storm/15 bg-void/35 px-3 py-2 text-sm text-silver;
+}
+
+.operator-console .app-editor-summary-list {
+  @apply space-y-2;
+}
+
+.operator-console .app-editor-action-stack {
+  @apply grid gap-2;
+}
+
+.operator-console .app-editor-action-stack > * {
+  @apply w-full justify-center;
+}
+
 .settings-command-bar {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,460px)];
 }

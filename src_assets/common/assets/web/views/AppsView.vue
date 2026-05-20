@@ -449,389 +449,452 @@
     </section>
 
     <!-- Edit form -->
-  <section v-if="showEditForm" class="section-card app-editor-card">
-    <div class="space-y-4">
-      <!-- Application Name -->
-      <div>
-        <div class="settings-field-head">
-          <label for="appName" class="settings-field-label">{{ $t('apps.app_name') }}</label>
-          <InfoHint size="sm" :label="$t('apps.app_name')">{{ $t('apps.app_name_desc') }}</InfoHint>
-        </div>
-        <div class="flex gap-2">
-          <input type="text" class="flex-1 bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="appName" v-model="editForm.name" />
-          <div class="relative" ref="coverFinderWrapper">
-            <button class="bg-storm/30 text-silver px-3 py-2 rounded-lg hover:bg-storm/50 transition text-sm whitespace-nowrap" type="button"
-              @click="showCoverFinder">
-              {{ $t('apps.find_cover') }} (Online)
-            </button>
-            <div v-if="coverFinderOpen" class="absolute right-0 top-full mt-1 z-50 w-96 bg-deep border border-storm rounded-xl shadow-2xl overflow-hidden">
-              <div class="flex justify-between items-center p-3 border-b border-storm">
-                <h4 class="text-silver font-medium">{{ $t('apps.covers_found') }}</h4>
-                <button type="button" class="text-storm hover:text-silver" @click="closeCoverFinder">
-                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-                </button>
+    <section v-if="showEditForm" class="app-editor-layout">
+      <div class="app-editor-main">
+        <section class="section-card app-editor-card app-editor-section">
+          <div class="app-editor-section-head">
+            <div>
+              <div class="section-kicker">Profile</div>
+              <h2 class="section-title">Client entry</h2>
+            </div>
+            <span class="data-pill">{{ editForm?.uuid ? 'Published' : 'Draft' }}</span>
+          </div>
+
+          <div class="app-editor-grid">
+            <div class="app-editor-field app-editor-field-wide">
+              <div class="settings-field-head">
+                <label for="appName" class="settings-field-label">{{ $t('apps.app_name') }}</label>
+                <InfoHint size="sm" :label="$t('apps.app_name')">{{ $t('apps.app_name_desc') }}</InfoHint>
               </div>
-              <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }">
-                <div class="grid grid-cols-3 gap-3">
-                  <div v-if="coverSearching" class="col-span-1">
-                    <div class="cover-container flex items-center justify-center">
-                      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-ice"></div>
+              <div class="app-editor-inline-control">
+                <input type="text" class="app-editor-input" id="appName" v-model="editForm.name" />
+                <div class="relative" ref="coverFinderWrapper">
+                  <button class="app-editor-secondary-button" type="button" @click="showCoverFinder">
+                    {{ $t('apps.find_cover') }}
+                  </button>
+                  <div v-if="coverFinderOpen" class="absolute right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
+                    <div class="flex justify-between items-center p-3 border-b border-storm">
+                      <h4 class="text-silver font-medium">{{ $t('apps.covers_found') }}</h4>
+                      <button type="button" class="text-storm hover:text-silver" @click="closeCoverFinder">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                      </button>
                     </div>
-                  </div>
-                  <div v-for="(cover,i) in coverCandidates" :key="'i'" class="cursor-pointer hover:opacity-80 transition"
-                    @click="useCover(cover)">
-                    <div class="cover-container">
-                      <img class="rounded" :src="cover.url" />
+                    <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }">
+                      <div class="grid grid-cols-3 gap-3">
+                        <div v-if="coverSearching" class="col-span-1">
+                          <div class="cover-container flex items-center justify-center">
+                            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-ice"></div>
+                          </div>
+                        </div>
+                        <div v-for="cover in coverCandidates" :key="cover.key" class="cursor-pointer hover:opacity-80 transition" @click="useCover(cover)">
+                          <div class="cover-container">
+                            <img class="rounded" :src="cover.url" />
+                          </div>
+                          <label class="block text-xs text-center text-storm truncate mt-1">
+                            {{ cover.name }}
+                          </label>
+                        </div>
+                      </div>
                     </div>
-                    <label class="block text-xs text-center text-storm truncate mt-1">
-                      {{cover.name}}
-                    </label>
                   </div>
                 </div>
               </div>
             </div>
+
+            <div class="app-editor-field app-editor-field-wide">
+              <div class="settings-field-head">
+                <label for="appImagePath" class="settings-field-label">{{ $t('apps.image') }}</label>
+                <InfoHint size="sm" :label="$t('apps.image')">{{ $t('apps.image_desc') }}</InfoHint>
+              </div>
+              <input type="text" class="app-editor-input app-editor-input-mono" id="appImagePath" v-model="editForm['image-path']" />
+            </div>
+
+            <div class="app-editor-field">
+              <div class="settings-field-head">
+                <label for="gameCategory" class="settings-field-label">Game Category</label>
+                <InfoHint size="sm" label="Game Category">Classification hint for Auto Quality. Auto-detected from Steam genres on import.</InfoHint>
+              </div>
+              <select id="gameCategory" class="app-editor-input" v-model="editForm['game-category']">
+                <option value="">Not classified</option>
+                <option value="fast_action">Fast Action (FPS, Racing, Fighting)</option>
+                <option value="cinematic">Cinematic (RPG, Adventure, Strategy)</option>
+                <option value="desktop">Desktop (Productivity, Browsing)</option>
+                <option value="vr">VR (Virtual Reality)</option>
+              </select>
+            </div>
+
+            <div v-if="platform !== 'macos'" class="app-editor-field">
+              <div class="settings-field-head">
+                <label for="gamepad" class="settings-field-label">{{ $t('config.gamepad') }}</label>
+                <InfoHint size="sm" :label="$t('config.gamepad')">{{ $t('config.gamepad_desc') }}</InfoHint>
+              </div>
+              <select id="gamepad" class="app-editor-input" v-model="editForm.gamepad">
+                <option value="">{{ $t('_common.default_global') }}</option>
+                <option value="disabled">{{ $t('_common.disabled') }}</option>
+                <option value="auto">{{ $t('_common.auto') }}</option>
+                <template v-if="platform === 'linux'">
+                  <option value="ds5">{{ $t("config.gamepad_ds5") }}</option>
+                  <option value="switch">{{ $t("config.gamepad_switch") }}</option>
+                  <option value="xone">{{ $t("config.gamepad_xone") }}</option>
+                </template>
+                <template v-if="platform === 'windows'">
+                  <option value="ds4">{{ $t('config.gamepad_ds4') }}</option>
+                  <option value="x360">{{ $t('config.gamepad_x360') }}</option>
+                </template>
+              </select>
+            </div>
           </div>
-        </div>
-      </div>
 
-      <!-- Application Image -->
-      <div>
-        <div class="settings-field-head">
-          <label for="appImagePath" class="settings-field-label">{{ $t('apps.image') }}</label>
-          <InfoHint size="sm" :label="$t('apps.image')">{{ $t('apps.image_desc') }}</InfoHint>
-        </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" id="appImagePath"
-          v-model="editForm['image-path']" />
-      </div>
-
-      <!-- gamepad override -->
-      <div v-if="platform !== 'macos'">
-        <div class="settings-field-head">
-          <label for="gamepad" class="settings-field-label">{{ $t('config.gamepad') }}</label>
-          <InfoHint size="sm" :label="$t('config.gamepad')">{{ $t('config.gamepad_desc') }}</InfoHint>
-        </div>
-        <select id="gamepad" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="editForm.gamepad">
-          <option value="">{{ $t('_common.default_global') }}</option>
-          <option value="disabled">{{ $t('_common.disabled') }}</option>
-          <option value="auto">{{ $t('_common.auto') }}</option>
-          <template v-if="platform === 'linux'">
-            <option value="ds5">{{ $t("config.gamepad_ds5") }}</option>
-            <option value="switch">{{ $t("config.gamepad_switch") }}</option>
-            <option value="xone">{{ $t("config.gamepad_xone") }}</option>
-          </template>
-          <template v-if="platform === 'windows'">
-            <option value="ds4">{{ $t('config.gamepad_ds4') }}</option>
-            <option value="x360">{{ $t('config.gamepad_x360') }}</option>
-          </template>
-        </select>
-      </div>
-
-      <!-- game category -->
-      <div>
-        <div class="settings-field-head">
-          <label for="gameCategory" class="settings-field-label">Game Category</label>
-          <InfoHint size="sm" label="Game Category">Classification hint for AI optimizer. Auto-detected from Steam genres on import.</InfoHint>
-        </div>
-        <select id="gameCategory" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="editForm['game-category']">
-          <option value="">Not classified</option>
-          <option value="fast_action">Fast Action (FPS, Racing, Fighting)</option>
-          <option value="cinematic">Cinematic (RPG, Adventure, Strategy)</option>
-          <option value="desktop">Desktop (Productivity, Browsing)</option>
-          <option value="vr">VR (Virtual Reality)</option>
-        </select>
-      </div>
-
-      <!-- MangoHud toggle -->
-      <div class="flex items-center justify-between p-3 border border-storm/30 rounded-lg">
-        <div>
-          <div class="section-title-row">
-            <div class="text-sm font-medium text-silver">MangoHud Overlay</div>
-            <InfoHint size="sm" label="MangoHud Overlay">Show GPU, CPU, temp, and frametime in the stream from the host side.</InfoHint>
+          <div class="app-editor-toggle-row">
+            <div class="section-title-row">
+              <div class="text-sm font-medium text-silver">MangoHud Overlay</div>
+              <InfoHint size="sm" label="MangoHud Overlay">Show GPU, CPU, temp, and frametime in the stream from the host side.</InfoHint>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" v-model="editMangoHud" class="sr-only peer" />
+              <div class="w-9 h-5 bg-storm/40 peer-focus:outline-none rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+            </label>
           </div>
-        </div>
-        <label class="relative inline-flex items-center cursor-pointer">
-          <input type="checkbox" v-model="editMangoHud" class="sr-only peer" />
-          <div class="w-9 h-5 bg-storm/40 peer-focus:outline-none rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
-        </label>
-      </div>
+        </section>
 
-      <!-- Streaming Tweaks (per-game environment variables) -->
-      <div class="border border-storm/30 rounded-lg overflow-hidden">
-        <div class="flex items-center justify-between gap-2 p-3 hover:bg-ice/5 transition-colors">
-          <button type="button" class="flex min-w-0 flex-1 items-center justify-between text-left"
-                  @click="showTweaks = !showTweaks">
-            <span class="text-sm font-medium text-silver">Streaming Tweaks</span>
-            <svg class="w-4 h-4 text-storm transition-transform" :class="{ 'rotate-180': showTweaks }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-          </button>
-          <InfoHint size="sm" align="right" label="Streaming Tweaks">Environment variables, Proton settings, and per-game launch-time overrides.</InfoHint>
-        </div>
-        <div v-if="showTweaks" class="p-3 pt-0 space-y-3 border-t border-storm/20">
-          <div class="text-xs text-storm">Set per-game environment variables (e.g. PROTON_NO_FSYNC=1, DXVK_ASYNC=1, MANGOHUD=1)</div>
-          <div v-for="(envVar, i) in editEnvVars" :key="i" class="flex items-center gap-2">
-            <input type="text" v-model="envVar.key" placeholder="KEY" class="w-40 bg-deep border border-storm rounded-lg px-3 py-1.5 text-silver focus:border-ice focus:outline-none font-mono text-xs" />
-            <span class="text-storm">=</span>
-            <input type="text" v-model="envVar.value" placeholder="value" class="flex-1 bg-deep border border-storm rounded-lg px-3 py-1.5 text-silver focus:border-ice focus:outline-none font-mono text-xs" />
-            <button type="button" class="bg-red-500/20 text-red-400 px-2 py-1 rounded hover:bg-red-500/30 transition" @click="editEnvVars.splice(i, 1)">
-              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-            </button>
+        <section class="section-card app-editor-card app-editor-section">
+          <div class="app-editor-section-head">
+            <div>
+              <div class="section-kicker">Launch</div>
+              <h2 class="section-title">Command path</h2>
+            </div>
+            <span class="data-pill">{{ editForm.cmd?.trim() ? 'Command set' : 'Needs command' }}</span>
           </div>
-          <button type="button" class="bg-ice/20 text-ice px-3 py-1 rounded-lg hover:bg-ice/30 transition text-xs" @click="editEnvVars.push({ key: '', value: '' })">
-            + Add Variable
-          </button>
-        </div>
-      </div>
 
-      <!-- command -->
-      <div>
-        <div class="settings-field-head">
-          <label for="appCmd" class="settings-field-label">{{ $t('apps.cmd') }}</label>
-          <InfoHint size="sm" :label="$t('apps.cmd')">
-            {{ $t('apps.cmd_desc') }}
-            {{ $t('apps.cmd_note') }}
-          </InfoHint>
-        </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" id="appCmd"
-          v-model="editForm.cmd" />
-      </div>
+          <div class="app-editor-grid">
+            <div class="app-editor-field app-editor-field-wide">
+              <div class="settings-field-head">
+                <label for="appCmd" class="settings-field-label">{{ $t('apps.cmd') }}</label>
+                <InfoHint size="sm" :label="$t('apps.cmd')">
+                  {{ $t('apps.cmd_desc') }}
+                  {{ $t('apps.cmd_note') }}
+                </InfoHint>
+              </div>
+              <input type="text" class="app-editor-input app-editor-input-mono" id="appCmd" v-model="editForm.cmd" />
+            </div>
 
-      <!-- elevation -->
-      <Checkbox v-if="platform === 'windows'"
-                class="mb-3"
-                id="appElevation"
-                label="_common.run_as"
-                desc="apps.run_as_desc"
-                desc-as-hint
-                v-model="editForm.elevated"
-                default="false"
-      ></Checkbox>
+            <Checkbox v-if="platform === 'windows'"
+                      class="app-editor-field app-editor-field-wide"
+                      id="appElevation"
+                      label="_common.run_as"
+                      desc="apps.run_as_desc"
+                      desc-as-hint
+                      v-model="editForm.elevated"
+                      default="false"
+            ></Checkbox>
 
-      <!-- detached -->
-      <div>
-        <div class="settings-field-head">
-          <label class="settings-field-label">{{ $t('apps.detached_cmds') }}</label>
-          <InfoHint size="sm" :label="$t('apps.detached_cmds')">
-            {{ $t('apps.detached_cmds_desc') }}
-            {{ $t('apps.detached_cmds_note') }}
-          </InfoHint>
-        </div>
-        <div v-for="(c,i) in editForm.detached" class="flex items-center gap-2 my-2">
-          <input type="text" v-model="editForm.detached[i]" class="flex-1 bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm">
-          <button class="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 transition" @click="editForm.detached.splice(i,1)">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-          </button>
-          <button class="bg-ice/20 text-ice px-2 py-1 rounded hover:bg-ice/30 transition" @click="editForm.detached.splice(i, 0, '')">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-          </button>
-        </div>
-        <button class="bg-ice/20 text-ice px-3 py-1 rounded-lg hover:bg-ice/30 transition text-sm" @click="editForm.detached.push('');">
-          + {{ $t('apps.detached_cmds_add') }}
-        </button>
-      </div>
+            <div class="app-editor-field">
+              <div class="settings-field-head">
+                <label for="appWorkingDir" class="settings-field-label">{{ $t('apps.working_dir') }}</label>
+                <InfoHint size="sm" :label="$t('apps.working_dir')">{{ $t('apps.working_dir_desc') }}</InfoHint>
+              </div>
+              <input type="text" class="app-editor-input app-editor-input-mono" id="appWorkingDir" v-model="editForm['working-dir']" />
+            </div>
 
-      <!-- allow client commands -->
-      <Checkbox class="mb-3"
-                id="clientCommands"
-                label="apps.allow_client_commands"
-                desc="apps.allow_client_commands_desc"
-                desc-as-hint
-                v-model="editForm['allow-client-commands']"
-                default="true"
-      ></Checkbox>
-
-      <!-- prep and state-cmd -->
-      <template v-for="type in ['prep', 'state']">
-        <Checkbox class="mb-3"
-                  :id="'excludeGlobal_' + type"
-                  :label="'apps.global_' + type + '_name'"
-                  :desc="'apps.global_' + type + '_desc'"
-                  desc-as-hint
-                  v-model="editForm['exclude-global-' + type + '-cmd']"
-                  default="true"
-                  inverse-values
-        ></Checkbox>
-        <div>
-          <div class="settings-field-head">
-            <label class="settings-field-label">{{ $t('apps.cmd_' + type + '_name') }}</label>
-            <InfoHint size="sm" :label="$t('apps.cmd_' + type + '_name')">{{ $t('apps.cmd_' + type + '_desc') }}</InfoHint>
+            <div class="app-editor-field">
+              <div class="settings-field-head">
+                <label for="appOutput" class="settings-field-label">{{ $t('apps.output_name') }}</label>
+                <InfoHint size="sm" :label="$t('apps.output_name')">{{ $t('apps.output_desc') }}</InfoHint>
+              </div>
+              <input type="text" class="app-editor-input app-editor-input-mono" id="appOutput" v-model="editForm.output" />
+            </div>
           </div>
-          <table class="w-full text-left mt-2" v-if="editForm[type + '-cmd'].length > 0">
-            <thead>
-              <tr class="border-b border-storm">
-                <th class="py-2 text-storm text-sm">
-                  <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/></svg>
-                  {{ $t('_common.do_cmd') }}
-                </th>
-                <th class="py-2 text-storm text-sm">
-                  <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
-                  {{ $t('_common.undo_cmd') }}
-                </th>
-                <th class="py-2 text-storm text-sm" v-if="platform === 'windows'">
-                  {{ $t('_common.run_as') }}
-                </th>
-                <th class="py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(c, i) in editForm[type + '-cmd']" class="border-b border-storm/30">
-                <td class="py-2 pr-2">
-                  <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="c.do" />
-                </td>
-                <td class="py-2 pr-2">
-                  <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="c.undo" />
-                </td>
-                <td v-if="platform === 'windows'" class="py-2 pr-2 align-middle">
-                  <Checkbox :id="type + '-cmd-admin-' + i"
-                            label="_common.elevated"
-                            desc=""
-                            v-model="c.elevated"
-                  ></Checkbox>
-                </td>
-                <td class="py-2 text-right">
-                  <div class="flex gap-1 justify-end">
-                    <button class="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 transition" @click="editForm[type + '-cmd'].splice(i,1)">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                    </button>
-                    <button class="bg-ice/20 text-ice px-2 py-1 rounded hover:bg-ice/30 transition" @click="addCmd(editForm[type + '-cmd'], i)">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-                    </button>
+
+          <details class="app-editor-inline-disclosure" :open="editForm.detached.length > 0">
+            <summary class="focus-ring">
+              <span>{{ $t('apps.detached_cmds') }}</span>
+              <span class="control-chip">{{ editForm.detached.length }}</span>
+            </summary>
+            <div class="app-editor-disclosure-body">
+              <div class="settings-field-head">
+                <span class="settings-field-label">{{ $t('apps.detached_cmds') }}</span>
+                <InfoHint size="sm" :label="$t('apps.detached_cmds')">
+                  {{ $t('apps.detached_cmds_desc') }}
+                  {{ $t('apps.detached_cmds_note') }}
+                </InfoHint>
+              </div>
+              <div v-for="(c,i) in editForm.detached" :key="i" class="app-editor-command-row">
+                <input type="text" v-model="editForm.detached[i]" class="app-editor-input app-editor-input-mono">
+                <button class="icon-action-button icon-action-button-danger" type="button" @click="editForm.detached.splice(i,1)" :aria-label="`Remove detached command ${i + 1}`">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                </button>
+                <button class="icon-action-button" type="button" @click="editForm.detached.splice(i, 0, '')" :aria-label="`Insert detached command before ${i + 1}`">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                </button>
+              </div>
+              <button class="app-editor-secondary-button" type="button" @click="editForm.detached.push('');">
+                + {{ $t('apps.detached_cmds_add') }}
+              </button>
+            </div>
+          </details>
+
+          <details class="app-editor-inline-disclosure" :open="showTweaks">
+            <summary class="focus-ring" @click.prevent="showTweaks = !showTweaks">
+              <span>Streaming Tweaks</span>
+              <span class="control-chip">{{ editEnvVars.length + (editMangoHud ? 1 : 0) }}</span>
+            </summary>
+            <div v-if="showTweaks" class="app-editor-disclosure-body">
+              <div class="settings-field-head">
+                <span class="settings-field-label">Environment variables</span>
+                <InfoHint size="sm" align="right" label="Streaming Tweaks">Environment variables, Proton settings, and per-game launch-time overrides.</InfoHint>
+              </div>
+              <div v-for="(envVar, i) in editEnvVars" :key="i" class="app-editor-env-row">
+                <input type="text" v-model="envVar.key" placeholder="KEY" class="app-editor-input app-editor-input-mono" />
+                <span class="text-storm">=</span>
+                <input type="text" v-model="envVar.value" placeholder="value" class="app-editor-input app-editor-input-mono" />
+                <button type="button" class="icon-action-button icon-action-button-danger" @click="editEnvVars.splice(i, 1)" :aria-label="`Remove environment variable ${i + 1}`">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </div>
+              <button type="button" class="app-editor-secondary-button" @click="editEnvVars.push({ key: '', value: '' })">
+                + Add Variable
+              </button>
+            </div>
+          </details>
+        </section>
+
+        <section class="section-card app-editor-card app-editor-section">
+          <div class="app-editor-section-head">
+            <div>
+              <div class="section-kicker">Automation</div>
+              <h2 class="section-title">Prep and state commands</h2>
+            </div>
+            <span class="data-pill">{{ editForm['prep-cmd'].length + editForm['state-cmd'].length }} commands</span>
+          </div>
+
+          <Checkbox class="app-editor-toggle-card"
+                    id="clientCommands"
+                    label="apps.allow_client_commands"
+                    desc="apps.allow_client_commands_desc"
+                    desc-as-hint
+                    v-model="editForm['allow-client-commands']"
+                    default="true"
+          ></Checkbox>
+
+          <div class="app-editor-automation-stack">
+            <details
+              v-for="type in ['prep', 'state']"
+              :key="type"
+              class="app-editor-inline-disclosure"
+              :open="editForm[type + '-cmd'].length > 0"
+            >
+              <summary class="focus-ring">
+                <span>{{ $t('apps.cmd_' + type + '_name') }}</span>
+                <span class="control-chip">{{ editForm[type + '-cmd'].length }}</span>
+              </summary>
+              <div class="app-editor-disclosure-body">
+                <Checkbox class="app-editor-toggle-card"
+                          :id="'excludeGlobal_' + type"
+                          :label="'apps.global_' + type + '_name'"
+                          :desc="'apps.global_' + type + '_desc'"
+                          desc-as-hint
+                          v-model="editForm['exclude-global-' + type + '-cmd']"
+                          default="true"
+                          inverse-values
+                ></Checkbox>
+                <div>
+                  <div class="settings-field-head">
+                    <span class="settings-field-label">{{ $t('apps.cmd_' + type + '_name') }}</span>
+                    <InfoHint size="sm" :label="$t('apps.cmd_' + type + '_name')">{{ $t('apps.cmd_' + type + '_desc') }}</InfoHint>
                   </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <div class="mt-2 mb-4">
-            <button class="bg-ice/20 text-ice px-3 py-1 rounded-lg hover:bg-ice/30 transition text-sm" @click="addCmd(editForm[type + '-cmd'], -1)">
-              + {{ $t('apps.add_cmds') }}
-            </button>
+                  <div class="app-editor-table-wrap" v-if="editForm[type + '-cmd'].length > 0">
+                    <table class="app-editor-command-table">
+                      <thead>
+                        <tr>
+                          <th>
+                            <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/></svg>
+                            {{ $t('_common.do_cmd') }}
+                          </th>
+                          <th>
+                            <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+                            {{ $t('_common.undo_cmd') }}
+                          </th>
+                          <th v-if="platform === 'windows'">
+                            {{ $t('_common.run_as') }}
+                          </th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(c, i) in editForm[type + '-cmd']" :key="i">
+                          <td>
+                            <input type="text" class="app-editor-input app-editor-input-mono" v-model="c.do" />
+                          </td>
+                          <td>
+                            <input type="text" class="app-editor-input app-editor-input-mono" v-model="c.undo" />
+                          </td>
+                          <td v-if="platform === 'windows'" class="align-middle">
+                            <Checkbox :id="type + '-cmd-admin-' + i"
+                                      label="_common.elevated"
+                                      desc=""
+                                      v-model="c.elevated"
+                            ></Checkbox>
+                          </td>
+                          <td>
+                            <div class="flex gap-1 justify-end">
+                              <button class="icon-action-button icon-action-button-danger" type="button" @click="editForm[type + '-cmd'].splice(i,1)" :aria-label="`Remove ${type} command ${i + 1}`">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                              </button>
+                              <button class="icon-action-button" type="button" @click="addCmd(editForm[type + '-cmd'], i)" :aria-label="`Insert ${type} command before ${i + 1}`">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <button class="app-editor-secondary-button mt-3" type="button" @click="addCmd(editForm[type + '-cmd'], -1)">
+                    + {{ $t('apps.add_cmds') }}
+                  </button>
+                </div>
+              </div>
+            </details>
           </div>
-        </div>
-      </template>
+        </section>
 
-      <!-- working dir -->
-      <div>
-        <div class="settings-field-head">
-          <label for="appWorkingDir" class="settings-field-label">{{ $t('apps.working_dir') }}</label>
-          <InfoHint size="sm" :label="$t('apps.working_dir')">{{ $t('apps.working_dir_desc') }}</InfoHint>
-        </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" id="appWorkingDir"
-          v-model="editForm['working-dir']" />
-      </div>
-
-      <!-- output -->
-      <div>
-        <div class="settings-field-head">
-          <label for="appOutput" class="settings-field-label">{{ $t('apps.output_name') }}</label>
-          <InfoHint size="sm" :label="$t('apps.output_name')">{{ $t('apps.output_desc') }}</InfoHint>
-        </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" id="appOutput"
-          v-model="editForm.output" />
-      </div>
-
-      <!-- auto-detach -->
-      <Checkbox class="mb-3" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" desc-as-hint v-model="editForm['auto-detach']" default="true"></Checkbox>
-      <!-- wait for all processes -->
-      <Checkbox class="mb-3" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" desc-as-hint v-model="editForm['wait-all']" default="true"></Checkbox>
-      <!-- terminate on pause -->
-      <Checkbox class="mb-3" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" desc-as-hint v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
-
-      <!-- exit timeout -->
-      <div>
-        <div class="settings-field-head">
-          <label for="exitTimeout" class="settings-field-label">{{ $t('apps.exit_timeout') }}</label>
-          <InfoHint size="sm" :label="$t('apps.exit_timeout')">{{ $t('apps.exit_timeout_desc') }}</InfoHint>
-        </div>
-        <input type="number" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" id="exitTimeout"
-               v-model="editForm['exit-timeout']" min="0" placeholder="5" />
-      </div>
-
-      <!-- use virtual display -->
-      <Checkbox class="mb-3" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" desc-as-hint v-model="editForm['virtual-display']" default="false"></Checkbox>
-      <!-- use app identity -->
-      <Checkbox class="mb-3" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" desc-as-hint v-model="editForm['use-app-identity']" default="false"></Checkbox>
-      <!-- per-client app identity -->
-      <Checkbox class="mb-3" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" desc-as-hint v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
-
-      <!-- resolution scale factor -->
-      <div v-if="platform === 'windows'">
-        <div class="settings-field-head">
-          <label for="resolutionScaleFactor" class="settings-field-label">{{ $t('apps.resolution_scale_factor') }}: {{editForm['scale-factor']}}%</label>
-          <InfoHint size="sm" :label="$t('apps.resolution_scale_factor')">{{ $t('apps.resolution_scale_factor_desc') }}</InfoHint>
-        </div>
-        <input type="range" step="1" min="20" max="200" class="w-full accent-ice" id="resolutionScaleFactor" v-model="editForm['scale-factor']"/>
-      </div>
-
-      <details class="rounded-lg border border-storm/20 bg-deep/35 text-silver">
-        <summary class="cursor-pointer px-4 py-3 text-sm font-semibold text-silver transition-colors hover:text-ice">
-          {{ $t('apps.env_vars_about') }}
-          <span class="ml-2 text-xs font-normal text-storm">Reference</span>
-        </summary>
-        <div class="overflow-auto border-t border-storm/20 px-4 pb-4 pt-3">
-        <table class="env-table text-sm">
-          <tr>
-            <td class="font-bold text-storm pr-4 py-1">{{ $t('apps.env_var_name') }}</td>
-            <td class="font-bold text-storm py-1"></td>
-          </tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_ID</td><td class="text-storm py-1">{{ $t('apps.env_app_id') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_NAME</td><td class="text-storm py-1">{{ $t('apps.env_app_name') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_UUID</td><td class="text-storm py-1">{{ $t('apps.env_app_uuid') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_STATUS</td><td class="text-storm py-1">{{ $t('apps.env_app_status') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_UUID</td><td class="text-storm py-1">{{ $t('apps.env_client_uuid') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_NAME</td><td class="text-storm py-1">{{ $t('apps.env_client_name') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_WIDTH</td><td class="text-storm py-1">{{ $t('apps.env_client_width') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HEIGHT</td><td class="text-storm py-1">{{ $t('apps.env_client_height') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_FPS</td><td class="text-storm py-1">{{ $t('apps.env_client_fps') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HDR</td><td class="text-storm py-1">{{ $t('apps.env_client_hdr') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_GCMAP</td><td class="text-storm py-1">{{ $t('apps.env_client_gcmap') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HOST_AUDIO</td><td class="text-storm py-1">{{ $t('apps.env_client_host_audio') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_ENABLE_SOPS</td><td class="text-storm py-1">{{ $t('apps.env_client_enable_sops') }}</td></tr>
-          <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_AUDIO_CONFIGURATION</td><td class="text-storm py-1">{{ $t('apps.env_client_audio_config') }}</td></tr>
-        </table>
-
-        <template v-if="platform === 'windows'">
-          <div class="text-sm text-storm mt-3"><b>{{ $t('apps.env_rtss_cli_example') }}</b>
-            <pre class="mt-1 text-silver bg-void p-2 rounded">cmd /C \path\to\rtss-cli.exe limit:set %POLARIS_CLIENT_FPS%</pre>
+        <details class="section-card app-editor-disclosure">
+          <summary class="focus-ring">
+            <div>
+              <div class="section-kicker">Advanced</div>
+              <h2 class="section-title">Runtime behavior</h2>
+            </div>
+            <span class="data-pill">{{ editForm['exit-timeout'] || 5 }}s timeout</span>
+          </summary>
+          <div class="app-editor-disclosure-body">
+            <div class="app-editor-grid">
+              <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" desc-as-hint v-model="editForm['auto-detach']" default="true"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" desc-as-hint v-model="editForm['wait-all']" default="true"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" desc-as-hint v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" desc-as-hint v-model="editForm['virtual-display']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" desc-as-hint v-model="editForm['use-app-identity']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" desc-as-hint v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
+              <div class="app-editor-field">
+                <div class="settings-field-head">
+                  <label for="exitTimeout" class="settings-field-label">{{ $t('apps.exit_timeout') }}</label>
+                  <InfoHint size="sm" :label="$t('apps.exit_timeout')">{{ $t('apps.exit_timeout_desc') }}</InfoHint>
+                </div>
+                <input type="number" class="app-editor-input app-editor-input-mono" id="exitTimeout" v-model="editForm['exit-timeout']" min="0" placeholder="5" />
+              </div>
+              <div v-if="platform === 'windows'" class="app-editor-field">
+                <div class="settings-field-head">
+                  <label for="resolutionScaleFactor" class="settings-field-label">{{ $t('apps.resolution_scale_factor') }}: {{ editForm['scale-factor'] }}%</label>
+                  <InfoHint size="sm" :label="$t('apps.resolution_scale_factor')">{{ $t('apps.resolution_scale_factor_desc') }}</InfoHint>
+                </div>
+                <input type="range" step="1" min="20" max="200" class="w-full accent-ice" id="resolutionScaleFactor" v-model="editForm['scale-factor']"/>
+              </div>
+            </div>
           </div>
-        </template>
-        <template v-if="platform === 'linux'">
-          <div class="text-sm text-storm mt-3"><b>{{ $t('apps.env_xrandr_example') }}</b>
-            <pre class="mt-1 text-silver bg-void p-2 rounded">sh -c "xrandr --output HDMI-1 --mode \"${POLARIS_CLIENT_WIDTH}x${POLARIS_CLIENT_HEIGHT}\" --rate ${POLARIS_CLIENT_FPS}"</pre>
-          </div>
-        </template>
-        <template v-if="platform === 'macos'">
-          <div class="text-sm text-storm mt-3"><b>{{ $t('apps.env_displayplacer_example') }}</b>
-            <pre class="mt-1 text-silver bg-void p-2 rounded">sh -c "displayplacer "id:&lt;screenId&gt; res:${POLARIS_CLIENT_WIDTH}x${POLARIS_CLIENT_HEIGHT} hz:${POLARIS_CLIENT_FPS} scaling:on origin:(0,0) degree:0""</pre>
-          </div>
-        </template>
+        </details>
 
-        <div class="text-sm mt-2">
-          <a href="https://docs.lizardbyte.dev/projects/polaris/latest/md_docs_2app__examples.html" target="_blank" class="text-ice hover:text-ice/80 no-underline">
-            {{ $t('_common.see_more') }}
-          </a>
-        </div>
-        </div>
-      </details>
+        <details class="section-card app-editor-disclosure">
+          <summary class="focus-ring">
+            <div>
+              <div class="section-kicker">Reference</div>
+              <h2 class="section-title">{{ $t('apps.env_vars_about') }}</h2>
+            </div>
+            <span class="data-pill">Optional</span>
+          </summary>
+          <div class="app-editor-disclosure-body">
+            <div class="app-editor-compat-note">
+              <svg class="h-5 w-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span>Environment compatibility</span>
+              <InfoHint size="sm" align="right" label="Environment compatibility">
+                {{ $t('apps.env_sunshine_compatibility') }}
+              </InfoHint>
+            </div>
+            <div class="app-editor-table-wrap">
+              <table class="env-table text-sm">
+                <tbody>
+                  <tr>
+                    <td class="font-bold text-storm pr-4 py-1">{{ $t('apps.env_var_name') }}</td>
+                    <td class="font-bold text-storm py-1"></td>
+                  </tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_ID</td><td class="text-storm py-1">{{ $t('apps.env_app_id') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_NAME</td><td class="text-storm py-1">{{ $t('apps.env_app_name') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_UUID</td><td class="text-storm py-1">{{ $t('apps.env_app_uuid') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_APP_STATUS</td><td class="text-storm py-1">{{ $t('apps.env_app_status') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_UUID</td><td class="text-storm py-1">{{ $t('apps.env_client_uuid') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_NAME</td><td class="text-storm py-1">{{ $t('apps.env_client_name') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_WIDTH</td><td class="text-storm py-1">{{ $t('apps.env_client_width') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HEIGHT</td><td class="text-storm py-1">{{ $t('apps.env_client_height') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_FPS</td><td class="text-storm py-1">{{ $t('apps.env_client_fps') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HDR</td><td class="text-storm py-1">{{ $t('apps.env_client_hdr') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_GCMAP</td><td class="text-storm py-1">{{ $t('apps.env_client_gcmap') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_HOST_AUDIO</td><td class="text-storm py-1">{{ $t('apps.env_client_host_audio') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_ENABLE_SOPS</td><td class="text-storm py-1">{{ $t('apps.env_client_enable_sops') }}</td></tr>
+                  <tr><td class="font-mono text-silver pr-4 py-1">POLARIS_CLIENT_AUDIO_CONFIGURATION</td><td class="text-storm py-1">{{ $t('apps.env_client_audio_config') }}</td></tr>
+                </tbody>
+              </table>
+            </div>
 
-      <div class="flex items-center gap-2 rounded-lg border border-storm/20 bg-deep/35 p-3 text-sm text-silver">
-        <svg class="w-5 h-5 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-        <span>Environment compatibility</span>
-        <InfoHint size="sm" align="right" label="Environment compatibility">
-          {{ $t('apps.env_sunshine_compatibility') }}
-        </InfoHint>
+            <template v-if="platform === 'windows'">
+              <div class="text-sm text-storm"><b>{{ $t('apps.env_rtss_cli_example') }}</b>
+                <pre class="mt-1 text-silver bg-void p-2 rounded">cmd /C \path\to\rtss-cli.exe limit:set %POLARIS_CLIENT_FPS%</pre>
+              </div>
+            </template>
+            <template v-if="platform === 'linux'">
+              <div class="text-sm text-storm"><b>{{ $t('apps.env_xrandr_example') }}</b>
+                <pre class="mt-1 text-silver bg-void p-2 rounded">sh -c "xrandr --output HDMI-1 --mode \"${POLARIS_CLIENT_WIDTH}x${POLARIS_CLIENT_HEIGHT}\" --rate ${POLARIS_CLIENT_FPS}"</pre>
+              </div>
+            </template>
+            <template v-if="platform === 'macos'">
+              <div class="text-sm text-storm"><b>{{ $t('apps.env_displayplacer_example') }}</b>
+                <pre class="mt-1 text-silver bg-void p-2 rounded">sh -c "displayplacer "id:&lt;screenId&gt; res:${POLARIS_CLIENT_WIDTH}x${POLARIS_CLIENT_HEIGHT} hz:${POLARIS_CLIENT_FPS} scaling:on origin:(0,0) degree:0""</pre>
+              </div>
+            </template>
+
+            <a href="https://docs.lizardbyte.dev/projects/polaris/latest/md_docs_2app__examples.html" target="_blank" class="text-sm text-ice hover:text-ice/80 no-underline">
+              {{ $t('_common.see_more') }}
+            </a>
+          </div>
+        </details>
       </div>
 
-      <!-- Save buttons -->
-      <div class="flex gap-2 pt-4">
-        <Button variant="outline" @click="showEditForm = false">
-          <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-          {{ $t('_common.cancel') }}
-        </Button>
-        <Button variant="primary" :disabled="actionDisabled || !canSaveEdit" @click="save">
-          <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
-          {{ $t('_common.save') }}
-        </Button>
-      </div>
-    </div>
-  </section>
+      <aside class="app-editor-rail">
+        <section class="section-card app-editor-summary-card">
+          <div class="section-kicker">Launcher Profile</div>
+          <h2 class="section-title">{{ editForm.name || 'Untitled app' }}</h2>
+          <div class="app-editor-summary-list">
+            <div class="library-health-chip">
+              <span>Platform</span>
+              <strong>{{ platform || 'Unknown' }}</strong>
+            </div>
+            <div class="library-health-chip">
+              <span>Category</span>
+              <strong>{{ formatCategory(editForm['game-category']) || 'None' }}</strong>
+            </div>
+            <div class="library-health-chip">
+              <span>Command</span>
+              <strong>{{ editForm.cmd?.trim() ? 'Ready' : 'Missing' }}</strong>
+            </div>
+            <div class="library-health-chip">
+              <span>Tweaks</span>
+              <strong>{{ editEnvVars.length + (editMangoHud ? 1 : 0) }}</strong>
+            </div>
+          </div>
+          <div class="app-editor-action-stack">
+            <Button variant="primary" :disabled="actionDisabled || !canSaveEdit" @click="save">
+              <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3m-1 4-3 3m0 0-3-3m3 3V4"/></svg>
+              {{ $t('_common.save') }}
+            </Button>
+            <Button variant="outline" :disabled="!canExportEdit" @click="exportLauncherFile(editForm)">
+              <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-8-4-4m0 0L8 8m4-4v12"/></svg>
+              {{ $t('apps.export_launcher_file') }}
+            </Button>
+            <Button variant="outline" @click="showEditForm = false">
+              <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
+              {{ $t('_common.cancel') }}
+            </Button>
+          </div>
+        </section>
+      </aside>
+    </section>
   </div>
 </template>
 
@@ -968,8 +1031,8 @@ function sourceBadgeClass(source) {
   }[source] || 'bg-void/60 text-silver'
 }
 
-function formatCategory(category) {
-  return category.replaceAll('_', ' ')
+function formatCategory(category = '') {
+  return String(category || '').replaceAll('_', ' ')
 }
 
 function trimCommand(command = '') {
@@ -993,6 +1056,12 @@ function clearLibraryFilters() {
 
 function launchHref(app) {
   return `art://launch?host_uuid=${hostUUID.value}&host_name=${hostName.value}&app_uuid=${app.uuid}&app_name=${app.name}`
+}
+
+function scrollEditorToTop() {
+  requestAnimationFrame(() => {
+    document.querySelector('main')?.scrollTo({ top: 0, left: 0 })
+  })
 }
 
 // Methods
@@ -1110,6 +1179,7 @@ function newApp() {
   editMangoHud.value = false
   showTweaks.value = false
   showEditForm.value = true
+  scrollEditorToTop()
 }
 
 function launchApp(event, app) {
@@ -1164,6 +1234,7 @@ function editApp(app) {
     .map(([key, value]) => ({ key, value }))
   showTweaks.value = editEnvVars.value.length > 0
   showEditForm.value = true
+  scrollEditorToTop()
 }
 
 function exportLauncherFile(app) {
