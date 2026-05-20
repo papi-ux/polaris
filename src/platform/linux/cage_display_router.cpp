@@ -489,6 +489,13 @@ namespace cage_display_router {
     headless_extcopy_dmabuf_probe_result.store(supported ? 2 : 1);
   }
 
+  bool headless_extcopy_dmabuf_probe_succeeded(
+    bool capture_initialized,
+    bool live_gpu_frame_converted
+  ) {
+    return capture_initialized && live_gpu_frame_converted;
+  }
+
   bool should_report_headless_ram_capture_fallback(const platf::runtime_state_t &runtime_state) {
     return runtime_state.effective_headless ||
            (runtime_state.requested_headless && !runtime_state.gpu_native_override_active);

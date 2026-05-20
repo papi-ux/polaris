@@ -4626,9 +4626,28 @@ namespace video {
           << "Live GPU capture probe fell back to transport="sv << platf::from_frame_transport(metadata.transport)
           << " residency="sv << platf::from_frame_residency(metadata.residency)
           << " format="sv << platf::from_frame_format(metadata.format);
+        return false;
       }
 
-      return gpu_native;
+      auto frame = make_frame(std::move(captured_img));
+      auto encode_device = make_encode_device(*disp, *chosen_encoder, config);
+      if (!encode_device) {
+        BOOST_LOG(debug) << "Live GPU capture probe could not create an encode device for conversion validation"sv;
+        return false;
+      }
+
+      auto session = make_encode_session(disp.get(), *chosen_encoder, config, frame.width, frame.height, std::move(encode_device));
+      if (!session) {
+        BOOST_LOG(debug) << "Live GPU capture probe could not create an encode session for conversion validation"sv;
+        return false;
+      }
+
+      if (session->convert(frame)) {
+        BOOST_LOG(debug) << "Live GPU capture probe received a DMA-BUF frame but conversion failed"sv;
+        return false;
+      }
+
+      return true;
     }
 
     return false;

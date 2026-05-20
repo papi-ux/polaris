@@ -36,7 +36,7 @@ using frame_t = util::safe_ptr<AVFrame, free_frame>;
 
 namespace gl {
   extern GladGLContext ctx;
-  void drain_errors(const std::string_view &prefix);
+  bool drain_errors(const std::string_view &prefix);
 
   class tex_t: public util::buffer_t<GLuint> {
     using util::buffer_t<GLuint>::buffer_t;

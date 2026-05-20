@@ -158,6 +158,15 @@ namespace cage_display_router {
   void update_headless_extcopy_dmabuf_probe_result(bool supported);
 
   /**
+   * @brief Returns whether the headless extcopy DMA-BUF probe has validated
+   *        enough of the path to be selected for a real stream.
+   */
+  bool headless_extcopy_dmabuf_probe_succeeded(
+    bool capture_initialized,
+    bool live_gpu_frame_converted
+  );
+
+  /**
    * @brief Returns whether RAM-capture fallback logging should describe the
    *        current labwc runtime as headless.
    */
