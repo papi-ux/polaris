@@ -117,8 +117,7 @@ namespace video {
       std::string_view codec_name,
       nvenc::nvenc_split_encode_mode mode
     ) {
-      if (!should_apply_nvenc_split_encode_mode(encoder_name, codec_name) ||
-          mode == nvenc::nvenc_split_encode_mode::disabled) {
+      if (!should_apply_nvenc_split_encode_mode(encoder_name, codec_name)) {
         return std::nullopt;
       }
 
@@ -152,19 +151,13 @@ namespace video {
         };
       }
 
-      if (mode == nvenc::nvenc_split_encode_mode::disabled) {
-        return {
-          split_encode_action_e::disabled,
-          std::nullopt,
-          false
-        };
-      }
-
       if (!has_private_option) {
         return {
-          split_encode_action_e::missing_ffmpeg_option,
+          mode == nvenc::nvenc_split_encode_mode::disabled ?
+            split_encode_action_e::disabled :
+            split_encode_action_e::missing_ffmpeg_option,
           std::nullopt,
-          true
+          mode != nvenc::nvenc_split_encode_mode::disabled
         };
       }
 

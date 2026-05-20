@@ -9,19 +9,14 @@ export const test = base.extend({
     }
 
     await page.context().clearCookies()
-    const response = await page.request.post('/api/login', {
-      data: {
-        username: user,
-        password: pass,
-      },
-    })
-    if (!response.ok()) {
-      const body = await response.text().catch(() => '')
-      throw new Error(`Login setup failed with ${response.status()}: ${body}`)
-    }
-
-    await page.goto('/#/')
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 15000 })
+    await page.goto('/#/login')
+    const nav = page.getByRole('navigation')
+    const loginButton = page.getByRole('button', { name: /^login$/i })
+    await expect(loginButton).toBeVisible({ timeout: 15000 })
+    await page.getByRole('textbox', { name: /^username$/i }).fill(user)
+    await page.getByRole('textbox', { name: /^password$/i }).fill(pass)
+    await loginButton.click()
+    await expect(nav).toBeVisible({ timeout: 15000 })
     await use(page)
   },
 })

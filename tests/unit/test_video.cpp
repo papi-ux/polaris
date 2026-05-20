@@ -204,12 +204,25 @@ TEST(VideoNvencSplitEncodeModeTests, DecidesToApplySupportedRequestedModeWhenFfm
   EXPECT_FALSE(decision.should_warn);
 }
 
-TEST(VideoNvencSplitEncodeModeTests, DecidesDisabledModeSkipsWithoutWarning) {
+TEST(VideoNvencSplitEncodeModeTests, DecidesDisabledModeAppliesExplicitFfmpegDisableWhenOptionExists) {
   const auto decision = video::nvenc_split_encode_mode_decision_for_tests(
     "nvenc",
     "hevc_nvenc",
     nvenc::nvenc_split_encode_mode::disabled,
     true
+  );
+
+  EXPECT_EQ(decision.decision, video::nvenc_split_encode_mode_decision_e::apply);
+  EXPECT_EQ(decision.ffmpeg_value, 15);
+  EXPECT_FALSE(decision.should_warn);
+}
+
+TEST(VideoNvencSplitEncodeModeTests, DecidesDisabledModeSkipsWithoutWarningWhenFfmpegOptionIsMissing) {
+  const auto decision = video::nvenc_split_encode_mode_decision_for_tests(
+    "nvenc",
+    "hevc_nvenc",
+    nvenc::nvenc_split_encode_mode::disabled,
+    false
   );
 
   EXPECT_EQ(decision.decision, video::nvenc_split_encode_mode_decision_e::disabled);

@@ -15,6 +15,7 @@
 #include <src/nvhttp.h>
 
 using namespace nvhttp;
+using namespace std::literals;
 
 struct pairing_input {
   std::shared_ptr<pair_session_t> session;
@@ -87,6 +88,7 @@ struct PairingTest: testing::TestWithParam<std::tuple<pairing_input, pairing_out
   void SetUp() override {
     previous_fresh_state = config::sunshine.flags.test(config::flag::FRESH_STATE);
     config::sunshine.flags.set(config::flag::FRESH_STATE);
+    reset_pairing_state_for_tests();
 
     std::string host_uuid = "12345678-1234-1234-1234-1234567890ab";
     http::uuid = uuid_util::uuid_t::parse(host_uuid);
@@ -308,4 +310,106 @@ TEST(CertChainTest, ConcurrentVerifyUsesIndependentOpenSslContexts) {
   }
 
   EXPECT_EQ(failures.load(std::memory_order_relaxed), 0);
+}
+
+struct PairingAccessPresetTest: testing::Test {
+  void SetUp() override {
+    previous_fresh_state = config::sunshine.flags.test(config::flag::FRESH_STATE);
+    config::sunshine.flags.set(config::flag::FRESH_STATE);
+    reset_pairing_state_for_tests();
+
+    std::string host_uuid = "12345678-1234-1234-1234-1234567890ab";
+    http::uuid = uuid_util::uuid_t::parse(host_uuid);
+    http::unique_id = http::uuid.string();
+    setup(PRIVATE_KEY, PUBLIC_CERT);
+  }
+
+  void TearDown() override {
+    reset_pairing_state_for_tests();
+    config::sunshine.flags.set(config::flag::FRESH_STATE, previous_fresh_state);
+  }
+
+  bool previous_fresh_state = false;
+};
+
+pair_session_t successful_pairing_session(const std::string &unique_id, std::optional<crypto::PERM> pairing_perm = std::nullopt) {
+  pair_session_t session {
+    .client = {
+      .uniqueID = unique_id,
+      .cert = PUBLIC_CERT,
+      .name = "test-" + unique_id
+    },
+    .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"},
+    .pairing_perm = pairing_perm
+  };
+  return session;
+}
+
+void complete_successful_pairing(pair_session_t &session) {
+  boost::property_tree::ptree tree;
+
+  getservercert(session, tree, "5338");
+  ASSERT_EQ(tree.get<int>("root.paired"), 1);
+
+  clientchallenge(session, tree, util::from_hex_vec("741CD3D6890C16DA39D53BCA0893AAF0", true));
+  ASSERT_EQ(tree.get<int>("root.paired"), 1);
+
+  serverchallengeresp(session, tree, util::from_hex_vec("920BABAE9F7599AA1CA8EC87FB3454C91872A7D8D5127DDC176C2FDAE635CF7A", true));
+  ASSERT_EQ(tree.get<int>("root.paired"), 1);
+
+  session.serverchallenge = util::from_hex_vec("AAAAAAAAAAAAAAAA", true);
+  clientpairingsecret(
+    session,
+    tree,
+    util::from_hex_vec("000102030405060708090A0B0C0D0EFF"
+                       "9BB74D8DE2FF006C3F47FC45EFDAA97D433783AFAB3ACD85CA7ED2330BB2A7BD18A5B044AF8CAC177116FAE8A6E8E44653A8944A0F8EA138B2E013756D847D2C4FC52F736E2E7E9B4154712B18F8307B2A161E010F0587744163E42ECA9EA548FC435756EDCF1FEB94037631ABB72B29DDAC0EA5E61F2DBFCC3B20AA021473CC85AC98D88052CA6618ED1701EFBF142C18D5E779A3155B84DF65057D4823EC194E6DF14006793E8D7A3DCCE20A911636C4E01ECA8B54B9DE9F256F15DE9A980EA024B30D77579140D45EC220C738164BDEEEBF7364AE94A5FF9B784B40F2E640CE8603017DEEAC7B2AD77B807C643B7B349C110FE15F94C7B3D37FF15FDFBE26",
+                       true)
+  );
+  ASSERT_EQ(tree.get<int>("root.paired"), 1);
+}
+
+TEST_F(PairingAccessPresetTest, ParsesAccessPresets) {
+  const auto standard = pairing_access_preset_from_view("standard");
+  ASSERT_TRUE(standard);
+  EXPECT_EQ(pairing_access_preset_perm(*standard), crypto::PERM::_default);
+  EXPECT_EQ(pairing_access_preset_name(*standard), "standard"sv);
+
+  const auto game_control = pairing_access_preset_from_view("game_control");
+  ASSERT_TRUE(game_control);
+  EXPECT_EQ(pairing_access_preset_perm(*game_control), crypto::PERM::_game_control);
+  EXPECT_EQ(
+    static_cast<uint32_t>(pairing_access_preset_perm(*game_control) & crypto::PERM::_all_opeiations),
+    0U
+  );
+  EXPECT_EQ(pairing_access_preset_name(*game_control), "game_control"sv);
+
+  const auto full = pairing_access_preset_from_view("full");
+  ASSERT_TRUE(full);
+  EXPECT_EQ(pairing_access_preset_perm(*full), crypto::PERM::_all);
+  EXPECT_EQ(pairing_access_preset_name(*full), "full"sv);
+
+  EXPECT_FALSE(pairing_access_preset_from_view("invalid"));
+}
+
+TEST_F(PairingAccessPresetTest, StoredAccessPresetOverridesFirstPairFullDefault) {
+  auto session = successful_pairing_session("game-control", crypto::PERM::_game_control);
+
+  complete_successful_pairing(session);
+
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
+}
+
+TEST_F(PairingAccessPresetTest, LegacyPairingKeepsFirstFullThenStandardBehavior) {
+  auto first = successful_pairing_session("legacy-first");
+  complete_successful_pairing(first);
+
+  auto second = successful_pairing_session("legacy-second");
+  complete_successful_pairing(second);
+
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 2);
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_all));
+  EXPECT_EQ(clients[1]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_default));
 }

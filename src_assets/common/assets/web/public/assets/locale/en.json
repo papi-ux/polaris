@@ -711,7 +711,7 @@
     "sync_ready_badge": "Nova sync ready",
     "sync_pending_badge": "Sync pending",
     "sync_unavailable_badge": "Sync unavailable",
-    "sync_ready_desc": "Nova can update live bitrate, AI Auto Quality, and next-stream display choices here.",
+    "sync_ready_desc": "Nova can update live bitrate, Auto Quality, and next-stream display choices here.",
     "sync_pending_desc": "Polaris saved the requested display mode and will apply it after the active stream relaunches.",
     "sync_unavailable_desc": "This host has not advertised the Nova client-settings endpoint yet.",
     "restart_badge": "Restart",
@@ -721,11 +721,11 @@
         "desc": "Start sessions on a hidden stream-only display."
       },
       "adaptive_bitrate_enabled": {
-        "label": "AI Auto Quality Bitrate Recovery",
-        "desc": "Controlled by the AI Auto Quality toggle."
+        "label": "Auto Quality Bitrate Recovery",
+        "desc": "Controlled by the Auto Quality toggle."
       },
       "ai_enabled": {
-        "label": "AI Auto Quality",
+        "label": "Auto Quality",
         "desc": "Balance FPS, bitrate, and per-game tuning automatically."
       },
       "stream_audio": {
@@ -959,6 +959,7 @@
     "enable_hdr": "Enable HDR",
     "fine_tune_permissions": "Fine-Tune Permissions",
     "full_control": "Full Control",
+    "game_control_access": "Game Control",
     "generate_qr": "Generate QR Code",
     "host_address": "Host Address",
     "host_address_placeholder": "e.g. 10.0.0.10",
@@ -987,8 +988,12 @@
     "pair_device_desc": "Choose how a new client should join Polaris. Nova QR is fastest, Trusted Network is best for known LAN devices, and Manual PIN stays available for everything else.",
     "pair_device_title": "Choose a Pairing Method",
     "pair_success": "Success! Please check Moonlight to continue",
-    "pair_success_check_perm": "Pair success! Please grant necessary permissions to the client manually below.",
+    "pair_success_access_applied": "Pair success. {access} was applied.",
+    "pair_success_check_perm": "Pair success. The selected access level was applied.",
     "paired_devices": "paired devices",
+    "pairing_access": "Pairing Access",
+    "pairing_access_desc": "This preset is attached to the pairing ticket before the device joins.",
+    "pairing_access_title": "Access for this device",
     "pin_pairing": "PIN Pairing",
     "pin_code": "PIN Code",
     "pin_code_placeholder": "Enter the pairing PIN",
@@ -1028,6 +1033,7 @@
     "otp_expired_msg": "OTP expired. Please request a new one.",
     "otp_request_failed": "Unable to generate a QR code right now. Please try again.",
     "otp_success": "PIN request success, the PIN is available within 3 minutes.",
+    "otp_success_access": "PIN request success. {access} will be applied when the device pairs.",
     "otp_msg": "OTP pairing is only available for the latest Nova clients. Please use legacy pairing method for other clients.",
     "otp_pair_now": "PIN generated successfully, do you want to pair now?",
     "device_management": "Device Management",

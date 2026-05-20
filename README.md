@@ -69,14 +69,14 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.0.18
+## What's New in v1.1.0
 
-Polaris `v1.0.18` is a Shield, Retroid, and Android TV resolution hotfix for Polaris-backed launches.
+Polaris `v1.1.0` focuses on web-console polish, Library workflows, safer pairing defaults, and NVENC split-frame hardening.
 
-- Cached AI launch profiles are now bounded by the explicit client display request, so a stale 720p cache cannot force a 1080p-capable client back to 720p.
-- Confirmed history-safe recovery profiles can still lower resolution or FPS when a recent session needs a safer target.
-- Nova `v1.0.10` pairs with this fix by migrating upgraded Android installs to Balanced 1080p and keeping cached Auto Safe profiles above a 1080p floor.
-- Shield direct-launch smoke now confirms `1920x1080x60` at the Nova request, Polaris-selected mode, labwc headless runtime, and Android decoder.
+- Mission Control and Library screens are easier to scan, with cleaner degraded-state handling, app editing, and import flow polish.
+- Auto Quality labels now use clearer stream-profile language across the web UI.
+- Pairing can apply the new `Game Control` access preset up front, giving Nova and Moonlight devices launch plus input permissions without clipboard, file transfer, or server-command access.
+- NVENC split-frame encoding remains experimental, and the disabled default now explicitly maps to FFmpeg's disabled split-frame value when supported.
 
 See the [changelog](docs/changelog.md) for the full release history.
 

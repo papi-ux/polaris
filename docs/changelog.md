@@ -7,6 +7,17 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.1.0
+
+Feature release focused on the Polaris web console, Library workflows, safer pairing defaults, and NVENC split-frame hardening.
+
+- Polished Mission Control degraded-state handling and Library management flows so active sessions, imports, and app editing are easier to scan and manage
+- Renamed Auto Quality UI surfaces toward clearer stream-profile language
+- Added a server-authoritative `Game Control` pairing access preset for QR/OTP and manual PIN pairing, granting list/view/launch plus input permissions without clipboard, file transfer, or server-command access
+- Labeled paired clients with the exact Game Control permission mask as `Game Control` instead of `Custom Access`
+- Hardened NVENC split-frame defaults by explicitly passing FFmpeg's disabled split-frame value when split-frame encoding is disabled
+- Added web, pairing, and video regression coverage for the new access preset and split-frame default behavior
+
 ## v1.0.18
 
 Hotfix release focused on keeping cached AI launch profiles from forcing capable clients back to 720p.

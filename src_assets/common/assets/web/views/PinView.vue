@@ -59,6 +59,35 @@
         </div>
       </div>
 
+      <div v-if="currentTab !== 'TOFU'" class="mt-5 rounded-xl border border-storm/20 bg-void/40 p-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div class="min-w-0">
+            <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.pairing_access') }}</div>
+            <h3 class="mt-2 text-base font-semibold text-silver">{{ $t('pin.pairing_access_title') }}</h3>
+            <p class="mt-1 text-sm text-storm">{{ $t('pin.pairing_access_desc') }}</p>
+          </div>
+          <span class="rounded-full border px-2.5 py-1 text-xs font-medium" :class="accessToneClass(permissionPresetMask(selectedAccessPreset) || 0)">
+            {{ selectedPairingAccessLabel }}
+          </span>
+        </div>
+        <div class="mt-4 flex flex-wrap gap-2" role="radiogroup" :aria-label="$t('pin.pairing_access_title')">
+          <button
+            v-for="preset in pairingPermissionPresets"
+            :key="preset.key"
+            type="button"
+            role="radio"
+            class="rounded-lg border px-3 py-2 text-sm font-medium transition-all duration-200"
+            :class="selectedAccessPreset === preset.key
+              ? preset.activeClass
+              : 'border-storm/30 bg-deep/40 text-storm hover:border-storm/50 hover:text-silver'"
+            :aria-checked="selectedAccessPreset === preset.key"
+            @click="selectedAccessPreset = preset.key"
+          >
+            {{ $t(preset.labelKey) }}
+          </button>
+        </div>
+      </div>
+
       <div class="pairing-stage mt-5">
         <div class="pairing-main space-y-4">
           <section v-if="currentTab === 'TOFU'" class="surface-subtle p-5">
@@ -891,6 +920,7 @@ import { useAiOptimizer } from '../composables/useAiOptimizer'
 import {
   useClients,
   permissionMapping, permissionGroups,
+  permissionPresetKey, permissionPresetMask,
   permToStr, checkPermission, isSuppressed
 } from '../composables/useClients'
 
@@ -924,11 +954,17 @@ const permissionPresets = [
     activeClass: 'border-ice/40 bg-ice/10 text-ice',
   },
   {
+    key: 'game_control',
+    labelKey: 'pin.game_control_access',
+    activeClass: 'border-green-400/40 bg-green-400/10 text-green-200',
+  },
+  {
     key: 'full',
     labelKey: 'pin.full_control',
     activeClass: 'border-red-400/40 bg-red-400/10 text-red-200',
   },
 ]
+const pairingPermissionPresets = permissionPresets.filter((preset) => ['standard', 'game_control', 'full'].includes(preset.key))
 
 let resetOTPTimeout = null
 let qrContainer = null
@@ -1151,6 +1187,7 @@ const pinCode = ref('')
 const pinDeviceName = ref('')
 const pinMessage = ref('')
 const pinStatus = ref('error')
+const selectedAccessPreset = ref('standard')
 
 function resetState() {
   editingHost.value = false
@@ -1197,6 +1234,10 @@ const activePairingMethod = computed(() =>
   pairingMethods.find((method) => method.key === currentTab.value) || pairingMethods[0]
 )
 const activePairingMethodLabel = computed(() => i18n.t(activePairingMethod.value.titleKey))
+const selectedPairingAccessLabel = computed(() => {
+  const preset = permissionPresets.find((item) => item.key === selectedAccessPreset.value)
+  return i18n.t(preset?.labelKey || 'pin.standard_access')
+})
 const activePairingSummary = computed(() => {
   if (currentTab.value === 'TOFU') {
     return 'Fast on a trusted LAN, but only appropriate when you fully control the network boundary.'
@@ -1252,17 +1293,21 @@ function registerDevice() {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
-    body: JSON.stringify({ pin: pinCode.value, name: pinDeviceName.value })
+    body: JSON.stringify({
+      pin: pinCode.value,
+      name: pinDeviceName.value,
+      access_preset: selectedAccessPreset.value,
+    })
   })
     .then((response) => response.json())
     .then((response) => {
       if (response.status === true) {
         pinStatus.value = 'success'
-        pinMessage.value = i18n.t('pin.pair_success')
+        pinMessage.value = i18n.t('pin.pair_success_access_applied', { access: selectedPairingAccessLabel.value })
         pinCode.value = ''
         pinDeviceName.value = ''
         setTimeout(() => refreshClients(), 1000)
-        showToast(i18n.t('pin.pair_success_check_perm'), 'success')
+        showToast(i18n.t('pin.pair_success_access_applied', { access: selectedPairingAccessLabel.value }), 'success')
       } else {
         pinStatus.value = 'error'
         pinMessage.value = i18n.t('pin.pair_failure')
@@ -1280,7 +1325,11 @@ async function requestOTP() {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
-    body: JSON.stringify({ passphrase: passphrase.value, deviceName: deviceName.value })
+    body: JSON.stringify({
+      passphrase: passphrase.value,
+      deviceName: deviceName.value,
+      access_preset: selectedAccessPreset.value,
+    })
   })
     .then(resp => resp.json())
     .then(async resp => {
@@ -1292,7 +1341,7 @@ async function requestOTP() {
       otp.value = resp.otp
       hostName.value = resp.name
       otpStatus.value = 'success'
-      otpMessage.value = i18n.t('pin.otp_success')
+      otpMessage.value = i18n.t('pin.otp_success_access', { access: selectedPairingAccessLabel.value })
 
       const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
 
@@ -1350,17 +1399,12 @@ function removeCmd(arr, idx) {
   arr.splice(idx, 1)
 }
 
-function permissionPresetKey(perm) {
-  if ((perm & permissionMapping._all) === permissionMapping._all) return 'full'
-  if (perm === permissionMapping._default) return 'standard'
-  if (perm === permissionMapping.view || perm === permissionMapping.list || perm === permissionMapping._allow_view) return 'viewer'
-  return 'custom'
-}
-
 function accessPresetLabel(perm) {
   switch (permissionPresetKey(perm)) {
     case 'full':
       return i18n.t('pin.full_control')
+    case 'game_control':
+      return i18n.t('pin.game_control_access')
     case 'standard':
       return i18n.t('pin.standard_access')
     case 'viewer':
@@ -1374,6 +1418,8 @@ function accessToneClass(perm) {
   switch (permissionPresetKey(perm)) {
     case 'full':
       return 'border-red-400/30 bg-red-400/10 text-red-200'
+    case 'game_control':
+      return 'border-green-400/30 bg-green-400/10 text-green-200'
     case 'standard':
       return 'border-ice/30 bg-ice/10 text-ice'
     case 'viewer':
@@ -1384,17 +1430,8 @@ function accessToneClass(perm) {
 }
 
 function applyPermissionPreset(client, preset) {
-  switch (preset) {
-    case 'viewer':
-      client.editPerm = permissionMapping.view
-      break
-    case 'standard':
-      client.editPerm = permissionMapping._default
-      break
-    case 'full':
-      client.editPerm = permissionMapping._all
-      break
-  }
+  const nextPerm = permissionPresetMask(preset)
+  if (nextPerm !== null) client.editPerm = nextPerm
 }
 
 function colorRangeLabel(colorRange) {
