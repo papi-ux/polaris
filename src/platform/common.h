@@ -355,6 +355,7 @@ namespace platf {
     frame_transport_e transport {frame_transport_e::unknown};
     frame_residency_e residency {frame_residency_e::unknown};
     frame_format_e format {frame_format_e::unknown};
+    std::string device;
   };
 
   struct runtime_state_t {

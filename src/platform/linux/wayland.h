@@ -7,6 +7,7 @@
 // standard includes
 #include <bitset>
 #include <sys/types.h>
+#include <string>
 #include <string_view>
 
 #ifdef POLARIS_BUILD_WAYLAND
@@ -198,6 +199,10 @@ namespace wl {
       return current_frame == &frames[0] ? &frames[1] : &frames[0];
     }
 
+    std::string capture_render_node() const {
+      return render_node;
+    }
+
     status_e status;
     std::array<frame_t, 2> frames;
     frame_t *current_frame;
@@ -242,6 +247,7 @@ namespace wl {
     ext_image_copy_capture_session_v1 *capture_session {nullptr};
     ext_image_copy_capture_frame_v1 *capture_frame_object {nullptr};
     ::gbm_device *gbm_device {nullptr};
+    std::string render_node;
     dev_t gbm_device_id {};
     bool gbm_device_id_valid {false};
     bool blend_cursor {false};

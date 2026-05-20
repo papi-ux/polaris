@@ -634,6 +634,7 @@ namespace wl {
         .transport = platf::frame_transport_e::dmabuf,
         .residency = platf::frame_residency_e::gpu,
         .format = platf::frame_format_e::bgra8,
+        .device = extcopy.capture_render_node(),
       };
       stream_stats::update_capture_metadata(img->frame_metadata);
       log_capture_metadata(img->frame_metadata);
@@ -773,17 +774,31 @@ namespace platf {
     if (try_headless_extcopy_dmabuf && gpu_native_capture_supported) {
       auto wlr = std::make_shared<wl::wlr_extcopy_vram_t>();
       if (!wlr->init(hwdevice_type, display_name, config)) {
+        const auto capture_render_node = wlr->extcopy.capture_render_node();
+        if (!config::video.adapter_name.empty() &&
+            !capture_render_node.empty() &&
+            config::video.adapter_name != capture_render_node) {
+          BOOST_LOG(warning)
+            << "wlr: Disabling true-headless ext-image-copy-capture DMA-BUF because capture render_node=["sv
+            << capture_render_node
+            << "] differs from encoder adapter=["sv << config::video.adapter_name
+            << "]; using SHM/system-memory fallback to avoid known cross-GPU black video"sv;
 #ifdef __linux__
-        cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+          cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
-        BOOST_LOG(info) << "wlr: Using ext-image-copy-capture DMA-BUF for headless labwc"sv;
-        return wlr;
+        } else {
+#ifdef __linux__
+          cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+#endif
+          BOOST_LOG(info) << "wlr: Using ext-image-copy-capture DMA-BUF for headless labwc"sv;
+          return wlr;
+        }
       }
 
 #ifdef __linux__
       cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
-      BOOST_LOG(info) << "wlr: Headless ext-image-copy-capture DMA-BUF unavailable; using SHM fallback"sv;
+      BOOST_LOG(info) << "wlr: Headless ext-image-copy-capture DMA-BUF unavailable or unsafe; using SHM fallback"sv;
     }
 
     auto wlr = std::make_shared<wl::wlr_ram_t>();
