@@ -60,11 +60,15 @@ namespace gl {
     return std::filesystem::path {POLARIS_SHADERS_DIR} / std::string {shader_name};
   }
 
-  void drain_errors(const std::string_view &prefix) {
+  bool drain_errors(const std::string_view &prefix) {
     GLenum err;
+    bool drained = false;
     while ((err = ctx.GetError()) != GL_NO_ERROR) {
+      drained = true;
       BOOST_LOG(error) << "GL: "sv << prefix << ": ["sv << util::hex(err).to_string_view() << ']';
     }
+
+    return drained;
   }
 
   tex_t::~tex_t() {
@@ -586,7 +590,9 @@ namespace egl {
 
     gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
 
-    gl_drain_errors;
+    if (gl_drain_errors) {
+      return std::nullopt;
+    }
 
     return rgb;
   }

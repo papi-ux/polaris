@@ -180,6 +180,12 @@ TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeResultCachesSuccess
   EXPECT_EQ(cage_display_router::cached_headless_extcopy_dmabuf_probe_result(), std::optional<bool> {true});
 }
 
+TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeRequiresLiveFrameConversion) {
+  EXPECT_FALSE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(false, false));
+  EXPECT_FALSE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(true, false));
+  EXPECT_TRUE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(true, true));
+}
+
 TEST(CageDisplayRouterPolicyTests, MangoHudPrefixIsSuppressedForSteamBigPicture) {
   EXPECT_TRUE(cage_display_router::mangohud_prefix_for_command_for_tests(
     "steam -gamepadui",

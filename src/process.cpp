@@ -2908,9 +2908,18 @@ namespace proc {
         return false;
       }
 
-      if (cage_display_router::cached_headless_extcopy_dmabuf_probe_result() != std::optional<bool> {true}) {
+      const bool extcopy_initialized =
+        cage_display_router::cached_headless_extcopy_dmabuf_probe_result() == std::optional<bool> {true};
+      const bool live_gpu_frame_converted =
+        extcopy_initialized && video::active_encoder_runtime_supports_live_gpu_capture(gpu_native_probe_config);
+
+      if (!cage_display_router::headless_extcopy_dmabuf_probe_succeeded(extcopy_initialized, live_gpu_frame_converted)) {
         cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
-        BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not initialize DMA-BUF capture"sv;
+        if (!extcopy_initialized) {
+          BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not initialize DMA-BUF capture"sv;
+        } else {
+          BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not validate live GPU frame conversion"sv;
+        }
         return false;
       }
 

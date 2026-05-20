@@ -521,10 +521,11 @@ namespace video {
   bool active_encoder_runtime_supports_config(const config_t &config);
 
   /**
-   * @brief Validate that the active encoder can capture at least one live GPU-native frame right now.
+   * @brief Validate that the active encoder can capture and convert at least one live GPU-native frame right now.
    * @details This is intended for runtime probes where a dummy encode session is not enough and we need
-   *          to confirm that the current display path is actually delivering DMA-BUF resident frames.
-   * @return True when a live frame arrives with DMA-BUF transport and GPU residency.
+   *          to confirm that the current display path is actually delivering DMA-BUF resident frames
+   *          that survive the active encoder conversion path.
+   * @return True when a live frame arrives with DMA-BUF transport/GPU residency and converts successfully.
    */
   bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config);
 
