@@ -20,6 +20,8 @@ namespace {
     bool dbus_clears_lock = false;
     bool loginctl_run_ok = true;
     bool loginctl_clears_lock = false;
+    std::string loginctl_command_that_clears;
+    std::string loginctl_list_sessions_output;
     std::vector<std::string> run_commands;
 
     SessionManagerCommandHarness() {
@@ -27,6 +29,9 @@ namespace {
         [this](const std::string &cmd) {
           if (cmd.find("org.freedesktop.ScreenSaver.GetActive") != std::string::npos) {
             return locked ? std::string {"true"} : std::string {"false"};
+          }
+          if (cmd.find("loginctl list-sessions") != std::string::npos) {
+            return loginctl_list_sessions_output;
           }
           return std::string {};
         },
@@ -41,7 +46,10 @@ namespace {
 
           if (cmd.find("loginctl unlock-session") != std::string::npos ||
               cmd.find("loginctl unlock-sessions") != std::string::npos) {
-            if (loginctl_run_ok && loginctl_clears_lock) {
+            const bool clears_expected_session =
+              loginctl_command_that_clears.empty() ||
+              cmd.find(loginctl_command_that_clears) != std::string::npos;
+            if (loginctl_run_ok && loginctl_clears_lock && clears_expected_session) {
               locked = false;
             }
             return loginctl_run_ok;
@@ -97,6 +105,24 @@ TEST(SessionManagerUnlockTests, DbusSuccessStillLockedUsesSessionLoginctlFallbac
   EXPECT_FALSE(harness.locked);
   EXPECT_TRUE(harness.ran("org.freedesktop.ScreenSaver.SetActive"));
   EXPECT_TRUE(harness.ran("loginctl unlock-session 'alpha'\\''beta'"));
+}
+
+TEST(SessionManagerUnlockTests, ManagerSessionIdFallsBackToGraphicalLoginctlSession) {
+  SessionManagerCommandHarness harness;
+  harness.loginctl_clears_lock = true;
+  harness.loginctl_command_that_clears = "loginctl unlock-session '1'";
+  const char *user = std::getenv("USER");
+  ASSERT_NE(nullptr, user);
+  harness.loginctl_list_sessions_output =
+    "1 1000 " + std::string {user} + " seat0 2134 user tty1 no -\n"
+    "2 1000 " + std::string {user} + " - 2197 manager - no -";
+  setenv("XDG_SESSION_ID", "2", 1);
+
+  EXPECT_TRUE(session_manager::unlock_screen());
+
+  EXPECT_FALSE(harness.locked);
+  EXPECT_TRUE(harness.ran("loginctl unlock-session '1'"));
+  EXPECT_FALSE(harness.ran("loginctl unlock-session '2'"));
 }
 
 TEST(SessionManagerUnlockTests, MissingSessionIdUsesAllSessionsLoginctlFallback) {

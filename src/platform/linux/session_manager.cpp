@@ -26,6 +26,7 @@
 #ifdef POLARIS_TESTS
   #include <functional>
 #endif
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -108,10 +109,72 @@ namespace session_manager {
     return !is_screen_locked();
   }
 
+  struct loginctl_session_t {
+    std::string id;
+    std::string user;
+    std::string seat;
+    std::string session_class;
+    bool valid = false;
+
+    bool is_graphical_user_session(std::string_view current_user) const {
+      return valid &&
+             session_class == "user" &&
+             !seat.empty() &&
+             seat != "-" &&
+             (current_user.empty() || user == current_user);
+    }
+  };
+
+  static loginctl_session_t parse_loginctl_session_line(const std::string &line) {
+    loginctl_session_t session;
+    std::string uid;
+    std::string leader;
+    std::istringstream input {line};
+    if (input >> session.id >> uid >> session.user >> session.seat >> leader >> session.session_class) {
+      session.valid = true;
+    }
+    return session;
+  }
+
+  static std::string select_loginctl_session_for_unlock() {
+    const char *env_session_id = std::getenv("XDG_SESSION_ID");
+    const std::string xdg_session_id =
+      (env_session_id && env_session_id[0] != '\0') ? env_session_id : "";
+    const char *env_user = std::getenv("USER");
+    const std::string current_user = (env_user && env_user[0] != '\0') ? env_user : "";
+
+    auto sessions = exec("loginctl list-sessions --no-legend 2>/dev/null");
+    std::istringstream lines {sessions};
+    std::string line;
+    std::string graphical_session_id;
+    bool xdg_session_is_graphical = false;
+
+    while (std::getline(lines, line)) {
+      const auto session = parse_loginctl_session_line(line);
+      if (!session.is_graphical_user_session(current_user)) {
+        continue;
+      }
+      if (graphical_session_id.empty()) {
+        graphical_session_id = session.id;
+      }
+      if (!xdg_session_id.empty() && session.id == xdg_session_id) {
+        xdg_session_is_graphical = true;
+      }
+    }
+
+    if (xdg_session_is_graphical) {
+      return xdg_session_id;
+    }
+    if (!graphical_session_id.empty()) {
+      return graphical_session_id;
+    }
+    return xdg_session_id;
+  }
+
   static bool unlock_with_loginctl() {
-    const char *session_id = std::getenv("XDG_SESSION_ID");
+    const std::string session_id = select_loginctl_session_for_unlock();
     std::string cmd;
-    if (session_id && session_id[0] != '\0') {
+    if (!session_id.empty()) {
       BOOST_LOG(info) << "session_manager: Attempting loginctl unlock for session "sv << session_id;
       cmd = "loginctl unlock-session " + shell_quote(session_id) + " 2>/dev/null";
     } else {
