@@ -37,6 +37,7 @@
 .vscode/
 .codex
 .claude/
+.hermes/
 .superpowers/
 .private/
 AGENTS.md
