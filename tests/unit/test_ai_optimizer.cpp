@@ -30,11 +30,11 @@ namespace {
 TEST(AiOptimizerCodexHome, UsesExplicitCodexHomeWhenConfigured) {
   auto resolved = ai_optimizer::resolve_codex_home_for_subscription(
     "/tmp/polaris-profile-home",
-    "/home/papi/.codex"
+    "/tmp/codex-home"
   );
 
   ASSERT_TRUE(resolved.has_value());
-  EXPECT_EQ("/home/papi/.codex", *resolved);
+  EXPECT_EQ("/tmp/codex-home", *resolved);
 }
 
 TEST(AiOptimizerCodexHome, FallsBackToRuntimeHomeCodexDirectory) {
