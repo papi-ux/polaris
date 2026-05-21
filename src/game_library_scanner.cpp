@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <fstream>
 #include <set>
@@ -15,8 +16,35 @@
 
 #include <nlohmann/json.hpp>
 
+#if !defined(_WIN32)
+  #include <pwd.h>
+  #include <sys/types.h>
+  #include <unistd.h>
+#endif
+
 namespace game_library {
   namespace {
+    void append_unique_path(std::vector<std::filesystem::path> &paths, std::filesystem::path path) {
+      if (path.empty()) {
+        return;
+      }
+
+      path = path.lexically_normal();
+      if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+        paths.push_back(std::move(path));
+      }
+    }
+
+    std::string account_home_dir() {
+    #if !defined(_WIN32)
+      const auto *entry = getpwuid(getuid());
+      if (entry && entry->pw_dir && *entry->pw_dir) {
+        return entry->pw_dir;
+      }
+    #endif
+      return {};
+    }
+
     std::string trim_copy(std::string_view text) {
       auto begin = text.begin();
       auto end = text.end();
@@ -187,6 +215,18 @@ namespace game_library {
     return std::all_of(slug.begin(), slug.end(), [](unsigned char ch) {
       return std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.';
     });
+  }
+
+  std::vector<std::filesystem::path> library_home_roots(std::string_view runtime_home, std::string_view account_home) {
+    std::vector<std::filesystem::path> roots;
+    append_unique_path(roots, std::filesystem::path(runtime_home));
+    append_unique_path(roots, std::filesystem::path(account_home));
+    return roots;
+  }
+
+  std::vector<std::filesystem::path> library_home_roots() {
+    const char *home = std::getenv("HOME");
+    return library_home_roots(home ? std::string_view(home) : std::string_view(), account_home_dir());
   }
 
   std::string lutris_launch_command(const std::string &slug) {
