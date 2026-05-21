@@ -1422,6 +1422,9 @@ namespace nvhttp {
       policy["capture_transport"] = platf::from_frame_transport(stats.capture_transport);
       policy["capture_residency"] = platf::from_frame_residency(stats.capture_residency);
       policy["capture_format"] = platf::from_frame_format(stats.capture_format);
+      policy["capture_device"] = stats.capture_device;
+      policy["capture_encoder_adapter"] = config::video.adapter_name;
+      policy["capture_cross_gpu_dmabuf_risk"] = stream_stats::capture_path_has_cross_gpu_dmabuf_risk(stats);
       policy["capture_decision"] = {
         {"path", capture_path},
         {"reason", capture_reason},
@@ -1429,6 +1432,9 @@ namespace nvhttp {
         {"transport", policy["capture_transport"]},
         {"residency", policy["capture_residency"]},
         {"format", policy["capture_format"]},
+        {"capture_device", policy["capture_device"]},
+        {"encoder_adapter", policy["capture_encoder_adapter"]},
+        {"cross_gpu_dmabuf_risk", policy["capture_cross_gpu_dmabuf_risk"]},
         {"cpu_copy", capture_cpu_copy},
         {"gpu_native", capture_gpu_native},
         {"runtime_backend", stats.runtime_backend},
@@ -4665,6 +4671,9 @@ namespace nvhttp {
       capture_info["transport"] = platf::from_frame_transport(stats.capture_transport);
       capture_info["residency"] = platf::from_frame_residency(stats.capture_residency);
       capture_info["format"] = platf::from_frame_format(stats.capture_format);
+      capture_info["device"] = stats.capture_device;
+      capture_info["encoder_adapter"] = config::video.adapter_name;
+      capture_info["cross_gpu_dmabuf_risk"] = stream_stats::capture_path_has_cross_gpu_dmabuf_risk(stats);
       capture_info["path"] = stream_stats::capture_path_summary(stats);
       const auto capture_reason = stream_stats::capture_path_reason(stats);
       capture_info["reason"] = capture_reason;
@@ -4678,6 +4687,9 @@ namespace nvhttp {
         {"transport", capture_info["transport"]},
         {"residency", capture_info["residency"]},
         {"format", capture_info["format"]},
+        {"capture_device", capture_info["device"]},
+        {"encoder_adapter", capture_info["encoder_adapter"]},
+        {"cross_gpu_dmabuf_risk", capture_info["cross_gpu_dmabuf_risk"]},
         {"cpu_copy", capture_info["cpu_copy"]},
         {"gpu_native", capture_info["gpu_native"]},
         {"runtime_backend", stats.runtime_backend.empty() ? "screencopy" : stats.runtime_backend},

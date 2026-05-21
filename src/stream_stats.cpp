@@ -107,6 +107,7 @@ namespace stream_stats {
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
+    j["capture_device"] = capture_device;
     const auto capture_path = capture_path_summary(*this);
     const auto capture_reason = capture_path_reason(*this);
     const auto capture_reason_message = capture_path_reason_message(capture_reason);
@@ -124,6 +125,9 @@ namespace stream_stats {
       {"transport", platf::from_frame_transport(capture_transport)},
       {"residency", platf::from_frame_residency(capture_residency)},
       {"format", platf::from_frame_format(capture_format)},
+      {"capture_device", capture_device},
+      {"encoder_adapter", config::video.adapter_name},
+      {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(*this)},
       {"cpu_copy", capture_cpu_copy},
       {"gpu_native", capture_gpu_native},
       {"runtime_backend", runtime_backend},
@@ -205,6 +209,21 @@ namespace stream_stats {
       stats.encode_target_residency == platf::frame_residency_e::gpu;
   }
 
+  bool capture_path_has_cross_gpu_dmabuf_risk(const stats_t &stats) {
+#ifdef __linux__
+    return
+      stats.runtime_effective_headless &&
+      config::video.linux_display.use_cage_compositor &&
+      stats.capture_transport == platf::frame_transport_e::dmabuf &&
+      stats.capture_residency == platf::frame_residency_e::gpu &&
+      !stats.capture_device.empty() &&
+      !config::video.adapter_name.empty() &&
+      stats.capture_device != config::video.adapter_name;
+#else
+    return false;
+#endif
+  }
+
   std::string capture_path_summary(const stats_t &stats) {
     const bool capture_unknown =
       stats.capture_transport == platf::frame_transport_e::unknown &&
@@ -245,6 +264,9 @@ namespace stream_stats {
 #ifdef __linux__
       const auto &linux_display = config::video.linux_display;
       if (stats.runtime_effective_headless && linux_display.use_cage_compositor) {
+        if (capture_path_has_cross_gpu_dmabuf_risk(stats)) {
+          return "headless_extcopy_dmabuf_cross_gpu_risk";
+        }
         return "headless_extcopy_dmabuf";
       }
       if (stats.runtime_gpu_native_override_active) {
@@ -291,6 +313,9 @@ namespace stream_stats {
     }
     if (reason == "headless_extcopy_dmabuf") {
       return "True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.";
+    }
+    if (reason == "headless_extcopy_dmabuf_cross_gpu_risk") {
+      return "True-headless DMA-BUF capture is using a different DRM render node than the configured encoder adapter; Polaris should fall back to SHM/system memory to avoid known cross-GPU black video.";
     }
     if (reason == "windowed_dmabuf_override") {
       return "Polaris is using a windowed private compositor so DMA-BUF/CUDA capture can stay GPU-resident.";
@@ -502,6 +527,7 @@ namespace stream_stats {
     current_stats.capture_transport = metadata.transport;
     current_stats.capture_residency = metadata.residency;
     current_stats.capture_format = metadata.format;
+    current_stats.capture_device = metadata.device;
   }
 
   void update_encode_path_metadata(const std::string &target_device,
