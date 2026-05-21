@@ -74,6 +74,173 @@
       </div>
     </section>
 
+    <section v-if="!showEditForm && showImport" class="section-card library-import-console">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div class="section-kicker">Import Console</div>
+          <div class="section-title-row">
+            <h2 class="section-title">Import games</h2>
+            <InfoHint size="sm" label="Import console">
+              Polaris can import games from supported sources, keep track of what is already published, and stage multiple entries before one import pass.
+            </InfoHint>
+          </div>
+        </div>
+        <div class="page-actions-secondary">
+          <Button variant="outline" @click="showImport = false">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
+            Hide Import
+          </Button>
+          <Button variant="outline" :disabled="gameScanning" @click="scanGames">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
+            {{ gameScanning ? 'Scanning...' : 'Rescan Sources' }}
+          </Button>
+        </div>
+      </div>
+
+      <div v-if="hasImportSources" class="library-import-overview">
+        <div class="library-import-metric">
+          <span>New</span>
+          <strong>{{ availableImportCount }}</strong>
+        </div>
+        <div class="library-import-metric">
+          <span>Staged</span>
+          <strong>{{ selectedImportCount }}</strong>
+        </div>
+        <div class="library-import-metric">
+          <span>Imported</span>
+          <strong>{{ importedImportCount }}</strong>
+        </div>
+      </div>
+
+      <div v-if="gameScanError" class="library-import-alert">
+        <div class="min-w-0">
+          <div class="text-sm font-semibold text-amber-100">Import scanner needs attention</div>
+          <div class="mt-1 text-xs text-storm">{{ gameScanError }}</div>
+        </div>
+        <Button variant="outline" size="sm" :disabled="gameScanning" @click="scanGames">Retry scan</Button>
+      </div>
+
+      <div v-if="!hasImportSources && !gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
+        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-storm/20 bg-void/60 text-storm">
+          <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
+        </div>
+        <div class="mt-4 flex items-center justify-center gap-2">
+          <h3 class="text-lg font-semibold text-silver">Ready to scan</h3>
+          <InfoHint size="sm" label="Game library scan">
+            Start a scan to discover install candidates from Steam, Lutris, and Heroic. Already-imported entries stay visible so you can spot what is new.
+          </InfoHint>
+        </div>
+        <div class="mt-5">
+          <Button variant="primary" :disabled="gameScanning" @click="scanGames">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
+            Scan for Games
+          </Button>
+        </div>
+      </div>
+
+      <div v-else-if="gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
+        <svg class="mx-auto h-7 w-7 animate-spin text-ice" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4Zm2 5.291A7.962 7.962 0 0 1 4 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647Z" /></svg>
+        <h3 class="mt-4 text-lg font-semibold text-silver">Scanning installed libraries</h3>
+      </div>
+
+      <div v-else class="library-import-workspace">
+        <div class="library-import-source-list">
+          <button
+            v-for="source in importSources"
+            :key="source.key"
+            type="button"
+            class="focus-ring library-import-source-button"
+            :class="activeImportSourceKey === source.key ? source.activeClass : 'border-storm/15 bg-deep/30 text-storm hover:border-storm/35 hover:text-silver'"
+            @click="selectImportSource(source.key)"
+          >
+            <span class="library-import-source-head">
+              <span>{{ source.label }}</span>
+              <strong>{{ source.available }}</strong>
+            </span>
+            <span class="library-import-source-meta">
+              {{ source.selected }} staged / {{ source.imported }} imported
+            </span>
+          </button>
+        </div>
+
+        <div class="library-import-stage">
+          <div class="library-import-stage-head">
+            <div class="min-w-0">
+              <div class="section-kicker">Stage entries</div>
+              <div class="mt-1 text-sm text-silver">
+                {{ activeImportSource?.label || 'Source' }} / {{ visibleImportGames.length }} shown
+              </div>
+            </div>
+            <Button variant="primary" :disabled="gameImporting || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
+              {{ importSelectedButtonLabel }}
+            </Button>
+          </div>
+
+          <div class="library-import-toolbar">
+            <label class="library-search">
+              <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
+              <input
+                v-model="importSearch"
+                class="library-search-input"
+                type="search"
+                aria-label="Search import candidates"
+                placeholder="Search candidates"
+              />
+            </label>
+            <div class="library-filter-strip">
+              <button
+                v-for="filter in importStatusFilters"
+                :key="filter.key"
+                type="button"
+                class="focus-ring library-filter-button"
+                :class="{ 'is-active': importStatus === filter.key }"
+                @click="importStatus = filter.key"
+              >
+                <span>{{ filter.label }}</span>
+                <span>{{ filter.count }}</span>
+              </button>
+            </div>
+            <div class="library-import-toolbar-actions">
+              <Button variant="ghost" size="sm" :disabled="visibleImportSelectableCount === 0" @click="selectVisibleImportGames(true)">Select shown</Button>
+              <Button variant="ghost" size="sm" :disabled="activeImportSelectedCount === 0" @click="clearActiveImportSource">Clear source</Button>
+            </div>
+          </div>
+
+          <div v-if="visibleImportGames.length === 0" class="library-import-empty">
+            <div class="text-sm font-semibold text-silver">No candidates match this view</div>
+            <div class="mt-1 text-xs text-storm">Clear the search or switch filters to see more import candidates.</div>
+            <Button v-if="importViewFiltered" class="mt-4" variant="outline" size="sm" @click="clearImportFilters">Clear filters</Button>
+          </div>
+
+          <div v-else class="library-import-game-grid">
+            <label
+              v-for="game in visibleImportGames"
+              :key="game.appid || game.slug || game.name"
+              class="library-import-game-card"
+              :class="game.already_imported ? 'is-imported' : game.selected ? 'is-selected' : ''"
+            >
+              <input type="checkbox" v-model="game.selected" :disabled="game.already_imported" class="mt-1 h-4 w-4 rounded accent-ice" />
+              <div class="min-w-0 flex-1">
+                <div class="flex min-w-0 items-start justify-between gap-2">
+                  <div class="truncate text-sm font-medium text-silver">{{ game.name }}</div>
+                  <span class="control-chip">{{ game.already_imported ? 'Imported' : game.selected ? 'Staged' : 'New' }}</span>
+                </div>
+                <div class="mt-1 text-xs text-storm">
+                  {{ game.already_imported ? 'Already in Polaris.' : game.selected ? 'Queued for import.' : 'Ready to stage.' }}
+                </div>
+                <div class="mt-2 flex flex-wrap gap-1.5 text-[11px] text-storm">
+                  <span v-if="game.appid" class="control-chip">{{ game.appid }}</span>
+                  <span v-if="game.runner" class="control-chip">{{ game.runner }}</span>
+                  <span v-if="game.slug" class="control-chip">{{ game.slug }}</span>
+                  <span v-if="game.game_category && game.game_category !== 'unknown'" class="control-chip">{{ formatCategory(game.game_category) }}</span>
+                </div>
+              </div>
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <div v-if="!showEditForm" class="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)]">
       <section class="section-card">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -349,173 +516,6 @@
         </div>
       </section>
     </div>
-
-    <section v-if="!showEditForm && showImport" class="section-card library-import-console">
-      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div class="section-kicker">Import Console</div>
-          <div class="section-title-row">
-            <h2 class="section-title">Import games</h2>
-            <InfoHint size="sm" label="Import console">
-              Polaris can import games from supported sources, keep track of what is already published, and stage multiple entries before one import pass.
-            </InfoHint>
-          </div>
-        </div>
-        <div class="page-actions-secondary">
-          <Button variant="outline" @click="showImport = false">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
-            Hide Import
-          </Button>
-          <Button variant="outline" :disabled="gameScanning" @click="scanGames">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
-            {{ gameScanning ? 'Scanning...' : 'Rescan Sources' }}
-          </Button>
-        </div>
-      </div>
-
-      <div v-if="hasImportSources" class="library-import-overview">
-        <div class="library-import-metric">
-          <span>New</span>
-          <strong>{{ availableImportCount }}</strong>
-        </div>
-        <div class="library-import-metric">
-          <span>Staged</span>
-          <strong>{{ selectedImportCount }}</strong>
-        </div>
-        <div class="library-import-metric">
-          <span>Imported</span>
-          <strong>{{ importedImportCount }}</strong>
-        </div>
-      </div>
-
-      <div v-if="gameScanError" class="library-import-alert">
-        <div class="min-w-0">
-          <div class="text-sm font-semibold text-amber-100">Import scanner needs attention</div>
-          <div class="mt-1 text-xs text-storm">{{ gameScanError }}</div>
-        </div>
-        <Button variant="outline" size="sm" :disabled="gameScanning" @click="scanGames">Retry scan</Button>
-      </div>
-
-      <div v-if="!hasImportSources && !gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
-        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-storm/20 bg-void/60 text-storm">
-          <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
-        </div>
-        <div class="mt-4 flex items-center justify-center gap-2">
-          <h3 class="text-lg font-semibold text-silver">Ready to scan</h3>
-          <InfoHint size="sm" label="Game library scan">
-            Start a scan to discover install candidates from Steam, Lutris, and Heroic. Already-imported entries stay visible so you can spot what is new.
-          </InfoHint>
-        </div>
-        <div class="mt-5">
-          <Button variant="primary" :disabled="gameScanning" @click="scanGames">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
-            Scan for Games
-          </Button>
-        </div>
-      </div>
-
-      <div v-else-if="gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
-        <svg class="mx-auto h-7 w-7 animate-spin text-ice" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4Zm2 5.291A7.962 7.962 0 0 1 4 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647Z" /></svg>
-        <h3 class="mt-4 text-lg font-semibold text-silver">Scanning installed libraries</h3>
-      </div>
-
-      <div v-else class="library-import-workspace">
-        <div class="library-import-source-list">
-          <button
-            v-for="source in importSources"
-            :key="source.key"
-            type="button"
-            class="focus-ring library-import-source-button"
-            :class="activeImportSourceKey === source.key ? source.activeClass : 'border-storm/15 bg-deep/30 text-storm hover:border-storm/35 hover:text-silver'"
-            @click="selectImportSource(source.key)"
-          >
-            <span class="library-import-source-head">
-              <span>{{ source.label }}</span>
-              <strong>{{ source.available }}</strong>
-            </span>
-            <span class="library-import-source-meta">
-              {{ source.selected }} staged / {{ source.imported }} imported
-            </span>
-          </button>
-        </div>
-
-        <div class="library-import-stage">
-          <div class="library-import-stage-head">
-            <div class="min-w-0">
-              <div class="section-kicker">Stage entries</div>
-              <div class="mt-1 text-sm text-silver">
-                {{ activeImportSource?.label || 'Source' }} / {{ visibleImportGames.length }} shown
-              </div>
-            </div>
-            <Button variant="primary" :disabled="gameImporting || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
-              {{ importSelectedButtonLabel }}
-            </Button>
-          </div>
-
-          <div class="library-import-toolbar">
-            <label class="library-search">
-              <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
-              <input
-                v-model="importSearch"
-                class="library-search-input"
-                type="search"
-                aria-label="Search import candidates"
-                placeholder="Search candidates"
-              />
-            </label>
-            <div class="library-filter-strip">
-              <button
-                v-for="filter in importStatusFilters"
-                :key="filter.key"
-                type="button"
-                class="focus-ring library-filter-button"
-                :class="{ 'is-active': importStatus === filter.key }"
-                @click="importStatus = filter.key"
-              >
-                <span>{{ filter.label }}</span>
-                <span>{{ filter.count }}</span>
-              </button>
-            </div>
-            <div class="library-import-toolbar-actions">
-              <Button variant="ghost" size="sm" :disabled="visibleImportSelectableCount === 0" @click="selectVisibleImportGames(true)">Select shown</Button>
-              <Button variant="ghost" size="sm" :disabled="activeImportSelectedCount === 0" @click="clearActiveImportSource">Clear source</Button>
-            </div>
-          </div>
-
-          <div v-if="visibleImportGames.length === 0" class="library-import-empty">
-            <div class="text-sm font-semibold text-silver">No candidates match this view</div>
-            <div class="mt-1 text-xs text-storm">Clear the search or switch filters to see more import candidates.</div>
-            <Button v-if="importViewFiltered" class="mt-4" variant="outline" size="sm" @click="clearImportFilters">Clear filters</Button>
-          </div>
-
-          <div v-else class="library-import-game-grid">
-            <label
-              v-for="game in visibleImportGames"
-              :key="game.appid || game.slug || game.name"
-              class="library-import-game-card"
-              :class="game.already_imported ? 'is-imported' : game.selected ? 'is-selected' : ''"
-            >
-              <input type="checkbox" v-model="game.selected" :disabled="game.already_imported" class="mt-1 h-4 w-4 rounded accent-ice" />
-              <div class="min-w-0 flex-1">
-                <div class="flex min-w-0 items-start justify-between gap-2">
-                  <div class="truncate text-sm font-medium text-silver">{{ game.name }}</div>
-                  <span class="control-chip">{{ game.already_imported ? 'Imported' : game.selected ? 'Staged' : 'New' }}</span>
-                </div>
-                <div class="mt-1 text-xs text-storm">
-                  {{ game.already_imported ? 'Already in Polaris.' : game.selected ? 'Queued for import.' : 'Ready to stage.' }}
-                </div>
-                <div class="mt-2 flex flex-wrap gap-1.5 text-[11px] text-storm">
-                  <span v-if="game.appid" class="control-chip">{{ game.appid }}</span>
-                  <span v-if="game.runner" class="control-chip">{{ game.runner }}</span>
-                  <span v-if="game.slug" class="control-chip">{{ game.slug }}</span>
-                  <span v-if="game.game_category && game.game_category !== 'unknown'" class="control-chip">{{ formatCategory(game.game_category) }}</span>
-                </div>
-              </div>
-            </label>
-          </div>
-        </div>
-      </div>
-    </section>
 
     <!-- Edit form -->
     <section v-if="showEditForm" class="app-editor-layout">
