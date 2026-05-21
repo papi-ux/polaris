@@ -97,7 +97,7 @@
                 <p class="mt-2 text-sm text-storm">{{ $t('pin.trusted_network_desc') }}</p>
               </div>
               <a
-                href="#/config"
+                href="#/config#encryption_and_trust"
                 class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)]"
               >
                 {{ $t('pin.configure_network') }}
