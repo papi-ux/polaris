@@ -62,6 +62,7 @@ namespace stream_stats {
     platf::frame_transport_e capture_transport = platf::frame_transport_e::unknown;
     platf::frame_residency_e capture_residency = platf::frame_residency_e::unknown;
     platf::frame_format_e capture_format = platf::frame_format_e::unknown;
+    std::string capture_device;
     std::string encode_target_device;
     platf::frame_residency_e encode_target_residency = platf::frame_residency_e::unknown;
     platf::frame_format_e encode_target_format = platf::frame_format_e::unknown;
@@ -137,6 +138,12 @@ namespace stream_stats {
    * @param stats Current stream statistics snapshot.
    */
   std::string capture_path_reason(const stats_t &stats);
+
+  /**
+   * @brief Whether a true-headless DMA-BUF path is crossing DRM render nodes.
+   * @param stats Current stream statistics snapshot.
+   */
+  bool capture_path_has_cross_gpu_dmabuf_risk(const stats_t &stats);
 
   /**
    * @brief Human-readable explanation for a capture path reason.

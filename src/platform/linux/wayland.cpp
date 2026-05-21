@@ -1237,10 +1237,11 @@ namespace wl {
 
     gbm_device_id = device;
     gbm_device_id_valid = true;
+    render_node = path_for_fd(gbm_device_get_fd(gbm_device));
 
     BOOST_LOG(info) << "Extcopy DMA-BUF capture using GBM backend ["sv
                     << gbm_device_get_backend_name(gbm_device)
-                    << "] render_node=["sv << path_for_fd(gbm_device_get_fd(gbm_device)) << ']';
+                    << "] render_node=["sv << render_node << ']';
     return true;
   }
 
@@ -1256,6 +1257,7 @@ namespace wl {
 
     gbm_device_id = {};
     gbm_device_id_valid = false;
+    render_node.clear();
   }
 
   void extcopy_t::destroy_capture_frame() {
