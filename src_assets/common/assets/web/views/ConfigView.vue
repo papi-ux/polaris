@@ -584,6 +584,9 @@ const mobileNavItems = computed(() => tabGroups.value.flatMap(group => group.ite
 const visibleTabCountLabel = computed(() => i18n.t('config.visible_tabs', { count: matchingTabs.value.length, total: tabs.value.length }))
 const searchSummary = computed(() => i18n.t('config.search_results', { query: searchQuery.value, count: matchingTabs.value.length }))
 const searchHasResults = computed(() => matchingTabs.value.length > 0)
+const sectionHashTabs = {
+  encryption_and_trust: 'network',
+}
 const hasUnsavedChanges = computed(() => {
   if (!config.value || !initialSerialized.value) return false
   return JSON.stringify(serialize()) !== initialSerialized.value
@@ -699,6 +702,11 @@ function resolveSearchTarget(optionKey) {
   return null
 }
 
+function resolveSectionTarget(sectionId) {
+  if (!settingsContentRef.value || !sectionId) return null
+  return settingsContentRef.value.querySelector(`#${escapeSelector(sectionId)}`)
+}
+
 async function focusSearchTarget(optionKey) {
   if (!searchQuery.value || !optionKey) return
   await nextTick()
@@ -723,6 +731,13 @@ function selectNavTab(tabId) {
     return
   }
   currentTab.value = tabId
+}
+
+async function focusSectionTarget(sectionId) {
+  await nextTick()
+  const target = resolveSectionTarget(sectionId)
+  if (!target) return
+  target.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' })
 }
 
 function serialize() {
@@ -946,6 +961,14 @@ function handleHash() {
 
     if (configHash) {
       let stripped_hash = configHash
+
+      if (sectionHashTabs[stripped_hash]) {
+        currentTab.value = sectionHashTabs[stripped_hash]
+        setTimeout(() => {
+          focusSectionTarget(stripped_hash)
+        }, 400)
+        return
+      }
 
       tabs.value.forEach(tab => {
         Object.keys(tab.options).forEach(key => {
