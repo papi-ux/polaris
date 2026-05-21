@@ -287,12 +287,16 @@ the client stream itself fails to connect.
 CPU BGR0 frame without a valid row pitch. Use a release newer than `v1.0.4`, where
 the headless CPU fallback path was fixed.
 
-`Failed to gain CAP_SYS_ADMIN` or `You must run [sudo setcap ...] for KMS display
-capture to work` means the KMS capability was not applied to the binary that the
-user service is running. On Bazzite, copy the current packaged binary to
-`/usr/local/bin/polaris-kms`, apply `setcap` there, and make sure the
-`~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf` override points
-`ExecStart` at that file.
+`Failed to gain CAP_SYS_ADMIN` with `KMS probe could not access DRM framebuffer
+handles; continuing with non-KMS capture backends when available` is only a
+startup probe warning for portal/compositor users. Do not apply `setcap` for the
+normal portal path.
+
+`KMS display capture requires CAP_SYS_ADMIN` is actionable only when you
+intentionally selected explicit KMS capture. On Bazzite, copy the current
+packaged binary to `/usr/local/bin/polaris-kms`, apply `setcap` there, and make
+sure the `~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf` override
+points `ExecStart` at that file.
 
 `Virtual display: failed to open EVDI device` usually means the EVDI kernel
 module is loaded without a pre-created DRM card. Load EVDI with

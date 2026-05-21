@@ -151,11 +151,14 @@ nvidia_drm.modeset=1
 ```
 
 If you do not need DRM/KMS capture, keep using the default compositor and portal paths instead.
+A startup warning that says `KMS probe could not access DRM framebuffer handles; continuing with
+non-KMS capture backends when available` is informational for portal/compositor users; do not apply
+`setcap` unless you intentionally selected KMS capture.
 
-If a manually copied test binary still logs `Failed to gain CAP_SYS_ADMIN` after `setcap`, check the
-mount options for the binary path. File capabilities are ignored on `nosuid` mounts, so `/tmp`
-builds can be misleading; copy the test binary to a normal path such as `/usr/local/bin` before
-applying `setcap`.
+If a manually copied explicit-KMS test binary still logs `Failed to gain CAP_SYS_ADMIN` after
+`setcap`, check the mount options for the binary path. File capabilities are ignored on `nosuid`
+mounts, so `/tmp` builds can be misleading; copy the test binary to a normal path such as
+`/usr/local/bin` before applying `setcap`.
 
 For low-FPS NVIDIA headless reports, check `Build features: cuda=...` first. If the log says
 `cuda=disabled` and later shows `Attempting to use NVENC without CUDA support. Reverting back to
