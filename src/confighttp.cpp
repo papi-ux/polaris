@@ -2349,6 +2349,7 @@ namespace confighttp {
         : config::video.ai_optimizer.api_key;
     ai_cfg.base_url = get_string("ai_base_url");
     ai_cfg.use_subscription = get_enabled("ai_use_subscription", false);
+    ai_cfg.codex_home = get_string("ai_codex_home", config::video.ai_optimizer.codex_home.c_str());
     ai_cfg.timeout_ms = body.value("ai_timeout_ms", config::video.ai_optimizer.timeout_ms);
     ai_cfg.cache_ttl_hours = body.value("ai_cache_ttl_hours", config::video.ai_optimizer.cache_ttl_hours);
     return ai_cfg;
@@ -4722,6 +4723,7 @@ namespace confighttp {
       ai_cfg.api_key = config::video.ai_optimizer.api_key;
       ai_cfg.base_url = config::video.ai_optimizer.base_url;
       ai_cfg.use_subscription = config::video.ai_optimizer.use_subscription;
+      ai_cfg.codex_home = config::video.ai_optimizer.codex_home;
       ai_cfg.timeout_ms = config::video.ai_optimizer.timeout_ms;
       ai_cfg.cache_ttl_hours = config::video.ai_optimizer.cache_ttl_hours;
       ai_optimizer::init(ai_cfg);

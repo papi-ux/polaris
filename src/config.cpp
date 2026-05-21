@@ -605,6 +605,7 @@ namespace config {
       {},     // api_key
       {},     // base_url
       false,  // use_subscription
+      {},     // codex_home
       5000,   // timeout_ms
       168,    // cache_ttl_hours (1 week)
     },
@@ -1352,6 +1353,7 @@ namespace config {
     string_f(vars, "ai_api_key", video.ai_optimizer.api_key);
     string_f(vars, "ai_base_url", video.ai_optimizer.base_url);
     bool_f(vars, "ai_use_subscription", video.ai_optimizer.use_subscription);
+    string_f(vars, "ai_codex_home", video.ai_optimizer.codex_home);
     int_f(vars, "ai_timeout_ms", video.ai_optimizer.timeout_ms);
     int_f(vars, "ai_cache_ttl_hours", video.ai_optimizer.cache_ttl_hours);
 

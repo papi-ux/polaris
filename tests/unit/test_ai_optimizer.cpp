@@ -27,6 +27,26 @@ namespace {
   }
 }
 
+TEST(AiOptimizerCodexHome, UsesExplicitCodexHomeWhenConfigured) {
+  auto resolved = ai_optimizer::resolve_codex_home_for_subscription(
+    "/tmp/polaris-profile-home",
+    "/home/papi/.codex"
+  );
+
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ("/home/papi/.codex", *resolved);
+}
+
+TEST(AiOptimizerCodexHome, FallsBackToRuntimeHomeCodexDirectory) {
+  auto resolved = ai_optimizer::resolve_codex_home_for_subscription(
+    "/tmp/polaris-profile-home",
+    ""
+  );
+
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ("/tmp/polaris-profile-home/.codex", *resolved);
+}
+
 TEST(AiOptimizerSessionFeedback, DisconnectIsAcceptedButCannotInvalidateCache) {
   auto policy = ai_optimizer::classify_session_feedback(
     "Black Myth: Wukong",

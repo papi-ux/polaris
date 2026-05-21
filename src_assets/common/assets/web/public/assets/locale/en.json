@@ -153,6 +153,8 @@
     "ai_api_key_desc": "Provider API key used when AI optimization runs in direct API mode.",
     "ai_cache_ttl_hours": "AI Cache Duration",
     "ai_cache_ttl_hours_desc": "How long to cache AI optimization results before re-querying.",
+    "ai_codex_home": "AI Codex Home",
+    "ai_codex_home_desc": "Optional CODEX_HOME override for OpenAI subscription mode. Use an absolute path to the Codex login directory when Polaris runs with a different HOME.",
     "ai_enabled": "AI Auto Quality",
     "ai_enabled_desc": "Let Polaris balance launch profile, bitrate recovery, and stream smoothness automatically.",
     "ai_provider": "AI Provider",

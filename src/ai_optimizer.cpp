@@ -28,6 +28,10 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+
 using namespace std::literals;
 
 namespace ai_optimizer {
@@ -274,6 +278,45 @@ namespace ai_optimizer {
     return escaped;
   }
 
+  static std::string shell_env_assignment(const std::string &name, const std::string &value) {
+    if (value.empty()) {
+      return {};
+    }
+    return name + "='" + shell_escape_single_quotes(value) + "' ";
+  }
+
+  std::optional<std::string> resolve_codex_home_for_subscription(
+    const std::string &runtime_home,
+    const std::string &configured_codex_home) {
+    if (!configured_codex_home.empty()) {
+      return configured_codex_home;
+    }
+    if (!runtime_home.empty()) {
+      return (std::filesystem::path(runtime_home) / ".codex").string();
+    }
+    return std::nullopt;
+  }
+
+  static std::optional<std::string> active_codex_home(const config_t &active_cfg) {
+    const std::string runtime_home = getenv("HOME") ? getenv("HOME") : "";
+    return resolve_codex_home_for_subscription(runtime_home, active_cfg.codex_home);
+  }
+
+  static int decode_process_status(int status) {
+    if (status == -1) {
+      return -1;
+    }
+#ifndef _WIN32
+    if (WIFEXITED(status)) {
+      return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+      return 128 + WTERMSIG(status);
+    }
+#endif
+    return status;
+  }
+
   static std::string resolve_existing_binary(const std::vector<std::string> &candidates, const std::string &fallback) {
     for (const auto &candidate : candidates) {
       if (std::filesystem::exists(candidate)) {
@@ -295,22 +338,26 @@ namespace ai_optimizer {
       result.output += buffer;
     }
 
-    result.exit_code = pclose(pipe);
+    result.exit_code = decode_process_status(pclose(pipe));
     return result;
   }
 
-  static std::optional<bool> codex_login_ready() {
-    auto status = run_command_capture("codex login status 2>/dev/null");
+  static std::optional<bool> codex_login_ready(const config_t &active_cfg) {
+    const auto codex_home = active_codex_home(active_cfg);
+    auto status = run_command_capture(
+      shell_env_assignment("CODEX_HOME", codex_home.value_or("")) +
+      "codex login status 2>&1"
+    );
     if (status.exit_code == -1) {
       return std::nullopt;
     }
 
     const auto normalized = to_lower_copy(status.output);
-    if (normalized.find("logged in") != std::string::npos) {
-      return true;
-    }
     if (normalized.find("not logged in") != std::string::npos || normalized.find("logged out") != std::string::npos) {
       return false;
+    }
+    if (normalized.find("logged in") != std::string::npos) {
+      return true;
     }
     return status.exit_code == 0;
   }
@@ -1916,9 +1963,12 @@ namespace ai_optimizer {
          << "Return only the JSON object in the requested schema.";
     }
 
+    const auto codex_home = active_codex_home(active_cfg);
     std::string cmd =
+      shell_env_assignment("CODEX_HOME", codex_home.value_or("")) +
       "'" + codex_bin + "' exec "
       "--skip-git-repo-check "
+      "--ephemeral "
       "--ignore-user-config "
       "--ignore-rules "
       "--sandbox read-only "
@@ -1926,7 +1976,7 @@ namespace ai_optimizer {
       "-m '" + shell_escape_single_quotes(active_cfg.model) + "' "
       "-o '" + shell_escape_single_quotes(output_file.string()) + "' "
       "- < '" + shell_escape_single_quotes(prompt_file.string()) + "' "
-      "2>/dev/null";
+      "2>&1";
 
     BOOST_LOG(debug) << "ai_optimizer: Running Codex CLI for "sv << device_name;
     const auto result = run_command_capture(cmd);
@@ -2719,6 +2769,7 @@ namespace ai_optimizer {
     status["use_subscription"] = cfg.auth_mode == AUTH_SUBSCRIPTION;
     status["timeout_ms"] = cfg.timeout_ms;
     status["cache_ttl_hours"] = cfg.cache_ttl_hours;
+    status["codex_home"] = cfg.codex_home;
     status["cache_count"] = cache_count;
     status["recommendation_version"] = OPTIMIZATION_SCHEMA_VERSION;
     status["in_flight_requests"] = in_flight_requests.load();
@@ -2738,8 +2789,14 @@ namespace ai_optimizer {
       if (!login_command.empty()) {
         status["cli_login_command"] = login_command;
       }
+      if (cfg.provider == PROVIDER_OPENAI) {
+        const auto codex_home = active_codex_home(cfg);
+        if (codex_home.has_value()) {
+          status["codex_home_effective"] = *codex_home;
+        }
+      }
       if (cfg.provider == PROVIDER_OPENAI && status["cli_available"].get<bool>()) {
-        auto authenticated = codex_login_ready();
+        auto authenticated = codex_login_ready(cfg);
         if (authenticated.has_value()) {
           status["cli_authenticated"] = *authenticated;
         }

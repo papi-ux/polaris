@@ -217,6 +217,7 @@ const draftMatchesRuntime = computed(() => {
     && aiStatus.value.model === config.value.ai_model
     && aiStatus.value.auth_mode === config.value.ai_auth_mode
     && aiStatus.value.base_url === config.value.ai_base_url
+    && (aiStatus.value.codex_home || '') === (config.value.ai_codex_home || '')
     && Number(aiStatus.value.timeout_ms || 0) === (Number(config.value.ai_timeout_ms) || 5000)
     && Number(aiStatus.value.cache_ttl_hours || 0) === (Number(config.value.ai_cache_ttl_hours) || 168)
 })
@@ -525,6 +526,7 @@ function buildDraftPayload() {
     clear_ai_api_key: !!config.value.clear_ai_api_key,
     ai_base_url: config.value.ai_base_url,
     ai_use_subscription: config.value.ai_use_subscription,
+    ai_codex_home: config.value.ai_codex_home || '',
     ai_timeout_ms: Number(config.value.ai_timeout_ms) || 5000,
     ai_cache_ttl_hours: Number(config.value.ai_cache_ttl_hours) || 168
   }
@@ -767,12 +769,24 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div v-if="config.ai_auth_mode === 'subscription'" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-4">
-            <div class="text-xs uppercase tracking-[0.2em] text-storm">{{ currentSubscriptionLabel }}</div>
-            <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
-            <div class="text-xs text-storm mt-2">The Web UI can test the draft config below, but live sessions still switch over only after save and apply.</div>
-            <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
-              If this host is not authorized yet, run <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionLoginCommand }}</code> in a terminal first.
+          <div v-if="config.ai_auth_mode === 'subscription'" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-4 space-y-3">
+            <div>
+              <div class="text-xs uppercase tracking-[0.2em] text-storm">{{ currentSubscriptionLabel }}</div>
+              <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
+              <div class="text-xs text-storm mt-2">The Web UI can test the draft config below, but live sessions still switch over only after save and apply.</div>
+              <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
+                If this host is not authorized yet, run <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionLoginCommand }}</code> in a terminal first.
+              </div>
+            </div>
+            <div v-if="config.ai_provider === 'openai'">
+              <label class="block text-sm font-medium text-silver mb-1">Codex home</label>
+              <input
+                v-model="config.ai_codex_home"
+                type="text"
+                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+                placeholder="/home/you/.codex" />
+              <div class="text-xs text-storm mt-1">Optional CODEX_HOME override. Use this when Polaris runs as a service or profile with a different HOME than your logged-in Codex CLI.</div>
+              <div v-if="aiStatus?.codex_home_effective" class="text-xs text-storm mt-1">Live effective CODEX_HOME: <span class="font-mono text-silver/80">{{ aiStatus.codex_home_effective }}</span></div>
             </div>
           </div>
 

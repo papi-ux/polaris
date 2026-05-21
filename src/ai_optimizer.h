@@ -31,9 +31,17 @@ namespace ai_optimizer {
     std::string api_key;             ///< Provider API key when auth_mode == api_key
     std::string base_url;            ///< Provider base URL or local endpoint
     bool use_subscription = false;   ///< Legacy compatibility for older configs/UI
+    std::string codex_home;          ///< Optional CODEX_HOME override for OpenAI subscription mode
     int timeout_ms = 5000;           ///< Max wait for API response
     int cache_ttl_hours = 168;       ///< Cache TTL (default 1 week)
   };
+
+  /**
+   * @brief Resolve the CODEX_HOME value Polaris should use for Codex subscription mode.
+   */
+  std::optional<std::string> resolve_codex_home_for_subscription(
+    const std::string &runtime_home,
+    const std::string &configured_codex_home);
 
   /**
    * @brief Initialize the AI optimizer (load cache, validate config).

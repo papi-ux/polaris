@@ -179,6 +179,7 @@ namespace config {
       std::string api_key;
       std::string base_url;
       bool use_subscription = false;  // Legacy fallback for older configs/UI subscription modes.
+      std::string codex_home;
       int timeout_ms = 5000;
       int cache_ttl_hours = 168;
     } ai_optimizer;

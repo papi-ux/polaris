@@ -410,6 +410,7 @@ const tabs = ref([
       "ai_api_key": "",
       "ai_base_url": "",
       "ai_use_subscription": "disabled",
+      "ai_codex_home": "",
       "ai_timeout_ms": 5000,
       "ai_cache_ttl_hours": 168,
     },

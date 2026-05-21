@@ -81,6 +81,7 @@ namespace confighttp::validation {
       "ai_auth_mode"sv,
       "ai_base_url"sv,
       "ai_cache_ttl_hours"sv,
+      "ai_codex_home"sv,
       "ai_enabled"sv,
       "ai_model"sv,
       "ai_provider"sv,
