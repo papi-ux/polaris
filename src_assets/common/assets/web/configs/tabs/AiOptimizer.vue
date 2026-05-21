@@ -784,7 +784,7 @@ onBeforeUnmount(() => {
                 v-model="config.ai_codex_home"
                 type="text"
                 class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
-                placeholder="/home/you/.codex" />
+                placeholder="~/.codex" />
               <div class="text-xs text-storm mt-1">Optional CODEX_HOME override. Use this when Polaris runs as a service or profile with a different HOME than your logged-in Codex CLI.</div>
               <div v-if="aiStatus?.codex_home_effective" class="text-xs text-storm mt-1">Live effective CODEX_HOME: <span class="font-mono text-silver/80">{{ aiStatus.codex_home_effective }}</span></div>
             </div>
