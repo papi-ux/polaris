@@ -1595,46 +1595,58 @@ namespace confighttp {
    */
   std::vector<fs::path> lutris_game_config_dirs() {
     std::vector<fs::path> dirs;
-    const char *home = std::getenv("HOME");
-    if (!home || !*home) {
-      return dirs;
-    }
+    std::set<fs::path> seen_dirs;
+    auto append_dir = [&](fs::path path) {
+      if (path.empty()) {
+        return;
+      }
+      path = path.lexically_normal();
+      if (seen_dirs.insert(path).second) {
+        dirs.push_back(std::move(path));
+      }
+    };
 
     const char *xdg_config_home = std::getenv("XDG_CONFIG_HOME");
     const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
-    dirs.emplace_back(
-      xdg_config_home && *xdg_config_home ?
-        fs::path(xdg_config_home) / "lutris/games" :
-        fs::path(home) / ".config/lutris/games"
-    );
-    dirs.emplace_back(
-      xdg_data_home && *xdg_data_home ?
-        fs::path(xdg_data_home) / "lutris/games" :
-        fs::path(home) / ".local/share/lutris/games"
-    );
+    if (xdg_config_home && *xdg_config_home) {
+      append_dir(fs::path(xdg_config_home) / "lutris/games");
+    }
+    if (xdg_data_home && *xdg_data_home) {
+      append_dir(fs::path(xdg_data_home) / "lutris/games");
+    }
+    for (const auto &home : game_library::library_home_roots()) {
+      append_dir(home / ".config/lutris/games");
+      append_dir(home / ".local/share/lutris/games");
+    }
 
     return dirs;
   }
 
   std::vector<fs::path> lutris_art_roots() {
     std::vector<fs::path> roots;
-    const char *home = std::getenv("HOME");
-    if (!home || !*home) {
-      return roots;
-    }
+    std::set<fs::path> seen_roots;
+    auto append_root = [&](fs::path path) {
+      if (path.empty()) {
+        return;
+      }
+      path = path.lexically_normal();
+      if (seen_roots.insert(path).second) {
+        roots.push_back(std::move(path));
+      }
+    };
 
     const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
     const char *xdg_cache_home = std::getenv("XDG_CACHE_HOME");
-    roots.emplace_back(
-      xdg_data_home && *xdg_data_home ?
-        fs::path(xdg_data_home) / "lutris" :
-        fs::path(home) / ".local/share/lutris"
-    );
-    roots.emplace_back(
-      xdg_cache_home && *xdg_cache_home ?
-        fs::path(xdg_cache_home) / "lutris" :
-        fs::path(home) / ".cache/lutris"
-    );
+    if (xdg_data_home && *xdg_data_home) {
+      append_root(fs::path(xdg_data_home) / "lutris");
+    }
+    if (xdg_cache_home && *xdg_cache_home) {
+      append_root(fs::path(xdg_cache_home) / "lutris");
+    }
+    for (const auto &home : game_library::library_home_roots()) {
+      append_root(home / ".local/share/lutris");
+      append_root(home / ".cache/lutris");
+    }
 
     return roots;
   }
@@ -1759,24 +1771,26 @@ namespace confighttp {
 
     // Scan Steam appmanifest files
     std::vector<std::string> steam_paths;
+    std::set<std::string> seen_steam_paths;
     std::set<std::string> seen_appids;
-    const char *home = std::getenv("HOME");
-    if (home) {
-      steam_paths.push_back(std::string(home) + "/.steam/steam/steamapps");
-      steam_paths.push_back(std::string(home) + "/.local/share/Steam/steamapps");
+    auto append_steam_path = [&](const fs::path &path) {
+      const auto value = path.lexically_normal().string();
+      if (!value.empty() && seen_steam_paths.insert(value).second) {
+        steam_paths.push_back(value);
+      }
+    };
+    for (const auto &home : game_library::library_home_roots()) {
+      append_steam_path(home / ".steam/steam/steamapps");
+      append_steam_path(home / ".local/share/Steam/steamapps");
 
-      // Discover additional library locations from libraryfolders.vdf
-      std::set<std::string> seen_steam_paths(steam_paths.begin(), steam_paths.end());
       const std::vector<std::string> vdf_candidates = {
-        std::string(home) + "/.steam/steam/steamapps/libraryfolders.vdf",
-        std::string(home) + "/.local/share/Steam/steamapps/libraryfolders.vdf",
-        std::string(home) + "/.local/share/Steam/config/libraryfolders.vdf",
+        (home / ".steam/steam/steamapps/libraryfolders.vdf").string(),
+        (home / ".local/share/Steam/steamapps/libraryfolders.vdf").string(),
+        (home / ".local/share/Steam/config/libraryfolders.vdf").string(),
       };
       for (const auto &vdf : vdf_candidates) {
         for (const auto &lib_path : parse_steam_library_folders(vdf)) {
-          if (seen_steam_paths.insert(lib_path).second) {
-            steam_paths.push_back(lib_path);
-          }
+          append_steam_path(lib_path);
         }
       }
     }
@@ -1845,7 +1859,8 @@ namespace confighttp {
 
     // Scan Lutris games
     nlohmann::json lutris_games = nlohmann::json::array();
-    if (home) {
+    const auto home_roots = game_library::library_home_roots();
+    if (!home_roots.empty()) {
       auto lutris_yml_dirs = lutris_game_config_dirs();
       auto lutris_roots = lutris_art_roots();
 
@@ -1878,12 +1893,12 @@ namespace confighttp {
 
     // Scan Heroic Games Launcher (GOG + Epic via Legendary)
     nlohmann::json heroic_games = nlohmann::json::array();
-    if (home) {
-      // Heroic stores installed game info in library JSON files
-      std::vector<std::pair<std::string, std::string>> heroic_paths = {
-        {std::string(home) + "/.config/heroic/gog_store/installed.json", "gog"},
-        {std::string(home) + "/.config/heroic/legendaryConfig/legendary/installed.json", "epic"},
-      };
+    if (!home_roots.empty()) {
+      std::vector<std::pair<std::string, std::string>> heroic_paths;
+      for (const auto &home : home_roots) {
+        heroic_paths.emplace_back((home / ".config/heroic/gog_store/installed.json").string(), "gog");
+        heroic_paths.emplace_back((home / ".config/heroic/legendaryConfig/legendary/installed.json").string(), "epic");
+      }
 
       for (const auto &[path, store] : heroic_paths) {
         if (!std::filesystem::exists(path)) continue;
@@ -1929,11 +1944,12 @@ namespace confighttp {
       }
 
       // Also check Heroic library.json (a combined library cache)
-      std::string heroic_lib = std::string(home) + "/.config/heroic/store_cache/gog_library.json";
-      std::string heroic_egs = std::string(home) + "/.config/heroic/store_cache/egs_library.json";
-      for (const auto &[path, store] : std::vector<std::pair<std::string, std::string>>{
-        {heroic_lib, "gog"}, {heroic_egs, "epic"}
-      }) {
+      std::vector<std::pair<std::string, std::string>> heroic_cache_paths;
+      for (const auto &home : home_roots) {
+        heroic_cache_paths.emplace_back((home / ".config/heroic/store_cache/gog_library.json").string(), "gog");
+        heroic_cache_paths.emplace_back((home / ".config/heroic/store_cache/egs_library.json").string(), "epic");
+      }
+      for (const auto &[path, store] : heroic_cache_paths) {
         if (!std::filesystem::exists(path)) continue;
         try {
           std::ifstream f(path);

@@ -21,6 +21,8 @@ namespace game_library {
   };
 
   bool is_lutris_slug_safe(const std::string &slug);
+  std::vector<std::filesystem::path> library_home_roots(std::string_view runtime_home, std::string_view account_home);
+  std::vector<std::filesystem::path> library_home_roots();
   std::string find_lutris_image_path(const std::string &slug, const std::vector<std::filesystem::path> &lutris_roots);
   std::string lutris_launch_command(const std::string &slug);
   std::vector<lutris_game_t> parse_lutris_list_games_json(std::string_view json_payload);

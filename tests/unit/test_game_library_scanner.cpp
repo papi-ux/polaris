@@ -145,3 +145,11 @@ TEST(LutrisLibraryScannerTests, FindsLocalLutrisArtworkBySlug) {
   EXPECT_EQ(image_path, (lutris_root / "coverart" / "black-myth-wukong.jpg").string());
   EXPECT_TRUE(game_library::find_lutris_image_path("bad slug", {lutris_root}).empty());
 }
+
+TEST(GameLibraryScannerTests, IncludesAccountHomeWhenRuntimeHomeIsProfile) {
+  const auto roots = game_library::library_home_roots("/tmp/agent-profile-home", "/tmp/account-home");
+
+  ASSERT_EQ(roots.size(), 2);
+  EXPECT_EQ(roots[0], std::filesystem::path("/tmp/agent-profile-home"));
+  EXPECT_EQ(roots[1], std::filesystem::path("/tmp/account-home"));
+}
