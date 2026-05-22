@@ -5,6 +5,7 @@
 // standard includes
 #include <codecvt>
 #include <csignal>
+#include <exception>
 #include <fstream>
 #include <iostream>
 
@@ -159,10 +160,21 @@ int main(int argc, char *argv[]) {
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  // Use UTF-8 conversion for the default C++ locale (used by boost::log)
-  std::locale utf8_locale(std::locale(), new std::codecvt_utf8<wchar_t>);
+  // Use UTF-8 conversion for the default C++ locale (used by boost::log).
+  // Base this on the classic locale so startup does not depend on the host's
+  // generated locale list being complete or valid.
+  std::locale utf8_locale(std::locale::classic(), new std::codecvt_utf8<wchar_t>);
   std::locale::global(utf8_locale);
-  boost::filesystem::path::imbue(utf8_locale);
+  try {
+    boost::filesystem::path::imbue(utf8_locale);
+  } catch (const std::exception &e) {
+    // On POSIX, Boost.Filesystem returns the previous path locale from
+    // std::locale(""). That can throw before logging is initialized when a
+    // user's LANG/LC_* references an ungenerated locale. The new UTF-8 locale
+    // has already been installed, so keep booting instead of aborting.
+    std::cerr << "Warning: failed to read previous filesystem locale ("sv << e.what()
+              << "); continuing with UTF-8 path handling."sv << std::endl;
+  }
 #pragma GCC diagnostic pop
 
   mail::man = std::make_shared<safe::mail_raw_t>();

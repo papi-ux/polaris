@@ -249,6 +249,16 @@ configure_polaris_test_target(${PROJECT_NAME}
     ${TEST_FAST_SOURCES}
 )
 
+if (UNIX AND NOT APPLE)
+    add_test(
+        NAME polaris_invalid_locale_startup
+        COMMAND ${CMAKE_COMMAND} -E env
+                LANG=zz_ZZ.UTF-8
+                LC_ALL=zz_ZZ.UTF-8
+                $<TARGET_FILE:polaris> --version
+    )
+endif()
+
 if (BUILD_FULL_TESTS)
     configure_polaris_test_object_library(test_polaris_runtime_objects
         ${POLARIS_SOURCES}
