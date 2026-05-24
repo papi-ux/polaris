@@ -1,30 +1,50 @@
-// Polaris Theme System — Space Whale (default) and OLED Dark Galaxy
+// Polaris Theme System — Space Whale (default), OLED Dark Galaxy, and Miami Nebula
 
 const STORAGE_KEY = 'polaris-theme'
-const THEMES = ['polaris', 'oled']
+
+export const THEMES = [
+  { id: 'polaris', label: 'Space Whale', shortLabel: 'Polaris' },
+  { id: 'oled', label: 'OLED Dark Galaxy', shortLabel: 'OLED' },
+  { id: 'miami', label: 'Miami Nebula', shortLabel: 'Miami' },
+]
+
+const DEFAULT_THEME = THEMES[0].id
+const THEME_IDS = THEMES.map((theme) => theme.id)
 
 export function getTheme() {
-  return localStorage.getItem(STORAGE_KEY) || 'polaris'
+  const storedTheme = localStorage.getItem(STORAGE_KEY)
+  return THEME_IDS.includes(storedTheme) ? storedTheme : DEFAULT_THEME
+}
+
+export function getThemeMeta(theme) {
+  return THEMES.find((item) => item.id === theme) || THEMES[0]
 }
 
 export function setTheme(theme) {
-  if (!THEMES.includes(theme)) return
+  if (!THEME_IDS.includes(theme)) return
   localStorage.setItem(STORAGE_KEY, theme)
   applyTheme(theme)
 }
 
-export function toggleTheme() {
-  const current = getTheme()
-  const next = current === 'polaris' ? 'oled' : 'polaris'
+export function getNextTheme(theme = getTheme()) {
+  const currentIndex = THEME_IDS.indexOf(theme)
+  if (currentIndex === -1) return DEFAULT_THEME
+  return THEME_IDS[(currentIndex + 1) % THEME_IDS.length]
+}
+
+export function cycleTheme() {
+  const next = getNextTheme()
   setTheme(next)
   return next
 }
 
+export const toggleTheme = cycleTheme
+
 export function applyTheme(theme) {
-  if (theme === 'oled') {
-    document.documentElement.setAttribute('data-theme', 'oled')
-  } else {
+  if (theme === DEFAULT_THEME) {
     document.documentElement.removeAttribute('data-theme')
+  } else if (THEME_IDS.includes(theme)) {
+    document.documentElement.setAttribute('data-theme', theme)
   }
 }
 
