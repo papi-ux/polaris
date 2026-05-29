@@ -7,6 +7,17 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.1.1
+
+Patch release focused on UI polish, safer startup behavior, Linux input/capture hardening, and public-project hygiene.
+
+- Added the Miami Nebula theme and refreshed web console theme handling, including regression coverage for theme selection and layout behavior
+- Fixed startup locale handling so invalid or stale locale configuration no longer blocks server startup
+- Moved the Library import console to the top of the Apps view and improved Library scanning so account-home paths outside Hermes profiles are discovered safely
+- Deep-linked pairing network-trust settings and tightened the Game Control pairing path so users can find the safer access preset more easily
+- Hardened Linux input and capture paths, including touchport clamp bounds, Wayland virtual keyboard modifiers, cross-GPU headless DMA-BUF fallback behavior, KMS probe diagnostics, and stream-stat reporting
+- Added sanitizer CI coverage, refreshed vulnerable npm transitive dependencies, and cleaned public-facing docs/examples so release artifacts stay suitable for the public repo
+
 ## v1.1.0
 
 Feature release focused on the Polaris web console, Library workflows, safer pairing defaults, and NVENC split-frame hardening.
