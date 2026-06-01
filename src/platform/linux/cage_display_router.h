@@ -227,6 +227,14 @@ namespace cage_display_router {
     std::string_view mangohud_value,
     std::string_view mangohud_config
   );
+
+  /**
+   * @brief Test helper for labwc process environment policy.
+   */
+  std::string labwc_process_environment_value_for_tests(
+    bool headless,
+    std::string_view key
+  );
 #endif
 
 }  // namespace cage_display_router

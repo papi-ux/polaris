@@ -214,6 +214,23 @@ TEST(CageDisplayRouterPolicyTests, MangoHudPrefixStillAppliesToRegularGames) {
   );
 }
 
+TEST(CageDisplayRouterPolicyTests, LabwcProcessEnvironmentDisablesHardwareCursors) {
+  EXPECT_EQ(
+    cage_display_router::labwc_process_environment_value_for_tests(
+      true,
+      "WLR_NO_HARDWARE_CURSORS"
+    ),
+    "1"
+  );
+  EXPECT_EQ(
+    cage_display_router::labwc_process_environment_value_for_tests(
+      false,
+      "WLR_NO_HARDWARE_CURSORS"
+    ),
+    "1"
+  );
+}
+
 TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentMode) {
   constexpr std::string_view output = R"(HEADLESS-1 "Headless output 1"
   Enabled: yes
