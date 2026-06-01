@@ -138,6 +138,43 @@ namespace cage_display_router {
     return prefix;
   }
 
+  static std::string labwc_process_environment_value(bool headless, std::string_view key) {
+    if (key == "WLR_NO_HARDWARE_CURSORS") {
+      // Polaris captures the private labwc compositor, not the host desktop. On
+      // some wlroots/labwc stacks hardware cursors remain interactive but never
+      // appear in captured frames, so force wlroots to paint software cursors.
+      return "1";
+    }
+
+    if (key == "WLR_BACKENDS") {
+      return headless ? "headless" : "wayland";
+    }
+
+    if (key == "WLR_RENDERER") {
+      return headless ? "gles2" : "vulkan";
+    }
+
+    if (headless && key == "WLR_HEADLESS_OUTPUTS") {
+      return "1";
+    }
+
+    return {};
+  }
+
+  static void set_labwc_process_environment(bool headless) {
+    for (std::string_view key : {
+           "WLR_NO_HARDWARE_CURSORS"sv,
+           "WLR_BACKENDS"sv,
+           "WLR_RENDERER"sv,
+           "WLR_HEADLESS_OUTPUTS"sv,
+         }) {
+      const auto value = labwc_process_environment_value(headless, key);
+      if (!value.empty()) {
+        setenv(std::string {key}.c_str(), value.c_str(), 1);
+      }
+    }
+  }
+
   static bool executable_accessible(const std::string &path) {
     return !path.empty() && access(path.c_str(), X_OK) == 0;
   }
@@ -547,6 +584,10 @@ namespace cage_display_router {
   ) {
     return mangohud_prefix_for_command(game_cmd, allow_mangohud, mangohud_value, mangohud_config);
   }
+
+  std::string labwc_process_environment_value_for_tests(bool headless, std::string_view key) {
+    return labwc_process_environment_value(headless, key);
+  }
 #endif
 
   // -----------------------------------------------------------------------
@@ -672,6 +713,7 @@ namespace cage_display_router {
     pid_t pid = fork();
     if (pid == 0) {
       // Child: set wlroots environment, detach, exec labwc
+      set_labwc_process_environment(headless);
       if (headless) {
         // Headless mode: no visible window on desktop, no parent display needed.
         // labwc creates virtual outputs that still support wlr-screencopy.
@@ -684,9 +726,6 @@ namespace cage_display_router {
         //
         // For now: use headless with GLES2, the SHM capture path in wlgrab
         // handles the conversion via software scaler (slower but functional).
-        setenv("WLR_BACKENDS", "headless", 1);
-        setenv("WLR_HEADLESS_OUTPUTS", "1", 1);
-        setenv("WLR_RENDERER", "gles2", 1);
         // Clear inherited display vars so children ONLY talk to labwc.
         // labwc will set its own WAYLAND_DISPLAY and start XWayland (new DISPLAY).
         // Without this, Steam connects to KDE's :0 instead of labwc's XWayland.
@@ -694,8 +733,6 @@ namespace cage_display_router {
         unsetenv("WAYLAND_DISPLAY");
       } else {
         // Windowed mode: labwc runs as a Wayland window on the desktop
-        setenv("WLR_BACKENDS", "wayland", 1);
-        setenv("WLR_RENDERER", "vulkan", 1);
       }
       // Clear DISPLAY in ALL modes so games connect to labwc's XWayland,
       // not KDE's :0. labwc will set its own DISPLAY via XWayland.
