@@ -741,7 +741,13 @@ namespace platf {
         prefer_ram_capture = true;
         using_headless_ram_capture = true;
         try_headless_extcopy_dmabuf =
-          cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state);
+          cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state, hwdevice_type);
+        if (!try_headless_extcopy_dmabuf &&
+            hwdevice_type == platf::mem_type_e::vaapi &&
+            cage_display_router::should_log_headless_ram_capture_warning()) {
+          BOOST_LOG(info)
+            << "wlr: Using RAM capture path for headless labwc because true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"sv;
+        }
       } else {
         prefer_ram_capture = true;
 

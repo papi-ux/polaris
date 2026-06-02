@@ -55,7 +55,7 @@ TEST(CageDisplayRouterPolicyTests, HeadlessRuntimeDoesNotAttemptGpuNativeCapture
   EXPECT_FALSE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
 }
 
-TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessAttemptsExtcopyDmabufBeforeShmFallback) {
+TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiSkipsExtcopyDmabufForShmFallback) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,
     .effective_headless = true,
@@ -63,7 +63,24 @@ TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessAttemptsExtcopyDmabufBeforeS
     .backend_name = "labwc",
   };
 
-  EXPECT_TRUE(cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state));
+  EXPECT_FALSE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+    runtime_state,
+    platf::mem_type_e::vaapi
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessCudaCanAttemptExtcopyDmabuf) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+    runtime_state,
+    platf::mem_type_e::cuda
+  ));
 }
 
 TEST(CageDisplayRouterPolicyTests, WindowedOverrideDoesNotAttemptHeadlessExtcopyDmabuf) {
@@ -74,7 +91,10 @@ TEST(CageDisplayRouterPolicyTests, WindowedOverrideDoesNotAttemptHeadlessExtcopy
     .backend_name = "labwc",
   };
 
-  EXPECT_FALSE(cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state));
+  EXPECT_FALSE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+    runtime_state,
+    platf::mem_type_e::cuda
+  ));
 }
 
 TEST(CageDisplayRouterPolicyTests, RequestedHeadlessWithoutOverrideStillReportsHeadlessFallback) {
