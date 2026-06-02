@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Hardened Linux lock-screen dismissal so a failed `loginctl unlock-session` attempt continues through other graphical user sessions before falling back to `loginctl unlock-sessions`
+
 ## v1.1.0
 
 Feature release focused on the Polaris web console, Library workflows, safer pairing defaults, and NVENC split-frame hardening.

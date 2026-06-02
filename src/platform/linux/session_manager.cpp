@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 using namespace std::literals;
 
@@ -136,7 +137,21 @@ namespace session_manager {
     return session;
   }
 
-  static std::string select_loginctl_session_for_unlock() {
+  static void append_unique_session_id(std::vector<std::string> &session_ids, const std::string &session_id) {
+    if (session_id.empty()) {
+      return;
+    }
+
+    for (const auto &candidate : session_ids) {
+      if (candidate == session_id) {
+        return;
+      }
+    }
+
+    session_ids.push_back(session_id);
+  }
+
+  static std::vector<std::string> select_loginctl_sessions_for_unlock() {
     const char *env_session_id = std::getenv("XDG_SESSION_ID");
     const std::string xdg_session_id =
       (env_session_id && env_session_id[0] != '\0') ? env_session_id : "";
@@ -146,7 +161,7 @@ namespace session_manager {
     auto sessions = exec("loginctl list-sessions --no-legend 2>/dev/null");
     std::istringstream lines {sessions};
     std::string line;
-    std::string graphical_session_id;
+    std::vector<std::string> graphical_session_ids;
     bool xdg_session_is_graphical = false;
 
     while (std::getline(lines, line)) {
@@ -154,40 +169,50 @@ namespace session_manager {
       if (!session.is_graphical_user_session(current_user)) {
         continue;
       }
-      if (graphical_session_id.empty()) {
-        graphical_session_id = session.id;
-      }
+
+      append_unique_session_id(graphical_session_ids, session.id);
       if (!xdg_session_id.empty() && session.id == xdg_session_id) {
         xdg_session_is_graphical = true;
       }
     }
 
+    std::vector<std::string> candidates;
     if (xdg_session_is_graphical) {
-      return xdg_session_id;
+      append_unique_session_id(candidates, xdg_session_id);
     }
-    if (!graphical_session_id.empty()) {
-      return graphical_session_id;
+    for (const auto &session_id : graphical_session_ids) {
+      append_unique_session_id(candidates, session_id);
     }
-    return xdg_session_id;
+    if (candidates.empty()) {
+      append_unique_session_id(candidates, xdg_session_id);
+    }
+
+    return candidates;
   }
 
-  static bool unlock_with_loginctl() {
-    const std::string session_id = select_loginctl_session_for_unlock();
-    std::string cmd;
-    if (!session_id.empty()) {
-      BOOST_LOG(info) << "session_manager: Attempting loginctl unlock for session "sv << session_id;
-      cmd = "loginctl unlock-session " + shell_quote(session_id) + " 2>/dev/null";
-    } else {
-      BOOST_LOG(info) << "session_manager: XDG_SESSION_ID is not set; attempting loginctl unlock-sessions"sv;
-      cmd = "loginctl unlock-sessions 2>/dev/null";
-    }
-
+  static bool run_loginctl_unlock_command(const std::string &cmd, std::string_view failure_message) {
     if (!run(cmd)) {
-      BOOST_LOG(warning) << "session_manager: loginctl unlock command failed"sv;
+      BOOST_LOG(warning) << failure_message;
       return false;
     }
 
     return wait_for_unlock(2s);
+  }
+
+  static bool unlock_with_loginctl() {
+    for (const auto &session_id : select_loginctl_sessions_for_unlock()) {
+      BOOST_LOG(info) << "session_manager: Attempting loginctl unlock for session "sv << session_id;
+      const std::string cmd = "loginctl unlock-session " + shell_quote(session_id) + " 2>/dev/null";
+      if (run_loginctl_unlock_command(cmd, "session_manager: loginctl unlock command failed"sv)) {
+        return true;
+      }
+    }
+
+    BOOST_LOG(info) << "session_manager: Attempting loginctl unlock-sessions"sv;
+    return run_loginctl_unlock_command(
+      "loginctl unlock-sessions 2>/dev/null",
+      "session_manager: loginctl unlock-sessions command failed"sv
+    );
   }
 
   // -----------------------------------------------------------------------

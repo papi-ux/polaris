@@ -125,6 +125,26 @@ TEST(SessionManagerUnlockTests, ManagerSessionIdFallsBackToGraphicalLoginctlSess
   EXPECT_FALSE(harness.ran("loginctl unlock-session '2'"));
 }
 
+TEST(SessionManagerUnlockTests, FailedGraphicalUnlockTriesNextGraphicalSession) {
+  SessionManagerCommandHarness harness;
+  harness.loginctl_clears_lock = true;
+  harness.loginctl_command_that_clears = "loginctl unlock-session '3'";
+  const char *user = std::getenv("USER");
+  ASSERT_NE(nullptr, user);
+  harness.loginctl_list_sessions_output =
+    "1 1000 " + std::string {user} + " seat0 2134 user tty1 no -\n"
+    "2 1000 " + std::string {user} + " - 2197 manager - no -\n"
+    "3 1000 " + std::string {user} + " seat0 2244 user tty2 no -";
+  setenv("XDG_SESSION_ID", "2", 1);
+
+  EXPECT_TRUE(session_manager::unlock_screen());
+
+  EXPECT_FALSE(harness.locked);
+  EXPECT_TRUE(harness.ran("loginctl unlock-session '1'"));
+  EXPECT_TRUE(harness.ran("loginctl unlock-session '3'"));
+  EXPECT_FALSE(harness.ran("loginctl unlock-session '2'"));
+}
+
 TEST(SessionManagerUnlockTests, MissingSessionIdUsesAllSessionsLoginctlFallback) {
   SessionManagerCommandHarness harness;
   harness.loginctl_clears_lock = true;
