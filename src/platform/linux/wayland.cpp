@@ -214,8 +214,9 @@ namespace wl {
     return wl_display_get_registry(display_internal.get());
   }
 
-  inline monitor_t::monitor_t(wl_output *output):
+  inline monitor_t::monitor_t(wl_output *output, std::uint32_t registry_id):
       output {output},
+      registry_id {registry_id},
       wl_listener {
         &CLASS_CALL(monitor_t, wl_geometry),
         &CLASS_CALL(monitor_t, wl_mode),
@@ -493,9 +494,11 @@ namespace wl {
 
     if (!std::strcmp(interface, wl_output_interface.name)) {
       BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      output_registry_state.add_output(id);
       monitors.emplace_back(
         std::make_unique<monitor_t>(
-          (wl_output *) wl_registry_bind(registry, id, &wl_output_interface, 2)
+          (wl_output *) wl_registry_bind(registry, id, &wl_output_interface, 2),
+          id
         )
       );
     } else if (!std::strcmp(interface, zxdg_output_manager_v1_interface.name)) {
@@ -536,7 +539,27 @@ namespace wl {
   }
 
   void interface_t::del_interface(wl_registry *registry, uint32_t id) {
-    BOOST_LOG(info) << "Delete: "sv << id;
+    if (!output_registry_state.remove_global(id)) {
+      BOOST_LOG(info) << "Delete: "sv << id;
+      return;
+    }
+
+    const auto original_monitor_count = monitors.size();
+    monitors.erase(
+      std::remove_if(
+        monitors.begin(),
+        monitors.end(),
+        [id](const std::unique_ptr<monitor_t> &monitor) {
+          return monitor && monitor->registry_id == id;
+        }
+      ),
+      monitors.end()
+    );
+
+    BOOST_LOG(info) << "Wayland output topology changed: removed output global "sv
+                    << id
+                    << "; monitors="sv << original_monitor_count
+                    << "->"sv << monitors.size();
   }
 
   // Initialize GBM

@@ -6,6 +6,33 @@
 
 #ifdef __linux__
   #include <src/platform/linux/cage_display_router.h>
+  #include <src/platform/linux/wayland.h>
+
+TEST(WaylandOutputRegistryStateTests, OutputHotplugMarksTopologyDirtyUntilCleared) {
+  wl::output_registry_state_t state;
+
+  state.add_output(10);
+  EXPECT_TRUE(state.output_topology_dirty());
+
+  state.clear_output_topology_dirty();
+  EXPECT_FALSE(state.output_topology_dirty());
+
+  state.remove_global(10);
+  EXPECT_TRUE(state.output_topology_dirty());
+  EXPECT_FALSE(state.has_output(10));
+}
+
+TEST(WaylandOutputRegistryStateTests, RemovingNonOutputGlobalDoesNotDirtyOutputTopology) {
+  wl::output_registry_state_t state;
+
+  state.add_output(10);
+  state.clear_output_topology_dirty();
+
+  state.remove_global(99);
+
+  EXPECT_FALSE(state.output_topology_dirty());
+  EXPECT_TRUE(state.has_output(10));
+}
 
 TEST(CageDisplayRouterPolicyTests, HeadlessNvencRequestsWindowedGpuNativeProbeWhenAllConditionsMatch) {
   EXPECT_TRUE(cage_display_router::should_attempt_windowed_gpu_native_probe(

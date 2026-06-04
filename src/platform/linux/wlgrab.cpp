@@ -126,9 +126,8 @@ namespace wl {
       monitor->listen(interface.output_manager);
 
       display.roundtrip();
-
+      interface.consume_output_topology_dirty();
       output = monitor->output;
-
       offset_x = monitor->viewport.offset_x;
       offset_y = monitor->viewport.offset_y;
       width = monitor->viewport.width;
@@ -161,6 +160,10 @@ namespace wl {
         auto remaining_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(to - std::chrono::steady_clock::now());
         if (remaining_time_ms.count() < 0 || !display.dispatch(remaining_time_ms)) {
           return platf::capture_e::timeout;
+        }
+        if (interface.consume_output_topology_dirty()) {
+          BOOST_LOG(warning) << "wlr: Wayland output topology changed during capture; reinitializing display capture"sv;
+          return platf::capture_e::reinit;
         }
       } while (dmabuf.status == dmabuf_t::WAITING);
 
@@ -608,6 +611,10 @@ namespace wl {
         capture_ready = true;
       } else {
         extcopy.capture(display);
+        if (interface.consume_output_topology_dirty()) {
+          BOOST_LOG(warning) << "wlr: Wayland output topology changed during ext-image-copy capture; reinitializing display capture"sv;
+          return platf::capture_e::reinit;
+        }
         if (extcopy.status == wl::extcopy_t::WAITING) {
           return platf::capture_e::timeout;
         }
