@@ -34,6 +34,21 @@ TEST(WaylandOutputRegistryStateTests, RemovingNonOutputGlobalDoesNotDirtyOutputT
   EXPECT_TRUE(state.has_output(10));
 }
 
+#ifdef POLARIS_TESTS
+TEST(WaylandInterfaceTests, RemovedOutputMarksDirtyButKeepsMonitorStorageUntilReinit) {
+  wl::interface_t interface;
+
+  interface.add_monitor_for_tests(57);
+  EXPECT_TRUE(interface.consume_output_topology_dirty());
+  ASSERT_EQ(interface.monitors.size(), 1u);
+
+  interface.remove_global_for_tests(57);
+
+  EXPECT_TRUE(interface.consume_output_topology_dirty());
+  EXPECT_EQ(interface.monitors.size(), 1u);
+}
+#endif
+
 TEST(CageDisplayRouterPolicyTests, HeadlessNvencRequestsWindowedGpuNativeProbeWhenAllConditionsMatch) {
   EXPECT_TRUE(cage_display_router::should_attempt_windowed_gpu_native_probe(
     true,

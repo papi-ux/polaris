@@ -544,23 +544,23 @@ namespace wl {
       return;
     }
 
-    const auto original_monitor_count = monitors.size();
-    monitors.erase(
-      std::remove_if(
-        monitors.begin(),
-        monitors.end(),
-        [id](const std::unique_ptr<monitor_t> &monitor) {
-          return monitor && monitor->registry_id == id;
-        }
-      ),
-      monitors.end()
-    );
-
+    const auto monitor_count = monitors.size();
     BOOST_LOG(info) << "Wayland output topology changed: removed output global "sv
                     << id
-                    << "; monitors="sv << original_monitor_count
-                    << "->"sv << monitors.size();
+                    << "; keeping "sv << monitor_count
+                    << " monitor handle(s) alive until capture reinit"sv;
   }
+
+#ifdef POLARIS_TESTS
+  void interface_t::add_monitor_for_tests(std::uint32_t id) {
+    output_registry_state.add_output(id);
+    monitors.emplace_back(std::make_unique<monitor_t>(nullptr, id));
+  }
+
+  void interface_t::remove_global_for_tests(std::uint32_t id) {
+    del_interface(nullptr, id);
+  }
+#endif
 
   // Initialize GBM
   bool dmabuf_t::init_gbm() {

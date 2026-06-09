@@ -385,6 +385,11 @@ namespace wl {
       return true;
     }
 
+#ifdef POLARIS_TESTS
+    void add_monitor_for_tests(std::uint32_t id);
+    void remove_global_for_tests(std::uint32_t id);
+#endif
+
     std::vector<std::unique_ptr<monitor_t>> monitors;
     zwlr_screencopy_manager_v1 *screencopy_manager {nullptr};
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
