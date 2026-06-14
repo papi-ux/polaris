@@ -3,7 +3,7 @@ module github.com/papi-ux/polaris/browser_stream_helper
 go 1.24.0
 
 require (
-	github.com/quic-go/quic-go v0.59.0
+	github.com/quic-go/quic-go v0.59.1
 	github.com/quic-go/webtransport-go v0.10.0
 )
 
