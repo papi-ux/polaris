@@ -3390,10 +3390,18 @@ namespace confighttp {
 
     print_req(request);
 
-    proc::proc.terminate();
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["restarting"] = true;
+    send_response(response, output_tree);
 
-    // We may not return from this call
-    platf::restart();
+    std::thread([]() {
+      std::this_thread::sleep_for(250ms);
+      proc::proc.terminate();
+
+      // We may not return from this call
+      platf::restart();
+    }).detach();
   }
 
   /**

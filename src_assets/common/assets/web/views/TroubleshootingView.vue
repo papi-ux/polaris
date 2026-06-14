@@ -260,6 +260,7 @@ import { ref, computed, onBeforeUnmount, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
+import { requestHostRestart } from '../restart-host.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -679,22 +680,22 @@ async function downloadSupportBundle() {
 
 function restart() {
   serverRestarting.value = true
-  setTimeout(() => { serverRestarting.value = false }, 5000)
-  fetch("./api/restart", {
-    credentials: 'include',
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' }
-  })
-  .then((resp) => {
-    if (resp.status !== 200) {
-      setTimeout(() => { location.reload() }, 1000)
-      return
-    }
-  })
-  .catch((e) => {
+  showToast(i18n.t('troubleshooting.restart_polaris_success') || 'Polaris is restarting...', 'info')
+
+  requestHostRestart({
+    onReady: () => {
+      serverRestarting.value = false
+      showToast(i18n.t('troubleshooting.restart_ready') || 'Polaris is back online.', 'success')
+      refreshLogs()
+    },
+    onTimeout: () => {
+      serverRestarting.value = false
+      showToast(i18n.t('troubleshooting.restart_timeout') || 'Restart requested. If the Web UI is still unavailable, wait a moment and refresh manually.', 'info')
+    },
+  }).catch((e) => {
     serverRestarting.value = false
     console.error(e)
-    setTimeout(() => { location.reload() }, 1000)
+    showToast(i18n.t('troubleshooting.restart_polaris_error') || 'Failed to request Polaris restart.', 'error')
   })
 }
 
