@@ -41,5 +41,8 @@
     "vite-plugin-ejs": "1.7.0",
     "vitest": "4.1.4",
     "vue-eslint-parser": "10.4.0"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
   }
 }

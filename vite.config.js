@@ -108,6 +108,7 @@ export default defineConfig({
     ],
     root: resolve(assetsSrcPath),
     build: {
+        target: 'es2020',
         outDir: resolve(assetsDstPath),
         emptyOutDir: true,
         minify: 'esbuild',
