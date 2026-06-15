@@ -8,10 +8,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <dirent.h>
 #include <fcntl.h>
 #include <iomanip>
 #include <libevdev/libevdev.h>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -25,8 +27,15 @@ namespace {
   constexpr std::string_view xbox_virtual_name = "Sunshine X-Box One (virtual) pad";
   constexpr std::string_view switch_virtual_name = "Sunshine Nintendo (virtual) pad";
   constexpr std::string_view ps5_virtual_name = "Sunshine PS5 (virtual) pad";
+  constexpr std::string_view polaris_xbox_virtual_name = "Polaris X-Box One (virtual) pad";
+  constexpr std::string_view polaris_switch_virtual_name = "Polaris Nintendo (virtual) pad";
+  constexpr std::string_view polaris_ps5_virtual_name = "Polaris PS5 (virtual) pad";
   constexpr std::string_view xbox_private_prefix = "02:00:00:00:10:";
+  constexpr std::string_view switch_private_prefix = "02:00:00:00:20:";
   constexpr std::string_view ds5_private_prefix = "02:00:00:00:00:";
+
+  std::mutex virtual_nodes_mutex;
+  std::map<int, std::vector<std::string>> virtual_nodes_by_gamepad;
 
   std::string safe_string(const char *value) {
     return value ? std::string(value) : std::string {};
@@ -49,6 +58,8 @@ namespace {
 
     return starts_with(phys, xbox_private_prefix) ||
            starts_with(uniq, xbox_private_prefix) ||
+           starts_with(phys, switch_private_prefix) ||
+           starts_with(uniq, switch_private_prefix) ||
            starts_with(phys, ds5_private_prefix) ||
            starts_with(uniq, ds5_private_prefix);
   }
@@ -56,7 +67,10 @@ namespace {
   bool has_known_virtual_name(std::string_view name) {
     return name == xbox_virtual_name ||
            name == switch_virtual_name ||
-           name == ps5_virtual_name;
+           name == ps5_virtual_name ||
+           name == polaris_xbox_virtual_name ||
+           name == polaris_switch_virtual_name ||
+           name == polaris_ps5_virtual_name;
   }
 
   std::optional<vid_pid_pair_t> vid_pid(const device_snapshot_t &device) {
@@ -85,6 +99,71 @@ namespace {
     return joined;
   }
 
+  bool has_numeric_suffix(std::string_view value, std::string_view prefix) {
+    if (!starts_with(value, prefix) || value.size() == prefix.size()) {
+      return false;
+    }
+
+    return std::all_of(value.begin() + static_cast<std::ptrdiff_t>(prefix.size()), value.end(), [](unsigned char ch) {
+      return std::isdigit(ch) != 0;
+    });
+  }
+
+  bool is_virtual_gamepad_node(std::string_view node) {
+    return has_numeric_suffix(node, "/dev/input/event") ||
+           has_numeric_suffix(node, "/dev/input/js") ||
+           has_numeric_suffix(node, "/dev/hidraw");
+  }
+
+  bool is_hidraw_node(std::string_view node) {
+    return starts_with(node, "/dev/hidraw");
+  }
+
+  std::vector<std::string> sanitized_virtual_nodes(const std::vector<std::string> &nodes) {
+    std::set<std::string> unique;
+    for (const auto &node : nodes) {
+      if (is_virtual_gamepad_node(node)) {
+        unique.insert(node);
+      }
+    }
+
+    return std::vector<std::string>(unique.begin(), unique.end());
+  }
+
+  std::string find_executable(std::string_view name) {
+    if (name.empty()) {
+      return {};
+    }
+
+    const auto requested = std::string(name);
+    if (requested.find("/") != std::string::npos) {
+      return access(requested.c_str(), X_OK) == 0 ? requested : std::string {};
+    }
+
+    const char *path_env = std::getenv("PATH");
+    const std::string path = path_env && *path_env ? path_env : "/usr/local/bin:/usr/bin:/bin";
+    std::size_t start = 0;
+    while (start <= path.size()) {
+      const auto end = path.find(static_cast<char>(58), start);
+      auto dir = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
+      if (dir.empty()) {
+        dir = ".";
+      }
+
+      const auto candidate = dir + "/" + requested;
+      if (access(candidate.c_str(), X_OK) == 0) {
+        return candidate;
+      }
+
+      if (end == std::string::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    return {};
+  }
+
   std::string shell_quote(std::string_view value) {
     const auto quote = std::string(1, static_cast<char>(39));
     const auto slash = std::string(1, static_cast<char>(92));
@@ -103,6 +182,26 @@ namespace {
 
     result += quote;
     return result;
+  }
+
+  bool probe_bubblewrap_usable(std::string_view bubblewrap_path) {
+    if (bubblewrap_path.empty()) {
+      return false;
+    }
+
+    std::string command = shell_quote(bubblewrap_path);
+    command += " --bind / /";
+    command += " --dev /dev";
+    command += " --proc /proc";
+    command += " --ro-bind /sys /sys";
+    command += " --tmpfs /dev/input";
+    command += " --dir /dev/input/by-id";
+    command += " --dir /dev/input/by-path";
+    command += " --tmpfs /run/udev";
+    command += " --tmpfs /sys/class/input";
+    command += " --tmpfs /sys/class/hidraw";
+    command += " -- /usr/bin/true >/dev/null 2>&1";
+    return std::system(command.c_str()) == 0;
   }
 
   bool libevdev_has_any_key(const libevdev *device, const std::array<int, 12> &codes) {
@@ -237,6 +336,42 @@ sdl_hint_plan_t build_sdl_hint_plan(const std::vector<classified_device_t> &devi
   return plan;
 }
 
+
+strict_gamepad_isolation_plan_t build_strict_gamepad_isolation_plan(
+  const std::vector<classified_device_t> &devices,
+  const std::vector<std::string> &registered_virtual_nodes,
+  const strict_isolation_options_t &options
+) {
+  strict_gamepad_isolation_plan_t plan;
+  plan.bubblewrap_path = options.bubblewrap_path.empty() ? "bwrap" : options.bubblewrap_path;
+  plan.fallback_sdl = build_sdl_hint_plan(devices);
+  plan.allowed_nodes = sanitized_virtual_nodes(registered_virtual_nodes);
+
+  if (!options.bubblewrap_available || !options.bubblewrap_usable) {
+    const auto unavailable_reason = options.bubblewrap_available ?
+                                      std::string("bubblewrap probe failed") :
+                                      std::string("bubblewrap is unavailable");
+    if (plan.fallback_sdl.applied()) {
+      plan.mode = isolation_mode_e::best_effort_sdl;
+      plan.reason = "gamepad_isolation: strict device isolation is not active because " + unavailable_reason + "; using best-effort SDL hints";
+    } else {
+      plan.mode = isolation_mode_e::unavailable;
+      plan.reason = "gamepad_isolation: strict device isolation is not active because " + unavailable_reason;
+    }
+    return plan;
+  }
+
+  plan.mode = isolation_mode_e::strict_bwrap;
+  if (plan.allowed_nodes.empty()) {
+    plan.reason = "gamepad_isolation: strict bubblewrap device isolation active; no registered Polaris virtual gamepad nodes are exposed";
+  } else {
+    plan.reason = "gamepad_isolation: strict bubblewrap device isolation active; binding " +
+                  std::to_string(plan.allowed_nodes.size()) +
+                  " registered Polaris virtual gamepad node(s)";
+  }
+  return plan;
+}
+
 std::string command_with_sdl_env_prefix(const std::string &command, const sdl_hint_plan_t &plan) {
   if (!plan.applied() || command.empty()) {
     return command;
@@ -254,7 +389,97 @@ std::string command_with_sdl_env_prefix(const std::string &command, const sdl_hi
   return prefixed;
 }
 
-sdl_hint_plan_t prepare_headless_labwc_launch() {
+std::string command_with_headless_gamepad_isolation(const std::string &command, const strict_gamepad_isolation_plan_t &plan) {
+  if (command.empty()) {
+    return command;
+  }
+
+  if (!plan.strict_applied()) {
+    return command_with_sdl_env_prefix(command, plan.fallback_sdl);
+  }
+
+  std::string wrapped = shell_quote(plan.bubblewrap_path.empty() ? "bwrap" : plan.bubblewrap_path);
+  wrapped += " --bind / /";
+  wrapped += " --dev /dev";
+  wrapped += " --proc /proc";
+  wrapped += " --ro-bind /sys /sys";
+  wrapped += " --tmpfs /dev/input";
+  wrapped += " --dir /dev/input/by-id";
+  wrapped += " --dir /dev/input/by-path";
+  wrapped += " --tmpfs /run/udev";
+  wrapped += " --tmpfs /sys/class/input";
+  wrapped += " --tmpfs /sys/class/hidraw";
+
+  static constexpr std::array<std::string_view, 12> runtime_device_roots {
+    "/dev/dri",
+    "/dev/snd",
+    "/dev/kfd",
+    "/dev/nvidiactl",
+    "/dev/nvidia0",
+    "/dev/nvidia-uvm",
+    "/dev/nvidia-uvm-tools",
+    "/dev/nvidia-modeset",
+    "/dev/nvidia-caps",
+    "/dev/shm",
+    "/dev/fd",
+    "/dev/pts",
+  };
+
+  for (const auto node : runtime_device_roots) {
+    wrapped += " --dev-bind-try ";
+    wrapped += node;
+    wrapped += " ";
+    wrapped += node;
+  }
+
+  for (const auto &node : plan.allowed_nodes) {
+    wrapped += is_hidraw_node(node) ? " --dev-bind-try " : " --dev-bind ";
+    wrapped += node;
+    wrapped += " ";
+    wrapped += node;
+  }
+
+  wrapped += " -- /bin/sh -lc ";
+  wrapped += shell_quote(command);
+  return wrapped;
+}
+
+void register_virtual_gamepad_nodes(int gamepad_index, const std::vector<std::string> &nodes) {
+  auto sanitized = sanitized_virtual_nodes(nodes);
+  std::lock_guard lock(virtual_nodes_mutex);
+  if (sanitized.empty()) {
+    virtual_nodes_by_gamepad.erase(gamepad_index);
+    return;
+  }
+  virtual_nodes_by_gamepad[gamepad_index] = std::move(sanitized);
+}
+
+void unregister_virtual_gamepad_nodes(int gamepad_index) {
+  std::lock_guard lock(virtual_nodes_mutex);
+  virtual_nodes_by_gamepad.erase(gamepad_index);
+}
+
+std::vector<std::string> registered_virtual_gamepad_nodes() {
+  std::vector<std::string> nodes;
+  std::lock_guard lock(virtual_nodes_mutex);
+  for (const auto &[_, device_nodes] : virtual_nodes_by_gamepad) {
+    nodes.insert(nodes.end(), device_nodes.begin(), device_nodes.end());
+  }
+  return sanitized_virtual_nodes(nodes);
+}
+
+strict_isolation_options_t detect_strict_isolation_options() {
+  strict_isolation_options_t options;
+  options.bubblewrap_path = find_executable("bwrap");
+  options.bubblewrap_available = !options.bubblewrap_path.empty();
+  if (options.bubblewrap_path.empty()) {
+    options.bubblewrap_path = "bwrap";
+  }
+  options.bubblewrap_usable = options.bubblewrap_available && probe_bubblewrap_usable(options.bubblewrap_path);
+  return options;
+}
+
+strict_gamepad_isolation_plan_t prepare_headless_labwc_launch() {
   const auto devices = classify_devices(enumerate_visible_gamepads());
 
   std::size_t polaris_virtual_count = 0;
@@ -272,13 +497,20 @@ sdl_hint_plan_t prepare_headless_labwc_launch() {
                   << " host_visible="
                   << host_visible_count;
 
-  auto plan = build_sdl_hint_plan(devices);
-  if (host_visible_count > 0 && !plan.applied()) {
-    BOOST_LOG(warning) << plan.reason;
-  } else {
+  const auto registered_nodes = registered_virtual_gamepad_nodes();
+  auto plan = build_strict_gamepad_isolation_plan(devices, registered_nodes, detect_strict_isolation_options());
+  BOOST_LOG(info) << "gamepad_isolation: registered Polaris virtual nodes="
+                  << registered_nodes.size();
+
+  if (plan.strict_applied()) {
     BOOST_LOG(info) << plan.reason;
+  } else {
+    BOOST_LOG(warning) << plan.reason;
+    if (!plan.fallback_sdl.reason.empty()) {
+      BOOST_LOG(info) << plan.fallback_sdl.reason;
+    }
+    BOOST_LOG(info) << "gamepad_isolation: fallback is best-effort only; strict /dev/input and hidraw hiding is not active";
   }
-  BOOST_LOG(info) << "gamepad_isolation: diagnostics and SDL hints are best-effort only; strict /dev/input and hidraw hiding is not active";
   return plan;
 }
 

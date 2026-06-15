@@ -10,6 +10,7 @@
 // local includes
 #include "inputtino_common.h"
 #include "inputtino_gamepad.h"
+#include "inputtino_gamepad_isolation.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -25,6 +26,16 @@ namespace platf::gamepad {
     XINPUT_NOT_AVAILABLE,  ///< XINPUT is not available
     GAMEPAD_STATUS  ///< Helper to indicate the number of status
   };
+
+  std::vector<std::string> joypad_nodes(const joypads_t &joypad) {
+    return std::visit([](const auto &device) {
+      return device.get_nodes();
+    }, joypad);
+  }
+
+  void register_created_joypad_nodes(int globalIndex, const joypads_t &joypad) {
+    isolation::register_virtual_gamepad_nodes(globalIndex, joypad_nodes(joypad));
+  }
 
   auto create_xbox_one(int globalIndex) {
     std::string device_id = "";
@@ -42,12 +53,20 @@ namespace platf::gamepad {
                                              .device_uniq = device_id});
   }
 
-  auto create_switch() {
+  auto create_switch(int globalIndex) {
+    std::string device_id = "";
+
+    if (globalIndex >= 0 && globalIndex <= 255) {
+      device_id = std::format("02:00:00:00:20:{:02x}", globalIndex);
+    }
+
     return inputtino::SwitchJoypad::create({.name = "Sunshine Nintendo (virtual) pad",
                                             // https://github.com/torvalds/linux/blob/master/drivers/hid/hid-ids.h#L981
                                             .vendor_id = 0x057e,
                                             .product_id = 0x2009,
-                                            .version = 0x8111});
+                                            .version = 0x8111,
+                                            .device_phys = device_id,
+                                            .device_uniq = device_id});
   }
 
   auto create_ds5(int globalIndex) {
@@ -131,6 +150,7 @@ namespace platf::gamepad {
           if (xOne) {
             (*xOne).set_on_rumble(on_rumble_fn);
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*xOne));
+            register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
           } else {
@@ -140,10 +160,11 @@ namespace platf::gamepad {
         }
       case SwitchProWired:
         {
-          auto switchPro = create_switch();
+          auto switchPro = create_switch(id.globalIndex);
           if (switchPro) {
             (*switchPro).set_on_rumble(on_rumble_fn);
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*switchPro));
+            register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
           } else {
@@ -176,6 +197,7 @@ namespace platf::gamepad {
             feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
 
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*ds5));
+            register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
           } else {
@@ -188,6 +210,7 @@ namespace platf::gamepad {
   }
 
   void free(input_raw_t *raw, int nr) {
+    isolation::unregister_virtual_gamepad_nodes(nr);
     // This will call the destructor which in turn will stop the background threads for rumble and LED (and ultimately remove the joypad device)
     raw->gamepads[nr]->joypad.reset();
     raw->gamepads[nr].reset();
@@ -283,7 +306,7 @@ namespace platf::gamepad {
     }
 
     auto ds5 = create_ds5(-1);  // Index -1 will result in a random MAC virtual device, which is fine for probing
-    auto switchPro = create_switch();
+    auto switchPro = create_switch(-1);
     auto xOne = create_xbox_one(0);
 
     static std::vector gps {

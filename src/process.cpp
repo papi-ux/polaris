@@ -3013,7 +3013,7 @@ namespace proc {
     }
 
     const bool has_launch_commands = !_app.detached.empty() || !_app.cmd.empty();
-    platf::gamepad::isolation::sdl_hint_plan_t gamepad_sdl_hint_plan;
+    platf::gamepad::isolation::strict_gamepad_isolation_plan_t gamepad_isolation_plan;
     bool gamepad_isolation_prepared = false;
 
     auto should_apply_headless_gamepad_isolation = [&]() {
@@ -3028,19 +3028,22 @@ namespace proc {
         return;
       }
       gamepad_isolation_prepared = true;
-      gamepad_sdl_hint_plan = platf::gamepad::isolation::prepare_headless_labwc_launch();
+      gamepad_isolation_plan = platf::gamepad::isolation::prepare_headless_labwc_launch();
     };
 
     auto apply_gamepad_sdl_env = [&](auto &env) {
       prepare_headless_gamepad_isolation();
-      for (const auto &[key, value] : gamepad_sdl_hint_plan.env) {
+      if (!gamepad_isolation_plan.fallback_applied()) {
+        return;
+      }
+      for (const auto &[key, value] : gamepad_isolation_plan.fallback_sdl.env) {
         env[key] = value;
       }
     };
 
-    auto command_with_gamepad_sdl_env = [&](const std::string &command) {
+    auto command_with_gamepad_isolation = [&](const std::string &command) {
       prepare_headless_gamepad_isolation();
-      return platf::gamepad::isolation::command_with_sdl_env_prefix(command, gamepad_sdl_hint_plan);
+      return platf::gamepad::isolation::command_with_headless_gamepad_isolation(command, gamepad_isolation_plan);
     };
     auto start_cage_with_runtime_fallback = [&](const std::string &startup_cmd) -> bool {
       confighttp::set_session_state(confighttp::session_state_e::cage_starting);
@@ -3056,7 +3059,7 @@ namespace proc {
         force_windowed_cage_for_gpu_native = false;
       }
 
-      return start_cage_session(command_with_gamepad_sdl_env(startup_cmd), false);
+      return start_cage_session(command_with_gamepad_isolation(startup_cmd), false);
     };
 
     if (has_launch_commands) {
@@ -3095,11 +3098,12 @@ namespace proc {
             cmd_env.erase("DISPLAY");
           }
         }
+        const auto launch_cmd = command_with_gamepad_isolation(cmd);
         boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                 find_working_directory(cmd, cmd_env) :
                                                 boost::filesystem::path(_app.working_dir);
-        BOOST_LOG(info) << "Spawning ["sv << cmd << "] in ["sv << working_dir << ']';
-        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
+        BOOST_LOG(info) << "Spawning ["sv << launch_cmd << "] in ["sv << working_dir << ']';
+        auto child = platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
         if (ec) {
           BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
         } else {
@@ -3133,9 +3137,13 @@ namespace proc {
 #ifdef __linux__
     // Set cage environment for the app command (if cage is running and app has a cmd)
     std::string effective_cmd = _app.cmd;
+    std::string working_dir_cmd = effective_cmd;
     auto launch_env = _env;
+    bool app_command_uses_cage_runtime = false;
     if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running() && !_app.cmd.empty()) {
       effective_cmd = cage_runtime_command(_app.cmd);
+      working_dir_cmd = effective_cmd;
+      app_command_uses_cage_runtime = true;
       if (!allow_cage_mangohud) {
         strip_mangohud_env(launch_env);
       }
@@ -3156,8 +3164,12 @@ namespace proc {
         }
       }
     }
+    if (app_command_uses_cage_runtime) {
+      effective_cmd = command_with_gamepad_isolation(effective_cmd);
+    }
 #else
     const std::string &effective_cmd = _app.cmd;
+    const std::string &working_dir_cmd = effective_cmd;
     auto &launch_env = _env;
 #endif
 
@@ -3173,7 +3185,7 @@ namespace proc {
       placebo = true;
     } else {
       boost::filesystem::path working_dir = _app.working_dir.empty() ?
-                                              find_working_directory(effective_cmd, launch_env) :
+                                              find_working_directory(working_dir_cmd, launch_env) :
                                               boost::filesystem::path(_app.working_dir);
       BOOST_LOG(info) << "Executing: ["sv << effective_cmd << "] in ["sv << working_dir << ']';
       _process = platf::run_command(_app.elevated, true, effective_cmd, working_dir, launch_env, _pipe.get(), ec, &_process_group);
