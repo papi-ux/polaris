@@ -68,6 +68,7 @@
   #include "platform/linux/session_manager.h"
   #include "platform/linux/cage_display_router.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <signal.h>
   #include <unistd.h>
@@ -3011,6 +3012,36 @@ namespace proc {
                          << "] can use a GPU-native capture path"sv;
     }
 
+    const bool has_launch_commands = !_app.detached.empty() || !_app.cmd.empty();
+    platf::gamepad::isolation::sdl_hint_plan_t gamepad_sdl_hint_plan;
+    bool gamepad_isolation_prepared = false;
+
+    auto should_apply_headless_gamepad_isolation = [&]() {
+      return has_launch_commands &&
+             config::video.linux_display.use_cage_compositor &&
+             config::video.linux_display.headless_mode &&
+             !force_windowed_cage_for_gpu_native;
+    };
+
+    auto prepare_headless_gamepad_isolation = [&]() {
+      if (gamepad_isolation_prepared || !should_apply_headless_gamepad_isolation()) {
+        return;
+      }
+      gamepad_isolation_prepared = true;
+      gamepad_sdl_hint_plan = platf::gamepad::isolation::prepare_headless_labwc_launch();
+    };
+
+    auto apply_gamepad_sdl_env = [&](auto &env) {
+      prepare_headless_gamepad_isolation();
+      for (const auto &[key, value] : gamepad_sdl_hint_plan.env) {
+        env[key] = value;
+      }
+    };
+
+    auto command_with_gamepad_sdl_env = [&](const std::string &command) {
+      prepare_headless_gamepad_isolation();
+      return platf::gamepad::isolation::command_with_sdl_env_prefix(command, gamepad_sdl_hint_plan);
+    };
     auto start_cage_with_runtime_fallback = [&](const std::string &startup_cmd) -> bool {
       confighttp::set_session_state(confighttp::session_state_e::cage_starting);
       confighttp::emit_session_event("cage_starting", "Starting compositor");
@@ -3025,10 +3056,10 @@ namespace proc {
         force_windowed_cage_for_gpu_native = false;
       }
 
-      return start_cage_session(startup_cmd, false);
+      return start_cage_session(command_with_gamepad_sdl_env(startup_cmd), false);
     };
 
-    if (!_app.detached.empty() || !_app.cmd.empty()) {
+    if (has_launch_commands) {
       input::preallocate_gamepad();
     }
 
@@ -3052,6 +3083,7 @@ namespace proc {
         if (!allow_cage_mangohud) {
           strip_mangohud_env(cmd_env);
         }
+        apply_gamepad_sdl_env(cmd_env);
         auto cage_socket = cage_display_router::get_wayland_socket();
         if (!cage_socket.empty()) {
           cmd_env["WAYLAND_DISPLAY"] = cage_socket;
@@ -3107,6 +3139,7 @@ namespace proc {
       if (!allow_cage_mangohud) {
         strip_mangohud_env(launch_env);
       }
+      apply_gamepad_sdl_env(launch_env);
       auto cage_socket = cage_display_router::get_wayland_socket();
       if (!cage_socket.empty()) {
         launch_env["WAYLAND_DISPLAY"] = cage_socket;
