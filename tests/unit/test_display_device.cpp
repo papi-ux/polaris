@@ -46,6 +46,10 @@ namespace {
   struct DisplayDeviceConfigTest: testing::TestWithParam<T> {};
 }  // namespace
 
+TEST(DisplayDeviceNameMappingTests, MapDisplayNameFallsBackToProvidedNameWhenNoSettingsManagerAvailable) {
+  EXPECT_EQ(display_device::map_display_name("HDMI-A-1"), "HDMI-A-1");
+}
+
 using ParseDeviceId = DisplayDeviceConfigTest<std::pair<std::string, std::string>>;
 INSTANTIATE_TEST_SUITE_P(
   DisplayDeviceConfigTest,
