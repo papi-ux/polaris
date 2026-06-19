@@ -992,6 +992,14 @@ namespace proc {
              !steam_appid_for_context(ctx).empty();
     }
 
+    bool should_skip_steam_shutdown_undo_after_cage_cleanup(const proc::ctx_t &ctx,
+                                                            const proc::cmd_t &cmd,
+                                                            bool use_cage_compositor) {
+      return use_cage_compositor &&
+             context_uses_steam(ctx) &&
+             command_requests_steam_shutdown(cmd.undo_cmd);
+    }
+
     bool is_browser_stream_session(const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session) {
       return launch_session && launch_session->device_name == "Browser Stream";
     }
@@ -1663,6 +1671,12 @@ namespace proc {
                                                    bool use_cage_compositor,
                                                    bool requested_headless) {
     return cage_mangohud_allowed_for_session(app, use_cage_compositor, requested_headless);
+  }
+
+  bool should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(const proc::ctx_t &app,
+                                                                   const proc::cmd_t &cmd,
+                                                                   bool use_cage_compositor) {
+    return should_skip_steam_shutdown_undo_after_cage_cleanup(app, cmd, use_cage_compositor);
   }
 #endif
 
@@ -3553,10 +3567,12 @@ namespace proc {
       }
 
 #ifdef __linux__
-      if (config::video.linux_display.use_cage_compositor &&
-          !steam_appid_for_context(_app).empty() &&
-          command_requests_steam_shutdown(cmd.undo_cmd)) {
-        BOOST_LOG(info) << "Skipping Steam shutdown undo after isolated cage Steam app cleanup ["sv
+      if (should_skip_steam_shutdown_undo_after_cage_cleanup(
+            _app,
+            cmd,
+            config::video.linux_display.use_cage_compositor
+          )) {
+        BOOST_LOG(info) << "Skipping Steam shutdown undo after isolated cage Steam cleanup ["sv
                         << cmd.undo_cmd << ']';
         continue;
       }
