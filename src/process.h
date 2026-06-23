@@ -63,6 +63,9 @@ namespace proc {
   bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
                                                    bool use_cage_compositor,
                                                    bool requested_headless);
+  bool should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(const struct ctx_t &app,
+                                                                   const config::prep_cmd_t &cmd,
+                                                                   bool use_cage_compositor);
 #endif
 
   typedef config::prep_cmd_t cmd_t;

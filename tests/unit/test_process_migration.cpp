@@ -71,6 +71,21 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureNeverAllowsCageMangoHud) {
 
   EXPECT_FALSE(proc::cage_mangohud_allowed_for_session_for_tests(app, true, true));
 }
+
+TEST(ProcessRuntimeConfigTests, HeadlessCageSteamBigPictureSkipsHostShutdownUndo) {
+  proc::ctx_t app {};
+  app.name = "Steam Big Picture";
+  app.detached = {"setsid steam -gamepadui"};
+
+  proc::cmd_t shutdown_undo {
+    std::string {},
+    std::string {"setsid -f steam -shutdown"},
+    false
+  };
+
+  EXPECT_TRUE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, true));
+  EXPECT_FALSE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, false));
+}
 #endif
 
 TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
