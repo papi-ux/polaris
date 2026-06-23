@@ -766,7 +766,11 @@ namespace display_device {
   std::string map_display_name(const std::string &display_name) {
     std::lock_guard lock { DD_DATA.mutex };
     if (!DD_DATA.sm_instance) {
-      return {};
+      // Fallback to the display name itself when the platform display-device
+      // settings manager is unavailable. Linux capture backends already use
+      // connector names such as HDMI-A-1 directly, so clearing the name here
+      // causes host virtual display capture to fall back to the wrong output.
+      return display_name;
     }
 
     const auto available_devices { DD_DATA.sm_instance->execute([](auto &settings_iface) { return settings_iface.enumAvailableDevices(); }) };
