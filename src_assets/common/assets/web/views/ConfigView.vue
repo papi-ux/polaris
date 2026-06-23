@@ -229,6 +229,7 @@ import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
 import { CLIENT_SETTINGS_RESPONSE_ONLY_KEYS, stripClientSettingsResponseOnly } from '../client-settings-sync'
+import { requestHostRestart } from '../restart-host.js'
 
 const { toast } = useToast()
 const i18n = inject('i18n')
@@ -824,25 +825,23 @@ function apply() {
       restarting.value = true
       restarted.value = true
       toast(i18n.t('config.restart_note') || 'Polaris is restarting...', 'info', 5000)
-      setTimeout(() => {
-        saved.value = false
-        restarted.value = false
-        restarting.value = false
-      }, 5000)
-      fetch("./api/restart", {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      })
-      .then((resp) => {
-        if (resp.status !== 200) {
-          location.reload()
-          return
-        }
-      })
-      .catch((e) => {
+      requestHostRestart({
+        onReady: () => {
+          saved.value = false
+          restarted.value = false
+          restarting.value = false
+          toast(i18n.t('config.restart_ready') || 'Polaris is back online.', 'success', 5000)
+        },
+        onTimeout: () => {
+          saved.value = false
+          restarted.value = false
+          restarting.value = false
+          toast(i18n.t('config.restart_timeout') || 'Restart requested. If the Web UI is still unavailable, wait a moment and refresh manually.', 'info', 8000)
+        },
+      }).catch((e) => {
         console.error(e)
         restarting.value = false
-        setTimeout(() => { location.reload() }, 1000)
+        toast(i18n.t('config.restart_error') || 'Failed to request Polaris restart.', 'error', 8000)
       })
     }
   })
