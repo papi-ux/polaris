@@ -158,6 +158,10 @@ const authModeLabels = {
   none: { name: 'No Auth', description: 'Call the endpoint without auth' }
 }
 
+function authModeName(mode) {
+  return authModeLabels[mode]?.name || mode
+}
+
 const currentProvider = computed(() =>
   providerOptions.find(provider => provider.id === config.value.ai_provider) || providerOptions[0]
 )
@@ -202,6 +206,59 @@ const autoQualityEnabled = computed(() => (
   config.value.ai_enabled === 'enabled' &&
   config.value.adaptive_bitrate_enabled === 'enabled'
 ))
+
+const authReady = computed(() => {
+  if (config.value.ai_auth_mode === 'none') return true
+  if (config.value.ai_auth_mode === 'api_key') return !!config.value.ai_api_key || hasStoredApiKey.value
+  if (!aiStatus.value || aiStatus.value.provider !== config.value.ai_provider) return false
+  if (aiStatus.value.cli_authenticated === true) return true
+  return aiStatus.value.cli_available === true && aiStatus.value.cli_authenticated == null
+})
+
+const authHelpText = computed(() => {
+  if (config.value.ai_auth_mode === 'api_key') return hasStoredApiKey.value ? 'Stored key ready' : 'Add an API key'
+  if (config.value.ai_auth_mode === 'none') return 'No auth needed'
+  if (aiStatus.value?.provider === config.value.ai_provider && aiStatus.value?.cli_login_command) {
+    return `Run ${aiStatus.value.cli_login_command}`
+  }
+  if (currentSubscriptionLoginCommand.value) return `Run ${currentSubscriptionLoginCommand.value}`
+  return `Sign in with ${currentSubscriptionLabel.value}`
+})
+
+const hasFirstStreamProfile = computed(() => {
+  const cacheCount = Number(aiStatus.value?.cache_count || 0)
+  const historyCount = Array.isArray(aiHistory.value) ? aiHistory.value.length : 0
+  const cacheEntries = Array.isArray(aiCache.value) ? aiCache.value.length : 0
+  return cacheCount > 0 || historyCount > 0 || cacheEntries > 0
+})
+
+const setupSteps = computed(() => [
+  {
+    label: '1. Choose provider',
+    status: config.value.ai_provider ? currentProvider.value.name : 'Needed',
+    done: !!config.value.ai_provider
+  },
+  {
+    label: '2. Verify auth',
+    status: authReady.value ? 'Ready' : authHelpText.value,
+    done: authReady.value
+  },
+  {
+    label: '3. Test draft',
+    status: testResult.value?.success ? 'Passed' : 'Run before saving',
+    done: testResult.value?.success === true
+  },
+  {
+    label: '4. Enable Auto Quality',
+    status: autoQualityEnabled.value ? 'Enabled' : 'Turn on when the draft passes',
+    done: autoQualityEnabled.value
+  },
+  {
+    label: '5. Build first stream profile',
+    status: hasFirstStreamProfile.value ? 'Profile history found' : 'Start one stream after save/apply',
+    done: hasFirstStreamProfile.value
+  }
+])
 
 function setAutoQualityEnabled(enabled) {
   const value = enabled ? 'enabled' : 'disabled'
@@ -403,6 +460,21 @@ function providerPill(providerId) {
   return provider?.pill || 'text-silver border-storm/40'
 }
 
+function providerAuthSummary(provider) {
+  return provider.authModes.map(authModeName).join(', ')
+}
+
+function providerRuntimeSummary(provider) {
+  if (!aiStatus.value || aiStatus.value.provider !== provider.id) return 'Not saved'
+  if (aiStatus.value.enabled) return 'Saved runtime · Auto Quality on'
+  return 'Saved runtime · Auto Quality off'
+}
+
+function providerRuntimeTone(provider) {
+  if (!aiStatus.value || aiStatus.value.provider !== provider.id) return 'text-storm'
+  return aiStatus.value.enabled ? 'text-emerald-200' : 'text-amber-200'
+}
+
 function subscriptionRuntimeTone(status) {
   if (!status) return 'text-storm'
   if (status.cli_authenticated === true) return 'text-green-300'
@@ -548,13 +620,23 @@ async function testProviderConfig() {
     const message = provider.id === 'local'
       ? `Local endpoint returned a valid optimization for ${testDeviceName.value || 'the selected device'}.`
       : `${provider.name} returned a valid optimization for ${testDeviceName.value || 'the selected device'}.`
-    testResult.value = { success: true, message, detail: result.reasoning || '', payload: result }
+    testResult.value = {
+      success: true,
+      label: 'Draft verified',
+      message,
+      detail: result.reasoning || '',
+      action: 'Next step: save and apply, then start a stream to build the first profile.',
+      payload: result
+    }
     toast(`${provider.name} draft settings verified`, 'success')
   } else {
     testResult.value = {
       success: false,
+      label: 'Action needed',
       message: result.error || 'Connection test failed',
-      detail: '',
+      detail: result.detail || '',
+      action: result.action || authHelpText.value,
+      retryLabel: result.retryable === false ? 'Review settings' : 'Retry after fixing auth',
       payload: null
     }
     toast(`${provider.name} test failed: ${result.error || 'Unknown error'}`, 'error')
@@ -655,7 +737,34 @@ onBeforeUnmount(() => {
           <p class="text-sm mt-3 leading-6" :class="config.ai_provider === provider.id ? 'text-current/90' : 'text-storm'">
             {{ provider.summary }}
           </p>
+          <div class="mt-3 space-y-1 text-[11px] leading-5" :class="config.ai_provider === provider.id ? 'text-current/85' : 'text-storm'">
+            <div>Auth: {{ providerAuthSummary(provider) }}</div>
+            <div :class="providerRuntimeTone(provider)">{{ providerRuntimeSummary(provider) }}</div>
+          </div>
         </button>
+      </div>
+
+      <div class="rounded-2xl border border-ice/15 bg-ice/5 p-4">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div class="section-kicker">Recommended setup</div>
+            <div class="settings-section-title mt-2 text-base">Guided path to first Auto Quality profile</div>
+            <p class="settings-section-copy mt-2">Follow these in order when you only want the safe default path. Advanced controls stay below.</p>
+          </div>
+          <div class="rounded-full border border-storm/40 bg-void/30 px-3 py-1 text-xs text-storm">
+            {{ setupSteps.filter(step => step.done).length }}/{{ setupSteps.length }} done
+          </div>
+        </div>
+        <div class="mt-4 grid gap-2 lg:grid-cols-5">
+          <div
+            v-for="step in setupSteps"
+            :key="step.label"
+            class="rounded-xl border px-3 py-2"
+            :class="step.done ? 'border-emerald-300/20 bg-emerald-300/8' : 'border-storm/30 bg-void/30'">
+            <div class="text-xs font-semibold" :class="step.done ? 'text-emerald-200' : 'text-silver'">{{ step.label }}</div>
+            <div class="mt-1 text-[11px] leading-5" :class="step.done ? 'text-emerald-100/80' : 'text-storm'">{{ step.status }}</div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -666,6 +775,7 @@ onBeforeUnmount(() => {
             <div>
               <div class="section-kicker">Setup</div>
               <h3 class="settings-section-title mt-2">{{ currentProvider.name }} setup</h3>
+              <p class="settings-section-copy mt-2">Guided step: choose the {{ currentProvider.name }} setup that matches your auth, then test this draft before saving.</p>
             </div>
             <div class="flex items-center gap-2">
               <button
@@ -906,8 +1016,13 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="testResult" class="rounded-xl border px-4 py-3" :class="testResult.success ? 'border-green-400/20 bg-green-400/8' : 'border-red-400/20 bg-red-400/8'">
+            <div class="text-[10px] uppercase tracking-[0.2em]" :class="testResult.success ? 'text-green-300' : 'text-red-300'">{{ testResult.label }}</div>
             <div class="text-sm font-medium" :class="testResult.success ? 'text-green-300' : 'text-red-300'">{{ testResult.message }}</div>
             <div v-if="testResult.detail" class="text-xs text-silver/70 mt-2">{{ testResult.detail }}</div>
+            <div v-if="testResult.action" class="mt-3 rounded-lg border px-3 py-2 text-xs" :class="testResult.success ? 'border-green-400/20 bg-void/30 text-green-100' : 'border-red-400/20 bg-void/30 text-red-100'">
+              {{ testResult.action }}
+            </div>
+            <div v-if="testResult.retryLabel" class="mt-2 text-xs font-medium text-silver/80">{{ testResult.retryLabel }}</div>
             <div v-if="testResult.success && testResult.payload" class="grid gap-2 mt-3 sm:grid-cols-2">
               <div class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
                 <div class="text-[10px] uppercase tracking-wider text-storm">Source</div>
