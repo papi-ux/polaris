@@ -68,6 +68,44 @@
           </div>
         </div>
 
+        <section class="dashboard-live-summary-grid" aria-label="Live stream summary">
+          <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
+            <div class="dashboard-live-summary-label">Quality</div>
+            <div class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ liveSummary.quality }}</div>
+            <div class="dashboard-live-summary-copy">{{ liveSummary.qualityDetail }}</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="Latency">
+            <div class="dashboard-live-summary-label">Latency</div>
+            <div class="dashboard-live-summary-value" :class="liveSummary.latencyTone">{{ liveSummary.latency }}</div>
+            <div class="dashboard-live-summary-copy">Round trip</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="FPS">
+            <div class="dashboard-live-summary-label">FPS</div>
+            <div class="dashboard-live-summary-value" :class="liveSummary.fpsTone">{{ liveSummary.fps }}</div>
+            <div class="dashboard-live-summary-copy">{{ liveSummary.fpsDetail }}</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="Loss">
+            <div class="dashboard-live-summary-label">Loss</div>
+            <div class="dashboard-live-summary-value" :class="liveSummary.lossTone">{{ liveSummary.loss }}</div>
+            <div class="dashboard-live-summary-copy">Packet loss</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="Bitrate">
+            <div class="dashboard-live-summary-label">Bitrate</div>
+            <div class="dashboard-live-summary-value text-silver">{{ liveSummary.bitrate }}</div>
+            <div class="dashboard-live-summary-copy">{{ stats.codec?.toUpperCase() || '--' }}</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="Capture path">
+            <div class="dashboard-live-summary-label">Capture path</div>
+            <div class="dashboard-live-summary-value" :class="captureGpuNativeTone">{{ capturePathLabel }}</div>
+            <div class="dashboard-live-summary-copy">{{ captureTransportLabel }} · {{ captureResidencyLabel }}</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="Runtime mode">
+            <div class="dashboard-live-summary-label">Runtime mode</div>
+            <div class="dashboard-live-summary-value" :class="runtimeEffectiveTone">{{ runtimeEffectiveMode }}</div>
+            <div class="dashboard-live-summary-copy">{{ runtimeBackendLabel }}</div>
+          </div>
+        </section>
+
         <section class="rounded-xl border p-4" :class="autoQuality.panelClass">
           <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div class="min-w-0">
@@ -173,7 +211,12 @@
             </section>
 
             <div class="dashboard-live-support-grid">
-              <section class="surface-subtle p-4 dashboard-support-card">
+              <details class="dashboard-secondary-group" open>
+                <summary class="dashboard-secondary-group-summary">
+                  <span>Priority guidance</span>
+                  <span>{{ primaryRecommendations.length || 0 }} live cues</span>
+                </summary>
+                <section class="surface-subtle p-4 dashboard-support-card">
                 <div class="flex items-start justify-between gap-3">
                   <div>
                     <div class="eyebrow-label">{{ $t('dashboard.recommendations') }}</div>
@@ -213,9 +256,15 @@
                     {{ $t('dashboard.ai_optimization_empty') }}
                   </div>
                 </div>
-              </section>
+                </section>
+              </details>
 
-              <section class="surface-subtle p-4 dashboard-support-card">
+              <details class="dashboard-secondary-group" open>
+                <summary class="dashboard-secondary-group-summary">
+                  <span>Capture and replay</span>
+                  <span>{{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}</span>
+                </summary>
+                <section class="surface-subtle p-4 dashboard-support-card">
                 <div class="flex items-start justify-between gap-3">
                   <div>
                     <div class="eyebrow-label">Session tools</div>
@@ -285,10 +334,16 @@
                     {{ $t('dashboard.session_history_empty') }}
                   </div>
                 </div>
-              </section>
+                </section>
+              </details>
             </div>
 
-            <section class="dashboard-telemetry-card">
+            <details class="dashboard-secondary-group" open>
+              <summary class="dashboard-secondary-group-summary">
+                <span>{{ $t('dashboard.telemetry_title') }}</span>
+                <span>{{ stats.fps?.toFixed(1) || '--' }} fps · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
+              </summary>
+              <section class="dashboard-telemetry-card">
               <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
                 <div>
                   <div class="section-kicker">{{ $t('dashboard.telemetry') }}</div>
@@ -356,7 +411,8 @@
                   <div class="mt-1 text-xs text-storm">{{ gpu.vram_total_mb != null ? '/ ' + (gpu.vram_total_mb / 1024).toFixed(0) + ' GB' : '' }}</div>
                 </div>
               </div>
-            </section>
+              </section>
+            </details>
           </div>
 
           <div class="dashboard-live-side">
@@ -1222,6 +1278,39 @@ const qualitySummaryLabel = computed(() => t('dashboard.quality_summary', {
   grade: qualityGrade.value,
   score: qualityScore.value,
 }))
+
+function formatLiveNumber(value, digits = 1, suffix = '') {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return '--'
+  return `${parsed.toFixed(digits)}${suffix}`
+}
+
+const liveSummary = computed(() => {
+  const s = stats.value || {}
+  const fps = metricNumber(s.fps)
+  const targetFps = metricNumber(s.session_target_fps || s.requested_client_fps)
+  const latency = Number(s.latency_ms)
+  const loss = Number(s.packet_loss)
+  const bitrate = Number(s.bitrate_kbps)
+
+  return {
+    quality: `${qualityGrade.value} · ${qualityScore.value}`,
+    qualityDetail: 'Stream score',
+    qualityTone: gradeColor(qualityGrade.value),
+    latency: formatLiveNumber(latency, 0, ' ms'),
+    latencyTone: Number.isFinite(latency)
+      ? (latency <= 20 ? 'text-green-400' : latency <= 50 ? 'text-yellow-400' : 'text-red-400')
+      : 'text-storm',
+    fps: formatLiveNumber(fps, 1),
+    fpsTone: fps > 0 ? (fps >= 55 ? 'text-green-400' : fps >= 30 ? 'text-yellow-400' : 'text-red-400') : 'text-storm',
+    fpsDetail: targetFps > 0 ? `${targetFps.toFixed(0)} target` : 'Encoded',
+    loss: formatLiveNumber(loss, 1, '%'),
+    lossTone: Number.isFinite(loss)
+      ? (loss < 0.5 ? 'text-green-400' : loss < 2 ? 'text-yellow-400' : 'text-red-400')
+      : 'text-storm',
+    bitrate: Number.isFinite(bitrate) ? `${(bitrate / 1000).toFixed(1)} Mbps` : '--',
+  }
+})
 
 // Check if a specific client name has AI-optimized settings (for multi-viewer list)
 function isClientAiOptimized(clientName) {

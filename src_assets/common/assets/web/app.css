@@ -1056,6 +1056,30 @@ textarea {
   @apply flex flex-wrap gap-2 xl:justify-end;
 }
 
+.dashboard-live-summary-grid {
+  @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-7;
+}
+
+.dashboard-live-summary-tile {
+  @apply rounded-2xl border border-storm/20 bg-void/35 px-4 py-3;
+}
+
+.dashboard-live-summary-tile-primary {
+  @apply border-ice/25 bg-ice/10;
+}
+
+.dashboard-live-summary-label {
+  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+}
+
+.dashboard-live-summary-value {
+  @apply mt-2 truncate text-xl font-semibold leading-tight;
+}
+
+.dashboard-live-summary-copy {
+  @apply mt-1 truncate text-[11px] text-storm;
+}
+
 .dashboard-live-stage {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.95fr)];
   align-items: start;
@@ -1192,6 +1216,31 @@ textarea {
 
 .dashboard-live-support-grid {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)];
+}
+
+.dashboard-secondary-group {
+  @apply rounded-2xl border border-storm/20 bg-deep/20;
+}
+
+.dashboard-secondary-group[open] {
+  @apply bg-deep/30;
+}
+
+.dashboard-secondary-group-summary {
+  @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-storm transition-colors duration-200 hover:text-silver;
+}
+
+.dashboard-secondary-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.dashboard-secondary-group-summary span:last-child {
+  @apply rounded-full border border-storm/20 bg-void/40 px-2 py-1 text-[10px] normal-case tracking-normal text-silver;
+}
+
+.dashboard-secondary-group > .surface-subtle,
+.dashboard-secondary-group > .dashboard-telemetry-card {
+  @apply rounded-t-none border-x-0 border-b-0;
 }
 
 .dashboard-support-card {
