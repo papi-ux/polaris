@@ -7,6 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Added confirmation dialogs and async toast feedback for host-affecting web actions such as disconnecting clients, recovery controls, stale display cleanup, and restart-sensitive quick toggles
 - Hardened Linux lock-screen dismissal so a failed `loginctl unlock-session` attempt continues through other graphical user sessions before falling back to `loginctl unlock-sessions`
 
 ## v1.1.0
