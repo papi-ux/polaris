@@ -1382,22 +1382,22 @@ textarea {
   --color-ice: #17202a;
   --color-silver: #33404c;
   --color-storm: #6f7b88;
-  --color-twilight: #c3c9d1;
-  --color-deep: #d8dce2;
-  --color-void: #eef1f5;
+  --color-twilight: #b6bec8;
+  --color-deep: #cbd1d9;
+  --color-void: #e4e8ed;
   --color-accent: #5f7fa7;
-  --color-surface: #edf0f4;
-  --color-background: #d8dce2;
+  --color-surface: #e2e6eb;
+  --color-background: #cbd1d9;
   --color-foreground: #25313d;
-  --color-muted: #64717e;
-  --color-border: #a7b0ba;
+  --color-muted: #596673;
+  --color-border: #97a2ae;
 }
 
 [data-theme="portable-chrome"] body {
   background:
-    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.72), transparent 18rem),
-    radial-gradient(circle at 82% 8%, rgba(95, 127, 167, 0.20), transparent 24rem),
-    linear-gradient(135deg, #f3f5f7 0%, #d8dce2 42%, #bfc6cf 100%);
+    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.48), transparent 18rem),
+    radial-gradient(circle at 82% 8%, rgba(95, 127, 167, 0.16), transparent 24rem),
+    linear-gradient(135deg, #e5e9ee 0%, #cbd1d9 42%, #aeb8c4 100%);
 }
 
 [data-theme="portable-chrome"] body::before {
@@ -1406,9 +1406,9 @@ textarea {
   inset: 0;
   pointer-events: none;
   background:
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.18) 0, rgba(255, 255, 255, 0.18) 1px, transparent 1px, transparent 5px),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.26), rgba(118, 132, 148, 0.10));
-  opacity: 0.42;
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.10) 0, rgba(255, 255, 255, 0.10) 1px, transparent 1px, transparent 5px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(118, 132, 148, 0.08));
+  opacity: 0.30;
   mix-blend-mode: soft-light;
   z-index: 0;
 }
@@ -1423,15 +1423,15 @@ textarea {
 [data-theme="portable-chrome"] .section-card,
 [data-theme="portable-chrome"] .config-page .settings-section {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(231, 235, 240, 0.84) 46%, rgba(199, 206, 216, 0.88)),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.42), rgba(148, 160, 174, 0.16) 52%, rgba(255, 255, 255, 0.28));
-  border-color: rgba(128, 141, 155, 0.46);
+    linear-gradient(180deg, rgba(239, 244, 248, 0.90), rgba(211, 218, 226, 0.86) 46%, rgba(183, 193, 204, 0.90)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.26), rgba(148, 160, 174, 0.14) 52%, rgba(255, 255, 255, 0.18));
+  border-color: rgba(119, 132, 147, 0.52);
   color: #25313d;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.95),
-    inset 0 -1px 0 rgba(106, 119, 135, 0.30),
-    0 16px 36px rgba(72, 84, 99, 0.20),
-    0 0 0 1px rgba(255, 255, 255, 0.40);
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    inset 0 -1px 0 rgba(106, 119, 135, 0.34),
+    0 16px 36px rgba(72, 84, 99, 0.22),
+    0 0 0 1px rgba(255, 255, 255, 0.24);
 }
 
 [data-theme="portable-chrome"] .surface-subtle,
@@ -1439,19 +1439,19 @@ textarea {
 [data-theme="portable-chrome"] .meta-pill,
 [data-theme="portable-chrome"] .control-chip {
   background:
-    linear-gradient(180deg, rgba(249, 251, 253, 0.88), rgba(219, 224, 230, 0.76)),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.38), rgba(139, 151, 165, 0.12));
-  border-color: rgba(137, 150, 164, 0.44);
+    linear-gradient(180deg, rgba(231, 236, 242, 0.88), rgba(201, 209, 219, 0.80)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.22), rgba(139, 151, 165, 0.12));
+  border-color: rgba(132, 145, 160, 0.50);
   color: #25313d;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84), inset 0 -1px 0 rgba(109, 122, 138, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), inset 0 -1px 0 rgba(109, 122, 138, 0.26);
 }
 
 [data-theme="portable-chrome"] .action-tile:hover {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(226, 232, 238, 0.86)),
-    linear-gradient(90deg, rgba(95, 127, 167, 0.18), rgba(255, 255, 255, 0.32));
+    linear-gradient(180deg, rgba(239, 244, 248, 0.94), rgba(208, 216, 225, 0.88)),
+    linear-gradient(90deg, rgba(95, 127, 167, 0.18), rgba(255, 255, 255, 0.20));
   border-color: rgba(95, 127, 167, 0.56);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 0 18px rgba(95, 127, 167, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76), 0 0 18px rgba(95, 127, 167, 0.18);
 }
 
 [data-theme="portable-chrome"] .sidebar-link {
@@ -1460,8 +1460,8 @@ textarea {
 
 [data-theme="portable-chrome"] .sidebar-link.active {
   color: #17202a;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.72), rgba(95, 127, 167, 0.16));
-  box-shadow: inset 2px 0 0 rgba(95, 127, 167, 0.90), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.42), rgba(95, 127, 167, 0.18));
+  box-shadow: inset 2px 0 0 rgba(95, 127, 167, 0.90), inset 0 1px 0 rgba(255, 255, 255, 0.62);
 }
 
 [data-theme="portable-chrome"] .border-storm {
@@ -1474,6 +1474,6 @@ textarea {
 }
 
 [data-theme="portable-chrome"] .skeleton-shimmer {
-  background: linear-gradient(90deg, rgba(196, 204, 214, 0.86) 25%, rgba(255, 255, 255, 0.68) 50%, rgba(196, 204, 214, 0.86) 75%);
+  background: linear-gradient(90deg, rgba(177, 188, 201, 0.86) 25%, rgba(226, 232, 239, 0.56) 50%, rgba(177, 188, 201, 0.86) 75%);
   background-size: 200% 100%;
 }
