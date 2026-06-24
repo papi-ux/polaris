@@ -7,6 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Added a Settings pending-changes review drawer with safe before/after values, save/apply impact labels, jump links, and per-setting reset controls
 - Added confirmation dialogs and async toast feedback for host-affecting web actions such as disconnecting clients, recovery controls, stale display cleanup, and restart-sensitive quick toggles
 - Hardened Linux lock-screen dismissal so a failed `loginctl unlock-session` attempt continues through other graphical user sessions before falling back to `loginctl unlock-sessions`
 

@@ -56,6 +56,55 @@
       </div>
     </section>
 
+    <section v-if="config" class="section-card settings-pending-review" aria-live="polite">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div class="min-w-0">
+          <div class="section-kicker">{{ $t('config.pending_changes_kicker') }}</div>
+          <h2 class="section-title">{{ pendingChanges.length ? $t('config.pending_changes_title') : $t('config.pending_changes_empty_title') }}</h2>
+          <p class="section-copy">
+            {{ pendingChanges.length ? $t('config.pending_changes_desc', { count: pendingChanges.length }) : $t('config.pending_changes_empty_desc') }}
+          </p>
+        </div>
+        <button class="focus-ring settings-action-button settings-action-button-secondary" @click="resetLocalChanges" :disabled="!hasUnsavedChanges || saving || restarting">
+          {{ $t('config.reset_local') }}
+        </button>
+      </div>
+
+      <div v-if="pendingChanges.length" class="mt-4 grid gap-3">
+        <article
+          v-for="change in pendingChanges"
+          :key="change.key"
+          class="surface-subtle p-4"
+          :data-pending-change="change.key"
+        >
+          <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+            <div class="min-w-0">
+              <div class="text-sm font-semibold text-silver">{{ change.label }}</div>
+              <div class="mt-1 text-[11px] uppercase tracking-[0.24em] text-storm">{{ change.section }} · {{ change.impact }}</div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button class="focus-ring settings-action-button settings-action-button-secondary" :data-pending-change-jump="change.key" @click="jumpToChangedSetting(change.key)">
+                {{ $t('config.pending_changes_jump') }}
+              </button>
+              <button class="focus-ring settings-action-button settings-action-button-secondary" :data-pending-change-reset="change.key" @click="resetLocalChange(change.key)" :disabled="saving || restarting">
+                {{ $t('config.pending_changes_reset_one') }}
+              </button>
+            </div>
+          </div>
+          <div class="mt-3 grid gap-3 md:grid-cols-2">
+            <div>
+              <div class="eyebrow-label">{{ $t('config.pending_changes_before') }}</div>
+              <div class="mt-1 break-words rounded-lg border border-white/10 bg-deep/60 px-3 py-2 font-mono text-xs text-storm">{{ change.before }}</div>
+            </div>
+            <div>
+              <div class="eyebrow-label">{{ $t('config.pending_changes_after') }}</div>
+              <div class="mt-1 break-words rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 font-mono text-xs text-amber-100">{{ change.after }}</div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
   <!-- Skeleton while loading -->
   <div v-if="!config" class="space-y-4">
     <Skeleton type="text" />
@@ -589,9 +638,50 @@ const searchHasResults = computed(() => matchingTabs.value.length > 0)
 const sectionHashTabs = {
   encryption_and_trust: 'network',
 }
+const sensitiveValuePattern = /(api[_-]?key|token|password|credential|secret|cert|pkey|private[_-]?key)/i
 const hasUnsavedChanges = computed(() => {
   if (!config.value || !initialSerialized.value) return false
   return JSON.stringify(serialize()) !== initialSerialized.value
+})
+const optionMetadataByKey = computed(() => {
+  const entries = []
+  tabs.value.forEach((tab) => {
+    Object.keys(tab.options).forEach((key) => {
+      entries.push([key, tab])
+    })
+  })
+  return Object.fromEntries(entries)
+})
+const pendingChanges = computed(() => {
+  if (!config.value || !initialSerialized.value) return []
+
+  let baseline = {}
+  try {
+    baseline = JSON.parse(initialSerialized.value)
+  } catch {
+    return []
+  }
+
+  const current = serialize()
+  const keys = Array.from(new Set([
+    ...Object.keys(baseline),
+    ...Object.keys(current),
+  ]))
+
+  return keys
+    .filter(key => JSON.stringify(baseline[key]) !== JSON.stringify(current[key]))
+    .map((key) => {
+      const tab = optionMetadataByKey.value[key]
+      return {
+        key,
+        label: settingLabel(key),
+        section: tab?.name || i18n.t('config.configuration'),
+        tabId: tab?.id || 'general',
+        before: formatPendingValue(key, baseline[key]),
+        after: formatPendingValue(key, current[key]),
+        impact: pendingChangeImpact(key),
+      }
+    })
 })
 const activePanelTitle = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.name || 'General'))
 const activePanelGroupLabel = computed(() => currentTabIsEncoder.value ? 'Encoder Profiles' : (activeTabMeta.value?.groupLabel || 'Core Setup'))
@@ -639,6 +729,35 @@ function shouldShowTab(tabId) {
     return matchingTabs.value.some(tab => tab.id === tabId)
   }
   return currentTab.value === tabId
+}
+
+function settingLabel(key) {
+  const label = i18n?.t?.(`config.${key}`)
+  return label && label !== `config.${key}` ? label : key
+}
+
+function formatPendingValue(key, value) {
+  if (sensitiveValuePattern.test(key)) {
+    return value === undefined || value === '' || value === null
+      ? i18n.t('config.pending_changes_empty_value')
+      : i18n.t('config.pending_changes_hidden_value')
+  }
+  if (value === undefined) return i18n.t('config.pending_changes_not_set')
+  if (value === null || value === '') return i18n.t('config.pending_changes_empty_value')
+  if (Array.isArray(value) || typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function pendingChangeImpact(key) {
+  const liveFields = responseOnlyConfig.value.client_settings_live_fields
+  const restartFields = responseOnlyConfig.value.client_settings_restart_fields
+  if (Array.isArray(liveFields) && liveFields.includes(key)) {
+    return i18n.t('config.pending_changes_live_apply')
+  }
+  if (Array.isArray(restartFields) && restartFields.includes(key)) {
+    return i18n.t('config.pending_changes_apply_required')
+  }
+  return i18n.t('config.pending_changes_apply_required')
 }
 
 function onSearch() {
@@ -710,7 +829,7 @@ function resolveSectionTarget(sectionId) {
 }
 
 async function focusSearchTarget(optionKey) {
-  if (!searchQuery.value || !optionKey) return
+  if (!optionKey) return
   await nextTick()
   const target = resolveSearchTarget(optionKey)
   if (!target) return
@@ -718,7 +837,7 @@ async function focusSearchTarget(optionKey) {
   clearSearchHighlight()
   highlightedSearchTarget = target
   target.classList.add('settings-search-hit')
-  target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+  target.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'nearest' })
 
   searchHighlightTimeout = window.setTimeout(() => {
     clearSearchHighlight()
@@ -735,11 +854,19 @@ function selectNavTab(tabId) {
   currentTab.value = tabId
 }
 
+async function jumpToChangedSetting(optionKey) {
+  const tabId = optionMetadataByKey.value[optionKey]?.id
+  if (tabId) {
+    currentTab.value = tabId
+  }
+  await focusSearchTarget(optionKey)
+}
+
 async function focusSectionTarget(sectionId) {
   await nextTick()
   const target = resolveSectionTarget(sectionId)
   if (!target) return
-  target.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' })
+  target.scrollIntoView?.({ behavior: 'smooth', block: 'start', inline: 'nearest' })
 }
 
 function serialize() {
@@ -855,6 +982,29 @@ function resetLocalChanges() {
   global_prep_cmd.value = Array.isArray(serialized.global_prep_cmd) ? serialized.global_prep_cmd : []
   global_state_cmd.value = Array.isArray(serialized.global_state_cmd) ? serialized.global_state_cmd : []
   server_cmd.value = Array.isArray(serialized.server_cmd) ? serialized.server_cmd : []
+  saved.value = false
+  restarted.value = false
+}
+
+function resetLocalChange(optionKey) {
+  if (!initialSerialized.value || !config.value) return
+  const serialized = JSON.parse(initialSerialized.value)
+  if (serialized[optionKey] === undefined) {
+    delete config.value[optionKey]
+  } else {
+    config.value[optionKey] = JSON.parse(JSON.stringify(serialized[optionKey]))
+  }
+
+  if (optionKey === 'global_prep_cmd') {
+    global_prep_cmd.value = Array.isArray(serialized.global_prep_cmd) ? serialized.global_prep_cmd : []
+  }
+  if (optionKey === 'global_state_cmd') {
+    global_state_cmd.value = Array.isArray(serialized.global_state_cmd) ? serialized.global_state_cmd : []
+  }
+  if (optionKey === 'server_cmd') {
+    server_cmd.value = Array.isArray(serialized.server_cmd) ? serialized.server_cmd : []
+  }
+
   saved.value = false
   restarted.value = false
 }
