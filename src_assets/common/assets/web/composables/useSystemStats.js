@@ -4,10 +4,11 @@ import { ref, onMounted, onUnmounted, watch } from 'vue'
  * Composable for polling system hardware stats (GPU telemetry).
  *
  * Fetches from /api/stats/system at a configurable interval.
+ * Uses a completion-driven timeout loop so slow or failing requests do not overlap.
  *
  * @param {number} intervalMs - Poll interval in ms (default: 3000)
- * @param {{ shouldPoll?: (() => boolean) | { value: boolean }, pauseWhenHidden?: boolean }} options
- * @returns {{ gpu: Ref, loading: Ref<boolean> }}
+ * @param {{ shouldPoll?: (() => boolean) | { value: boolean }, pauseWhenHidden?: boolean, maxBackoffMs?: number }} options
+ * @returns {{ gpu: Ref, displays: Ref, audio: Ref, sessionType: Ref, loading: Ref<boolean> }}
  */
 export function useSystemStats(intervalMs = 3000, options = {}) {
   const gpu = ref(null)
@@ -16,8 +17,13 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
   const sessionType = ref(null)
   const loading = ref(true)
 
+  const maxBackoffMs = Math.max(intervalMs, options.maxBackoffMs ?? intervalMs * 8)
+
   let timer = null
+  let inFlight = null
   let stopPollingWatcher = null
+  let consecutiveFailures = 0
+  let mounted = false
 
   function shouldPauseForVisibility() {
     return options.pauseWhenHidden !== false && typeof document !== 'undefined' && document.hidden
@@ -36,53 +42,82 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
     return true
   }
 
+  function nextDelayMs() {
+    if (consecutiveFailures <= 0) {
+      return intervalMs
+    }
+    return Math.min(maxBackoffMs, intervalMs * (2 ** consecutiveFailures))
+  }
+
   function stopTimer() {
     if (timer) {
-      clearInterval(timer)
+      clearTimeout(timer)
       timer = null
     }
   }
 
-  function startTimer() {
-    if (timer) return
-    timer = setInterval(() => {
-      if (resolveShouldPoll()) {
-        fetchStats()
-      }
-    }, intervalMs)
+  function scheduleNextPoll(delayMs = nextDelayMs()) {
+    stopTimer()
+    if (!mounted || !resolveShouldPoll()) {
+      return
+    }
+
+    timer = setTimeout(async () => {
+      timer = null
+      await pollNow()
+    }, delayMs)
   }
 
   async function fetchStats() {
-    if (!resolveShouldPoll()) return
+    if (!resolveShouldPoll()) return false
+    if (inFlight) return inFlight
 
-    try {
-      const res = await fetch('./api/stats/system', { credentials: 'include' })
-      if (res.ok) {
-        const data = await res.json()
-        gpu.value = data.gpu
-        displays.value = data.displays || []
-        audio.value = data.audio || null
-        sessionType.value = data.session_type || null
+    inFlight = (async () => {
+      let ok = false
+      try {
+        const res = await fetch('./api/stats/system', { credentials: 'include' })
+        if (res.ok) {
+          const data = await res.json()
+          gpu.value = data.gpu
+          displays.value = data.displays || []
+          audio.value = data.audio || null
+          sessionType.value = data.session_type || null
+          ok = true
+        }
+      } catch {
+        // Silently fail because GPU stats are non-critical.
+      } finally {
+        consecutiveFailures = ok ? 0 : consecutiveFailures + 1
+        loading.value = false
+        inFlight = null
       }
-    } catch {
-      // Silently fail — GPU stats are non-critical
-    }
-    loading.value = false
+
+      return ok
+    })()
+
+    return inFlight
+  }
+
+  async function pollNow() {
+    stopTimer()
+    if (!mounted || !resolveShouldPoll()) return
+
+    await fetchStats()
+    scheduleNextPoll()
   }
 
   function handleVisibilityChange() {
     if (resolveShouldPoll()) {
-      fetchStats()
-      startTimer()
+      pollNow()
     } else {
       stopTimer()
     }
   }
 
   onMounted(() => {
+    mounted = true
     if (resolveShouldPoll()) {
-      fetchStats()
-      startTimer()
+      pollNow()
     }
 
     if (options.pauseWhenHidden !== false && typeof document !== 'undefined') {
@@ -92,8 +127,7 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
     if (options.shouldPoll) {
       stopPollingWatcher = watch(resolveShouldPoll, (enabled) => {
         if (enabled) {
-          fetchStats()
-          startTimer()
+          pollNow()
         } else {
           stopTimer()
         }
@@ -102,6 +136,7 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
   })
 
   onUnmounted(() => {
+    mounted = false
     stopTimer()
     if (options.pauseWhenHidden !== false && typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
