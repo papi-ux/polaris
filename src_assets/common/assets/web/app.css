@@ -1425,13 +1425,14 @@ textarea {
   background:
     linear-gradient(180deg, rgba(239, 244, 248, 0.90), rgba(211, 218, 226, 0.86) 46%, rgba(183, 193, 204, 0.90)),
     linear-gradient(90deg, rgba(255, 255, 255, 0.26), rgba(148, 160, 174, 0.14) 52%, rgba(255, 255, 255, 0.18));
-  border-color: rgba(119, 132, 147, 0.52);
+  border-color: rgba(88, 101, 116, 0.58);
   color: #25313d;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.78),
-    inset 0 -1px 0 rgba(106, 119, 135, 0.34),
-    0 16px 36px rgba(72, 84, 99, 0.22),
-    0 0 0 1px rgba(255, 255, 255, 0.24);
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    inset 0 -1px 0 rgba(81, 94, 110, 0.36),
+    inset 0 0 0 1px rgba(74, 86, 101, 0.20),
+    0 22px 48px rgba(54, 65, 79, 0.28),
+    0 3px 10px rgba(255, 255, 255, 0.22);
 }
 
 [data-theme="portable-chrome"] .surface-subtle,
@@ -1441,17 +1442,17 @@ textarea {
   background:
     linear-gradient(180deg, rgba(231, 236, 242, 0.88), rgba(201, 209, 219, 0.80)),
     linear-gradient(90deg, rgba(255, 255, 255, 0.22), rgba(139, 151, 165, 0.12));
-  border-color: rgba(132, 145, 160, 0.50);
+  border-color: rgba(96, 111, 128, 0.56);
   color: #25313d;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), inset 0 -1px 0 rgba(109, 122, 138, 0.26);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), inset 0 -1px 0 rgba(81, 94, 110, 0.30), 0 8px 20px rgba(72, 84, 99, 0.12);
 }
 
 [data-theme="portable-chrome"] .action-tile:hover {
   background:
     linear-gradient(180deg, rgba(239, 244, 248, 0.94), rgba(208, 216, 225, 0.88)),
     linear-gradient(90deg, rgba(95, 127, 167, 0.18), rgba(255, 255, 255, 0.20));
-  border-color: rgba(95, 127, 167, 0.56);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76), 0 0 18px rgba(95, 127, 167, 0.18);
+  border-color: rgba(82, 111, 148, 0.68);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.70), inset 0 -1px 0 rgba(81, 94, 110, 0.28), 0 10px 24px rgba(72, 84, 99, 0.16), 0 0 18px rgba(95, 127, 167, 0.16);
 }
 
 [data-theme="portable-chrome"] .sidebar-link {
@@ -1465,7 +1466,7 @@ textarea {
 }
 
 [data-theme="portable-chrome"] .border-storm {
-  border-color: rgba(137, 150, 164, 0.48);
+  border-color: rgba(92, 106, 123, 0.56);
 }
 
 [data-theme="portable-chrome"] .pulse-dot {
