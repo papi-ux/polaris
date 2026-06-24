@@ -93,6 +93,10 @@ function focusCancel() {
   dialogEl.value?.querySelector('[data-confirm-cancel]')?.focus()
 }
 
+function getFocusableControls() {
+  return Array.from(dialogEl.value?.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
+}
+
 function restoreFocus() {
   if (previousFocus instanceof HTMLElement && document.contains(previousFocus)) {
     previousFocus.focus()
@@ -111,6 +115,26 @@ function handleKeydown(event) {
   if (event.key === 'Escape') {
     event.preventDefault()
     requestCancel()
+    return
+  }
+
+  if (event.key === 'Tab') {
+    const controls = getFocusableControls()
+    if (!controls.length) {
+      event.preventDefault()
+      dialogEl.value?.focus()
+      return
+    }
+
+    const first = controls[0]
+    const last = controls[controls.length - 1]
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
   }
 }
 

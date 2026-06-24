@@ -437,7 +437,15 @@ textarea {
     right: 0.75rem !important;
     bottom: 1rem;
     top: auto !important;
+    width: auto;
     max-width: none;
+  }
+
+  .operator-console .library-import-staged-summary,
+  .settings-command-bar.sticky {
+    position: static;
+    top: auto;
+    z-index: auto;
   }
 }
 

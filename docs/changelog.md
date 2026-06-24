@@ -8,6 +8,7 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Added a guided AI Auto Quality optimizer setup checklist with clearer provider/auth/runtime cards and actionable draft test feedback
+- Polished v1.1.1 accessibility/mobile readiness with named icon controls, live status regions, trapped confirmation-dialog focus, and non-sticky handheld review bars
 - Polished Mission Control live-session hierarchy with a stronger top summary for stream quality, latency, FPS, loss, bitrate, capture path, and runtime mode plus collapsible secondary live panels
 - Added a sticky Library import staging summary and review drawer with source counts, per-game removal, clear-all staging, and already-imported confirmation
 - Reduced idle web console polling pressure by deduplicating overlapping system/stream stats fetches and backing off transient fallback failures

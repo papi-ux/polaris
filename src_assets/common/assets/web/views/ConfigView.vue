@@ -5,7 +5,7 @@
         <h1 class="page-title">{{ $t('navbar.settings') }}</h1>
         <p class="page-subtitle max-w-2xl">{{ $t('config.configuration_desc') }}</p>
       </div>
-      <div v-if="config" class="page-meta">
+      <div v-if="config" class="page-meta" role="status" aria-live="polite" aria-atomic="true">
         <span class="meta-pill">{{ visibleTabCountLabel }}</span>
         <span class="meta-pill">{{ activePanelTitle }}</span>
         <span class="meta-pill">{{ activePanelGroupLabel }}</span>
@@ -16,7 +16,7 @@
       </div>
     </section>
 
-    <section class="section-card settings-command-bar sticky top-4 z-20">
+    <section class="section-card settings-command-bar sticky top-4 z-20" role="region" :aria-label="$t('config.action_center')">
       <div class="settings-command-copy">
         <div class="section-kicker">{{ $t('config.action_center') }}</div>
         <div class="settings-command-title">
@@ -56,12 +56,12 @@
       </div>
     </section>
 
-    <section v-if="config" class="section-card settings-pending-review" aria-live="polite">
+    <section v-if="config" class="section-card settings-pending-review">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="min-w-0">
           <div class="section-kicker">{{ $t('config.pending_changes_kicker') }}</div>
           <h2 class="section-title">{{ pendingChanges.length ? $t('config.pending_changes_title') : $t('config.pending_changes_empty_title') }}</h2>
-          <p class="section-copy">
+          <p class="section-copy" role="status" aria-live="polite" aria-atomic="true">
             {{ pendingChanges.length ? $t('config.pending_changes_desc', { count: pendingChanges.length }) : $t('config.pending_changes_empty_desc') }}
           </p>
         </div>

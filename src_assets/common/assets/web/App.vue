@@ -39,12 +39,13 @@
             v-for="item in section.items"
             :key="item.to"
             :to="item.to"
+            :aria-label="item.label"
             class="sidebar-link group"
             active-class="active"
             :title="sidebarCollapsed ? item.label : ''"
             @click="sidebarOpen = false"
           >
-            <div v-html="item.icon" class="w-5 h-5 shrink-0"></div>
+            <div aria-hidden="true" v-html="item.icon" class="w-5 h-5 shrink-0"></div>
             <span v-if="!sidebarCollapsed">{{ item.label }}</span>
             <kbd v-if="!sidebarCollapsed" class="ml-auto hidden text-[11px] text-storm/40 transition-opacity duration-150 lg:inline group-hover:opacity-70 group-focus-within:opacity-70" :class="$route.path === item.to ? 'opacity-70' : 'opacity-0'">
               {{ item.shortcut }}
@@ -56,6 +57,7 @@
         <button
           type="button"
           @click="cycleAppTheme"
+          :aria-label="`Switch theme to ${nextThemeLabel}`"
           class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-[background-color,color,border-color] duration-200"
           :class="currentTheme !== 'polaris' ? 'text-ice bg-ice/10' : 'text-storm hover:text-silver hover:bg-twilight/50'"
           :title="'Switch to ' + nextThemeLabel"
@@ -70,6 +72,7 @@
           type="button"
           class="focus-ring flex w-full items-center gap-2 rounded-lg border border-storm/20 bg-deep/30 px-3 py-2 text-left text-sm text-silver transition-[background-color,border-color,color] duration-200 hover:border-ice/25 hover:bg-twilight/35 hover:text-ice"
           :title="paletteShortcut"
+          :aria-label="`Open command palette (${paletteShortcut})`"
           @click="commandPaletteOpen = true"
         >
           <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
@@ -92,6 +95,7 @@
         class="focus-ring mx-3 mb-2 flex items-center justify-center rounded-lg p-2 text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
         @click="toggleCollapse"
         :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+        :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
       >
         <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-180': sidebarCollapsed }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
       </button>
