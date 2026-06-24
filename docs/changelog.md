@@ -7,6 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Reduced idle web console polling pressure by deduplicating overlapping system/stream stats fetches and backing off transient fallback failures
 - Hardened Linux lock-screen dismissal so a failed `loginctl unlock-session` attempt continues through other graphical user sessions before falling back to `loginctl unlock-sessions`
 
 ## v1.1.0
