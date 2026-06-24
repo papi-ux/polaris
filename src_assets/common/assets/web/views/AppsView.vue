@@ -112,8 +112,8 @@
         </div>
       </div>
 
-      <section v-if="hasImportSources" class="library-import-staged-summary" aria-live="polite">
-        <div class="min-w-0">
+      <section v-if="hasImportSources" class="library-import-staged-summary">
+        <div class="min-w-0" role="status" aria-live="polite" aria-atomic="true">
           <div class="section-kicker">Staged import</div>
           <div class="library-import-staged-title">{{ stagedImportSummaryTitle }}</div>
           <div class="library-import-staged-copy">{{ stagedImportSummaryCopy }}</div>
@@ -194,7 +194,7 @@
         </div>
       </div>
 
-      <div v-else-if="gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
+      <div v-else-if="gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center" role="status" aria-live="polite">
         <svg class="mx-auto h-7 w-7 animate-spin text-ice" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4Zm2 5.291A7.962 7.962 0 0 1 4 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647Z" /></svg>
         <h3 class="mt-4 text-lg font-semibold text-silver">Scanning installed libraries</h3>
         <p class="mt-2 text-sm text-storm">Checking Steam, Lutris, and Heroic for new, staged, and already-imported entries.</p>

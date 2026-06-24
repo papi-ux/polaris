@@ -80,4 +80,22 @@ describe('ConfirmActionDialog', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.emitted('cancel')).toHaveLength(1)
   })
+
+  it('traps Tab focus inside the dialog controls', async () => {
+    const wrapper = mountDialog()
+    await wrapper.vm.$nextTick()
+
+    const cancel = bodyGet('[data-confirm-cancel]')
+    const confirm = bodyGet('[data-confirm-confirm]')
+
+    cancel.focus()
+    bodyGet('[role="dialog"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, shiftKey: true }))
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement).toBe(confirm)
+
+    confirm.focus()
+    bodyGet('[role="dialog"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement).toBe(cancel)
+  })
 })

@@ -11,7 +11,7 @@
         </div>
         <div class="page-subtitle">{{ actionSummary }}</div>
       </div>
-      <div class="page-meta">
+      <div class="page-meta" role="status" aria-live="polite" aria-atomic="true">
         <span v-if="stats?.streaming" class="pulse-dot"></span>
         <span class="meta-pill" :class="stats?.streaming ? 'border-green-500/30 bg-green-500/10 text-green-300' : ''">
           {{ stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
@@ -68,7 +68,7 @@
           </div>
         </div>
 
-        <section class="dashboard-live-summary-grid" aria-label="Live stream summary">
+        <section class="dashboard-live-summary-grid" role="status" aria-live="polite" aria-atomic="true" aria-label="Live stream telemetry summary">
           <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
             <div class="dashboard-live-summary-label">Quality</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ liveSummary.quality }}</div>
@@ -173,14 +173,14 @@
                     @load="handlePreviewLoad"
                     @error="handlePreviewError"
                   />
-                  <div v-if="!previewLoaded && !previewError" class="dashboard-preview-overlay">
+                  <div v-if="!previewLoaded && !previewError" class="dashboard-preview-overlay" role="status" aria-live="polite">
                     <svg class="h-7 w-7 animate-spin text-storm" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
                       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                     </svg>
                     <span>{{ $t('dashboard.preview_capturing') }}</span>
                   </div>
-                  <div v-if="previewError" class="dashboard-preview-overlay dashboard-preview-overlay-error">
+                  <div v-if="previewError" class="dashboard-preview-overlay dashboard-preview-overlay-error" role="alert">
                     <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_error') }}</div>
                     <button @click="retryPreviewNow" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
                       {{ $t('dashboard.preview_retry') }}
