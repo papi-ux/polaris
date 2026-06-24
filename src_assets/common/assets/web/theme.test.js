@@ -36,21 +36,34 @@ describe('theme skin registry', () => {
     const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
 
     expect(portableChromeCss).toContain('Moonlight-grey early-2000s')
-    expect(portableChromeCss).toContain('--color-background: #cbd1d9')
-    expect(portableChromeCss).toContain('--color-accent: #5f7fa7')
-    expect(portableChromeCss).toContain('linear-gradient(180deg, rgba(239, 244, 248, 0.90)')
-    expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.10)')
+    expect(portableChromeCss).toContain('--color-background: #b8c1cc')
+    expect(portableChromeCss).toContain('--color-accent: #557395')
+    expect(portableChromeCss).toContain('linear-gradient(180deg, rgba(224, 231, 238, 0.90)')
+    expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.06)')
   })
 
   it('adds panel depth while keeping the approved Portable Chrome base palette', () => {
     const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
     const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
 
-    expect(portableChromeCss).toContain('--color-background: #cbd1d9')
-    expect(portableChromeCss).toContain('--color-surface: #e2e6eb')
+    expect(portableChromeCss).toContain('--color-background: #b8c1cc')
+    expect(portableChromeCss).toContain('--color-surface: #d6dde5')
     expect(portableChromeCss).toContain('0 22px 48px rgba(54, 65, 79, 0.28)')
     expect(portableChromeCss).toContain('inset 0 0 0 1px rgba(74, 86, 101, 0.20)')
     expect(portableChromeCss).toContain('box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), inset 0 -1px 0 rgba(81, 94, 110, 0.30), 0 8px 20px rgba(72, 84, 99, 0.12);')
+  })
+
+  it('dims Portable Chrome whites and restrains green status text for readability', () => {
+    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
+    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
+
+    expect(portableChromeCss).toContain('--color-background: #b8c1cc')
+    expect(portableChromeCss).toContain('--color-surface: #d6dde5')
+    expect(portableChromeCss).toContain('linear-gradient(135deg, #d7dde5 0%, #b8c1cc 46%, #98a6b5 100%)')
+    expect(portableChromeCss).toContain('[data-theme="portable-chrome"] [class*="text-green-"]')
+    expect(portableChromeCss).toContain('color: #315b45 !important;')
+    expect(portableChromeCss).toContain('background-color: rgba(58, 102, 78, 0.12) !important;')
+    expect(portableChromeCss).toContain('border-color: rgba(49, 91, 69, 0.34) !important;')
   })
 
   it('applies non-default skins through the data-theme attribute', () => {
