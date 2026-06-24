@@ -626,6 +626,39 @@ textarea {
   @apply text-base font-semibold text-silver;
 }
 
+.operator-console .library-import-staged-summary {
+  @apply sticky top-4 z-20 flex flex-col gap-4 rounded-xl border border-ice/25 bg-deep/95 px-4 py-4 shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur lg:flex-row lg:items-center lg:justify-between;
+}
+
+.operator-console .library-import-staged-title {
+  @apply mt-1 text-lg font-semibold text-silver;
+}
+
+.operator-console .library-import-staged-copy {
+  @apply mt-1 max-w-2xl text-sm leading-relaxed text-storm;
+}
+
+.operator-console .library-import-staged-sources,
+.operator-console .library-import-staged-actions {
+  @apply mt-3 flex flex-wrap items-center gap-2;
+}
+
+.operator-console .library-import-staged-actions {
+  @apply lg:mt-0 lg:justify-end;
+}
+
+.operator-console .library-import-review-drawer {
+  @apply rounded-xl border border-storm/20 bg-deep/45 p-4;
+}
+
+.operator-console .library-import-review-list {
+  @apply mt-4 grid gap-2;
+}
+
+.operator-console .library-import-review-row {
+  @apply flex min-w-0 flex-col gap-3 rounded-lg border border-storm/15 bg-void/35 px-3 py-3 sm:flex-row sm:items-center sm:justify-between;
+}
+
 .operator-console .library-import-alert {
   @apply flex flex-col gap-3 rounded-lg border border-amber-300/25 bg-amber-300/8 px-4 py-3 sm:flex-row sm:items-center sm:justify-between;
 }

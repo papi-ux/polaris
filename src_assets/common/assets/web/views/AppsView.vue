@@ -112,6 +112,62 @@
         </div>
       </div>
 
+      <section v-if="hasImportSources" class="library-import-staged-summary" aria-live="polite">
+        <div class="min-w-0">
+          <div class="section-kicker">Staged import</div>
+          <div class="library-import-staged-title">{{ stagedImportSummaryTitle }}</div>
+          <div class="library-import-staged-copy">{{ stagedImportSummaryCopy }}</div>
+          <div v-if="stagedImportSources.length" class="library-import-staged-sources">
+            <span v-for="source in stagedImportSources" :key="source.key" class="meta-pill">
+              {{ source.label }} {{ source.selected }}
+            </span>
+          </div>
+        </div>
+        <div class="library-import-staged-actions">
+          <Button variant="outline" :disabled="allImportGames.length === 0" data-import-review-open @click="showImportReview = !showImportReview">
+            {{ showImportReview ? 'Hide review' : 'Review staged' }}
+          </Button>
+          <Button variant="outline" :disabled="selectedImportCount === 0" data-import-stage-clear-all @click="clearAllImportStaging">
+            Clear all
+          </Button>
+          <Button variant="primary" :disabled="gameImporting || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
+            {{ importSelectedButtonLabel }}
+          </Button>
+        </div>
+      </section>
+
+      <section v-if="hasImportSources && showImportReview" class="library-import-review-drawer">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div class="section-kicker">Review queue</div>
+            <h3 class="text-base font-semibold text-silver">Confirm staged and already imported games</h3>
+            <p class="mt-1 text-sm text-storm">Remove individual staged entries before importing, or use already-imported rows as a sanity check.</p>
+          </div>
+          <span class="meta-pill">{{ reviewImportGames.length }} discovered</span>
+        </div>
+        <div class="library-import-review-list">
+          <article v-for="game in reviewImportGames" :key="importGameKey(game)" class="library-import-review-row">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="truncate text-sm font-semibold text-silver">{{ game.name }}</span>
+                <span class="control-chip">{{ sourceLabel(game.source) }}</span>
+                <span class="control-chip">{{ importGameStateLabel(game) }}</span>
+              </div>
+              <div class="mt-1 text-xs text-storm">{{ importGameStateCopy(game) }}</div>
+            </div>
+            <Button
+              v-if="game.selected && !game.already_imported"
+              variant="ghost"
+              size="sm"
+              :data-import-stage-remove="importGameKey(game)"
+              @click="unstageImportGame(game)"
+            >
+              Remove
+            </Button>
+          </article>
+        </div>
+      </section>
+
       <div v-if="gameScanError" class="library-import-alert">
         <div class="min-w-0">
           <div class="text-sm font-semibold text-amber-100">Import scanner needs attention</div>
@@ -125,7 +181,7 @@
           <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
         </div>
         <div class="mt-4 flex items-center justify-center gap-2">
-          <h3 class="text-lg font-semibold text-silver">Ready to scan</h3>
+          <h3 class="text-lg font-semibold text-silver">Ready to scan installed libraries</h3>
           <InfoHint size="sm" label="Game library scan">
             Start a scan to discover install candidates from Steam, Lutris, and Heroic. Already-imported entries stay visible so you can spot what is new.
           </InfoHint>
@@ -141,6 +197,7 @@
       <div v-else-if="gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
         <svg class="mx-auto h-7 w-7 animate-spin text-ice" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4Zm2 5.291A7.962 7.962 0 0 1 4 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647Z" /></svg>
         <h3 class="mt-4 text-lg font-semibold text-silver">Scanning installed libraries</h3>
+        <p class="mt-2 text-sm text-storm">Checking Steam, Lutris, and Heroic for new, staged, and already-imported entries.</p>
       </div>
 
       <div v-else class="library-import-workspace">
@@ -985,6 +1042,7 @@ const {
   scan: scanGames, importSelected, toggleAll: gameToggleAll
 } = useGameScanner()
 const showImport = ref(false)
+const showImportReview = ref(false)
 const importTab = ref('steam')
 const importSearch = ref('')
 const importStatus = ref('new')
@@ -992,6 +1050,7 @@ async function doImport() {
   const count = await importSelected()
   if (count > 0) {
     showToast(`Imported ${count} game${count > 1 ? 's' : ''}`, 'success')
+    showImportReview.value = true
     loadApps()
   }
 }
@@ -1091,12 +1150,23 @@ const allImportGames = computed(() => [...steamGames.value, ...lutrisGames.value
 const availableImportCount = computed(() => allImportGames.value.filter((game) => !game.already_imported).length)
 const selectedImportCount = computed(() => allImportGames.value.filter((game) => game.selected && !game.already_imported).length)
 const importedImportCount = computed(() => allImportGames.value.filter((game) => game.already_imported).length)
+const stagedImportSources = computed(() => importSources.value.filter((source) => source.selected > 0))
+const reviewImportGames = computed(() => allImportGames.value.filter((game) => game.selected || game.already_imported))
+const stagedImportSummaryTitle = computed(() => {
+  if (selectedImportCount.value === 0) return 'No games staged'
+  return `${selectedImportCount.value} game${selectedImportCount.value === 1 ? '' : 's'} staged`
+})
+const stagedImportSummaryCopy = computed(() => {
+  if (selectedImportCount.value === 0 && importedImportCount.value > 0) return 'Nothing queued. Already-imported entries remain visible in review so you can confirm state.'
+  if (selectedImportCount.value === 0) return 'Select candidates from any source to build one import queue.'
+  return 'Review the cross-source queue, remove anything you do not want, then import everything in one pass.'
+})
 const activeImportSource = computed(() => importSources.value.find((source) => source.key === importTab.value) || importSources.value[0] || null)
 const activeImportSourceKey = computed(() => activeImportSource.value?.key || importTab.value)
 const activeImportGames = computed(() => importPools.value[activeImportSourceKey.value] || [])
 const activeImportSummary = computed(() => summarizeImportGames(activeImportGames.value))
 const activeImportSelectedCount = computed(() => activeImportSummary.value.selected)
-const importSelectedButtonLabel = computed(() => selectedImportCount.value > 0 ? `Import ${selectedImportCount.value} Selected` : 'Import Selected')
+const importSelectedButtonLabel = computed(() => selectedImportCount.value > 0 ? `Import ${selectedImportCount.value} staged game${selectedImportCount.value === 1 ? '' : 's'}` : 'Import staged games')
 const visibleImportGames = computed(() => filterImportGames(activeImportGames.value, {
   query: importSearch.value,
   status: importStatus.value,
@@ -1127,6 +1197,30 @@ function formatCategory(category = '') {
 function trimCommand(command = '') {
   if (command.length <= 44) return command
   return `${command.slice(0, 41)}...`
+}
+
+function sourceLabel(source = '') {
+  return {
+    steam: 'Steam',
+    lutris: 'Lutris',
+    heroic: 'Heroic',
+  }[source] || source || 'Unknown'
+}
+
+function importGameKey(game) {
+  return game.appid || game.slug || game.name
+}
+
+function importGameStateLabel(game) {
+  if (game.already_imported) return 'Already imported'
+  if (game.selected) return 'Staged'
+  return 'New'
+}
+
+function importGameStateCopy(game) {
+  if (game.already_imported) return 'Already in Polaris; it will not be imported again.'
+  if (game.selected) return 'Queued for the next import pass.'
+  return 'Available to stage from its source list.'
 }
 
 function appOrderIndex(app) {
@@ -1161,6 +1255,14 @@ function selectVisibleImportGames(selected) {
 
 function clearActiveImportSource() {
   gameToggleAll(false, activeImportSourceKey.value)
+}
+
+function clearAllImportStaging() {
+  gameToggleAll(false)
+}
+
+function unstageImportGame(game) {
+  if (!game?.already_imported) game.selected = false
 }
 
 function launchHref(app) {
