@@ -1374,3 +1374,74 @@ textarea {
   background: #ff5cab;
   box-shadow: 0 0 18px rgba(255, 92, 171, 0.45);
 }
+
+/* ── Portable Chrome Skin ── */
+[data-theme="portable-chrome"] {
+  --color-ice: #eaf7ff;
+  --color-silver: #d9e0e5;
+  --color-storm: #65707a;
+  --color-twilight: #2e343a;
+  --color-deep: #11171d;
+  --color-void: #05080b;
+  --color-accent: #7bd7ff;
+  --color-surface: #20262c;
+  --color-background: #0b1015;
+  --color-foreground: #d9e0e5;
+  --color-muted: #8f9aa3;
+  --color-border: #6f7a83;
+}
+
+[data-theme="portable-chrome"] body {
+  background:
+    radial-gradient(circle at 18% 12%, rgba(123, 215, 255, 0.18), transparent 28rem),
+    radial-gradient(circle at 82% 18%, rgba(192, 202, 210, 0.20), transparent 24rem),
+    linear-gradient(135deg, #070a0d 0%, #141a20 48%, #070a0d 100%);
+}
+
+[data-theme="portable-chrome"] .glass,
+[data-theme="portable-chrome"] .card,
+[data-theme="portable-chrome"] .section-card,
+[data-theme="portable-chrome"] .config-page .settings-section {
+  background:
+    linear-gradient(145deg, rgba(246, 250, 252, 0.18), rgba(96, 107, 116, 0.14) 36%, rgba(5, 8, 11, 0.78) 37%, rgba(13, 18, 23, 0.92)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.02));
+  border-color: rgba(218, 228, 235, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.62),
+    0 18px 42px rgba(0, 0, 0, 0.34),
+    0 0 0 1px rgba(123, 215, 255, 0.06);
+}
+
+[data-theme="portable-chrome"] .surface-subtle,
+[data-theme="portable-chrome"] .action-tile,
+[data-theme="portable-chrome"] .meta-pill,
+[data-theme="portable-chrome"] .control-chip {
+  background:
+    linear-gradient(160deg, rgba(232, 239, 244, 0.16), rgba(70, 80, 88, 0.18) 34%, rgba(5, 8, 11, 0.74) 35%, rgba(11, 16, 21, 0.86));
+  border-color: rgba(218, 228, 235, 0.20);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.52);
+}
+
+[data-theme="portable-chrome"] .action-tile:hover {
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.22), rgba(92, 104, 113, 0.22) 34%, rgba(7, 13, 18, 0.78) 35%, rgba(15, 23, 30, 0.9));
+  border-color: rgba(123, 215, 255, 0.34);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 0 22px rgba(123, 215, 255, 0.10);
+}
+
+[data-theme="portable-chrome"] .sidebar-link.active {
+  color: #eaf7ff;
+  background: linear-gradient(90deg, rgba(123, 215, 255, 0.18), rgba(123, 215, 255, 0.06));
+  box-shadow: inset 2px 0 0 rgba(123, 215, 255, 0.94), inset 0 1px 0 rgba(255,255,255,0.18);
+}
+
+[data-theme="portable-chrome"] .pulse-dot {
+  background: #59ff8f;
+  box-shadow: 0 0 16px rgba(89, 255, 143, 0.68), 0 0 28px rgba(123, 215, 255, 0.24);
+}
+
+[data-theme="portable-chrome"] .skeleton-shimmer {
+  background: linear-gradient(90deg, rgba(12, 18, 24, 0.9) 25%, rgba(123, 215, 255, 0.12) 50%, rgba(12, 18, 24, 0.9) 75%);
+  background-size: 200% 100%;
+}
