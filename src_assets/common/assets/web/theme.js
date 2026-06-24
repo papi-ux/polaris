@@ -1,4 +1,4 @@
-// Polaris Theme System — Space Whale (default), OLED Dark Galaxy, and Miami Nebula
+// Polaris Theme System — Space Whale (default), OLED Dark Galaxy, Miami Nebula, and Portable Chrome
 
 const STORAGE_KEY = 'polaris-theme'
 
@@ -6,6 +6,7 @@ export const THEMES = [
   { id: 'polaris', label: 'Space Whale', shortLabel: 'Polaris' },
   { id: 'oled', label: 'OLED Dark Galaxy', shortLabel: 'OLED' },
   { id: 'miami', label: 'Miami Nebula', shortLabel: 'Miami' },
+  { id: 'portable-chrome', label: 'Portable Chrome', shortLabel: 'Portable Chrome' },
 ]
 
 const DEFAULT_THEME = THEMES[0].id
