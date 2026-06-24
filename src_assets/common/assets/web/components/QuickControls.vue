@@ -2,9 +2,11 @@
 import { computed, ref, onMounted, onUnmounted, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import { CLIENT_SETTINGS_RESPONSE_ONLY_KEYS, resolveClientSettingsSync } from '../client-settings-sync'
+import ConfirmActionDialog from './ConfirmActionDialog.vue'
 
 const config = ref({})
 const pendingKey = ref(null)
+const pendingRestartToggle = ref(null)
 const i18n = inject('i18n')
 const { toast } = useToast()
 const emit = defineEmits(['change'])
@@ -129,6 +131,26 @@ async function toggle(key) {
   pendingKey.value = null
 }
 
+function requestToggle(toggleConfig) {
+  if (toggleConfig.requiresRestart) {
+    pendingRestartToggle.value = toggleConfig
+    return
+  }
+  toggle(toggleConfig.key)
+}
+
+async function confirmRestartToggle() {
+  const toggleConfig = pendingRestartToggle.value
+  if (!toggleConfig) return
+  await toggle(toggleConfig.key)
+  pendingRestartToggle.value = null
+}
+
+const pendingRestartToggleImpact = computed(() => [
+  i18n.t('quick_controls.restart_confirm_impact'),
+  i18n.t('quick_controls.restart_confirm_reconnect'),
+])
+
 function labelFor(key) {
   return i18n.t(`quick_controls.items.${key}.label`)
 }
@@ -201,7 +223,7 @@ const syncBadgeTone = computed(() => {
       class="focus-ring flex w-full items-center justify-between rounded-xl border border-storm/15 bg-deep/35 text-left transition-[background-color,border-color,color,opacity] duration-200 hover:border-storm/30 hover:bg-ice/5"
       :class="[props.compact ? 'px-3 py-2' : 'px-3 py-2.5', { 'opacity-60': pendingKey && pendingKey !== t.key }]"
       :aria-pressed="isEnabled(t.key)"
-      @click="toggle(t.key)"
+      @click="requestToggle(t)"
     >
       <div class="min-w-0 pr-3">
         <div :class="props.compact ? 'flex flex-col items-start gap-1' : 'flex items-center gap-2'">
@@ -228,5 +250,19 @@ const syncBadgeTone = computed(() => {
       <router-link to="/config" class="text-ice no-underline hover:text-ice/80">Settings</router-link>.
     </div>
     <div v-if="pendingKey" class="pt-1 text-center text-[11px] text-storm">{{ $t('quick_controls.saving') }}</div>
+    <ConfirmActionDialog
+      v-if="pendingRestartToggle"
+      :model-value="Boolean(pendingRestartToggle)"
+      :title="$t('quick_controls.restart_confirm_title', { setting: labelFor(pendingRestartToggle.key) })"
+      :message="$t('quick_controls.restart_confirm_message')"
+      :impact-items="pendingRestartToggleImpact"
+      :confirm-label="$t('quick_controls.restart_confirm_apply')"
+      :cancel-label="$t('_common.cancel')"
+      :pending="pendingKey === pendingRestartToggle.key"
+      :pending-label="$t('quick_controls.saving')"
+      @confirm="confirmRestartToggle"
+      @cancel="pendingRestartToggle = null"
+      @update:model-value="value => { if (!value) pendingRestartToggle = null }"
+    />
   </div>
 </template>
