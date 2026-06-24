@@ -42,6 +42,17 @@ describe('theme skin registry', () => {
     expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.10)')
   })
 
+  it('adds panel depth while keeping the approved Portable Chrome base palette', () => {
+    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
+    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
+
+    expect(portableChromeCss).toContain('--color-background: #cbd1d9')
+    expect(portableChromeCss).toContain('--color-surface: #e2e6eb')
+    expect(portableChromeCss).toContain('0 22px 48px rgba(54, 65, 79, 0.28)')
+    expect(portableChromeCss).toContain('inset 0 0 0 1px rgba(74, 86, 101, 0.20)')
+    expect(portableChromeCss).toContain('box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), inset 0 -1px 0 rgba(81, 94, 110, 0.30), 0 8px 20px rgba(72, 84, 99, 0.12);')
+  })
+
   it('applies non-default skins through the data-theme attribute', () => {
     setTheme('portable-chrome')
 
