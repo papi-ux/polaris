@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it } from 'vitest'
 import ThemeToggle from './ThemeToggle.vue'
@@ -28,6 +29,17 @@ describe('theme skin registry', () => {
       label: 'Portable Chrome',
       shortLabel: 'Portable Chrome',
     })
+  })
+
+  it('defines Portable Chrome as a Moonlight-grey early-2000s skin', () => {
+    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
+    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
+
+    expect(portableChromeCss).toContain('Moonlight-grey early-2000s')
+    expect(portableChromeCss).toContain('--color-background: #d8dce2')
+    expect(portableChromeCss).toContain('--color-accent: #5f7fa7')
+    expect(portableChromeCss).toContain('linear-gradient(180deg, rgba(255, 255, 255, 0.92)')
+    expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.18)')
   })
 
   it('applies non-default skins through the data-theme attribute', () => {
