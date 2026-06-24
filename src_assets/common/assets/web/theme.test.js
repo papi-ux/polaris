@@ -36,10 +36,10 @@ describe('theme skin registry', () => {
     const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
 
     expect(portableChromeCss).toContain('Moonlight-grey early-2000s')
-    expect(portableChromeCss).toContain('--color-background: #d8dce2')
+    expect(portableChromeCss).toContain('--color-background: #cbd1d9')
     expect(portableChromeCss).toContain('--color-accent: #5f7fa7')
-    expect(portableChromeCss).toContain('linear-gradient(180deg, rgba(255, 255, 255, 0.92)')
-    expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.18)')
+    expect(portableChromeCss).toContain('linear-gradient(180deg, rgba(239, 244, 248, 0.90)')
+    expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.10)')
   })
 
   it('applies non-default skins through the data-theme attribute', () => {

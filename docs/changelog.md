@@ -7,7 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
-- Added the Portable Chrome web theme with a Moonlight-grey early-2000s retro-futurist skin and generic theme-toggle cycling across every registered skin
+- Added the Portable Chrome web theme with a slightly dimmer Moonlight-grey early-2000s retro-futurist skin and generic theme-toggle cycling across every registered skin
 - Improved `npm run smoke:web` so release smoke gates can target live Polaris or built static web assets, check hashed JS/CSS assets plus the unauthenticated login page, and report a clear preflight when the live HTTPS server is not running
 - Added a guided AI Auto Quality optimizer setup checklist with clearer provider/auth/runtime cards and actionable draft test feedback
 - Polished v1.1.1 accessibility/mobile readiness with named icon controls, live status regions, trapped confirmation-dialog focus, and non-sticky handheld review bars
