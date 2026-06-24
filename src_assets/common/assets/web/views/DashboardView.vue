@@ -237,21 +237,24 @@
                 <div class="mt-4 flex flex-wrap items-center gap-2">
                   <button
                     v-if="!recording.active"
+                    :disabled="recordingActionPending"
                     @click="startRecording"
-                    class="focus-ring dashboard-action-button dashboard-action-button-danger"
+                    class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
                   >
                     {{ $t('dashboard.record') }}
                   </button>
                   <button
                     v-if="recording.active"
+                    :disabled="recordingActionPending"
                     @click="stopRecording"
-                    class="focus-ring dashboard-action-button dashboard-action-button-secondary"
+                    class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
                   >
                     {{ $t('dashboard.stop_recording') }}
                   </button>
                   <button
+                    :disabled="recordingActionPending"
                     @click="saveReplay"
-                    class="focus-ring dashboard-action-button dashboard-action-button-ghost"
+                    class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
                   >
                     {{ $t('dashboard.save_replay') }}
                   </button>
@@ -385,8 +388,9 @@
                   <span>{{ $t('dashboard.connected_clients') }}</span>
                   <button
                     v-if="connectedClientUuid"
-                    @click="disconnectClient"
-                    class="focus-ring dashboard-action-button dashboard-action-button-danger"
+                    :disabled="disconnectingClient"
+                    @click="disconnectConfirmOpen = true"
+                    class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
                   >
                     {{ $t('dashboard.disconnect_client') }}
                   </button>
@@ -682,6 +686,18 @@
         </div>
       </div>
     </div>
+
+    <ConfirmActionDialog
+      v-model="disconnectConfirmOpen"
+      :title="t('dashboard.disconnect_client_confirm_title')"
+      :message="t('dashboard.disconnect_client_confirm_message', { client: currentClientName })"
+      :impact-items="disconnectClientImpactItems"
+      :confirm-label="t('dashboard.disconnect_client')"
+      :cancel-label="t('_common.cancel')"
+      :pending="disconnectingClient"
+      :pending-label="t('dashboard.disconnect_client_pending')"
+      @confirm="disconnectClient"
+    />
   </div>
 </template>
 
@@ -696,6 +712,8 @@ import Skeleton from '../components/Skeleton.vue'
 import GaugeArc from '../components/GaugeArc.vue'
 import QuickControls from '../components/QuickControls.vue'
 import InfoHint from '../components/InfoHint.vue'
+import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
+import { useToast } from '../composables/useToast'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
 import { AUTO_QUALITY_STATES, resolveAutoQualityState } from '../auto-quality-state'
@@ -719,6 +737,7 @@ const discoveryEnabled = ref(false)
 const pairingEnabled = ref(false)
 const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
+const { toast: showToast } = useToast()
 
 const autoQuality = computed(() => resolveAutoQualityState(stats.value || {}, clientSettingsSync.value || {}))
 
@@ -1468,6 +1487,7 @@ const primaryRecommendations = computed(() => recommendations.value.slice(0, 2))
 
 // Recording controls
 const recording = ref({ active: false, file: '' })
+const recordingActionPending = ref(false)
 
 async function fetchRecordingStatus() {
   try {
@@ -1477,22 +1497,41 @@ async function fetchRecordingStatus() {
 }
 
 async function startRecording() {
-  await fetch('./api/recording/start', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } })
-  fetchRecordingStatus()
+  await runRecordingAction('./api/recording/start', 'dashboard.recording_start_success', 'dashboard.recording_start_error')
 }
 
 async function stopRecording() {
-  await fetch('./api/recording/stop', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } })
-  fetchRecordingStatus()
+  await runRecordingAction('./api/recording/stop', 'dashboard.recording_stop_success', 'dashboard.recording_stop_error')
 }
 
 async function saveReplay() {
-  await fetch('./api/recording/save-replay', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } })
-  fetchRecordingStatus()
+  await runRecordingAction('./api/recording/save-replay', 'dashboard.recording_replay_success', 'dashboard.recording_replay_error')
+}
+
+async function runRecordingAction(url, successKey, errorKey) {
+  if (recordingActionPending.value) return
+  recordingActionPending.value = true
+  try {
+    const response = await fetch(url, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    await fetchRecordingStatus()
+    showToast(t(successKey), 'success')
+  } catch (error) {
+    console.error(error)
+    showToast(t(errorKey), 'error')
+  } finally {
+    recordingActionPending.value = false
+  }
 }
 
 // Connected client disconnect
 const connectedClientUuid = ref(null)
+const disconnectConfirmOpen = ref(false)
+const disconnectingClient = ref(false)
+const disconnectClientImpactItems = computed(() => [
+  t('dashboard.disconnect_client_impact_stream'),
+  t('dashboard.disconnect_client_impact_reconnect'),
+])
 
 async function resolveConnectedClient() {
   if (!stats.value?.streaming) return
@@ -1508,14 +1547,23 @@ async function resolveConnectedClient() {
 
 async function disconnectClient() {
   if (!connectedClientUuid.value) return
+  disconnectingClient.value = true
   try {
-    await fetch('./api/clients/disconnect', {
+    const response = await fetch('./api/clients/disconnect', {
       method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uuid: connectedClientUuid.value })
     })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
     connectedClientUuid.value = null
-  } catch (e) { console.error(e) }
+    disconnectConfirmOpen.value = false
+    showToast(t('dashboard.disconnect_client_success'), 'success')
+  } catch (e) {
+    console.error(e)
+    showToast(t('dashboard.disconnect_client_error'), 'error')
+  } finally {
+    disconnectingClient.value = false
+  }
 }
 
 function formatAudioName(sink) {

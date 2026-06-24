@@ -41,7 +41,7 @@
             {{ $t('troubleshooting.force_close_error') }}
           </div>
           <div class="mt-4">
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="closeAppPressed" @click="closeApp">
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="closeAppPressed" @click="requestConfirmedAction('forceClose')">
               {{ $t('troubleshooting.force_close') }}
             </button>
           </div>
@@ -58,7 +58,7 @@
             {{ $t('troubleshooting.restart_polaris_success') }}
           </div>
           <div class="mt-4">
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="serverQuitting || serverRestarting" @click="restart">
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="serverQuitting || serverRestarting" @click="requestConfirmedAction('restart')">
               {{ $t('troubleshooting.restart_polaris') }}
             </button>
           </div>
@@ -78,7 +78,7 @@
             {{ $t('troubleshooting.quit_polaris_success_ongoing') }}
           </div>
           <div class="mt-4">
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-danger" :disabled="serverQuitting || serverRestarting" @click="quit">
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-danger" :disabled="serverQuitting || serverRestarting" @click="requestConfirmedAction('quit')">
               {{ $t('troubleshooting.quit_polaris') }}
             </button>
           </div>
@@ -187,7 +187,7 @@
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.clear_ai_cache') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.clear_ai_cache_desc') }}</div>
           </button>
-          <button v-if="platform === 'linux'" class="focus-ring troubleshooting-action-card" :disabled="cleaningStaleVirtualDisplay" @click="cleanupStaleVirtualDisplay">
+          <button v-if="platform === 'linux'" class="focus-ring troubleshooting-action-card" :disabled="cleaningStaleVirtualDisplay" @click="requestConfirmedAction('cleanupStaleVirtualDisplay')">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.cleanup_stale_virtual_display') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.cleanup_stale_virtual_display_desc') }}</div>
           </button>
@@ -252,6 +252,18 @@
           </div>
         </div>
     </section>
+    <ConfirmActionDialog
+      v-if="activeConfirmAction"
+      v-model="confirmActionOpen"
+      :title="activeConfirmAction.title"
+      :message="activeConfirmAction.message"
+      :impact-items="activeConfirmAction.impactItems"
+      :confirm-label="activeConfirmAction.confirmLabel"
+      :cancel-label="i18n.t('_common.cancel')"
+      :pending="Boolean(pendingConfirmedAction)"
+      :pending-label="activeConfirmAction.pendingLabel"
+      @confirm="executeConfirmedAction"
+    />
   </div>
 </template>
 
@@ -260,6 +272,7 @@ import { ref, computed, onBeforeUnmount, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
+import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { requestHostRestart } from '../restart-host.js'
 
 const { toast: showToast } = useToast()
@@ -283,6 +296,72 @@ const serverQuitting = ref(false)
 const serverQuit = ref(false)
 const platform = ref("")
 const version = ref("")
+const confirmActionOpen = ref(false)
+const pendingConfirmedAction = ref(null)
+const requestedConfirmAction = ref(null)
+
+const confirmedActions = computed(() => ({
+  forceClose: {
+    title: i18n.t('troubleshooting.force_close_confirm_title'),
+    message: i18n.t('troubleshooting.force_close_confirm_message'),
+    impactItems: [
+      i18n.t('troubleshooting.force_close_impact_app'),
+      i18n.t('troubleshooting.force_close_impact_clients'),
+    ],
+    confirmLabel: i18n.t('troubleshooting.force_close'),
+    pendingLabel: i18n.t('troubleshooting.force_close_pending'),
+    execute: closeApp,
+  },
+  restart: {
+    title: i18n.t('troubleshooting.restart_polaris_confirm_title'),
+    message: i18n.t('troubleshooting.restart_polaris_confirm_message'),
+    impactItems: [
+      i18n.t('troubleshooting.restart_polaris_impact_streams'),
+      i18n.t('troubleshooting.restart_polaris_impact_web'),
+    ],
+    confirmLabel: i18n.t('troubleshooting.restart_polaris'),
+    pendingLabel: i18n.t('troubleshooting.restart_polaris_success'),
+    execute: restart,
+  },
+  quit: {
+    title: i18n.t('troubleshooting.quit_polaris_confirm_title'),
+    message: i18n.t('troubleshooting.quit_polaris_confirm'),
+    impactItems: [
+      i18n.t('troubleshooting.quit_polaris_impact_streams'),
+      i18n.t('troubleshooting.quit_polaris_impact_access'),
+    ],
+    confirmLabel: i18n.t('troubleshooting.quit_polaris'),
+    pendingLabel: i18n.t('troubleshooting.quit_polaris_success_ongoing'),
+    execute: quit,
+  },
+  cleanupStaleVirtualDisplay: {
+    title: i18n.t('troubleshooting.cleanup_stale_virtual_display_confirm_title'),
+    message: i18n.t('troubleshooting.cleanup_stale_virtual_display_confirm_message'),
+    impactItems: [
+      i18n.t('troubleshooting.cleanup_stale_virtual_display_impact'),
+    ],
+    confirmLabel: i18n.t('troubleshooting.cleanup_stale_virtual_display'),
+    pendingLabel: i18n.t('troubleshooting.cleanup_stale_virtual_display_pending'),
+    execute: cleanupStaleVirtualDisplay,
+  },
+}))
+const activeConfirmAction = computed(() => confirmedActions.value[requestedConfirmAction.value] || null)
+
+function requestConfirmedAction(key) {
+  requestedConfirmAction.value = key
+  confirmActionOpen.value = true
+}
+
+async function executeConfirmedAction() {
+  if (!activeConfirmAction.value || pendingConfirmedAction.value) return
+  pendingConfirmedAction.value = requestedConfirmAction.value
+  try {
+    await activeConfirmAction.value.execute()
+    confirmActionOpen.value = false
+  } finally {
+    pendingConfirmedAction.value = null
+  }
+}
 
 function yesNo(value) {
   return value ? 'Yes' : 'No'
@@ -494,16 +573,26 @@ function refreshLogs() {
 
 function closeApp() {
   closeAppPressed.value = true
-  fetch("./api/apps/close", {
+  return fetch("./api/apps/close", {
     credentials: 'include',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' }
   })
     .then((r) => r.json())
     .then((r) => {
-      closeAppPressed.value = false
       closeAppStatus.value = r.status
+      if (!r.status) throw new Error(r.error || 'Failed to close app')
+      showToast(i18n.t('troubleshooting.force_close_success') || 'Application closed successfully.', 'success')
       setTimeout(() => { closeAppStatus.value = null }, 5000)
+    })
+    .catch((error) => {
+      closeAppStatus.value = false
+      console.error(error)
+      showToast(i18n.t('troubleshooting.force_close_error') || 'Error while closing application.', 'error')
+      throw error
+    })
+    .finally(() => {
+      closeAppPressed.value = false
     })
 }
 
@@ -614,7 +703,7 @@ function clearAiCache() {
 
 function cleanupStaleVirtualDisplay() {
   cleaningStaleVirtualDisplay.value = true
-  fetch("./api/virtual-display/cleanup-stale", {
+  return fetch("./api/virtual-display/cleanup-stale", {
     credentials: 'include',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' }
@@ -682,7 +771,7 @@ function restart() {
   serverRestarting.value = true
   showToast(i18n.t('troubleshooting.restart_polaris_success') || 'Polaris is restarting...', 'info')
 
-  requestHostRestart({
+  return requestHostRestart({
     onReady: () => {
       serverRestarting.value = false
       showToast(i18n.t('troubleshooting.restart_ready') || 'Polaris is back online.', 'success')
@@ -700,23 +789,22 @@ function restart() {
 }
 
 function quit() {
-  if (window.confirm(i18n.t('troubleshooting.quit_polaris_confirm'))) {
-    serverQuitting.value = true
-    fetch("./api/quit", {
-      credentials: 'include',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    .then(() => {
-      serverQuitting.value = false
-      serverQuit.value = false
-      showToast("Exit failed!", 'error')
-    })
-    .catch(() => {
-      serverQuitting.value = false
-      serverQuit.value = true
-    })
-  }
+  serverQuitting.value = true
+  return fetch("./api/quit", {
+    credentials: 'include',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' }
+  })
+  .then(() => {
+    serverQuitting.value = false
+    serverQuit.value = false
+    showToast(i18n.t('troubleshooting.quit_polaris_error') || 'Exit failed!', 'error')
+  })
+  .catch(() => {
+    serverQuitting.value = false
+    serverQuit.value = true
+    showToast(i18n.t('troubleshooting.quit_polaris_success') || 'Polaris has exited.', 'success')
+  })
 }
 
 function ddResetPersistence() {
