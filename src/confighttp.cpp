@@ -49,6 +49,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "session_event_queue.h"
 #include "stream_recorder.h"
 #include "stream_stats.h"
 #include "utility.h"
@@ -4709,8 +4710,7 @@ namespace confighttp {
 
   // Session event bus (file-scope for access from emit_session_event and SSE handler)
   static std::mutex s_event_mtx;
-  static std::vector<std::string> s_events;
-  static std::atomic<uint64_t> s_event_seq{0};
+  static session_event_queue::event_queue s_events;
 
   /**
    * @brief Start the HTTPS server.
@@ -4778,9 +4778,21 @@ namespace confighttp {
         });
         if (header_sent.get_future().get()) return;
 
-        uint64_t last_seq = s_event_seq;
+        uint64_t last_seq;
+        {
+          std::lock_guard lk(s_event_mtx);
+          last_seq = s_events.cursor();
+        }
 
         while (!shutdown_event->peek()) {
+          std::vector<std::string> pending_events;
+          uint64_t current_seq;
+          {
+            std::lock_guard lk(s_event_mtx);
+            current_seq = s_events.cursor();
+            pending_events = s_events.events_after(last_seq);
+          }
+
           // Build current session state
           nlohmann::json state;
 #ifdef __linux__
@@ -4788,19 +4800,17 @@ namespace confighttp {
           state["cage_socket"] = cage_display_router::get_wayland_socket();
           state["screen_locked"] = session_manager::is_screen_locked();
 #endif
-          state["seq"] = s_event_seq.load();
+          state["seq"] = current_seq;
           state["session_state"] = get_session_state();
 
-          // Check for new events
-          {
-            std::lock_guard lk(s_event_mtx);
-            if (!s_events.empty() && s_event_seq > last_seq) {
-              for (auto &evt : s_events) {
-                *response << "event: session\ndata: " << evt << "\n\n";
-              }
-              s_events.clear();
-              last_seq = s_event_seq;
+          // Send only events emitted after this SSE client cursor.
+          // Older terminal events may still be retained for other clients, but
+          // they must not be replayed into a fresh Nova game activity.
+          if (!pending_events.empty()) {
+            for (const auto &evt : pending_events) {
+              *response << "event: session\ndata: " << evt << "\n\n";
             }
+            last_seq = current_seq;
           }
 
           // Always send heartbeat with state
@@ -5018,8 +5028,7 @@ namespace confighttp {
       std::chrono::system_clock::now().time_since_epoch()).count();
 
     std::lock_guard lk(s_event_mtx);
-    s_events.push_back(evt.dump());
-    s_event_seq++;
+    s_events.push(evt.dump());
 
     BOOST_LOG(info) << "session_event: "sv << event << " ["sv << get_session_state() << "] "sv << message;
   }
