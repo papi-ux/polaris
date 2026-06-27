@@ -4,6 +4,8 @@
   "scripts": {
     "build": "vite build --debug",
     "build-clean": "vite build --debug --emptyOutDir",
+    "build:budget": "npm run build && npm run budget:web",
+    "budget:web": "node scripts/check-web-performance-budget.mjs",
     "deploy:web-assets": "bash scripts/deploy-web-assets.sh",
     "dev": "vite build --watch",
     "lint": "eslint \"src_assets/common/assets/web/**/*.{js,vue}\"",
