@@ -111,17 +111,18 @@ test.describe('dashboard', () => {
       encode_target_format: 'nv12',
     }
 
-    // Intercept the SSE endpoint so the remounted DashboardView gets streaming stats
-    // without needing a full page reload (which would reset the module-level authed flag
-    // and trigger a real /api/config auth check against the server).
-    await loggedInPage.route('**/api/stats/stream-sse', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream',
-        headers: { 'Cache-Control': 'no-cache' },
-        body: `data: ${JSON.stringify(streamStats)}\n\n`,
-      })
-    })
+    await loggedInPage.addInitScript(function (payload) {
+      window.EventSource = class MockEventSource {
+        constructor() {
+          setTimeout(function () {
+            if (this.onopen) this.onopen({})
+            if (this.onmessage) this.onmessage({ data: JSON.stringify(payload) })
+          }.bind(this), 25)
+        }
+
+        close() {}
+      }
+    }, streamStats)
 
     // AMD-style payload: vendor/utilization/clocks/VRAM present, temperature_c and encoder_pct absent
     await loggedInPage.route('**/api/stats/system', async (route) => {
@@ -145,14 +146,11 @@ test.describe('dashboard', () => {
       })
     })
 
-    // Navigate away then back using hash routing — unmounts and remounts DashboardView
-    // without triggering a full page reload, so the in-memory auth state is preserved.
-    await loggedInPage.evaluate(() => { window.location.hash = '#/apps' })
-    await loggedInPage.evaluate(() => { window.location.hash = '#/' })
+    await loggedInPage.reload({ waitUntil: 'domcontentloaded' })
 
-    // Wait for the streaming dashboard to render with AMD GPU data
-    await expect(loggedInPage.getByText('GPU Load', { exact: false }).first()).toBeVisible({ timeout: 10000 })
-    await expect(loggedInPage.getByText('VRAM', { exact: false }).first()).toBeVisible({ timeout: 10000 })
+    // Wait for the streaming dashboard to render with AMD GPU data.
+    await expect(loggedInPage.locator('.dashboard-metric-tile').filter({ hasText: 'GPU Load' })).toBeVisible({ timeout: 10000 })
+    await expect(loggedInPage.locator('.dashboard-metric-tile').filter({ hasText: 'VRAM' })).toBeVisible({ timeout: 10000 })
 
     // Encoder tile must be hidden when encoder_pct is absent
     await expect(loggedInPage.locator('.dashboard-metric-tile').filter({ hasText: /^Encoder$/ })).not.toBeVisible()

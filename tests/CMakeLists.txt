@@ -85,6 +85,7 @@ set(TEST_AUDIT_SUPPORT_SOURCES
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_client_settings_advertisement.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_browser_stream_protocol.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
@@ -93,6 +94,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_prepared_ffmpeg.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)

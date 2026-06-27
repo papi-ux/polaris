@@ -8,7 +8,7 @@ function webSource(relativePath) {
 
 describe('dangerous host action workflows', () => {
   it('uses the reusable confirmation dialog instead of native confirms for host-affecting views', () => {
-    for (const relativePath of ['views/DashboardView.vue', 'views/TroubleshootingView.vue', 'components/QuickControls.vue']) {
+    for (const relativePath of ['views/DashboardView.vue', 'views/TroubleshootingView.vue', 'components/QuickControls.vue', 'CommandPalette.vue']) {
       const source = webSource(relativePath)
       expect(source).toContain("ConfirmActionDialog")
       expect(source).not.toMatch(/window\.confirm\(|(?<!\.)\bconfirm\(/)
@@ -34,5 +34,10 @@ describe('dangerous host action workflows', () => {
     expect(quickControls).toContain('pendingRestartToggle')
     expect(quickControls).toContain('quick_controls.restart_confirm_impact')
     expect(quickControls).toContain('quick_controls.save_failed')
+
+    const commandPalette = webSource('CommandPalette.vue')
+    expect(commandPalette).toContain('pendingDangerousAction')
+    expect(commandPalette).toContain('Command palette confirmation')
+    expect(commandPalette).toContain('executeCommandAction')
   })
 })

@@ -404,6 +404,10 @@ textarea {
   @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ice/50 focus-visible:ring-offset-2 focus-visible:ring-offset-deep;
 }
 
+.skip-link {
+  @apply fixed left-3 top-3 z-[200] -translate-y-16 rounded-lg border border-ice/30 bg-void px-3 py-2 text-sm font-semibold text-ice no-underline shadow-[0_12px_32px_rgba(0,0,0,0.35)] transition-transform duration-150 focus-visible:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ice/50 focus-visible:ring-offset-2 focus-visible:ring-offset-deep;
+}
+
 .info-hint {
   @apply relative inline-flex shrink-0 align-middle;
 }
@@ -545,6 +549,42 @@ textarea {
 
 .operator-console .ready-check-summary-attention {
   @apply border-amber-300/25 bg-amber-300/8;
+}
+
+.operator-console .mission-control-strip {
+  @apply grid gap-3 lg:grid-cols-3;
+}
+
+.operator-console .mission-control-tile {
+  @apply min-w-0 rounded-lg border border-ice/15 bg-deep/55 px-4 py-3 shadow-[inset_0_1px_0_rgba(200,214,229,0.05)];
+}
+
+.operator-console .mission-control-label {
+  @apply text-[10px] font-semibold uppercase tracking-[0.24em] text-storm;
+}
+
+.operator-console .mission-control-title {
+  @apply mt-2 text-base font-semibold text-balance;
+}
+
+.operator-console .mission-control-copy {
+  @apply mt-1 text-xs leading-relaxed text-storm;
+}
+
+.operator-console .mission-control-link {
+  @apply mt-3 inline-flex text-[11px] font-semibold text-ice no-underline hover:text-ice/80;
+}
+
+.operator-console .mission-control-overlay-note {
+  @apply flex flex-col gap-3 rounded-lg border border-storm/15 bg-void/35 px-4 py-3 lg:flex-row lg:items-start lg:justify-between;
+}
+
+.operator-console .mission-control-overlay-note .mission-control-copy {
+  @apply max-w-3xl lg:mt-0;
+}
+
+.operator-console .dashboard-telemetry-concern {
+  @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-3;
 }
 
 .operator-console .dashboard-degraded-state {
@@ -1327,6 +1367,41 @@ textarea {
 
   .page-enter {
     animation: none;
+  }
+
+  .pulse-dot,
+  .skeleton-shimmer,
+  .dashboard-preview-overlay .animate-spin {
+    animation: none !important;
+  }
+
+  .card-interactive:hover,
+  .action-tile:hover,
+  .settings-nav-button:hover {
+    transform: none;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 32rem) and (max-width: 64rem) {
+  .glass,
+  .card,
+  .section-card,
+  .info-hint-panel,
+  .config-page .settings-section {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .dashboard-live-shell,
+  .dashboard-preview-panel,
+  .dashboard-telemetry-card,
+  .dashboard-secondary-group,
+  .dashboard-live-summary-tile {
+    box-shadow: none;
+  }
+
+  .dashboard-telemetry-grid {
+    @apply grid-cols-2;
   }
 }
 

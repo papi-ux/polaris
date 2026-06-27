@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test'
 
-const baseURL = process.env.POLARIS_URL || 'https://127.0.0.1:49001'
+const baseURL = process.env.POLARIS_E2E_BASE_URL || process.env.POLARIS_URL || 'https://127.0.0.1:49001'
 
 export default defineConfig({
   testDir: './tests/e2e',

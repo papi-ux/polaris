@@ -13,6 +13,24 @@ import {
   toggleTheme,
 } from './theme.js'
 
+function hexToRgb(hex) {
+  return hex.replace('#', '').match(/.{2}/g).map((channel) => Number.parseInt(channel, 16) / 255)
+}
+
+function relativeLuminance(hex) {
+  const [red, green, blue] = hexToRgb(hex).map((channel) => (
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  ))
+
+  return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+}
+
+function contrastRatio(foreground, background) {
+  const [lighter, darker] = [relativeLuminance(foreground), relativeLuminance(background)].sort((a, b) => b - a)
+
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
 describe('theme skin registry', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -64,6 +82,19 @@ describe('theme skin registry', () => {
     expect(portableChromeCss).toContain('color: #315b45 !important;')
     expect(portableChromeCss).toContain('background-color: rgba(58, 102, 78, 0.12) !important;')
     expect(portableChromeCss).toContain('border-color: rgba(49, 91, 69, 0.34) !important;')
+  })
+
+  it('keeps Portable Chrome tokens readable against Moonlight-grey panels', () => {
+    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
+    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
+    const tokens = Object.fromEntries([...portableChromeCss.matchAll(/--color-([\w-]+):\s*(#[0-9a-f]{6})/gi)].map(([, name, value]) => [name, value.toLowerCase()]))
+
+    expect(contrastRatio(tokens.foreground, tokens.surface)).toBeGreaterThanOrEqual(7)
+    expect(contrastRatio(tokens.silver, tokens.surface)).toBeGreaterThanOrEqual(7)
+    expect(contrastRatio(tokens.muted, tokens.surface)).toBeGreaterThanOrEqual(4.5)
+    expect(contrastRatio(tokens.ice, tokens.surface)).toBeGreaterThanOrEqual(7)
+    expect(contrastRatio('#315b45', tokens.surface)).toBeGreaterThanOrEqual(4.5)
+    expect(contrastRatio(tokens.accent, tokens.surface)).toBeGreaterThanOrEqual(3)
   })
 
   it('applies non-default skins through the data-theme attribute', () => {

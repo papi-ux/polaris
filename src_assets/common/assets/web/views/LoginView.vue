@@ -1,9 +1,10 @@
 <template>
   <div class="relative min-h-screen overflow-hidden bg-background">
+    <a href="#polaris-login-main" class="skip-link">Skip to main content</a>
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(124,115,255,0.18),transparent_35%),radial-gradient(circle_at_bottom_right,rgba(200,214,229,0.08),transparent_28%)]"></div>
     <div class="relative mx-auto flex min-h-screen max-w-5xl items-center justify-center p-4 sm:p-6">
       <div class="grid w-full max-w-4xl gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <section class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
+        <main id="polaris-login-main" tabindex="-1" class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
           <div class="flex items-center gap-3">
             <img src="/images/logo-polaris.svg" class="h-12" alt="Polaris">
             <div>
@@ -73,7 +74,7 @@
               <b>{{ $t('_common.success') }}</b> {{ $t('welcome.login_success') }}
             </div>
           </form>
-        </section>
+        </main>
 
         <aside class="section-card self-center">
           <div class="section-kicker">Before You Continue</div>

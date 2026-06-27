@@ -11,7 +11,7 @@ test.describe('pairing', () => {
   })
 
   test('supports keyboard switching between pairing methods', async ({ loggedInPage }) => {
-    await loggedInPage.getByRole('link', { name: /pairing/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
     await expect(loggedInPage.getByRole('heading', { name: /pair/i }).first()).toBeVisible()
 
     const manualPinButton = loggedInPage.getByRole('button', { name: /manual pin/i })
@@ -57,7 +57,7 @@ test.describe('pairing', () => {
       await route.fulfill({ json: { status: false } })
     })
 
-    await loggedInPage.getByRole('link', { name: /pairing/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
 
     const editButtons = loggedInPage.getByRole('button', { name: /edit access/i })
     await editButtons.first().click()
@@ -84,7 +84,7 @@ test.describe('pairing', () => {
       })
     })
 
-    await loggedInPage.getByRole('link', { name: /pairing/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
     await loggedInPage.locator('#otp-passphrase').fill('abcd')
     await loggedInPage.getByRole('button', { name: /generate qr/i }).click()
 
@@ -107,7 +107,7 @@ test.describe('pairing', () => {
       })
     })
 
-    await loggedInPage.getByRole('link', { name: /pairing/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
     await loggedInPage.getByRole('radio', { name: /game control/i }).click()
     await loggedInPage.locator('#otp-passphrase').fill('abcd')
     await loggedInPage.getByRole('button', { name: /generate qr/i }).click()
@@ -122,7 +122,7 @@ test.describe('pairing', () => {
       await route.fulfill({ json: { status: true, access_preset: 'game_control' } })
     })
 
-    await loggedInPage.getByRole('link', { name: /pairing/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
     await loggedInPage.getByRole('button', { name: /manual pin/i }).click()
     await loggedInPage.getByRole('radio', { name: /game control/i }).click()
     await loggedInPage.locator('#pin-input').fill('1234')
@@ -155,7 +155,7 @@ test.describe('pairing', () => {
       })
     })
 
-    await loggedInPage.getByRole('link', { name: /pairing/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
 
     const clientCard = loggedInPage.locator('article').filter({ hasText: 'QA Client' }).first()
     await expect(clientCard.getByText('Game Control').first()).toBeVisible()

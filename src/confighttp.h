@@ -7,7 +7,9 @@
 // standard includes
 #include <functional>
 #include <chrono>
+#include <cstdint>
 #include <string>
+#include <string_view>
 
 // local includes
 #include "thread_safe.h"
@@ -19,6 +21,46 @@ using namespace std::chrono_literals;
 namespace confighttp {
   constexpr auto PORT_HTTPS = 1;
   constexpr auto SESSION_EXPIRE_DURATION = 24h * 15;
+  inline constexpr std::string_view CLIENT_SETTINGS_ENDPOINT = "/polaris/v1/client-settings";
+
+  namespace detail {
+    inline std::string host_without_port(std::string_view host_header) {
+      std::string host {host_header};
+      if (host.empty()) {
+        return "127.0.0.1";
+      }
+
+      if (host.front() == '[') {
+        const auto closing_bracket = host.find(']');
+        if (closing_bracket != std::string::npos) {
+          return host.substr(0, closing_bracket + 1);
+        }
+        return host;
+      }
+
+      const auto first_colon = host.find(':');
+      if (first_colon == std::string::npos) {
+        return host;
+      }
+      if (host.find(':', first_colon + 1) != std::string::npos) {
+        return host;
+      }
+      return host.substr(0, first_colon);
+    }
+  }  // namespace detail
+
+  inline std::string client_settings_endpoint_base_url(std::string_view request_host, std::uint16_t https_port) {
+    return "https://" + detail::host_without_port(request_host) + ":" + std::to_string(https_port);
+  }
+
+  inline std::string client_settings_endpoint_url(std::string_view request_host, std::uint16_t https_port) {
+    return client_settings_endpoint_base_url(request_host, https_port) + std::string(CLIENT_SETTINGS_ENDPOINT);
+  }
+
+  std::uint16_t client_settings_endpoint_https_port();
+  std::string client_settings_endpoint_base_url(std::string_view request_host);
+  std::string client_settings_endpoint_url(std::string_view request_host);
+
   void start();
 
   /**

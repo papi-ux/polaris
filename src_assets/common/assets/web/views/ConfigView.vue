@@ -279,6 +279,7 @@ import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
 import { CLIENT_SETTINGS_RESPONSE_ONLY_KEYS, stripClientSettingsResponseOnly } from '../client-settings-sync'
 import { requestHostRestart } from '../restart-host.js'
+import { rankSettingsSearchTabs } from '../settings-search.js'
 
 const { toast } = useToast()
 const i18n = inject('i18n')
@@ -358,6 +359,7 @@ const tabs = ref([
     group: "core",
     groupLabel: "Core Setup",
     summary: "Capture strategy, audio routing, display outputs, virtual display management, and stream delivery controls.",
+    searchAliases: ["linux streaming setup", "headless display pairing discovery", "encoder display pairing", "wayland nvidia copy", "dmabuf cuda nvenc"],
     options: {
       "audio_sink": "",
       "virtual_sink": "",
@@ -381,6 +383,7 @@ const tabs = ref([
       "dd_mode_remapping": {"mixed": [], "resolution_only": [], "refresh_rate_only": []},
       "dd_wa_hdr_toggle": "disabled",
       "headless_mode": "disabled",
+      "linux_use_cage_compositor": "disabled",
       "linux_prefer_gpu_native_capture": "disabled",
       "linux_capture_profile": "disabled",
       "double_refreshrate": "disabled",
@@ -452,6 +455,7 @@ const tabs = ref([
     group: "host",
     groupLabel: "Host & Runtime",
     summary: "Provider choice, runtime behavior, cache policy, and optimization defaults.",
+    searchAliases: ["auto quality", "headless quality", "adaptive bitrate", "per game stream profile"],
     options: {
       "ai_enabled": "disabled",
       "ai_provider": "anthropic",
@@ -573,35 +577,28 @@ function optionSearchText(optionKey) {
     .join(' ')
 }
 
-const searchResults = computed(() => {
-  const query = normalizeSearchValue(searchQuery.value)
-  if (!query) {
-    return tabs.value.map(tab => ({ tab, firstOptionKey: null }))
+function optionSearchMetadata(optionKey) {
+  const aliases = {
+    adapter_name: ["gpu display adapter", "encoder gpu", "display pairing discovery"],
+    output_name: ["monitor output", "display output", "display pairing discovery"],
+    dd_configuration_option: ["display device", "virtual display", "display pairing"],
+    headless_mode: ["headless stream", "hidden output", "linux setup"],
+    linux_use_cage_compositor: ["private compositor", "labwc", "wayland headless"],
+    linux_prefer_gpu_native_capture: ["gpu native", "wayland nvidia copy", "dmabuf", "cuda", "nvenc residency"],
+    linux_capture_profile: ["capture diagnostics", "profiling", "copy path"],
+    ai_enabled: ["auto quality", "profile optimizer", "per game tuning"],
+    adaptive_bitrate_enabled: ["auto quality", "adaptive bitrate", "headless quality"],
+    ai_codex_home: ["codex home", "runtime home", "subscription auth"],
   }
 
-  return tabs.value
-    .map((tab) => {
-      const tabText = [
-        normalizeSearchValue(tab.name),
-        normalizeSearchValue(tab.summary),
-        normalizeSearchValue(tab.groupLabel)
-      ].join(' ')
+  return {
+    label: translatedSearchText(`config.${optionKey}`) || optionKey,
+    description: [translatedSearchText(`config.${optionKey}_desc`), optionSearchText(optionKey)].filter(Boolean).join(' '),
+    aliases: aliases[optionKey] || [],
+  }
+}
 
-      const matchedOptionKeys = Object.keys(tab.options).filter((optionKey) =>
-        optionSearchText(optionKey).includes(query)
-      )
-
-      if (!tabText.includes(query) && matchedOptionKeys.length === 0) {
-        return null
-      }
-
-      return {
-        tab,
-        firstOptionKey: matchedOptionKeys[0] || Object.keys(tab.options)[0] || null
-      }
-    })
-    .filter(Boolean)
-})
+const searchResults = computed(() => rankSettingsSearchTabs(tabs.value, searchQuery.value, optionSearchMetadata))
 
 const matchingTabs = computed(() => searchResults.value.map((entry) => entry.tab))
 const matchedOptionByTab = computed(() => Object.fromEntries(

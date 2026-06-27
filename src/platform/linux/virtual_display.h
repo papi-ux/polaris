@@ -78,6 +78,15 @@ namespace virtual_display {
   backend_e detect_backend();
 
   /**
+   * @brief Return whether a detected backend has the configuration it needs to create a display.
+   *
+   * kscreen-doctor can only manage an existing configured streaming output.
+   * Treating the binary alone as available makes clients select host virtual display
+   * and then fail launch with a 503 when no output was configured.
+   */
+  bool backend_has_required_configuration(backend_e backend, const std::string &streaming_output);
+
+  /**
    * @brief Create a virtual display with the given resolution and refresh rate.
    * @param width Horizontal resolution in pixels.
    * @param height Vertical resolution in pixels.
