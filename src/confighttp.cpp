@@ -49,6 +49,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "session_event_queue.h"
 #include "stream_recorder.h"
 #include "stream_stats.h"
 #include "utility.h"
@@ -84,6 +85,18 @@ using namespace std::literals;
 
 namespace confighttp {
   namespace fs = std::filesystem;
+
+  std::uint16_t client_settings_endpoint_https_port() {
+    return net::map_port(nvhttp::PORT_HTTPS);
+  }
+
+  std::string client_settings_endpoint_base_url(std::string_view request_host) {
+    return client_settings_endpoint_base_url(request_host, client_settings_endpoint_https_port());
+  }
+
+  std::string client_settings_endpoint_url(std::string_view request_host) {
+    return client_settings_endpoint_url(request_host, client_settings_endpoint_https_port());
+  }
 
   class PolarisConfigHTTPSServer: public SimpleWeb::ServerBase<SimpleWeb::HTTPS> {
   public:
@@ -598,7 +611,7 @@ namespace confighttp {
       headers.emplace("Referrer-Policy", "no-referrer");
       headers.emplace("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()");
       headers.emplace("Strict-Transport-Security", "max-age=31536000");
-      headers.emplace("Content-Security-Policy", std::format("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*:{}; font-src 'self'; frame-ancestors 'none';", browser_stream::default_webtransport_port));
+      headers.emplace("Content-Security-Policy", std::format("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*:{} https://*:{}; font-src 'self'; frame-ancestors 'none';", browser_stream::default_webtransport_port, client_settings_endpoint_https_port()));
     }
 
     void append_json_security_headers(SimpleWeb::CaseInsensitiveMultimap &headers) {
@@ -2617,9 +2630,17 @@ namespace confighttp {
     }
     const bool client_settings_relaunch_required =
       stats.streaming && configured_mode != effective_mode;
+    const auto host_header = request->header.find("host");
+    const auto request_host = host_header == request->header.end() ? std::string {} : host_header->second;
     output_tree["client_settings_available"] = true;
     output_tree["client_settings_v1"] = true;
-    output_tree["client_settings_endpoint"] = "/polaris/v1/client-settings";
+    output_tree["client_settings_endpoint"] = client_settings_endpoint_url(request_host);
+    output_tree["client_settings_endpoint_path"] = std::string(CLIENT_SETTINGS_ENDPOINT);
+    output_tree["client_settings_endpoint_origin"] = "gamestream_https";
+    output_tree["client_settings_endpoint_same_origin"] = false;
+    output_tree["client_settings_endpoint_https_port"] = client_settings_endpoint_https_port();
+    output_tree["client_settings_endpoint_base_url"] = client_settings_endpoint_base_url(request_host);
+    output_tree["client_settings_endpoint_url"] = client_settings_endpoint_url(request_host);
     output_tree["client_settings_sync_mode"] = "bidirectional";
     output_tree["client_settings_authority"] = "polaris_effective_runtime";
     output_tree["client_settings_relaunch_required"] = client_settings_relaunch_required;
@@ -2739,6 +2760,12 @@ namespace confighttp {
                key == "client_settings_available"sv ||
                key == "client_settings_v1"sv ||
                key == "client_settings_endpoint"sv ||
+               key == "client_settings_endpoint_path"sv ||
+               key == "client_settings_endpoint_origin"sv ||
+               key == "client_settings_endpoint_same_origin"sv ||
+               key == "client_settings_endpoint_https_port"sv ||
+               key == "client_settings_endpoint_base_url"sv ||
+               key == "client_settings_endpoint_url"sv ||
                key == "client_settings_sync_mode"sv ||
                key == "client_settings_authority"sv ||
                key == "client_settings_relaunch_required"sv ||
@@ -4709,8 +4736,7 @@ namespace confighttp {
 
   // Session event bus (file-scope for access from emit_session_event and SSE handler)
   static std::mutex s_event_mtx;
-  static std::vector<std::string> s_events;
-  static std::atomic<uint64_t> s_event_seq{0};
+  static session_event_queue::event_queue s_events;
 
   /**
    * @brief Start the HTTPS server.
@@ -4778,9 +4804,21 @@ namespace confighttp {
         });
         if (header_sent.get_future().get()) return;
 
-        uint64_t last_seq = s_event_seq;
+        uint64_t last_seq;
+        {
+          std::lock_guard lk(s_event_mtx);
+          last_seq = s_events.cursor();
+        }
 
         while (!shutdown_event->peek()) {
+          std::vector<std::string> pending_events;
+          uint64_t current_seq;
+          {
+            std::lock_guard lk(s_event_mtx);
+            current_seq = s_events.cursor();
+            pending_events = s_events.events_after(last_seq);
+          }
+
           // Build current session state
           nlohmann::json state;
 #ifdef __linux__
@@ -4788,19 +4826,17 @@ namespace confighttp {
           state["cage_socket"] = cage_display_router::get_wayland_socket();
           state["screen_locked"] = session_manager::is_screen_locked();
 #endif
-          state["seq"] = s_event_seq.load();
+          state["seq"] = current_seq;
           state["session_state"] = get_session_state();
 
-          // Check for new events
-          {
-            std::lock_guard lk(s_event_mtx);
-            if (!s_events.empty() && s_event_seq > last_seq) {
-              for (auto &evt : s_events) {
-                *response << "event: session\ndata: " << evt << "\n\n";
-              }
-              s_events.clear();
-              last_seq = s_event_seq;
+          // Send only events emitted after this SSE client cursor.
+          // Older terminal events may still be retained for other clients, but
+          // they must not be replayed into a fresh Nova game activity.
+          if (!pending_events.empty()) {
+            for (const auto &evt : pending_events) {
+              *response << "event: session\ndata: " << evt << "\n\n";
             }
+            last_seq = current_seq;
           }
 
           // Always send heartbeat with state
@@ -5018,8 +5054,7 @@ namespace confighttp {
       std::chrono::system_clock::now().time_since_epoch()).count();
 
     std::lock_guard lk(s_event_mtx);
-    s_events.push_back(evt.dump());
-    s_event_seq++;
+    s_events.push(evt.dump());
 
     BOOST_LOG(info) << "session_event: "sv << event << " ["sv << get_session_state() << "] "sv << message;
   }
