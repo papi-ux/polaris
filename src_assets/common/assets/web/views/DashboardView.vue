@@ -19,6 +19,23 @@
       </div>
     </section>
 
+    <section class="mission-control-strip" aria-label="Mission Control Now Next Fix">
+      <div v-for="item in missionControlStrip" :key="item.key" class="mission-control-tile">
+        <div class="mission-control-label">{{ item.label }}</div>
+        <div class="mission-control-title" :class="item.tone">{{ item.title }}</div>
+        <div class="mission-control-copy">{{ item.detail }}</div>
+        <router-link v-if="item.to" :to="item.to" class="mission-control-link">Open fix</router-link>
+      </div>
+    </section>
+
+    <section class="mission-control-overlay-note" aria-label="Mission Control overlay recommendation">
+      <div>
+        <div class="mission-control-label">Recommended later local lane</div>
+        <div class="mission-control-title text-silver">{{ secondScreenOverlayRecommendation.title }}</div>
+      </div>
+      <div class="mission-control-copy">{{ secondScreenOverlayRecommendation.detail }}</div>
+    </section>
+
     <div v-if="statsLoaded && !stats?.streaming" class="grid grid-cols-1 gap-3 lg:grid-cols-3">
       <div class="surface-subtle p-4">
         <div class="section-title-row">
@@ -242,6 +259,15 @@
                 <div v-else class="dashboard-empty-state">
                   {{ $t('dashboard.recommendations_empty') }}
                 </div>
+                <div v-if="telemetryConcerns.length" class="dashboard-support-subsection">
+                  <div class="dashboard-support-subtitle">Gamer-readable telemetry</div>
+                  <div class="mt-3 grid gap-2 sm:grid-cols-2">
+                    <div v-for="concern in telemetryConcerns" :key="concern.key" class="dashboard-telemetry-concern">
+                      <div class="text-[11px] font-semibold uppercase tracking-[0.16em]" :class="concern.tone">{{ concern.label }}</div>
+                      <div class="mt-1 text-xs leading-relaxed text-storm">{{ concern.detail }}</div>
+                    </div>
+                  </div>
+                </div>
                 <div class="dashboard-support-subsection">
                   <div class="dashboard-support-subtitle">{{ $t('dashboard.ai_optimization') }}</div>
                   <div v-if="aiOptimization" class="space-y-3">
@@ -360,7 +386,7 @@
                 </div>
               </div>
 
-              <div class="dashboard-telemetry-grid mt-4">
+              <div v-if="!prefersReducedMotion" class="dashboard-telemetry-grid mt-4">
                 <div class="card p-3">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-green-400/80">FPS</div>
                   <div ref="fpsChartEl" class="h-24 w-full"></div>
@@ -385,6 +411,9 @@
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-red-400/80">Packet Loss</div>
                   <div ref="lossChartEl" class="h-24 w-full"></div>
                 </div>
+              </div>
+              <div v-else class="dashboard-empty-state mt-4">
+                Live charts are paused while reduced motion is enabled; the summary tiles above keep updating without the extra canvas work.
               </div>
 
               <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -772,8 +801,17 @@ import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { useToast } from '../composables/useToast'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
-import { AUTO_QUALITY_STATES, resolveAutoQualityState } from '../auto-quality-state'
+import { resolveAutoQualityState } from '../auto-quality-state'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
+import {
+  buildFpsTargetGap,
+  buildLiveSummary,
+  buildMissionControlStrip,
+  buildQualityGrade,
+  buildQualityScore,
+  buildSecondScreenOverlayRecommendation,
+  buildTelemetryGuidance,
+} from '../dashboard-summary'
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
@@ -1025,11 +1063,6 @@ function captureReasonMessage(reason) {
   return messages[key] || 'The active capture and encoder path is mixed or not fully classified.'
 }
 
-function metricNumber(value) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
 function modeLabelFromBool(value) {
   return value ? 'Headless Stream' : 'Windowed Stream'
 }
@@ -1201,14 +1234,7 @@ const runtimePathNoteTone = computed(() => {
   return 'text-amber-300'
 })
 
-const fpsTargetGap = computed(() => {
-  if (!stats.value?.streaming) return null
-  const encoded = metricNumber(stats.value?.fps)
-  const target = metricNumber(stats.value?.session_target_fps || stats.value?.requested_client_fps)
-
-  if (target < 90 || encoded <= 0 || encoded >= target * 0.85) return null
-  return { encoded, target }
-})
+const fpsTargetGap = computed(() => buildFpsTargetGap(stats.value || {}))
 
 const streamPathNotices = computed(() => {
   if (!stats.value?.streaming) return []
@@ -1279,37 +1305,13 @@ const qualitySummaryLabel = computed(() => t('dashboard.quality_summary', {
   score: qualityScore.value,
 }))
 
-function formatLiveNumber(value, digits = 1, suffix = '') {
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return '--'
-  return `${parsed.toFixed(digits)}${suffix}`
-}
-
 const liveSummary = computed(() => {
-  const s = stats.value || {}
-  const fps = metricNumber(s.fps)
-  const targetFps = metricNumber(s.session_target_fps || s.requested_client_fps)
-  const latency = Number(s.latency_ms)
-  const loss = Number(s.packet_loss)
-  const bitrate = Number(s.bitrate_kbps)
-
-  return {
-    quality: `${qualityGrade.value} · ${qualityScore.value}`,
-    qualityDetail: 'Stream score',
-    qualityTone: gradeColor(qualityGrade.value),
-    latency: formatLiveNumber(latency, 0, ' ms'),
-    latencyTone: Number.isFinite(latency)
-      ? (latency <= 20 ? 'text-green-400' : latency <= 50 ? 'text-yellow-400' : 'text-red-400')
-      : 'text-storm',
-    fps: formatLiveNumber(fps, 1),
-    fpsTone: fps > 0 ? (fps >= 55 ? 'text-green-400' : fps >= 30 ? 'text-yellow-400' : 'text-red-400') : 'text-storm',
-    fpsDetail: targetFps > 0 ? `${targetFps.toFixed(0)} target` : 'Encoded',
-    loss: formatLiveNumber(loss, 1, '%'),
-    lossTone: Number.isFinite(loss)
-      ? (loss < 0.5 ? 'text-green-400' : loss < 2 ? 'text-yellow-400' : 'text-red-400')
-      : 'text-storm',
-    bitrate: Number.isFinite(bitrate) ? `${(bitrate / 1000).toFixed(1)} Mbps` : '--',
-  }
+  return buildLiveSummary({
+    stats: stats.value || {},
+    qualityGrade: qualityGrade.value,
+    qualityScore: qualityScore.value,
+    gradeTone: gradeColor(qualityGrade.value),
+  })
 })
 
 // Check if a specific client name has AI-optimized settings (for multi-viewer list)
@@ -1414,40 +1416,9 @@ function stopPreview() {
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
 }
 
-// Stream quality scoring (0-100, computed from live stats)
-const qualityScore = computed(() => {
-  if (!stats.value?.streaming) return 0
-  const s = stats.value
-  let score = 100
+const qualityScore = computed(() => buildQualityScore(stats.value || {}))
 
-  // FPS stability: penalize if below target (assume 60fps baseline)
-  if (s.fps < 55) score -= Math.min(30, (60 - s.fps) * 2)
-  else if (s.fps < 58) score -= 5
-
-  // Encode time: penalize if above 8ms (1 frame at 120fps)
-  if (s.encode_time_ms > 16) score -= 25
-  else if (s.encode_time_ms > 8) score -= Math.min(15, (s.encode_time_ms - 8) * 2)
-
-  // Latency: penalize above 20ms
-  if (s.latency_ms > 50) score -= 20
-  else if (s.latency_ms > 20) score -= Math.min(10, (s.latency_ms - 20) / 3)
-
-  // Packet loss: heavily penalize
-  if (s.packet_loss > 5) score -= 30
-  else if (s.packet_loss > 1) score -= s.packet_loss * 5
-  else if (s.packet_loss > 0) score -= 3
-
-  return Math.max(0, Math.min(100, Math.round(score)))
-})
-
-const qualityGrade = computed(() => {
-  const s = qualityScore.value
-  if (s >= 90) return 'A'
-  if (s >= 75) return 'B'
-  if (s >= 55) return 'C'
-  if (s >= 35) return 'D'
-  return 'F'
-})
+const qualityGrade = computed(() => buildQualityGrade(qualityScore.value))
 
 // Stream metrics for the left column (compact vertical list)
 const streamMetrics = computed(() => {
@@ -1512,7 +1483,6 @@ const runtimeSummaryRows = computed(() => ([
   { label: 'Override', value: runtimeOverrideLabel.value, tone: runtimeOverrideTone.value },
 ]))
 
-// qualityGrade, qualityScore already defined above — reuse them
 const qualityBadgeClass = computed(() => {
   const g = qualityGrade.value
   return {
@@ -1524,55 +1494,44 @@ const qualityBadgeClass = computed(() => {
   }
 })
 
+const telemetryGuidance = computed(() => buildTelemetryGuidance({
+  stats: stats.value || {},
+  gpu: gpu.value,
+  fpsTargetGap: fpsTargetGap.value,
+  captureReason: captureReasonLabel.value,
+  autoQuality: autoQuality.value,
+  headlessGpuNativeOverrideActive: headlessGpuNativeOverrideActive.value,
+}))
+
+const telemetryConcerns = computed(() => telemetryGuidance.value.concerns)
+
 // Optimization recommendations (computed from live stats)
 const recommendations = computed(() => {
   if (!stats.value?.streaming) return []
-  const s = stats.value
-  const recs = []
+  const recs = [...telemetryGuidance.value.recommendations]
 
-  if (s.encode_time_ms > 12)
-    recs.push({ color: 'text-yellow-400', message: `Encode time is ${s.encode_time_ms.toFixed(1)}ms — consider lowering resolution or switching to NVENC Low Latency preset.` })
-  else if (s.encode_time_ms > 8)
-    recs.push({ color: 'text-ice', message: `Encode time is ${s.encode_time_ms.toFixed(1)}ms — approaching limit for 120fps. Monitor for frame drops.` })
-
-  if (s.packet_loss > 2)
-    recs.push({ color: 'text-red-400', message: `Packet loss at ${s.packet_loss}% — try enabling FEC, lowering bitrate, or checking network quality.` })
-  else if (s.packet_loss > 0.5)
-    recs.push({ color: 'text-yellow-400', message: `Minor packet loss (${s.packet_loss.toFixed(1)}%) — stream may have occasional artifacts.` })
-
-  if (fpsTargetGap.value)
-    recs.push({ color: 'text-ice', message: `Client requested ${fpsTargetGap.value.target.toFixed(0)} FPS, but encode is near ${fpsTargetGap.value.encoded.toFixed(1)} FPS. Check the game's frame cap, VSync, or idle/menu throttling first.` })
-  else if (s.fps < 55 && s.fps > 0)
-    recs.push({ color: 'text-yellow-400', message: `FPS dropped to ${s.fps.toFixed(1)} — GPU may be overloaded. Consider lowering resolution or quality.` })
-
-  if (s.latency_ms > 40)
-    recs.push({ color: 'text-yellow-400', message: `Latency is ${s.latency_ms.toFixed(0)}ms — check network path or try wired connection.` })
-
-  if (fpsTargetGap.value && gpu.value && gpu.value.utilization_pct < 30 && s.encode_time_ms < 4)
-    recs.push({ color: 'text-green-400', message: `GPU and encoder headroom are available (${gpu.value.utilization_pct}% GPU, ${s.encode_time_ms.toFixed(1)}ms encode), so this looks more like an app/output cap than encoder pressure.` })
-  else if (gpu.value && gpu.value.utilization_pct < 30 && s.encode_time_ms < 4)
-    recs.push({ color: 'text-green-400', message: `GPU utilization is low (${gpu.value.utilization_pct}%) with fast encode — you have headroom for higher resolution or quality.` })
-
-  // Stream display mode recommendations
-  if (!s.headless_mode && s.streaming)
-    recs.push({ color: 'text-accent', message: `Use Headless Stream in Audio/Video settings for hidden stream-only sessions that leave the desktop layout alone.` })
-
-  if (headlessGpuNativeOverrideActive.value)
-    recs.push({ color: 'text-amber-300', message: `GPU-native override is active: Polaris requested headless but is using windowed labwc to preserve the GPU-resident capture path.` })
-
-  if (s.capture_cpu_copy)
-    recs.push({ color: 'text-orange-300', message: captureReasonLabel.value })
-
-  if (!autoQuality.value.enabled && s.streaming) {
-    recs.push({ color: 'text-accent', message: 'Enable Auto Quality in Audio/Video settings so Polaris can balance bitrate, profile choice, and recovery behavior automatically.' })
-  } else if (autoQuality.value.state === AUTO_QUALITY_STATES.RECOVERING && autoQuality.value.detail) {
-    recs.push({ color: 'text-amber-300', message: autoQuality.value.detail })
+  if (!stats.value.headless_mode) {
+    recs.push({ color: 'text-accent', message: 'Use Headless Stream in Audio/Video settings for hidden stream-only sessions that leave the desktop layout alone.' })
   }
 
   return recs
 })
 
 const primaryRecommendations = computed(() => recommendations.value.slice(0, 2))
+
+const missionControlStrip = computed(() => buildMissionControlStrip({
+  statsLoaded: statsLoaded.value,
+  stats: stats.value || {},
+  pairedClients: pairedClients.value,
+  appCatalogCount: appCatalogCount.value,
+  readyCheckDisplay: readyCheckDisplay.value,
+  liveSummary: liveSummary.value,
+  telemetryConcerns: telemetryConcerns.value,
+  primaryRecommendation: primaryRecommendations.value[0] || null,
+  runtimePathNote: runtimePathNote.value,
+}))
+
+const secondScreenOverlayRecommendation = buildSecondScreenOverlayRecommendation()
 
 // Recording controls
 const recording = ref({ active: false, file: '' })
@@ -1671,16 +1630,21 @@ useFavicon(stats)
 
 // Lazy-load uPlot
 let uPlotLib = null
-const uPlotLoaded = ref(false)
 
 async function loadUPlot() {
   if (!uPlotLib) {
     const mod = await import('uplot')
     await import('uplot/dist/uPlot.min.css')
     uPlotLib = mod.default
-    uPlotLoaded.value = true
   }
   return uPlotLib
+}
+
+const prefersReducedMotion = ref(false)
+let reducedMotionQuery = null
+
+function updateReducedMotionPreference(event) {
+  prefersReducedMotion.value = Boolean(event?.matches)
 }
 
 // Track whether we've gotten at least one stats response
@@ -1877,13 +1841,18 @@ watch(stats, (newStats, oldStats) => {
   if (newStats.streaming && (!oldStats || !oldStats.streaming)) {
     resolveConnectedClient()
     fetchRecordingStatus()
-    if (!showPreview.value) startPreview()
+    if (!showPreview.value && !prefersReducedMotion.value) startPreview()
     // Fetch AI optimization for connected device
     if (newStats.client_name) {
       getAiSuggestion(newStats.client_name).then(opt => {
         if (opt && opt.status) aiOptimization.value = opt
       })
     }
+  }
+
+  if (prefersReducedMotion.value) {
+    destroyCharts()
+    return
   }
 
   const now = Date.now() / 1000
@@ -1924,7 +1893,21 @@ watch(stats, (newStats, oldStats) => {
   })
 })
 
+watch(prefersReducedMotion, (isReduced) => {
+  if (isReduced) {
+    destroyCharts()
+  } else if (stats.value?.streaming) {
+    setupCharts()
+  }
+})
+
 onMounted(async () => {
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
+    updateReducedMotionPreference(reducedMotionQuery)
+    reducedMotionQuery.addEventListener?.('change', updateReducedMotionPreference)
+  }
+
   fetchSystemInfo()
   fetchAiStatus()
   fetchAiDevices()
@@ -1991,6 +1974,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   destroyCharts()
+  reducedMotionQuery?.removeEventListener?.('change', updateReducedMotionPreference)
+  reducedMotionQuery = null
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null

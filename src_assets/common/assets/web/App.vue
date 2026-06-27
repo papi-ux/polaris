@@ -1,11 +1,13 @@
 <template>
   <SpaceParticles v-if="!showNav" :dense="true" />
   <div v-if="showNav" class="relative z-[1] flex h-screen bg-background text-foreground">
+    <a href="#polaris-main" class="skip-link">Skip to main content</a>
     <!-- Mobile overlay -->
     <div v-if="sidebarOpen" class="fixed inset-0 bg-void/70 backdrop-blur-sm z-30 md:hidden transition-opacity" @click="sidebarOpen = false"></div>
 
     <!-- Sidebar -->
     <aside
+      id="polaris-sidebar"
       class="bg-void border-r border-storm flex flex-col shrink-0 transition-[width,transform] duration-200 ease-in-out z-40"
       :class="[
         sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
@@ -111,11 +113,11 @@
     </aside>
 
     <!-- Main content -->
-    <main class="relative flex-1 overflow-auto overflow-x-hidden bg-background">
+    <main id="polaris-main" tabindex="-1" class="relative flex-1 overflow-auto overflow-x-hidden bg-background">
       <SpaceParticles :dense="false" :absolute="true" />
       <!-- Mobile header -->
       <div class="flex items-center gap-3 border-b border-storm/20 px-4 py-4 md:hidden">
-        <button type="button" aria-label="Toggle navigation" @click="sidebarOpen = !sidebarOpen" class="focus-ring text-silver transition-colors duration-200 hover:text-ice">
+        <button type="button" aria-label="Toggle navigation" aria-controls="polaris-sidebar" :aria-expanded="sidebarOpen" @click="sidebarOpen = !sidebarOpen" class="focus-ring text-silver transition-colors duration-200 hover:text-ice">
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
         <div class="min-w-0">
@@ -154,6 +156,7 @@ import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
 import { cycleTheme, getNextTheme, getTheme, getThemeMeta, initTheme } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
+import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-metadata.js'
 
 const route = useRoute()
 const currentTheme = ref(getTheme())
@@ -179,80 +182,9 @@ try {
   // i18n not yet ready
 }
 
-const navSections = computed(() => {
-  const sections = [
-    {
-      key: 'streaming',
-      label: i18nReady ? t('navbar.group_streaming') : 'Streaming',
-      items: [
-        {
-          to: '/',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 14a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1v-2zm10 0a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1h-4a1 1 0 01-1-1v-5z"/></svg>',
-          label: i18nReady ? t('navbar.dashboard') : 'Dashboard',
-        },
-        {
-          to: '/apps',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>',
-          label: i18nReady ? t('navbar.library') : 'Library',
-        },
-        {
-          to: '/pin',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>',
-          label: i18nReady ? t('navbar.pairing') : 'Pairing',
-        },
-        {
-          to: '/browser-stream',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h10a4 4 0 014 4v2a4 4 0 01-4 4H7a4 4 0 01-4-4v-2a4 4 0 014-4z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-2-2l2 2-2 2"/></svg>',
-          label: i18nReady ? t('navbar.browser_stream') : 'Browser Stream',
-        },
-      ],
-    },
-    {
-      key: 'host',
-      label: i18nReady ? t('navbar.group_host') : 'Host',
-      items: [
-        {
-          to: '/config',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>',
-          label: i18nReady ? t('navbar.settings') : 'Settings',
-        },
-        {
-          to: '/password',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>',
-          label: i18nReady ? t('navbar.security') : 'Security',
-        },
-      ],
-    },
-    {
-      key: 'support',
-      label: i18nReady ? t('navbar.group_support') : 'Support',
-      items: [
-        {
-          to: '/info',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
-          label: i18nReady ? t('navbar.system') : 'System',
-        },
-        {
-          to: '/troubleshooting',
-          icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>',
-          label: i18nReady ? t('navbar.troubleshoot') : 'Troubleshooting',
-        },
-      ],
-    },
-  ]
-
-  let shortcut = 1
-  return sections.map((section) => ({
-    ...section,
-    items: section.items.map((item) => ({
-      ...item,
-      shortcut: shortcut++,
-      sectionLabel: section.label,
-    })),
-  }))
-})
-const navItems = computed(() => navSections.value.flatMap((section) => section.items))
-const currentNavItem = computed(() => navItems.value.find((item) => item.to === route.path) || null)
+const navSections = computed(() => createNavSections(t))
+const navItems = computed(() => flattenNavItems(navSections.value))
+const currentNavItem = computed(() => getNavItemByPath(navSections.value, route.path))
 const currentPageLabel = computed(() => currentNavItem.value?.label || 'Polaris')
 const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 'Core')
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
@@ -292,7 +224,7 @@ function toggleCollapse() {
 
 function handleKeydown(e) {
   // Command palette
-  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     commandPaletteOpen.value = !commandPaletteOpen.value
     return
