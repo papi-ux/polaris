@@ -34,4 +34,21 @@ describe('DashboardView live-session hierarchy', () => {
     expectBefore(dashboard, 'dashboard-live-summary-grid', '<details class="dashboard-secondary-group')
     expect(dashboard).toContain('dashboard-secondary-group-summary')
   })
+
+  it('places Now Next Fix before standby and live dashboard detail', () => {
+    const dashboard = webSource('views/DashboardView.vue')
+
+    expectBefore(dashboard, 'mission-control-strip', 'dashboard-live-shell')
+    expectBefore(dashboard, 'mission-control-strip', 'dashboard-live-summary-grid')
+    expect(dashboard).toContain('Mission Control Now Next Fix')
+    expect(dashboard).toContain('Open fix')
+  })
+
+  it('keeps second-screen overlay framed as a later local lane', () => {
+    const dashboard = webSource('views/DashboardView.vue')
+
+    expectBefore(dashboard, 'mission-control-overlay-note', 'dashboard-live-shell')
+    expect(dashboard).toContain('Recommended later local lane')
+    expect(dashboard).toContain('secondScreenOverlayRecommendation')
+  })
 })

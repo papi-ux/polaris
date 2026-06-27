@@ -16,6 +16,20 @@ describe('cross-cutting accessibility and mobile polish', () => {
     expect(app).toContain('aria-hidden="true" v-html="item.icon"')
   })
 
+  it('keeps the mobile shell keyboard navigable with a landmark skip target and menu state', () => {
+    const app = webSource('App.vue')
+    const css = webSource('app.css')
+
+    expect(app).toContain('href="#polaris-main"')
+    expect(app).toContain('id="polaris-main"')
+    expect(app).toContain('tabindex="-1"')
+    expect(app).toContain('id="polaris-sidebar"')
+    expect(app).toContain('aria-controls="polaris-sidebar"')
+    expect(app).toContain(':aria-expanded="sidebarOpen"')
+    expect(css).toContain('.skip-link')
+    expect(css).toContain('focus-visible:translate-y-0')
+  })
+
   it('marks live status and progress surfaces for assistive technology updates', () => {
     const dashboard = webSource('views/DashboardView.vue')
     const apps = webSource('views/AppsView.vue')
