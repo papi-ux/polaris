@@ -298,6 +298,87 @@
       </div>
     </section>
 
+    <section v-if="!showEditForm && quickLaunchRailApps.length" class="section-card library-quick-launch-rail" aria-label="Library Quick Launch">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <div class="section-kicker">Quick Launch</div>
+          <div class="section-title-row">
+            <h2 class="section-title">Jump back in</h2>
+            <InfoHint size="sm" label="Library Quick Launch">
+              Favorite, recent, and launch-ready apps are ranked first so the Library feels familiar from the couch while still showing broken entries that need attention.
+            </InfoHint>
+          </div>
+          <p class="mt-2 text-sm text-storm">Moonlight-style shortcuts with Polaris host context, launch health, and repair paths in one rail.</p>
+        </div>
+        <span class="meta-pill">{{ quickLaunchReadyCount }} ready / {{ quickLaunchRailApps.length }} shown</span>
+      </div>
+
+      <div class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <article
+          v-for="app in quickLaunchRailApps"
+          :key="`quick-${app.uuid}`"
+          class="surface-subtle overflow-hidden p-0"
+          :data-quick-launch-app="app.uuid"
+        >
+          <div class="flex min-h-full gap-3 p-3">
+            <div class="relative h-24 w-16 shrink-0 overflow-hidden rounded-lg border border-storm/20 bg-void/60">
+              <img
+                v-if="app['image-path']"
+                :src="'./api/covers/image?name=' + encodeURIComponent(app.name)"
+                class="h-full w-full object-cover"
+                loading="lazy"
+                @error="$event.target.style.display='none'; $event.target.nextElementSibling.style.display='flex'"
+              />
+              <div class="flex h-full w-full items-center justify-center">
+                <svg class="h-6 w-6 text-storm/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+              </div>
+            </div>
+            <div class="flex min-w-0 flex-1 flex-col">
+              <div class="flex min-w-0 items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <h3 class="truncate text-sm font-semibold text-silver">{{ app.name || 'Untitled app' }}</h3>
+                  <div class="mt-1 text-xs text-storm">{{ quickLaunchStateCopy(app) }}</div>
+                </div>
+                <span class="control-chip shrink-0">{{ quickLaunchStateLabel(app) }}</span>
+              </div>
+              <div class="mt-3 flex flex-wrap gap-1.5 text-[11px] text-storm">
+                <span v-if="quickLaunchDetails(app).favorite" class="meta-pill border-yellow-300/25 bg-yellow-300/10 text-yellow-100">Favorite</span>
+                <span v-if="quickLaunchDetails(app).recent" class="meta-pill border-ice/20 bg-ice/10 text-ice">Recent</span>
+                <span v-if="app.source && app.source !== 'manual'" class="meta-pill">{{ app.source }}</span>
+              </div>
+              <div class="mt-auto pt-4">
+                <button
+                  v-if="quickLaunchDetails(app).running"
+                  class="focus-ring dashboard-action-button dashboard-action-button-secondary w-full justify-center"
+                  type="button"
+                  :disabled="actionDisabled"
+                  @click="requestCloseApp(app)"
+                >
+                  {{ pendingStopAppUuid === app.uuid ? "Confirm stop" : "Stop stream" }}
+                </button>
+                <a
+                  v-else-if="quickLaunchDetails(app).launchReady"
+                  class="focus-ring dashboard-action-button dashboard-action-button-primary w-full justify-center no-underline"
+                  :href="launchHref(app)"
+                  @click.prevent="launchApp($event, app)"
+                >
+                  Launch
+                </a>
+                <button
+                  v-else
+                  class="focus-ring dashboard-action-button dashboard-action-button-secondary w-full justify-center"
+                  type="button"
+                  @click="editApp(app)"
+                >
+                  Fix entry
+                </button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <div v-if="!showEditForm" class="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)]">
       <section class="section-card">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -1032,6 +1113,7 @@ import InfoHint from '../components/InfoHint.vue'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
+import { isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
 import { filterImportGames, summarizeImportGames } from '../library-imports'
 
 const { toast: showToast } = useToast()
@@ -1090,6 +1172,7 @@ const editMangoHud = ref(false)
 const apps = ref([])
 const showEditForm = ref(false)
 const actionDisabled = ref(false)
+const pendingStopAppUuid = ref("")
 const editForm = ref(null)
 const coverSearching = ref(false)
 const coverFinderBusy = ref(false)
@@ -1110,6 +1193,8 @@ const visibleApps = computed(() => filterLibraryApps(apps.value, {
   filter: libraryFilter.value,
   currentApp: currentApp.value,
 }))
+const quickLaunchRailApps = computed(() => buildQuickLaunchApps(apps.value, { currentApp: currentApp.value, limit: 6 }))
+const quickLaunchReadyCount = computed(() => quickLaunchRailApps.value.filter((app) => isLaunchReadyApp(app)).length)
 const appCount = computed(() => publishedApps.value.length)
 const activeApp = computed(() => apps.value.find((app) => app.uuid === currentApp.value) || null)
 const libraryFilters = computed(() => ([
@@ -1197,6 +1282,30 @@ function formatCategory(category = '') {
 function trimCommand(command = '') {
   if (command.length <= 44) return command
   return `${command.slice(0, 41)}...`
+}
+
+function quickLaunchDetails(app) {
+  return launchPriorityDetails(app, { currentApp: currentApp.value })
+}
+
+function quickLaunchStateLabel(app) {
+  const details = quickLaunchDetails(app)
+  if (details.running) return 'Live'
+  if (details.favorite && details.recent) return 'Favorite recent'
+  if (details.favorite) return 'Favorite'
+  if (details.recent) return 'Recent'
+  if (details.launchReady) return 'Ready'
+  return 'Needs fix'
+}
+
+function quickLaunchStateCopy(app) {
+  const details = quickLaunchDetails(app)
+  if (details.running) return 'Currently streaming for connected clients.'
+  if (!details.launchReady) return 'Missing a launch command; open the entry before sending it to clients.'
+  if (details.favorite && details.recent) return 'Pinned and recently played, so it stays at the front of the couch flow.'
+  if (details.favorite) return 'Pinned for quick couch launches.'
+  if (details.recent) return 'Recently launched from this host.'
+  return 'Launch-ready and available to paired clients.'
 }
 
 function sourceLabel(source = '') {
@@ -1377,6 +1486,7 @@ function loadApps() {
   .then(r => r.json())
   .then(r => {
     apps.value = r.apps.filter(i => i.uuid).map(i => ({ ...i, launching: false, dragover: false }))
+    pendingStopAppUuid.value = ""
     currentApp.value = r.current_app
     hostName.value = r.host_name
     hostUUID.value = r.host_uuid
@@ -1420,18 +1530,28 @@ function launchApp(event, app) {
   }
 }
 
-function closeApp() {
-  if (confirm(i18n.t('apps.close_warning'))) {
-    actionDisabled.value = true
-    fetch("./api/apps/close", {
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      method: 'POST',
-    })
-    .then((r) => r.json())
-    .then((r) => { if (!r.status) showToast('Failed to close app', 'error') })
-    .finally(() => { actionDisabled.value = false; loadApps() })
+function requestCloseApp(app) {
+  if (pendingStopAppUuid.value !== app.uuid) {
+    pendingStopAppUuid.value = app.uuid
+    return
   }
+  closeApp({ confirmFirst: false })
+}
+
+function closeApp(options = {}) {
+  const confirmFirst = options.confirmFirst !== false
+  if (confirmFirst && !confirm(i18n.t("apps.close_warning"))) {
+    return
+  }
+  actionDisabled.value = true
+  fetch("./api/apps/close", {
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  })
+  .then((r) => r.json())
+  .then((r) => { if (!r.status) showToast("Failed to close app", "error") })
+  .finally(() => { actionDisabled.value = false; pendingStopAppUuid.value = ""; loadApps() })
 }
 
 function editApp(app) {

@@ -5,7 +5,7 @@ test.describe('troubleshooting', () => {
     await loggedInPage.getByRole('link', { name: /troubleshooting/i }).click()
     await expect(loggedInPage).toHaveURL(/#\/troubleshooting/)
     await expect(loggedInPage.getByRole('heading', { name: /^troubleshooting$/i })).toBeVisible({ timeout: 15000 })
-    await expect(loggedInPage.getByRole('heading', { name: /^recovery$/i })).toBeVisible({ timeout: 15000 })
+    await expect(loggedInPage.getByRole('heading', { name: /^quick recovery$/i })).toBeVisible({ timeout: 15000 })
 
     const fatalFilter = loggedInPage.getByRole('button', { name: /^fatal$/i })
     await fatalFilter.focus()
@@ -16,9 +16,7 @@ test.describe('troubleshooting', () => {
     await expect(search).toBeVisible()
     await search.fill('Warning')
 
-    const clearButton = loggedInPage
-      .locator('.troubleshooting-filter-panel')
-      .getByRole('button', { name: /^clear log filters$/i })
+    const clearButton = loggedInPage.getByRole('button', { name: /^(clear log filters|clear)$/i })
     await expect(clearButton).toBeVisible()
   })
 })

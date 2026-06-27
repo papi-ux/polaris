@@ -52,7 +52,13 @@ describe('client settings sync helpers', () => {
     const config = stripClientSettingsResponseOnly({
       headless_mode: 'enabled',
       client_settings_available: true,
-      client_settings_endpoint: '/polaris/v1/client-settings',
+      client_settings_endpoint: 'https://10.0.0.232:47984/polaris/v1/client-settings',
+      client_settings_endpoint_path: '/polaris/v1/client-settings',
+      client_settings_endpoint_origin: 'gamestream_https',
+      client_settings_endpoint_same_origin: false,
+      client_settings_endpoint_https_port: 47984,
+      client_settings_endpoint_base_url: 'https://10.0.0.232:47984',
+      client_settings_endpoint_url: 'https://10.0.0.232:47984/polaris/v1/client-settings',
       ai_auto_quality_enabled: 'enabled',
     })
 

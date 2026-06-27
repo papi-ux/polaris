@@ -952,6 +952,9 @@ namespace virtual_display {
   namespace kscreen {
 
     static bool is_available() {
+      if (!backend_has_required_configuration(backend_e::KSCREEN_DOCTOR, config::video.linux_display.streaming_output)) {
+        return false;
+      }
       return exec_cmd_rc("which kscreen-doctor >/dev/null 2>&1") == 0;
     }
 
@@ -1091,8 +1094,22 @@ namespace virtual_display {
     return backend;
   }
 
+  bool backend_has_required_configuration(backend_e backend, const std::string &streaming_output) {
+    switch (backend) {
+      case backend_e::NONE:
+        return false;
+      case backend_e::KSCREEN_DOCTOR:
+        return !streaming_output.empty();
+      case backend_e::EVDI:
+      case backend_e::WAYLAND_WLR:
+        return true;
+    }
+    return false;
+  }
+
   bool is_available() {
-    return detect_backend() != backend_e::NONE;
+    const auto backend = detect_backend();
+    return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
   }
 
   bool cleanup_stale() {

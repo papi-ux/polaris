@@ -15,6 +15,24 @@ TEST(VirtualDisplayTests, BackendDetectionLogCacheOnlySignalsOnFirstObservationA
   EXPECT_TRUE(cache.note(virtual_display::backend_e::WAYLAND_WLR));
   EXPECT_FALSE(cache.note(virtual_display::backend_e::WAYLAND_WLR));
 }
+
+TEST(VirtualDisplayTests, KscreenDoctorRequiresConfiguredStreamingOutput) {
+  EXPECT_FALSE(virtual_display::backend_has_required_configuration(
+    virtual_display::backend_e::NONE,
+    "HDMI-A-1"));
+  EXPECT_TRUE(virtual_display::backend_has_required_configuration(
+    virtual_display::backend_e::EVDI,
+    ""));
+  EXPECT_TRUE(virtual_display::backend_has_required_configuration(
+    virtual_display::backend_e::WAYLAND_WLR,
+    ""));
+  EXPECT_FALSE(virtual_display::backend_has_required_configuration(
+    virtual_display::backend_e::KSCREEN_DOCTOR,
+    ""));
+  EXPECT_TRUE(virtual_display::backend_has_required_configuration(
+    virtual_display::backend_e::KSCREEN_DOCTOR,
+    "HDMI-A-1"));
+}
 #else
 TEST(VirtualDisplayTests, LinuxOnly) {
   GTEST_SKIP() << "Linux-only virtual display tests";

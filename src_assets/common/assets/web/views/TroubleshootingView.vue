@@ -15,6 +15,36 @@
       </div>
     </section>
 
+    <section class="section-card space-y-4" data-fix-my-stream>
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div class="section-kicker">{{ $t('troubleshooting.fix_my_stream_mode') }}</div>
+          <h2 class="section-title">{{ $t('troubleshooting.fix_my_stream') }}</h2>
+          <p class="section-copy">{{ $t('troubleshooting.fix_my_stream_desc') }}</p>
+        </div>
+        <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="downloadingSupportBundle" @click="downloadSupportBundle">
+          {{ $t('troubleshooting.export_anonymized_diagnostics') }}
+        </button>
+      </div>
+      <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div
+          v-for="item in fixMyStreamChecklist"
+          :key="item.key"
+          class="surface-subtle border p-4"
+          :class="fixMyStreamStatusClass(item.status)"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-semibold text-silver">{{ item.label }}</div>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="fixMyStreamBadgeClass(item.status)">
+              {{ fixMyStreamStatusLabel(item.status) }}
+            </span>
+          </div>
+          <p class="mt-2 text-sm leading-relaxed text-storm">{{ item.detail }}</p>
+          <p class="mt-3 text-xs leading-relaxed text-ice">{{ item.action }}</p>
+        </div>
+      </div>
+    </section>
+
     <section class="section-card space-y-4">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
@@ -215,7 +245,7 @@
               {{ level }}
             </button>
           </div>
-          <div class="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
+          <div class="troubleshooting-filter-panel flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
             <input
               type="text"
               name="logs-filter"
@@ -227,6 +257,7 @@
             >
             <button
               class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary"
+              :aria-label="$t('troubleshooting.logs_clear_filters')"
               :disabled="clearingLogs"
               @click="clearLogs"
             >
@@ -274,6 +305,7 @@ import { useStreamStats } from '../composables/useStreamStats'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { requestHostRestart } from '../restart-host.js'
+import { buildAnonymizedDiagnosticsBundle, buildFixMyStreamChecklist } from '../diagnostics-export.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -485,6 +517,31 @@ const groupedRecentIssues = computed(() => {
 const recentIssueSummaryText = computed(() => groupedRecentIssues.value
   .map((entry) => `${entry.timestamp} ${entry.level}: ${entry.message}${entry.count > 1 ? ` (${entry.count}x)` : ''}`.trim())
   .join('\n'))
+
+const fixMyStreamChecklist = computed(() => buildFixMyStreamChecklist({
+  stats: streamStats.value || {},
+  statsConnected: streamStatsConnected.value,
+  logs: logs.value,
+  recentIssues: groupedRecentIssues.value,
+}))
+
+function fixMyStreamStatusLabel(status) {
+  if (status === 'pass') return i18n.t('troubleshooting.fix_my_stream_status_pass')
+  if (status === 'fail') return i18n.t('troubleshooting.fix_my_stream_status_fail')
+  return i18n.t('troubleshooting.fix_my_stream_status_warning')
+}
+
+function fixMyStreamStatusClass(status) {
+  if (status === 'pass') return 'border-green-500/20'
+  if (status === 'fail') return 'border-red-500/25'
+  return 'border-amber-300/25'
+}
+
+function fixMyStreamBadgeClass(status) {
+  if (status === 'pass') return 'border border-green-500/30 bg-green-500/10 text-green-300'
+  if (status === 'fail') return 'border border-red-500/30 bg-red-500/10 text-red-200'
+  return 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
+}
 
 const sessionSnapshotItems = computed(() => {
   if (!streamStats.value || !streamStats.value.streaming) return []
@@ -733,31 +790,34 @@ async function downloadSupportBundle() {
   downloadingSupportBundle.value = true
 
   try {
-    const [systemStats, aiStatus, aiCache, aiHistory, latestLogs] = await Promise.all([
+    const [systemStats, aiStatus, aiCache, aiHistory, latestLogs, config] = await Promise.all([
       safeFetchJson('./api/stats/system'),
       safeFetchJson('./api/ai/status'),
       safeFetchJson('./api/ai/cache'),
       safeFetchJson('./api/ai/history'),
-      safeFetchText('./api/logs')
+      safeFetchText('./api/logs'),
+      safeFetchJson('./api/config')
     ])
 
-    const bundle = {
+    const bundle = buildAnonymizedDiagnosticsBundle({
       generated_at: new Date().toISOString(),
       platform: platform.value || 'unknown',
       version: version.value || 'unknown',
       browser_user_agent: navigator.userAgent,
       stream_stats_connected: streamStatsConnected.value,
+      fix_my_stream_checklist: fixMyStreamChecklist.value,
       session_snapshot: streamStats.value,
+      config,
       system_stats: systemStats,
       ai_status: aiStatus,
       ai_cache: aiCache,
       ai_history: aiHistory,
       recent_issues: groupedRecentIssues.value,
       logs: latestLogs || logs.value
-    }
+    })
 
     const timestamp = new Date().toISOString().replace(/[:]/g, '-')
-    triggerDownload(`polaris-support-bundle-${timestamp}.json`, JSON.stringify(bundle, null, 2), 'application/json;charset=utf-8')
+    triggerDownload(`polaris-anonymized-diagnostics-${timestamp}.json`, JSON.stringify(bundle, null, 2), 'application/json;charset=utf-8')
     showToast(i18n.t('troubleshooting.download_support_bundle_success') || 'Support bundle downloaded.', 'success')
   } catch (error) {
     console.error(error)

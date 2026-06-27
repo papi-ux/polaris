@@ -160,6 +160,38 @@ const autoQualityRows = computed(() => [
     note: clientSettingsSync.value.relaunchRequired ? 'Relaunch to sync' : 'Push/pull ready',
   },
 ])
+const linuxStreamingSetupChecklist = computed(() => [
+  {
+    id: 'pairing',
+    title: 'Pair encoder and display',
+    status: config.value.adapter_name || config.value.output_name ? 'Selected' : 'Discover first',
+    copy: config.value.adapter_name || config.value.output_name
+      ? 'Polaris has a GPU adapter or output hint saved for this host.'
+      : 'Start by selecting the GPU adapter/output Polaris should capture so encoder and display discovery line up.',
+  },
+  {
+    id: 'runtime',
+    title: 'Choose the Linux runtime path',
+    status: selectedStreamDisplayMode.value.title,
+    copy: 'Headless Stream is the safe default. GPU-Native Test is for validating DMA-BUF/CUDA residency when hidden Wayland capture falls back to RAM copies.',
+  },
+  {
+    id: 'quality',
+    title: 'Decide Auto Quality',
+    status: autoQualityBadge.value,
+    copy: autoQualityEnabled.value
+      ? 'Auto Quality will handle bitrate/profile recovery for this headless path.'
+      : 'Enable Auto Quality when you want Polaris to balance bitrate, profile choice, and recovery instead of hand-tuning every stream.',
+  },
+  {
+    id: 'wayland-nvidia',
+    title: 'Check Wayland / NVIDIA copy risk',
+    status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
+    copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
+      ? 'Polaris may keep labwc windowed to avoid the SHM/RAM copy path and preserve GPU-resident capture.'
+      : 'Leave GPU-native off for normal headless streaming; turn it on only when telemetry shows the hidden path is copying through system memory.',
+  },
+])
 
 function setEnabledConfig(key, enabled) {
   config.value[key] = enabled ? 'enabled' : 'disabled'
@@ -258,6 +290,29 @@ const validateFallbackMode = (event) => {
 
           <div class="settings-warning-surface">
             {{ selectedStreamDisplayMode.restartCopy }}
+          </div>
+
+          <div class="settings-subtle-surface" data-linux-streaming-setup>
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div class="section-kicker">Linux Streaming Setup</div>
+                <h4 class="mt-2 text-sm font-semibold text-silver">Guided checklist for desktop Linux hosts</h4>
+                <div class="mt-1 text-sm leading-relaxed text-storm">
+                  Use this before the first Moonlight run: discover the display pair, pick the runtime path, decide Auto Quality, then only enable GPU-native capture when Wayland/NVIDIA telemetry shows a copy problem.
+                </div>
+              </div>
+              <span class="meta-pill shrink-0">{{ selectedStreamDisplayMode.title }}</span>
+            </div>
+
+            <div class="mt-4 grid gap-3 xl:grid-cols-2">
+              <div v-for="item in linuxStreamingSetupChecklist" :key="item.id" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-3">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="text-sm font-semibold text-silver">{{ item.title }}</div>
+                  <span class="rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ item.status }}</span>
+                </div>
+                <div class="mt-2 text-sm leading-relaxed text-storm">{{ item.copy }}</div>
+              </div>
+            </div>
           </div>
 
           <div class="settings-subtle-surface">
