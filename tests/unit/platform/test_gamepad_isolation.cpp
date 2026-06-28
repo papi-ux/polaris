@@ -262,6 +262,7 @@ TEST(GamepadIsolationTests, StrictWrapperBindsOnlyRegisteredVirtualEventJsAndHid
   EXPECT_TRUE(text_lacks(command, "/dev/input/event3"));
   EXPECT_TRUE(text_lacks(command, "/dev/input/js3"));
   EXPECT_TRUE(text_lacks(command, "/dev/hidraw3"));
+  EXPECT_TRUE(text_lacks(command, "--dev-bind-try /dev/fd /dev/fd"));
 }
 
 TEST(GamepadIsolationTests, SameVidPidHostAndVirtualAllowsOnlyRegisteredVirtualNode) {
