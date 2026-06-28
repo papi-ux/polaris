@@ -4,8 +4,12 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <src/adaptive_bitrate.h>
+#include <src/ai_optimizer.h>
 #include <src/file_handler.h>
+#include <src/nvhttp.h>
 #include <src/process.h>
+#include <src/stream_stats.h>
 
 namespace {
 #ifdef __linux__
@@ -24,6 +28,20 @@ namespace {
   };
 #endif
 
+  struct auto_quality_guard_t {
+    bool ai_enabled;
+    bool adaptive_enabled;
+
+    auto_quality_guard_t():
+        ai_enabled(ai_optimizer::is_enabled()),
+        adaptive_enabled(adaptive_bitrate::is_enabled()) {}
+
+    ~auto_quality_guard_t() {
+      ai_optimizer::set_enabled(ai_enabled);
+      adaptive_bitrate::set_enabled(adaptive_enabled);
+    }
+  };
+
   constexpr const char *expected_steam_shutdown_command() {
 #ifdef __linux__
     return "setsid -f steam -shutdown";
@@ -32,6 +50,81 @@ namespace {
 #endif
   }
 }  // namespace
+
+TEST(ProcessRuntimeConfigTests, DeviceDbBitrateStaysOutWhenAutoQualityOffAndMaxBitrateUnlocked) {
+  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
+    0,
+    std::optional<int> {},
+    false,
+    "Steam Deck OLED",
+    "Steam Big Picture"
+  );
+
+  EXPECT_FALSE(resolved.has_value());
+}
+
+TEST(ProcessRuntimeConfigTests, DeviceDbBitrateCanSeedAutoQualityWhenEnabled) {
+  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
+    0,
+    std::optional<int> {},
+    true,
+    "Steam Deck OLED",
+    "Steam Big Picture"
+  );
+
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(*resolved, 25000);
+}
+
+TEST(ProcessRuntimeConfigTests, PairedClientBitrateWinsEvenWhenAutoQualityOff) {
+  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
+    0,
+    std::optional<int> {45000},
+    false,
+    "Steam Deck OLED",
+    "Steam Big Picture"
+  );
+
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(*resolved, 45000);
+}
+
+TEST(ProcessRuntimeConfigTests, ManualMaxBitrateLocksOutDeviceDbProfile) {
+  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
+    50000,
+    std::optional<int> {},
+    true,
+    "Steam Deck OLED",
+    "Steam Big Picture"
+  );
+
+  EXPECT_FALSE(resolved.has_value());
+}
+
+TEST(ProcessRuntimeConfigTests, MissionControlPolicyDoesNotUseDeviceDbBitrateWhenAutoQualityOffAndClientBitrateUnknown) {
+  auto_quality_guard_t guard;
+  ai_optimizer::set_enabled(false);
+  adaptive_bitrate::set_enabled(false);
+
+  crypto::named_cert_t client {};
+  client.name = "Steam Deck OLED";
+  client.uuid = "issue-147-client";
+
+  stream_stats::stats_t stats {};
+  stats.width = 1280;
+  stats.height = 800;
+  stats.requested_client_fps = 90.0;
+  stats.codec = "hevc";
+
+  const auto policy = nvhttp::build_stream_policy_json_for_tests(
+    client,
+    stats,
+    nlohmann::json::object()
+  );
+
+  EXPECT_EQ(policy.value("target_bitrate_kbps", -1), 0);
+  EXPECT_EQ(policy.value("target_bitrate_source", std::string {}), "client_request");
+}
 
 TEST(ProcessRuntimeConfigTests, InitialTerminateDoesNotResetAdaptiveBitrateMax) {
 #ifdef __linux__
