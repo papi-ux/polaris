@@ -130,8 +130,15 @@ namespace cage_display_router {
   /**
    * @brief Returns whether a headless labwc runtime should try the
    *        ext-image-copy-capture DMA-BUF path before falling back to SHM.
+   *
+   * The true-headless extcopy DMA-BUF path is only enabled for encoder memory
+   * types with a known-safe import/convert path. VAAPI stacks have proven
+   * crash-prone here, so they stay on the conservative SHM path.
    */
-  bool should_attempt_headless_extcopy_dmabuf(const platf::runtime_state_t &runtime_state);
+  bool should_attempt_headless_extcopy_dmabuf(
+    const platf::runtime_state_t &runtime_state,
+    platf::mem_type_e hwdevice_type
+  );
 
   /**
    * @brief Returns the cached result of the windowed GPU-native probe for the

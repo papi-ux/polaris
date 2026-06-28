@@ -5,10 +5,13 @@
 #pragma once
 
 // standard includes
+#include <algorithm>
 #include <bitset>
+#include <cstdint>
 #include <sys/types.h>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #ifdef POLARIS_BUILD_WAYLAND
   #include <ext-image-capture-source-v1.h>
@@ -23,6 +26,45 @@ struct gbm_device;
 
 // local includes
 #include "graphics.h"
+
+namespace wl {
+  class output_registry_state_t {
+  public:
+    void add_output(std::uint32_t id) {
+      if (std::find(output_ids.begin(), output_ids.end(), id) == output_ids.end()) {
+        output_ids.emplace_back(id);
+      }
+      topology_dirty = true;
+    }
+
+    bool remove_global(std::uint32_t id) {
+      auto it = std::find(output_ids.begin(), output_ids.end(), id);
+      if (it == output_ids.end()) {
+        return false;
+      }
+
+      output_ids.erase(it);
+      topology_dirty = true;
+      return true;
+    }
+
+    bool has_output(std::uint32_t id) const {
+      return std::find(output_ids.begin(), output_ids.end(), id) != output_ids.end();
+    }
+
+    bool output_topology_dirty() const {
+      return topology_dirty;
+    }
+
+    void clear_output_topology_dirty() {
+      topology_dirty = false;
+    }
+
+  private:
+    std::vector<std::uint32_t> output_ids;
+    bool topology_dirty {false};
+  };
+}  // namespace wl
 
 /**
  * The classes defined in this macro block should only be used by
@@ -268,7 +310,7 @@ namespace wl {
 
   class monitor_t {
   public:
-    explicit monitor_t(wl_output *output);
+    explicit monitor_t(wl_output *output, std::uint32_t registry_id = 0);
 
     monitor_t(monitor_t &&) = delete;
     monitor_t(const monitor_t &) = delete;
@@ -292,6 +334,7 @@ namespace wl {
     void wl_scale(wl_output *wl_output, std::int32_t factor) {}
 
     wl_output *output;
+    std::uint32_t registry_id;
     std::string name;
     std::string description;
     platf::touch_port_t viewport;
@@ -329,6 +372,24 @@ namespace wl {
       return interface[bit];
     }
 
+    bool output_topology_dirty() const {
+      return output_registry_state.output_topology_dirty();
+    }
+
+    bool consume_output_topology_dirty() {
+      if (!output_registry_state.output_topology_dirty()) {
+        return false;
+      }
+
+      output_registry_state.clear_output_topology_dirty();
+      return true;
+    }
+
+#ifdef POLARIS_TESTS
+    void add_monitor_for_tests(std::uint32_t id);
+    void remove_global_for_tests(std::uint32_t id);
+#endif
+
     std::vector<std::unique_ptr<monitor_t>> monitors;
     zwlr_screencopy_manager_v1 *screencopy_manager {nullptr};
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
@@ -350,6 +411,7 @@ namespace wl {
     void add_interface(wl_registry *registry, std::uint32_t id, const char *interface, std::uint32_t version);
     void del_interface(wl_registry *registry, uint32_t id);
 
+    output_registry_state_t output_registry_state;
     std::bitset<MAX_INTERFACES> interface;
     wl_registry_listener listener;
     zwp_linux_dmabuf_feedback_v1 *dmabuf_feedback_object {nullptr};
@@ -400,7 +462,7 @@ struct zxdg_output_manager_v1;
 namespace wl {
   class monitor_t {
   public:
-    monitor_t(wl_output *output);
+    monitor_t(wl_output *output, std::uint32_t registry_id = 0);
 
     monitor_t(monitor_t &&) = delete;
     monitor_t(const monitor_t &) = delete;
@@ -410,6 +472,7 @@ namespace wl {
     void listen(zxdg_output_manager_v1 *output_manager);
 
     wl_output *output;
+    std::uint32_t registry_id;
     std::string name;
     std::string description;
     platf::touch_port_t viewport;
