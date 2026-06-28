@@ -490,7 +490,7 @@ std::string command_with_headless_gamepad_isolation(const std::string &command, 
     wrapped += path;
   }
 
-  static constexpr std::array<std::string_view, 12> runtime_device_roots {
+  static constexpr std::array<std::string_view, 11> runtime_device_roots {
     "/dev/dri",
     "/dev/snd",
     "/dev/kfd",
@@ -501,7 +501,6 @@ std::string command_with_headless_gamepad_isolation(const std::string &command, 
     "/dev/nvidia-modeset",
     "/dev/nvidia-caps",
     "/dev/shm",
-    "/dev/fd",
     "/dev/pts",
   };
 
