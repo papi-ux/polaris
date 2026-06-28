@@ -38,11 +38,17 @@ isolated compositor / headless capture path.)
 git clone --recursive https://github.com/papi-ux/polaris.git
 cd polaris
 cmake -B build -G Ninja \
+  -DBUILD_DOCS=OFF \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr \
   -DPOLARIS_ASSETS_DIR=/usr/share/polaris \
+  -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
   -DBOOST_USE_STATIC=OFF \
-  -DPOLARIS_ENABLE_CUDA=OFF
+  -DPOLARIS_ENABLE_WAYLAND=ON \
+  -DPOLARIS_ENABLE_X11=ON \
+  -DPOLARIS_ENABLE_DRM=ON \
+  -DPOLARIS_ENABLE_BROWSER_STREAM=ON \
+  -DPOLARIS_ENABLE_CUDA=OFF -DCUDA_FAIL_ON_MISSING=OFF
 cmake --build build --parallel "$(nproc)"
 sudo cmake --install build
 sudo polaris --setup-host
