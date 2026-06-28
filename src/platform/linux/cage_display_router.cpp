@@ -492,8 +492,15 @@ namespace cage_display_router {
     return runtime_state.gpu_native_override_active;
   }
 
-  bool should_attempt_headless_extcopy_dmabuf(const platf::runtime_state_t &runtime_state) {
-    return runtime_state.effective_headless && !runtime_state.gpu_native_override_active;
+  bool should_attempt_headless_extcopy_dmabuf(
+    const platf::runtime_state_t &runtime_state,
+    platf::mem_type_e hwdevice_type
+  ) {
+    if (!runtime_state.effective_headless || runtime_state.gpu_native_override_active) {
+      return false;
+    }
+
+    return hwdevice_type == platf::mem_type_e::cuda;
   }
 
   std::optional<bool> cached_windowed_gpu_native_probe_result() {
