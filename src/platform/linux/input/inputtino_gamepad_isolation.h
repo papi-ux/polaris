@@ -19,6 +19,7 @@ namespace platf::gamepad::isolation {
 
   struct device_snapshot_t {
     std::string event_node;
+    std::string sysfs_path;
     std::string name;
     std::optional<uint16_t> vendor_id;
     std::optional<uint16_t> product_id;
@@ -59,6 +60,7 @@ namespace platf::gamepad::isolation {
     isolation_mode_e mode = isolation_mode_e::disabled;
     std::string bubblewrap_path = "bwrap";
     std::vector<std::string> allowed_nodes;
+    std::vector<std::string> masked_sysfs_paths;
     sdl_hint_plan_t fallback_sdl;
     std::string reason;
 

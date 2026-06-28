@@ -408,4 +408,35 @@ TEST(GamepadIsolationTests, StrictWrapperHidesHostUdevAndInputSysfsMetadata) {
   EXPECT_TRUE(text_lacks(command, "--ro-bind /run/udev /run/udev"));
 }
 
+
+TEST(GamepadIsolationTests, StrictWrapperMasksHostSysfsInputDeviceRoots) {
+  auto host = gamepad("Microsoft X-Box One pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea});
+  host.event_node = "/dev/input/event4";
+  host.sysfs_path = "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/input/input41/event4";
+  auto virtual_pad = gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea});
+  virtual_pad.event_node = "/dev/input/event99";
+  virtual_pad.sysfs_path = "/sys/devices/virtual/input/input99/event99";
+
+  const auto plan = build_strict_gamepad_isolation_plan(
+    classify_devices({host, virtual_pad}),
+    {"/dev/input/event99", "/dev/input/js99"},
+    strict_options()
+  );
+  const auto command = command_with_headless_gamepad_isolation("steam", plan);
+
+  EXPECT_TRUE(text_contains(command, "--tmpfs /sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/input/input41"));
+  EXPECT_TRUE(text_lacks(command, "/sys/devices/virtual/input/input99"));
+}
+
+TEST(GamepadIsolationTests, StrictWrapperMasksHostHidBusMetadata) {
+  const auto plan = build_strict_gamepad_isolation_plan(
+    classify_devices({gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
+    {"/dev/input/event9"},
+    strict_options()
+  );
+  const auto command = command_with_headless_gamepad_isolation("steam", plan);
+
+  EXPECT_TRUE(text_contains(command, "--tmpfs /sys/bus/hid/devices"));
+}
+
 #endif

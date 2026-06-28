@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <iomanip>
+#include <limits.h>
 #include <libevdev/libevdev.h>
 #include <mutex>
 #include <set>
@@ -130,6 +131,77 @@ namespace {
     return std::vector<std::string>(unique.begin(), unique.end());
   }
 
+  bool is_safe_sysfs_path(std::string_view path) {
+    if (!starts_with(path, "/sys/devices/")) {
+      return false;
+    }
+
+    return std::all_of(path.begin(), path.end(), [](unsigned char ch) {
+      return std::isalnum(ch) != 0 ||
+             ch == 47 ||
+             ch == 45 ||
+             ch == 95 ||
+             ch == 46 ||
+             ch == 58;
+    });
+  }
+
+  std::optional<std::string> host_input_sysfs_root(std::string_view sysfs_path) {
+    if (!is_safe_sysfs_path(sysfs_path)) {
+      return std::nullopt;
+    }
+
+    constexpr std::string_view input_dir_marker = "/input/";
+    const auto input_dir_pos = sysfs_path.find(input_dir_marker);
+    if (input_dir_pos == std::string_view::npos) {
+      return std::nullopt;
+    }
+
+    const auto input_device_start = input_dir_pos + input_dir_marker.size();
+    if (!starts_with(sysfs_path.substr(input_device_start), "input")) {
+      return std::nullopt;
+    }
+
+    auto input_device_end = sysfs_path.find("/", input_device_start);
+    if (input_device_end == std::string_view::npos) {
+      input_device_end = sysfs_path.size();
+    }
+
+    const auto root = std::string(sysfs_path.substr(0, input_device_end));
+    if (root.find("/sys/devices/virtual/input/") == 0) {
+      return std::nullopt;
+    }
+    return root;
+  }
+
+  std::vector<std::string> host_input_sysfs_mask_paths(const std::vector<classified_device_t> &devices) {
+    std::set<std::string> paths;
+    for (const auto &classified : devices) {
+      if (classified.classification != device_classification_e::host_visible) {
+        continue;
+      }
+      auto root = host_input_sysfs_root(classified.device.sysfs_path);
+      if (root) {
+        paths.insert(*root);
+      }
+    }
+    return std::vector<std::string>(paths.begin(), paths.end());
+  }
+
+  std::string event_sysfs_path(std::string_view event_node) {
+    constexpr std::string_view input_prefix = "/dev/input/";
+    if (!starts_with(event_node, input_prefix)) {
+      return {};
+    }
+
+    const auto sysfs = std::string("/sys/class/input/") + std::string(event_node.substr(input_prefix.size()));
+    char resolved[PATH_MAX];
+    if (realpath(sysfs.c_str(), resolved) == nullptr) {
+      return {};
+    }
+    return std::string(resolved);
+  }
+
   std::string find_executable(std::string_view name) {
     if (name.empty()) {
       return {};
@@ -200,6 +272,7 @@ namespace {
     command += " --tmpfs /run/udev";
     command += " --tmpfs /sys/class/input";
     command += " --tmpfs /sys/class/hidraw";
+    command += " --tmpfs /sys/bus/hid/devices";
     command += " -- /usr/bin/true >/dev/null 2>&1";
     return std::system(command.c_str()) == 0;
   }
@@ -346,6 +419,7 @@ strict_gamepad_isolation_plan_t build_strict_gamepad_isolation_plan(
   plan.bubblewrap_path = options.bubblewrap_path.empty() ? "bwrap" : options.bubblewrap_path;
   plan.fallback_sdl = build_sdl_hint_plan(devices);
   plan.allowed_nodes = sanitized_virtual_nodes(registered_virtual_nodes);
+  plan.masked_sysfs_paths = host_input_sysfs_mask_paths(devices);
 
   if (!options.bubblewrap_available || !options.bubblewrap_usable) {
     const auto unavailable_reason = options.bubblewrap_available ?
@@ -409,6 +483,12 @@ std::string command_with_headless_gamepad_isolation(const std::string &command, 
   wrapped += " --tmpfs /run/udev";
   wrapped += " --tmpfs /sys/class/input";
   wrapped += " --tmpfs /sys/class/hidraw";
+  wrapped += " --tmpfs /sys/bus/hid/devices";
+
+  for (const auto &path : plan.masked_sysfs_paths) {
+    wrapped += " --tmpfs ";
+    wrapped += path;
+  }
 
   static constexpr std::array<std::string_view, 12> runtime_device_roots {
     "/dev/dri",
@@ -542,6 +622,7 @@ std::vector<device_snapshot_t> enumerate_visible_gamepads() {
 
     device_snapshot_t snapshot;
     snapshot.event_node = event_node;
+    snapshot.sysfs_path = event_sysfs_path(event_node);
     snapshot.name = safe_string(libevdev_get_name(evdev));
     snapshot.vendor_id = positive_id(libevdev_get_id_vendor(evdev));
     snapshot.product_id = positive_id(libevdev_get_id_product(evdev));
