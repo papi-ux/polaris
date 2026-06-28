@@ -179,6 +179,26 @@ namespace cage_display_router {
     return !path.empty() && access(path.c_str(), X_OK) == 0;
   }
 
+  static std::string shell_quote(std::string_view value) {
+    const auto quote = std::string(1, static_cast<char>(39));
+    const auto slash = std::string(1, static_cast<char>(92));
+    std::string result = quote;
+
+    for (char ch : value) {
+      if (ch == static_cast<char>(39)) {
+        result += quote;
+        result += slash;
+        result += quote;
+        result += quote;
+      } else {
+        result += ch;
+      }
+    }
+
+    result += quote;
+    return result;
+  }
+
   static std::string resolve_executable(const std::string &name) {
     if (name.find('/') != std::string::npos) {
       return executable_accessible(name) ? name : "";
@@ -763,9 +783,10 @@ namespace cage_display_router {
       }
 
       // labwc -C: config dir for rc.xml, -s: startup command (game)
+      const auto startup_shell = std::string("bash -c " ) + shell_quote(startup_cmd);
       execl(labwc_path.c_str(), "labwc",
         "-C", config_dir.c_str(),
-        "-s", ("bash -c '" + startup_cmd + "'").c_str(),
+        "-s", startup_shell.c_str(),
         nullptr);
       _exit(errno == ENOENT ? 127 : 126);
     } else if (pid > 0) {
