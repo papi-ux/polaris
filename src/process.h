@@ -59,6 +59,16 @@ namespace proc {
   bool is_valid_steam_launch_mode(std::string_view mode);
   bool steam_launch_mode_is_big_picture(std::string_view mode);
 
+#if defined(POLARIS_TESTS)
+  std::optional<int> resolve_device_db_launch_bitrate_for_tests(
+    int configured_max_bitrate,
+    const std::optional<int> &paired_target_bitrate_kbps,
+    bool ai_auto_quality_enabled,
+    const std::string &device_name,
+    const std::string &app_name
+  );
+#endif
+
 #if defined(POLARIS_TESTS) && defined(__linux__)
   bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
                                                    bool use_cage_compositor,

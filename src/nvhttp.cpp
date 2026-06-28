@@ -820,7 +820,9 @@ namespace nvhttp {
         {"live", true},
         {"requires_relaunch", false},
         {"adaptive_target_bitrate_kbps", stats.adaptive_target_bitrate_kbps},
-        {"paired_override_active", paired_bitrate_override}
+        {"paired_override_active", paired_bitrate_override},
+        {"source", policy.value("target_bitrate_source", std::string {"client_request"})},
+        {"source_label", policy.value("target_bitrate_source_label", std::string {"Client request"})}
       };
       fields["ai_auto_quality_enabled"] = {
         {"direction", "read_write"},
@@ -1246,6 +1248,15 @@ namespace nvhttp {
       if (normalized == "paired_client") {
         return "Paired client override";
       }
+      if (normalized == "client_request") {
+        return "Client request";
+      }
+      if (normalized == "manual_config") {
+        return "Manual max bitrate";
+      }
+      if (normalized == "adaptive_bitrate") {
+        return "Adaptive bitrate";
+      }
       if (normalized.find("ai_live") != std::string::npos) {
         return "Live AI recommendation";
       }
@@ -1329,14 +1340,28 @@ namespace nvhttp {
       const auto capture_reason = stream_stats::capture_path_reason(stats);
       const bool capture_cpu_copy = stream_stats::capture_path_uses_cpu_copy(stats);
       const bool capture_gpu_native = stream_stats::capture_path_is_gpu_native(stats);
-      const int target_bitrate_kbps =
-        stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps :
-        stats.bitrate_kbps > 0 ? stats.bitrate_kbps :
-        paired_bitrate_override ? client.target_bitrate_kbps :
-        device_profile ? device_profile->ideal_bitrate_kbps : 0;
+      const bool auto_quality_enabled = ai_auto_quality_enabled();
+      int target_bitrate_kbps = 0;
+      std::string target_bitrate_source = "client_request";
+      if (stats.adaptive_target_bitrate_kbps > 0) {
+        target_bitrate_kbps = stats.adaptive_target_bitrate_kbps;
+        target_bitrate_source = "adaptive_bitrate";
+      } else if (stats.bitrate_kbps > 0) {
+        target_bitrate_kbps = stats.bitrate_kbps;
+        target_bitrate_source = "client_request";
+      } else if (paired_bitrate_override) {
+        target_bitrate_kbps = client.target_bitrate_kbps;
+        target_bitrate_source = "paired_client";
+      } else if (config::video.max_bitrate > 0) {
+        target_bitrate_kbps = config::video.max_bitrate;
+        target_bitrate_source = "manual_config";
+      } else if (auto_quality_enabled && device_profile && device_profile->ideal_bitrate_kbps > 0) {
+        target_bitrate_kbps = device_profile->ideal_bitrate_kbps;
+        target_bitrate_source = "device_db";
+      }
       const std::string source = (paired_display_override || paired_bitrate_override) ? "paired_client" :
         (!stats.optimization_source.empty() ? stats.optimization_source :
-          (device_profile ? "device_db" : "default"));
+          (target_bitrate_source == "device_db" || (auto_quality_enabled && device_profile) ? "device_db" : "default"));
 
       nlohmann::json warnings = nlohmann::json::array();
       if (paired_display_override) {
@@ -1409,6 +1434,8 @@ namespace nvhttp {
       policy["paired_target_bitrate_locked"] = paired_bitrate_override;
       policy["target_fps"] = policy_fps;
       policy["target_bitrate_kbps"] = target_bitrate_kbps;
+      policy["target_bitrate_source"] = target_bitrate_source;
+      policy["target_bitrate_source_label"] = stream_policy_source_label(target_bitrate_source);
       policy["preferred_codec"] = stats.codec;
       policy["hdr_requested"] = stats.dynamic_range > 0;
       policy["hdr_active"] = stats.stream_hdr_enabled;
@@ -1477,6 +1504,8 @@ namespace nvhttp {
       effective["stream_display_mode_reason"] = stream_display_mode_reason_for_selection(effective_mode);
       effective["display_mode"] = policy.value("selected_display_mode", std::string {});
       effective["target_bitrate_kbps"] = policy.value("target_bitrate_kbps", 0);
+      effective["target_bitrate_source"] = policy.value("target_bitrate_source", std::string {"client_request"});
+      effective["target_bitrate_source_label"] = policy.value("target_bitrate_source_label", std::string {"Client request"});
       effective["ai_auto_quality_enabled"] = ai_auto_quality_enabled();
       effective["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
       effective["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
@@ -2001,6 +2030,12 @@ namespace nvhttp {
       paired_bitrate_kbps,
       applied_history_safe
     );
+  }
+
+  nlohmann::json build_stream_policy_json_for_tests(const crypto::named_cert_t &client,
+                                                    const stream_stats::stats_t &stats,
+                                                    const nlohmann::json &health) {
+    return build_stream_policy_json(client, stats, health);
   }
 #endif
 

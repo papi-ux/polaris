@@ -25,6 +25,12 @@
 
 using namespace std::chrono_literals;
 
+#ifdef POLARIS_TESTS
+namespace stream_stats {
+  struct stats_t;
+}
+#endif
+
 /**
  * @brief Contains all the functions and variables related to the nvhttp (GameStream) server.
  */
@@ -314,6 +320,9 @@ namespace nvhttp {
   );
 
 #ifdef POLARIS_TESTS
+  nlohmann::json build_stream_policy_json_for_tests(const crypto::named_cert_t &client,
+                                                    const stream_stats::stats_t &stats,
+                                                    const nlohmann::json &health);
   void reset_pairing_state_for_tests();
 #endif
 }  // namespace nvhttp

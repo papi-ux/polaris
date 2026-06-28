@@ -1397,6 +1397,12 @@ namespace proc {
       resolved.normalization_reason += reason;
     }
 
+    bool launch_bitrate_is_locked(int configured_max_bitrate,
+                                   bool has_paired_target_bitrate,
+                                   bool ai_auto_quality_enabled) {
+      return configured_max_bitrate > 0 || has_paired_target_bitrate || !ai_auto_quality_enabled;
+    }
+
     void apply_optimization_layer(resolved_session_optimization_t &resolved,
                                   const optimization_locks_t &locks,
                                   const device_db::optimization_t &optimization,
@@ -1664,6 +1670,31 @@ namespace proc {
 #if defined(POLARIS_TESTS)
   bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state) {
     return should_publish_stream_ended_after_terminate(had_running_app, active_sessions, session_state);
+  }
+
+  std::optional<int> resolve_device_db_launch_bitrate_for_tests(
+      int configured_max_bitrate,
+      const std::optional<int> &paired_target_bitrate_kbps,
+      bool ai_auto_quality_enabled,
+      const std::string &device_name,
+      const std::string &app_name) {
+    optimization_locks_t locks;
+    locks.bitrate = launch_bitrate_is_locked(
+      configured_max_bitrate,
+      paired_target_bitrate_kbps.has_value(),
+      ai_auto_quality_enabled
+    );
+
+    resolved_session_optimization_t resolved;
+    if (paired_target_bitrate_kbps.has_value()) {
+      resolved.target_bitrate_kbps = *paired_target_bitrate_kbps;
+      resolved.bitrate_source = "paired_client";
+      note_layer(resolved, "paired_client");
+    }
+
+    const auto device_optimization = device_db::get_optimization(device_name, app_name);
+    apply_optimization_layer(resolved, locks, device_optimization, "device_db");
+    return resolved.target_bitrate_kbps;
   }
 #endif
 
@@ -1954,7 +1985,16 @@ namespace proc {
     optimization_locks_t optimization_locks;
     optimization_locks.display_mode = launch_session->user_locked_display_mode || !launch_session->enable_sops;
     optimization_locks.virtual_display = launch_session->user_locked_virtual_display;
-    optimization_locks.bitrate = config::video.max_bitrate > 0 || launch_session->paired_target_bitrate_kbps.has_value();
+    const bool auto_quality_enabled = ai_optimizer::is_enabled();
+    optimization_locks.bitrate = launch_bitrate_is_locked(
+      config::video.max_bitrate,
+      launch_session->paired_target_bitrate_kbps.has_value(),
+      auto_quality_enabled
+    );
+    if (!auto_quality_enabled && config::video.max_bitrate <= 0 &&
+        !launch_session->paired_target_bitrate_kbps.has_value()) {
+      BOOST_LOG(debug) << "session_optimization: AI Auto Quality disabled with max_bitrate=0; leaving bitrate to the client request"sv;
+    }
 
     resolved_session_optimization_t resolved_optimization;
     if (launch_session->paired_target_bitrate_kbps.has_value()) {
@@ -1999,7 +2039,7 @@ namespace proc {
     std::optional<ai_optimizer::session_history_t> history;
 
     // AI optimizer: cached results override device DB; unknown devices get a sync request.
-    if (ai_optimizer::is_enabled()) {
+    if (auto_quality_enabled) {
       std::string gpu_info = config::video.adapter_name.empty()
         ? "NVIDIA GPU (NVENC)"s
         : config::video.adapter_name;
