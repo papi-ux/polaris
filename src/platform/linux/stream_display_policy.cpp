@@ -62,12 +62,12 @@ namespace stream_display_policy {
       input.runtime_gpu_native_override_active;
 
     if (gpu_native_test) {
-      result.mode = mode_e::GPU_NATIVE_TEST;
+      result.mode = mode_e::GPU_NATIVE_STREAM;
       result.selection = "windowed_stream";
-      result.label = "GPU-Native Test";
+      result.label = "GPU-Native Stream";
       result.reason = input.runtime_gpu_native_override_active ?
         "Polaris is running the private compositor windowed so capture can stay GPU-native." :
-        "Polaris may override hidden headless at runtime if that is required for DMA-BUF/CUDA capture.";
+        "Polaris can force a windowed private compositor when hidden headless capture cannot stay GPU-native.";
       result.effective_headless = !input.runtime_gpu_native_override_active;
       return result;
     }
@@ -75,7 +75,7 @@ namespace stream_display_policy {
     result.mode = mode_e::HEADLESS;
     result.selection = "headless_stream";
     result.label = "Headless Stream";
-    result.reason = "Polaris will stream from the private headless compositor runtime.";
+    result.reason = "Polaris streams from a private headless compositor and uses DMA-BUF/CUDA GPU-native capture when the host supports it.";
     result.effective_headless = true;
     return result;
   }

@@ -18,6 +18,32 @@ endif()
 
 # cuda
 set(CUDA_FOUND OFF)
+set(POLARIS_CUDA_DISABLED_ON_NVIDIA_DETECTED OFF)
+if(NOT POLARIS_ENABLE_CUDA AND NOT POLARIS_ALLOW_CUDA_DISABLED_ON_NVIDIA)
+    find_program(POLARIS_DISABLED_CUDA_NVCC
+            NAMES nvcc
+            HINTS
+                /usr/local/cuda/bin
+                /usr/local/cuda-13.2/bin
+                /usr/local/cuda-13.1/bin
+                /usr/local/cuda-13.0/bin
+                /usr/local/cuda-12.9/bin
+                /usr/local/cuda-12.8/bin
+                /usr/local/cuda-12.6/bin
+                /usr/local/cuda-12.5/bin
+                /usr/local/cuda-12.4/bin)
+    find_program(POLARIS_DISABLED_CUDA_NVIDIA_SMI NAMES nvidia-smi)
+
+    if(POLARIS_DISABLED_CUDA_NVCC AND POLARIS_DISABLED_CUDA_NVIDIA_SMI)
+        set(POLARIS_CUDA_DISABLED_ON_NVIDIA_DETECTED ON)
+        message(FATAL_ERROR
+                "POLARIS_ENABLE_CUDA=OFF was requested, but this build host has both nvcc and nvidia-smi. "
+                "CUDA-capable NVIDIA hosts should build Polaris with CUDA support so GPU-native/NVENC streaming remains available. "
+                "If this CPU-only build is intentional, reconfigure with -DPOLARIS_ALLOW_CUDA_DISABLED_ON_NVIDIA=ON."
+        )
+    endif()
+endif()
+
 if(${POLARIS_ENABLE_CUDA})
     include(CheckLanguage)
     check_language(CUDA)
@@ -27,43 +53,50 @@ if(${POLARIS_ENABLE_CUDA})
         enable_language(CUDA)
 
         message(STATUS "CUDA Compiler Version: ${CMAKE_CUDA_COMPILER_VERSION}")
-        set(CMAKE_CUDA_ARCHITECTURES "")
 
-        # https://docs.nvidia.com/cuda/archive/12.0.0/cuda-compiler-driver-nvcc/index.html
-        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
-            list(APPEND CMAKE_CUDA_ARCHITECTURES 75 80 86 87 89 90)
+        if(POLARIS_CUDA_ARCHITECTURES)
+            set(CMAKE_CUDA_ARCHITECTURES "${POLARIS_CUDA_ARCHITECTURES}")
+            message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES} (POLARIS_CUDA_ARCHITECTURES override)")
         else()
-            message(FATAL_ERROR
-                    "Polaris requires a minimum CUDA Compiler version of 12.0.
-                    Found version: ${CMAKE_CUDA_COMPILER_VERSION}"
-            )
-        endif()
+            set(CMAKE_CUDA_ARCHITECTURES "")
 
-        # https://docs.nvidia.com/cuda/archive/12.8.0/cuda-compiler-driver-nvcc/index.html
-        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
-            list(APPEND CMAKE_CUDA_ARCHITECTURES 100 101 120)
-        endif()
+            # https://docs.nvidia.com/cuda/archive/12.0.0/cuda-compiler-driver-nvcc/index.html
+            if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 75 80 86 87 89 90)
+            else()
+                message(FATAL_ERROR
+                        "Polaris requires a minimum CUDA Compiler version of 12.0.
+                        Found version: ${CMAKE_CUDA_COMPILER_VERSION}"
+                )
+            endif()
 
-        # https://docs.nvidia.com/cuda/archive/12.9.0/cuda-compiler-driver-nvcc/index.html
-        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
-            list(APPEND CMAKE_CUDA_ARCHITECTURES 103 121)
-        endif()
+            # https://docs.nvidia.com/cuda/archive/12.8.0/cuda-compiler-driver-nvcc/index.html
+            if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 100 101 120)
+            endif()
 
-        # https://docs.nvidia.com/cuda/archive/13.2.0/cuda-compiler-driver-nvcc/index.html
-        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.2)
-            list(APPEND CMAKE_CUDA_ARCHITECTURES 88)
-        endif()
+            # https://docs.nvidia.com/cuda/archive/12.9.0/cuda-compiler-driver-nvcc/index.html
+            if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 103 121)
+            endif()
 
-        # https://docs.nvidia.com/cuda/archive/13.0.0/cuda-compiler-driver-nvcc/index.html
-        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
-            list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES 101)
-            list(APPEND CMAKE_CUDA_ARCHITECTURES 110)
-        else()
-            list(APPEND CMAKE_CUDA_ARCHITECTURES 50 52 53 60 61 62 70 72)
-        endif()
+            # https://docs.nvidia.com/cuda/archive/13.2.0/cuda-compiler-driver-nvcc/index.html
+            if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.2)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 88)
+            endif()
 
-        # sort the architectures
-        list(SORT CMAKE_CUDA_ARCHITECTURES COMPARE NATURAL)
+            # https://docs.nvidia.com/cuda/archive/13.0.0/cuda-compiler-driver-nvcc/index.html
+            if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+                list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES 101)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 110)
+            else()
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 50 52 53 60 61 62 70 72)
+            endif()
+
+            # sort the architectures
+            list(SORT CMAKE_CUDA_ARCHITECTURES COMPARE NATURAL)
+            message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+        endif()
 
         # Enable fast math for CUDA kernels (safe for game streaming workloads)
         if(CMAKE_BUILD_TYPE STREQUAL "Release")

@@ -700,7 +700,7 @@ namespace wl {
         return -1;
       }
 
-      BOOST_LOG(info) << "wlr: Attempting experimental headless DMA-BUF capture via ext-image-copy-capture"sv;
+      BOOST_LOG(info) << "wlr: Attempting headless GPU-native DMA-BUF capture via ext-image-copy-capture"sv;
       blend_cursor = false;
       if (extcopy.init(display, interface.copy_capture_manager, interface.output_capture_source_manager, interface.dmabuf_interface, output, blend_cursor)) {
         BOOST_LOG(info) << "wlr: ext-image-copy-capture DMA-BUF initialization failed on this headless runtime"sv;

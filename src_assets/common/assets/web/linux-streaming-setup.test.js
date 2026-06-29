@@ -61,7 +61,7 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Decide Auto Quality')
     expect(checklist.text()).toContain('Manual')
     expect(checklist.text()).toContain('Check Wayland / NVIDIA copy risk')
-    expect(checklist.text()).toContain('Safe default')
+    expect(checklist.text()).toContain('GPU-native auto')
   })
 
   it('reflects selected display pairing and GPU-native copy intent', () => {
@@ -75,7 +75,7 @@ describe('Linux Streaming Setup checklist', () => {
     const text = wrapper.find('[data-linux-streaming-setup]').text()
 
     expect(text).toContain('Selected')
-    expect(text).toContain('GPU-native requested')
+    expect(text).toContain('GPU-native fallback forced')
     expect(text).toContain('Enabled')
     expect(text).toContain('avoid the SHM/RAM copy path')
   })

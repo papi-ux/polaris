@@ -31,6 +31,8 @@ else()
 endif()
 
 option(CUDA_FAIL_ON_MISSING "Fail the build if CUDA is not found." ON)
+option(POLARIS_ALLOW_CUDA_DISABLED_ON_NVIDIA "Allow POLARIS_ENABLE_CUDA=OFF even when NVIDIA CUDA tooling is detected on the build host. Use only for intentional CPU-only/package builds." OFF)
+set(POLARIS_CUDA_ARCHITECTURES "" CACHE STRING "Override CUDA architectures for Polaris CUDA builds (for example 89 for RTX 4090/Ada). Empty uses the project default multi-architecture set.")
 option(CUDA_INHERIT_COMPILE_OPTIONS
         "When building CUDA code, inherit compile options from the the main project. You may want to disable this if
         your IDE throws errors about unknown flags after running cmake." ON)

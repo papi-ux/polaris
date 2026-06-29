@@ -25,6 +25,15 @@ describe('client settings sync helpers', () => {
     })).toBe('windowed_stream')
   })
 
+  it('labels GPU-native as a primary stream mode', () => {
+    const sync = resolveClientSettingsSync({
+      client_settings_available: true,
+      client_settings_stream_display_mode: 'windowed_stream',
+    })
+
+    expect(sync.desiredModeLabel).toBe('GPU-Native Stream')
+  })
+
   it('reports unavailable hosts clearly', () => {
     const sync = resolveClientSettingsSync({})
 
