@@ -693,14 +693,14 @@ namespace nvhttp {
         return "Host Virtual Display";
       }
       if (selection == "windowed_stream") {
-        return "GPU-Native Test";
+        return "GPU-Native Stream";
       }
       return "Desktop Display";
     }
 
     std::string stream_display_mode_reason_for_selection(const std::string &selection) {
       if (selection == "headless_stream") {
-        return "Polaris will stream from the private headless compositor runtime.";
+        return "Polaris streams from a private headless compositor and uses DMA-BUF/CUDA GPU-native capture when the host supports it.";
       }
       if (selection == "host_virtual_display") {
         return host_virtual_display_available() ?
@@ -708,7 +708,7 @@ namespace nvhttp {
           "Polaris requested a host virtual display, but no backend is currently available.";
       }
       if (selection == "windowed_stream") {
-        return "Polaris may run the private compositor windowed when that is needed to keep capture GPU-native.";
+        return "Polaris can force a windowed private compositor when hidden headless capture cannot stay GPU-native.";
       }
       return "Polaris will stream from the current desktop session.";
     }

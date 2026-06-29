@@ -2595,7 +2595,7 @@ namespace confighttp {
         return "Host Virtual Display"s;
       }
       if (selection == "windowed_stream") {
-        return "GPU-Native Test"s;
+        return "GPU-Native Stream"s;
       }
       return "Desktop Display"s;
     };
