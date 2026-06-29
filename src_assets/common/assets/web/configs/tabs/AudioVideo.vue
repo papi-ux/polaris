@@ -36,8 +36,8 @@ const streamDisplayModes = [
     id: 'headless_stream',
     title: 'Headless Stream',
     badge: 'Recommended',
-    copy: 'Recommended. Starts apps inside a private hidden compositor. It does not mirror your current desktop.',
-    note: 'Best isolation path. On some wlroots headless outputs this can fall back to SHM/RAM capture instead of DMA-BUF.',
+    copy: 'Recommended. Starts apps inside a private hidden compositor. On capable NVIDIA/Wayland hosts this is the default GPU-native DMA-BUF/CUDA path and does not mirror your desktop.',
+    note: 'Best isolation path. If a host cannot provide DMA-BUF, Polaris reports the SHM/RAM fallback instead of pretending.',
     restartCopy: 'Requires restart. Polaris will stream an isolated hidden runtime, not the existing KDE or GNOME session.',
   },
   {
@@ -58,11 +58,11 @@ const streamDisplayModes = [
   },
   {
     id: 'windowed_stream',
-    title: 'GPU-Native Test',
-    badge: 'Experimental',
-    copy: 'Requests a private stream runtime and allows Polaris to run it windowed when that is needed to preserve DMA-BUF/CUDA capture.',
-    note: 'This is the fast-path validation mode. It can look less "headless" on purpose so capture stays GPU-resident.',
-    restartCopy: 'Requires restart. GPU-Native Test may override hidden headless into a windowed labwc runtime to avoid the SHM/RAM copy path.',
+    title: 'GPU-Native Stream',
+    badge: 'Performance',
+    copy: 'Forces the GPU-native fallback path: private stream runtime with windowed labwc allowed when hidden headless cannot stay on DMA-BUF/CUDA.',
+    note: 'Use when diagnostics say hidden headless fell back to SHM/RAM; capable hosts may not need it because Headless Stream can already be GPU-native.',
+    restartCopy: 'Requires restart. GPU-Native Stream can force a windowed labwc runtime to avoid the SHM/RAM copy path when hidden headless cannot stay GPU-resident.',
   },
 ]
 
@@ -173,7 +173,7 @@ const linuxStreamingSetupChecklist = computed(() => [
     id: 'runtime',
     title: 'Choose the Linux runtime path',
     status: selectedStreamDisplayMode.value.title,
-    copy: 'Headless Stream is the safe default. GPU-Native Test is for validating DMA-BUF/CUDA residency when hidden Wayland capture falls back to RAM copies.',
+    copy: 'Headless Stream is the isolated compatibility path. GPU-Native Stream is the primary performance path for capable DMA-BUF/CUDA/NVENC hosts.',
   },
   {
     id: 'quality',
@@ -186,10 +186,10 @@ const linuxStreamingSetupChecklist = computed(() => [
   {
     id: 'wayland-nvidia',
     title: 'Check Wayland / NVIDIA copy risk',
-    status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
+    status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native fallback forced' : 'GPU-native auto',
     copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
-      ? 'Polaris may keep labwc windowed to avoid the SHM/RAM copy path and preserve GPU-resident capture.'
-      : 'Leave GPU-native off for normal headless streaming; turn it on only when telemetry shows the hidden path is copying through system memory.',
+      ? 'Polaris may force labwc windowed to avoid the SHM/RAM copy path and preserve GPU-resident capture.'
+      : 'Headless Stream will use DMA-BUF/CUDA automatically on capable hosts; force GPU-Native Stream only when diagnostics report SHM/RAM fallback.',
   },
 ])
 
@@ -339,7 +339,7 @@ const validateFallbackMode = (event) => {
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Test favors DMA-BUF and CUDA/NVENC residency, even if that means a visible labwc window.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Stream favors DMA-BUF and CUDA/NVENC residency, even if that means a visible labwc window.</div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>
@@ -392,10 +392,10 @@ const validateFallbackMode = (event) => {
 
               <div class="surface-muted p-4">
                 <div class="text-sm font-medium text-silver">GPU-native capture preference</div>
-                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by GPU-Native Test. When active, Polaris may run labwc windowed instead of truly hidden so capture can stay on the GPU.</div>
+                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by GPU-Native Stream. When active, Polaris may force labwc windowed instead of hidden headless so capture can stay on the GPU if hidden headless falls back.</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_prefer_gpu_native_capture</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Experimental</span>
+                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Performance</span>
                   <input
                     type="checkbox"
                     class="sr-only peer"

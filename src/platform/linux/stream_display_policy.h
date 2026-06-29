@@ -12,7 +12,7 @@ namespace stream_display_policy {
     DESKTOP,
     HEADLESS,
     HOST_VIRTUAL_DISPLAY,
-    GPU_NATIVE_TEST,
+    GPU_NATIVE_STREAM,
   };
 
   struct input_t {
