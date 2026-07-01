@@ -54,6 +54,8 @@ namespace rtsp_stream {
     bool enable_hdr;
     bool enable_sops;
     bool virtual_display;
+    bool mirror_desktop = false;
+    bool force_private_after_desktop_steam_shutdown = false;
     bool user_locked_display_mode;
     bool user_locked_virtual_display;
     uint32_t scale_factor;

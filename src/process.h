@@ -69,7 +69,48 @@ namespace proc {
   );
 #endif
 
+#if defined(__linux__)
+  struct desktop_launch_safety_policy_t {
+    bool desktopSteamActive = false;
+    bool physicalDisplayRisk = false;
+    bool canLaunchPrivateStream = true;
+    bool canMirrorDesktop = false;
+    bool canForceCloseDesktopSteamForPrivateStream = false;
+    std::string recommendedAction;
+    std::string privateStreamUnavailableReason;
+    std::string forcePrivateStreamLabel;
+  };
+
+  desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy(
+    bool private_stream_requested,
+    bool mirror_desktop_explicit,
+    bool force_private_after_desktop_steam_shutdown,
+    const struct ctx_t &app,
+    bool desktop_steam_active,
+    bool active_desktop_game
+  );
+
+  nlohmann::json desktop_launch_safety_policy_to_json(const desktop_launch_safety_policy_t &policy);
+  bool desktop_steam_client_active();
+  bool request_desktop_steam_shutdown_for_private_stream();
+#endif
+
 #if defined(POLARIS_TESTS) && defined(__linux__)
+
+  desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_for_tests(
+    bool private_stream_requested,
+    bool mirror_desktop_explicit,
+    bool app_uses_steam,
+    bool desktop_steam_active,
+    bool active_desktop_game,
+    bool force_private_after_desktop_steam_shutdown = false
+  );
+
+  bool desktop_steam_client_process_for_tests(std::string_view comm,
+                                               std::string_view argv0_path,
+                                               std::string_view cmdline,
+                                               std::string_view status = {});
+
   bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
                                                    bool use_cage_compositor,
                                                    bool requested_headless);

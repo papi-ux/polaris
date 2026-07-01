@@ -976,6 +976,13 @@ namespace confighttp {
     response->write(code, tree.dump(), headers);
   }
 
+  void conflict_response(resp_https_t response, const nlohmann::json &tree) {
+    constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::client_error_conflict;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(code, tree.dump(), headers);
+  }
+
 
   /**
    * @brief Validate the request content type and send bad request when mismatch.
@@ -3487,6 +3494,31 @@ namespace confighttp {
         return;
       }
       std::string uuid = input_tree["uuid"].get<std::string>();
+      auto launch_args = request->parse_query_string();
+      const auto launch_mode = boost::to_lower_copy(input_tree.value("launchMode", std::string {}));
+      bool mirror_desktop_explicit = input_tree.value("mirrorDesktop", false) ||
+                                     input_tree.value("mirror_desktop", false) ||
+                                     launch_mode == "mirror_desktop" ||
+                                     launch_mode == "mirrordesktop";
+      const bool force_private_after_desktop_steam_shutdown =
+        input_tree.value("closeDesktopSteamForPrivate", false) ||
+        input_tree.value("forcePrivateAfterSteamClose", false) ||
+        launch_mode == "force_private_stream" ||
+        launch_mode == "forceprivate";
+      if (mirror_desktop_explicit || force_private_after_desktop_steam_shutdown) {
+        launch_args.erase("mirrorDesktop");
+        launch_args.erase("mirror_desktop");
+        launch_args.erase("closeDesktopSteamForPrivate");
+        launch_args.erase("forcePrivateAfterSteamClose");
+        launch_args.erase("launchMode");
+      }
+      if (mirror_desktop_explicit) {
+        launch_args.emplace("mirrorDesktop", "1");
+        launch_args.emplace("launchMode", "mirror_desktop");
+      } else if (force_private_after_desktop_steam_shutdown) {
+        launch_args.emplace("closeDesktopSteamForPrivate", "1");
+        launch_args.emplace("launchMode", "force_private_stream");
+      }
 
       nlohmann::json output_tree;
       const auto &apps = proc::proc.get_apps();
@@ -3498,14 +3530,51 @@ namespace confighttp {
             .perm = crypto::PERM::_all,
           };
           BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
-          auto launch_session = nvhttp::make_launch_session(true, false, request->parse_query_string(), &named_cert);
+#ifdef __linux__
+          const bool private_stream_requested =
+            config::video.linux_display.headless_mode &&
+            config::video.linux_display.use_cage_compositor;
+          const int running_app = proc::proc.running();
+          const auto launch_policy = proc::resolve_desktop_launch_safety_policy(
+            private_stream_requested,
+            mirror_desktop_explicit,
+            force_private_after_desktop_steam_shutdown,
+            app,
+            proc::desktop_steam_client_active(),
+            running_app > 0 && running_app != proc::input_only_app_id
+          );
+          const auto launch_policy_json = proc::desktop_launch_safety_policy_to_json(launch_policy);
+          if (launch_policy.recommendedAction == "refuse_private_stream") {
+            nlohmann::json error_tree;
+            error_tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_conflict);
+            error_tree["status"] = false;
+            error_tree["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.";
+            error_tree["error_code"] = "desktop_active_private_stream_refused";
+            error_tree["launchPolicy"] = launch_policy_json;
+            conflict_response(response, error_tree);
+            return;
+          }
+#endif
+          auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);
           auto err = proc::proc.execute(app, launch_session);
           if (err) {
-            bad_request(response, request, err == 503 ?
-                        "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
-                        "Failed to start the specified application");
+            nlohmann::json error_tree;
+            error_tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_bad_request);
+            error_tree["status"] = false;
+            error_tree["error"] = err == 503 ?
+              "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
+              "Failed to start the specified application";
+#ifdef __linux__
+            error_tree["launchPolicy"] = launch_policy_json;
+#endif
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            append_json_security_headers(headers);
+            response->write(SimpleWeb::StatusCode::client_error_bad_request, error_tree.dump(), headers);
           } else {
             output_tree["status"] = true;
+#ifdef __linux__
+            output_tree["launchPolicy"] = launch_policy_json;
+#endif
             send_response(response, output_tree);
           }
           return;

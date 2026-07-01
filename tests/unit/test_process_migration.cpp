@@ -179,6 +179,199 @@ TEST(ProcessRuntimeConfigTests, HeadlessCageSteamBigPictureSkipsHostShutdownUndo
   EXPECT_TRUE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, true));
   EXPECT_FALSE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, false));
 }
+
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorRecognizesSteamWebHelper) {
+  EXPECT_TRUE(proc::desktop_steam_client_process_for_tests(
+    "steamwebhelper",
+    "/opt/steam-test/Steam/ubuntu12_64/steamwebhelper",
+    std::string("/opt/steam-test/Steam/ubuntu12_64/steamwebhelper") + char(0) + "-type=zygote"
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresTransientShutdownClient) {
+  EXPECT_FALSE(proc::desktop_steam_client_process_for_tests(
+    "steam",
+    "/usr/bin/steam",
+    std::string("steam") + char(0) + "-shutdown"
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresZombieShutdownRemnant) {
+  EXPECT_FALSE(proc::desktop_steam_client_process_for_tests(
+    "steam",
+    "",
+    "",
+    "Name:\tsteam\nState:\tZ (zombie)\nPPid:\t275560\n"
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamActiveOffersExplicitForcePrivateShutdown) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    false,
+    true,
+    true,
+    true,
+    false
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_TRUE(policy.canForceCloseDesktopSteamForPrivateStream);
+  EXPECT_EQ(policy.recommendedAction, "refuse_private_stream");
+}
+
+TEST(ProcessRuntimeConfigTests, ExplicitForcePrivateAfterDesktopSteamShutdownAllowsPrivateLaunch) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    false,
+    true,
+    true,
+    false,
+    true
+  );
+
+  EXPECT_TRUE(policy.canLaunchPrivateStream);
+  EXPECT_EQ(policy.recommendedAction, "force_private_stream_after_desktop_steam_shutdown");
+}
+
+TEST(ProcessRuntimeConfigTests, ForcePrivateFlagWithoutPrivateStreamDoesNotEscalatePolicy) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    false,
+    false,
+    true,
+    true,
+    false,
+    true
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_EQ(policy.recommendedAction, "launch_desktop_stream");
+}
+
+TEST(ProcessRuntimeConfigTests, ExplicitMirrorBeatsContradictoryForcePrivateFlag) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    true,
+    true,
+    true,
+    false,
+    true
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_EQ(policy.recommendedAction, "mirror_desktop");
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamActiveRefusesUnsafePrivateSteamLaunch) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    false,
+    true,
+    true,
+    false
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_TRUE(policy.physicalDisplayRisk);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_TRUE(policy.canMirrorDesktop);
+  EXPECT_EQ(policy.recommendedAction, "refuse_private_stream");
+
+  const auto contract = proc::desktop_launch_safety_policy_to_json(policy);
+  EXPECT_TRUE(contract.at("desktopSteamActive"));
+  EXPECT_TRUE(contract.at("physicalDisplayRisk"));
+  EXPECT_FALSE(contract.at("canLaunchPrivateStream"));
+  EXPECT_TRUE(contract.at("canMirrorDesktop"));
+  EXPECT_EQ(contract.at("recommendedAction"), "refuse_private_stream");
+}
+
+TEST(ProcessRuntimeConfigTests, ActiveDesktopGameRefusesUnsafePrivateLaunch) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    false,
+    false,
+    false,
+    true
+  );
+
+  EXPECT_FALSE(policy.desktopSteamActive);
+  EXPECT_TRUE(policy.physicalDisplayRisk);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_TRUE(policy.canMirrorDesktop);
+  EXPECT_EQ(policy.recommendedAction, "refuse_private_stream");
+}
+
+TEST(ProcessRuntimeConfigTests, ExplicitMirrorDesktopReportsPhysicalDisplayRisk) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    true,
+    true,
+    true,
+    false
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_TRUE(policy.physicalDisplayRisk);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_TRUE(policy.canMirrorDesktop);
+  EXPECT_EQ(policy.recommendedAction, "mirror_desktop");
+}
+
+TEST(ProcessRuntimeConfigTests, NvHttpStreamingLaunchPolicyRefusesUnsafePrivateSteamLaunch) {
+  nvhttp::args_t args;
+
+  const auto policy = nvhttp::resolve_streaming_launch_safety_policy_for_tests(
+    args,
+    true,
+    true,
+    true,
+    false
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_TRUE(policy.physicalDisplayRisk);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_TRUE(policy.canMirrorDesktop);
+  EXPECT_EQ(policy.recommendedAction, "refuse_private_stream");
+}
+
+TEST(ProcessRuntimeConfigTests, NvHttpStreamingLaunchPolicyAcceptsExplicitMirrorDesktopQueryParam) {
+  nvhttp::args_t args;
+  args.emplace("launchMode", "mirror_desktop");
+
+  const auto policy = nvhttp::resolve_streaming_launch_safety_policy_for_tests(
+    args,
+    true,
+    true,
+    true,
+    false
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_TRUE(policy.physicalDisplayRisk);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_TRUE(policy.canMirrorDesktop);
+  EXPECT_EQ(policy.recommendedAction, "mirror_desktop");
+}
+
+TEST(ProcessRuntimeConfigTests, ClearPrivateSteamLaunchIsAllowed) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    false,
+    true,
+    false,
+    false
+  );
+
+  EXPECT_FALSE(policy.desktopSteamActive);
+  EXPECT_FALSE(policy.physicalDisplayRisk);
+  EXPECT_TRUE(policy.canLaunchPrivateStream);
+  EXPECT_TRUE(policy.canMirrorDesktop);
+  EXPECT_EQ(policy.recommendedAction, "launch_private_stream");
+}
 #endif
 
 TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
