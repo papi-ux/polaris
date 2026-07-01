@@ -329,6 +329,10 @@ namespace nvhttp {
   nlohmann::json build_stream_policy_json_for_tests(const crypto::named_cert_t &client,
                                                     const stream_stats::stats_t &stats,
                                                     const nlohmann::json &health);
+  nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
+                                                   bool current_virtual_display,
+                                                   const std::string &device_name,
+                                                   const std::string &app_name);
 #if defined(__linux__)
   proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
     const args_t &args,

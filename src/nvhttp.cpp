@@ -1500,6 +1500,9 @@ namespace nvhttp {
       const bool capture_cpu_copy = stream_stats::capture_path_uses_cpu_copy(stats);
       const bool capture_gpu_native = stream_stats::capture_path_is_gpu_native(stats);
       const bool auto_quality_enabled = ai_auto_quality_enabled();
+      const auto hdr_effective_mode = stream_stats::hdr_effective_mode(stats);
+      const auto hdr_downgrade_reason = stream_stats::hdr_downgrade_reason(stats);
+      const auto hdr_downgrade_message = stream_stats::hdr_downgrade_message(stats);
       int target_bitrate_kbps = 0;
       std::string target_bitrate_source = "client_request";
       if (stats.adaptive_target_bitrate_kbps > 0) {
@@ -1541,7 +1544,7 @@ namespace nvhttp {
         append_stream_policy_warning(
           warnings,
           "hdr_downgraded",
-          "The client requested HDR, but the active capture path is not exposing HDR metadata; Polaris is reporting the stream as SDR."
+          hdr_downgrade_message
         );
       }
       if (device_profile && is_mobile_client_type(device_profile) &&
@@ -1599,6 +1602,9 @@ namespace nvhttp {
       policy["hdr_requested"] = stats.dynamic_range > 0;
       policy["hdr_active"] = stats.stream_hdr_enabled;
       policy["hdr_metadata_available"] = stats.hdr_metadata_available;
+      policy["hdr_effective_mode"] = hdr_effective_mode;
+      policy["hdr_downgrade_reason"] = hdr_downgrade_reason;
+      policy["hdr_downgrade_message"] = hdr_downgrade_message;
       const auto capture_reason_message = stream_stats::capture_path_reason_message(capture_reason);
       policy["capture_path"] = capture_path;
       policy["capture_path_reason"] = capture_reason;
@@ -1974,7 +1980,10 @@ namespace nvhttp {
         !build_has_cuda() &&
         capture_fallback;
       const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
-      const bool hdr_source_missing = stats.dynamic_range > 0 && !stats.stream_hdr_enabled;
+      const auto hdr_effective_mode = stream_stats::hdr_effective_mode(stats);
+      const auto hdr_downgrade_reason = stream_stats::hdr_downgrade_reason(stats);
+      const auto hdr_downgrade_message = stream_stats::hdr_downgrade_message(stats);
+      const bool hdr_source_missing = hdr_downgrade_reason != "none";
       const bool hdr_risk = stats.stream_hdr_enabled && (pacing_risk || encoder_risk);
       const bool decoder_risk =
         (active_codec_family == "av1" || stats.encode_target_format == platf::frame_format_e::p010) &&
@@ -2018,6 +2027,10 @@ namespace nvhttp {
         issues.push_back(capture_reason);
         recommendations.push_back(stream_stats::capture_path_reason_message(capture_reason));
       }
+      if (hdr_source_missing) {
+        issues.push_back("hdr_downgraded");
+        recommendations.push_back(hdr_downgrade_message);
+      }
       if (nvenc_cuda_disabled_path) {
         issues.push_back("nvenc_cuda_disabled");
         recommendations.push_back("Use a CUDA-enabled Polaris build/package before judging NVIDIA headless performance.");
@@ -2041,6 +2054,7 @@ namespace nvhttp {
 
       std::string primary_issue = "steady";
       if (network_risk) primary_issue = "network_jitter";
+      else if (hdr_source_missing) primary_issue = "hdr_downgraded";
       else if (hdr_risk) primary_issue = "hdr_path";
       else if (virtual_display_risk) primary_issue = "virtual_display_path";
       else if (decoder_risk) primary_issue = "decoder_path";
@@ -2052,6 +2066,7 @@ namespace nvhttp {
 
       const std::string limiting_factor =
         network_risk ? "network" :
+        hdr_source_missing ? "hdr" :
         hdr_risk ? "hdr" :
         virtual_display_risk ? "capture" :
         decoder_risk ? "decoder" :
@@ -2063,7 +2078,7 @@ namespace nvhttp {
         "none";
       const std::string auto_action =
         network_risk || encoder_risk ? "lower_bitrate" :
-        hdr_risk || virtual_display_risk || decoder_risk || nvenc_cuda_disabled_path || capture_fallback ? "suggest_recovery" :
+        hdr_source_missing || hdr_risk || virtual_display_risk || decoder_risk || nvenc_cuda_disabled_path || capture_fallback ? "suggest_recovery" :
         host_render_limited ? "lower_render_profile" :
         "none";
 
@@ -2073,6 +2088,7 @@ namespace nvhttp {
         static_cast<int>(capture_fallback) +
         static_cast<int>(nvenc_cuda_disabled_path) +
         static_cast<int>(encoder_risk) +
+        static_cast<int>(hdr_source_missing) +
         static_cast<int>(hdr_risk) +
         static_cast<int>(decoder_risk) +
         static_cast<int>(virtual_display_risk);
@@ -2132,6 +2148,7 @@ namespace nvhttp {
       health["summary"] =
         grade == "good" ? "Session looks steady." :
         network_risk ? "Network jitter is the most likely source of the hitching." :
+        hdr_source_missing ? hdr_downgrade_message :
         hdr_risk ? "The current HDR path looks unstable." :
         virtual_display_risk ? "The virtual display path is likely adding pacing overhead." :
         decoder_risk ? "The current codec path looks harder on this client than expected." :
@@ -2147,6 +2164,9 @@ namespace nvhttp {
         health["safe_target_fps"] = static_cast<int>(std::round(safe_target_fps));
       }
       health["safe_hdr"] = stats.stream_hdr_enabled && !hdr_risk;
+      health["hdr_effective_mode"] = hdr_effective_mode;
+      health["hdr_downgrade_reason"] = hdr_downgrade_reason;
+      health["hdr_downgrade_message"] = hdr_downgrade_message;
       health["decoder_risk"] = decoder_risk ? "elevated" : "normal";
       health["hdr_risk"] = hdr_risk ? "elevated" : "normal";
       health["hdr_source"] = hdr_source_missing ? "missing" : (stats.stream_hdr_enabled ? "metadata" : "sdr");
@@ -2165,7 +2185,7 @@ namespace nvhttp {
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
       health["cuda_build"] = build_has_cuda();
-      health["relaunch_recommended"] = hdr_risk || decoder_risk || virtual_display_risk ||
+      health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
         nvenc_cuda_disabled_path || safe_target_fps > 0.0;
       if (safe_codec) {
         health["safe_codec"] = *safe_codec;
@@ -2195,6 +2215,14 @@ namespace nvhttp {
                                                     const stream_stats::stats_t &stats,
                                                     const nlohmann::json &health) {
     return build_stream_policy_json(client, stats, health);
+  }
+
+
+  nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
+                                                   bool current_virtual_display,
+                                                   const std::string &device_name,
+                                                   const std::string &app_name) {
+    return build_session_health_json(stats, current_virtual_display, device_name, app_name);
   }
 
 #if defined(__linux__)
@@ -4871,6 +4899,9 @@ namespace nvhttp {
       hdr["metadata_available"] = stats.hdr_metadata_available;
       hdr["stream_hdr_enabled"] = stats.stream_hdr_enabled;
       hdr["color_coding"] = stats.color_coding;
+      hdr["effective_mode"] = stream_stats::hdr_effective_mode(stats);
+      hdr["downgrade_reason"] = stream_stats::hdr_downgrade_reason(stats);
+      hdr["downgrade_message"] = stream_stats::hdr_downgrade_message(stats);
       output["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
       output["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
       output["adaptive_bitrate_state"] = adaptive_state.state;
