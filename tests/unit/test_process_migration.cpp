@@ -184,8 +184,8 @@ TEST(ProcessRuntimeConfigTests, HeadlessCageSteamBigPictureSkipsHostShutdownUndo
 TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorRecognizesSteamWebHelper) {
   EXPECT_TRUE(proc::desktop_steam_client_process_for_tests(
     "steamwebhelper",
-    "/home/papi/.local/share/Steam/ubuntu12_64/steamwebhelper",
-    std::string("/home/papi/.local/share/Steam/ubuntu12_64/steamwebhelper") + char(0) + "-type=zygote"
+    "/opt/steam-test/Steam/ubuntu12_64/steamwebhelper",
+    std::string("/opt/steam-test/Steam/ubuntu12_64/steamwebhelper") + char(0) + "-type=zygote"
   ));
 }
 
