@@ -236,6 +236,35 @@ TEST(ProcessRuntimeConfigTests, ExplicitForcePrivateAfterDesktopSteamShutdownAll
   EXPECT_EQ(policy.recommendedAction, "force_private_stream_after_desktop_steam_shutdown");
 }
 
+TEST(ProcessRuntimeConfigTests, ForcePrivateFlagWithoutPrivateStreamDoesNotEscalatePolicy) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    false,
+    false,
+    true,
+    true,
+    false,
+    true
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_FALSE(policy.canLaunchPrivateStream);
+  EXPECT_EQ(policy.recommendedAction, "launch_desktop_stream");
+}
+
+TEST(ProcessRuntimeConfigTests, ExplicitMirrorBeatsContradictoryForcePrivateFlag) {
+  const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
+    true,
+    true,
+    true,
+    true,
+    false,
+    true
+  );
+
+  EXPECT_TRUE(policy.desktopSteamActive);
+  EXPECT_EQ(policy.recommendedAction, "mirror_desktop");
+}
+
 TEST(ProcessRuntimeConfigTests, DesktopSteamActiveRefusesUnsafePrivateSteamLaunch) {
   const auto policy = proc::resolve_desktop_launch_safety_policy_for_tests(
     true,

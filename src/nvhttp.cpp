@@ -3098,8 +3098,13 @@ namespace nvhttp {
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     const bool client_display_mode_explicit = util::from_view(get_arg(args, "displayModeExplicit", "0"));
     const bool client_requested_virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0"));
+    #if defined(__linux__)
     launch_session->mirror_desktop = explicit_mirror_desktop_requested(args);
     launch_session->force_private_after_desktop_steam_shutdown = force_private_after_desktop_steam_shutdown_requested(args);
+    #else
+    launch_session->mirror_desktop = false;
+    launch_session->force_private_after_desktop_steam_shutdown = false;
+    #endif
     launch_session->virtual_display = !launch_session->mirror_desktop && (client_requested_virtual_display || named_cert_p->always_use_virtual_display);
     launch_session->user_locked_display_mode = !named_cert_p->display_mode.empty();
     launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
@@ -4203,6 +4208,15 @@ namespace nvhttp {
             tree.put("root.gamesession", 0);
             return;
           }
+          const auto refreshed_launch_policy = proc::resolve_desktop_launch_safety_policy(
+            true,
+            false,
+            false,
+            *app_iter,
+            false,
+            proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
+          );
+          put_desktop_launch_policy(tree, refreshed_launch_policy);
         }
         if (launch_policy.recommendedAction == "refuse_private_stream") {
           tree.put("root.resume", 0);

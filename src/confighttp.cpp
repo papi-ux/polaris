@@ -3494,11 +3494,30 @@ namespace confighttp {
         return;
       }
       std::string uuid = input_tree["uuid"].get<std::string>();
+      auto launch_args = request->parse_query_string();
+      const auto launch_mode = boost::to_lower_copy(input_tree.value("launchMode", std::string {}));
       bool mirror_desktop_explicit = input_tree.value("mirrorDesktop", false) ||
-                                     input_tree.value("mirror_desktop", false);
-      if (!mirror_desktop_explicit) {
-        const auto launch_mode = boost::to_lower_copy(input_tree.value("launchMode", std::string {}));
-        mirror_desktop_explicit = launch_mode == "mirror_desktop" || launch_mode == "mirrordesktop";
+                                     input_tree.value("mirror_desktop", false) ||
+                                     launch_mode == "mirror_desktop" ||
+                                     launch_mode == "mirrordesktop";
+      const bool force_private_after_desktop_steam_shutdown =
+        input_tree.value("closeDesktopSteamForPrivate", false) ||
+        input_tree.value("forcePrivateAfterSteamClose", false) ||
+        launch_mode == "force_private_stream" ||
+        launch_mode == "forceprivate";
+      if (mirror_desktop_explicit || force_private_after_desktop_steam_shutdown) {
+        launch_args.erase("mirrorDesktop");
+        launch_args.erase("mirror_desktop");
+        launch_args.erase("closeDesktopSteamForPrivate");
+        launch_args.erase("forcePrivateAfterSteamClose");
+        launch_args.erase("launchMode");
+      }
+      if (mirror_desktop_explicit) {
+        launch_args.emplace("mirrorDesktop", "1");
+        launch_args.emplace("launchMode", "mirror_desktop");
+      } else if (force_private_after_desktop_steam_shutdown) {
+        launch_args.emplace("closeDesktopSteamForPrivate", "1");
+        launch_args.emplace("launchMode", "force_private_stream");
       }
 
       nlohmann::json output_tree;
@@ -3519,7 +3538,7 @@ namespace confighttp {
           const auto launch_policy = proc::resolve_desktop_launch_safety_policy(
             private_stream_requested,
             mirror_desktop_explicit,
-            false,
+            force_private_after_desktop_steam_shutdown,
             app,
             proc::desktop_steam_client_active(),
             running_app > 0 && running_app != proc::input_only_app_id
@@ -3536,7 +3555,7 @@ namespace confighttp {
             return;
           }
 #endif
-          auto launch_session = nvhttp::make_launch_session(true, false, request->parse_query_string(), &named_cert);
+          auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);
           auto err = proc::proc.execute(app, launch_session);
           if (err) {
             nlohmann::json error_tree;

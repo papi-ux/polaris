@@ -1134,16 +1134,21 @@ namespace proc {
         "Desktop Steam is already active. Private launch is blocked unless you close desktop Steam first." :
         (active_desktop_game ? "A desktop game is already active on this host." : "");
 
-      if (force_private_after_desktop_steam_shutdown && policy.canForceCloseDesktopSteamForPrivateStream) {
+      if (mirror_desktop_explicit && policy.canMirrorDesktop) {
+        policy.recommendedAction = "mirror_desktop";
+        return policy;
+      }
+
+      if (private_stream_requested &&
+          force_private_after_desktop_steam_shutdown &&
+          policy.canForceCloseDesktopSteamForPrivateStream) {
         policy.canLaunchPrivateStream = true;
         policy.recommendedAction = "force_private_stream_after_desktop_steam_shutdown";
         return policy;
       }
 
       policy.canLaunchPrivateStream = !policy.physicalDisplayRisk;
-      if (mirror_desktop_explicit && policy.canMirrorDesktop) {
-        policy.recommendedAction = "mirror_desktop";
-      } else if (private_stream_requested && policy.canLaunchPrivateStream) {
+      if (private_stream_requested && policy.canLaunchPrivateStream) {
         policy.recommendedAction = "launch_private_stream";
       } else if (private_stream_requested && policy.physicalDisplayRisk) {
         policy.recommendedAction = "refuse_private_stream";
