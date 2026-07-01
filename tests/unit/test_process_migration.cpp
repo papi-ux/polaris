@@ -175,6 +175,30 @@ TEST(ProcessRuntimeConfigTests, SessionHealthFlagsHdrSourceMissingAsActionableIs
   EXPECT_NE(health.dump().find("10-bit SDR, not HDR"), std::string::npos);
   EXPECT_NE(health.dump().find("hdr_downgraded"), std::string::npos);
 }
+
+TEST(ProcessRuntimeConfigTests, SessionHealthFlagsHeadlessHdrUnavailableSeparately) {
+  stream_stats::stats_t stats {};
+  stats.dynamic_range = 1;
+  stats.runtime_effective_headless = true;
+  stats.display_hdr = false;
+  stats.hdr_metadata_available = false;
+  stats.stream_hdr_enabled = false;
+  stats.color_coding = "SDR (Rec. 709)";
+
+  const auto health = nvhttp::build_session_health_json_for_tests(
+    stats,
+    false,
+    "Nova Client",
+    "Steam Big Picture"
+  );
+
+  EXPECT_EQ(health.value("primary_issue", std::string {}), "hdr_downgraded");
+  EXPECT_EQ(health.value("hdr_effective_mode", std::string {}), "sdr_10bit");
+  EXPECT_EQ(health.value("hdr_downgrade_reason", std::string {}), "headless_hdr_unavailable");
+  EXPECT_NE(health.dump().find("Private Headless Stream"), std::string::npos);
+  EXPECT_NE(health.dump().find("physical or virtual HDR-capable display path"), std::string::npos);
+}
+
 TEST(ProcessRuntimeConfigTests, InitialTerminateDoesNotResetAdaptiveBitrateMax) {
 #ifdef __linux__
   linux_cage_compositor_guard_t linux_guard;

@@ -120,6 +120,28 @@ TEST(StreamStatsHdrStateTests, LabelsRequestedHdrWithoutSourceAsTenBitSdr) {
   );
 }
 
+TEST(StreamStatsHdrStateTests, LabelsRequestedHdrOnHeadlessAsHeadlessUnavailable) {
+  stream_stats::stats_t stats {};
+  stats.dynamic_range = 1;
+  stats.runtime_effective_headless = true;
+  stats.display_hdr = false;
+  stats.hdr_metadata_available = false;
+  stats.stream_hdr_enabled = false;
+  stats.color_coding = "SDR (Rec. 709)";
+
+  EXPECT_EQ(stream_stats::hdr_effective_mode(stats), "sdr_10bit");
+  EXPECT_EQ(stream_stats::hdr_downgrade_reason(stats), "headless_hdr_unavailable");
+  EXPECT_NE(
+    stream_stats::hdr_downgrade_message(stats).find("Private Headless Stream"),
+    std::string::npos
+  );
+
+  const auto json = nlohmann::json::parse(stats.to_json());
+  EXPECT_EQ(json.at("hdr_effective_mode"), "sdr_10bit");
+  EXPECT_EQ(json.at("hdr_downgrade_reason"), "headless_hdr_unavailable");
+  EXPECT_NE(json.dump().find("physical or virtual HDR-capable display path"), std::string::npos);
+}
+
 TEST(StreamStatsHdrStateTests, LabelsTrueHdrAndPlainSdrWithoutDowngrade) {
   stream_stats::stats_t hdr_stats {};
   hdr_stats.dynamic_range = 1;

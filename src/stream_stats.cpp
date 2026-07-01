@@ -366,6 +366,9 @@ namespace stream_stats {
       return "none";
     }
     if (!stats.display_hdr) {
+      if (stats.runtime_effective_headless) {
+        return "headless_hdr_unavailable";
+      }
       return "display_not_hdr";
     }
     if (!stats.hdr_metadata_available) {
@@ -378,6 +381,9 @@ namespace stream_stats {
     const auto reason = hdr_downgrade_reason(stats);
     if (reason == "none") {
       return {};
+    }
+    if (reason == "headless_hdr_unavailable") {
+      return "The client requested HDR, but Private Headless Stream is using a compositor output that does not report HDR. Polaris is streaming 10-bit SDR, not HDR; use a physical or virtual HDR-capable display path for true HDR.";
     }
     if (reason == "display_not_hdr") {
       return "The client requested HDR, but the active capture display is not reporting HDR. Polaris is streaming 10-bit SDR, not HDR.";
