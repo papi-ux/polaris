@@ -1,0 +1,100 @@
+name: Build (openSUSE Tumbleweed)
+
+# Manual-trigger only by default so it doesn't impose container builds on every
+# push. Maintainers can add `push:` / `pull_request:` triggers if desired.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: opensuse/tumbleweed:latest
+    steps:
+      - name: Bootstrap container (node + git for actions)
+        run: |
+          zypper --non-interactive --gpg-auto-import-keys refresh
+          zypper --non-interactive install nodejs24 git tar gzip
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          # The opensuse/tumbleweed base image ships busybox-gawk, which blocks the
+          # real gawk that desktop-file-utils and rpm-build require. Swap it in first.
+          zypper --non-interactive install --force-resolution gawk
+          zypper --non-interactive install \
+            gcc-c++ make cmake ninja python3 which wget rpm-build \
+            nodejs24 npm24 go \
+            libboost_headers-devel libboost_filesystem-devel libboost_log-devel \
+            libboost_locale-devel libboost_program_options-devel libboost_thread-devel \
+            libcap-devel libcurl-devel libdrm-devel libevdev-devel libgudev-1_0-devel \
+            libnotify-devel libva-devel libopenssl-devel systemd-devel \
+            libX11-devel libxcb-devel libXcursor-devel libXfixes-devel libXi-devel \
+            libXinerama-devel libXrandr-devel libXtst-devel \
+            Mesa-libGL-devel libgbm-devel \
+            libminiupnpc-devel nlohmann_json-devel libnuma-devel libpulse-devel \
+            libopus-devel libopusenc-devel \
+            wayland-devel wayland-protocols-devel pipewire-devel \
+            libayatana-appindicator3-devel desktop-file-utils appstream-glib
+
+      - name: Build
+        run: |
+          # The Browser Stream helper is built with Go; Go 1.18+ stamps VCS info and the
+          # container checkout trips git's "dubious ownership" guard (exit 128). Mark the
+          # repo safe and disable VCS stamping so the Go helper builds.
+          git config --global --add safe.directory '*'
+          export GOFLAGS=-buildvcs=false
+          # Flag set mirrors the upstream Fedora spec / Arch PKGBUILD feature set, so an
+          # openSUSE build is the "whole thing", not a stripped-down variant:
+          #   * BROWSER_STREAM=ON           - both Fedora and Arch enable it (needs Go, installed above)
+          #   * WAYLAND/X11/DRM=ON          - all capture backends (also defaults)
+          #   * BOOST_USE_STATIC=OFF        - matches Arch; required on openSUSE (shared-only Boost)
+          #   * CUDA=OFF, FAIL_ON_MISSING=OFF - matches Arch on a host without the CUDA toolkit
+          #                                    (NVENC is NVIDIA-only; harmless on AMD/Intel)
+          #   * POLARIS_DESKTOP_ICON=polaris - upstream bug: the .desktop template references
+          #                                    @POLARIS_DESKTOP_ICON@ but never set()s it, so the
+          #                                    Icon= line ships empty and no launcher icon shows.
+          cmake -B build -G Ninja \
+            -DBUILD_DOCS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBOOST_USE_STATIC=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DPOLARIS_ASSETS_DIR=/usr/share/polaris \
+            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
+            -DPOLARIS_DESKTOP_ICON=polaris \
+            -DPOLARIS_ENABLE_WAYLAND=ON \
+            -DPOLARIS_ENABLE_X11=ON \
+            -DPOLARIS_ENABLE_DRM=ON \
+            -DPOLARIS_ENABLE_BROWSER_STREAM=ON \
+            -DPOLARIS_ENABLE_CUDA=OFF \
+            -DCUDA_FAIL_ON_MISSING=OFF \
+            -DPOLARIS_PUBLISHER_NAME='Polaris Project' \
+            -DPOLARIS_PUBLISHER_WEBSITE='https://github.com/papi-ux/polaris' \
+            -DPOLARIS_PUBLISHER_ISSUE_URL='https://github.com/papi-ux/polaris/issues'
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Package (tarball)
+        run: |
+          mkdir -p dist stage
+          DESTDIR="$PWD/stage" cmake --install build
+          tar -C stage -czf "dist/polaris-opensuse-tumbleweed-x86_64.tar.gz" .
+
+      - name: Package (RPM)
+        continue-on-error: true
+        run: |
+          # The project's CPACK_RPM_PACKAGE_REQUIRES uses Fedora package names; override
+          # with openSUSE names. Shared-library deps are still auto-detected (autoreq).
+          ( cd build && cpack -G RPM \
+              -D CPACK_RPM_PACKAGE_REQUIRES="grim, labwc, wlr-randr, xdpyinfo, xwayland, which" )
+          find build -name '*.rpm' -exec cp {} dist/ \; || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: polaris-opensuse-tumbleweed
+          path: dist/
+          if-no-files-found: error
