@@ -993,6 +993,166 @@ namespace proc {
              !steam_appid_for_context(ctx).empty();
     }
 
+    bool proc_pid_dir_name(std::string_view name) {
+      return !name.empty() && std::all_of(name.begin(), name.end(), [](char ch) {
+        return std::isdigit(static_cast<unsigned char>(ch));
+      });
+    }
+
+    std::string read_proc_status_file(pid_t pid, std::string_view name) {
+      std::ifstream file("/proc/" + std::to_string(pid) + "/" + std::string {name}, std::ios::binary);
+      if (!file) {
+        return {};
+      }
+
+      std::ostringstream buffer;
+      buffer << file.rdbuf();
+      return buffer.str();
+    }
+
+    std::string proc_argv0_from_cmdline(std::string_view cmdline) {
+      const auto end = cmdline.find('\0');
+      return boost::to_lower_copy(std::string {cmdline.substr(0, end)});
+    }
+
+    std::string basename_from_path(std::string_view path) {
+      auto value = std::string {path};
+      if (const auto slash = value.find_last_of('/'); slash != std::string::npos) {
+        value = value.substr(slash + 1);
+      }
+      return value;
+    }
+
+    bool path_has_suffix(std::string_view value, std::string_view suffix) {
+      return value.size() >= suffix.size() &&
+             value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
+    bool is_desktop_steam_client_process(std::string_view comm, std::string_view argv0_path) {
+      const auto argv0 = basename_from_path(argv0_path);
+      return comm == "steam" ||
+             comm == "steamwebhelper" ||
+             argv0 == "steam" ||
+             argv0 == "steam.sh" ||
+             argv0 == "steamwebhelper" ||
+             path_has_suffix(argv0_path, "/steam.sh") ||
+             path_has_suffix(argv0_path, "/steamwebhelper") ||
+             path_has_suffix(argv0_path, "/ubuntu12_32/steam");
+    }
+
+    bool is_transient_steam_client_cmdline(std::string_view cmdline) {
+      const auto lower_cmdline = boost::to_lower_copy(std::string {cmdline});
+      return lower_cmdline.find("-shutdown") != std::string::npos ||
+             lower_cmdline.find("-child-update-ui") != std::string::npos ||
+             lower_cmdline.find("-srt-logger-opened") != std::string::npos;
+    }
+
+    bool proc_status_is_zombie(std::string_view status) {
+      for (size_t index = 0; index + 5 < status.size(); ++index) {
+        if (static_cast<unsigned char>(status[index]) != 83 ||
+            static_cast<unsigned char>(status[index + 1]) != 116 ||
+            static_cast<unsigned char>(status[index + 2]) != 97 ||
+            static_cast<unsigned char>(status[index + 3]) != 116 ||
+            static_cast<unsigned char>(status[index + 4]) != 101 ||
+            static_cast<unsigned char>(status[index + 5]) != 58) {
+          continue;
+        }
+
+        auto value_pos = index + 6;
+        while (value_pos < status.size() && std::isspace(static_cast<unsigned char>(status[value_pos]))) {
+          ++value_pos;
+        }
+
+        return value_pos < status.size() && status[value_pos] == static_cast<char>(90);
+      }
+
+      return false;
+    }
+
+    bool is_active_desktop_steam_client_process(
+      std::string_view comm,
+      std::string_view argv0_path,
+      std::string_view cmdline,
+      std::string_view status
+    ) {
+      return is_desktop_steam_client_process(comm, argv0_path) &&
+             !proc_status_is_zombie(status) &&
+             !is_transient_steam_client_cmdline(cmdline);
+    }
+
+    bool desktop_steam_client_active_impl() {
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        return false;
+      }
+
+      const auto this_pid = getpid();
+      while (auto *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (!proc_pid_dir_name(name)) {
+          continue;
+        }
+
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == this_pid) {
+          continue;
+        }
+
+        auto comm = boost::to_lower_copy(read_proc_status_file(pid, "comm"));
+        while (!comm.empty() && (comm.back() == '\n' || comm.back() == '\r')) {
+          comm.pop_back();
+        }
+
+        const auto cmdline = read_proc_status_file(pid, "cmdline");
+        const auto argv0 = proc_argv0_from_cmdline(cmdline);
+        const auto status = read_proc_status_file(pid, "status");
+        if (is_active_desktop_steam_client_process(comm, argv0, cmdline, status)) {
+          closedir(dir);
+          return true;
+        }
+      }
+
+      closedir(dir);
+      return false;
+    }
+
+    proc::desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_impl(
+      bool private_stream_requested,
+      bool mirror_desktop_explicit,
+      bool app_uses_steam,
+      bool desktop_steam_active,
+      bool active_desktop_game,
+      bool force_private_after_desktop_steam_shutdown
+    ) {
+      proc::desktop_launch_safety_policy_t policy;
+      policy.desktopSteamActive = desktop_steam_active && app_uses_steam;
+      policy.physicalDisplayRisk = active_desktop_game || policy.desktopSteamActive;
+      policy.canMirrorDesktop = true;
+      policy.canForceCloseDesktopSteamForPrivateStream = policy.desktopSteamActive;
+      policy.forcePrivateStreamLabel = "Close desktop Steam and start private stream";
+      policy.privateStreamUnavailableReason = policy.desktopSteamActive ?
+        "Desktop Steam is already active. Private launch is blocked unless you close desktop Steam first." :
+        (active_desktop_game ? "A desktop game is already active on this host." : "");
+
+      if (force_private_after_desktop_steam_shutdown && policy.canForceCloseDesktopSteamForPrivateStream) {
+        policy.canLaunchPrivateStream = true;
+        policy.recommendedAction = "force_private_stream_after_desktop_steam_shutdown";
+        return policy;
+      }
+
+      policy.canLaunchPrivateStream = !policy.physicalDisplayRisk;
+      if (mirror_desktop_explicit && policy.canMirrorDesktop) {
+        policy.recommendedAction = "mirror_desktop";
+      } else if (private_stream_requested && policy.canLaunchPrivateStream) {
+        policy.recommendedAction = "launch_private_stream";
+      } else if (private_stream_requested && policy.physicalDisplayRisk) {
+        policy.recommendedAction = "refuse_private_stream";
+      } else {
+        policy.recommendedAction = "launch_desktop_stream";
+      }
+      return policy;
+    }
+
     bool should_skip_steam_shutdown_undo_after_cage_cleanup(const proc::ctx_t &ctx,
                                                             const proc::cmd_t &cmd,
                                                             bool use_cage_compositor) {
@@ -1698,7 +1858,109 @@ namespace proc {
   }
 #endif
 
+#if defined(__linux__)
+  desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy(
+    bool private_stream_requested,
+    bool mirror_desktop_explicit,
+    const proc::ctx_t &app,
+    bool desktop_steam_active,
+    bool active_desktop_game
+  ) {
+    return resolve_desktop_launch_safety_policy(
+      private_stream_requested,
+      mirror_desktop_explicit,
+      false,
+      app,
+      desktop_steam_active,
+      active_desktop_game
+    );
+  }
+
+  desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy(
+    bool private_stream_requested,
+    bool mirror_desktop_explicit,
+    bool force_private_after_desktop_steam_shutdown,
+    const proc::ctx_t &app,
+    bool desktop_steam_active,
+    bool active_desktop_game
+  ) {
+    return resolve_desktop_launch_safety_policy_impl(
+      private_stream_requested,
+      mirror_desktop_explicit,
+      context_uses_steam(app),
+      desktop_steam_active,
+      active_desktop_game,
+      force_private_after_desktop_steam_shutdown
+    );
+  }
+
+  nlohmann::json desktop_launch_safety_policy_to_json(const desktop_launch_safety_policy_t &policy) {
+    return {
+      {"desktopSteamActive", policy.desktopSteamActive},
+      {"physicalDisplayRisk", policy.physicalDisplayRisk},
+      {"canLaunchPrivateStream", policy.canLaunchPrivateStream},
+      {"canMirrorDesktop", policy.canMirrorDesktop},
+      {"canForceCloseDesktopSteamForPrivateStream", policy.canForceCloseDesktopSteamForPrivateStream},
+      {"recommendedAction", policy.recommendedAction},
+      {"privateStreamUnavailableReason", policy.privateStreamUnavailableReason},
+      {"forcePrivateStreamLabel", policy.forcePrivateStreamLabel},
+      {"desktopGameDetection", "polaris_running_app_only"},
+    };
+  }
+
+  bool desktop_steam_client_active() {
+    return desktop_steam_client_active_impl();
+  }
+
+  bool request_desktop_steam_shutdown_for_private_stream() {
+    const auto command = canonical_steam_shutdown_command("steam");
+    BOOST_LOG(info) << "process: explicit Nova request closing desktop Steam before private stream using [" << command << "]";
+    auto env = boost::this_process::environment();
+    boost::system::error_code ec;
+    boost::filesystem::path working_dir {};
+    auto child = platf::run_command(false, true, command, working_dir, env, nullptr, ec, nullptr);
+    if (ec) {
+      BOOST_LOG(warning) << "process: explicit desktop Steam shutdown command failed: " << ec.message();
+      return false;
+    }
+    child.detach();
+    for (int i = 0; i < 50; ++i) {
+      if (!desktop_steam_client_active_impl()) {
+        return true;
+      }
+      std::this_thread::sleep_for(100ms);
+    }
+    BOOST_LOG(warning) << "process: desktop Steam still active after explicit shutdown wait";
+    return !desktop_steam_client_active_impl();
+  }
+#endif
+
 #if defined(POLARIS_TESTS) && defined(__linux__)
+  desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_for_tests(
+    bool private_stream_requested,
+    bool mirror_desktop_explicit,
+    bool app_uses_steam,
+    bool desktop_steam_active,
+    bool active_desktop_game,
+    bool force_private_after_desktop_steam_shutdown
+  ) {
+    return resolve_desktop_launch_safety_policy_impl(
+      private_stream_requested,
+      mirror_desktop_explicit,
+      app_uses_steam,
+      desktop_steam_active,
+      active_desktop_game,
+      force_private_after_desktop_steam_shutdown
+    );
+  }
+
+  bool desktop_steam_client_process_for_tests(std::string_view comm,
+                                               std::string_view argv0_path,
+                                               std::string_view cmdline,
+                                               std::string_view status) {
+    return is_active_desktop_steam_client_process(comm, argv0_path, cmdline, status);
+  }
+
   bool cage_mangohud_allowed_for_session_for_tests(const proc::ctx_t &app,
                                                    bool use_cage_compositor,
                                                    bool requested_headless) {
@@ -1931,8 +2193,14 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
+    const bool use_cage_compositor_for_session =
+      config::video.linux_display.use_cage_compositor &&
+      !(launch_session && launch_session->mirror_desktop);
+    const bool requested_headless_for_session =
+      config::video.linux_display.headless_mode &&
+      !(launch_session && launch_session->mirror_desktop);
     settle_recent_browser_stream_steam_cleanup_before_launch(_app);
-    if (config::video.linux_display.use_cage_compositor) {
+    if (use_cage_compositor_for_session) {
       terminate_isolated_session_processes("before launching isolated cage session"sv);
     }
 #endif
@@ -2223,8 +2491,8 @@ namespace proc {
 
 #ifdef __linux__
     const bool using_headless_cage_runtime =
-      config::video.linux_display.headless_mode &&
-      config::video.linux_display.use_cage_compositor;
+      requested_headless_for_session &&
+      use_cage_compositor_for_session;
     if (using_headless_cage_runtime && launch_session->virtual_display) {
       BOOST_LOG(info) << "session_optimization: normalized virtual_display from true to false for headless cage runtime"sv;
       launch_session->virtual_display = false;
@@ -2856,13 +3124,13 @@ namespace proc {
       return false;
     };
 
-    const bool requested_headless = config::video.linux_display.headless_mode;
+    const bool requested_headless = requested_headless_for_session;
     const bool prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
     const bool encoder_requires_gpu_native_capture = video::active_encoder_requires_gpu_native_capture();
     const bool should_try_gpu_native_cage_probe =
       prefer_gpu_native_capture || encoder_requires_gpu_native_capture;
     const bool should_probe_windowed_cage_for_gpu_native =
-      config::video.linux_display.use_cage_compositor &&
+      use_cage_compositor_for_session &&
       cage_display_router::should_attempt_windowed_gpu_native_probe(
         requested_headless,
         prefer_gpu_native_capture,
@@ -3058,8 +3326,8 @@ namespace proc {
 
     auto should_apply_headless_gamepad_isolation = [&]() {
       return has_launch_commands &&
-             config::video.linux_display.use_cage_compositor &&
-             config::video.linux_display.headless_mode &&
+             use_cage_compositor_for_session &&
+             requested_headless_for_session &&
              !force_windowed_cage_for_gpu_native;
     };
 
@@ -3108,7 +3376,7 @@ namespace proc {
 
     // Start cage with the first detached command as its primary client.
     // Cage is a kiosk compositor — it only displays its main process fullscreen.
-    if (config::video.linux_display.use_cage_compositor && !_app.detached.empty()) {
+    if (use_cage_compositor_for_session && !_app.detached.empty()) {
       std::string game_cmd = cage_runtime_command(_app.detached[0]);
       if (!start_cage_with_runtime_fallback(game_cmd)) {
         BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
@@ -3150,7 +3418,7 @@ namespace proc {
           child.detach();
         }
       }
-    } else if (config::video.linux_display.use_cage_compositor) {
+    } else if (use_cage_compositor_for_session) {
       // No detached commands — start cage empty, game will use _app.cmd
       if (!start_cage_with_runtime_fallback("")) {
         BOOST_LOG(error) << "session_manager: Failed to start cage compositor"sv;
@@ -3180,7 +3448,7 @@ namespace proc {
     std::string working_dir_cmd = effective_cmd;
     auto launch_env = _env;
     bool app_command_uses_cage_runtime = false;
-    if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running() && !_app.cmd.empty()) {
+    if (use_cage_compositor_for_session && cage_display_router::is_running() && !_app.cmd.empty()) {
       effective_cmd = cage_runtime_command(_app.cmd);
       working_dir_cmd = effective_cmd;
       app_command_uses_cage_runtime = true;
@@ -3522,6 +3790,7 @@ namespace proc {
           (codec_lower.find("h264") != std::string::npos || codec_lower.find("avc") != std::string::npos) ? "h264" :
           "";
         session.last_safe_display_mode =
+          (_launch_session && _launch_session->mirror_desktop) ? "desktop_display" :
           (virtual_display_risk || config::video.linux_display.headless_mode) ? "headless" :
           (_launch_session->virtual_display ? "virtual_display" : "headless");
         session.last_safe_target_fps = ai_optimizer::derive_safe_target_fps(

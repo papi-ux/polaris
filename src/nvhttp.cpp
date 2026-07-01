@@ -143,6 +143,165 @@ namespace nvhttp {
       return value;
     }
 
+#if defined(__linux__)
+    bool truthy_query_value(std::string value) {
+      value = lower_copy(std::move(value));
+      return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+
+    bool explicit_mirror_desktop_requested(const args_t &args) {
+      for (const auto &key : {"mirrorDesktop", "mirror_desktop"}) {
+        const auto it = args.find(key);
+        if (it != args.end() && truthy_query_value(it->second)) {
+          return true;
+        }
+      }
+
+      const auto launch_mode_it = args.find("launchMode");
+      if (launch_mode_it == args.end()) {
+        return false;
+      }
+
+      const auto launch_mode = lower_copy(launch_mode_it->second);
+      return launch_mode == "mirror_desktop" || launch_mode == "mirrordesktop";
+    }
+
+    bool explicit_mirror_desktop_requested(const nlohmann::json &body) {
+      if (body.value("mirrorDesktop", false) || body.value("mirror_desktop", false)) {
+        return true;
+      }
+
+      const auto launch_mode = lower_copy(body.value("launchMode", std::string {}));
+      return launch_mode == "mirror_desktop" || launch_mode == "mirrordesktop";
+    }
+
+    bool force_private_after_desktop_steam_shutdown_requested(const args_t &args) {
+      for (const auto &key : {"closeDesktopSteamForPrivate", "forcePrivateAfterSteamClose"}) {
+        const auto it = args.find(key);
+        if (it != args.end() && truthy_query_value(it->second)) {
+          return true;
+        }
+      }
+
+      const auto launch_mode_it = args.find("launchMode");
+      if (launch_mode_it == args.end()) {
+        return false;
+      }
+      const auto launch_mode = lower_copy(launch_mode_it->second);
+      return launch_mode == "force_private_stream" || launch_mode == "forceprivate";
+    }
+
+    bool force_private_after_desktop_steam_shutdown_requested(const nlohmann::json &body) {
+      if (body.value("closeDesktopSteamForPrivate", false) || body.value("forcePrivateAfterSteamClose", false)) {
+        return true;
+      }
+      const auto launch_mode = lower_copy(body.value("launchMode", std::string {}));
+      return launch_mode == "force_private_stream" || launch_mode == "forceprivate";
+    }
+
+#if defined(POLARIS_TESTS)
+    proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy(
+      const args_t &args,
+      bool app_uses_steam,
+      bool private_stream_requested,
+      bool desktop_steam_active,
+      bool active_desktop_game,
+      bool force_private_after_desktop_steam_shutdown = false
+    ) {
+      return proc::resolve_desktop_launch_safety_policy_for_tests(
+        private_stream_requested,
+        explicit_mirror_desktop_requested(args),
+        app_uses_steam,
+        desktop_steam_active,
+        active_desktop_game,
+        force_private_after_desktop_steam_shutdown
+      );
+    }
+#endif
+
+    proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy(
+      const args_t &args,
+      const proc::ctx_t &app,
+      bool active_desktop_game
+    ) {
+      const bool private_stream_requested =
+        config::video.linux_display.headless_mode &&
+        config::video.linux_display.use_cage_compositor;
+      return proc::resolve_desktop_launch_safety_policy(
+        private_stream_requested,
+        explicit_mirror_desktop_requested(args),
+        force_private_after_desktop_steam_shutdown_requested(args),
+        app,
+        proc::desktop_steam_client_active(),
+        active_desktop_game
+      );
+    }
+
+    proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy(
+      const nlohmann::json &body,
+      const proc::ctx_t &app,
+      bool active_desktop_game
+    ) {
+      const bool private_stream_requested =
+        config::video.linux_display.headless_mode &&
+        config::video.linux_display.use_cage_compositor;
+      return proc::resolve_desktop_launch_safety_policy(
+        private_stream_requested,
+        explicit_mirror_desktop_requested(body),
+        force_private_after_desktop_steam_shutdown_requested(body),
+        app,
+        proc::desktop_steam_client_active(),
+        active_desktop_game
+      );
+    }
+
+    void put_desktop_launch_policy(pt::ptree &tree, const proc::desktop_launch_safety_policy_t &policy) {
+      const auto json = proc::desktop_launch_safety_policy_to_json(policy);
+      for (const auto &[key, value] : json.items()) {
+        const auto path = "root.launchPolicy."s + key;
+        if (value.is_boolean()) {
+          tree.put(path, value.get<bool>() ? 1 : 0);
+        } else if (value.is_string()) {
+          tree.put(path, value.get<std::string>());
+        }
+      }
+    }
+
+    std::optional<proc::ctx_t> find_app_for_optimization_game(const std::string &game) {
+      if (game.empty()) {
+        return std::nullopt;
+      }
+
+      const auto apps = proc::proc.get_apps();
+      const auto app_iter = std::find_if(apps.begin(), apps.end(), [&game](const proc::ctx_t &app) {
+        return boost::iequals(app.name, game) ||
+               boost::iequals(app.uuid, game) ||
+               boost::iequals(app.id, game);
+      });
+
+      if (app_iter == apps.end()) {
+        return std::nullopt;
+      }
+      return *app_iter;
+    }
+
+    void put_optimization_launch_policy(nlohmann::json &output,
+                                        const args_t &args,
+                                        const std::string &game) {
+      const auto app = find_app_for_optimization_game(game);
+      if (!app) {
+        return;
+      }
+
+      const auto launch_policy = resolve_streaming_launch_safety_policy(
+        args,
+        *app,
+        proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
+      );
+      output["launchPolicy"] = proc::desktop_launch_safety_policy_to_json(launch_policy);
+    }
+#endif
+
     std::optional<int> select_paired_client_launch_bitrate(
         const std::optional<int> &target_bitrate_kbps,
         int paired_bitrate_kbps,
@@ -2037,6 +2196,26 @@ namespace nvhttp {
                                                     const nlohmann::json &health) {
     return build_stream_policy_json(client, stats, health);
   }
+
+#if defined(__linux__)
+  proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
+    const args_t &args,
+    bool app_uses_steam,
+    bool private_stream_requested,
+    bool desktop_steam_active,
+    bool active_desktop_game,
+    bool force_private_after_desktop_steam_shutdown
+  ) {
+    return resolve_streaming_launch_safety_policy(
+      args,
+      app_uses_steam,
+      private_stream_requested,
+      desktop_steam_active,
+      active_desktop_game,
+      force_private_after_desktop_steam_shutdown
+    );
+  }
+#endif
 #endif
 
 #ifdef __linux__
@@ -2919,7 +3098,9 @@ namespace nvhttp {
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     const bool client_display_mode_explicit = util::from_view(get_arg(args, "displayModeExplicit", "0"));
     const bool client_requested_virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0"));
-    launch_session->virtual_display = client_requested_virtual_display || named_cert_p->always_use_virtual_display;
+    launch_session->mirror_desktop = explicit_mirror_desktop_requested(args);
+    launch_session->force_private_after_desktop_steam_shutdown = force_private_after_desktop_steam_shutdown_requested(args);
+    launch_session->virtual_display = !launch_session->mirror_desktop && (client_requested_virtual_display || named_cert_p->always_use_virtual_display);
     launch_session->user_locked_display_mode = !named_cert_p->display_mode.empty();
     launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
@@ -4005,6 +4186,33 @@ namespace nvhttp {
           launch_session->client_do_cmds.clear();
           launch_session->client_undo_cmds.clear();
         }
+
+#ifdef __linux__
+        const auto launch_policy = resolve_streaming_launch_safety_policy(
+          args,
+          *app_iter,
+          current_appid > 0 && current_appid != proc::input_only_app_id
+        );
+        put_desktop_launch_policy(tree, launch_policy);
+        if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
+          if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
+            tree.put("root.resume", 0);
+            tree.put("root.<xmlattr>.status_code", 409);
+            tree.put("root.<xmlattr>.status_message", "Desktop Steam did not exit, so Nova did not start a private stream. Quit Steam on the desktop or choose Mirror Desktop.");
+            tree.put("root.error_code", "desktop_steam_shutdown_failed");
+            tree.put("root.gamesession", 0);
+            return;
+          }
+        }
+        if (launch_policy.recommendedAction == "refuse_private_stream") {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 409);
+          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.");
+          tree.put("root.error_code", "desktop_active_private_stream_refused");
+          tree.put("root.gamesession", 0);
+          return;
+        }
+#endif
 
         // Update last_launched timestamp
         try {
@@ -5280,6 +5488,46 @@ namespace nvhttp {
           return;
         }
 
+#ifdef __linux__
+        const auto &app = apps.at(static_cast<size_t>(app_id - 1));
+        const auto launch_policy = resolve_streaming_launch_safety_policy(
+          body,
+          app,
+          proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
+        );
+        auto launch_policy_json = proc::desktop_launch_safety_policy_to_json(launch_policy);
+        if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
+          if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
+            nlohmann::json err;
+            err["error"] = "Desktop Steam did not exit, so Nova did not start a private stream. Quit Steam on the desktop or choose Mirror Desktop.";
+            err["error_code"] = "desktop_steam_shutdown_failed";
+            err["launchPolicy"] = launch_policy_json;
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Content-Type", "application/json");
+            response->write(SimpleWeb::StatusCode::client_error_conflict, err.dump(), headers);
+            return;
+          }
+          launch_policy_json = proc::desktop_launch_safety_policy_to_json(proc::resolve_desktop_launch_safety_policy(
+            true,
+            false,
+            false,
+            app,
+            false,
+            proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
+          ));
+        }
+        if (launch_policy.recommendedAction == "refuse_private_stream") {
+          nlohmann::json err;
+          err["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.";
+          err["error_code"] = "desktop_active_private_stream_refused";
+          err["launchPolicy"] = launch_policy_json;
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_conflict, err.dump(), headers);
+          return;
+        }
+#endif
+
         // Update last_launched timestamp in apps.json
         try {
           std::string content = file_handler::read_file(config::stream.file_apps.c_str());
@@ -5302,6 +5550,9 @@ namespace nvhttp {
         output["status"] = "launching";
         output["game"] = app_name;
         output["game_id"] = game_id;
+#ifdef __linux__
+        output["launchPolicy"] = launch_policy_json;
+#endif
         if (client_width > 0 && client_height > 0) {
           output["smart_launch"] = {
             {"client_width", client_width},
@@ -6147,6 +6398,10 @@ namespace nvhttp {
         output.value("recovery_policy", nlohmann::json::object()),
         applied_history_safe
       );
+
+#ifdef __linux__
+      put_optimization_launch_policy(output, args, game);
+#endif
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");

@@ -31,6 +31,12 @@ namespace stream_stats {
 }
 #endif
 
+#if defined(__linux__)
+namespace proc {
+  struct desktop_launch_safety_policy_t;
+}
+#endif
+
 /**
  * @brief Contains all the functions and variables related to the nvhttp (GameStream) server.
  */
@@ -323,6 +329,16 @@ namespace nvhttp {
   nlohmann::json build_stream_policy_json_for_tests(const crypto::named_cert_t &client,
                                                     const stream_stats::stats_t &stats,
                                                     const nlohmann::json &health);
+#if defined(__linux__)
+  proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
+    const args_t &args,
+    bool app_uses_steam,
+    bool private_stream_requested,
+    bool desktop_steam_active,
+    bool active_desktop_game,
+    bool force_private_after_desktop_steam_shutdown = false
+  );
+#endif
   void reset_pairing_state_for_tests();
 #endif
 }  // namespace nvhttp
