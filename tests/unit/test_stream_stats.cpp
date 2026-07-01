@@ -95,6 +95,47 @@ TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
   EXPECT_FALSE(decision.at("gpu_native_override_active"));
 }
 
+
+TEST(StreamStatsHdrStateTests, LabelsRequestedHdrWithoutSourceAsTenBitSdr) {
+  stream_stats::stats_t stats {};
+  stats.dynamic_range = 1;
+  stats.display_hdr = false;
+  stats.hdr_metadata_available = false;
+  stats.stream_hdr_enabled = false;
+  stats.color_coding = "SDR (Rec. 709)";
+
+  EXPECT_EQ(stream_stats::hdr_effective_mode(stats), "sdr_10bit");
+  EXPECT_EQ(stream_stats::hdr_downgrade_reason(stats), "display_not_hdr");
+  EXPECT_NE(
+    stream_stats::hdr_downgrade_message(stats).find("10-bit SDR, not HDR"),
+    std::string::npos
+  );
+
+  const auto json = nlohmann::json::parse(stats.to_json());
+  EXPECT_EQ(json.at("hdr_effective_mode"), "sdr_10bit");
+  EXPECT_EQ(json.at("hdr_downgrade_reason"), "display_not_hdr");
+  EXPECT_NE(
+    json.at("hdr_downgrade_message").get<std::string>().find("10-bit SDR, not HDR"),
+    std::string::npos
+  );
+}
+
+TEST(StreamStatsHdrStateTests, LabelsTrueHdrAndPlainSdrWithoutDowngrade) {
+  stream_stats::stats_t hdr_stats {};
+  hdr_stats.dynamic_range = 1;
+  hdr_stats.display_hdr = true;
+  hdr_stats.hdr_metadata_available = true;
+  hdr_stats.stream_hdr_enabled = true;
+
+  EXPECT_EQ(stream_stats::hdr_effective_mode(hdr_stats), "hdr10");
+  EXPECT_EQ(stream_stats::hdr_downgrade_reason(hdr_stats), "none");
+  EXPECT_TRUE(stream_stats::hdr_downgrade_message(hdr_stats).empty());
+
+  stream_stats::stats_t sdr_stats {};
+  EXPECT_EQ(stream_stats::hdr_effective_mode(sdr_stats), "sdr_8bit");
+  EXPECT_EQ(stream_stats::hdr_downgrade_reason(sdr_stats), "none");
+}
+
 TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {
   LinuxDisplayConfigGuard guard;
   config::video.linux_display.use_cage_compositor = true;

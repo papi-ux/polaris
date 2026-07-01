@@ -152,6 +152,24 @@ namespace stream_stats {
   std::string capture_path_reason_message(const std::string &reason);
 
   /**
+   * @brief Effective dynamic range mode Polaris is advertising for the stream.
+   * @param stats Current stream statistics snapshot.
+   */
+  std::string hdr_effective_mode(const stats_t &stats);
+
+  /**
+   * @brief Machine-readable reason when a requested HDR stream was downgraded.
+   * @param stats Current stream statistics snapshot.
+   */
+  std::string hdr_downgrade_reason(const stats_t &stats);
+
+  /**
+   * @brief Human-readable HDR downgrade explanation for diagnostics and clients.
+   * @param stats Current stream statistics snapshot.
+   */
+  std::string hdr_downgrade_message(const stats_t &stats);
+
+  /**
    * @brief Update stream active state.
    * @param active Whether streaming is active.
    * @param client_name Name of the connected client.
