@@ -143,6 +143,9 @@ namespace stream_stats {
     j["hdr_metadata_available"] = hdr_metadata_available;
     j["stream_hdr_enabled"] = stream_hdr_enabled;
     j["color_coding"] = color_coding;
+    j["hdr_effective_mode"] = hdr_effective_mode(*this);
+    j["hdr_downgrade_reason"] = hdr_downgrade_reason(*this);
+    j["hdr_downgrade_message"] = hdr_downgrade_message(*this);
     j["fps"] = fps;
     j["requested_client_fps"] = requested_client_fps;
     j["session_target_fps"] = session_target_fps;
@@ -343,8 +346,46 @@ namespace stream_stats {
     }
     if (reason == "no_capture_metadata") {
       return "No capture metadata has been reported yet.";
+
     }
     return "The active capture and encoder path is mixed or not fully classified.";
+  }
+
+  std::string hdr_effective_mode(const stats_t &stats) {
+    if (stats.dynamic_range > 0 && stats.stream_hdr_enabled) {
+      return "hdr10";
+    }
+    if (stats.dynamic_range > 0) {
+      return "sdr_10bit";
+    }
+    return "sdr_8bit";
+  }
+
+  std::string hdr_downgrade_reason(const stats_t &stats) {
+    if (stats.dynamic_range <= 0 || stats.stream_hdr_enabled) {
+      return "none";
+    }
+    if (!stats.display_hdr) {
+      return "display_not_hdr";
+    }
+    if (!stats.hdr_metadata_available) {
+      return "hdr_metadata_missing";
+    }
+    return "stream_hdr_disabled";
+  }
+
+  std::string hdr_downgrade_message(const stats_t &stats) {
+    const auto reason = hdr_downgrade_reason(stats);
+    if (reason == "none") {
+      return {};
+    }
+    if (reason == "display_not_hdr") {
+      return "The client requested HDR, but the active capture display is not reporting HDR. Polaris is streaming 10-bit SDR, not HDR.";
+    }
+    if (reason == "hdr_metadata_missing") {
+      return "The client requested HDR, but the active capture display did not expose HDR10 metadata. Polaris is streaming 10-bit SDR, not HDR.";
+    }
+    return "The client requested HDR, but Polaris did not advertise HDR for this stream. Polaris is streaming 10-bit SDR, not HDR.";
   }
 
   void update_stream_active(bool active, const std::string &client_name, const std::string &client_ip) {
