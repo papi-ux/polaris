@@ -401,6 +401,21 @@ TEST_F(PairingAccessPresetTest, StoredAccessPresetOverridesFirstPairFullDefault)
   EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
 }
 
+TEST_F(PairingAccessPresetTest, NovaTrustedPairGetsGameControlForAdditionalClient) {
+  auto first = successful_pairing_session("legacy-first");
+  complete_successful_pairing(first);
+
+  auto nova = successful_pairing_session("nova-retroid");
+  nova.client.family_hint = "nova";
+  complete_successful_pairing(nova);
+
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 2);
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_all));
+  EXPECT_EQ(clients[1]["client_family"].get<std::string>(), "nova");
+  EXPECT_EQ(clients[1]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
+  EXPECT_NE(static_cast<uint32_t>(crypto::PERM::_game_control & crypto::PERM::launch), 0U);
+}
 TEST_F(PairingAccessPresetTest, LegacyPairingKeepsFirstFullThenStandardBehavior) {
   auto first = successful_pairing_session("legacy-first");
   complete_successful_pairing(first);
