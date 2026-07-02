@@ -205,7 +205,7 @@ TEST(GamepadIsolationTests, SdlEnvPrefixUsesShellSafeQuoting) {
   EXPECT_EQ(expected, command_with_sdl_env_prefix("steam --gamepadui", plan));
 }
 
-TEST(GamepadIsolationTests, RegisteredVirtualNodesKeepStrictWrapperActiveWhenNoHostPadIsVisibleYet) {
+TEST(GamepadIsolationTests, NoHostPhysicalControllersLeaveLaunchUnwrappedEvenWhenVirtualNodesAreRegistered) {
   const auto devices = classify_devices({
     gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea}),
   });
@@ -217,13 +217,14 @@ TEST(GamepadIsolationTests, RegisteredVirtualNodesKeepStrictWrapperActiveWhenNoH
   );
   const auto command = command_with_headless_gamepad_isolation("steam --gamepadui", plan);
 
-  EXPECT_EQ(isolation_mode_e::strict_bwrap, plan.mode);
-  EXPECT_TRUE(plan.strict_applied());
-  EXPECT_TRUE(text_contains(command, "--tmpfs /run/udev"));
-  EXPECT_TRUE(text_contains(command, "--tmpfs /sys/class/input"));
-  EXPECT_TRUE(text_contains(command, "--dev-bind /dev/input/event42 /dev/input/event42"));
-  EXPECT_TRUE(text_contains(command, "--dev-bind /dev/input/js42 /dev/input/js42"));
-  EXPECT_TRUE(text_contains(plan.reason, "binding 2 registered Polaris virtual gamepad node"));
+  EXPECT_EQ(isolation_mode_e::disabled, plan.mode);
+  EXPECT_FALSE(plan.strict_applied());
+  EXPECT_EQ("steam --gamepadui", command);
+  EXPECT_TRUE(text_lacks(command, "--tmpfs /run/udev"));
+  EXPECT_TRUE(text_lacks(command, "--tmpfs /sys/class/input"));
+  EXPECT_TRUE(text_lacks(command, "--dev-bind /dev/input/event42 /dev/input/event42"));
+  EXPECT_TRUE(text_lacks(command, "--dev-bind /dev/input/js42 /dev/input/js42"));
+  EXPECT_TRUE(text_contains(plan.reason, "no host physical controllers visible"));
 }
 
 TEST(GamepadIsolationTests, StrictPlanWithNoRegisteredNodesStillHidesHostDevices) {
