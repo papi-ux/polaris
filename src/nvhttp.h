@@ -333,6 +333,10 @@ namespace nvhttp {
                                                    bool current_virtual_display,
                                                    const std::string &device_name,
                                                    const std::string &app_name);
+  nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
+                                                      const std::string &app_name,
+                                                      bool host_virtual_display_available,
+                                                      bool host_prefers_headless);
 #if defined(__linux__)
   proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
     const args_t &args,

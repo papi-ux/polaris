@@ -143,6 +143,7 @@ set(TEST_PAIRING_SOURCES
 
 set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_mode_contract.cpp
 )
 
 set(TEST_NETWORK_SOURCES

@@ -61,6 +61,7 @@ namespace platf::gamepad::isolation {
     std::string bubblewrap_path = "bwrap";
     std::vector<std::string> allowed_nodes;
     std::vector<std::string> masked_sysfs_paths;
+    std::vector<std::string> allowed_sysfs_paths;
     sdl_hint_plan_t fallback_sdl;
     std::string reason;
 
