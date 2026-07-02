@@ -1134,6 +1134,8 @@ namespace proc {
         "Desktop Steam is already active. Private launch is blocked unless you close desktop Steam first." :
         (active_desktop_game ? "A desktop game is already active on this host." : "");
 
+      policy.canLaunchPrivateStream = !policy.physicalDisplayRisk;
+
       if (mirror_desktop_explicit && policy.canMirrorDesktop) {
         policy.recommendedAction = "mirror_desktop";
         return policy;
