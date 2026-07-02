@@ -500,9 +500,9 @@ strict_gamepad_isolation_plan_t build_strict_gamepad_isolation_plan(
   const bool has_host_visible_controller = std::any_of(devices.begin(), devices.end(), [](const auto &device) {
     return device.classification == device_classification_e::host_visible;
   });
-  if (!has_host_visible_controller && plan.allowed_nodes.empty()) {
+  if (!has_host_visible_controller) {
     plan.mode = isolation_mode_e::disabled;
-    plan.reason = "gamepad_isolation: no host physical controllers or registered Polaris virtual nodes visible; leaving launch unwrapped";
+    plan.reason = "gamepad_isolation: no host physical controllers visible; leaving launch unwrapped so Polaris virtual gamepads keep native input and udev metadata";
     return plan;
   }
 
