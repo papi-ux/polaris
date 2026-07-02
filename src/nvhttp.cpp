@@ -3354,6 +3354,9 @@ namespace nvhttp {
       named_cert_p->client_family = client.family_hint;
       if (sess.pairing_perm) {
         named_cert_p->perm = *sess.pairing_perm;
+      } else if (boost::iequals(client.family_hint, "nova")) {
+        // Nova trusted-pair clients are game stream controllers, not passive viewers.
+        named_cert_p->perm = PERM::_game_control;
       }
       // If the device is the first one paired with the server, assign full permission.
       else if (client_root.named_devices.empty()) {
