@@ -518,6 +518,58 @@ namespace nvhttp {
 #endif
     }
 
+    nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
+                                              std::string_view app_name,
+                                              bool virtual_display_available,
+                                              bool prefers_headless) {
+      // preferred_mode reflects the per-game stored preference; recommended_mode reflects
+      // the Polaris-supported launch mode clients should choose for this host right now.
+      const std::string preferred_mode = app_prefers_virtual_display ? "host_virtual_display" : "headless_stream";
+      std::string recommended_mode = preferred_mode;
+      std::string mode_reason;
+
+      auto allowed_modes = nlohmann::json::array();
+      allowed_modes.push_back("headless_stream");
+      allowed_modes.push_back("desktop_display");
+      allowed_modes.push_back("windowed_stream");
+      if (virtual_display_available) {
+        allowed_modes.push_back("host_virtual_display");
+      }
+
+      const bool steam_big_picture = boost::iequals(boost::trim_copy(std::string {app_name}), "Steam Big Picture");
+
+      if (prefers_headless) {
+        recommended_mode = "headless_stream";
+        mode_reason = app_prefers_virtual_display ?
+          "This app prefers Host Virtual Display, but this Polaris host is already configured for Headless Stream, so Headless Stream is recommended." :
+          "Headless Stream is recommended because this Polaris host is already configured for headless streaming.";
+      } else if (app_prefers_virtual_display && virtual_display_available) {
+        recommended_mode = "host_virtual_display";
+        mode_reason = steam_big_picture ?
+          "Steam Big Picture is configured to prefer a dedicated virtual display on this host." :
+          "This app is configured to prefer a dedicated virtual display on the host.";
+      } else if (app_prefers_virtual_display && !virtual_display_available) {
+        recommended_mode = "headless_stream";
+        mode_reason =
+          "This app prefers Host Virtual Display, but Polaris does not currently have a virtual display backend available, so Headless Stream is recommended.";
+      } else if (virtual_display_available) {
+        recommended_mode = "headless_stream";
+        mode_reason =
+          "This app defaults to Headless Stream. Host Virtual Display is available when you want a dedicated display for the session.";
+      } else {
+        recommended_mode = "headless_stream";
+        mode_reason =
+          "This app defaults to Headless Stream on this host.";
+      }
+
+      nlohmann::json launch_mode;
+      launch_mode["preferred_mode"] = preferred_mode;
+      launch_mode["recommended_mode"] = recommended_mode;
+      launch_mode["allowed_modes"] = std::move(allowed_modes);
+      launch_mode["mode_reason"] = mode_reason;
+      return launch_mode;
+    }
+
     bool build_has_cuda() {
 #ifdef POLARIS_BUILD_CUDA
       return true;
@@ -2225,6 +2277,18 @@ namespace nvhttp {
     return build_session_health_json(stats, current_virtual_display, device_name, app_name);
   }
 
+  nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
+                                                      const std::string &app_name,
+                                                      bool host_virtual_display_available,
+                                                      bool host_prefers_headless) {
+    return build_launch_mode_contract(
+      app_prefers_virtual_display,
+      app_name,
+      host_virtual_display_available,
+      host_prefers_headless
+    );
+  }
+
 #if defined(__linux__)
   proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
     const args_t &args,
@@ -2497,50 +2561,12 @@ namespace nvhttp {
     }
 
     nlohmann::json launch_mode_contract_for_app(const proc::ctx_t &app) {
-      const bool app_prefers_virtual_display = app.virtual_display;
-      const std::string preferred_mode = app_prefers_virtual_display ? "host_virtual_display" : "headless_stream";
-      std::string recommended_mode = preferred_mode;
-      std::string mode_reason;
-
-      auto allowed_modes = nlohmann::json::array();
-      allowed_modes.push_back("headless_stream");
-      allowed_modes.push_back("desktop_display");
-      allowed_modes.push_back("windowed_stream");
-      if (host_virtual_display_available()) {
-        allowed_modes.push_back("host_virtual_display");
-      }
-
-      const bool steam_big_picture = boost::iequals(boost::trim_copy(app.name), "Steam Big Picture");
-
-      if (app_prefers_virtual_display && host_virtual_display_available()) {
-        recommended_mode = "host_virtual_display";
-        mode_reason = steam_big_picture ?
-          "Steam Big Picture is configured to prefer a dedicated virtual display on this host." :
-          "This app is configured to prefer a dedicated virtual display on the host.";
-      } else if (app_prefers_virtual_display && !host_virtual_display_available()) {
-        recommended_mode = "headless_stream";
-        mode_reason =
-          "This app prefers Host Virtual Display, but Polaris does not currently have a virtual display backend available, so Headless Stream is recommended.";
-      } else if (host_prefers_headless()) {
-        recommended_mode = "headless_stream";
-        mode_reason =
-          "Headless Stream is recommended because this Polaris host is already configured for headless streaming.";
-      } else if (host_virtual_display_available()) {
-        recommended_mode = "headless_stream";
-        mode_reason =
-          "This app defaults to Headless Stream. Host Virtual Display is available when you want a dedicated display for the session.";
-      } else {
-        recommended_mode = "headless_stream";
-        mode_reason =
-          "This app defaults to Headless Stream on this host.";
-      }
-
-      nlohmann::json launch_mode;
-      launch_mode["preferred_mode"] = preferred_mode;
-      launch_mode["recommended_mode"] = recommended_mode;
-      launch_mode["allowed_modes"] = std::move(allowed_modes);
-      launch_mode["mode_reason"] = mode_reason;
-      return launch_mode;
+      return build_launch_mode_contract(
+        app.virtual_display,
+        app.name,
+        host_virtual_display_available(),
+        host_prefers_headless()
+      );
     }
 
     nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {

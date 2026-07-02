@@ -188,6 +188,80 @@ namespace {
     return std::vector<std::string>(paths.begin(), paths.end());
   }
 
+  std::optional<std::string> virtual_input_sysfs_root(std::string_view sysfs_path) {
+    if (!is_safe_sysfs_path(sysfs_path)) {
+      return std::nullopt;
+    }
+
+    constexpr std::string_view input_dir_marker = "/input/";
+    const auto input_dir_pos = sysfs_path.find(input_dir_marker);
+    if (input_dir_pos == std::string_view::npos) {
+      return std::nullopt;
+    }
+
+    const auto input_device_start = input_dir_pos + input_dir_marker.size();
+    if (!starts_with(sysfs_path.substr(input_device_start), "input")) {
+      return std::nullopt;
+    }
+
+    auto input_device_end = sysfs_path.find("/", input_device_start);
+    if (input_device_end == std::string_view::npos) {
+      input_device_end = sysfs_path.size();
+    }
+
+    return std::string(sysfs_path.substr(0, input_device_end));
+  }
+
+  std::optional<std::string> input_class_sysfs_path_for_node(std::string_view node) {
+    constexpr std::string_view input_prefix = "/dev/input/";
+    if (!starts_with(node, input_prefix)) {
+      return std::nullopt;
+    }
+    if (!has_numeric_suffix(node, "/dev/input/event") && !has_numeric_suffix(node, "/dev/input/js")) {
+      return std::nullopt;
+    }
+    return std::string("/sys/class/input/") + std::string(node.substr(input_prefix.size()));
+  }
+
+  std::optional<std::string> hidraw_class_sysfs_path_for_node(std::string_view node) {
+    constexpr std::string_view dev_prefix = "/dev/";
+    if (!starts_with(node, dev_prefix) || !has_numeric_suffix(node, "/dev/hidraw")) {
+      return std::nullopt;
+    }
+    return std::string("/sys/class/hidraw/") + std::string(node.substr(dev_prefix.size()));
+  }
+
+  std::vector<std::string> virtual_gamepad_sysfs_bind_paths(
+    const std::vector<classified_device_t> &devices,
+    const std::vector<std::string> &allowed_nodes
+  ) {
+    std::set<std::string> paths;
+    std::set<std::string> allowed(allowed_nodes.begin(), allowed_nodes.end());
+
+    for (const auto &node : allowed_nodes) {
+      if (auto path = input_class_sysfs_path_for_node(node)) {
+        paths.insert(*path);
+      }
+      if (auto path = hidraw_class_sysfs_path_for_node(node)) {
+        paths.insert(*path);
+      }
+    }
+
+    for (const auto &classified : devices) {
+      if (classified.classification != device_classification_e::polaris_virtual) {
+        continue;
+      }
+      if (classified.device.event_node.empty() || !allowed.contains(classified.device.event_node)) {
+        continue;
+      }
+      if (auto root = virtual_input_sysfs_root(classified.device.sysfs_path)) {
+        paths.insert(*root);
+      }
+    }
+
+    return std::vector<std::string>(paths.begin(), paths.end());
+  }
+
   std::string event_sysfs_path(std::string_view event_node) {
     constexpr std::string_view input_prefix = "/dev/input/";
     if (!starts_with(event_node, input_prefix)) {
@@ -421,6 +495,17 @@ strict_gamepad_isolation_plan_t build_strict_gamepad_isolation_plan(
   plan.allowed_nodes = sanitized_virtual_nodes(registered_virtual_nodes);
   plan.masked_sysfs_paths = host_input_sysfs_mask_paths(devices);
 
+  plan.allowed_sysfs_paths = virtual_gamepad_sysfs_bind_paths(devices, plan.allowed_nodes);
+
+  const bool has_host_visible_controller = std::any_of(devices.begin(), devices.end(), [](const auto &device) {
+    return device.classification == device_classification_e::host_visible;
+  });
+  if (!has_host_visible_controller && plan.allowed_nodes.empty()) {
+    plan.mode = isolation_mode_e::disabled;
+    plan.reason = "gamepad_isolation: no host physical controllers or registered Polaris virtual nodes visible; leaving launch unwrapped";
+    return plan;
+  }
+
   if (!options.bubblewrap_available || !options.bubblewrap_usable) {
     const auto unavailable_reason = options.bubblewrap_available ?
                                       std::string("bubblewrap probe failed") :
@@ -487,6 +572,13 @@ std::string command_with_headless_gamepad_isolation(const std::string &command, 
 
   for (const auto &path : plan.masked_sysfs_paths) {
     wrapped += " --tmpfs ";
+    wrapped += path;
+  }
+
+  for (const auto &path : plan.allowed_sysfs_paths) {
+    wrapped += " --ro-bind-try ";
+    wrapped += path;
+    wrapped += " ";
     wrapped += path;
   }
 
@@ -582,6 +674,8 @@ strict_gamepad_isolation_plan_t prepare_headless_labwc_launch() {
                   << registered_nodes.size();
 
   if (plan.strict_applied()) {
+    BOOST_LOG(info) << plan.reason;
+  } else if (plan.mode == isolation_mode_e::disabled) {
     BOOST_LOG(info) << plan.reason;
   } else {
     BOOST_LOG(warning) << plan.reason;

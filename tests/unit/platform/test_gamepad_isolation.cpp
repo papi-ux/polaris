@@ -205,7 +205,7 @@ TEST(GamepadIsolationTests, SdlEnvPrefixUsesShellSafeQuoting) {
   EXPECT_EQ(expected, command_with_sdl_env_prefix("steam --gamepadui", plan));
 }
 
-TEST(GamepadIsolationTests, StrictPlanAppliesEvenWhenNoHostControllersCurrentlyVisible) {
+TEST(GamepadIsolationTests, RegisteredVirtualNodesKeepStrictWrapperActiveWhenNoHostPadIsVisibleYet) {
   const auto devices = classify_devices({
     gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea}),
   });
@@ -215,10 +215,15 @@ TEST(GamepadIsolationTests, StrictPlanAppliesEvenWhenNoHostControllersCurrentlyV
     {"/dev/input/event42", "/dev/input/js42"},
     strict_options()
   );
+  const auto command = command_with_headless_gamepad_isolation("steam --gamepadui", plan);
 
   EXPECT_EQ(isolation_mode_e::strict_bwrap, plan.mode);
   EXPECT_TRUE(plan.strict_applied());
-  EXPECT_TRUE(text_contains(plan.reason, "strict"));
+  EXPECT_TRUE(text_contains(command, "--tmpfs /run/udev"));
+  EXPECT_TRUE(text_contains(command, "--tmpfs /sys/class/input"));
+  EXPECT_TRUE(text_contains(command, "--dev-bind /dev/input/event42 /dev/input/event42"));
+  EXPECT_TRUE(text_contains(command, "--dev-bind /dev/input/js42 /dev/input/js42"));
+  EXPECT_TRUE(text_contains(plan.reason, "binding 2 registered Polaris virtual gamepad node"));
 }
 
 TEST(GamepadIsolationTests, StrictPlanWithNoRegisteredNodesStillHidesHostDevices) {
@@ -287,8 +292,10 @@ TEST(GamepadIsolationTests, VirtualNameAloneDoesNotCreateStrictBindWhenRegistryD
   auto virtual_pad = gamepad("Polaris X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea});
   virtual_pad.event_node = "/dev/input/event20";
 
+  auto host = gamepad("Logitech Gamepad F310", std::optional<uint16_t> {0x046d}, std::optional<uint16_t> {0xc216});
+  host.event_node = "/dev/input/event3";
   const auto plan = build_strict_gamepad_isolation_plan(
-    classify_devices({virtual_pad}),
+    classify_devices({host, virtual_pad}),
     {"/dev/input/event21"},
     strict_options()
   );
@@ -346,8 +353,10 @@ TEST(GamepadIsolationTests, FailedBubblewrapProbeFallsBackHonestlyToSdlHints) {
 TEST(GamepadIsolationTests, StrictWrapperRejectsMalformedVirtualNodesAndQuotesBwrapPath) {
   auto options = strict_options();
   options.bubblewrap_path = "/tmp/bwrap helper";
+  auto host = gamepad("Logitech Gamepad F310", std::optional<uint16_t> {0x046d}, std::optional<uint16_t> {0xc216});
+  host.event_node = "/dev/input/event3";
   const auto plan = build_strict_gamepad_isolation_plan(
-    classify_devices({gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
+    classify_devices({host, gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
     {"/dev/input/event9;touch /tmp/polaris-pwned", "/dev/input/js9", "/dev/hidraw9;echo nope", "/dev/hidraw9"},
     options
   );
@@ -367,8 +376,10 @@ TEST(GamepadIsolationTests, StrictWrapperRejectsMalformedVirtualNodesAndQuotesBw
 
 TEST(GamepadIsolationTests, StrictWrapperQuotesOriginalCommandSafely) {
   const auto quote = std::string(1, static_cast<char>(39));
+  auto host = gamepad("Logitech Gamepad F310", std::optional<uint16_t> {0x046d}, std::optional<uint16_t> {0xc216});
+  host.event_node = "/dev/input/event3";
   const auto plan = build_strict_gamepad_isolation_plan(
-    classify_devices({gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
+    classify_devices({host, gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
     {"/dev/input/event9"},
     strict_options()
   );
@@ -395,8 +406,10 @@ TEST(GamepadIsolationTests, StrictWrapperDoesNotExposeBroadInputOrHidrawPaths) {
 }
 
 TEST(GamepadIsolationTests, StrictWrapperHidesHostUdevAndInputSysfsMetadata) {
+  auto host = gamepad("Logitech Gamepad F310", std::optional<uint16_t> {0x046d}, std::optional<uint16_t> {0xc216});
+  host.event_node = "/dev/input/event3";
   const auto plan = build_strict_gamepad_isolation_plan(
-    classify_devices({gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
+    classify_devices({host, gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
     {"/dev/input/event9"},
     strict_options()
   );
@@ -426,12 +439,16 @@ TEST(GamepadIsolationTests, StrictWrapperMasksHostSysfsInputDeviceRoots) {
   const auto command = command_with_headless_gamepad_isolation("steam", plan);
 
   EXPECT_TRUE(text_contains(command, "--tmpfs /sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/input/input41"));
-  EXPECT_TRUE(text_lacks(command, "/sys/devices/virtual/input/input99"));
+  EXPECT_TRUE(text_contains(command, "--ro-bind-try /sys/devices/virtual/input/input99 /sys/devices/virtual/input/input99"));
+  EXPECT_TRUE(text_contains(command, "--ro-bind-try /sys/class/input/event99 /sys/class/input/event99"));
+  EXPECT_TRUE(text_contains(command, "--ro-bind-try /sys/class/input/js99 /sys/class/input/js99"));
 }
 
 TEST(GamepadIsolationTests, StrictWrapperMasksHostHidBusMetadata) {
+  auto host = gamepad("Logitech Gamepad F310", std::optional<uint16_t> {0x046d}, std::optional<uint16_t> {0xc216});
+  host.event_node = "/dev/input/event3";
   const auto plan = build_strict_gamepad_isolation_plan(
-    classify_devices({gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
+    classify_devices({host, gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea})}),
     {"/dev/input/event9"},
     strict_options()
   );
