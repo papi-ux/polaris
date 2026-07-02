@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <src/adaptive_bitrate.h>
 #include <src/ai_optimizer.h>
 #include <src/file_handler.h>
@@ -49,7 +51,31 @@ namespace {
     return "setsid steam -shutdown";
 #endif
   }
+
+  std::string read_source_file_for_contract(const char *relative_path) {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / relative_path;
+    std::ifstream in(path);
+    if (!in) {
+      return {};
+    }
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+  }
+
 }  // namespace
+
+TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRouted) {
+  const auto source = read_source_file_for_contract("src/nvhttp.cpp");
+  ASSERT_FALSE(source.empty());
+
+  EXPECT_NE(source.find("session_stop_v1"), std::string::npos);
+  EXPECT_NE(source.find("stop_allowed"), std::string::npos);
+  EXPECT_NE(source.find("polarisSessionStop"), std::string::npos);
+  EXPECT_NE(source.find("/polaris/v1/session/stop"), std::string::npos);
+  EXPECT_NE(source.find("session_token_matches_value"), std::string::npos);
+  EXPECT_NE(source.find("request_active_session_shutdown"), std::string::npos);
+}
 
 TEST(ProcessRuntimeConfigTests, DeviceDbBitrateStaysOutWhenAutoQualityOffAndMaxBitrateUnlocked) {
   const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(

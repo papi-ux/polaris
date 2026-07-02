@@ -2719,10 +2719,27 @@ namespace nvhttp {
       return util::from_view(get_arg(args, "watch", "0"));
     }
 
-    bool session_token_matches_request(const args_t &args) {
-      const auto expected_token = get_arg(args, "sessiontoken", "");
+    bool session_token_matches_value(std::string_view expected_token) {
       const auto active_token = proc::proc.get_session_token();
       return expected_token.empty() || active_token.empty() || crypto::constant_time_equals(expected_token, active_token);
+    }
+
+    bool session_token_matches_request(const args_t &args) {
+      return session_token_matches_value(get_arg(args, "sessiontoken", ""));
+    }
+
+    void request_active_session_shutdown() {
+      proc::proc.set_session_shutdown_requested(true);
+      rtsp_stream::terminate_sessions();
+
+      if (proc::proc.running() > 0) {
+        proc::proc.terminate();
+      } else {
+        proc::proc.set_session_shutdown_requested(false);
+      }
+
+      // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
+      display_device::revert_configuration();
     }
 
     void append_current_game_session_fields(pt::ptree &tree, const crypto::named_cert_t *named_cert_p) {
@@ -4513,17 +4530,8 @@ namespace nvhttp {
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
-    proc::proc.set_session_shutdown_requested(true);
-    rtsp_stream::terminate_sessions();
+    request_active_session_shutdown();
 
-    if (proc::proc.running() > 0) {
-      proc::proc.terminate();
-    } else {
-      proc::proc.set_session_shutdown_requested(false);
-    }
-
-    // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
-    display_device::revert_configuration();
   }
 
   void appasset(resp_https_t response, req_https_t request) {
@@ -4780,6 +4788,7 @@ namespace nvhttp {
       features["adaptive_bitrate_control"] = true;
       features["game_library"] = true;
       features["session_lifecycle"] = true;
+      features["session_stop_v1"] = true;
       features["device_profiles"] = true;
       features["stream_policy_v1"] = true;
       features["client_settings_v1"] = true;
@@ -4886,6 +4895,7 @@ namespace nvhttp {
         session_command_allowed &&
         proc::proc.allow_client_commands &&
         named_cert_p->allow_client_commands;
+      const bool session_stop_allowed = session_command_allowed;
 
       // Game info
       output["game_id"] = proc::proc.running();
@@ -4913,6 +4923,8 @@ namespace nvhttp {
       auto &controls = output["controls"];
       controls["host_tuning_allowed"] = host_tuning_allowed;
       controls["quit_allowed"] = quit_allowed;
+      controls["stop_allowed"] = session_stop_allowed;
+      controls["stop_endpoint"] = "/polaris/v1/session/stop";
       controls["shutdown_in_progress"] = shutdown_requested;
       controls["client_commands_enabled"] = proc::proc.allow_client_commands;
       controls["device_commands_enabled"] = named_cert_p->allow_client_commands;
@@ -5971,6 +5983,68 @@ namespace nvhttp {
       }
     };
 
+    auto polarisSessionStop = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert_p = get_verified_cert(request);
+      auto write_json = [&](const nlohmann::json &body, SimpleWeb::StatusCode code = SimpleWeb::StatusCode::success_ok) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(code, body.dump(), headers);
+      };
+
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      std::string expected_token;
+      try {
+        std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+        if (!body_str.empty()) {
+          const auto body = nlohmann::json::parse(body_str);
+          expected_token = body.value("session_token", body.value("sessiontoken", ""));
+        }
+      } catch (std::exception &e) {
+        write_json({{"status", false}, {"error", e.what()}}, SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+
+      if (!(named_cert_p->perm & PERM::launch)) {
+        write_json({{"status", false}, {"error", "Permission denied"}}, SimpleWeb::StatusCode::client_error_forbidden);
+        return;
+      }
+
+      const bool had_running_app = proc::proc.running() > 0;
+      const auto active_sessions = rtsp_stream::session_count();
+      if (had_running_app && !proc::proc.is_session_owner(named_cert_p->uuid)) {
+        write_json({{"status", false}, {"error", "The current session belongs to another client"}}, static_cast<SimpleWeb::StatusCode>(470));
+        return;
+      }
+      if (had_running_app && !session_token_matches_value(expected_token)) {
+        write_json({{"status", false}, {"error", "The requested session token does not match the active session"}}, static_cast<SimpleWeb::StatusCode>(470));
+        return;
+      }
+
+      const auto game = proc::proc.get_last_run_app_name();
+      const auto session_token = proc::proc.get_session_token();
+      const bool stopped = had_running_app || active_sessions > 0;
+      if (stopped) {
+        confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+        confighttp::emit_session_event("stream_stopping", "Stopping session");
+        request_active_session_shutdown();
+      }
+
+      nlohmann::json output;
+      output["status"] = true;
+      output["stopped"] = stopped;
+      output["had_running_app"] = had_running_app;
+      output["terminated_streams"] = active_sessions;
+      output["game"] = game;
+      output["session_token"] = session_token;
+      output["state"] = confighttp::get_session_state();
+      write_json(output);
+    };
+
     // Client session report — Nova sends quality summary at session end
     auto polarisSessionReport = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
@@ -6460,6 +6534,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;
     https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/client-settings$"]["POST"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/stream-policy$"]["GET"] = polarisStreamPolicy;
