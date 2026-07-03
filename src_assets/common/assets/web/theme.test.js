@@ -55,7 +55,7 @@ describe('theme skin registry', () => {
 
     expect(portableChromeCss).toContain('Moonlight-grey early-2000s')
     expect(portableChromeCss).toContain('--color-background: #b8c1cc')
-    expect(portableChromeCss).toContain('--color-accent: #557395')
+    expect(portableChromeCss).toContain('--color-accent: #2f64b3')
     expect(portableChromeCss).toContain('linear-gradient(180deg, rgba(224, 231, 238, 0.90)')
     expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.06)')
   })
@@ -95,6 +95,33 @@ describe('theme skin registry', () => {
     expect(contrastRatio(tokens.ice, tokens.surface)).toBeGreaterThanOrEqual(7)
     expect(contrastRatio('#315b45', tokens.surface)).toBeGreaterThanOrEqual(4.5)
     expect(contrastRatio(tokens.accent, tokens.surface)).toBeGreaterThanOrEqual(3)
+  })
+
+  it('makes Miami cyan/aqua the scoped hero accent without leaking into other skins', () => {
+    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
+    const miamiCss = css.slice(css.indexOf('/* ── Miami Nebula Skin ── */'), css.indexOf('/* ── Portable Chrome Skin ── */'))
+    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
+    const dq = String.fromCharCode(34)
+
+    expect(miamiCss).toContain('--color-accent: #47f3ff')
+    expect(miamiCss).toContain('[data-theme=' + dq + 'miami' + dq + '] .sidebar-link.active')
+    expect(miamiCss).toContain('box-shadow: inset 2px 0 0 rgba(71, 243, 255, 0.92)')
+    expect(miamiCss).toContain('border-color: rgba(71, 243, 255, 0.36)')
+    expect(miamiCss).toContain('box-shadow: 0 0 18px rgba(71, 243, 255, 0.52)')
+    expect(portableChromeCss).not.toContain('--color-accent: #47f3ff')
+  })
+
+  it('moves Portable Chrome accents to subtle original PlayStation button colors', () => {
+    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
+    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
+
+    expect(portableChromeCss).toContain('--color-accent: #2f64b3')
+    expect(portableChromeCss).toContain('--portable-cross: #2f64b3')
+    expect(portableChromeCss).toContain('--portable-square: #9d679d')
+    expect(portableChromeCss).toContain('--portable-circle: #b8575f')
+    expect(portableChromeCss).toContain('--portable-triangle: #4f9a67')
+    expect(portableChromeCss).toContain('box-shadow: inset 2px 0 0 rgba(47, 100, 179, 0.90)')
+    expect(portableChromeCss).toContain('0 0 18px rgba(157, 103, 157, 0.20)')
   })
 
   it('applies non-default skins through the data-theme attribute', () => {
