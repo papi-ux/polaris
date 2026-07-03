@@ -14,7 +14,7 @@ what the host is actually doing.
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
-[Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Tour](#tour) · [Nova](#use-with-nova) · [Docs](#docs) · [FAQ](#faq) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [Roadmap](ROADMAP.md)
+[Features](#feature-matrix) · [Quick Start](#quick-start) · [Install](#install) · [Compatibility](#compatibility) · [Launch Modes](#launch-modes-explained) · [Tour](#tour) · [Nova](#use-with-nova) · [Support](#support-and-bug-reports) · [FAQ](#faq) · [Security](SECURITY.md) · [Changelog](docs/changelog.md) · [Roadmap](ROADMAP.md)
 
 **Support**: [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 
@@ -33,6 +33,26 @@ what the host is actually doing.
 
 > [!NOTE]
 > Start with **Headless Stream** if you want games to launch into a stream-only runtime without changing your KDE, GNOME, or wlroots desktop layout.
+
+## Feature Matrix
+
+| Feature | Status | Why it matters |
+|---|---|---|
+| Headless Stream runtime | Recommended path | Launches games into a stream-only compositor instead of rearranging your physical desktop |
+| Nova-aware launch contract | Supported | Lets Nova show Private Stream, Host Virtual Display, Mirror Desktop, watch/resume, and safety state before launch |
+| Mission Control | Supported | Shows runtime, capture path, encoder, clients, stream health, and host actions in one cockpit |
+| Portable Chrome web UI | Supported | v1.2 smoked graphite / dim Moonlight-grey interface with clearer panels and safer action feedback |
+| Game Control pairing preset | Supported | Trusted clients can browse, launch, and send input without broad server-admin permissions |
+| AI Auto Quality | Optional | Provider-configured tuning and recovery guidance; core streaming does not require AI or cloud services |
+| Browser Stream | Experimental | Chromium-oriented WebTransport/WebCodecs streaming path for browser testing |
+| HDR / Main10 | Conditional | Main10 SDR can work when requested; true HDR requires real HDR metadata from the active capture path |
+| VAAPI / software encode | Supported, less validated | Useful fallback paths, but NVIDIA/NVENC is still the most exercised release target |
+
+## Privacy and Local-First Defaults
+
+Polaris is self-hosted by default. Pairing keys, client permissions, library state, stream settings, and web credentials live on your host. Core GameStream/Moonlight-compatible streaming does not require a Polaris cloud account.
+
+AI Auto Quality is optional. If you enable it, Polaris uses the provider you configure, including local OpenAI-compatible endpoints such as Ollama or LM Studio. Keep it disabled if you want a purely local/non-AI host.
 
 ## Quick Start
 
@@ -72,13 +92,13 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 
 ## What is New in v1.2.0
 
-Polaris v1.2.0 focuses on Nova-ready private/headless streaming, Portable Chrome cockpit polish, safer launch contracts, and Linux input/capture hardening.
+Polaris v1.2.0 is about making Linux streaming feel less like ritual sacrifice and more like a controllable cockpit.
 
-- Portable Chrome gives the web cockpit a dim Moonlight-grey / smoked-silver skin with restrained green status accents.
-- Mission Control, Library staging, settings review, and host-affecting actions are easier to scan and safer to execute.
-- Nova pairing/session integration is stronger, including client settings, session status/stop surfaces, stream events, and launch-capable trusted-client permissions.
-- Private/headless launch policy is safer around desktop Steam, mirror-desktop intent, virtual gamepads, and strict gamepad isolation.
-- NVIDIA/Linux streaming diagnostics now make CUDA/GPU-native, DMA-BUF, virtual-display, and headless capture behavior clearer.
+- **Portable Chrome is the new visual baseline**: Mission Control now uses a smoked graphite / dim Moonlight-grey skin with restrained green status accents.
+- **Private streams are safer by default**: Polaris and Nova coordinate launch intent so handheld launches do not silently reuse desktop Steam or expose games on the physical monitor.
+- **Mission Control tells the truth**: stream quality, latency, FPS, packet loss, bitrate, capture path, runtime mode, and host-affecting actions are easier to scan and act on.
+- **Trusted Nova clients get the right permissions**: Game Control pairing can grant browse, launch, and input without broad clipboard, file-transfer, or server-command access.
+- **Linux capture diagnostics improved**: CUDA/GPU-native, DMA-BUF fallback, virtual-display preservation, VAAPI/headless behavior, and downgrade reasons are surfaced more clearly.
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
@@ -121,6 +141,16 @@ Detailed source builds, local Arch package builds, distro dependency lists, open
 | Standard Moonlight clients | Compatible | Core streaming works without Nova-specific UX |
 | Browser Stream | Experimental | Browser-based streaming path using WebTransport and WebCodecs; best tested on Chromium-family browsers |
 
+### Best-tested first setup
+
+If you want the smoothest first run, start here:
+
+- **Host distro**: Fedora 44 or Arch Linux / CachyOS.
+- **GPU path**: NVIDIA with NVENC.
+- **Desktop**: KDE Plasma Wayland is the most exercised daily-driver setup, but Headless Stream launches its own compositor and is not KDE-only.
+- **Config**: `headless_mode = enabled`, `linux_use_cage_compositor = enabled`, `linux_prefer_gpu_native_capture = disabled`.
+- **Client**: Nova on an ARM64 Android handheld / Android TV device, or a standard Moonlight client for the core stream path.
+
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
@@ -143,6 +173,29 @@ Polaris takes a different route:
 - **Headless-first Linux path**: designed to avoid HDMI dummy plugs, display scripts, and manual compositor surgery
 - **Practical control surface**: live preview, telemetry, quality controls, library management, and pairing in one UI
 - **Shared viewing**: additional clients can watch an active stream without stealing ownership
+
+## Launch Modes Explained
+
+Polaris is explicit about launch intent because a request to stream the game can mean several very different things on a Linux host.
+
+| Mode | What it does | Use when |
+|---|---|---|
+| Private Headless Stream | Starts the game inside the isolated Polaris headless runtime | You want the safest handheld/remote play path without touching the real desktop |
+| Host Virtual Display | Uses a separate host-side virtual display path when available | You want display-like behavior without reusing the physical monitor |
+| Mirror Desktop | Streams the existing desktop/session | You intentionally want to show or control what is on the host right now |
+| Direct Steam/Game launch | Starts a specific app/game through the configured runtime | You know what you want to launch and want the shortest path |
+| Watch Stream | Lets another client view an already active compatible session | You want a second device to observe without stealing ownership |
+
+Nova can show these choices before launch when Polaris exposes the capability contract. Standard Moonlight clients still work, but they usually cannot explain this decision tree before the stream starts.
+
+## For Sunshine, Apollo, and Moonlight Users
+
+Polaris keeps the GameStream/Moonlight-compatible protocol lineage while changing the Linux host model.
+
+- You do **not** need to uninstall Sunshine or Apollo to try Polaris, but do not run multiple hosts on the same default ports at the same time.
+- Standard Moonlight clients work for core pairing, app launch, and streaming.
+- Nova unlocks richer Polaris-specific UX: launch-mode choice, watch/resume state, live tuning, Polaris Sync, and clearer health diagnostics.
+- Polaris focuses on Linux host safety: headless runtime, capture-path truth, input isolation, and cleanup that does not treat your desktop as disposable confetti.
 
 ## Use with Nova
 
@@ -384,6 +437,19 @@ Then avoid MangoHud on Steam Big Picture and Steam/Proton launches. Polaris and 
 The AI optimizer is optional and disabled by default. When enabled, it sends device specs, app metadata, and recent session history to the provider you configure: Anthropic, OpenAI, Gemini, or a local OpenAI-compatible endpoint such as Ollama or LM Studio. Results are cached locally.
 
 </details>
+
+## Support and Bug Reports
+
+Great bug reports save everyone time. When reporting a Polaris host issue, include as much of this as you can without posting secrets:
+
+- Distro and version, GPU model, driver version, desktop/compositor, and whether the session is Wayland or X11.
+- Client used: Nova, Moonlight, Browser Stream, or another compatible client.
+- Launch mode: Private Headless Stream, Host Virtual Display, Mirror Desktop, direct app, or watch/resume.
+- Encoder path and whether Headless Stream is enabled.
+- Relevant logs from `journalctl --user -u polaris` around the failed launch or stream.
+- Screenshots or recordings for UI/video/input issues. Redact hostnames, tokens, LAN-only URLs, and pairing material if needed.
+
+If you are comparing clients, say whether the same host/app works differently in Nova and in a standard Moonlight client. That comparison is extremely useful for separating host bugs from client UI bugs.
 
 ## AI Transparency
 
