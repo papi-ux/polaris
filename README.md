@@ -3,7 +3,7 @@
 <img src="docs/screenshots/logo-polaris.svg" width="72" alt="Polaris" />
 
 # Polaris
-
+1 synapse or 2 backup now.
 **Self-hosted game streaming for Linux.**
 
 Stream PC games to Nova and Moonlight clients without letting the stream take
@@ -398,14 +398,7 @@ Contributions are welcome, especially focused fixes, docs, translations, packagi
 > [!NOTE]
 > The web UI lives in `src_assets/common/assets/web/` and uses Vue 3 with Tailwind CSS v4. The backend lives in `src/`. CMake builds both together.
 
-## Donate
-
-Polaris is a spare-time project built to make Linux game streaming safer,
-clearer, and easier to trust. If it becomes part of your setup, that alone makes my day, donations are appreciated but never expected. They help with my actual coffee budget, which coffee obviously keeps the project moving. Bug reports, testing notes, and thoughtful feedback help too.
-
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=for-the-badge&logo=ko-fi&labelColor=1a1a2e)](https://ko-fi.com/papiux)
-&nbsp;
-[![PayPal](https://img.shields.io/badge/PayPal-Donate-7c73ff?style=for-the-badge&logo=paypal&labelColor=1a1a2e)](https://www.paypal.com/donate/?hosted_button_id=KD9R5KLYF6GN4)
+Polaris is a spare-time project built to make Linux game streaming safer, clearer, and easier to trust. If it becomes part of your setup, that alone makes my day. Bug reports, testing notes, and thoughtful feedback help too.
 
 ## License
 
