@@ -20,11 +20,10 @@ what the host is actually doing.
 
 <br/>
 
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/polaris-showcase.gif" width="820" />
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/polaris-showcase-oled.gif" width="820" />
-  <img src="docs/screenshots/polaris-showcase-oled.gif" width="820" alt="Polaris Portable Chrome Mission Control, Library, Settings, Pairing, and Troubleshooting views" />
-</picture>
+<video width="820" autoplay muted loop playsinline controls poster="docs/screenshots/mission-control-tour.png">
+  <source src="docs/screenshots/mission-control-tour.webm" type="video/webm" />
+  <a href="docs/screenshots/mission-control-tour.webm">Watch the Polaris Mission Control dashboard demo</a>
+</video>
 
 </div>
 
@@ -230,9 +229,10 @@ The Obtainium shortcut is prefiltered to Nova's public `app-nonRoot_game-arm64-v
 Polaris is built around a dashboard that answers the questions stream hosts usually have to reverse-engineer from logs: what runtime is active, what capture path is in use, whether the GPU-native path survived, and how much headroom remains.
 
 <p align="center">
-  <picture>
-    <img src="docs/screenshots/mission-control-tour.png" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
-  </picture>
+  <video width="900" autoplay muted loop playsinline controls poster="docs/screenshots/mission-control-tour.png">
+    <source src="docs/screenshots/mission-control-tour.webm" type="video/webm" />
+    <a href="docs/screenshots/mission-control-tour.webm">Watch the Polaris Mission Control dashboard demo</a>
+  </video>
 </p>
 
 ### Live Session View
@@ -240,9 +240,10 @@ Polaris is built around a dashboard that answers the questions stream hosts usua
 When a stream is active, Polaris shifts from setup to operations: preview, charts, runtime-path telemetry, recording controls, and recommendations are visible in one place.
 
 <p align="center">
-  <picture>
-    <img src="docs/screenshots/live-session-tour.gif" width="900" alt="Polaris live streaming view with preview, charts, runtime path, and recording controls" />
-  </picture>
+  <video width="900" autoplay muted loop playsinline controls poster="docs/screenshots/live-session-tour.png">
+    <source src="docs/screenshots/live-session-tour.webm" type="video/webm" />
+    <a href="docs/screenshots/live-session-tour.webm">Watch the Polaris live session operations demo</a>
+  </video>
 </p>
 
 ### Library and Pairing
@@ -256,9 +257,10 @@ When a stream is active, Polaris shifts from setup to operations: preview, chart
       <p><strong>Game library</strong><br/>Import from Steam, Lutris, and Heroic, attach art, organize categories, and tune launch behavior.</p>
     </td>
     <td width="50%" valign="top">
-      <picture>
-        <img src="docs/screenshots/pairing-tour.png" width="100%" alt="Polaris pairing interface with QR code, trusted pairing, and device management" />
-      </picture>
+      <video width="100%" autoplay muted loop playsinline controls poster="docs/screenshots/pairing-tour.png">
+        <source src="docs/screenshots/pairing-tour.webm" type="video/webm" />
+        <a href="docs/screenshots/pairing-tour.webm">Watch the Polaris pairing flow demo</a>
+      </video>
       <p><strong>Pairing</strong><br/>Use Trusted Pair (TOFU), QR for Nova, or manual PIN pairing for standard Moonlight clients.</p>
     </td>
   </tr>
