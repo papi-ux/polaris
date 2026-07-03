@@ -338,6 +338,7 @@ const tabs = ref([
       "motion_as_ds4": "enabled",
       "touchpad_as_ds4": "enabled",
       "ds5_inputtino_randomize_mac": "enabled",
+      "headless_gamepad_isolation": "enabled",
       "back_button_timeout": -1,
       "keyboard": "enabled",
       "key_repeat_delay": 500,

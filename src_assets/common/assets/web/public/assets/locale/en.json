@@ -363,6 +363,8 @@
     "gamepad_manual": "Manual DS4 options",
     "gamepad_x360": "X360 (Xbox 360)",
     "gamepad_xone": "XOne (Xbox One)",
+    "headless_gamepad_isolation": "Isolate Host Gamepads in Headless Streams",
+    "headless_gamepad_isolation_desc": "Prevents controllers physically connected to the host from appearing inside private headless streams. Disable only when you intentionally use a host-wired controller, such as a DualSense for haptics or adaptive triggers.",
     "global_prep_cmd": "Command Preparations",
     "global_prep_cmd_desc": "Configure a list of commands to be executed before or after running any application. If any of the specified preparation commands fail, the application launch process will be aborted.",
     "global_state_cmd": "Resume/Pause Commands",

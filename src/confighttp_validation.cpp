@@ -132,6 +132,7 @@ namespace confighttp::validation {
       "file_state"sv,
       "forward_rumble"sv,
       "gamepad"sv,
+      "headless_gamepad_isolation"sv,
       "global_prep_cmd"sv,
       "global_state_cmd"sv,
       "hdr_mode"sv,

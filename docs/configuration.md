@@ -45,6 +45,7 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
 | `linux_prefer_gpu_native_capture` | `disabled` | Keep Headless Stream as the first validation path; enable only after testing GPU-native capture on your stack |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
+| `headless_gamepad_isolation` | `enabled` | Hide host-connected gamepads from private headless streams; disable only when you intentionally want a wired host controller visible inside the stream |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |

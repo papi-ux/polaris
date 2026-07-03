@@ -227,6 +227,29 @@ TEST(GamepadIsolationTests, NoHostPhysicalControllersLeaveLaunchUnwrappedEvenWhe
   EXPECT_TRUE(text_contains(plan.reason, "no host physical controllers visible"));
 }
 
+TEST(GamepadIsolationTests, DisabledHeadlessHostControllerIsolationLeavesLaunchUnwrapped) {
+  auto host = gamepad("Sony DualSense Wireless Controller", std::optional<uint16_t> {0x054c}, std::optional<uint16_t> {0x0ce6});
+  host.event_node = "/dev/input/event7";
+
+  auto options = strict_options();
+  options.enabled = false;
+
+  const auto plan = build_strict_gamepad_isolation_plan(
+    classify_devices({host}),
+    {},
+    options
+  );
+  const auto command = command_with_headless_gamepad_isolation("steam --gamepadui", plan);
+
+  EXPECT_EQ(isolation_mode_e::disabled, plan.mode);
+  EXPECT_FALSE(plan.strict_applied());
+  EXPECT_FALSE(plan.fallback_applied());
+  EXPECT_EQ("steam --gamepadui", command);
+  EXPECT_TRUE(text_lacks(command, "bwrap"));
+  EXPECT_TRUE(text_lacks(command, "SDL_GAMECONTROLLER_IGNORE_DEVICES"));
+  EXPECT_TRUE(text_contains(plan.reason, "disabled by config"));
+}
+
 TEST(GamepadIsolationTests, StrictPlanWithNoRegisteredNodesStillHidesHostDevices) {
   auto host = gamepad("Microsoft X-Box One pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea});
   host.event_node = "/dev/input/event3";
