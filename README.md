@@ -68,15 +68,15 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What's New in v1.1.0
+## What is New in v1.2.0
 
-Polaris `v1.1.0` focuses on web-console polish, Library workflows, safer pairing defaults, and NVENC split-frame hardening.
+Polaris v1.2.0 focuses on Nova-ready private/headless streaming, Portable Chrome cockpit polish, safer launch contracts, and Linux input/capture hardening.
 
-- Mission Control and Library screens are easier to scan, with cleaner degraded-state handling, app editing, and import flow polish.
-- Auto Quality labels now use clearer stream-profile language across the web UI.
-- Pairing can apply the new `Game Control` access preset up front, giving Nova and Moonlight devices launch plus input permissions without clipboard, file transfer, or server-command access.
-- NVENC split-frame encoding remains experimental, and the disabled default now explicitly maps to FFmpeg's disabled split-frame value when supported.
-
+- Portable Chrome gives the web cockpit a dim Moonlight-grey / smoked-silver skin with restrained green status accents.
+- Mission Control, Library staging, settings review, and host-affecting actions are easier to scan and safer to execute.
+- Nova pairing/session integration is stronger, including client settings, session status/stop surfaces, stream events, and launch-capable trusted-client permissions.
+- Private/headless launch policy is safer around desktop Steam, mirror-desktop intent, virtual gamepads, and strict gamepad isolation.
+- NVIDIA/Linux streaming diagnostics now make CUDA/GPU-native, DMA-BUF, virtual-display, and headless capture behavior clearer.
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install

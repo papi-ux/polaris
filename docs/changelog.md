@@ -7,16 +7,24 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.2.0 - 2026-07-03
+
+Feature release focused on Nova-ready private/headless streaming, Portable Chrome cockpit polish, safer launch contracts, Linux input/capture hardening, and broader package coverage.
+
 - Added the Portable Chrome web theme with a dimmer Moonlight-grey early-2000s retro-futurist skin, stronger chrome panel depth, restrained green status accents, and generic theme-toggle cycling across every registered skin
-- Improved `npm run smoke:web` so release smoke gates can target live Polaris or built static web assets, check hashed JS/CSS assets plus the unauthenticated login page, and report a clear preflight when the live HTTPS server is not running
+- Improved npm run smoke:web so release smoke gates can target live Polaris or built static web assets, check hashed JS/CSS assets plus the unauthenticated login page, and report a clear preflight when the live HTTPS server is not running
 - Added a guided AI Auto Quality optimizer setup checklist with clearer provider/auth/runtime cards and actionable draft test feedback
-- Polished v1.1.1 accessibility/mobile readiness with named icon controls, live status regions, trapped confirmation-dialog focus, and non-sticky handheld review bars
+- Polished release accessibility/mobile readiness with named icon controls, live status regions, trapped confirmation-dialog focus, and non-sticky handheld review bars
 - Polished Mission Control live-session hierarchy with a stronger top summary for stream quality, latency, FPS, loss, bitrate, capture path, and runtime mode plus collapsible secondary live panels
 - Added a sticky Library import staging summary and review drawer with source counts, per-game removal, clear-all staging, and already-imported confirmation
 - Reduced idle web console polling pressure by deduplicating overlapping system/stream stats fetches and backing off transient fallback failures
 - Added a Settings pending-changes review drawer with safe before/after values, save/apply impact labels, jump links, and per-setting reset controls
 - Added confirmation dialogs and async toast feedback for host-affecting web actions such as disconnecting clients, recovery controls, stale display cleanup, and restart-sensitive quick toggles
-- Hardened Linux lock-screen dismissal so a failed `loginctl unlock-session` attempt continues through other graphical user sessions before falling back to `loginctl unlock-sessions`
+- Hardened Linux lock-screen dismissal so a failed loginctl unlock-session attempt continues through other graphical user sessions before falling back to loginctl unlock-sessions
+- Added Polaris v1 client/session surfaces for Nova: client settings advertisement, session status/stop integration, stream event queueing, and paired-client launch/input permission hardening
+- Hardened private/headless launch policy around desktop Steam, mirror-desktop intent, strict gamepad isolation, host virtual-gamepad metadata, and headless bwrap setup
+- Improved NVIDIA/Linux capture contracts with CUDA/GPU-native capability checks, DMA-BUF fallback diagnostics, virtual display output preservation, and headless VAAPI capture reinitialization
+- Added openSUSE Tumbleweed build coverage and refreshed package/release workflows for the current Fedora, Ubuntu, and Arch asset line
 
 ## v1.1.0
 
