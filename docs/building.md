@@ -1,11 +1,11 @@
 # Building Polaris
 
 Polaris is a Linux-first host today. The most validated install paths are the Fedora RPM and Arch
-package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). Source builds
-remain the right path for other Debian-family distros and local development, and Arch also supports
-a local package-build flow in addition to the published package asset. Bazzite can use the matching
-Fedora RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both of those package paths
-need broader real-hardware validation.
+package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). CachyOS and
+most pacman-compatible Arch derivatives should start with the Arch package path. Bazzite can use the
+matching Fedora RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both package paths
+need broader real-hardware validation. openSUSE Tumbleweed is source-build supported with a dedicated
+[openSUSE guide](openSUSE.md); other distros remain source-build/community-validation oriented.
 
 ## Release packages
 
@@ -44,8 +44,22 @@ systemctl --user enable --now polaris
 
 The web UI will be available at `https://localhost:47990`.
 
-See the [Bazzite install guide](bazzite.md) and [Ubuntu install guide](ubuntu.md) for caveats,
-fallback paths, and validation notes before using either experimental path.
+See the [Bazzite install guide](bazzite.md), [Ubuntu install guide](ubuntu.md), and
+[openSUSE build guide](openSUSE.md) for caveats, fallback paths, and validation notes before using
+those less-turnkey paths.
+
+### Distro compatibility buckets
+
+| Host distro | Current path | Notes |
+| --- | --- | --- |
+| Fedora 42/43/44 | Published RPM assets | Most validated package path. |
+| Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
+| CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
+| Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage, Steam/Game Mode needs more reports. |
+| Ubuntu 24.04 | Published DEB asset | Experimental tester package; broader desktop/GPU coverage needed. |
+| openSUSE Tumbleweed | Source build | Dedicated guide and CI build coverage; no published release asset yet. |
+| Debian-family other than Ubuntu 24.04 | Source build | No general Debian package asset yet. |
+| openSUSE Leap, NixOS, Gentoo, custom hosts | Source build/community validation | Please report distro, GPU, driver, compositor, package list, and stream runtime details. |
 
 ## Source Build
 
@@ -79,7 +93,7 @@ sudo dnf builddep -y packaging/linux/fedora/Polaris.spec
 sudo dnf install grim labwc wlr-randr xorg-x11-server-Xwayland xdpyinfo
 ```
 
-#### Arch
+#### Arch / CachyOS
 
 ```bash
 sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
@@ -89,6 +103,12 @@ sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
   miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \
   grim labwc wlr-randr xorg-xwayland xorg-xdpyinfo cuda
 ```
+
+CachyOS should use the same package/dependency family first. If a CachyOS kernel, NVIDIA/CUDA stack, or pacman package split behaves differently, include those details when opening an issue.
+
+#### openSUSE Tumbleweed
+
+Use the dedicated [openSUSE guide](openSUSE.md). The short version is: shared Boost is required, so configure with `-DBOOST_USE_STATIC=OFF`; AMD/VAAPI can build with CUDA disabled, while NVIDIA hosts should install CUDA and enable `-DPOLARIS_ENABLE_CUDA=ON`.
 
 ### Build and install
 
@@ -184,5 +204,6 @@ The public release assets are currently:
 - `Polaris-arch-x86_64.pkg.tar.zst`
 
 Bazzite installs use the matching Fedora RPM through `rpm-ostree` for now. Ubuntu 24.04 has a
-direct DEB package. Both still need broader validation; other Debian-family distro paths are still
-source-build oriented.
+direct DEB package. openSUSE Tumbleweed has source-build guidance and CI build coverage but no
+published release package asset yet. CachyOS should start with the Arch package path. Other distro
+paths are still source-build/community-validation oriented.

@@ -23,13 +23,13 @@ what the host is actually doing.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/polaris-showcase.gif" width="820" />
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/polaris-showcase-oled.gif" width="820" />
-  <img src="docs/screenshots/polaris-showcase-oled.gif" width="820" alt="Polaris dashboard, live session view, game library, and pairing flow" />
+  <img src="docs/screenshots/polaris-showcase-oled.gif" width="820" alt="Polaris Portable Chrome Mission Control, Library, Settings, Pairing, and Troubleshooting views" />
 </picture>
 
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42, Fedora 43, Fedora 44, and Arch Linux are the recommended package paths. Bazzite and Ubuntu 24.04 packages are available for testers, but they need more real-hardware coverage.
+> Polaris is a Linux host today. Fedora 42/43/44 and Arch Linux are the recommended package paths. CachyOS generally follows the Arch package path; Bazzite and Ubuntu 24.04 are tester package paths; openSUSE Tumbleweed builds from source with a dedicated guide.
 
 > [!NOTE]
 > Start with **Headless Stream** if you want games to launch into a stream-only runtime without changing your KDE, GNOME, or wlroots desktop layout.
@@ -46,7 +46,7 @@ sudo polaris --setup-host
 polaris
 ```
 
-### Arch Linux
+### Arch Linux / CachyOS
 
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
@@ -54,6 +54,8 @@ sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
 sudo polaris --setup-host
 polaris
 ```
+
+CachyOS and most pacman-compatible Arch derivatives should start with the Arch package path. If a derivative has dependency naming or runtime helper differences, fall back to the source/local package flow in [Building Polaris](docs/building.md).
 
 Open **https://localhost:47990/#/welcome**, create your web UI account, and pair a client. After credentials are created, **https://localhost:47990** opens the normal console.
 
@@ -89,11 +91,13 @@ Use the release package for your distro before considering source builds. Packag
 | Fedora 43 | `Polaris-fedora43-x86_64.rpm` from the latest release |
 | Fedora 44 | `Polaris-fedora44-x86_64.rpm` from the latest release |
 | Arch Linux | `Polaris-arch-x86_64.pkg.tar.zst` from the latest release |
+| CachyOS / Arch derivatives | Start with the Arch package; source/local package fallback if a derivative drifts |
 | Bazzite 44 | Layer the matching Fedora 44 RPM with `rpm-ostree`; see [Bazzite guide](docs/bazzite.md) |
 | Ubuntu 24.04 | `Polaris-ubuntu24.04-x86_64.deb` experimental tester path; see [Ubuntu guide](docs/ubuntu.md) |
-| Debian-family or custom host | Source build; see [Building Polaris](docs/building.md) |
+| openSUSE Tumbleweed | Source build; see [openSUSE guide](docs/openSUSE.md) |
+| Debian-family, Leap, NixOS, Gentoo, or custom host | Source build; see [Building Polaris](docs/building.md) |
 
-Detailed source builds, local Arch package builds, distro dependency lists, and Browser Stream build flags live in [docs/building.md](docs/building.md).
+Detailed source builds, local Arch package builds, distro dependency lists, openSUSE notes, and Browser Stream build flags live in [docs/building.md](docs/building.md).
 
 > [!WARNING]
 > Only grant `cap_sys_admin` with `sudo polaris --setup-host --enable-kms` when you actually need DRM/KMS capture. Polaris works fine without it on the default compositor and Headless Stream paths.
@@ -103,11 +107,14 @@ Detailed source builds, local Arch package builds, distro dependency lists, and 
 | Area | Status | Notes |
 |---|---|---|
 | Linux host OS | Supported | Polaris is Linux-first today |
-| Fedora 42/43/44 | Recommended | Official RPM assets |
+| Fedora 42/43/44 | Recommended | Official RPM assets and most validated release path |
 | Arch Linux | Recommended | Official package asset |
-| Bazzite | Experimental | Desktop Mode validated on NVIDIA with Headless Stream; real Steam/Game Mode needs more coverage |
-| Ubuntu 24.04 | Extremely experimental | DEB asset is available, but this path needs broader real-hardware validation |
-| Debian-family distros | Supported from source | Less turnkey than Fedora or Arch |
+| CachyOS / Arch derivatives | Expected via Arch package | Pacman-compatible derivatives should start here; report derivative-specific dependency/runtime gaps |
+| Bazzite | Experimental | Layer the Fedora RPM with `rpm-ostree`; Desktop Mode validated on NVIDIA with Headless Stream; real Steam/Game Mode needs more coverage |
+| Ubuntu 24.04 | Experimental tester path | DEB asset is available, but this path needs broader real-hardware validation |
+| openSUSE Tumbleweed | Source-build supported | Dedicated dependency/build guide and CI build coverage; no published release package asset yet |
+| Debian-family distros | Source-build oriented | Ubuntu 24.04 is the only direct DEB asset today |
+| Other Linux distros | Source-build/community validation | Bring distro, GPU, driver, compositor, and package details when reporting success or breakage |
 | NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
 | VAAPI / software encode | Supported | Works, but is less battle-tested than NVENC |
 | Nova for Android | Best experience | Full launch contract, watch mode, tuning, and richer live state |
@@ -117,8 +124,10 @@ Detailed source builds, local Arch package builds, distro dependency lists, and 
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
+- Fedora and Arch are the most validated package paths; CachyOS should use the Arch path first, but derivative-specific issues still need reports.
 - Bazzite support is experimental. Desktop Mode has NVIDIA validation with the recommended Headless Stream settings, while real Steam/Game Mode, AMD, and Steam Deck client flows need more hardware coverage.
-- Ubuntu 24.04 DEB packaging is extremely experimental; other Debian-family distros are still source-build oriented.
+- Ubuntu 24.04 DEB packaging is experimental; other Debian-family distros are still source-build oriented.
+- openSUSE Tumbleweed has source-build guidance and CI coverage, but no published release package asset yet; Leap and other RPM distros should start from source.
 - NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
 - Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova Android client.
 - MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.
@@ -169,7 +178,7 @@ Polaris is built around a dashboard that answers the questions stream hosts usua
 
 <p align="center">
   <picture>
-    <img src="docs/screenshots/mission-control-tour.gif" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
+    <img src="docs/screenshots/mission-control-tour.png" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
   </picture>
 </p>
 
@@ -189,13 +198,13 @@ When a stream is active, Polaris shifts from setup to operations: preview, chart
   <tr>
     <td width="50%" valign="top">
       <picture>
-        <img src="docs/screenshots/game-library-tour.gif" width="100%" alt="Polaris game library with imported games, cover art, and categories" />
+        <img src="docs/screenshots/game-library-tour.png" width="100%" alt="Polaris game library with imported games, cover art, and categories" />
       </picture>
       <p><strong>Game library</strong><br/>Import from Steam, Lutris, and Heroic, attach art, organize categories, and tune launch behavior.</p>
     </td>
     <td width="50%" valign="top">
       <picture>
-        <img src="docs/screenshots/pairing-tour.gif" width="100%" alt="Polaris pairing interface with QR code, trusted pairing, and device management" />
+        <img src="docs/screenshots/pairing-tour.png" width="100%" alt="Polaris pairing interface with QR code, trusted pairing, and device management" />
       </picture>
       <p><strong>Pairing</strong><br/>Use Trusted Pair (TOFU), QR for Nova, or manual PIN pairing for standard Moonlight clients.</p>
     </td>
@@ -259,6 +268,7 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
+
 > [!TIP]
 > With Headless Stream you generally do not need KDE window rules, `kscreen-doctor` scripts, HDMI dummy plugs, or manual portal juggling. Turn on the recommended stream runtime and let Polaris manage the compositor, app routing, and input isolation.
 
@@ -271,6 +281,7 @@ Full config tables, AI provider examples, HDR notes, and credential recovery ste
 | [Runtime and Streaming Model](docs/runtime.md) | Headless Stream, capture/encoder paths, Browser Stream, session lifecycle, HDR/Main10 behavior |
 | [Configuration](docs/configuration.md) | Config file paths, common options, AI provider settings, credential reset |
 | [Building Polaris](docs/building.md) | Source builds, local packages, distro dependencies, Browser Stream build flags |
+| [openSUSE Build Guide](docs/openSUSE.md) | Tumbleweed dependency list, shared Boost notes, optional local RPM build |
 | [Troubleshooting](docs/troubleshooting.md) | Runtime logs, capture fallbacks, audio/session issues |
 | [Bazzite Install Guide](docs/bazzite.md) | Bazzite layering, validation status, rollback, Game Mode notes |
 | [Ubuntu Install Guide](docs/ubuntu.md) | Ubuntu DEB status, source fallback, validation notes |
