@@ -51,6 +51,7 @@ namespace platf::gamepad::isolation {
   };
 
   struct strict_isolation_options_t {
+    bool enabled = true;
     bool bubblewrap_available = false;
     bool bubblewrap_usable = true;
     std::string bubblewrap_path = "bwrap";

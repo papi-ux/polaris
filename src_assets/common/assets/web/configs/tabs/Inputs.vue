@@ -100,6 +100,13 @@ const config = ref(props.config)
           </div>
         </details>
       </template>
+        <Checkbox class="mb-3"
+                  v-if="platform === 'linux'"
+                  id="headless_gamepad_isolation"
+                  locale-prefix="config"
+                  v-model="config.headless_gamepad_isolation"
+                  default="true"
+        ></Checkbox>
       </template>
 
       <div class="mb-3" v-if="config.controller === 'enabled'">
