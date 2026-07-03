@@ -21,9 +21,7 @@ what the host is actually doing.
 <br/>
 
 <picture>
-  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/polaris-showcase.gif" width="820" />
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/polaris-showcase-oled.gif" width="820" />
-  <img src="docs/screenshots/polaris-showcase-oled.gif" width="820" alt="Polaris Portable Chrome Mission Control, Library, Settings, Pairing, and Troubleshooting views" />
+  <img src="docs/screenshots/mission-control-tour.gif" width="820" alt="Animated Polaris Mission Control dashboard demo with quick controls, GPU gauges, recent games, and system status" />
 </picture>
 
 </div>
@@ -231,7 +229,7 @@ Polaris is built around a dashboard that answers the questions stream hosts usua
 
 <p align="center">
   <picture>
-    <img src="docs/screenshots/mission-control-tour.png" width="900" alt="Polaris Mission Control dashboard with quick controls, GPU gauges, recent games, and system status" />
+    <img src="docs/screenshots/mission-control-tour.gif" width="900" alt="Animated Polaris Mission Control dashboard demo with quick controls, GPU gauges, recent games, and system status" />
   </picture>
 </p>
 
@@ -241,7 +239,7 @@ When a stream is active, Polaris shifts from setup to operations: preview, chart
 
 <p align="center">
   <picture>
-    <img src="docs/screenshots/live-session-tour.gif" width="900" alt="Polaris live streaming view with preview, charts, runtime path, and recording controls" />
+    <img src="docs/screenshots/live-session-tour.gif" width="900" alt="Animated Polaris live streaming view with preview, charts, runtime path, and recording controls" />
   </picture>
 </p>
 
@@ -257,7 +255,7 @@ When a stream is active, Polaris shifts from setup to operations: preview, chart
     </td>
     <td width="50%" valign="top">
       <picture>
-        <img src="docs/screenshots/pairing-tour.png" width="100%" alt="Polaris pairing interface with QR code, trusted pairing, and device management" />
+        <img src="docs/screenshots/pairing-tour.gif" width="100%" alt="Animated Polaris pairing interface with QR code, trusted pairing, and device management" />
       </picture>
       <p><strong>Pairing</strong><br/>Use Trusted Pair (TOFU), QR for Nova, or manual PIN pairing for standard Moonlight clients.</p>
     </td>
