@@ -244,6 +244,7 @@ namespace config {
     bool motion_as_ds4;
     bool touchpad_as_ds4;
     bool ds5_inputtino_randomize_mac;
+    bool headless_gamepad_isolation;
 
     bool keyboard;
     bool mouse;

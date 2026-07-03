@@ -3,6 +3,7 @@
  * @brief Linux gamepad visibility classification for headless labwc launch diagnostics.
  */
 #include "inputtino_gamepad_isolation.h"
+#include "src/config.h"
 #include "src/logging.h"
 
 #include <algorithm>
@@ -497,6 +498,13 @@ strict_gamepad_isolation_plan_t build_strict_gamepad_isolation_plan(
 
   plan.allowed_sysfs_paths = virtual_gamepad_sysfs_bind_paths(devices, plan.allowed_nodes);
 
+  if (!options.enabled) {
+    plan.mode = isolation_mode_e::disabled;
+    plan.reason = "gamepad_isolation: strict headless host controller isolation disabled by config; leaving host controllers visible to the launched app";
+    plan.fallback_sdl = {};
+    return plan;
+  }
+
   const bool has_host_visible_controller = std::any_of(devices.begin(), devices.end(), [](const auto &device) {
     return device.classification == device_classification_e::host_visible;
   });
@@ -641,6 +649,7 @@ std::vector<std::string> registered_virtual_gamepad_nodes() {
 
 strict_isolation_options_t detect_strict_isolation_options() {
   strict_isolation_options_t options;
+  options.enabled = config::input.headless_gamepad_isolation;
   options.bubblewrap_path = find_executable("bwrap");
   options.bubblewrap_available = !options.bubblewrap_path.empty();
   if (options.bubblewrap_path.empty()) {
