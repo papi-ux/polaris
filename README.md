@@ -3,7 +3,6 @@
 <img src="docs/screenshots/logo-polaris.svg" width="72" alt="Polaris" />
 
 # Polaris
-1 synapse or 2 backup now.
 **Self-hosted game streaming for Linux.**
 
 Stream PC games to Nova and Moonlight clients without letting the stream take
