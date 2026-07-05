@@ -867,6 +867,18 @@ async function focusSectionTarget(sectionId) {
   target.scrollIntoView?.({ behavior: 'smooth', block: 'start', inline: 'nearest' })
 }
 
+async function configSaveFailureMessage(response) {
+  const fallbackMessage = 'Failed to save configuration'
+  if (!response || typeof response.text !== 'function') return fallbackMessage
+
+  try {
+    const detail = (await response.text()).trim()
+    return detail ? `${fallbackMessage}: ${detail}` : fallbackMessage
+  } catch {
+    return fallbackMessage
+  }
+}
+
 function serialize() {
   // Validate fallback mode
   if (config.value.fallback_mode && !config.value.fallback_mode.match(/^\d+x\d+x\d+$/)) {
@@ -915,7 +927,7 @@ function save() {
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
     body: JSON.stringify(configCopy),
-  }).then((r) => {
+  }).then(async (r) => {
     if (r.status === 200) {
       saved.value = true
       initialSerialized.value = JSON.stringify(serialize())
@@ -931,7 +943,7 @@ function save() {
       return saved.value
     }
     else {
-      toast('Failed to save configuration', 'error')
+      toast(await configSaveFailureMessage(r), 'error')
       return false
     }
   }).finally(() => {

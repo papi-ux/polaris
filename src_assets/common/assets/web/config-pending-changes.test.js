@@ -4,6 +4,12 @@ import { nextTick } from 'vue'
 
 import ConfigView from './views/ConfigView.vue'
 
+const mockToast = vi.fn()
+
+vi.mock('./composables/useToast', () => ({
+  useToast: () => ({ toast: mockToast }),
+}))
+
 vi.mock('./restart-host.js', () => ({
   requestHostRestart: vi.fn(() => Promise.resolve()),
 }))
@@ -95,6 +101,7 @@ function mountConfigView(config = {}) {
 describe('ConfigView pending changes review', () => {
   afterEach(() => {
     document.body.innerHTML = ''
+    mockToast.mockClear()
     vi.restoreAllMocks()
     delete global.fetch
   })
@@ -138,5 +145,44 @@ describe('ConfigView pending changes review', () => {
     expect(wrapper.vm.config.sunshine_name).toBe('Old Host')
     expect(wrapper.text()).not.toContain('Polaris Name')
     expect(wrapper.text()).toContain('Maximum Bitrate')
+  })
+
+  it('shows backend validation details when saving configuration fails', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.config.sunshine_name = 'Broken Host'
+    await nextTick()
+
+    global.fetch.mockResolvedValueOnce({
+      status: 400,
+      text: () => Promise.resolve('Unsupported config key: container_encoders'),
+    })
+
+    const result = await wrapper.vm.save()
+
+    expect(result).toBe(false)
+    expect(mockToast).toHaveBeenCalledWith(
+      'Failed to save configuration: Unsupported config key: container_encoders',
+      'error'
+    )
+  })
+
+  it('uses the generic save failure when the backend response body is empty', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.config.sunshine_name = 'Broken Host'
+    await nextTick()
+
+    global.fetch.mockResolvedValueOnce({
+      status: 500,
+      text: () => Promise.resolve('   '),
+    })
+
+    const result = await wrapper.vm.save()
+
+    expect(result).toBe(false)
+    expect(mockToast).toHaveBeenCalledWith('Failed to save configuration', 'error')
   })
 })
