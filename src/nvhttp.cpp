@@ -540,9 +540,14 @@ namespace nvhttp {
 
       if (prefers_headless) {
         recommended_mode = "headless_stream";
-        mode_reason = app_prefers_virtual_display ?
-          "This app prefers Host Virtual Display, but this Polaris host is already configured for Headless Stream, so Headless Stream is recommended." :
-          "Headless Stream is recommended because this Polaris host is already configured for headless streaming.";
+        if (steam_big_picture) {
+          mode_reason =
+            "Steam Big Picture is safest in the private headless session because this Polaris host is already configured for Headless Stream; this avoids waking Steam/Gamepad UI on the physical desktop during launch or teardown.";
+        } else {
+          mode_reason = app_prefers_virtual_display ?
+            "This app prefers Host Virtual Display, but this Polaris host is already configured for Headless Stream, so Headless Stream is recommended." :
+            "Headless Stream is recommended because this Polaris host is already configured for headless streaming.";
+        }
       } else if (app_prefers_virtual_display && virtual_display_available) {
         recommended_mode = "host_virtual_display";
         mode_reason = steam_big_picture ?
