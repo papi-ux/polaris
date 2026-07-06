@@ -333,7 +333,7 @@ namespace stream_stats {
       return "GPU-native capture was requested, but encoder upload/conversion is still CPU-resident.";
     }
     if (reason == "headless_shm_fallback" || reason == "headless_shm_default") {
-      return "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS NVIDIA hosts should use a CUDA-enabled GPU-native path.";
+      return "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available.";
     }
     if (reason == "encoder_upload_cpu") {
       return "Capture is GPU-resident, but encoder upload/conversion crosses system memory.";

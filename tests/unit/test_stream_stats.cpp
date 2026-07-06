@@ -57,7 +57,7 @@ TEST(StreamStatsCapturePathTests, DetectsShmCpuCapture) {
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
   EXPECT_EQ(
     stream_stats::capture_path_reason_message(stream_stats::capture_path_reason(stats)),
-    "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS NVIDIA hosts should use a CUDA-enabled GPU-native path."
+    "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available."
   );
 }
 
