@@ -90,6 +90,27 @@ describe('Fix My Stream checklist', () => {
     expect(checklist[4].detail).not.toContain('abc123')
   })
 
+
+  it('does not treat FEC frame warnings as auth or pairing failures', () => {
+    const checklist = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: {
+        streaming: true,
+        packet_loss: 0,
+        capture_gpu_native: true,
+        encode_time_ms: 3.2,
+      },
+      logs: 'Warning: Skipping FEC for abnormally large encoded frame (needed 7 FEC blocks)',
+      recentIssues: [
+        { level: 'Warning', message: 'Skipping FEC for abnormally large encoded frame (needed 7 FEC blocks)' },
+      ],
+    })
+
+    const authPairing = checklist.find((item) => item.key === 'auth-pairing')
+    expect(authPairing.status).toBe('pass')
+    expect(authPairing.detail).toContain('No recent auth or pairing errors')
+  })
+
   it('marks a healthy stream as clean enough to keep playing', () => {
     const checklist = buildFixMyStreamChecklist({
       statsConnected: true,

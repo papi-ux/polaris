@@ -35,14 +35,25 @@ export function sanitizeDiagnosticsValue(value, seen = new WeakSet()) {
   ]))
 }
 
+function issueTermPattern(term) {
+  const normalized = String(term || '').toLowerCase()
+  const tokenBoundary = (pattern) => new RegExp(`(?:^|[^a-z0-9])${pattern}(?=$|[^a-z0-9])`, 'i')
+
+  if (normalized === 'auth') return tokenBoundary('auth(?:entication|orization)?')
+  if (normalized === 'pair') return tokenBoundary('pair(?:ed|ing)?')
+  if (normalized === 'pin') return tokenBoundary('pin')
+
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return tokenBoundary(escaped)
+}
+
 function latestIssueMatching(logs = '', terms = []) {
-  const lowerTerms = terms.map((term) => term.toLowerCase())
+  const patterns = terms.map(issueTermPattern)
   return String(logs || '')
     .split('\n')
     .reverse()
     .find((line) => {
-      const lower = line.toLowerCase()
-      return /(error|warning|fatal)/i.test(line) && lowerTerms.some((term) => lower.includes(term))
+      return /(error|warning|fatal)/i.test(line) && patterns.some((pattern) => pattern.test(line))
     })
 }
 
