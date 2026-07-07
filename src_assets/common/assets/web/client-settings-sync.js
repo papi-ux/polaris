@@ -69,6 +69,38 @@ export function labelForStreamDisplayMode(mode) {
   return 'Desktop Display'
 }
 
+export function resolveStreamDisplayRuntimeNotice(sync = {}, selectedMode = '') {
+  const selectedLabel = labelForStreamDisplayMode(selectedMode) || sync.desiredModeLabel || 'Stream display mode'
+  const desiredLabel = sync.desiredModeLabel || selectedLabel
+  const effectiveLabel = sync.effectiveModeLabel || desiredLabel
+
+  if (sync.available && selectedMode && sync.desiredMode && selectedMode !== sync.desiredMode) {
+    return {
+      state: 'unsaved',
+      copy: `${selectedLabel} selected. Save this display choice; new launches use it after Polaris reloads the host settings.`,
+    }
+  }
+
+  if (sync.available && sync.relaunchRequired) {
+    return {
+      state: 'pending_relaunch',
+      copy: `Pending relaunch. The active stream is still using ${effectiveLabel}; relaunch to apply ${desiredLabel}.`,
+    }
+  }
+
+  if (sync.available) {
+    return {
+      state: 'synced',
+      copy: `${desiredLabel} saved. Effective runtime is ${effectiveLabel}; no pending relaunch is reported.`,
+    }
+  }
+
+  return {
+    state: 'info',
+    copy: `${selectedLabel} selected. Save this display choice; it applies when the next stream starts.`,
+  }
+}
+
 export function normalizeFieldList(value) {
   if (Array.isArray(value)) return value
   if (typeof value === 'string') {

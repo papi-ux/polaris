@@ -7,7 +7,7 @@ import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
-import { resolveClientSettingsSync } from '../../client-settings-sync'
+import { resolveClientSettingsSync, resolveStreamDisplayRuntimeNotice } from '../../client-settings-sync'
 
 const $t = inject('i18n').t;
 
@@ -38,7 +38,6 @@ const streamDisplayModes = [
     badge: 'Recommended',
     copy: 'Recommended. Starts apps inside a private hidden compositor. Capable GPU-native hosts can stay on DMA-BUF frames; AMD/VAAPI and other unsupported paths honestly report SHM/system-memory fallback instead of pretending.',
     note: 'Best isolation path. Hosts that cannot produce GPU-resident frames may still fall back to Headless Stream with SHM/RAM capture; Polaris reports that instead of pretending.',
-    restartCopy: 'Requires restart. Polaris will stream an isolated hidden runtime, not the existing KDE or GNOME session.',
   },
   {
     id: 'host_virtual_display',
@@ -46,7 +45,6 @@ const streamDisplayModes = [
     badge: 'Compatibility',
     copy: 'Compatibility mode. Creates a display the operating system can see. Your desktop may rearrange or remember it.',
     note: 'Use this when the hidden compositor path is not available or the desktop needs to own the virtual output.',
-    restartCopy: 'Requires restart. KDE, GNOME, or display tools may see this as a monitor.',
   },
   {
     id: 'desktop_display',
@@ -54,7 +52,6 @@ const streamDisplayModes = [
     badge: 'Visible desktop',
     copy: 'Streams from your current desktop session when you want the visible KDE, GNOME, or wlroots desktop.',
     note: 'Useful for quick validation, but it is not isolated from the host desktop.',
-    restartCopy: 'Requires restart. Polaris will stream from the current desktop session.',
   },
   {
     id: 'windowed_stream',
@@ -62,7 +59,6 @@ const streamDisplayModes = [
     badge: 'Performance',
     copy: 'Requests the GPU-native fallback path: private stream runtime with windowed labwc allowed when hidden headless cannot stay GPU-resident.',
     note: 'Use when diagnostics say hidden headless fell back to SHM/system-memory. Hosts that cannot produce GPU-resident frames may still fall back to Headless Stream with SHM/RAM capture.',
-    restartCopy: 'Requires restart. GPU-Native Stream may use a windowed labwc runtime when the runtime proves it can avoid SHM/system-memory fallback.',
   },
 ]
 
@@ -82,6 +78,18 @@ const selectedStreamDisplayMode = computed(() => (
 ))
 
 const clientSettingsSync = computed(() => resolveClientSettingsSync(config.value))
+const streamDisplayRuntimeNotice = computed(() => (
+  resolveStreamDisplayRuntimeNotice(clientSettingsSync.value, streamDisplayMode.value)
+))
+const streamDisplayRuntimeNoticeTone = computed(() => {
+  if (streamDisplayRuntimeNotice.value.state === 'synced') {
+    return 'border-green-400/25 bg-green-400/10 text-green-200'
+  }
+  if (streamDisplayRuntimeNotice.value.state === 'pending_relaunch' || streamDisplayRuntimeNotice.value.state === 'unsaved') {
+    return 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+  }
+  return 'border-storm/30 bg-deep/40 text-storm'
+})
 const clientSettingsSyncBadge = computed(() => {
   if (!clientSettingsSync.value.available) return 'Unavailable'
   if (clientSettingsSync.value.relaunchRequired) return 'Pending relaunch'
@@ -288,8 +296,12 @@ const validateFallbackMode = (event) => {
             </button>
           </div>
 
-          <div class="settings-warning-surface">
-            {{ selectedStreamDisplayMode.restartCopy }}
+          <div
+            class="rounded-2xl border p-4 text-sm leading-relaxed"
+            :class="streamDisplayRuntimeNoticeTone"
+            data-stream-display-runtime-notice
+          >
+            {{ streamDisplayRuntimeNotice.copy }}
           </div>
 
           <div class="settings-subtle-surface" data-linux-streaming-setup>
