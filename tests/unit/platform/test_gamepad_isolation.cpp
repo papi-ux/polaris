@@ -294,6 +294,26 @@ TEST(GamepadIsolationTests, StrictWrapperBindsOnlyRegisteredVirtualEventJsAndHid
   EXPECT_TRUE(text_lacks(command, "--dev-bind-try /dev/fd /dev/fd"));
 }
 
+TEST(GamepadIsolationTests, StrictWrapperPreservesAmdVaapiRuntimeDevices) {
+  auto host = gamepad("Microsoft X-Box One pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea});
+  host.event_node = "/dev/input/event3";
+  auto virtual_pad = gamepad("Sunshine X-Box One (virtual) pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea});
+  virtual_pad.event_node = "/dev/input/event9";
+
+  const auto plan = build_strict_gamepad_isolation_plan(
+    classify_devices({host, virtual_pad}),
+    {"/dev/input/event9"},
+    strict_options()
+  );
+  const auto command = command_with_headless_gamepad_isolation("steam --gamepadui", plan);
+
+  EXPECT_TRUE(plan.strict_applied());
+  EXPECT_TRUE(text_contains(command, "--dev-bind-try /dev/dri /dev/dri"));
+  EXPECT_TRUE(text_contains(command, "--dev-bind-try /dev/kfd /dev/kfd"));
+  EXPECT_TRUE(text_contains(command, "--dev-bind-try /dev/shm /dev/shm"));
+  EXPECT_TRUE(text_lacks(command, "--dev-bind /dev/input /dev/input"));
+}
+
 TEST(GamepadIsolationTests, SameVidPidHostAndVirtualAllowsOnlyRegisteredVirtualNode) {
   auto host = gamepad("Microsoft X-Box One pad", std::optional<uint16_t> {0x045e}, std::optional<uint16_t> {0x02ea});
   host.event_node = "/dev/input/event4";
