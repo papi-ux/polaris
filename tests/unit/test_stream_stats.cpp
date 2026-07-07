@@ -160,6 +160,7 @@ TEST(StreamStatsHdrStateTests, LabelsTrueHdrAndPlainSdrWithoutDowngrade) {
 
 TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {
   LinuxDisplayConfigGuard guard;
+  config::video.adapter_name = "/dev/dri/renderD128";
   config::video.linux_display.use_cage_compositor = true;
   config::video.linux_display.prefer_gpu_native_capture = true;
 
@@ -167,12 +168,26 @@ TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {
   stats.runtime_effective_headless = true;
   stats.capture_transport = platf::frame_transport_e::shm;
   stats.capture_residency = platf::frame_residency_e::cpu;
-  stats.encode_target_residency = platf::frame_residency_e::cpu;
+  stats.capture_format = platf::frame_format_e::bgra8;
+  stats.capture_device = "/dev/dri/renderD128";
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_format = platf::frame_format_e::nv12;
 
   EXPECT_EQ(stream_stats::capture_path_summary(stats), "shm_cpu_capture");
-  EXPECT_EQ(stream_stats::capture_path_reason(stats), "headless_shm_fallback");
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "gpu_native_requested_shm_fallback");
   EXPECT_TRUE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
+
+  const auto json = nlohmann::json::parse(stats.to_json());
+  ASSERT_TRUE(json.contains("linux_gpu_profile"));
+  const auto &profile = json.at("linux_gpu_profile");
+  EXPECT_EQ(profile.at("encoder_api"), "vaapi");
+  EXPECT_EQ(profile.at("encoder_adapter"), "/dev/dri/renderD128");
+  EXPECT_EQ(profile.at("capture_device"), "/dev/dri/renderD128");
+  EXPECT_TRUE(profile.at("adapter_matches_capture_device"));
+  EXPECT_TRUE(profile.at("gpu_native_requested"));
+  EXPECT_FALSE(profile.at("gpu_native_succeeded"));
 }
 
 TEST(StreamStatsCapturePathTests, DetectsCpuEncodeUpload) {
