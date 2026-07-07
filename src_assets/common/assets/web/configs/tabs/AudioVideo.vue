@@ -36,8 +36,8 @@ const streamDisplayModes = [
     id: 'headless_stream',
     title: 'Headless Stream',
     badge: 'Recommended',
-    copy: 'Recommended. Starts apps inside a private hidden compositor. It does not mirror your current desktop.',
-    note: 'Best isolation path. On some wlroots headless outputs this can fall back to SHM/system-memory capture instead of DMA-BUF.',
+    copy: 'Recommended. Starts apps inside a private hidden compositor. Capable GPU-native hosts can stay on DMA-BUF frames; AMD/VAAPI and other unsupported paths honestly report SHM/system-memory fallback instead of pretending.',
+    note: 'Best isolation path. Hosts that cannot produce GPU-resident frames may still fall back to Headless Stream with SHM/RAM capture; Polaris reports that instead of pretending.',
     restartCopy: 'Requires restart. Polaris will stream an isolated hidden runtime, not the existing KDE or GNOME session.',
   },
   {
@@ -60,9 +60,9 @@ const streamDisplayModes = [
     id: 'windowed_stream',
     title: 'GPU-Native Stream',
     badge: 'Performance',
-    copy: 'Requests a private stream runtime and allows Polaris to run it windowed when that is needed to preserve DMA-BUF/GPU-resident capture.',
-    note: 'Use when diagnostics say hidden headless fell back to SHM/system-memory; capable hosts may not need it because Headless Stream can already be GPU-resident.',
-    restartCopy: 'Requires restart. GPU-Native Stream may override hidden headless into a windowed labwc runtime to avoid SHM/system-memory fallback.',
+    copy: 'Requests the GPU-native fallback path: private stream runtime with windowed labwc allowed when hidden headless cannot stay GPU-resident.',
+    note: 'Use when diagnostics say hidden headless fell back to SHM/system-memory. Hosts that cannot produce GPU-resident frames may still fall back to Headless Stream with SHM/RAM capture.',
+    restartCopy: 'Requires restart. GPU-Native Stream may use a windowed labwc runtime when the runtime proves it can avoid SHM/system-memory fallback.',
   },
 ]
 
@@ -173,7 +173,7 @@ const linuxStreamingSetupChecklist = computed(() => [
     id: 'runtime',
     title: 'Choose the Linux runtime path',
     status: selectedStreamDisplayMode.value.title,
-    copy: 'Headless Stream is the safe default. GPU-Native Stream is for validating DMA-BUF/VAAPI residency when hidden Wayland capture falls back to SHM/system-memory frames.',
+    copy: 'Headless Stream is the safe default. GPU-Native Stream is for validating capable GPU-native hosts; AMD/VAAPI and other unsupported runtimes honestly fall back when frames cannot stay GPU-resident.',
   },
   {
     id: 'quality',
@@ -188,7 +188,7 @@ const linuxStreamingSetupChecklist = computed(() => [
     title: 'Check Wayland / VAAPI capture truth',
     status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
     copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
-      ? 'Polaris may keep labwc windowed to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture.'
+      ? 'Polaris may use windowed labwc to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture when the runtime proves it can.'
       : 'VAAPI / Mesa is the AMD Linux baseline. Leave GPU-native off for normal headless streaming; turn it on only when telemetry shows SHM/system-memory fallback and you are collecting support evidence. KMS/DRM is advanced.',
   },
 ])
@@ -339,7 +339,7 @@ const validateFallbackMode = (event) => {
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Stream favors DMA-BUF and hardware-encoder residency, even if that means a visible labwc window.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Stream favors GPU-resident capture, even if that means a visible labwc window when the runtime supports it.</div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>

@@ -376,7 +376,7 @@
     "linux_use_cage_compositor": "Private Compositor Runtime",
     "linux_use_cage_compositor_desc": "Run Linux sessions inside Polaris' private labwc Wayland compositor instead of the current desktop session.",
     "linux_prefer_gpu_native_capture": "GPU-Native Stream Capture",
-    "linux_prefer_gpu_native_capture_desc": "Allows Polaris to force a windowed private runtime when hidden headless cannot keep DMA-BUF/CUDA capture GPU-native.",
+    "linux_prefer_gpu_native_capture_desc": "Allows Polaris to request a windowed private runtime when hidden headless cannot keep capture GPU-native; unsupported hosts fall back to SHM/RAM.",
     "hevc_mode": "HEVC Support",
     "hevc_mode_0": "Polaris will advertise support for HEVC based on encoder capabilities (recommended)",
     "hevc_mode_1": "Polaris will not advertise support for HEVC",

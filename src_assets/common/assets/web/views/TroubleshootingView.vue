@@ -440,7 +440,7 @@ function captureReasonDescription(reason) {
   const messages = {
     gpu_native: 'Capture and encoder conversion are GPU-resident.',
     headless_extcopy_dmabuf: 'True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.',
-    windowed_dmabuf_override: 'Windowed private compositor is preserving the DMA-BUF/GPU-resident capture path.',
+    windowed_dmabuf_override: 'Windowed private compositor is preserving the GPU-native capture path.',
     headless_shm_fallback: 'Headless Stream is using SHM/system-memory capture; healthy streams can still show this, including AMD/VAAPI conservative baselines.',
     headless_shm_default: 'Headless Stream is using SHM/system-memory capture; healthy streams can still show this, including AMD/VAAPI conservative baselines.',
     gpu_native_requested_shm_fallback: 'GPU-native capture was requested, but Wayland capture fell back to SHM/system-memory frames.',
