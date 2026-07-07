@@ -25,6 +25,21 @@ TEST(LaunchModeContractTests, HostHeadlessConfigurationWinsOverPerGameVirtualDis
   EXPECT_NE(contract.at("mode_reason").get<std::string>().find("already configured for Headless Stream"), std::string::npos);
 }
 
+TEST(LaunchModeContractTests, SteamBigPictureOnHeadlessHostExplainsPrivateDesktopSafety) {
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests(
+    true,
+    "Steam Big Picture",
+    true,
+    true
+  );
+
+  EXPECT_EQ(contract.at("preferred_mode"), "host_virtual_display");
+  EXPECT_EQ(contract.at("recommended_mode"), "headless_stream");
+  const auto reason = contract.at("mode_reason").get<std::string>();
+  EXPECT_NE(reason.find("private headless session"), std::string::npos);
+  EXPECT_NE(reason.find("physical desktop"), std::string::npos);
+}
+
 TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHostIsNotHeadless) {
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
     true,
