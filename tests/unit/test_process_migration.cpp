@@ -17,16 +17,22 @@ namespace {
 #ifdef __linux__
   struct linux_cage_compositor_guard_t {
     linux_cage_compositor_guard_t():
+        adapter_name(config::video.adapter_name),
         auto_manage_displays(config::video.linux_display.auto_manage_displays),
-        use_cage_compositor(config::video.linux_display.use_cage_compositor) {}
+        use_cage_compositor(config::video.linux_display.use_cage_compositor),
+        prefer_gpu_native_capture(config::video.linux_display.prefer_gpu_native_capture) {}
 
     ~linux_cage_compositor_guard_t() {
+      config::video.adapter_name = adapter_name;
       config::video.linux_display.auto_manage_displays = auto_manage_displays;
       config::video.linux_display.use_cage_compositor = use_cage_compositor;
+      config::video.linux_display.prefer_gpu_native_capture = prefer_gpu_native_capture;
     }
 
+    std::string adapter_name;
     bool auto_manage_displays;
     bool use_cage_compositor;
+    bool prefer_gpu_native_capture;
   };
 #endif
 
@@ -224,6 +230,44 @@ TEST(ProcessRuntimeConfigTests, SessionHealthFlagsHeadlessHdrUnavailableSeparate
   EXPECT_NE(health.dump().find("Private Headless Stream"), std::string::npos);
   EXPECT_NE(health.dump().find("physical or virtual HDR-capable display path"), std::string::npos);
 }
+
+#ifdef __linux__
+TEST(ProcessRuntimeConfigTests, MissionControlPolicyIncludesLinuxGpuProfileForVaapiCaptureTruth) {
+  linux_cage_compositor_guard_t linux_guard;
+  config::video.adapter_name = "/dev/dri/renderD128";
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = true;
+
+  crypto::named_cert_t client {};
+  client.name = "Steam Deck OLED";
+  client.uuid = "amd-vaapi-client";
+
+  stream_stats::stats_t stats {};
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.capture_format = platf::frame_format_e::bgra8;
+  stats.capture_device = "/dev/dri/renderD128";
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_format = platf::frame_format_e::nv12;
+
+  const auto policy = nvhttp::build_stream_policy_json_for_tests(
+    client,
+    stats,
+    nlohmann::json::object()
+  );
+
+  ASSERT_TRUE(policy.contains("linux_gpu_profile"));
+  const auto &profile = policy.at("linux_gpu_profile");
+  EXPECT_EQ(profile.at("encoder_api"), "vaapi");
+  EXPECT_EQ(profile.at("encoder_adapter"), "/dev/dri/renderD128");
+  EXPECT_EQ(profile.at("capture_device"), "/dev/dri/renderD128");
+  EXPECT_TRUE(profile.at("adapter_matches_capture_device"));
+  EXPECT_TRUE(profile.at("gpu_native_requested"));
+  EXPECT_FALSE(profile.at("gpu_native_succeeded"));
+}
+#endif
 
 TEST(ProcessRuntimeConfigTests, InitialTerminateDoesNotResetAdaptiveBitrateMax) {
 #ifdef __linux__

@@ -1669,6 +1669,7 @@ namespace nvhttp {
       policy["capture_device"] = stats.capture_device;
       policy["capture_encoder_adapter"] = config::video.adapter_name;
       policy["capture_cross_gpu_dmabuf_risk"] = stream_stats::capture_path_has_cross_gpu_dmabuf_risk(stats);
+      policy["linux_gpu_profile"] = stream_stats::linux_gpu_profile_json(stats);
       policy["capture_decision"] = {
         {"path", capture_path},
         {"reason", capture_reason},

@@ -14,6 +14,9 @@
 #include <string>
 #include <vector>
 
+// lib includes
+#include <nlohmann/json_fwd.hpp>
+
 // local includes
 #include "platform/common.h"
 
@@ -144,6 +147,12 @@ namespace stream_stats {
    * @param stats Current stream statistics snapshot.
    */
   bool capture_path_has_cross_gpu_dmabuf_risk(const stats_t &stats);
+
+  /**
+   * @brief Structured Linux GPU/capture truth for diagnostics and v1 APIs.
+   * @param stats Current stream statistics snapshot.
+   */
+  nlohmann::json linux_gpu_profile_json(const stats_t &stats);
 
   /**
    * @brief Human-readable explanation for a capture path reason.

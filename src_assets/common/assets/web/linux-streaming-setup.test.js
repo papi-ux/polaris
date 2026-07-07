@@ -50,7 +50,7 @@ function mountAudioVideo(config = linuxConfig()) {
 }
 
 describe('Linux Streaming Setup checklist', () => {
-  it('guides desktop Linux operators through display pairing, Auto Quality, and Wayland/NVIDIA copy checks', () => {
+  it('guides desktop Linux operators through display pairing, Auto Quality, and AMD/VAAPI capture checks', () => {
     const wrapper = mountAudioVideo()
     const checklist = wrapper.find('[data-linux-streaming-setup]')
 
@@ -60,8 +60,10 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Discover first')
     expect(checklist.text()).toContain('Decide Auto Quality')
     expect(checklist.text()).toContain('Manual')
-    expect(checklist.text()).toContain('Check Wayland / NVIDIA copy risk')
-    expect(checklist.text()).toContain('GPU-native auto')
+    expect(checklist.text()).toContain('Check Wayland / VAAPI capture truth')
+    expect(checklist.text()).toContain('VAAPI / Mesa')
+    expect(checklist.text()).toContain('KMS/DRM is advanced')
+    expect(checklist.text()).toContain('Safe default')
   })
 
   it('reflects selected display pairing and GPU-native copy intent', () => {
@@ -75,8 +77,10 @@ describe('Linux Streaming Setup checklist', () => {
     const text = wrapper.find('[data-linux-streaming-setup]').text()
 
     expect(text).toContain('Selected')
-    expect(text).toContain('GPU-native fallback forced')
+    expect(text).toContain('GPU-native requested')
     expect(text).toContain('Enabled')
-    expect(text).toContain('avoid the SHM/RAM copy path')
+    expect(text).toContain('SHM/system-memory')
+    expect(text).not.toContain('CUDA')
+    expect(text).not.toContain('NVIDIA')
   })
 })

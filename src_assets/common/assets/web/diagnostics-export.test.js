@@ -3,6 +3,7 @@ import {
   REDACTED_VALUE,
   buildAnonymizedDiagnosticsBundle,
   buildFixMyStreamChecklist,
+  describeLinuxGpuProfile,
   redactSensitiveText,
   sanitizeDiagnosticsValue,
 } from './diagnostics-export.js'
@@ -125,5 +126,38 @@ describe('Fix My Stream checklist', () => {
     })
 
     expect(checklist.every((item) => item.status === 'pass')).toBe(true)
+  })
+
+  it('explains AMD VAAPI SHM fallback without vendor-biased copy', () => {
+    const stats = {
+      streaming: true,
+      packet_loss: 0,
+      capture_path: 'shm_cpu_capture',
+      capture_path_reason: 'gpu_native_requested_shm_fallback',
+      capture_cpu_copy: true,
+      capture_gpu_native: false,
+      encode_target_device: 'vaapi',
+      encode_time_ms: 5.2,
+      linux_gpu_profile: {
+        encoder_api: 'vaapi',
+        encoder_adapter: '/dev/dri/renderD128',
+        capture_device: '/dev/dri/renderD128',
+        adapter_matches_capture_device: true,
+        gpu_native_requested: true,
+        gpu_native_succeeded: false,
+      },
+    }
+
+    expect(describeLinuxGpuProfile(stats)).toContain('AMD/VAAPI')
+    expect(describeLinuxGpuProfile(stats)).toContain('SHM/system-memory')
+
+    const checklist = buildFixMyStreamChecklist({ statsConnected: true, stats })
+    const capture = checklist.find((item) => item.key === 'capture-path')
+
+    expect(capture.detail).toContain('AMD/VAAPI')
+    expect(capture.detail).toContain('SHM/system-memory')
+    expect(capture.action).toContain('conservative Headless Stream baseline')
+    expect(`${capture.detail} ${capture.action}`).not.toContain('CUDA')
+    expect(`${capture.detail} ${capture.action}`).not.toContain('NVIDIA')
   })
 })

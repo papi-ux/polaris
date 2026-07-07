@@ -135,6 +135,7 @@ namespace stream_stats {
       {"effective_headless", runtime_effective_headless},
       {"gpu_native_override_active", runtime_gpu_native_override_active}
     };
+    j["linux_gpu_profile"] = linux_gpu_profile_json(*this);
     j["encode_target_device"] = encode_target_device;
     j["encode_target_residency"] = platf::from_frame_residency(encode_target_residency);
     j["encode_target_format"] = platf::from_frame_format(encode_target_format);
@@ -227,6 +228,32 @@ namespace stream_stats {
 #endif
   }
 
+  nlohmann::json linux_gpu_profile_json(const stats_t &stats) {
+    const auto &linux_display = config::video.linux_display;
+    const bool gpu_native_requested =
+      stats.runtime_gpu_native_override_active ||
+      linux_display.prefer_gpu_native_capture;
+    const bool adapter_matches_capture_device =
+      stats.capture_device.empty() ||
+      config::video.adapter_name.empty() ||
+      stats.capture_device == config::video.adapter_name;
+    const bool capture_metadata_reported =
+      stats.capture_transport != platf::frame_transport_e::unknown ||
+      stats.capture_residency != platf::frame_residency_e::unknown ||
+      stats.encode_target_residency != platf::frame_residency_e::unknown;
+
+    return {
+      {"encoder_api", stats.encode_target_device},
+      {"encoder_adapter", config::video.adapter_name},
+      {"capture_device", stats.capture_device},
+      {"adapter_matches_capture_device", adapter_matches_capture_device},
+      {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
+      {"gpu_native_requested", gpu_native_requested},
+      {"gpu_native_attempted", gpu_native_requested && capture_metadata_reported},
+      {"gpu_native_succeeded", capture_path_is_gpu_native(stats)}
+    };
+  }
+
   std::string capture_path_summary(const stats_t &stats) {
     const bool capture_unknown =
       stats.capture_transport == platf::frame_transport_e::unknown &&
@@ -285,11 +312,11 @@ namespace stream_stats {
       linux_display.prefer_gpu_native_capture;
 
     if (stats.capture_transport == platf::frame_transport_e::shm) {
-      if (stats.runtime_effective_headless && linux_display.use_cage_compositor) {
-        return "headless_shm_fallback";
-      }
       if (gpu_native_requested) {
         return "gpu_native_requested_shm_fallback";
+      }
+      if (stats.runtime_effective_headless && linux_display.use_cage_compositor) {
+        return "headless_shm_fallback";
       }
       return "shm_capture";
     }
