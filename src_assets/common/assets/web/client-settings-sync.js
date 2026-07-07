@@ -66,13 +66,15 @@ export function labelForStreamDisplayMode(mode) {
   if (mode === 'headless_stream') return 'Headless Stream'
   if (mode === 'host_virtual_display') return 'Host Virtual Display'
   if (mode === 'windowed_stream') return 'GPU-Native Stream'
-  return 'Desktop Display'
+  if (mode === 'desktop_display') return 'Desktop Display'
+  return ''
 }
 
 export function resolveStreamDisplayRuntimeNotice(sync = {}, selectedMode = '') {
   const selectedLabel = labelForStreamDisplayMode(selectedMode) || sync.desiredModeLabel || 'Stream display mode'
-  const desiredLabel = sync.desiredModeLabel || selectedLabel
-  const effectiveLabel = sync.effectiveModeLabel || desiredLabel
+  const desiredLabel = sync.desiredModeLabel || labelForStreamDisplayMode(sync.desiredMode) || selectedLabel
+  const effectiveLabel = sync.effectiveModeLabel || labelForStreamDisplayMode(sync.effectiveMode) || desiredLabel
+  const modesDiffer = sync.desiredMode && sync.effectiveMode ? sync.desiredMode !== sync.effectiveMode : sync.relaunchRequired
 
   if (sync.available && selectedMode && sync.desiredMode && selectedMode !== sync.desiredMode) {
     return {
@@ -81,7 +83,7 @@ export function resolveStreamDisplayRuntimeNotice(sync = {}, selectedMode = '') 
     }
   }
 
-  if (sync.available && sync.relaunchRequired) {
+  if (sync.available && sync.relaunchRequired && modesDiffer) {
     return {
       state: 'pending_relaunch',
       copy: `Pending relaunch. The active stream is still using ${effectiveLabel}; relaunch to apply ${desiredLabel}.`,

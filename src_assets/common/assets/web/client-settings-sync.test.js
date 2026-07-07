@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  labelForStreamDisplayMode,
   resolveClientSettingsSync,
   resolveStreamDisplayMode,
   resolveStreamDisplayRuntimeNotice,
@@ -73,6 +74,37 @@ describe('client settings sync helpers', () => {
     expect(pending.copy).toContain('Pending relaunch')
     expect(pending.copy).toContain('Headless Stream')
     expect(pending.copy).toContain('GPU-Native Stream')
+  })
+
+  it('does not show pending relaunch when backend restart flag is stale but modes match', () => {
+    const notice = resolveStreamDisplayRuntimeNotice(
+      resolveClientSettingsSync({
+        client_settings_available: true,
+        client_settings_relaunch_required: true,
+        client_settings_stream_display_mode: 'windowed_stream',
+        client_settings_effective_stream_display_mode: 'windowed_stream',
+      }),
+      'windowed_stream'
+    )
+
+    expect(notice.state).toBe('synced')
+    expect(notice.copy).not.toContain('Pending relaunch')
+  })
+
+  it('keeps unknown stream display modes unlabeled so server labels can win', () => {
+    expect(labelForStreamDisplayMode('future_stream_mode')).toBe('')
+
+    const notice = resolveStreamDisplayRuntimeNotice(
+      resolveClientSettingsSync({
+        client_settings_available: true,
+        client_settings_stream_display_mode: 'future_stream_mode',
+        client_settings_stream_display_mode_label: 'Future Stream',
+      }),
+      'future_stream_mode'
+    )
+
+    expect(notice.copy).toContain('Future Stream saved')
+    expect(notice.copy).not.toContain('Desktop Display saved')
   })
 
   it('shows saved active-mode copy after GPU-native stream is synced', () => {
