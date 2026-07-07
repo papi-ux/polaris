@@ -14,6 +14,15 @@ describe('config defaults', () => {
     expect(source).not.toContain('DMA-BUF/CUDA/NVENC hosts')
   })
 
+  it('uses dynamic stream-display runtime notices instead of static restart warnings', () => {
+    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/configs/tabs/AudioVideo.vue'), 'utf8')
+
+    expect(source).toContain('resolveStreamDisplayRuntimeNotice')
+    expect(source).toContain('streamDisplayRuntimeNotice.copy')
+    expect(source).not.toContain('restartCopy')
+    expect(source).not.toContain('Requires restart.')
+  })
+
   it('uses Browser Stream as the primary browser streaming config key', () => {
     const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/ConfigView.vue'), 'utf8')
 
