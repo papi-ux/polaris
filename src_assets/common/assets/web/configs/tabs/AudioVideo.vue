@@ -36,8 +36,8 @@ const streamDisplayModes = [
     id: 'headless_stream',
     title: 'Headless Stream',
     badge: 'Recommended',
-    copy: 'Recommended. Starts apps inside a private hidden compositor. On capable NVIDIA/Wayland hosts this is the default GPU-native DMA-BUF/CUDA path and does not mirror your desktop.',
-    note: 'Best isolation path. If a host cannot provide DMA-BUF, Polaris reports the SHM/RAM fallback instead of pretending.',
+    copy: 'Recommended. Starts apps inside a private hidden compositor. It does not mirror your current desktop.',
+    note: 'Best isolation path. On some wlroots headless outputs this can fall back to SHM/system-memory capture instead of DMA-BUF.',
     restartCopy: 'Requires restart. Polaris will stream an isolated hidden runtime, not the existing KDE or GNOME session.',
   },
   {
@@ -60,9 +60,9 @@ const streamDisplayModes = [
     id: 'windowed_stream',
     title: 'GPU-Native Stream',
     badge: 'Performance',
-    copy: 'Forces the GPU-native fallback path: private stream runtime with windowed labwc allowed when hidden headless cannot stay on DMA-BUF/CUDA.',
-    note: 'Use when diagnostics say hidden headless fell back to SHM/RAM; capable hosts may not need it because Headless Stream can already be GPU-native.',
-    restartCopy: 'Requires restart. GPU-Native Stream can force a windowed labwc runtime to avoid the SHM/RAM copy path when hidden headless cannot stay GPU-resident.',
+    copy: 'Requests a private stream runtime and allows Polaris to run it windowed when that is needed to preserve DMA-BUF/GPU-resident capture.',
+    note: 'Use when diagnostics say hidden headless fell back to SHM/system-memory; capable hosts may not need it because Headless Stream can already be GPU-resident.',
+    restartCopy: 'Requires restart. GPU-Native Stream may override hidden headless into a windowed labwc runtime to avoid SHM/system-memory fallback.',
   },
 ]
 
@@ -173,7 +173,7 @@ const linuxStreamingSetupChecklist = computed(() => [
     id: 'runtime',
     title: 'Choose the Linux runtime path',
     status: selectedStreamDisplayMode.value.title,
-    copy: 'Headless Stream is the isolated compatibility path. GPU-Native Stream is the primary performance path for capable DMA-BUF/CUDA/NVENC hosts.',
+    copy: 'Headless Stream is the safe default. GPU-Native Stream is for validating DMA-BUF/VAAPI residency when hidden Wayland capture falls back to SHM/system-memory frames.',
   },
   {
     id: 'quality',
@@ -184,12 +184,12 @@ const linuxStreamingSetupChecklist = computed(() => [
       : 'Enable Auto Quality when you want Polaris to balance bitrate, profile choice, and recovery instead of hand-tuning every stream.',
   },
   {
-    id: 'wayland-nvidia',
-    title: 'Check Wayland / NVIDIA copy risk',
-    status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native fallback forced' : 'GPU-native auto',
+    id: 'wayland-vaapi',
+    title: 'Check Wayland / VAAPI capture truth',
+    status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
     copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
-      ? 'Polaris may force labwc windowed to avoid the SHM/RAM copy path and preserve GPU-resident capture.'
-      : 'Headless Stream will use DMA-BUF/CUDA automatically on capable hosts; force GPU-Native Stream only when diagnostics report SHM/RAM fallback.',
+      ? 'Polaris may keep labwc windowed to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture.'
+      : 'VAAPI / Mesa is the AMD Linux baseline. Leave GPU-native off for normal headless streaming; turn it on only when telemetry shows SHM/system-memory fallback and you are collecting support evidence. KMS/DRM is advanced.',
   },
 ])
 
@@ -298,7 +298,7 @@ const validateFallbackMode = (event) => {
                 <div class="section-kicker">Linux Streaming Setup</div>
                 <h4 class="mt-2 text-sm font-semibold text-silver">Guided checklist for desktop Linux hosts</h4>
                 <div class="mt-1 text-sm leading-relaxed text-storm">
-                  Use this before the first Moonlight run: discover the display pair, pick the runtime path, decide Auto Quality, then only enable GPU-native capture when Wayland/NVIDIA telemetry shows a copy problem.
+                  Use this before the first Moonlight run: discover the display pair, pick the runtime path, decide Auto Quality, then only enable GPU-native capture when Wayland/VAAPI telemetry shows SHM/system-memory fallback.
                 </div>
               </div>
               <span class="meta-pill shrink-0">{{ selectedStreamDisplayMode.title }}</span>
@@ -339,7 +339,7 @@ const validateFallbackMode = (event) => {
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Stream favors DMA-BUF and CUDA/NVENC residency, even if that means a visible labwc window.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Stream favors DMA-BUF and hardware-encoder residency, even if that means a visible labwc window.</div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>

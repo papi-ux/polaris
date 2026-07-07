@@ -61,12 +61,61 @@ function checklistItem(key, label, status, detail, action) {
   return { key, label, status, detail, action }
 }
 
+function lower(value) {
+  return String(value || '').toLowerCase()
+}
+
+function linuxGpuProfile(stats = {}) {
+  return stats?.linux_gpu_profile || stats?.linuxGpuProfile || {}
+}
+
+export function describeLinuxGpuProfile(stats = {}) {
+  const profile = linuxGpuProfile(stats)
+  const encoderApi = lower(profile.encoder_api || profile.encoderApi || stats?.encode_target_device)
+  const captureReason = lower(stats?.capture_path_reason || stats?.capture?.reason)
+  const capturePath = lower(stats?.capture_path || stats?.capture?.path || stats?.capture_transport)
+  const gpuNativeRequested = Boolean(profile.gpu_native_requested ?? profile.gpuNativeRequested)
+  const gpuNativeSucceeded = Boolean(
+    profile.gpu_native_succeeded ??
+    profile.gpuNativeSucceeded ??
+    stats?.capture_gpu_native ??
+    stats?.capture?.gpu_native
+  )
+  const adapterMatchesCaptureDevice = profile.adapter_matches_capture_device ?? profile.adapterMatchesCaptureDevice
+  const cpuCopy = Boolean(
+    stats?.capture_cpu_copy ||
+    stats?.capture?.cpu_copy ||
+    capturePath.includes('shm') ||
+    captureReason.includes('shm')
+  )
+
+  if (encoderApi !== 'vaapi') return ''
+
+  if (adapterMatchesCaptureDevice === false) {
+    return 'AMD/VAAPI is active, but the capture render node does not match the encoder adapter. Review the /dev/dri/renderD* selection before blaming the client.'
+  }
+
+  if (cpuCopy) {
+    if (gpuNativeRequested && !gpuNativeSucceeded) {
+      return 'AMD/VAAPI is active, but GPU-native capture fell back to SHM/system-memory frames. This can be a safe conservative Headless Stream baseline.'
+    }
+    return 'AMD/VAAPI is active with SHM/system-memory capture. This can be a safe conservative Headless Stream baseline.'
+  }
+
+  if (gpuNativeSucceeded || stats?.capture_gpu_native || stats?.capture?.gpu_native) {
+    return 'AMD/VAAPI is using GPU-native capture; capture and encode are staying on the GPU path.'
+  }
+
+  return 'AMD/VAAPI is active. Compare the reported capture path, render node, and encoder adapter before changing advanced capture flags.'
+}
+
 export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, logs = '', recentIssues = [] } = {}) {
   const streaming = Boolean(stats?.streaming)
   const packetLoss = Number(stats?.packet_loss)
   const encodeTime = Number(stats?.encode_time_ms)
   const captureKnown = Boolean(stats?.capture_path || stats?.capture_transport || stats?.capture_path_reason)
   const captureCpuCopy = Boolean(stats?.capture_cpu_copy)
+  const gpuProfileDescription = describeLinuxGpuProfile(stats)
   const authPairingIssue = latestIssueMatching(logs, ['auth', 'pair', 'pin', 'credential', 'unauthorized', 'forbidden'])
   const recentIssueCount = Array.isArray(recentIssues) ? recentIssues.length : 0
 
@@ -85,11 +134,19 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
     : checklistItem('packet-loss', 'Packet loss', 'warning', 'Packet loss has not been reported yet.', 'Start a live stream and wait for session telemetry.')
 
   const capture = captureCpuCopy
-    ? checklistItem('capture-path', 'Capture path', 'fail', 'The active capture path is crossing system memory/CPU copy.', 'On Linux, prefer DMA-BUF/GPU-native capture for high-FPS streams; check Audio/Video display pairing and capture settings.')
+    ? checklistItem(
+      'capture-path',
+      'Capture path',
+      'fail',
+      gpuProfileDescription || 'The active capture path is crossing SHM/system-memory frames.',
+      gpuProfileDescription
+        ? 'Treat the conservative Headless Stream baseline as valid, then review render-node pairing and support evidence before testing GPU-native or KMS/DRM capture.'
+        : 'On Linux, compare DMA-BUF/GPU-native capture telemetry with the selected display and encoder adapter before changing advanced capture settings.'
+    )
     : stats?.capture_gpu_native
-      ? checklistItem('capture-path', 'Capture path', 'pass', 'Capture is reported as GPU-native.', 'Keep display pairing as-is unless the stream feels wrong.')
+      ? checklistItem('capture-path', 'Capture path', 'pass', gpuProfileDescription || 'Capture is reported as GPU-native.', 'Keep display pairing as-is unless the stream feels wrong.')
       : captureKnown
-        ? checklistItem('capture-path', 'Capture path', 'warning', `Capture path is ${stats.capture_path || stats.capture_transport || 'mixed/unknown'}.`, 'Check whether the chosen display and encoder are paired to the intended GPU path.')
+        ? checklistItem('capture-path', 'Capture path', 'warning', gpuProfileDescription || `Capture path is ${stats.capture_path || stats.capture_transport || 'mixed/unknown'}.`, 'Check whether the chosen display and encoder are paired to the intended GPU path.')
         : checklistItem('capture-path', 'Capture path', 'warning', 'No capture metadata has been reported yet.', 'Start a stream, then confirm capture path and display pairing.')
 
   const encoder = Number.isFinite(encodeTime)

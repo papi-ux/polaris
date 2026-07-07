@@ -46,7 +46,7 @@ function optionFactory(key) {
   const descriptions = {
     adapter_name: 'Pick the encoder GPU that owns the display path.',
     output_name: 'Pair Polaris with the monitor or virtual output to capture.',
-    linux_prefer_gpu_native_capture: 'Wayland NVIDIA copy avoidance; keep frames GPU resident.',
+    linux_prefer_gpu_native_capture: 'Wayland VAAPI DMA-BUF capture truth; distinguish SHM/system-memory fallback from GPU-native capture.',
     ai_enabled: 'Let Auto Quality choose per-game profiles.',
     adaptive_bitrate_enabled: 'Let Auto Quality adjust bitrate for headless streams.',
   }
@@ -69,13 +69,13 @@ describe('ranked settings search helper', () => {
     expect(results[0].firstOptionKey).toBeTruthy()
   })
 
-  it('scores Wayland NVIDIA copy queries against the GPU-native capture setting', () => {
+  it('scores AMD VAAPI SHM fallback queries against the GPU-native capture setting', () => {
     expect(scoreSettingsOption({
       key: 'linux_prefer_gpu_native_capture',
       label: 'GPU-native capture preference',
-      description: 'Wayland NVIDIA copy avoidance and DMA-BUF/CUDA capture residency.',
-      aliases: ['nvidia wayland copy', 'headless gpu native'],
-    }, 'wayland nvidia copy')).toBeGreaterThan(0)
+      description: 'Wayland VAAPI DMA-BUF capture truth and SHM/system-memory fallback guidance for AMD hosts.',
+      aliases: ['amd vaapi shm fallback', 'headless gpu native'],
+    }, 'amd vaapi shm fallback')).toBeGreaterThan(0)
   })
 
   it('keeps Auto Quality discoverable from both AI and bitrate language', () => {
