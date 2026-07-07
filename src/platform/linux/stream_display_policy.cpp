@@ -90,7 +90,7 @@ namespace stream_display_policy {
     result.mode = mode_e::HEADLESS;
     result.selection = "headless_stream";
     result.label = "Headless Stream";
-    result.reason = "Polaris streams from a private headless compositor and uses DMA-BUF/CUDA GPU-native capture when the host supports it.";
+    result.reason = "Polaris streams from a private headless compositor and uses GPU-native DMA-BUF capture when the host supports it.";
     result.effective_headless = true;
     return result;
   }

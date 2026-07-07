@@ -348,7 +348,7 @@ namespace stream_stats {
       return "True-headless DMA-BUF capture is using a different DRM render node than the configured encoder adapter; Polaris should fall back to SHM/system memory to avoid known cross-GPU black video.";
     }
     if (reason == "windowed_dmabuf_override") {
-      return "Polaris is using a windowed private compositor so DMA-BUF/CUDA capture can stay GPU-resident.";
+      return "Polaris is using a windowed private compositor so GPU-native capture can stay GPU-resident.";
     }
     if (reason == "gpu_native_requested_shm_fallback") {
       return "GPU-native capture was requested, but the active Wayland capture fell back to SHM/system-memory frames.";
