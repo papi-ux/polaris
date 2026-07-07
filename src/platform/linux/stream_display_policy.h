@@ -12,6 +12,7 @@ namespace stream_display_policy {
     DESKTOP,
     HEADLESS,
     HOST_VIRTUAL_DISPLAY,
+    WINDOWED_STREAM,
     GPU_NATIVE_STREAM,
   };
 

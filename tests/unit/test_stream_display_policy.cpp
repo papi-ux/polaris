@@ -61,3 +61,21 @@ TEST(StreamDisplayPolicyTests, EncoderGpuNativeRequirementPromotesCapableHostPat
   EXPECT_EQ(resolved.label, "GPU-Native Stream");
   EXPECT_EQ(resolved.reason, "Polaris can force a windowed private compositor when hidden headless capture cannot stay GPU-native.");
 }
+
+TEST(StreamDisplayPolicyTests, WindowedCageDefersEncoderProbeUntilRuntimeExists) {
+  LinuxDisplayPolicyGuard guard;
+  config::video.linux_display.headless_mode = false;
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = false;
+
+  const auto resolved = stream_display_policy::resolve(stream_display_policy::input_t {});
+
+  EXPECT_EQ(resolved.selection, "windowed_stream");
+  EXPECT_EQ(resolved.label, "Windowed Stream");
+  EXPECT_EQ(resolved.mode, stream_display_policy::mode_e::WINDOWED_STREAM);
+  EXPECT_FALSE(resolved.requested_headless);
+  EXPECT_FALSE(resolved.effective_headless);
+  EXPECT_TRUE(resolved.use_cage_runtime);
+  EXPECT_TRUE(resolved.should_defer_encoder_probe);
+  EXPECT_TRUE(resolved.should_probe_against_runtime);
+}
