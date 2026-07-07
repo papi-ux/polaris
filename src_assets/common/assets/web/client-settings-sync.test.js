@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  labelForStreamDisplayMode,
   resolveClientSettingsSync,
   resolveStreamDisplayMode,
+  resolveStreamDisplayRuntimeNotice,
   stripClientSettingsResponseOnly,
 } from './client-settings-sync'
 
@@ -55,6 +57,88 @@ describe('client settings sync helpers', () => {
     expect(sync.relaunchRequired).toBe(true)
     expect(sync.desiredModeLabel).toBe('Headless Stream')
     expect(sync.effectiveModeLabel).toBe('Desktop Display')
+  })
+
+  it('uses pending relaunch copy only when desired and effective stream display modes differ', () => {
+    const pending = resolveStreamDisplayRuntimeNotice(
+      resolveClientSettingsSync({
+        client_settings_available: true,
+        client_settings_relaunch_required: true,
+        client_settings_stream_display_mode: 'windowed_stream',
+        client_settings_effective_stream_display_mode: 'headless_stream',
+      }),
+      'windowed_stream'
+    )
+
+    expect(pending.state).toBe('pending_relaunch')
+    expect(pending.copy).toContain('Pending relaunch')
+    expect(pending.copy).toContain('Headless Stream')
+    expect(pending.copy).toContain('GPU-Native Stream')
+  })
+
+  it('does not show pending relaunch when backend restart flag is stale but modes match', () => {
+    const notice = resolveStreamDisplayRuntimeNotice(
+      resolveClientSettingsSync({
+        client_settings_available: true,
+        client_settings_relaunch_required: true,
+        client_settings_stream_display_mode: 'windowed_stream',
+        client_settings_effective_stream_display_mode: 'windowed_stream',
+      }),
+      'windowed_stream'
+    )
+
+    expect(notice.state).toBe('synced')
+    expect(notice.copy).not.toContain('Pending relaunch')
+  })
+
+  it('keeps unknown stream display modes unlabeled so server labels can win', () => {
+    expect(labelForStreamDisplayMode('future_stream_mode')).toBe('')
+
+    const notice = resolveStreamDisplayRuntimeNotice(
+      resolveClientSettingsSync({
+        client_settings_available: true,
+        client_settings_stream_display_mode: 'future_stream_mode',
+        client_settings_stream_display_mode_label: 'Future Stream',
+      }),
+      'future_stream_mode'
+    )
+
+    expect(notice.copy).toContain('Future Stream saved')
+    expect(notice.copy).not.toContain('Desktop Display saved')
+  })
+
+  it('shows saved active-mode copy after GPU-native stream is synced', () => {
+    const notice = resolveStreamDisplayRuntimeNotice(
+      resolveClientSettingsSync({
+        client_settings_available: true,
+        client_settings_relaunch_required: false,
+        client_settings_stream_display_mode: 'windowed_stream',
+        client_settings_effective_stream_display_mode: 'windowed_stream',
+      }),
+      'windowed_stream'
+    )
+
+    expect(notice.state).toBe('synced')
+    expect(notice.copy).toContain('GPU-Native Stream saved')
+    expect(notice.copy).toContain('no pending relaunch')
+    expect(notice.copy).not.toContain('Requires restart')
+  })
+
+  it('calls out unsaved local display-mode changes before relaunch guidance', () => {
+    const notice = resolveStreamDisplayRuntimeNotice(
+      resolveClientSettingsSync({
+        client_settings_available: true,
+        client_settings_relaunch_required: false,
+        client_settings_stream_display_mode: 'headless_stream',
+        client_settings_effective_stream_display_mode: 'headless_stream',
+      }),
+      'windowed_stream'
+    )
+
+    expect(notice.state).toBe('unsaved')
+    expect(notice.copy).toContain('GPU-Native Stream selected')
+    expect(notice.copy).toContain('Save')
+    expect(notice.copy).not.toContain('Requires restart')
   })
 
   it('strips server-only client-settings fields before config save', () => {
