@@ -160,4 +160,31 @@ describe('Fix My Stream checklist', () => {
     expect(`${capture.detail} ${capture.action}`).not.toContain('CUDA')
     expect(`${capture.detail} ${capture.action}`).not.toContain('NVIDIA')
   })
+
+  it('surfaces NVIDIA true-headless GPU-native configuration warnings before capture tuning', () => {
+    const checklist = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: {
+        streaming: true,
+        packet_loss: 0,
+        encode_time_ms: 4.2,
+        linux_gpu_profile: {
+          configuration_warnings: [
+            {
+              id: 'nvidia_headless_gpu_native_disabled',
+              severity: 'warning',
+              message: 'NVIDIA true-headless labwc is configured with GPU-native capture disabled, which can cause cold-cache 503 encoder-init failures.',
+              action: 'Set linux_prefer_gpu_native_capture = enabled, restart Polaris, then retry Private Stream (GPU-native).',
+            },
+          ],
+        },
+      },
+    })
+
+    const hostConfig = checklist.find((item) => item.key === 'host-config')
+    expect(hostConfig.status).toBe('warning')
+    expect(hostConfig.detail).toContain('cold-cache 503')
+    expect(hostConfig.action).toContain('linux_prefer_gpu_native_capture = enabled')
+    expect(checklist.map((item) => item.key)[1]).toBe('host-config')
+  })
 })

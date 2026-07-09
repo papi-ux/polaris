@@ -242,7 +242,24 @@ namespace stream_stats {
       stats.capture_residency != platf::frame_residency_e::unknown ||
       stats.encode_target_residency != platf::frame_residency_e::unknown;
 
-    return {
+    nlohmann::json configuration_warnings = nlohmann::json::array();
+#ifdef __linux__
+    if (
+      linux_display.headless_mode &&
+      linux_display.use_cage_compositor &&
+      !linux_display.prefer_gpu_native_capture &&
+      config::video.encoder == "nvenc"
+    ) {
+      configuration_warnings.push_back({
+        {"id", "nvidia_headless_gpu_native_disabled"},
+        {"severity", "warning"},
+        {"message", "NVIDIA true-headless labwc is configured with GPU-native capture disabled; cold or missing encoder cache can fail launch with 503 encoder initialization even when NVENC is healthy."},
+        {"action", "Set linux_prefer_gpu_native_capture = enabled, restart Polaris, and retry Private Stream (GPU-native) before chasing CUDA/NVENC driver issues."}
+      });
+    }
+#endif
+
+    nlohmann::json profile = {
       {"encoder_api", stats.encode_target_device},
       {"encoder_adapter", config::video.adapter_name},
       {"capture_device", stats.capture_device},
@@ -250,8 +267,11 @@ namespace stream_stats {
       {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
       {"gpu_native_requested", gpu_native_requested},
       {"gpu_native_attempted", gpu_native_requested && capture_metadata_reported},
-      {"gpu_native_succeeded", capture_path_is_gpu_native(stats)}
+      {"gpu_native_succeeded", capture_path_is_gpu_native(stats)},
+      {"configuration_warnings", std::move(configuration_warnings)}
     };
+
+    return profile;
   }
 
   std::string capture_path_summary(const stats_t &stats) {

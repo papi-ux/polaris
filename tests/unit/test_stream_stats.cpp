@@ -15,17 +15,23 @@ namespace {
   struct LinuxDisplayConfigGuard {
     LinuxDisplayConfigGuard():
         adapter_name {config::video.adapter_name},
+        encoder {config::video.encoder},
+        headless_mode {config::video.linux_display.headless_mode},
         use_cage_compositor {config::video.linux_display.use_cage_compositor},
         prefer_gpu_native_capture {config::video.linux_display.prefer_gpu_native_capture} {
     }
 
     ~LinuxDisplayConfigGuard() {
       config::video.adapter_name = adapter_name;
+      config::video.encoder = encoder;
+      config::video.linux_display.headless_mode = headless_mode;
       config::video.linux_display.use_cage_compositor = use_cage_compositor;
       config::video.linux_display.prefer_gpu_native_capture = prefer_gpu_native_capture;
     }
 
     std::string adapter_name;
+    std::string encoder;
+    bool headless_mode;
     bool use_cage_compositor;
     bool prefer_gpu_native_capture;
   };
@@ -93,6 +99,36 @@ TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
   EXPECT_TRUE(decision.at("requested_headless"));
   EXPECT_TRUE(decision.at("effective_headless"));
   EXPECT_FALSE(decision.at("gpu_native_override_active"));
+}
+
+TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNativeCapture) {
+  LinuxDisplayConfigGuard guard;
+  config::video.encoder = "nvenc";
+  config::video.linux_display.headless_mode = true;
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = false;
+
+  stream_stats::stats_t stats {};
+  stats.runtime_backend = "labwc";
+  stats.runtime_requested_headless = true;
+  stats.runtime_effective_headless = true;
+
+  const auto json = nlohmann::json::parse(stats.to_json());
+  const auto &profile = json.at("linux_gpu_profile");
+
+  ASSERT_TRUE(profile.contains("configuration_warnings"));
+  const auto &warnings = profile.at("configuration_warnings");
+  ASSERT_EQ(warnings.size(), 1);
+  EXPECT_EQ(warnings.at(0).at("id"), "nvidia_headless_gpu_native_disabled");
+  EXPECT_EQ(warnings.at(0).at("severity"), "warning");
+  EXPECT_NE(
+    warnings.at(0).at("message").get<std::string>().find("503"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    warnings.at(0).at("action").get<std::string>().find("linux_prefer_gpu_native_capture = enabled"),
+    std::string::npos
+  );
 }
 
 
