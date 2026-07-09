@@ -69,6 +69,31 @@ function linuxGpuProfile(stats = {}) {
   return stats?.linux_gpu_profile || stats?.linuxGpuProfile || {}
 }
 
+function linuxConfigurationWarnings(stats = {}) {
+  const profile = linuxGpuProfile(stats)
+  if (Array.isArray(profile.configuration_warnings)) return profile.configuration_warnings
+  if (Array.isArray(profile.configurationWarnings)) return profile.configurationWarnings
+  return []
+}
+
+function hostConfigurationWarningItem(stats = {}) {
+  const warning = linuxConfigurationWarnings(stats)[0]
+  if (!warning) return null
+
+  const severity = lower(warning.severity)
+  const status = severity === 'fail' || severity === 'error' ? 'fail' : 'warning'
+  const detail = warning.message || warning.detail || 'Linux host configuration warning.'
+  const action = warning.action || 'Review Linux streaming configuration before changing capture or encoder settings.'
+
+  return checklistItem(
+    'host-config',
+    'Host configuration',
+    status,
+    redactSensitiveText(detail),
+    redactSensitiveText(action)
+  )
+}
+
 export function describeLinuxGpuProfile(stats = {}) {
   const profile = linuxGpuProfile(stats)
   const encoderApi = lower(profile.encoder_api || profile.encoderApi || stats?.encode_target_device)
@@ -124,6 +149,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
     : streaming
       ? checklistItem('connection', 'Connection', 'pass', 'Live telemetry is connected and a stream is active.', 'Keep this page open while reproducing the issue.')
       : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
+  const hostConfig = hostConfigurationWarningItem(stats)
 
   const loss = Number.isFinite(packetLoss)
     ? packetLoss > 2
@@ -165,7 +191,15 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
     ? checklistItem('logs', 'Logs', 'warning', `${recentIssueCount} recent warning/error group${recentIssueCount === 1 ? '' : 's'} are visible.`, 'Copy recent issues or export anonymized diagnostics for support.')
     : checklistItem('logs', 'Logs', 'pass', 'No recent warnings, fatals, or errors are standing out.', 'Keep the live log open while reproducing the issue.')
 
-  return [connection, loss, capture, encoder, authPairing, logsItem]
+  return [
+    connection,
+    ...(hostConfig ? [hostConfig] : []),
+    loss,
+    capture,
+    encoder,
+    authPairing,
+    logsItem,
+  ]
 }
 
 export function buildAnonymizedDiagnosticsBundle(input = {}) {

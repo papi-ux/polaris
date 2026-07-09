@@ -168,6 +168,12 @@ const autoQualityRows = computed(() => [
     note: clientSettingsSync.value.relaunchRequired ? 'Relaunch to sync' : 'Push/pull ready',
   },
 ])
+const nvidiaTrueHeadlessGpuNativeGuard = computed(() => (
+  String(config.value.encoder || '').toLowerCase() === 'nvenc' &&
+  config.value.headless_mode === 'enabled' &&
+  config.value.linux_use_cage_compositor === 'enabled' &&
+  config.value.linux_prefer_gpu_native_capture !== 'enabled'
+))
 const linuxStreamingSetupChecklist = computed(() => [
   {
     id: 'pairing',
@@ -199,6 +205,12 @@ const linuxStreamingSetupChecklist = computed(() => [
       ? 'Polaris may use windowed labwc to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture when the runtime proves it can. Session health will show GPU-native as the capture path.'
       : 'VAAPI / Mesa is the AMD Linux baseline. Leave forced GPU-native off for normal Private Stream; turn it on only when telemetry shows SHM/system-memory fallback and you are collecting support evidence. KMS/DRM is advanced.',
   },
+  ...(nvidiaTrueHeadlessGpuNativeGuard.value ? [{
+    id: 'nvidia-headless-gpu-native-guard',
+    title: 'NVIDIA true-headless guard',
+    status: 'Needs GPU-native preference',
+    copy: 'NVENC true-headless labwc hosts can hit cold-cache 503 encoder-init failures when linux_prefer_gpu_native_capture is disabled. Set linux_prefer_gpu_native_capture = enabled / Private Stream (GPU-native), restart Polaris, then retry before chasing CUDA or driver issues.',
+  }] : []),
 ])
 
 function setEnabledConfig(key, enabled) {
