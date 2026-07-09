@@ -83,4 +83,19 @@ describe('Linux Streaming Setup checklist', () => {
     expect(text).not.toContain('CUDA')
     expect(text).not.toContain('NVIDIA')
   })
+
+  it('warns NVIDIA true-headless hosts when GPU-native capture is disabled', () => {
+    const wrapper = mountAudioVideo(linuxConfig({
+      encoder: 'nvenc',
+      headless_mode: 'enabled',
+      linux_use_cage_compositor: 'enabled',
+      linux_prefer_gpu_native_capture: 'disabled',
+    }))
+    const text = wrapper.find('[data-linux-streaming-setup]').text()
+
+    expect(text).toContain('NVIDIA true-headless guard')
+    expect(text).toContain('linux_prefer_gpu_native_capture = enabled')
+    expect(text).toContain('503 encoder-init failures')
+    expect(text).toContain('Private Stream (GPU-native)')
+  })
 })
