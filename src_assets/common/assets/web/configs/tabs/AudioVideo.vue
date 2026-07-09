@@ -34,10 +34,10 @@ const isWindows = computed(() => props.platform === 'windows')
 const streamDisplayModes = [
   {
     id: 'headless_stream',
-    title: 'Headless Stream',
+    title: 'Private Stream',
     badge: 'Recommended',
-    copy: 'Recommended. Starts apps inside a private hidden compositor. Capable GPU-native hosts can stay on DMA-BUF frames; AMD/VAAPI and other unsupported paths honestly report SHM/system-memory fallback instead of pretending.',
-    note: 'Best isolation path. Hosts that cannot produce GPU-resident frames may still fall back to Headless Stream with SHM/RAM capture; Polaris reports that instead of pretending.',
+    copy: 'Recommended. Starts apps inside a private hidden compositor without taking over the physical desktop. Polaris still reports the live capture path honestly.',
+    note: 'Best handheld path. GPU-native appears in session health as the capture path when Polaris can keep frames on DMA-BUF/GPU; otherwise it reports SHM/system-memory fallback.',
   },
   {
     id: 'host_virtual_display',
@@ -48,17 +48,17 @@ const streamDisplayModes = [
   },
   {
     id: 'desktop_display',
-    title: 'Desktop Display',
-    badge: 'Visible desktop',
-    copy: 'Streams from your current desktop session when you want the visible KDE, GNOME, or wlroots desktop.',
-    note: 'Useful for quick validation, but it is not isolated from the host desktop.',
+    title: 'Mirror Desktop',
+    badge: 'Advanced',
+    copy: 'Streams the visible KDE, GNOME, or wlroots desktop. Use only when you explicitly want the host monitor/session mirrored.',
+    note: 'Advanced and not private: people near the PC may see the desktop or game window. Use for troubleshooting or already-running apps.',
   },
   {
     id: 'windowed_stream',
-    title: 'GPU-Native Stream',
-    badge: 'Performance',
-    copy: 'Requests the GPU-native fallback path: private stream runtime with windowed labwc allowed when hidden headless cannot stay GPU-resident.',
-    note: 'Use when diagnostics say hidden headless fell back to SHM/system-memory. Hosts that cannot produce GPU-resident frames may still fall back to Headless Stream with SHM/RAM capture.',
+    title: 'Private Stream (GPU-native)',
+    badge: 'Advanced capture',
+    copy: 'Advanced Private Stream preference: request GPU-native capture and allow Polaris to use a windowed private compositor if hidden headless cannot stay GPU-resident.',
+    note: 'Use when diagnostics say Private Stream fell back to SHM/system-memory. GPU-native appears in session health as the capture path, not as a separate user-facing play mode.',
   },
 ]
 
@@ -181,7 +181,7 @@ const linuxStreamingSetupChecklist = computed(() => [
     id: 'runtime',
     title: 'Choose the Linux runtime path',
     status: selectedStreamDisplayMode.value.title,
-    copy: 'Headless Stream is the safe default. GPU-Native Stream is for validating capable GPU-native hosts; AMD/VAAPI and other unsupported runtimes honestly fall back when frames cannot stay GPU-resident.',
+    copy: 'Private Stream is the safe default. GPU-native is a capture capability/status, not a separate normal play mode; Polaris reports fallback honestly when frames cannot stay GPU-resident.',
   },
   {
     id: 'quality',
@@ -196,8 +196,8 @@ const linuxStreamingSetupChecklist = computed(() => [
     title: 'Check Wayland / VAAPI capture truth',
     status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
     copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
-      ? 'Polaris may use windowed labwc to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture when the runtime proves it can.'
-      : 'VAAPI / Mesa is the AMD Linux baseline. Leave GPU-native off for normal headless streaming; turn it on only when telemetry shows SHM/system-memory fallback and you are collecting support evidence. KMS/DRM is advanced.',
+      ? 'Polaris may use windowed labwc to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture when the runtime proves it can. Session health will show GPU-native as the capture path.'
+      : 'VAAPI / Mesa is the AMD Linux baseline. Leave forced GPU-native off for normal Private Stream; turn it on only when telemetry shows SHM/system-memory fallback and you are collecting support evidence. KMS/DRM is advanced.',
   },
 ])
 
@@ -310,7 +310,7 @@ const validateFallbackMode = (event) => {
                 <div class="section-kicker">Linux Streaming Setup</div>
                 <h4 class="mt-2 text-sm font-semibold text-silver">Guided checklist for desktop Linux hosts</h4>
                 <div class="mt-1 text-sm leading-relaxed text-storm">
-                  Use this before the first Moonlight run: discover the display pair, pick the runtime path, decide Auto Quality, then only enable GPU-native capture when Wayland/VAAPI telemetry shows SHM/system-memory fallback.
+                  Use this before the first Moonlight run: discover the display pair, keep Private Stream as the default, decide Auto Quality, then only force GPU-native capture when telemetry shows SHM/system-memory fallback.
                 </div>
               </div>
               <span class="meta-pill shrink-0">{{ selectedStreamDisplayMode.title }}</span>
@@ -347,11 +347,11 @@ const validateFallbackMode = (event) => {
           <div class="grid gap-3 xl:grid-cols-3">
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-accent">Isolation</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">Headless Stream keeps apps off your real desktop and is the default stability target.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">Private Stream keeps apps off your real desktop and is the default stability target.</div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-Native Stream favors GPU-resident capture, even if that means a visible labwc window when the runtime supports it.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-native is reported as capture truth in session health. Force it only when diagnostics show CPU/SHM fallback.</div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>
@@ -372,7 +372,7 @@ const validateFallbackMode = (event) => {
             <div class="grid gap-4 p-4 pt-0 xl:grid-cols-2">
               <div class="surface-muted p-4">
                 <div class="text-sm font-medium text-silver">Hidden-output request</div>
-                <div class="mt-1 text-sm text-storm">Existing headless_mode config key. Enabled by Headless Stream and Host Virtual Display.</div>
+                <div class="mt-1 text-sm text-storm">Existing headless_mode config key. Enabled by Private Stream and Host Virtual Display.</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_mode</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
                   <span class="text-xs uppercase tracking-[0.18em] text-storm">Requested</span>
@@ -388,7 +388,7 @@ const validateFallbackMode = (event) => {
 
               <div class="surface-muted p-4">
                 <div class="text-sm font-medium text-silver">Private compositor runtime</div>
-                <div class="mt-1 text-sm text-storm">Existing linux_use_cage_compositor config key. Enabled by Headless Stream and Windowed Stream.</div>
+                <div class="mt-1 text-sm text-storm">Existing linux_use_cage_compositor config key. Enabled by Private Stream and Private Stream (GPU-native).</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_use_cage_compositor</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
                   <span class="text-xs uppercase tracking-[0.18em] text-storm">Use labwc</span>
@@ -404,7 +404,7 @@ const validateFallbackMode = (event) => {
 
               <div class="surface-muted p-4">
                 <div class="text-sm font-medium text-silver">GPU-native capture preference</div>
-                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by GPU-Native Stream. When active, Polaris may force labwc windowed instead of hidden headless so capture can stay on the GPU if hidden headless falls back.</div>
+                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by Private Stream (GPU-native). When active, Polaris may force labwc windowed instead of hidden headless so capture can stay on the GPU if Private Stream would otherwise fall back.</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_prefer_gpu_native_capture</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
                   <span class="text-xs uppercase tracking-[0.18em] text-storm">Performance</span>

@@ -542,11 +542,11 @@ namespace nvhttp {
         recommended_mode = "headless_stream";
         if (steam_big_picture) {
           mode_reason =
-            "Steam Big Picture is safest in the private headless session because this Polaris host is already configured for Headless Stream; this avoids waking Steam/Gamepad UI on the physical desktop during launch or teardown.";
+            "Steam Big Picture is safest in a Private Stream session because this Polaris host is already configured for Private Stream; this avoids waking Steam/Gamepad UI on the physical desktop during launch or teardown.";
         } else {
           mode_reason = app_prefers_virtual_display ?
-            "This app prefers Host Virtual Display, but this Polaris host is already configured for Headless Stream, so Headless Stream is recommended." :
-            "Headless Stream is recommended because this Polaris host is already configured for headless streaming.";
+            "This app prefers Host Virtual Display, but this Polaris host is already configured for Private Stream, so Private Stream is recommended." :
+            "Private Stream is recommended because this Polaris host is already configured for private streaming.";
         }
       } else if (app_prefers_virtual_display && virtual_display_available) {
         recommended_mode = "host_virtual_display";
@@ -556,15 +556,15 @@ namespace nvhttp {
       } else if (app_prefers_virtual_display && !virtual_display_available) {
         recommended_mode = "headless_stream";
         mode_reason =
-          "This app prefers Host Virtual Display, but Polaris does not currently have a virtual display backend available, so Headless Stream is recommended.";
+          "This app prefers Host Virtual Display, but Polaris does not currently have a virtual display backend available, so Private Stream is recommended.";
       } else if (virtual_display_available) {
         recommended_mode = "headless_stream";
         mode_reason =
-          "This app defaults to Headless Stream. Host Virtual Display is available when you want a dedicated display for the session.";
+          "This app defaults to Private Stream. Host Virtual Display is available when you want a dedicated display for the session.";
       } else {
         recommended_mode = "headless_stream";
         mode_reason =
-          "This app defaults to Headless Stream on this host.";
+          "This app defaults to Private Stream on this host.";
       }
 
       nlohmann::json launch_mode;
@@ -903,20 +903,20 @@ namespace nvhttp {
 
     std::string stream_display_mode_label_for_selection(const std::string &selection) {
       if (selection == "headless_stream") {
-        return "Headless Stream";
+        return "Private Stream";
       }
       if (selection == "host_virtual_display") {
         return "Host Virtual Display";
       }
       if (selection == "windowed_stream") {
-        return "GPU-Native Stream";
+        return "Private Stream (GPU-native)";
       }
-      return "Desktop Display";
+      return "Mirror Desktop";
     }
 
     std::string stream_display_mode_reason_for_selection(const std::string &selection) {
       if (selection == "headless_stream") {
-        return "Polaris streams from a private headless compositor and uses DMA-BUF/CUDA GPU-native capture when the host supports it.";
+        return "Polaris streams from a private headless compositor; GPU-native appears in session health when capture stays on DMA-BUF/GPU.";
       }
       if (selection == "host_virtual_display") {
         return host_virtual_display_available() ?
@@ -924,9 +924,9 @@ namespace nvhttp {
           "Polaris requested a host virtual display, but no backend is currently available.";
       }
       if (selection == "windowed_stream") {
-        return "Polaris can force a windowed private compositor when hidden headless capture cannot stay GPU-native.";
+        return "Polaris can force a windowed private compositor when hidden Private Stream capture cannot stay GPU-native.";
       }
-      return "Polaris will stream from the current desktop session.";
+      return "Polaris will mirror the current desktop session.";
     }
 
     bool apply_stream_display_mode_selection(const std::string &selection,
@@ -941,7 +941,7 @@ namespace nvhttp {
       } else if (selection == "host_virtual_display") {
         headless = true;
       } else if (selection == "desktop_display") {
-        // Defaults already describe desktop display.
+        // Defaults already describe Mirror Desktop.
       } else if (selection == "windowed_stream") {
         headless = true;
         cage = true;

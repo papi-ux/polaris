@@ -15,7 +15,7 @@ namespace stream_display_policy {
       return {
         mode_e::DESKTOP,
         "desktop_display",
-        "Desktop Display",
+        "Mirror Desktop",
         "Polaris is streaming from the current desktop session.",
         false,
         false,
@@ -41,7 +41,7 @@ namespace stream_display_policy {
         resolved_t result;
         result.mode = gpu_native_test ? mode_e::GPU_NATIVE_STREAM : mode_e::WINDOWED_STREAM;
         result.selection = "windowed_stream";
-        result.label = gpu_native_test ? "GPU-Native Stream" : "Windowed Stream";
+        result.label = gpu_native_test ? "Private Stream (GPU-native)" : "Private Stream (windowed)";
         result.reason = gpu_native_test ?
           "Polaris is running the private compositor windowed so capture can stay GPU-native." :
           "Polaris streams from a private compositor window on the current desktop.";
@@ -79,18 +79,18 @@ namespace stream_display_policy {
     if (gpu_native_test) {
       result.mode = mode_e::GPU_NATIVE_STREAM;
       result.selection = "windowed_stream";
-      result.label = "GPU-Native Stream";
+      result.label = "Private Stream (GPU-native)";
       result.reason = input.runtime_gpu_native_override_active ?
         "Polaris is running the private compositor windowed so capture can stay GPU-native." :
-        "Polaris can force a windowed private compositor when hidden headless capture cannot stay GPU-native.";
+        "Polaris can force a windowed private compositor when hidden Private Stream capture cannot stay GPU-native.";
       result.effective_headless = !input.runtime_gpu_native_override_active;
       return result;
     }
 
     result.mode = mode_e::HEADLESS;
     result.selection = "headless_stream";
-    result.label = "Headless Stream";
-    result.reason = "Polaris streams from a private headless compositor and uses GPU-native DMA-BUF capture when the host supports it.";
+    result.label = "Private Stream";
+    result.reason = "Polaris streams from a private headless compositor; GPU-native appears in session health when capture stays on DMA-BUF/GPU.";
     result.effective_headless = true;
     return result;
   }

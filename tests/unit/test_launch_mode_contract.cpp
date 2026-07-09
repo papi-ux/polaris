@@ -22,7 +22,7 @@ TEST(LaunchModeContractTests, HostHeadlessConfigurationWinsOverPerGameVirtualDis
     allowed_host_virtual_display = allowed_host_virtual_display || mode == "host_virtual_display";
   }
   EXPECT_TRUE(allowed_host_virtual_display);
-  EXPECT_NE(contract.at("mode_reason").get<std::string>().find("already configured for Headless Stream"), std::string::npos);
+  EXPECT_NE(contract.at("mode_reason").get<std::string>().find("already configured for Private Stream"), std::string::npos);
 }
 
 TEST(LaunchModeContractTests, SteamBigPictureOnHeadlessHostExplainsPrivateDesktopSafety) {
@@ -36,7 +36,7 @@ TEST(LaunchModeContractTests, SteamBigPictureOnHeadlessHostExplainsPrivateDeskto
   EXPECT_EQ(contract.at("preferred_mode"), "host_virtual_display");
   EXPECT_EQ(contract.at("recommended_mode"), "headless_stream");
   const auto reason = contract.at("mode_reason").get<std::string>();
-  EXPECT_NE(reason.find("private headless session"), std::string::npos);
+  EXPECT_NE(reason.find("Private Stream session"), std::string::npos);
   EXPECT_NE(reason.find("physical desktop"), std::string::npos);
 }
 

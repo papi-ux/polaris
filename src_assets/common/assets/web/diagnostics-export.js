@@ -97,9 +97,9 @@ export function describeLinuxGpuProfile(stats = {}) {
 
   if (cpuCopy) {
     if (gpuNativeRequested && !gpuNativeSucceeded) {
-      return 'AMD/VAAPI is active, but GPU-native capture fell back to SHM/system-memory frames. This can be a safe conservative Headless Stream baseline.'
+      return 'AMD/VAAPI is active, but GPU-native capture fell back to SHM/system-memory frames. This can be a safe conservative Private Stream baseline.'
     }
-    return 'AMD/VAAPI is active with SHM/system-memory capture. This can be a safe conservative Headless Stream baseline.'
+    return 'AMD/VAAPI is active with SHM/system-memory capture. This can be a safe conservative Private Stream baseline.'
   }
 
   if (gpuNativeSucceeded || stats?.capture_gpu_native || stats?.capture?.gpu_native) {
@@ -140,7 +140,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
       'fail',
       gpuProfileDescription || 'The active capture path is crossing SHM/system-memory frames.',
       gpuProfileDescription
-        ? 'Treat the conservative Headless Stream baseline as valid, then review render-node pairing and support evidence before testing GPU-native or KMS/DRM capture.'
+        ? 'Treat the conservative Private Stream baseline as valid, then review render-node pairing and support evidence before testing GPU-native or KMS/DRM capture.'
         : 'On Linux, compare DMA-BUF/GPU-native capture telemetry with the selected display and encoder adapter before changing advanced capture settings.'
     )
     : stats?.capture_gpu_native
