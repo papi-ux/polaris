@@ -37,7 +37,7 @@ namespace session_manager {
    * @brief Validate that the session environment supports streaming.
    *
    * Checks for required environment variables:
-   * - WAYLAND_DISPLAY (Wayland compositor access; optional for private Headless Stream)
+   * - WAYLAND_DISPLAY (Wayland compositor access; optional for private Private Stream)
    * - DBUS_SESSION_BUS_ADDRESS (D-Bus for lock screen, KWin)
    * - XDG_RUNTIME_DIR (Wayland sockets, PipeWire)
    *

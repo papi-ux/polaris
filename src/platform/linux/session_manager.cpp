@@ -230,7 +230,7 @@ namespace session_manager {
       const char *val = getenv(var);
       if (!val || val[0] == '\0') {
         if (std::string_view {var} == "WAYLAND_DISPLAY"sv && private_headless_runtime) {
-          BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY is not set; continuing because Headless Stream "
+          BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY is not set; continuing because Private Stream "
                           << "will start a private labwc socket. Desktop preview and portal capture may be "
                           << "unavailable until Polaris is launched from a desktop session."sv;
           continue;

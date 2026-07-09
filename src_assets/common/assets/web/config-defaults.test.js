@@ -2,14 +2,17 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 describe('config defaults', () => {
-  it('presents GPU-native capture as a primary stream mode with vendor-neutral fallback copy', () => {
+  it('presents Private Stream as the default and GPU-native as capture capability/status', () => {
     const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/configs/tabs/AudioVideo.vue'), 'utf8')
 
-    expect(source).toContain('GPU-Native Stream')
-    expect(source).toContain('may still fall back to Headless Stream with SHM/RAM capture')
-    expect(source).toContain('capable GPU-native hosts')
+    expect(source).toContain('Private Stream')
+    expect(source).toContain('Private Stream (GPU-native)')
+    expect(source).toContain('GPU-native appears in session health as the capture path')
+    expect(source).toContain('Mirror Desktop')
     expect(source).not.toContain('GPU-Native Test')
     expect(source).not.toContain('Experimental')
+    expect(source).not.toContain('GPU-Native Stream')
+    expect(source).not.toContain('Desktop Display')
     expect(source).not.toContain('capable NVIDIA/Wayland hosts')
     expect(source).not.toContain('DMA-BUF/CUDA/NVENC hosts')
   })

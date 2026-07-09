@@ -63,10 +63,10 @@ export function resolveClientSettingsSync(config = {}) {
 }
 
 export function labelForStreamDisplayMode(mode) {
-  if (mode === 'headless_stream') return 'Headless Stream'
+  if (mode === 'headless_stream') return 'Private Stream'
   if (mode === 'host_virtual_display') return 'Host Virtual Display'
-  if (mode === 'windowed_stream') return 'GPU-Native Stream'
-  if (mode === 'desktop_display') return 'Desktop Display'
+  if (mode === 'windowed_stream') return 'Private Stream (GPU-native)'
+  if (mode === 'desktop_display') return 'Mirror Desktop'
   return ''
 }
 

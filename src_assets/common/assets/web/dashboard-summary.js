@@ -95,7 +95,7 @@ export function buildTelemetryGuidance({ stats = {}, gpu = null, fpsTargetGap = 
   }
 
   if (stats.capture_cpu_copy) {
-    concerns.push({ key: 'cpu-copy-path', label: 'CPU copy path', tone: 'text-orange-300', detail: captureReason || 'Frames are crossing SHM/system-memory. For AMD/VAAPI, this can be the conservative Headless Stream baseline; compare DMA-BUF/GPU-native capture truth before changing advanced flags.' })
+    concerns.push({ key: 'cpu-copy-path', label: 'CPU copy path', tone: 'text-orange-300', detail: captureReason || 'Frames are crossing SHM/system-memory. For AMD/VAAPI, this can be the conservative Private Stream baseline; compare DMA-BUF/GPU-native capture truth before changing advanced flags.' })
   }
 
   if (fpsTargetGap) {

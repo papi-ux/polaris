@@ -57,7 +57,7 @@ TEST(StreamStatsCapturePathTests, DetectsShmCpuCapture) {
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
   EXPECT_EQ(
     stream_stats::capture_path_reason_message(stream_stats::capture_path_reason(stats)),
-    "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available."
+    "Private Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available."
   );
 }
 
@@ -132,7 +132,7 @@ TEST(StreamStatsHdrStateTests, LabelsRequestedHdrOnHeadlessAsHeadlessUnavailable
   EXPECT_EQ(stream_stats::hdr_effective_mode(stats), "sdr_10bit");
   EXPECT_EQ(stream_stats::hdr_downgrade_reason(stats), "headless_hdr_unavailable");
   EXPECT_NE(
-    stream_stats::hdr_downgrade_message(stats).find("Private Headless Stream"),
+    stream_stats::hdr_downgrade_message(stats).find("Private Stream"),
     std::string::npos
   );
 

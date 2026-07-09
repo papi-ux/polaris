@@ -2596,15 +2596,15 @@ namespace confighttp {
 
     const auto stream_display_mode_label = [](const std::string &selection) {
       if (selection == "headless_stream") {
-        return "Headless Stream"s;
+        return "Private Stream"s;
       }
       if (selection == "host_virtual_display") {
         return "Host Virtual Display"s;
       }
       if (selection == "windowed_stream") {
-        return "GPU-Native Stream"s;
+        return "Private Stream (GPU-native)"s;
       }
-      return "Desktop Display"s;
+      return "Mirror Desktop"s;
     };
     const auto configured_stream_display_mode = []() {
       const auto &linux_display = config::video.linux_display;

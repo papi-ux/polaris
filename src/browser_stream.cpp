@@ -452,7 +452,7 @@ namespace browser_stream {
 
       if (app_uses_steam(app)) {
         if (auto running_steam = wait_for_steam_client_blocker()) {
-          error_out = "Steam is already running on the host desktop. Quit Steam first, then start Browser Stream so Steam launches inside Headless Stream instead of reusing the host instance.";
+          error_out = "Steam is already running on the host desktop. Quit Steam first, then start Browser Stream so Steam launches inside Private Stream instead of reusing the host instance.";
           BOOST_LOG(warning) << "Browser Stream refused isolated Steam launch because a host Steam client is already running ["
                              << *running_steam << ']';
           return false;

@@ -27,13 +27,13 @@ describe('client settings sync helpers', () => {
     })).toBe('windowed_stream')
   })
 
-  it('labels GPU-native as a primary stream mode', () => {
+  it('labels GPU-native as a Private Stream capture capability', () => {
     const sync = resolveClientSettingsSync({
       client_settings_available: true,
       client_settings_stream_display_mode: 'windowed_stream',
     })
 
-    expect(sync.desiredModeLabel).toBe('GPU-Native Stream')
+    expect(sync.desiredModeLabel).toBe('Private Stream (GPU-native)')
   })
 
   it('reports unavailable hosts clearly', () => {
@@ -55,8 +55,8 @@ describe('client settings sync helpers', () => {
     expect(sync.available).toBe(true)
     expect(sync.state).toBe('pending_relaunch')
     expect(sync.relaunchRequired).toBe(true)
-    expect(sync.desiredModeLabel).toBe('Headless Stream')
-    expect(sync.effectiveModeLabel).toBe('Desktop Display')
+    expect(sync.desiredModeLabel).toBe('Private Stream')
+    expect(sync.effectiveModeLabel).toBe('Mirror Desktop')
   })
 
   it('uses pending relaunch copy only when desired and effective stream display modes differ', () => {
@@ -72,8 +72,8 @@ describe('client settings sync helpers', () => {
 
     expect(pending.state).toBe('pending_relaunch')
     expect(pending.copy).toContain('Pending relaunch')
-    expect(pending.copy).toContain('Headless Stream')
-    expect(pending.copy).toContain('GPU-Native Stream')
+    expect(pending.copy).toContain('Private Stream')
+    expect(pending.copy).toContain('Private Stream (GPU-native)')
   })
 
   it('does not show pending relaunch when backend restart flag is stale but modes match', () => {
@@ -119,7 +119,7 @@ describe('client settings sync helpers', () => {
     )
 
     expect(notice.state).toBe('synced')
-    expect(notice.copy).toContain('GPU-Native Stream saved')
+    expect(notice.copy).toContain('Private Stream (GPU-native) saved')
     expect(notice.copy).toContain('no pending relaunch')
     expect(notice.copy).not.toContain('Requires restart')
   })
@@ -136,7 +136,7 @@ describe('client settings sync helpers', () => {
     )
 
     expect(notice.state).toBe('unsaved')
-    expect(notice.copy).toContain('GPU-Native Stream selected')
+    expect(notice.copy).toContain('Private Stream (GPU-native) selected')
     expect(notice.copy).toContain('Save')
     expect(notice.copy).not.toContain('Requires restart')
   })
