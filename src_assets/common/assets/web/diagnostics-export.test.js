@@ -156,7 +156,7 @@ describe('Fix My Stream checklist', () => {
 
     expect(capture.detail).toContain('AMD/VAAPI')
     expect(capture.detail).toContain('SHM/system-memory')
-    expect(capture.action).toContain('conservative Headless Stream baseline')
+    expect(capture.action).toContain('conservative Private Stream baseline')
     expect(`${capture.detail} ${capture.action}`).not.toContain('CUDA')
     expect(`${capture.detail} ${capture.action}`).not.toContain('NVIDIA')
   })

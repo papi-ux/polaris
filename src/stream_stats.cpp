@@ -70,15 +70,15 @@ namespace stream_stats {
 #else
       const auto &linux_display = config::video.linux_display;
       if (!linux_display.headless_mode) {
-        return "Desktop Display";
+        return "Mirror Desktop";
       }
       if (!linux_display.use_cage_compositor) {
         return "Host Virtual Display";
       }
       if (linux_display.prefer_gpu_native_capture) {
-        return "Windowed Stream";
+        return "Private Stream (GPU-native)";
       }
-      return "Headless Stream";
+      return "Private Stream";
 #endif
     }
 
@@ -360,7 +360,7 @@ namespace stream_stats {
       return "GPU-native capture was requested, but encoder upload/conversion is still CPU-resident.";
     }
     if (reason == "headless_shm_fallback" || reason == "headless_shm_default") {
-      return "Headless Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available.";
+      return "Private Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available.";
     }
     if (reason == "encoder_upload_cpu") {
       return "Capture is GPU-resident, but encoder upload/conversion crosses system memory.";
@@ -410,7 +410,7 @@ namespace stream_stats {
       return {};
     }
     if (reason == "headless_hdr_unavailable") {
-      return "The client requested HDR, but Private Headless Stream is using a compositor output that does not report HDR. Polaris is streaming 10-bit SDR, not HDR; use a physical or virtual HDR-capable display path for true HDR.";
+      return "The client requested HDR, but Private Stream is using a compositor output that does not report HDR. Polaris is streaming 10-bit SDR, not HDR; use a physical or virtual HDR-capable display path for true HDR.";
     }
     if (reason == "display_not_hdr") {
       return "The client requested HDR, but the active capture display is not reporting HDR. Polaris is streaming 10-bit SDR, not HDR.";

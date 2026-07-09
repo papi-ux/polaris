@@ -1049,8 +1049,8 @@ function captureReasonMessage(reason) {
     gpu_native: 'Capture and encoder conversion are GPU-resident.',
     headless_extcopy_dmabuf: 'True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.',
     windowed_dmabuf_override: 'Windowed private compositor is preserving the GPU-native capture path.',
-    headless_shm_fallback: 'Headless Stream is using SHM/system-memory capture. The stream can be healthy, including AMD/VAAPI conservative baselines.',
-    headless_shm_default: 'Headless Stream is using SHM/system-memory capture. The stream can be healthy, including AMD/VAAPI conservative baselines.',
+    headless_shm_fallback: 'Private Stream is using SHM/system-memory capture. The stream can be healthy, including AMD/VAAPI conservative baselines.',
+    headless_shm_default: 'Private Stream is using SHM/system-memory capture. The stream can be healthy, including AMD/VAAPI conservative baselines.',
     gpu_native_requested_shm_fallback: 'GPU-native capture was requested, but Wayland capture fell back to SHM/system-memory frames.',
     gpu_native_requested_cpu_capture: 'GPU-native capture was requested, but capture frames are CPU-resident.',
     gpu_native_requested_cpu_encode_upload: 'GPU-native capture was requested, but encoder upload/conversion is CPU-resident.',
@@ -1064,7 +1064,7 @@ function captureReasonMessage(reason) {
 }
 
 function modeLabelFromBool(value) {
-  return value ? 'Headless Stream' : 'Windowed Stream'
+  return value ? 'Private Stream' : 'Private Stream (windowed)'
 }
 
 function streamDisplayModeLabel(statsPayload) {
@@ -1090,16 +1090,16 @@ const runtimeEffectiveMode = computed(() => {
 const runtimeModeTone = computed(() => {
   if (!stats.value?.streaming) return 'bg-storm/20 text-storm'
   const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
-  if (mode.includes('headless stream')) return 'bg-accent/15 text-accent'
-  if (mode.includes('windowed stream') || mode.includes('host virtual')) return 'bg-amber-500/15 text-amber-300'
+  if (mode.includes('private stream')) return 'bg-accent/15 text-accent'
+  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'bg-amber-500/15 text-amber-300'
   return 'bg-storm/20 text-storm'
 })
 
 const runtimeEffectiveTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
   const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
-  if (mode.includes('headless stream')) return 'text-accent'
-  if (mode.includes('windowed stream') || mode.includes('host virtual')) return 'text-amber-300'
+  if (mode.includes('private stream')) return 'text-accent'
+  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'text-amber-300'
   return 'text-silver'
 })
 
@@ -1511,7 +1511,7 @@ const recommendations = computed(() => {
   const recs = [...telemetryGuidance.value.recommendations]
 
   if (!stats.value.headless_mode) {
-    recs.push({ color: 'text-accent', message: 'Use Headless Stream in Audio/Video settings for hidden stream-only sessions that leave the desktop layout alone.' })
+    recs.push({ color: 'text-accent', message: 'Use Private Stream in Audio/Video settings for hidden stream-only sessions that leave the desktop layout alone.' })
   }
 
   return recs

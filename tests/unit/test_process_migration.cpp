@@ -227,7 +227,7 @@ TEST(ProcessRuntimeConfigTests, SessionHealthFlagsHeadlessHdrUnavailableSeparate
   EXPECT_EQ(health.value("primary_issue", std::string {}), "hdr_downgraded");
   EXPECT_EQ(health.value("hdr_effective_mode", std::string {}), "sdr_10bit");
   EXPECT_EQ(health.value("hdr_downgrade_reason", std::string {}), "headless_hdr_unavailable");
-  EXPECT_NE(health.dump().find("Private Headless Stream"), std::string::npos);
+  EXPECT_NE(health.dump().find("Private Stream"), std::string::npos);
   EXPECT_NE(health.dump().find("physical or virtual HDR-capable display path"), std::string::npos);
 }
 
