@@ -6,8 +6,8 @@ test.describe('troubleshooting', () => {
     await expect(loggedInPage).toHaveURL(/#\/troubleshooting/)
 
     await expect(loggedInPage.getByRole('heading', { name: /^fix my stream$/i })).toBeVisible({ timeout: 15000 })
-    await expect(loggedInPage.getByText(/plain diagnosis/i)).toBeVisible()
-    await expect(loggedInPage.getByText(/advanced \/ raw diagnostics/i)).toBeVisible()
+    await expect(loggedInPage.getByText('Plain Diagnosis', { exact: true })).toBeVisible()
+    await expect(loggedInPage.getByText('Advanced / raw diagnostics', { exact: true })).toBeVisible()
     await expect(loggedInPage.getByRole('button', { name: /copy issue draft/i })).toBeVisible()
     await expect(loggedInPage.getByRole('button', { name: /download issue draft/i })).toBeVisible()
     await expect(loggedInPage.getByText(/nothing was submitted automatically|will not submit it/i)).toBeVisible()
