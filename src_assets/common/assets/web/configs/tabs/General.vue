@@ -47,6 +47,22 @@ function addCmd(cmdArr, template, idx) {
 function removeCmd(cmdArr, index) {
   cmdArr.splice(index,1)
 }
+
+function clearStoredSteamGridDbKey() {
+  config.value.clear_steamgriddb_api_key = true
+  config.value.steamgriddb_api_key = ''
+}
+
+function keepStoredSteamGridDbKey() {
+  delete config.value.clear_steamgriddb_api_key
+  config.value.steamgriddb_api_key = ''
+}
+
+function handleSteamGridDbKeyInput() {
+  if (config.value.steamgriddb_api_key) {
+    delete config.value.clear_steamgriddb_api_key
+  }
+}
 </script>
 
 <template>
@@ -303,7 +319,7 @@ function removeCmd(cmdArr, index) {
           <button
             type="button"
             class="rounded-full border border-emerald-300/25 px-2.5 py-1 text-[11px] font-medium text-emerald-100 transition-colors hover:border-rose-300/40 hover:text-rose-200"
-            @click="config.clear_steamgriddb_api_key = true; config.steamgriddb_api_key = ''">
+            @click="clearStoredSteamGridDbKey">
             Clear Stored Key
           </button>
         </div>
@@ -312,14 +328,14 @@ function removeCmd(cmdArr, index) {
           <button
             type="button"
             class="rounded-full border border-rose-300/30 px-2.5 py-1 text-[11px] font-medium text-rose-100 transition-colors hover:border-ice/40 hover:text-ice"
-            @click="config.clear_steamgriddb_api_key = false">
+            @click="keepStoredSteamGridDbKey">
             Keep Existing Key
           </button>
         </div>
         <input type="password" id="steamgriddb_api_key"
                class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
                v-model="config.steamgriddb_api_key"
-               @input="config.steamgriddb_api_key && (config.clear_steamgriddb_api_key = false)"
+               @input="handleSteamGridDbKeyInput"
                placeholder="Enter your SteamGridDB API key" />
         <div class="text-xs text-storm mt-1">Enables cover art search for non-Steam games. Get a free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" class="text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
       </div>
