@@ -7,6 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.2.1 - 2026-07-10
+
+Patch release focused on CachyOS/Arch Settings reliability, Linux audio/capture diagnostics, and safer Moonlight-compatible host troubleshooting.
+
+- Fixed Settings saves being blocked by an internal SteamGridDB clear-key flag, allowing unrelated Network and trusted-subnet changes to save normally
+- Improved Settings pending-change handling so cancelled SteamGridDB key clears no longer reappear as phantom unsaved edits
+- Added clearer backend error details for failed Settings saves so support can identify rejected config keys instead of treating every failure like a filesystem permission issue
+- Improved PipeWire audio overrun diagnostics so stream support bundles and logs better explain audio-path failures during launch/connect attempts
+- Clarified GPU-native Stream relaunch/fallback reporting for Linux hosts, including AMD/VAAPI SHM fallback messaging and vendor-neutral capture diagnostics
+- Hardened Linux private/windowed compositor capture policy so cage/labwc runtime probes happen against the intended streaming runtime instead of a missing display context
+- Refreshed public docs, screenshots, and install guidance for Moonlight-compatible users arriving through Fedora, Arch/CachyOS, Ubuntu, and Bazzite paths
+
 ## v1.2.0 - 2026-07-03
 
 Feature release focused on Nova-ready private/headless streaming, Portable Chrome cockpit polish, safer launch contracts, Linux input/capture hardening, and broader package coverage.
