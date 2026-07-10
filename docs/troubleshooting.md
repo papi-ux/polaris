@@ -55,14 +55,15 @@ Confirm these settings first:
 ```ini
 headless_mode = enabled
 linux_use_cage_compositor = enabled
-linux_prefer_gpu_native_capture = disabled
+linux_prefer_gpu_native_capture = enabled
 ```
 
-That is the intended Headless Stream path. It avoids touching your normal desktop layout and reduces
-display mode churn after a session ends. On Bazzite, this is also the first NVIDIA Desktop Mode
-validation path; SHM/RAM capture warnings are performance notes if the client is receiving a stable
-`HEADLESS-1` stream. Enable GPU-native capture later only after the headless path is working on your
-driver and compositor stack.
+That is the intended Headless Stream path for NVIDIA/NVENC and AMD/Mesa VAAPI hosts that can keep
+frames GPU-resident. It avoids touching your normal desktop layout and reduces display mode churn
+after a session ends. If the stream is stable but logs report SHM/RAM capture, treat that as a
+performance/capability fallback first, not a startup failure. If enabling GPU-native capture blocks
+launch on a specific driver/compositor stack, temporarily set it to `disabled` and include the
+capture decision fields in the bug report.
 
 The built-in Desktop entry does not launch your existing KDE, GNOME, or wlroots desktop inside this
 private compositor. If the client connects but shows an empty or black desktop while app entries work,

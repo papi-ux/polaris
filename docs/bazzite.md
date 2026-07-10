@@ -121,19 +121,21 @@ Use Headless Stream for the first stream:
 ```ini
 headless_mode = enabled
 linux_use_cage_compositor = enabled
-linux_prefer_gpu_native_capture = disabled
+linux_prefer_gpu_native_capture = enabled
 ```
 
-This is the validated Bazzite optimization for the current NVIDIA Desktop Mode
-path. It creates an isolated headless `labwc` runtime for the stream, routes
-launched apps and virtual input into that socket, and avoids targeting the
-physical KDE desktop.
+This is the recommended Bazzite Desktop Mode optimization for NVIDIA/NVENC and
+AMD/Mesa VAAPI hosts. It creates an isolated headless `labwc` runtime for the
+stream, routes launched apps and virtual input into that socket, and avoids
+targeting the physical KDE desktop.
 
-Keep `linux_prefer_gpu_native_capture = disabled` until the stream is healthy on
-your hardware. On this path, logs may report SHM/RAM capture, CPU frame
-residency, or an extra CPU-side copy/conversion path. Treat those as performance
-notes, not startup failures, when the client receives a stable stream from
-`HEADLESS-1`.
+With `linux_prefer_gpu_native_capture = enabled`, logs may still report SHM/RAM
+capture, CPU frame residency, or an extra CPU-side copy/conversion path when the
+current compositor, driver, or encoder import path cannot stay GPU-native. Treat
+those as performance notes, not startup failures, when the client receives a
+stable stream from `HEADLESS-1`. If the setting prevents launch on a specific
+AMD/NVIDIA stack, temporarily switch it to `disabled` and report the capture
+decision JSON/logs.
 
 Do not manually export `WAYLAND_DISPLAY`; Polaris starts `labwc` with its own
 Wayland socket and routes launched apps into that socket. Do not add EVDI or

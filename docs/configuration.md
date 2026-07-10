@@ -18,7 +18,7 @@ If you change `port` in `polaris.conf`, the web UI moves to `https://localhost:<
 ```ini
 headless_mode = enabled
 linux_use_cage_compositor = enabled
-linux_prefer_gpu_native_capture = disabled
+linux_prefer_gpu_native_capture = enabled
 trusted_subnets = ["10.0.0.0/24"]
 encoder = nvenc
 nvenc_split_encode_mode = disabled
@@ -26,7 +26,7 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
-These are the settings behind the recommended Headless Stream mode on a Linux host.
+These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path.
 
 ## Linux display modes
 
@@ -43,7 +43,7 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | --- | --- | --- |
 | `headless_mode` | `enabled` | Request a stream-only session instead of the visible desktop |
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
-| `linux_prefer_gpu_native_capture` | `disabled` | Keep Headless Stream as the first validation path; enable only after testing GPU-native capture on your stack |
+| `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
 | `headless_gamepad_isolation` | `enabled` | Hide host-connected gamepads from private headless streams; disable only when you intentionally want a wired host controller visible inside the stream |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |

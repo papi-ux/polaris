@@ -11,12 +11,12 @@ Headless Stream is controlled by these settings:
 ```ini
 headless_mode = enabled
 linux_use_cage_compositor = enabled
-linux_prefer_gpu_native_capture = disabled
+linux_prefer_gpu_native_capture = enabled
 ```
 
 - `headless_mode` requests a stream-only session instead of the visible desktop.
 - `linux_use_cage_compositor` routes launched apps into Polaris' private Wayland compositor.
-- `linux_prefer_gpu_native_capture = disabled` keeps the conservative Headless Stream path as the first validation path. Enable it only when testing a stack where you intentionally want to prefer DMA-BUF or another GPU-native capture path.
+- `linux_prefer_gpu_native_capture = enabled` asks Polaris to prefer DMA-BUF/GPU-resident capture on capable NVIDIA and AMD/Mesa stacks. If a compositor or driver cannot provide it, Polaris should report the real SHM/system-memory fallback instead of pretending the stream is GPU-native.
 
 The private runtime is intentionally isolated. Steam, Wine, XWayland clients, and game launches should stay inside the stream compositor instead of bouncing back to the host desktop.
 
@@ -68,7 +68,7 @@ The 1.1.x validation target is the existing labwc Headless Stream architecture, 
 | Ubuntu 24.04 LTS | `labwc` private Wayland session, `HEADLESS-1`, `requested_headless=true`, `effective_headless=true` | Prefer `headless_extcopy_dmabuf` when wlroots/ext-image-copy and the encoder import path expose DMA-BUF; otherwise `headless_shm_fallback` is supported | Install Polaris runtime dependencies plus `labwc`, `xwayland`, `wayland-protocols`, Mesa/Vulkan drivers, PipeWire/WirePlumber, and `grim` for dashboard previews. NVIDIA high-FPS tests should use a CUDA-enabled package. |
 | Debian 12 Stable | Same headless labwc session and `HEADLESS-1` routing | `headless_shm_fallback` is the conservative baseline; DMA-BUF may be unavailable on older wlroots/protocol combinations | Ensure backported/new-enough `labwc`/wlroots where possible, `xwayland`, GPU userspace drivers, PipeWire/WirePlumber, and user access to render/input devices. Treat SHM as a compatibility path, not a startup failure. |
 | Ubuntu 22.04 LTS | Headless labwc can run when dependencies are available, but distro packages are older | Expect SHM/RAM fallback unless the compositor/protocol/driver stack has been updated | Older wlroots/labwc packages may miss headless-output or ext-image-copy behavior needed for DMA-BUF. Validate with logs before filing a runtime replacement issue. |
-| Parent Wayland desktop with GPU-native override | Windowed private compositor under the existing desktop, not true headless | `windowed_dmabuf_override` when `linux_prefer_gpu_native_capture`/override is active and frames stay GPU-resident | Requires a working parent `WAYLAND_DISPLAY`. Use only after normal Headless Stream has been validated. |
+| Parent Wayland desktop with GPU-native override | Windowed private compositor under the existing desktop, not true headless | `windowed_dmabuf_override` when `linux_prefer_gpu_native_capture`/override is active and frames stay GPU-resident on the selected NVIDIA/AMD render path | Requires a working parent `WAYLAND_DISPLAY`. Use only after normal Headless Stream has been validated. |
 
 Capture decision meanings:
 

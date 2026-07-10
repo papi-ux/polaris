@@ -55,7 +55,7 @@ those less-turnkey paths.
 | Fedora 42/43/44 | Published RPM assets | Most validated package path. |
 | Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
 | CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
-| Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage, Steam/Game Mode needs more reports. |
+| Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage and growing AMD/Mesa VAAPI validation, Steam/Game Mode needs more reports. |
 | Ubuntu 24.04 | Published DEB asset | Experimental tester package; broader desktop/GPU coverage needed. |
 | openSUSE Tumbleweed | Source build | Dedicated guide and CI build coverage; no published release asset yet. |
 | Debian-family other than Ubuntu 24.04 | Source build | No general Debian package asset yet. |
