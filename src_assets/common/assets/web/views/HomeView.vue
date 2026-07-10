@@ -54,6 +54,42 @@
         </article>
 
         <article class="header-support-card">
+          <div class="header-support-title-row">
+            <div class="section-kicker !mb-0">Update</div>
+            <span
+              data-update-status-light
+              class="h-2.5 w-2.5 rounded-full"
+              :class="updateCenterStatusLightClass"
+              :aria-label="updateCenterState.statusLightLabel"
+              role="status"
+            ></span>
+          </div>
+          <div class="header-support-value">{{ updateCenterState.statusLabel }}</div>
+          <div class="header-support-copy">{{ updateCheckError || updateCenterState.primaryActionSummary }}</div>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button
+              data-update-center-cta
+              type="button"
+              class="focus-ring inline-flex h-8 items-center justify-center rounded-lg px-3 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200"
+              :class="updateCenterCtaClass"
+              :disabled="updateCenterState.primaryActionKind === 'none'"
+              @click="handlePrimaryUpdateAction"
+            >
+              {{ copiedInstallCommand ? 'Copied' : updateCenterState.primaryActionLabel }}
+            </button>
+            <button
+              data-update-center-refresh
+              type="button"
+              class="focus-ring inline-flex h-8 items-center justify-center rounded-lg border border-storm px-3 text-sm font-medium text-silver transition-colors hover:border-ice hover:text-ice disabled:opacity-50"
+              :disabled="checkingUpdates"
+              @click="refreshUpdateStatus"
+            >
+              {{ checkingUpdates ? 'Checking…' : 'Refresh' }}
+            </button>
+          </div>
+        </article>
+
+        <article class="header-support-card">
           <div class="section-kicker">Issues</div>
           <div class="header-support-value">{{ recentIssues.length }}</div>
           <div class="header-support-copy">
@@ -63,7 +99,7 @@
       </div>
     </section>
 
-    <section class="section-card border-ice/15 bg-gradient-to-br from-deep/70 via-deep/40 to-ice/5">
+    <section ref="updateCenterSection" class="section-card border-ice/15 bg-gradient-to-br from-deep/70 via-deep/40 to-ice/5">
       <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
         <div class="max-w-3xl">
           <div class="section-kicker">Update Center</div>
@@ -75,7 +111,17 @@
           </div>
           <p class="section-copy mt-2">{{ updateCenterState.summary }}</p>
         </div>
-        <span class="meta-pill self-start" :class="updateCenterBadgeClass">{{ updateCenterState.statusLabel }}</span>
+        <div class="flex flex-wrap items-center gap-2 self-start">
+          <span class="meta-pill" :class="updateCenterBadgeClass">{{ updateCenterState.statusLabel }}</span>
+          <button
+            type="button"
+            class="focus-ring inline-flex h-8 items-center justify-center rounded-lg border border-storm px-3 text-sm font-medium text-silver transition-colors hover:border-ice hover:text-ice disabled:opacity-50"
+            :disabled="checkingUpdates"
+            @click="refreshUpdateStatus"
+          >
+            {{ checkingUpdates ? 'Checking…' : 'Check again' }}
+          </button>
+        </div>
       </div>
 
       <div class="mt-5 grid gap-3 lg:grid-cols-3">
@@ -309,6 +355,9 @@ const logs = ref(null)
 const copiedVersion = ref(false)
 const copiedInstallCommand = ref(false)
 const updateHost = ref({ platform: '', distro: {} })
+const checkingUpdates = ref(false)
+const updateCheckError = ref('')
+const updateCenterSection = ref(null)
 
 const compatibilityClients = [
   { platform: 'Android', name: 'Nova', status: 'Supported', link: 'https://github.com/papi-ux/nova' },
@@ -479,6 +528,32 @@ const updateCenterBadgeClass = computed(() => {
   }
 })
 
+
+const updateCenterStatusLightClass = computed(() => {
+  switch (updateCenterState.value.statusTone) {
+    case 'update':
+      return 'bg-ice shadow-[0_0_18px_rgba(200,214,229,0.75)] animate-pulse'
+    case 'ahead':
+      return 'bg-purple-300 shadow-[0_0_14px_rgba(216,180,254,0.55)]'
+    case 'warning':
+      return 'bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.55)]'
+    case 'disabled':
+      return 'bg-storm/60'
+    default:
+      return 'bg-green-400 shadow-[0_0_14px_rgba(74,222,128,0.55)]'
+  }
+})
+
+const updateCenterCtaClass = computed(() => {
+  if (updateCenterState.value.status === 'update_available') {
+    return 'bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.22)]'
+  }
+  if (updateCenterState.value.primaryActionKind === 'none') {
+    return 'border border-storm bg-deep/50 text-storm'
+  }
+  return 'border border-ice/30 text-ice hover:bg-ice/10'
+})
+
 function buildIssueCounter(count, label, tone) {
   if (count === 0) {
     return {
@@ -562,32 +637,66 @@ async function copyVersion() {
 }
 
 async function copyInstallCommand() {
-  if (!updateCenterState.value.installCommand || !navigator.clipboard) return
+  if (!updateCenterState.value.installCommand || !navigator.clipboard) return false
   await navigator.clipboard.writeText(updateCenterState.value.installCommand)
   copiedInstallCommand.value = true
   window.setTimeout(() => {
     copiedInstallCommand.value = false
   }, 1800)
+  return true
 }
 
-;(async () => {
+function scrollToUpdateCenter() {
+  updateCenterSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+async function handlePrimaryUpdateAction() {
+  const action = updateCenterState.value.primaryActionKind
+  if (action === 'refresh_update_status') {
+    await refreshUpdateStatus()
+    return
+  }
+  if (action === 'open_release' && updateCenterState.value.releaseUrl) {
+    window.open(updateCenterState.value.releaseUrl, '_blank', 'noopener')
+    return
+  }
+  scrollToUpdateCenter()
+  if (action === 'copy_install_command') {
+    await copyInstallCommand()
+  }
+}
+
+async function refreshUpdateStatus() {
+  checkingUpdates.value = true
+  updateCheckError.value = ''
   try {
     const config = await fetch('./api/config', { credentials: 'include' }).then((r) => r.json())
     const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((r) => r.json()).catch(() => null)
     updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }
     notifyPreReleases.value = config.notify_pre_releases
     version.value = new PolarisVersion(null, hostStatus?.version || config.version)
-    githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((r) => r.json()), null)
-    if (githubVersion.value) {
+
+    try {
+      githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((r) => r.json()), null)
       const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.json())
       const preRelease = releases.find((release) => release.prerelease)
-      if (preRelease) {
-        preReleaseVersion.value = new PolarisVersion(preRelease, null)
-      }
+      preReleaseVersion.value = preRelease ? new PolarisVersion(preRelease, null) : null
+    } catch (error) {
+      githubVersion.value = null
+      preReleaseVersion.value = null
+      updateCheckError.value = 'Release check unavailable'
+      console.error(error)
     }
-  } catch {
-    // GitHub API may be blocked by CSP — version check is non-critical
+  } catch (error) {
+    updateCheckError.value = 'Host update status unavailable'
+    console.error(error)
+  } finally {
+    checkingUpdates.value = false
   }
+}
+
+;(async () => {
+  await refreshUpdateStatus()
   try {
     logs.value = await fetch('./api/logs', { credentials: 'include' }).then((r) => r.text())
   } catch (error) {
