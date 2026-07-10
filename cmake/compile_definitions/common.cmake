@@ -126,6 +126,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/confighttp.h"
         "${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp"
         "${CMAKE_SOURCE_DIR}/src/confighttp_validation.h"
+        "${CMAKE_SOURCE_DIR}/src/update_status.h"
+        "${CMAKE_SOURCE_DIR}/src/update_status.cpp"
         "${CMAKE_SOURCE_DIR}/src/rtsp.cpp"
         "${CMAKE_SOURCE_DIR}/src/rtsp.h"
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"

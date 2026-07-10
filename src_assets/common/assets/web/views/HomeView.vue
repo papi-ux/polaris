@@ -63,6 +63,60 @@
       </div>
     </section>
 
+    <section class="section-card border-ice/15 bg-gradient-to-br from-deep/70 via-deep/40 to-ice/5">
+      <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+        <div class="max-w-3xl">
+          <div class="section-kicker">Update Center</div>
+          <div class="section-title-row">
+            <h2 class="section-title">Package updates</h2>
+            <InfoHint size="sm" label="Update Center details">
+              Polaris only checks and prepares manual install commands here. It never auto-installs packages or runs privileged commands from the web UI.
+            </InfoHint>
+          </div>
+          <p class="section-copy mt-2">{{ updateCenterState.summary }}</p>
+        </div>
+        <span class="meta-pill self-start" :class="updateCenterBadgeClass">{{ updateCenterState.statusLabel }}</span>
+      </div>
+
+      <div class="mt-5 grid gap-3 lg:grid-cols-3">
+        <article class="surface-subtle p-4">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">Installed</div>
+          <div class="mt-2 text-2xl font-semibold text-silver">{{ updateCenterState.currentVersion || version?.version || '—' }}</div>
+          <div class="mt-1 text-xs text-storm">Running on this host</div>
+        </article>
+        <article class="surface-subtle p-4">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">Latest</div>
+          <div class="mt-2 text-2xl font-semibold text-ice">{{ updateCenterState.latestVersion || '—' }}</div>
+          <a v-if="updateCenterState.releaseUrl" class="mt-2 inline-flex text-sm font-medium text-ice no-underline hover:text-ice/80" :href="updateCenterState.releaseUrl" target="_blank">View release notes</a>
+        </article>
+        <article class="surface-subtle p-4">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">Package</div>
+          <div class="mt-2 text-sm font-medium text-silver">{{ updateCenterState.packageLabel || 'Manual release page' }}</div>
+          <div class="mt-1 break-all text-xs text-storm">{{ updateCenterState.asset?.name || 'No matching package detected for this host yet.' }}</div>
+          <div v-if="updateCenterState.assetDigest" class="mt-2 break-all text-[11px] text-storm">{{ updateCenterState.assetDigest }}</div>
+        </article>
+      </div>
+
+      <div v-if="updateCenterState.asset || updateCenterState.releaseUrl" class="mt-5 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+        <div v-if="updateCenterState.canCopyInstallCommand" class="min-w-0 flex-1 rounded-2xl border border-storm/20 bg-void/40 p-4">
+          <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div class="text-sm font-medium text-silver">Manual install command</div>
+              <div class="mt-1 text-xs text-storm">Copy, inspect, and run locally when you are ready. No auto-install from the web UI.</div>
+            </div>
+            <button type="button" class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-ice/30 px-3 text-sm font-medium text-ice transition-colors hover:bg-ice/10" @click="copyInstallCommand">
+              {{ copiedInstallCommand ? 'Copied' : 'Copy command' }}
+            </button>
+          </div>
+          <pre class="mt-3 overflow-x-auto rounded-xl border border-storm/20 bg-black/30 p-3 text-xs text-ice"><code>{{ updateCenterState.installCommand }}</code></pre>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <a v-if="updateCenterState.asset" class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void no-underline transition-colors hover:bg-ice/90" :href="updateCenterState.asset.browser_download_url" target="_blank">Download package</a>
+          <a v-if="updateCenterState.releaseUrl" class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver no-underline transition-colors hover:border-ice hover:text-ice" :href="updateCenterState.releaseUrl" target="_blank">Open release</a>
+        </div>
+      </div>
+    </section>
+
     <section class="section-card">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
@@ -241,6 +295,7 @@
 import { ref, computed } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
+import { buildUpdateCenterState } from '../update-center.js'
 import InfoHint from '../components/InfoHint.vue'
 
 const { gpu, displays, audio, sessionType, loading: systemLoading } = useSystemStats(3000)
@@ -252,6 +307,8 @@ const preReleaseVersion = ref(null)
 const loading = ref(true)
 const logs = ref(null)
 const copiedVersion = ref(false)
+const copiedInstallCommand = ref(false)
+const updateHost = ref({ platform: '', distro: {} })
 
 const compatibilityClients = [
   { platform: 'Android', name: 'Nova', status: 'Supported', link: 'https://github.com/papi-ux/nova' },
@@ -399,6 +456,29 @@ const versionHeaderSummary = computed(() => {
   return 'Current public release'
 })
 
+const updateCenterState = computed(() => buildUpdateCenterState({
+  currentVersion: version.value?.version || '',
+  latestRelease: githubVersion.value?.release || null,
+  prereleaseRelease: preReleaseVersion.value?.release || null,
+  includePrereleases: notifyPreReleases.value,
+  host: updateHost.value,
+}))
+
+const updateCenterBadgeClass = computed(() => {
+  switch (updateCenterState.value.status) {
+    case 'update_available':
+      return 'border-ice/30 bg-ice/10 text-ice'
+    case 'ahead':
+      return 'border-purple-300/30 bg-purple-500/10 text-purple-200'
+    case 'unavailable':
+      return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+    case 'disabled':
+      return 'border-storm/30 bg-deep/60 text-storm'
+    default:
+      return 'border-green-500/30 bg-green-500/10 text-green-200'
+  }
+})
+
 function buildIssueCounter(count, label, tone) {
   if (count === 0) {
     return {
@@ -481,14 +561,29 @@ async function copyVersion() {
   }, 1800)
 }
 
+async function copyInstallCommand() {
+  if (!updateCenterState.value.installCommand || !navigator.clipboard) return
+  await navigator.clipboard.writeText(updateCenterState.value.installCommand)
+  copiedInstallCommand.value = true
+  window.setTimeout(() => {
+    copiedInstallCommand.value = false
+  }, 1800)
+}
+
 ;(async () => {
   try {
     const config = await fetch('./api/config', { credentials: 'include' }).then((r) => r.json())
+    const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((r) => r.json()).catch(() => null)
+    updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }
     notifyPreReleases.value = config.notify_pre_releases
-    version.value = new PolarisVersion(null, config.version)
+    version.value = new PolarisVersion(null, hostStatus?.version || config.version)
     githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((r) => r.json()), null)
     if (githubVersion.value) {
-      preReleaseVersion.value = new PolarisVersion((await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.json())).find((release) => release.prerelease), null)
+      const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.json())
+      const preRelease = releases.find((release) => release.prerelease)
+      if (preRelease) {
+        preReleaseVersion.value = new PolarisVersion(preRelease, null)
+      }
     }
   } catch {
     // GitHub API may be blocked by CSP — version check is non-critical

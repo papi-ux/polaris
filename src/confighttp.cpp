@@ -52,6 +52,7 @@
 #include "session_event_queue.h"
 #include "stream_recorder.h"
 #include "stream_stats.h"
+#include "update_status.h"
 #include "utility.h"
 #include "video.h"
 #include "uuid.h"
@@ -2578,6 +2579,22 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get update awareness metadata for the web Update Center.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/update-status| GET| null}
+   */
+  void getUpdateStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+    send_response(response, update_status::host_update_status());
+  }
+
+  /**
    * @brief Get the configuration settings.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -5025,6 +5042,7 @@ namespace confighttp {
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/logs/clear$"]["POST"] = withCsrf(clearLogs);
     server.resource["^/api/config$"]["GET"] = getConfig;
+    server.resource["^/api/update-status$"]["GET"] = getUpdateStatus;
     server.resource["^/api/config$"]["POST"] = withCsrf(saveConfig);
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = withCsrf(restart);
