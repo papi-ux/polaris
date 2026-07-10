@@ -3,6 +3,7 @@
  * @brief Definitions for audio capture and encoding.
  */
 // standard includes
+#include <algorithm>
 #include <thread>
 
 // lib includes
@@ -82,6 +83,34 @@ namespace audio {
       2048000,
     },
   };
+
+  namespace {
+    constexpr std::size_t CAPTURE_JITTER_BUFFER_FRAMES = 12;
+  }
+
+  std::size_t capture_jitter_buffer_capacity(std::uint32_t frame_size, int channels) {
+    if (frame_size == 0 || channels <= 0) {
+      return 0;
+    }
+
+    return static_cast<std::size_t>(frame_size) *
+           static_cast<std::size_t>(channels) *
+           CAPTURE_JITTER_BUFFER_FRAMES;
+  }
+
+  std::size_t ring_buffer_overflow_samples(std::size_t available, std::size_t capacity, std::size_t incoming_samples) {
+    if (capacity == 0 || incoming_samples == 0) {
+      return 0;
+    }
+
+    const auto clamped_available = std::min(available, capacity);
+    const auto free_samples = capacity - clamped_available;
+    if (incoming_samples <= free_samples) {
+      return 0;
+    }
+
+    return incoming_samples - free_samples;
+  }
 
   void encodeThread(sample_queue_t samples, config_t config, void *channel_data, packet_queue_t packets) {
     auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
