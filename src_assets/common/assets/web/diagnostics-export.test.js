@@ -3,6 +3,7 @@ import {
   REDACTED_VALUE,
   buildAnonymizedDiagnosticsBundle,
   buildFixMyStreamChecklist,
+  buildGithubIssueDraft,
   describeLinuxGpuProfile,
   redactSensitiveText,
   sanitizeDiagnosticsValue,
@@ -86,6 +87,79 @@ describe('diagnostics export redaction', () => {
     expect(JSON.stringify(bundle)).not.toContain('tok_live_secret')
   })
 })
+
+
+describe('GitHub issue draft support flow', () => {
+  it('builds a redacted GitHub-ready issue draft from support evidence without submitting it', () => {
+    const draft = buildGithubIssueDraft({
+      platform: 'linux',
+      version: '1.2.3-dev',
+      config: {
+        distro: 'Fedora 44',
+        session_type: 'wayland',
+        compositor: 'kwin_wayland',
+        encoder: 'vaapi',
+        gpu: 'AMD Radeon RX 7900 XTX',
+        driver: 'Mesa 26.0.0',
+      },
+      system_stats: {
+        gpu: { name: 'AMD Radeon RX 7900 XTX', driver: 'Mesa 26.0.0' },
+        os: { distro: 'Fedora 44' },
+        session: { type: 'wayland', compositor: 'kwin_wayland' },
+      },
+      client: { type: 'Nova', name: 'Living Room Deck' },
+      session_snapshot: {
+        client_name: 'Nova',
+        launch_mode: 'Private Stream',
+        encode_target_device: 'vaapi',
+        capture_path: 'shm_cpu_capture',
+        capture_path_reason: 'gpu_native_requested_shm_fallback',
+        streaming: true,
+        fps: 118.5,
+        session_target_fps: 120,
+        bitrate_kbps: 45000,
+        packet_loss: 2.4,
+        encode_time_ms: 9.8,
+        doctor: {
+          simple_state: 'Stream is playable, but capture fell back to system memory.',
+          primary_issue: 'gpu_native_requested_shm_fallback',
+          evidence: [{ id: 'capture', detail: 'password=hunter2 capture_path=shm_cpu_capture' }],
+          safe_recovery_action: { id: 'export_support_bundle', destructive: false },
+        },
+      },
+      fix_my_stream_checklist: [
+        { label: 'Capture path', status: 'warning', detail: 'GPU-native capture fell back to SHM/system-memory frames.', action: 'Export support bundle.' },
+      ],
+      recent_issues: [
+        { timestamp: '[12:00:01]', level: 'Warning', message: 'Authorization: Bearer abc123 capture fallback', count: 2 },
+      ],
+      user_notes: 'I already tried restarting Polaris and re-pairing Nova.',
+    })
+
+    expect(draft).toContain('## Environment')
+    expect(draft).toContain('- Polaris version: 1.2.3-dev')
+    expect(draft).toContain('- Distro: Fedora 44')
+    expect(draft).toContain('- GPU: AMD Radeon RX 7900 XTX')
+    expect(draft).toContain('- Driver: Mesa 26.0.0')
+    expect(draft).toContain('- Session/compositor: wayland / kwin_wayland')
+    expect(draft).toContain('- Client: Nova (Living Room Deck)')
+    expect(draft).toContain('- Launch mode: Private Stream')
+    expect(draft).toContain('- Encoder: vaapi')
+    expect(draft).toContain('- Capture: shm_cpu_capture — gpu_native_requested_shm_fallback')
+    expect(draft).toContain('- Active stream: yes, 118.5 FPS / 120.0 target, 45000 kbps, 2.40% loss, 9.8 ms encode')
+    expect(draft).toContain('## What Polaris thinks happened')
+    expect(draft).toContain('Stream is playable, but capture fell back to system memory.')
+    expect(draft).toContain('gpu_native_requested_shm_fallback')
+    expect(draft).toContain('## Recent warnings/errors')
+    expect(draft).toContain('Bearer [redacted]')
+    expect(draft).toContain('## What I already tried')
+    expect(draft).toContain('I already tried restarting Polaris and re-pairing Nova.')
+    expect(draft).toContain('This report was generated locally from a redacted Polaris support bundle. Nothing was submitted automatically.')
+    expect(draft).not.toContain('hunter2')
+    expect(draft).not.toContain('abc123')
+  })
+})
+
 
 describe('Fix My Stream checklist', () => {
   it('prioritizes connection, packet loss, capture path, encoder pressure, auth pairing, and logs', () => {

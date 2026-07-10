@@ -1,6 +1,19 @@
 import { test, expect } from './fixtures/auth.js'
 
 test.describe('troubleshooting', () => {
+  test('renders self-service Doctor support actions without auto-submitting issues', async ({ loggedInPage }) => {
+    await loggedInPage.getByRole('link', { name: /troubleshooting/i }).click()
+    await expect(loggedInPage).toHaveURL(/#\/troubleshooting/)
+
+    await expect(loggedInPage.getByRole('heading', { name: /^fix my stream$/i })).toBeVisible({ timeout: 15000 })
+    await expect(loggedInPage.getByText(/plain diagnosis/i)).toBeVisible()
+    await expect(loggedInPage.getByText(/advanced \/ raw diagnostics/i)).toBeVisible()
+    await expect(loggedInPage.getByRole('button', { name: /copy issue draft/i })).toBeVisible()
+    await expect(loggedInPage.getByRole('button', { name: /download issue draft/i })).toBeVisible()
+    await expect(loggedInPage.getByText(/nothing was submitted automatically|will not submit it/i)).toBeVisible()
+    await expect(loggedInPage.getByText(/no passwords, tokens, cookies, auth headers, or credentials/i)).toBeVisible()
+  })
+
   test('log filters remain keyboard reachable', async ({ loggedInPage }) => {
     await loggedInPage.getByRole('link', { name: /troubleshooting/i }).click()
     await expect(loggedInPage).toHaveURL(/#\/troubleshooting/)
