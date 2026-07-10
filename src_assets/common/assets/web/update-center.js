@@ -95,6 +95,67 @@ export function buildManualInstallCommand(asset, host = {}) {
   return lines.join('\n')
 }
 
+
+function buildActionMetadata(status, asset, installCommand, releaseUrl) {
+  if (status === 'update_available') {
+    if (installCommand) {
+      return {
+        statusTone: 'update',
+        statusLightLabel: 'Update available',
+        primaryActionLabel: 'Update',
+        primaryActionKind: 'copy_install_command',
+        primaryActionSummary: 'Copy the safe local install command and jump to the package details.',
+      }
+    }
+
+    return {
+      statusTone: 'update',
+      statusLightLabel: 'Update available',
+      primaryActionLabel: releaseUrl ? 'Open release' : 'Update details',
+      primaryActionKind: releaseUrl ? 'open_release' : 'scroll_to_update_center',
+      primaryActionSummary: 'A newer release is available, but Polaris could not match a local package for this host.',
+    }
+  }
+
+  if (status === 'ahead') {
+    return {
+      statusTone: 'ahead',
+      statusLightLabel: 'Build is newer than selected release channel',
+      primaryActionLabel: 'Details',
+      primaryActionKind: 'scroll_to_update_center',
+      primaryActionSummary: 'This host is ahead of the selected release channel.',
+    }
+  }
+
+  if (status === 'unavailable') {
+    return {
+      statusTone: 'warning',
+      statusLightLabel: 'Update check unavailable',
+      primaryActionLabel: 'Check again',
+      primaryActionKind: 'refresh_update_status',
+      primaryActionSummary: 'Release metadata could not be loaded from this browser session.',
+    }
+  }
+
+  if (status === 'disabled') {
+    return {
+      statusTone: 'disabled',
+      statusLightLabel: 'Update checks disabled',
+      primaryActionLabel: 'Disabled',
+      primaryActionKind: 'none',
+      primaryActionSummary: 'Update checks are disabled for this host.',
+    }
+  }
+
+  return {
+    statusTone: 'current',
+    statusLightLabel: 'Current release installed',
+    primaryActionLabel: asset ? 'Package' : 'Current',
+    primaryActionKind: asset ? 'scroll_to_update_center' : 'none',
+    primaryActionSummary: 'This host is on the latest public release.',
+  }
+}
+
 function versionFromRelease(release) {
   return release?.tag_name || release?.name || ''
 }
@@ -126,6 +187,7 @@ export function chooseCandidateRelease({ latestRelease, prereleaseRelease, inclu
 
 export function buildUpdateCenterState({ currentVersion = '', latestRelease = null, prereleaseRelease = null, includePrereleases = false, host = {}, disabled = false } = {}) {
   if (disabled) {
+    const action = buildActionMetadata('disabled', null, '', '')
     return {
       status: 'disabled',
       statusLabel: 'Update checks disabled',
@@ -136,21 +198,25 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
       packageLabel: '',
       installCommand: '',
       canCopyInstallCommand: false,
+      ...action,
     }
   }
 
   const candidateRelease = chooseCandidateRelease({ latestRelease, prereleaseRelease, includePrereleases, currentVersion })
   if (!currentVersion || !candidateRelease) {
+    const releaseUrl = candidateRelease?.html_url || ''
+    const action = buildActionMetadata('unavailable', null, '', releaseUrl)
     return {
       status: 'unavailable',
       statusLabel: 'Update status unavailable',
       summary: 'Polaris could not check GitHub releases from this browser session.',
       latestVersion: versionFromRelease(candidateRelease),
-      releaseUrl: candidateRelease?.html_url || '',
+      releaseUrl,
       asset: null,
       packageLabel: '',
       installCommand: '',
       canCopyInstallCommand: false,
+      ...action,
     }
   }
 
@@ -170,6 +236,8 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   const asset = selectReleaseAsset(candidateRelease, host)
   const packageFamily = normalizeToken(asset?.packageFamily || inferPackageFamily(host))
   const installCommand = asset ? buildManualInstallCommand(asset, { ...host, packageFamily }) : ''
+  const releaseUrl = candidateRelease.html_url || ''
+  const action = buildActionMetadata(status, asset, installCommand, releaseUrl)
 
   return {
     status,
@@ -177,7 +245,7 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     summary,
     currentVersion,
     latestVersion: versionFromRelease(candidateRelease),
-    releaseUrl: candidateRelease.html_url || '',
+    releaseUrl,
     asset,
     assetDigest: asset?.digest || '',
     packageFamily,
@@ -185,5 +253,6 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     installCommand,
     canCopyInstallCommand: Boolean(installCommand),
     manualInstallOnly: true,
+    ...action,
   }
 }

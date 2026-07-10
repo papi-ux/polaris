@@ -612,7 +612,7 @@ namespace confighttp {
       headers.emplace("Referrer-Policy", "no-referrer");
       headers.emplace("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()");
       headers.emplace("Strict-Transport-Security", "max-age=31536000");
-      headers.emplace("Content-Security-Policy", std::format("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*:{} https://*:{}; font-src 'self'; frame-ancestors 'none';", browser_stream::default_webtransport_port, client_settings_endpoint_https_port()));
+      headers.emplace("Content-Security-Policy", std::format("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.github.com https://*:{} https://*:{}; font-src 'self'; frame-ancestors 'none';", browser_stream::default_webtransport_port, client_settings_endpoint_https_port()));
     }
 
     void append_json_security_headers(SimpleWeb::CaseInsensitiveMultimap &headers) {
