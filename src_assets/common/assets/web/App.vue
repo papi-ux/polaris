@@ -55,6 +55,30 @@
           </router-link>
         </div>
       </nav>
+
+      <router-link
+        data-sidebar-update-status
+        :to="{ path: '/info', hash: '#update-center' }"
+        class="focus-ring mx-3 mb-2 flex items-center gap-2 rounded-lg border border-storm/20 bg-deep/35 px-3 py-2 text-left text-sm text-silver no-underline transition-[background-color,border-color,color,box-shadow] duration-200 hover:border-ice/25 hover:bg-twilight/40 hover:text-ice"
+        :class="{ 'justify-center px-2': sidebarCollapsed }"
+        :title="sidebarUpdateTitle"
+        :aria-label="sidebarUpdateTitle"
+        @click="sidebarOpen = false"
+      >
+        <span
+          data-sidebar-update-status-light
+          class="h-2.5 w-2.5 shrink-0 rounded-full"
+          :class="sidebarUpdateStatusLightClass"
+          aria-hidden="true"
+        ></span>
+        <template v-if="!sidebarCollapsed">
+          <span class="min-w-0 flex-1">
+            <span class="block text-[10px] font-semibold uppercase tracking-[0.2em] text-storm/70">Update</span>
+            <span class="block truncate text-sm font-medium text-silver">{{ sidebarUpdateLabel }}</span>
+            <span class="block truncate text-[11px] text-storm">{{ sidebarUpdateDetail }}</span>
+          </span>
+        </template>
+      </router-link>
       <div class="px-3 mb-1">
         <button
           type="button"
@@ -157,6 +181,7 @@ import SpaceParticles from './components/SpaceParticles.vue'
 import { cycleTheme, getNextTheme, getTheme, getThemeMeta, initTheme } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
 import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-metadata.js'
+import { buildUpdateCenterState } from './update-center.js'
 
 const route = useRoute()
 const currentTheme = ref(getTheme())
@@ -170,6 +195,12 @@ const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(localStorage.getItem('sidebarCollapsed') === 'true')
 const appVersion = ref('')
 const appVersionLoading = ref(false)
+const sidebarUpdateHost = ref({ platform: '', distro: {} })
+const sidebarLatestRelease = ref(null)
+const sidebarPrereleaseRelease = ref(null)
+const sidebarNotifyPreReleases = ref(false)
+const sidebarUpdateError = ref('')
+const sidebarUpdateLoading = ref(false)
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
 
 let i18nReady = false
@@ -190,6 +221,42 @@ const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
 const displayVersion = computed(() => appVersion.value ? `v${appVersion.value}` : 'v...')
 const compactVersion = computed(() => appVersion.value ? appVersion.value.split('.')[0] : '...')
+const sidebarUpdateState = computed(() => buildUpdateCenterState({
+  currentVersion: appVersion.value || '',
+  latestRelease: sidebarLatestRelease.value,
+  prereleaseRelease: sidebarPrereleaseRelease.value,
+  includePrereleases: sidebarNotifyPreReleases.value,
+  host: sidebarUpdateHost.value,
+}))
+const sidebarUpdateLabel = computed(() => {
+  if (sidebarUpdateLoading.value && !sidebarLatestRelease.value) return 'Checking…'
+  if (sidebarUpdateError.value) return 'Check unavailable'
+  if (sidebarUpdateState.value.status === 'update_available' && sidebarUpdateState.value.latestVersion) {
+    return `${sidebarUpdateState.value.latestVersion} available`
+  }
+  return sidebarUpdateState.value.currentVersion ? `v${sidebarUpdateState.value.currentVersion} current` : sidebarUpdateState.value.statusLabel
+})
+const sidebarUpdateDetail = computed(() => {
+  if (sidebarUpdateError.value) return sidebarUpdateError.value
+  if (sidebarUpdateState.value.status === 'update_available') return 'Open System to copy or download'
+  if (sidebarUpdateState.value.latestVersion) return `Latest ${sidebarUpdateState.value.latestVersion}`
+  return 'System update details'
+})
+const sidebarUpdateTitle = computed(() => `Update Center: ${sidebarUpdateLabel.value}. ${sidebarUpdateDetail.value}`)
+const sidebarUpdateStatusLightClass = computed(() => {
+  switch (sidebarUpdateState.value.statusTone) {
+    case 'update':
+      return 'bg-ice shadow-[0_0_18px_rgba(200,214,229,0.75)] animate-pulse'
+    case 'ahead':
+      return 'bg-purple-300 shadow-[0_0_14px_rgba(216,180,254,0.55)]'
+    case 'warning':
+      return 'bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.55)]'
+    case 'disabled':
+      return 'bg-storm/60'
+    default:
+      return 'bg-green-400 shadow-[0_0_14px_rgba(74,222,128,0.55)]'
+  }
+})
 const authRoutes = new Set(['/login', '/welcome', '/recover'])
 
 const showNav = computed(() => {
@@ -211,9 +278,45 @@ async function loadAppVersion() {
   }
 }
 
+async function refreshSidebarUpdateStatus() {
+  if (sidebarUpdateLoading.value) return
+  sidebarUpdateLoading.value = true
+  sidebarUpdateError.value = ''
+  try {
+    const config = await getCachedConfig().catch(() => null)
+    if (config?.version && !appVersion.value) {
+      appVersion.value = config.version
+    }
+    sidebarNotifyPreReleases.value = config?.notify_pre_releases === true || config?.notify_pre_releases === 'enabled'
+
+    const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((r) => r.ok ? r.json() : null).catch(() => null)
+    sidebarUpdateHost.value = hostStatus || { platform: config?.platform || '', distro: {} }
+    if (hostStatus?.version) {
+      appVersion.value = hostStatus.version
+    }
+
+    const latest = await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((r) => r.ok ? r.json() : null)
+    sidebarLatestRelease.value = latest
+    if (sidebarNotifyPreReleases.value) {
+      const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.ok ? r.json() : [])
+      sidebarPrereleaseRelease.value = Array.isArray(releases) ? releases.find((release) => release.prerelease) || null : null
+    } else {
+      sidebarPrereleaseRelease.value = null
+    }
+  } catch (error) {
+    sidebarLatestRelease.value = null
+    sidebarPrereleaseRelease.value = null
+    sidebarUpdateError.value = 'Release check unavailable'
+    console.error(error)
+  } finally {
+    sidebarUpdateLoading.value = false
+  }
+}
+
 watch(showNav, (visible) => {
   if (visible) {
     void loadAppVersion()
+    void refreshSidebarUpdateStatus()
   }
 })
 
@@ -262,6 +365,9 @@ onMounted(() => {
   initTheme()
   window.addEventListener('keydown', handleKeydown)
   void loadAppVersion()
+  if (showNav.value) {
+    void refreshSidebarUpdateStatus()
+  }
 })
 
 onUnmounted(() => {
