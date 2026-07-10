@@ -114,6 +114,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cage_display_router.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_portal_grab_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
 )
