@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   buildManualInstallCommand,
   buildUpdateCenterState,
@@ -83,6 +85,35 @@ describe('Update Center release awareness', () => {
       .toBe('current')
     expect(buildUpdateCenterState({ currentVersion: '1.2.2', latestRelease: release, prereleaseRelease: prerelease, includePrereleases: true }).status)
       .toBe('update_available')
+  })
+
+
+
+  it('surfaces a front-page update CTA and status light metadata', () => {
+    const state = buildUpdateCenterState({
+      currentVersion: '1.2.1',
+      latestRelease: release,
+      host: {
+        platform: 'linux',
+        distro: { id: 'cachyos', id_like: 'arch', version_id: '2026' },
+      },
+    })
+
+    expect(state.primaryActionLabel).toBe('Update')
+    expect(state.primaryActionKind).toBe('copy_install_command')
+    expect(state.statusTone).toBe('update')
+    expect(state.statusLightLabel).toBe('Update available')
+  })
+
+  it('keeps the front-page Update button copy-only and wires refresh affordances', () => {
+    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/HomeView.vue'), 'utf8')
+
+    expect(source).toContain('data-update-center-cta')
+    expect(source).toContain('data-update-status-light')
+    expect(source).toContain('@click="handlePrimaryUpdateAction"')
+    expect(source).toContain('@click="refreshUpdateStatus"')
+    expect(source).toContain('scrollIntoView')
+    expect(source).not.toMatch(/POST['"]\s*,\s*['"].*update/i)
   })
 
   it('stays informational on unsupported platforms instead of attempting auto-install', () => {
