@@ -185,4 +185,35 @@ describe('ConfigView pending changes review', () => {
     expect(result).toBe(false)
     expect(mockToast).toHaveBeenCalledWith('Failed to save configuration', 'error')
   })
+
+  it('does not treat a cancelled SteamGridDB clear as a pending settings change', async () => {
+    const wrapper = mountConfigView({ has_steamgriddb_api_key: true })
+    await flushConfigLoad()
+
+    wrapper.vm.config.clear_steamgriddb_api_key = false
+    await nextTick()
+
+    expect(wrapper.vm.hasUnsavedChanges).toBe(false)
+    expect(wrapper.vm.pendingChanges.map((change) => change.key)).not.toContain('clear_steamgriddb_api_key')
+  })
+
+  it('posts a SteamGridDB secret clear without leaking the internal clear flag', async () => {
+    const wrapper = mountConfigView({ has_steamgriddb_api_key: true })
+    await flushConfigLoad()
+
+    wrapper.vm.config.clear_steamgriddb_api_key = true
+    wrapper.vm.config.steamgriddb_api_key = ''
+    await nextTick()
+
+    global.fetch.mockResolvedValueOnce({ status: 200 })
+
+    const result = await wrapper.vm.save()
+
+    expect(result).toBe(true)
+    const saveRequest = global.fetch.mock.calls.at(-1)
+    expect(saveRequest[0]).toBe('./api/config')
+    const body = JSON.parse(saveRequest[1].body)
+    expect(body).not.toHaveProperty('clear_steamgriddb_api_key')
+    expect(body).toHaveProperty('steamgriddb_api_key', '')
+  })
 })
