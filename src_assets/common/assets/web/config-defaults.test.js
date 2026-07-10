@@ -38,4 +38,16 @@ describe('config defaults', () => {
 
     expect(source).toContain('"nvenc_split_encode_mode": "disabled"')
   })
+
+  it('surfaces the display planner as simple recommendations with advanced scale controls tucked away', () => {
+    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/configs/tabs/AudioVideo.vue'), 'utf8')
+
+    expect(source).toContain('data-display-resolution-planner')
+    expect(source).toContain('displayPlanner.recommendedTitle')
+    expect(source).toContain('Moonlight compatibility stays standard')
+    expect(source).toContain('data-display-resolution-planner-advanced')
+    expect(source).toContain('showDisplayPlannerAdvanced')
+    expect(source).toContain('Scale factors are capped to 0.5x–2x')
+    expect(source).toContain('client/game needs a specific override')
+  })
 })
