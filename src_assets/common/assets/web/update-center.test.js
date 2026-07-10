@@ -117,6 +117,14 @@ describe('Update Center release awareness', () => {
     expect(source).not.toMatch(/POST['"]\s*,\s*['"].*update/i)
   })
 
+
+
+  it('allows the browser release check through the web UI content security policy', () => {
+    const source = readFileSync(join(process.cwd(), 'src/confighttp.cpp'), 'utf8')
+
+    expect(source).toContain('https://api.github.com')
+  })
+
   it('stays informational on unsupported platforms instead of attempting auto-install', () => {
     const state = buildUpdateCenterState({
       currentVersion: '1.2.1',
