@@ -106,13 +106,14 @@ describe('Update Center release awareness', () => {
   })
 
   it('keeps the front-page Update button copy-only and wires refresh affordances', () => {
-    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/HomeView.vue'), 'utf8')
+    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/DashboardView.vue'), 'utf8')
 
     expect(source).toContain('data-update-center-cta')
     expect(source).toContain('data-update-status-light')
     expect(source).toContain('@click="handlePrimaryUpdateAction"')
     expect(source).toContain('@click="refreshUpdateStatus"')
     expect(source).toContain('scrollIntoView')
+    expect(source).toContain('buildUpdateCenterState')
     expect(source).not.toMatch(/POST['"]\s*,\s*['"].*update/i)
   })
 
