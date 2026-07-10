@@ -887,6 +887,9 @@ function serialize() {
     fallbackDisplayModeCache = config.value.fallback_mode
   }
   let configCopy = JSON.parse(JSON.stringify(config.value))
+  if (configCopy.clear_steamgriddb_api_key !== true) {
+    delete configCopy.clear_steamgriddb_api_key
+  }
   configCopy.global_prep_cmd = global_prep_cmd.value.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()))
   configCopy.global_state_cmd = global_state_cmd.value.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()))
   configCopy.dd_mode_remapping = configCopy.dd_mode_remapping
@@ -909,6 +912,8 @@ function save() {
   restarted.value = false
 
   let configCopy = serialize()
+  const clearSteamGridDbApiKey = configCopy.clear_steamgriddb_api_key === true
+  delete configCopy.clear_steamgriddb_api_key
 
   tabs.value.forEach(tab => {
     Object.keys(tab.options).forEach(optionKey => {
@@ -916,7 +921,7 @@ function save() {
       if (JSON.stringify(configCopy[optionKey]) === JSON.stringify(tab.options[optionKey])) {
         delete_value = true
       }
-      if (delete_value) {
+      if (delete_value && !(optionKey === 'steamgriddb_api_key' && clearSteamGridDbApiKey)) {
         delete configCopy[optionKey]
       }
     })
