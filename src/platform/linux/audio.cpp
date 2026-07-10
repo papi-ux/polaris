@@ -35,6 +35,7 @@
 #endif
 
 // local includes
+#include "src/audio.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -154,6 +155,12 @@ namespace platf {
     // Debug counters (atomics so they can be read without the mutex)
     std::atomic<uint64_t> total_callbacks {0};
     std::atomic<uint64_t> total_samples_written {0};
+    std::atomic<uint64_t> total_samples_dropped {0};
+    std::atomic<uint64_t> overrun_callbacks {0};
+
+    // Protected by mutex; used to rate-limit overrun warnings from sample().
+    uint64_t last_logged_samples_dropped = 0;
+    std::chrono::steady_clock::time_point next_overrun_log;
   };
 
   /**
@@ -198,6 +205,12 @@ namespace platf {
       if (n_samples > 0) {
         std::lock_guard<std::mutex> lock(self->capture_data.mutex);
         auto &cd = self->capture_data;
+
+        const auto dropped_samples = audio::ring_buffer_overflow_samples(cd.available, cd.buffer_capacity, n_samples);
+        if (dropped_samples > 0) {
+          cd.total_samples_dropped.fetch_add(dropped_samples, std::memory_order_relaxed);
+          cd.overrun_callbacks.fetch_add(1, std::memory_order_relaxed);
+        }
 
         for (uint32_t i = 0; i < n_samples; i++) {
           if (cd.available < cd.buffer_capacity) {
@@ -291,6 +304,8 @@ namespace platf {
                            << " format_negotiated="sv << capture_data.format_negotiated
                            << " callbacks="sv << capture_data.total_callbacks.load(std::memory_order_relaxed)
                            << " samples_written="sv << capture_data.total_samples_written.load(std::memory_order_relaxed)
+                           << " dropped_samples="sv << capture_data.total_samples_dropped.load(std::memory_order_relaxed)
+                           << " overrun_callbacks="sv << capture_data.overrun_callbacks.load(std::memory_order_relaxed)
                            << " available="sv << capture_data.available
                            << " needed="sv << needed;
         return capture_e::error;
@@ -306,6 +321,23 @@ namespace platf {
         capture_data.read_pos = (capture_data.read_pos + 1) % capture_data.buffer_capacity;
       }
       capture_data.available -= needed;
+
+      const auto total_dropped = capture_data.total_samples_dropped.load(std::memory_order_relaxed);
+      if (total_dropped > capture_data.last_logged_samples_dropped) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= capture_data.next_overrun_log) {
+          BOOST_LOG(warning) << "PipeWire audio capture overrun: dropped_samples_since_last_log="sv
+                             << (total_dropped - capture_data.last_logged_samples_dropped)
+                             << " total_dropped_samples="sv << total_dropped
+                             << " overrun_callbacks="sv << capture_data.overrun_callbacks.load(std::memory_order_relaxed)
+                             << " callbacks="sv << capture_data.total_callbacks.load(std::memory_order_relaxed)
+                             << " samples_written="sv << capture_data.total_samples_written.load(std::memory_order_relaxed)
+                             << " available="sv << capture_data.available
+                             << " capacity="sv << capture_data.buffer_capacity;
+          capture_data.last_logged_samples_dropped = total_dropped;
+          capture_data.next_overrun_log = now + 5s;
+        }
+      }
 
       return capture_e::ok;
     }
@@ -326,7 +358,11 @@ namespace platf {
       BOOST_LOG(debug) << "PipeWire capture destroyed: total_callbacks="sv
                        << capture_data.total_callbacks.load()
                        << " total_samples="sv
-                       << capture_data.total_samples_written.load();
+                       << capture_data.total_samples_written.load()
+                       << " total_dropped_samples="sv
+                       << capture_data.total_samples_dropped.load()
+                       << " overrun_callbacks="sv
+                       << capture_data.overrun_callbacks.load();
     }
   };
 
@@ -339,17 +375,28 @@ namespace platf {
                                                const std::string &source_name) {
     auto mic = std::make_unique<pw_mic_attr_t>();
 
-    // Initialize ring buffer: hold at least 4 frames worth of data
+    // Initialize ring buffer: hold a short jitter window worth of data. This
+    // avoids audible drops during brief host scheduling or PipeWire callback
+    // bursts while keeping latency bounded for game streaming.
     mic->capture_data.channels = channels;
     mic->capture_data.sample_rate = sample_rate;
-    mic->capture_data.buffer_capacity = frame_size * channels * 4;
+    mic->capture_data.buffer_capacity = audio::capture_jitter_buffer_capacity(frame_size, channels);
+    if (mic->capture_data.buffer_capacity == 0) {
+      BOOST_LOG(error) << "PipeWire: invalid audio buffer parameters (channels="sv << channels
+                       << " frame_size="sv << frame_size << ')';
+      return nullptr;
+    }
     mic->capture_data.buffer.resize(mic->capture_data.buffer_capacity, 0.0f);
+
+    const auto samples_per_frame = static_cast<std::size_t>(frame_size) * static_cast<std::size_t>(channels);
+    const auto jitter_frames = samples_per_frame == 0 ? 0 : mic->capture_data.buffer_capacity / samples_per_frame;
 
     BOOST_LOG(info) << "PipeWire: creating capture stream for source: "sv << source_name
                     << " (channels="sv << channels
                     << " rate="sv << sample_rate
                     << " frame_size="sv << frame_size
-                    << " ring_buffer="sv << mic->capture_data.buffer_capacity << " samples)"sv;
+                    << " ring_buffer="sv << mic->capture_data.buffer_capacity << " samples"sv
+                    << " jitter_frames="sv << jitter_frames << ')';
 
     // Create PipeWire thread loop
     mic->loop = pw_thread_loop_new("polaris-audio", nullptr);

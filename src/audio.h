@@ -10,6 +10,8 @@
 #include "utility.h"
 
 #include <bitset>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace audio {
@@ -40,6 +42,21 @@ namespace audio {
   };
 
   extern opus_stream_config_t stream_configs[MAX_STREAM_CONFIG];
+
+  /**
+   * Return the audio capture jitter buffer capacity in interleaved samples.
+   *
+   * The capture side should tolerate short host scheduling or PipeWire callback
+   * bursts without silently dropping audio. Keep this helper shared so the
+   * runtime and unit tests agree on the intended buffer depth.
+   */
+  std::size_t capture_jitter_buffer_capacity(std::uint32_t frame_size, int channels);
+
+  /**
+   * Return how many incoming interleaved samples would be dropped by appending
+   * incoming_samples to a ring buffer with the given available/capacity state.
+   */
+  std::size_t ring_buffer_overflow_samples(std::size_t available, std::size_t capacity, std::size_t incoming_samples);
 
   struct config_t {
     enum flags_e : int {

@@ -126,3 +126,18 @@ TEST(AudioSinkSelectionTest, ExplicitConfiguredSinkKeepsDefaultRoutingBehavior) 
 
   config::audio.sink = old_sink;
 }
+
+TEST(AudioCaptureBufferDiagnosticsTest, KeepsSixtyMillisecondsOfStereoJitterForFiveMsPackets) {
+  constexpr std::uint32_t frame_size = 240;  // 5 ms at 48 kHz
+  constexpr int channels = 2;
+
+  EXPECT_EQ(audio::capture_jitter_buffer_capacity(frame_size, channels), frame_size * channels * 12);
+}
+
+TEST(AudioCaptureBufferDiagnosticsTest, ReportsSamplesDroppedWhenIncomingBlockOverflows) {
+  EXPECT_EQ(audio::ring_buffer_overflow_samples(8, 10, 5), 3);
+}
+
+TEST(AudioCaptureBufferDiagnosticsTest, DoesNotReportDropsWhenIncomingBlockFits) {
+  EXPECT_EQ(audio::ring_buffer_overflow_samples(4, 10, 5), 0);
+}
