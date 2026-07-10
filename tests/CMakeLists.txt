@@ -68,6 +68,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
+    ${CMAKE_SOURCE_DIR}/src/update_status.cpp
     ${CMAKE_SOURCE_DIR}/src/rswrapper.c
 )
 
@@ -95,6 +96,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_prepared_ffmpeg.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_update_status.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
