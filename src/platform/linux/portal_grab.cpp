@@ -157,6 +157,32 @@ namespace portal {
     }
   };
 
+  constexpr uint32_t portal_source_monitor = 1;
+  constexpr uint32_t portal_source_window = 2;
+
+  static uint32_t capture_type_for_stream_display(bool headless_mode, bool use_cage_compositor) {
+    // Plain desktop display mirroring should ask the portal for a monitor/source,
+    // not a single app window. Windowed/headless cage paths keep the historical
+    // window source because they stream an isolated compositor/window.
+    if (!headless_mode && !use_cage_compositor) {
+      return portal_source_monitor;
+    }
+
+    return portal_source_window;
+  }
+
+#if defined(POLARIS_TESTS)
+  uint32_t capture_type_for_stream_display_for_tests(bool headless_mode, bool use_cage_compositor) {
+    return capture_type_for_stream_display(headless_mode, use_cage_compositor);
+  }
+#endif
+
+  static uint32_t capture_type_for_current_config() {
+    return capture_type_for_stream_display(
+      config::video.linux_display.headless_mode,
+      config::video.linux_display.use_cage_compositor);
+  }
+
   // Helper: call a portal method synchronously via D-Bus
   static GVariant *portal_call_sync(GDBusConnection *conn, const char *method,
     GVariant *params, int timeout_ms = 5000) {
@@ -260,7 +286,7 @@ namespace portal {
     return "/org/freedesktop/portal/desktop/request/" + sender + "/" + token;
   }
 
-  static std::unique_ptr<portal_session_t> create_portal_session(uint32_t capture_type = 2) {
+  static std::unique_ptr<portal_session_t> create_portal_session(uint32_t capture_type = portal_source_window) {
     auto session = std::make_unique<portal_session_t>();
 
     GError *gerr = nullptr;
@@ -904,7 +930,7 @@ namespace portal {
     // Create the portal D-Bus session once (shows picker on first use)
     if (!g_portal || !g_portal->ready || g_portal->pw_node_id == 0) {
       g_portal.reset();
-      g_portal = create_portal_session(2);
+      g_portal = create_portal_session(capture_type_for_current_config());
       if (!g_portal || g_portal->failed || !g_portal->ready || g_portal->pw_node_id == 0) {
         BOOST_LOG(warning) << "portal: Failed to create global session"sv;
         g_portal.reset();
