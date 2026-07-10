@@ -55,6 +55,36 @@ describe('diagnostics export redaction', () => {
 
     expect(sanitizeDiagnosticsValue(value)).toEqual({ name: 'root', self: '[circular]' })
   })
+
+
+  it('redacts Doctor inputs before support export and preserves safe action boundaries', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      stream: {
+        client_ip: '10.0.0.22',
+        auth_token: 'tok_live_secret',
+        doctor: {
+          result_id: 'doctor-v1-watch-gpu_native_requested_shm_fallback',
+          primary_issue: 'gpu_native_requested_shm_fallback',
+          safe_recovery_action: {
+            id: 'export_support_bundle',
+            destructive: false,
+            requires_confirmation: true,
+            payload_preview: { session_token: 'tok_live_secret' },
+          },
+          evidence: [
+            { id: 'capture_path', detail: 'Authorization: Bearer tok_live_secret' },
+          ],
+        },
+      },
+    })
+
+    expect(bundle.stream.doctor.result_id).toBe('doctor-v1-watch-gpu_native_requested_shm_fallback')
+    expect(bundle.stream.doctor.safe_recovery_action.destructive).toBe(false)
+    expect(bundle.stream.auth_token).toBe(REDACTED_VALUE)
+    expect(bundle.stream.doctor.safe_recovery_action.payload_preview.session_token).toBe(REDACTED_VALUE)
+    expect(bundle.stream.doctor.evidence[0].detail).toContain(`Bearer ${REDACTED_VALUE}`)
+    expect(JSON.stringify(bundle)).not.toContain('tok_live_secret')
+  })
 })
 
 describe('Fix My Stream checklist', () => {
