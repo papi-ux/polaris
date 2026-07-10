@@ -36,4 +36,16 @@ describe('Troubleshooting self-service support flow', () => {
     expect(source).toContain('troubleshooting.support_redaction_notice')
     expect(locale).toContain('No passwords, tokens, cookies, auth headers, or credentials are intentionally included')
   })
+
+  it('places optional AI Doctor explanation behind privacy copy and no action execution', () => {
+    const source = webSource('views/TroubleshootingView.vue')
+    const locale = webSource('public/assets/locale/en.json')
+
+    expect(source).toContain('data-ai-doctor-explanation')
+    expect(source).toContain('@click="requestAiDoctorExplanation"')
+    expect(source).toContain('AI_DOCTOR_EXPLANATION_CATEGORIES')
+    expect(locale).toContain('Disabled unless you configure AI')
+    expect(locale).toContain('Ollama or LM Studio')
+    expect(locale).toContain('AI cannot execute recovery actions')
+  })
 })

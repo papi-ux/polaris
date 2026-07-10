@@ -40,6 +40,33 @@
             </div>
           </div>
         </details>
+        <div class="mt-4 rounded-xl border border-sky-400/20 bg-sky-400/10 p-3" data-ai-doctor-explanation>
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-200">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
+              <p class="mt-1 text-xs leading-relaxed text-blue-100">{{ $t('troubleshooting.ai_doctor_explanation_privacy') }}</p>
+              <p class="mt-2 text-[11px] leading-relaxed text-storm">{{ aiDoctorCategoriesText }}</p>
+            </div>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="requestingAiDoctorExplanation" @click="requestAiDoctorExplanation">
+              {{ requestingAiDoctorExplanation ? $t('troubleshooting.ai_doctor_explanation_pending') : $t('troubleshooting.ai_doctor_explanation_button') }}
+            </button>
+          </div>
+          <div v-if="aiDoctorExplanation" class="mt-3 rounded-lg border border-storm/15 bg-void/40 p-3 text-sm text-silver">
+            <div class="font-semibold">{{ aiDoctorExplanation.likely_cause }}</div>
+            <ul class="mt-2 list-disc space-y-1 pl-5 text-storm">
+              <li v-for="item in aiDoctorExplanation.evidence" :key="item">{{ item }}</li>
+            </ul>
+            <div class="mt-3 text-xs uppercase tracking-[0.18em] text-ice">{{ $t('troubleshooting.ai_doctor_try_first') }}</div>
+            <ul class="mt-1 list-disc space-y-1 pl-5 text-storm">
+              <li v-for="item in aiDoctorExplanation.try_first" :key="item">{{ item }}</li>
+            </ul>
+            <details class="mt-3">
+              <summary class="cursor-pointer text-xs font-medium text-silver">{{ $t('troubleshooting.advanced_diagnostics') }}</summary>
+              <p class="mt-2 text-xs leading-relaxed text-storm">{{ aiDoctorExplanation.advanced_detail }}</p>
+              <p class="mt-2 text-[11px] text-ice">{{ $t('troubleshooting.ai_doctor_no_actions') }} · {{ aiDoctorExplanation.confidence }}</p>
+            </details>
+          </div>
+        </div>
       </div>
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         <div
@@ -332,6 +359,7 @@ import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { requestHostRestart } from '../restart-host.js'
 import { buildAnonymizedDiagnosticsBundle, buildFixMyStreamChecklist, buildGithubIssueDraft } from '../diagnostics-export.js'
+import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -347,6 +375,8 @@ const clearingAiCache = ref(false)
 const cleaningStaleVirtualDisplay = ref(false)
 const downloadingSupportBundle = ref(false)
 const generatingIssueDraft = ref(false)
+const requestingAiDoctorExplanation = ref(false)
+const aiDoctorExplanation = ref(null)
 const logFilter = ref(null)
 const logLevelFilter = ref(null)
 let logInterval = null
@@ -558,6 +588,7 @@ const fixMyStreamChecklist = computed(() => buildFixMyStreamChecklist({
 }))
 
 const doctorPayload = computed(() => streamStats.value?.doctor || null)
+const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doctor_categories_prefix')} ${AI_DOCTOR_EXPLANATION_CATEGORIES.join(', ')}`)
 const doctorPlainDiagnosis = computed(() => {
   const doctor = doctorPayload.value
   if (doctor?.simple_state || doctor?.summary || doctor?.diagnosis) {
@@ -926,6 +957,33 @@ async function downloadIssueDraft() {
     showToast(i18n.t('troubleshooting.issue_draft_error') || 'Failed to build issue draft.', 'error')
   } finally {
     generatingIssueDraft.value = false
+  }
+}
+
+async function requestAiDoctorExplanation() {
+  requestingAiDoctorExplanation.value = true
+  try {
+    const supportBundle = await createSupportBundle()
+    const config = supportBundle.config || {}
+    const result = await explainDoctorWithAi({
+      aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
+      config,
+      supportBundle,
+      deterministicSummary: doctorPlainDiagnosis.value,
+    })
+    aiDoctorExplanation.value = result.explanation || null
+    if (result.disabled) {
+      showToast(result.error || i18n.t('troubleshooting.ai_doctor_disabled'), 'info')
+    } else if (!result.status) {
+      showToast(i18n.t('troubleshooting.ai_doctor_fallback') || 'AI explanation unavailable; showing deterministic Doctor output.', 'info')
+    } else {
+      showToast(i18n.t('troubleshooting.ai_doctor_success') || 'AI Doctor explanation ready.', 'success')
+    }
+  } catch (error) {
+    console.error(error)
+    showToast(i18n.t('troubleshooting.ai_doctor_error') || 'Failed to request AI Doctor explanation.', 'error')
+  } finally {
+    requestingAiDoctorExplanation.value = false
   }
 }
 

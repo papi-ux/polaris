@@ -251,6 +251,20 @@ namespace ai_optimizer {
     const device_db::optimization_t &optimization);
 
   /**
+   * @brief Parse and normalize a Doctor explanation JSON response.
+   * Always forces destructive_action_allowed=false.
+   */
+  std::string parse_doctor_explanation_json(const std::string &text);
+
+  /**
+   * @brief Explain redacted Doctor/support-bundle evidence with an ad-hoc AI config.
+   * Returns a structured JSON response and falls back to deterministic evidence on
+   * disabled AI, provider failures, or invalid provider output.
+   */
+  std::string explain_doctor_json_with_config(const config_t &config,
+                                              const std::string &redacted_evidence_json);
+
+  /**
    * @brief Get AI status as JSON string.
    */
   std::string get_status_json();
