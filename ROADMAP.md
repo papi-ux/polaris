@@ -36,7 +36,7 @@ Polaris is public and usable today, but it is still early. This roadmap is meant
 - CachyOS generally follows the Arch package path, but derivative-specific gaps still need reports.
 - Bazzite and Ubuntu 24.04 are tester package paths.
 - openSUSE Tumbleweed is source-build supported; other distros are source-build/community-validation oriented.
-- NVIDIA/NVENC is the most heavily validated encoder path.
+- NVIDIA/NVENC is the most heavily validated encoder path; AMD/Mesa VAAPI is supported and should stay visible while broader validation catches up.
 - Browser Stream is experimental.
 - Some richer live-session behavior depends on Nova.
 

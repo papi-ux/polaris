@@ -44,7 +44,7 @@ what the host is actually doing.
 | AI Auto Quality | Optional | Provider-configured tuning and recovery guidance; core streaming does not require AI or cloud services |
 | Browser Stream | Experimental | Chromium-oriented WebTransport/WebCodecs streaming path for browser testing |
 | HDR / Main10 | Conditional | Main10 SDR can work when requested; true HDR requires real HDR metadata from the active capture path |
-| VAAPI / software encode | Supported, less validated | Useful fallback paths, but NVIDIA/NVENC is still the most exercised release target |
+| AMD / VAAPI and software encode | Supported, expanding validation | AMD/Intel VAAPI and software fallback are supported; NVIDIA/NVENC remains the most exercised release target while AMD coverage grows |
 
 ## Privacy and Local-First Defaults
 
@@ -80,7 +80,7 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 ### First stream checklist
 
 1. Open the first-run setup at **https://localhost:47990/#/welcome**.
-2. Confirm the recommended Linux path: `headless_mode = enabled`, `linux_use_cage_compositor = enabled`, and `linux_prefer_gpu_native_capture = disabled`.
+2. Confirm the recommended Linux path: `headless_mode = enabled`, `linux_use_cage_compositor = enabled`, and `linux_prefer_gpu_native_capture = enabled`.
 3. Pair with Trusted Pair on a trusted LAN, QR pairing for Nova, or manual PIN for standard Moonlight clients.
 4. Start a game from the Polaris library, Nova, or a Moonlight client.
 5. Watch the live session dashboard to confirm the active runtime and encoder path.
@@ -134,7 +134,8 @@ Detailed source builds, local Arch package builds, distro dependency lists, open
 | Debian-family distros | Source-build oriented | Ubuntu 24.04 is the only direct DEB asset today |
 | Other Linux distros | Source-build/community validation | Bring distro, GPU, driver, compositor, and package details when reporting success or breakage |
 | NVIDIA / NVENC | Best-tested | Main fast path and most validated encoder/runtime combination |
-| VAAPI / software encode | Supported | Works, but is less battle-tested than NVENC |
+| AMD / VAAPI | Supported, expanding validation | Mesa VAAPI is the Linux AMD baseline; GPU-native DMA-BUF is preferred when available and reported truthfully when it falls back |
+| Software encode | Supported fallback | Useful for diagnostics and unsupported hardware, but not the performance target |
 | Nova for Android | Best experience | Full launch contract, watch mode, tuning, and richer live state |
 | Standard Moonlight clients | Compatible | Core streaming works without Nova-specific UX |
 | Browser Stream | Experimental | Browser-based streaming path using WebTransport and WebCodecs; best tested on Chromium-family browsers |
@@ -144,19 +145,19 @@ Detailed source builds, local Arch package builds, distro dependency lists, open
 If you want the smoothest first run, start here:
 
 - **Host distro**: Fedora 44 or Arch Linux / CachyOS.
-- **GPU path**: NVIDIA with NVENC.
+- **GPU path**: NVIDIA/NVENC is the most validated path; AMD/Mesa VAAPI is supported and should use the same Headless Stream flow with capture-path truth in Mission Control.
 - **Desktop**: KDE Plasma Wayland is the most exercised daily-driver setup, but Headless Stream launches its own compositor and is not KDE-only.
-- **Config**: `headless_mode = enabled`, `linux_use_cage_compositor = enabled`, `linux_prefer_gpu_native_capture = disabled`.
+- **Config**: `headless_mode = enabled`, `linux_use_cage_compositor = enabled`, `linux_prefer_gpu_native_capture = enabled`.
 - **Client**: Nova on an ARM64 Android handheld / Android TV device, or a standard Moonlight client for the core stream path.
 
 ## Known Limitations
 
 - Polaris is not a Windows host today. Linux is the supported platform.
 - Fedora and Arch are the most validated package paths; CachyOS should use the Arch path first, but derivative-specific issues still need reports.
-- Bazzite support is experimental. Desktop Mode has NVIDIA validation with the recommended Headless Stream settings, while real Steam/Game Mode, AMD, and Steam Deck client flows need more hardware coverage.
+- Bazzite support is experimental. Desktop Mode has Headless Stream validation on NVIDIA and growing AMD/Mesa VAAPI coverage; real Steam/Game Mode and Steam Deck client flows need more hardware reports.
 - Ubuntu 24.04 DEB packaging is experimental; other Debian-family distros are still source-build oriented.
 - openSUSE Tumbleweed has source-build guidance and CI coverage, but no published release package asset yet; Leap and other RPM distros should start from source.
-- NVIDIA/NVENC is the most heavily validated hardware path. Other encode backends work, but they are not equally battle-tested.
+- NVIDIA/NVENC is the most heavily validated hardware path. AMD/Mesa VAAPI is supported and should stay visible in docs/UI, but it still needs broader real-hardware coverage before claiming parity.
 - Some UX surfaced in Nova, such as explicit launch recommendations, watch mode polish, and live tuning, depends on the Nova Android client.
 - MangoHud can still be risky on Steam Big Picture and some Steam/Proton launches.
 
@@ -306,12 +307,12 @@ Config file: `~/.config/polaris/polaris.conf`
 # Headless Stream path
 headless_mode = enabled
 linux_use_cage_compositor = enabled
-linux_prefer_gpu_native_capture = disabled
+linux_prefer_gpu_native_capture = enabled
 
 # Pairing on your trusted LAN
 trusted_subnets = ["10.0.0.0/24"]
 
-# Encoding
+# Encoding (choose for your GPU: nvenc on NVIDIA, vaapi on AMD/Intel)
 encoder = nvenc
 
 # Optional
@@ -342,7 +343,7 @@ Full config tables, AI provider examples, HDR notes, and credential recovery ste
 <details>
 <summary><b>Do I need an NVIDIA GPU?</b></summary>
 
-No, but NVENC is the most heavily tested path today. VAAPI and software encode paths are supported, but current Linux compositor and DMA-BUF work has been tuned most heavily around NVIDIA.
+No. NVIDIA/NVENC is the most heavily tested path today, but AMD/Mesa VAAPI and software encode paths are supported. GPU-native/DMA-BUF capture is an optimization request on both NVIDIA and AMD-capable stacks; Polaris reports the actual path when a host falls back to SHM/system memory.
 
 </details>
 
