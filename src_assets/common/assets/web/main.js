@@ -50,6 +50,12 @@ const routes = [
 const router = createRouter({
   history: createWebHashHistory(),
   routes,
+  scrollBehavior(to) {
+    if (to.hash) {
+      return { el: to.hash, behavior: 'smooth' }
+    }
+    return { top: 0 }
+  },
 })
 
 // Auth guard - redirect to login if not authenticated

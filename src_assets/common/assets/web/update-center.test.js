@@ -105,16 +105,27 @@ describe('Update Center release awareness', () => {
     expect(state.statusLightLabel).toBe('Update available')
   })
 
-  it('keeps the front-page Update button copy-only and wires refresh affordances', () => {
-    const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/DashboardView.vue'), 'utf8')
+  it('keeps Update Center out of Mission Control and exposes sidebar/System affordances', () => {
+    const dashboard = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/DashboardView.vue'), 'utf8')
+    const appShell = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/App.vue'), 'utf8')
+    const system = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/HomeView.vue'), 'utf8')
 
-    expect(source).toContain('data-update-center-cta')
-    expect(source).toContain('data-update-status-light')
-    expect(source).toContain('@click="handlePrimaryUpdateAction"')
-    expect(source).toContain('@click="refreshUpdateStatus"')
-    expect(source).toContain('scrollIntoView')
-    expect(source).toContain('buildUpdateCenterState')
-    expect(source).not.toMatch(/POST['"]\s*,\s*['"].*update/i)
+    expect(dashboard).not.toContain('data-update-center-cta')
+    expect(dashboard).not.toContain('data-update-status-light')
+    expect(dashboard).not.toContain('buildUpdateCenterState')
+
+    expect(appShell).toContain('data-sidebar-update-status')
+    expect(appShell).toContain('data-sidebar-update-status-light')
+    expect(appShell).toContain("path: '/info'")
+    expect(appShell).toContain("hash: '#update-center'")
+    expect(appShell).toContain('buildUpdateCenterState')
+
+    expect(system).toContain('id="update-center"')
+    expect(system).toContain('data-update-center-details')
+    expect(system).toContain('@click="handlePrimaryUpdateAction"')
+    expect(system).toContain('@click="refreshUpdateStatus"')
+    expect(system).toContain('scrollIntoView')
+    expect(system).not.toMatch(/POST['"]\s*,\s*['"].*update/i)
   })
 
 
