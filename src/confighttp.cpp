@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -3820,6 +3821,8 @@ namespace confighttp {
     if (!authenticate(response, request)) return;
     print_req(request);
 
+    session_manager::repair_desktop_session_environment();
+
     auto tid = std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
     std::string tmpfile = "/tmp/polaris_preview_" + tid + ".png";
     std::string outfile = tmpfile;
@@ -3893,6 +3896,8 @@ namespace confighttp {
   void getDisplayStream(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
+
+    session_manager::repair_desktop_session_environment();
 
     // Parse params
     int target_fps = 5;
@@ -4575,6 +4580,28 @@ namespace confighttp {
     output["gpu"] = nullptr;
     output["video"]["active_encoder"] = video::active_encoder_name();
 #ifdef __linux__
+    const bool display_environment_repaired =
+      session_manager::repair_desktop_session_environment() ||
+      session_manager::desktop_session_environment_was_repaired();
+    const char *wayland_display = std::getenv("WAYLAND_DISPLAY");
+    const char *x11_display = std::getenv("DISPLAY");
+    const char *desktop_name = std::getenv("XDG_CURRENT_DESKTOP");
+    const char *session_type = std::getenv("XDG_SESSION_TYPE");
+    const bool has_wayland_display = wayland_display && wayland_display[0] != '\0';
+    const bool has_x11_display = x11_display && x11_display[0] != '\0';
+    output["display_session"]["status"] = has_wayland_display || has_x11_display ? "healthy" : "missing_display_environment";
+    output["display_session"]["summary"] = has_wayland_display ?
+      "Wayland desktop environment is available to Polaris." :
+      (has_x11_display ? "X11 desktop environment is available to Polaris." :
+                         "Polaris could not find WAYLAND_DISPLAY or DISPLAY for desktop previews.");
+    output["display_session"]["action"] = has_wayland_display || has_x11_display ?
+      "No action needed." :
+      "Restart Polaris from the desktop session or run the user service so it inherits the graphical environment.";
+    output["display_session"]["environment_repaired"] = display_environment_repaired;
+    output["display_session"]["session_type"] = session_type && session_type[0] ? std::string(session_type) : "unknown";
+    output["display_session"]["desktop"] = desktop_name && desktop_name[0] ? std::string(desktop_name) : "unknown";
+    output["display_session"]["wayland_available"] = has_wayland_display;
+    output["display_session"]["x11_available"] = has_x11_display;
     {
       auto runtime_state = cage_display_router::runtime_state();
       output["runtime"]["backend"] = runtime_state.backend_name;
@@ -4635,7 +4662,7 @@ namespace confighttp {
         }
       }
 
-      if (wayland_monitors.empty()) {
+      if (wayland_monitors.empty() && has_wayland_display) {
         wayland_monitors = wl::monitors();
       }
 
