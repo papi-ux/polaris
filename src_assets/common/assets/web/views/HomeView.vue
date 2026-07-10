@@ -99,7 +99,7 @@
       </div>
     </section>
 
-    <section ref="updateCenterSection" class="section-card border-ice/15 bg-gradient-to-br from-deep/70 via-deep/40 to-ice/5">
+    <section id="update-center" ref="updateCenterSection" data-update-center-details class="section-card border-ice/15 bg-gradient-to-br from-deep/70 via-deep/40 to-ice/5">
       <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
         <div class="max-w-3xl">
           <div class="section-kicker">Update Center</div>

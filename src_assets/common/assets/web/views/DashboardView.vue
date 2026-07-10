@@ -36,56 +36,6 @@
       <div class="mission-control-copy">{{ secondScreenOverlayRecommendation.detail }}</div>
     </section>
 
-    <section ref="updateCenterSection" class="section-card border-ice/15 bg-gradient-to-br from-deep/70 via-deep/40 to-ice/5" aria-label="Update Center">
-      <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div class="min-w-0">
-          <div class="section-kicker">Update Center</div>
-          <div class="mt-2 flex flex-wrap items-center gap-3">
-            <span
-              data-update-status-light
-              class="h-2.5 w-2.5 rounded-full"
-              :class="updateCenterStatusLightClass"
-              :aria-label="updateCenterState.statusLightLabel"
-              role="status"
-            ></span>
-            <h2 class="section-title">{{ updateCenterState.statusLabel }}</h2>
-            <span class="meta-pill" :class="updateCenterBadgeClass">{{ updateCenterState.latestVersion || 'Release check' }}</span>
-          </div>
-          <p class="section-copy mt-2">{{ updateCheckError || updateCenterState.summary }}</p>
-          <div v-if="updateCenterState.asset?.name" class="mt-2 break-all text-xs text-storm">
-            {{ updateCenterState.packageLabel }} · {{ updateCenterState.asset.name }}
-          </div>
-        </div>
-        <div class="flex flex-wrap gap-2 lg:justify-end">
-          <button
-            data-update-center-cta
-            type="button"
-            class="focus-ring inline-flex h-10 items-center justify-center rounded-lg px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:opacity-50"
-            :class="updateCenterCtaClass"
-            :disabled="updateCenterState.primaryActionKind === 'none'"
-            @click="handlePrimaryUpdateAction"
-          >
-            {{ copiedInstallCommand ? 'Copied' : updateCenterState.primaryActionLabel }}
-          </button>
-          <button
-            data-update-center-refresh
-            type="button"
-            class="focus-ring inline-flex h-10 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-colors hover:border-ice hover:text-ice disabled:opacity-50"
-            :disabled="checkingUpdates"
-            @click="refreshUpdateStatus"
-          >
-            {{ checkingUpdates ? 'Checking…' : 'Refresh' }}
-          </button>
-          <router-link
-            to="/info"
-            class="focus-ring inline-flex h-10 items-center justify-center rounded-lg border border-ice/30 px-4 text-sm font-medium text-ice no-underline transition-colors hover:bg-ice/10"
-          >
-            Details
-          </router-link>
-        </div>
-      </div>
-    </section>
-
     <div v-if="statsLoaded && !stats?.streaming" class="grid grid-cols-1 gap-3 lg:grid-cols-3">
       <div class="surface-subtle p-4">
         <div class="section-title-row">
@@ -853,7 +803,6 @@ import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
-import { buildUpdateCenterState } from '../update-center.js'
 import {
   buildFpsTargetGap,
   buildLiveSummary,
@@ -880,125 +829,11 @@ const version = ref('')
 const headlessEnabled = ref(false)
 const discoveryEnabled = ref(false)
 const pairingEnabled = ref(false)
-const updateHost = ref({ platform: '', distro: {} })
-const latestRelease = ref(null)
-const prereleaseRelease = ref(null)
-const notifyPreReleases = ref(false)
-const checkingUpdates = ref(false)
-const updateCheckError = ref('')
-const copiedInstallCommand = ref(false)
-const updateCenterSection = ref(null)
 const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
 const { toast: showToast } = useToast()
 
 const autoQuality = computed(() => resolveAutoQualityState(stats.value || {}, clientSettingsSync.value || {}))
-
-const updateCenterState = computed(() => buildUpdateCenterState({
-  currentVersion: version.value || '',
-  latestRelease: latestRelease.value,
-  prereleaseRelease: prereleaseRelease.value,
-  includePrereleases: notifyPreReleases.value,
-  host: updateHost.value,
-}))
-
-const updateCenterBadgeClass = computed(() => {
-  switch (updateCenterState.value.status) {
-    case 'update_available':
-      return 'border-ice/30 bg-ice/10 text-ice'
-    case 'ahead':
-      return 'border-purple-300/30 bg-purple-500/10 text-purple-200'
-    case 'unavailable':
-      return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
-    case 'disabled':
-      return 'border-storm/30 bg-deep/60 text-storm'
-    default:
-      return 'border-green-500/30 bg-green-500/10 text-green-200'
-  }
-})
-
-const updateCenterStatusLightClass = computed(() => {
-  switch (updateCenterState.value.statusTone) {
-    case 'update':
-      return 'bg-ice shadow-[0_0_18px_rgba(200,214,229,0.75)] animate-pulse'
-    case 'ahead':
-      return 'bg-purple-300 shadow-[0_0_14px_rgba(216,180,254,0.55)]'
-    case 'warning':
-      return 'bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.55)]'
-    case 'disabled':
-      return 'bg-storm/60'
-    default:
-      return 'bg-green-400 shadow-[0_0_14px_rgba(74,222,128,0.55)]'
-  }
-})
-
-const updateCenterCtaClass = computed(() => {
-  if (updateCenterState.value.status === 'update_available') {
-    return 'bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.22)]'
-  }
-  if (updateCenterState.value.primaryActionKind === 'none') {
-    return 'border border-storm bg-deep/50 text-storm'
-  }
-  return 'border border-ice/30 text-ice hover:bg-ice/10'
-})
-
-function scrollToUpdateCenter() {
-  updateCenterSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
-
-async function copyInstallCommand() {
-  if (!updateCenterState.value.installCommand || !navigator.clipboard) return false
-  await navigator.clipboard.writeText(updateCenterState.value.installCommand)
-  copiedInstallCommand.value = true
-  window.setTimeout(() => {
-    copiedInstallCommand.value = false
-  }, 1800)
-  return true
-}
-
-async function handlePrimaryUpdateAction() {
-  const action = updateCenterState.value.primaryActionKind
-  if (action === 'refresh_update_status') {
-    await refreshUpdateStatus()
-    return
-  }
-  if (action === 'open_release' && updateCenterState.value.releaseUrl) {
-    window.open(updateCenterState.value.releaseUrl, '_blank', 'noopener')
-    return
-  }
-  scrollToUpdateCenter()
-  if (action === 'copy_install_command') {
-    await copyInstallCommand()
-  }
-}
-
-async function refreshUpdateStatus() {
-  checkingUpdates.value = true
-  updateCheckError.value = ''
-  try {
-    const config = await fetch('./api/config', { credentials: 'include' }).then((r) => r.json())
-    const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((r) => r.json()).catch(() => null)
-    updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }
-    notifyPreReleases.value = config.notify_pre_releases === true || config.notify_pre_releases === 'enabled'
-    version.value = hostStatus?.version || config.version || version.value
-
-    try {
-      latestRelease.value = await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((r) => r.json())
-      const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.json())
-      prereleaseRelease.value = Array.isArray(releases) ? releases.find((release) => release.prerelease) || null : null
-    } catch (error) {
-      latestRelease.value = null
-      prereleaseRelease.value = null
-      updateCheckError.value = 'Release check unavailable'
-      console.error(error)
-    }
-  } catch (error) {
-    updateCheckError.value = 'Host update status unavailable'
-    console.error(error)
-  } finally {
-    checkingUpdates.value = false
-  }
-}
 
 const actionSummary = computed(() => {
   if (!statsLoaded.value) return t('dashboard.loading_summary')
@@ -2074,7 +1909,6 @@ onMounted(async () => {
   }
 
   fetchSystemInfo()
-  refreshUpdateStatus()
   fetchAiStatus()
   fetchAiDevices()
 
