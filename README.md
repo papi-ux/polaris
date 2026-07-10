@@ -88,9 +88,9 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.2.0
+## What is New in v1.2.1
 
-Polaris v1.2.0 is about making Linux streaming feel less like ritual sacrifice and more like a controllable cockpit.
+Polaris v1.2.1 is a reliability patch for Linux hosts and Moonlight-compatible newcomers: fewer Settings save goblins, clearer capture/audio diagnostics, and better Arch/CachyOS support breadcrumbs.
 
 - **Portable Chrome is the new visual baseline**: Mission Control now uses a smoked graphite / dim Moonlight-grey skin with restrained green status accents.
 - **Private streams are safer by default**: Polaris and Nova coordinate launch intent so handheld launches do not silently reuse desktop Steam or expose games on the physical monitor.
