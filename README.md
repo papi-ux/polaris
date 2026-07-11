@@ -88,15 +88,16 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.2.1
+## What is New in v1.3.0
 
-Polaris v1.2.1 is a reliability patch for Linux hosts and Moonlight-compatible newcomers: fewer Settings save goblins, clearer capture/audio diagnostics, and better Arch/CachyOS support breadcrumbs.
+Polaris v1.3.0 turns the web console into a stronger self-service streaming cockpit: diagnose the host and live path, plan display modes before launch, see updates without spelunking GitHub, and recover more cleanly from Linux capture-environment drift.
 
-- **Portable Chrome is the new visual baseline**: Mission Control now uses a smoked graphite / dim Moonlight-grey skin with restrained green status accents.
-- **Private streams are safer by default**: Polaris and Nova coordinate launch intent so handheld launches do not silently reuse desktop Steam or expose games on the physical monitor.
-- **Mission Control tells the truth**: stream quality, latency, FPS, packet loss, bitrate, capture path, runtime mode, and host-affecting actions are easier to scan and act on.
-- **Trusted Nova clients get the right permissions**: Game Control pairing can grant browse, launch, and input without broad clipboard, file-transfer, or server-command access.
-- **Linux capture diagnostics improved**: CUDA/GPU-native, DMA-BUF fallback, virtual-display preservation, VAAPI/headless behavior, and downgrade reasons are surfaced more clearly.
+- **Polaris Doctor and support reports**: deterministic host, stream, and post-session findings now drive privacy-safe support bundles, self-tests, and issue drafts; optional AI explanations translate the evidence without replacing it.
+- **Network and controller truth**: native probes surface route, reachability, latency, packet loss, controller isolation, and haptics evidence so support can stop blaming the nearest random subsystem.
+- **Display planning before launch**: the resolution planner compares client requests, host capabilities, capture constraints, and output modes before a stream starts.
+- **Update Center**: Mission Control can check release metadata and expose package-aware update guidance without silently mutating the host.
+- **More resilient Linux capture**: stale desktop environment values self-heal, while headless DMA-BUF conversion failures fall back instead of stranding the session.
+- **Clearer GPU guidance**: public docs now explain NVIDIA, AMD/VAAPI, GPU-native, and fallback behavior with less vendor-specific fog.
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
