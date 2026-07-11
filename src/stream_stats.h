@@ -108,6 +108,16 @@ namespace stream_stats {
     // System
     double gpu_usage = 0;
 
+    // Controller/input runtime evidence
+    bool input_virtual_controller_created = false;
+    int input_virtual_controller_number = 0;
+    std::string input_virtual_controller_kind;
+    std::string input_virtual_controller_error;
+    std::string input_host_controller_isolation = "unknown";
+    std::string input_host_controller_isolation_detail;
+    bool input_haptics_supported = false;
+    std::string input_haptics_detail;
+
     // Multi-client
     std::vector<client_stats_t> clients;
 
@@ -321,6 +331,18 @@ namespace stream_stats {
                         bool hdr_metadata_available,
                         bool stream_hdr_enabled,
                         const std::string &color_coding);
+
+  /**
+   * @brief Update native controller/input diagnostics exposed to support self-tests.
+   */
+  void update_controller_input_state(bool virtual_controller_created,
+                                     int virtual_controller_number,
+                                     const std::string &virtual_controller_kind,
+                                     const std::string &virtual_controller_error,
+                                     const std::string &host_controller_isolation,
+                                     const std::string &host_controller_isolation_detail,
+                                     bool haptics_supported,
+                                     const std::string &haptics_detail);
 
   /**
    * @brief Record a single capture timing sample into the shared telemetry sink.

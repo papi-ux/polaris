@@ -131,6 +131,29 @@ TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNati
   );
 }
 
+TEST(StreamStatsControllerInputTests, SerializesNativeControllerDiagnostics) {
+  stream_stats::stats_t stats {};
+  stats.input_virtual_controller_created = true;
+  stats.input_virtual_controller_number = 2;
+  stats.input_virtual_controller_kind = "xone";
+  stats.input_virtual_controller_error = "";
+  stats.input_host_controller_isolation = "strict_bwrap";
+  stats.input_host_controller_isolation_detail = "2 virtual nodes allowed; host pads masked";
+  stats.input_haptics_supported = true;
+  stats.input_haptics_detail = "rumble callbacks registered for client pad 2";
+
+  const auto json = nlohmann::json::parse(stats.to_json());
+
+  ASSERT_TRUE(json.contains("controller_input"));
+  const auto &input = json.at("controller_input");
+  EXPECT_TRUE(input.at("virtual_controller_created"));
+  EXPECT_EQ(input.at("virtual_controller_number"), 2);
+  EXPECT_EQ(input.at("virtual_controller_kind"), "xone");
+  EXPECT_EQ(input.at("host_controller_isolation"), "strict_bwrap");
+  EXPECT_EQ(input.at("host_controller_isolation_detail"), "2 virtual nodes allowed; host pads masked");
+  EXPECT_TRUE(input.at("haptics_supported"));
+  EXPECT_EQ(input.at("haptics_detail"), "rumble callbacks registered for client pad 2");
+}
 
 TEST(StreamStatsHdrStateTests, LabelsRequestedHdrWithoutSourceAsTenBitSdr) {
   stream_stats::stats_t stats {};

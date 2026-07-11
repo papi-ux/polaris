@@ -370,23 +370,32 @@ describe('support self-service reports', () => {
     expect(copy).not.toContain('abc123')
   })
 
-  it('summarizes controller input events without requiring hardware-level host evidence', () => {
+  it('summarizes controller input events with native virtual pad, isolation, and haptics evidence', () => {
     const report = buildControllerInputTestReport({
       events: [
         { pad: 1, control: 'A', type: 'buttondown' },
         { pad: 2, control: 'Left Stick', type: 'axis', value: 0.74 },
       ],
       gamepads: [{ index: 0, id: 'Xbox Wireless Controller' }, { index: 1, id: 'DualSense' }],
-      virtualController: { created: true, number: 2 },
-      rumbleSupported: false,
-      hostPhysicalControllerIsolation: 'isolated',
+      native: {
+        virtualControllerCreated: true,
+        virtualControllerNumber: 2,
+        virtualControllerKind: 'xone',
+        hostControllerIsolation: 'strict_bwrap',
+        hostControllerIsolationDetail: '2 virtual nodes allowed; host pads masked',
+        hapticsSupported: true,
+        hapticsDetail: 'rumble callbacks registered for client pad 2',
+      },
     })
 
     expect(report.status).toBe('pass')
     expect(report.summary).toContain('2 client control events')
+    expect(report.summary).toContain('native virtual pad #2')
     expect(report.checks.find((check) => check.key === 'multi-pad').detail).toContain('2 client pads')
-    expect(report.checks.find((check) => check.key === 'rumble').status).toBe('warning')
+    expect(report.checks.find((check) => check.key === 'rumble').status).toBe('pass')
     expect(report.checks.find((check) => check.key === 'host-isolation').status).toBe('pass')
+    expect(report.checks.find((check) => check.key === 'host-isolation').detail).toContain('strict_bwrap')
+    expect(report.advancedEvidence.native.virtualControllerKind).toBe('xone')
   })
 
   it('builds a post-session report with issue owner and next launch profile', () => {
