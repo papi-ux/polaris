@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -21,24 +22,22 @@
 
 #include <poll.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <gio/gio.h>
+#include <gio/gunixfdlist.h>
 #include <wayland-client.h>
 #include <wlr-screencopy-unstable-v1.h>
-
-#include <pipewire/pipewire.h>
-#include <spa/param/video/format-utils.h>
-#include <spa/param/video/type-info.h>
-#include <spa/debug/types.h>
-#include <spa/param/video/format.h>
-#include <spa/utils/result.h>
 
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/linux/graphics.h"
 #include "src/video.h"
+#include "src/stream_stats.h"
 
 #include "src/platform/linux/cage_display_router.h"
+#include "src/platform/linux/pipewire_capture.h"
 
 #ifdef POLARIS_BUILD_CUDA
   #include "src/platform/linux/cuda.h"
@@ -137,11 +136,17 @@ namespace portal {
     GDBusConnection *conn = nullptr;
     std::string session_handle;
     uint32_t pw_node_id = 0;
+    uint64_t pw_node_serial = 0;
+    int pw_remote_fd = -1;
     std::string restore_token;
     bool ready = false;
     bool failed = false;
 
     ~portal_session_t() {
+      if (pw_remote_fd >= 0) {
+        close(pw_remote_fd);
+        pw_remote_fd = -1;
+      }
       if (conn) {
         if (!session_handle.empty()) {
           g_dbus_connection_call_sync(conn,
@@ -198,6 +203,88 @@ namespace portal {
       g_error_free(gerr);
     }
     return result;
+  }
+
+  static uint64_t lookup_uint64_property(GVariant *props, const char *name) {
+    if (!props) {
+      return 0;
+    }
+
+    GVariant *value = g_variant_lookup_value(props, name, nullptr);
+    if (!value) {
+      return 0;
+    }
+
+    uint64_t result = 0;
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_UINT64)) {
+      result = g_variant_get_uint64(value);
+    } else if (g_variant_is_of_type(value, G_VARIANT_TYPE_UINT32)) {
+      result = g_variant_get_uint32(value);
+    } else if (g_variant_is_of_type(value, G_VARIANT_TYPE_INT64)) {
+      auto signed_value = g_variant_get_int64(value);
+      if (signed_value > 0) {
+        result = static_cast<uint64_t>(signed_value);
+      }
+    } else if (g_variant_is_of_type(value, G_VARIANT_TYPE_INT32)) {
+      auto signed_value = g_variant_get_int32(value);
+      if (signed_value > 0) {
+        result = static_cast<uint64_t>(signed_value);
+      }
+    }
+
+    g_variant_unref(value);
+    return result;
+  }
+
+  static int open_pipewire_remote_fd(GDBusConnection *conn, const std::string &session_handle) {
+    GVariantBuilder builder;
+    g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
+
+    GError *gerr = nullptr;
+    GUnixFDList *out_fd_list = nullptr;
+    auto *result = g_dbus_connection_call_with_unix_fd_list_sync(
+      conn,
+      "org.freedesktop.portal.Desktop",
+      "/org/freedesktop/portal/desktop",
+      "org.freedesktop.portal.ScreenCast",
+      "OpenPipeWireRemote",
+      g_variant_new("(oa{sv})", session_handle.c_str(), &builder),
+      G_VARIANT_TYPE("(h)"),
+      G_DBUS_CALL_FLAGS_NONE,
+      10000,
+      nullptr,
+      &out_fd_list,
+      nullptr,
+      &gerr);
+
+    if (!result) {
+      if (gerr) {
+        BOOST_LOG(warning) << "portal: OpenPipeWireRemote failed: "sv << gerr->message;
+        g_error_free(gerr);
+      }
+      return -1;
+    }
+
+    int fd_index = -1;
+    g_variant_get(result, "(h)", &fd_index);
+    g_variant_unref(result);
+
+    int fd = -1;
+    if (out_fd_list) {
+      fd = g_unix_fd_list_get(out_fd_list, fd_index, &gerr);
+      g_object_unref(out_fd_list);
+    }
+
+    if (fd < 0) {
+      if (gerr) {
+        BOOST_LOG(warning) << "portal: failed to extract PipeWire remote fd: "sv << gerr->message;
+        g_error_free(gerr);
+      } else {
+        BOOST_LOG(warning) << "portal: OpenPipeWireRemote returned no usable fd"sv;
+      }
+    }
+
+    return fd;
   }
 
   // Helper: wait for a Response signal on a request path.
@@ -401,7 +488,12 @@ namespace portal {
           GVariant *props = nullptr;
           g_variant_get(stream_entry, "(u@a{sv})", &node_id, &props);
           session->pw_node_id = node_id;
-          BOOST_LOG(info) << "portal: PipeWire node ID: "sv << node_id;
+          session->pw_node_serial = lookup_uint64_property(props, "pipewire-serial");
+          if (session->pw_node_serial == 0) {
+            session->pw_node_serial = lookup_uint64_property(props, "pipewire.serial");
+          }
+          BOOST_LOG(info) << "portal: PipeWire node ID: "sv << node_id
+                          << " serial="sv << session->pw_node_serial;
           if (props) g_variant_unref(props);
           g_variant_unref(stream_entry);
           break;
@@ -422,173 +514,16 @@ namespace portal {
       g_variant_unref(resp);
 
       if (session->pw_node_id > 0) {
+        session->pw_remote_fd = open_pipewire_remote_fd(session->conn, session->session_handle);
+        if (session->pw_remote_fd < 0) {
+          session->failed = true;
+          return session;
+        }
         session->ready = true;
       }
     }
 
     return session;
-  }
-
-  // -----------------------------------------------------------------------
-  // PipeWire frame capture
-  // -----------------------------------------------------------------------
-
-  struct pw_capture_t {
-    struct pw_thread_loop *pw_loop = nullptr;
-    struct pw_stream *pw_stream_handle = nullptr;
-
-    int frame_width = 0;
-    int frame_height = 0;
-    uint32_t frame_stride = 0;
-
-    std::mutex frame_mtx;
-    std::vector<uint8_t> frame_data;
-    bool frame_available = false;
-    std::condition_variable frame_cv;
-
-    std::atomic<bool> running{false};
-    std::atomic<bool> negotiated{false};
-
-    ~pw_capture_t() {
-      if (pw_loop) pw_thread_loop_stop(pw_loop);
-      if (pw_stream_handle) pw_stream_destroy(pw_stream_handle);
-      if (pw_loop) pw_thread_loop_destroy(pw_loop);
-    }
-  };
-
-  static void on_process(void *userdata) {
-    auto *cap = static_cast<pw_capture_t *>(userdata);
-    struct pw_buffer *b = pw_stream_dequeue_buffer(cap->pw_stream_handle);
-    if (!b) return;
-
-    struct spa_buffer *buf = b->buffer;
-    if (!buf->datas[0].data || buf->datas[0].chunk->size == 0) {
-      pw_stream_queue_buffer(cap->pw_stream_handle, b);
-      return;
-    }
-
-    uint32_t size = buf->datas[0].chunk->size;
-    {
-      std::lock_guard lk(cap->frame_mtx);
-      cap->frame_data.resize(size);
-      std::memcpy(cap->frame_data.data(), buf->datas[0].data, size);
-      cap->frame_available = true;
-      cap->frame_cv.notify_one();
-    }
-
-    pw_stream_queue_buffer(cap->pw_stream_handle, b);
-  }
-
-  static void on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param) {
-    auto *cap = static_cast<pw_capture_t *>(userdata);
-    if (!param || id != SPA_PARAM_Format) return;
-
-    uint32_t media_type, media_subtype;
-    if (spa_format_parse(param, &media_type, &media_subtype) < 0) return;
-    if (media_type != SPA_MEDIA_TYPE_video || media_subtype != SPA_MEDIA_SUBTYPE_raw) return;
-
-    struct spa_video_info_raw raw_info;
-    spa_format_video_raw_parse(param, &raw_info);
-
-    cap->frame_width = raw_info.size.width;
-    cap->frame_height = raw_info.size.height;
-    cap->frame_stride = cap->frame_width * 4;
-    cap->negotiated = true;
-
-    BOOST_LOG(info) << "portal: PipeWire format negotiated: "sv
-                    << cap->frame_width << "x"sv << cap->frame_height;
-
-    // Set buffer parameters
-    uint8_t params_buffer[1024];
-    struct spa_pod_builder pb = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-    const struct spa_pod *buf_param = (const struct spa_pod *) spa_pod_builder_add_object(
-      &pb,
-      SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-      SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
-      SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_MemPtr));
-
-    pw_stream_update_params(cap->pw_stream_handle, &buf_param, 1);
-  }
-
-  static void on_state_changed(void *userdata, enum pw_stream_state old,
-    enum pw_stream_state state, const char *errmsg) {
-    BOOST_LOG(info) << "portal: PipeWire state: "sv
-                    << pw_stream_state_as_string(old) << " -> "sv
-                    << pw_stream_state_as_string(state);
-    if (state == PW_STREAM_STATE_ERROR && errmsg) {
-      BOOST_LOG(warning) << "portal: PipeWire error: "sv << errmsg;
-    }
-  }
-
-  static const struct pw_stream_events pw_events = {
-    .version = PW_VERSION_STREAM_EVENTS,
-    .state_changed = on_state_changed,
-    .param_changed = on_param_changed,
-    .process = on_process,
-  };
-
-  static std::unique_ptr<pw_capture_t> start_pw_capture(uint32_t node_id, int req_w, int req_h) {
-    auto cap = std::make_unique<pw_capture_t>();
-
-    pw_init(nullptr, nullptr);
-
-    cap->pw_loop = pw_thread_loop_new("polaris-portal-capture", nullptr);
-    if (!cap->pw_loop) {
-      BOOST_LOG(warning) << "portal: Failed to create PipeWire loop"sv;
-      return nullptr;
-    }
-
-    auto *props = pw_properties_new(
-      PW_KEY_MEDIA_TYPE, "Video",
-      PW_KEY_MEDIA_CATEGORY, "Capture",
-      PW_KEY_MEDIA_ROLE, "Screen",
-      nullptr);
-
-    cap->pw_stream_handle = pw_stream_new_simple(
-      pw_thread_loop_get_loop(cap->pw_loop),
-      "polaris-portal-capture",
-      props,
-      &pw_events,
-      cap.get());
-
-    if (!cap->pw_stream_handle) {
-      BOOST_LOG(warning) << "portal: Failed to create PipeWire stream"sv;
-      return nullptr;
-    }
-
-    // Accept any video format — let PipeWire/portal decide
-    uint8_t params_buffer[1024];
-    struct spa_pod_builder pb = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-
-    auto *fmt_param = (const struct spa_pod *) spa_pod_builder_add_object(
-      &pb,
-      SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-      SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-      SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-      SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5,
-        SPA_VIDEO_FORMAT_BGRx,
-        SPA_VIDEO_FORMAT_BGRx,
-        SPA_VIDEO_FORMAT_BGRA,
-        SPA_VIDEO_FORMAT_RGBx,
-        SPA_VIDEO_FORMAT_RGBA));
-
-    if (pw_stream_connect(cap->pw_stream_handle,
-          PW_DIRECTION_INPUT,
-          node_id,
-          (enum pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
-          &fmt_param, 1) < 0) {
-      BOOST_LOG(warning) << "portal: Failed to connect PipeWire stream to node "sv << node_id;
-      return nullptr;
-    }
-
-    if (pw_thread_loop_start(cap->pw_loop) < 0) {
-      BOOST_LOG(warning) << "portal: Failed to start PipeWire loop"sv;
-      return nullptr;
-    }
-
-    cap->running = true;
-    BOOST_LOG(info) << "portal: PipeWire capture started on node "sv << node_id;
-    return cap;
   }
 
   // -----------------------------------------------------------------------
@@ -923,7 +858,8 @@ namespace portal {
   // -----------------------------------------------------------------------
 
   static std::unique_ptr<portal_session_t> g_portal;
-  static std::unique_ptr<pw_capture_t> g_capture;
+  static std::shared_ptr<pipewire_capture::capture_t> g_capture;
+  static std::mutex g_capture_mtx;
   static uint32_t g_node_id = 0;
 
   static bool ensure_global_session() {
@@ -937,15 +873,18 @@ namespace portal {
         return false;
       }
       g_node_id = g_portal->pw_node_id;
-      BOOST_LOG(info) << "portal: Global session ready, node "sv << g_node_id;
+      BOOST_LOG(info) << "portal: Global session ready, node "sv << g_node_id
+                      << " serial="sv << g_portal->pw_node_serial;
     }
     return true;
   }
 
-  static pw_capture_t *ensure_global_capture(int width, int height) {
+  static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(int width, int height) {
+    std::lock_guard lock(g_capture_mtx);
+
     // If capture is running and healthy, reuse it
-    if (g_capture && g_capture->running) {
-      return g_capture.get();
+    if (g_capture && g_capture->running()) {
+      return g_capture;
     }
 
     // PipeWire stream died or never created — need a fresh portal session
@@ -958,18 +897,25 @@ namespace portal {
       return nullptr;
     }
 
-    g_capture = start_pw_capture(g_node_id, width, height);
-    if (!g_capture) {
+    auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {
+      .remote_fd = g_portal->pw_remote_fd,
+      .node_id = g_portal->pw_node_id,
+      .node_serial = g_portal->pw_node_serial,
+      .requested_width = width,
+      .requested_height = height,
+    });
+    if (!capture->start()) {
       BOOST_LOG(warning) << "portal: Failed to start PipeWire capture"sv;
       return nullptr;
     }
 
     // Wait for format negotiation
-    for (int i = 0; i < 100 && !g_capture->negotiated; ++i) {
+    for (int i = 0; i < 100 && !capture->negotiated(); ++i) {
       std::this_thread::sleep_for(100ms);
     }
 
-    return g_capture.get();
+    g_capture = capture;
+    return g_capture;
   }
 
   // -----------------------------------------------------------------------
@@ -1007,14 +953,15 @@ namespace portal {
             return -1;
           }
 
-          auto *cap = ensure_global_capture(cfg_width, cfg_height);
+          auto cap = ensure_global_capture(cfg_width, cfg_height);
           if (!cap) {
             return -1;
           }
 
-          if (cap->negotiated && cap->frame_width > 0 && cap->frame_height > 0) {
-            cfg_width = cap->frame_width;
-            cfg_height = cap->frame_height;
+          const auto info = cap->frame_info();
+          if (cap->negotiated() && info.width > 0 && info.height > 0) {
+            cfg_width = info.width;
+            cfg_height = info.height;
           }
         } else {
           BOOST_LOG(info) << "portal: Cage/labwc active — skipping portal, will use direct screencopy"sv;
@@ -1076,35 +1023,43 @@ namespace portal {
         return platf::capture_e::reinit;
       }
 
-      auto *cap = ensure_global_capture(cfg_width, cfg_height);
+      auto cap = ensure_global_capture(cfg_width, cfg_height);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
         return platf::capture_e::reinit;
       }
 
-      if (cap->negotiated && cap->frame_width > 0 && cap->frame_height > 0) {
-        cfg_width = cap->frame_width;
-        cfg_height = cap->frame_height;
+      auto info = cap->frame_info();
+      if (cap->negotiated() && info.width > 0 && info.height > 0) {
+        cfg_width = info.width;
+        cfg_height = info.height;
         this->env_width = cfg_width;
         this->env_height = cfg_height;
         this->width = cfg_width;
         this->height = cfg_height;
       }
 
-      while (cap && cap->running) {
-        // Wait for a frame (up to 1 second)
-        std::unique_lock lk(cap->frame_mtx);
-        if (!cap->frame_available) {
-          cap->frame_cv.wait_for(lk, 1s, [&] { return cap->frame_available; });
-        }
+      bool capture_transport_logged = false;
+      while (cap) {
+        const auto capture_start = std::chrono::steady_clock::now();
+        const auto wait_result = cap->wait_for_frame(1s);
+        const auto dispatch_time = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - capture_start);
 
-        if (!cap->frame_available) {
-          // Timeout — send empty frame
-          std::shared_ptr<platf::img_t> dummy;
-          if (!push_captured_image_cb(std::move(dummy), false)) {
-            return platf::capture_e::ok;
+        switch (wait_result) {
+          case pipewire_capture::wait_result_e::timeout: {
+            std::shared_ptr<platf::img_t> dummy;
+            if (!push_captured_image_cb(std::move(dummy), false)) {
+              return platf::capture_e::ok;
+            }
+            continue;
           }
-          continue;
+          case pipewire_capture::wait_result_e::reinit:
+            return platf::capture_e::reinit;
+          case pipewire_capture::wait_result_e::error:
+            return platf::capture_e::error;
+          case pipewire_capture::wait_result_e::frame:
+            break;
         }
 
         std::shared_ptr<platf::img_t> img_out;
@@ -1112,22 +1067,28 @@ namespace portal {
           return platf::capture_e::interrupted;
         }
 
-        // Copy frame
-        int copy_h = std::min(cap->frame_height, img_out->height);
-        int copy_w = std::min(cap->frame_width, img_out->width);
-        int src_stride = cap->frame_width * 4;
-        int dst_stride = img_out->row_pitch;
-
-        for (int y = 0; y < copy_h; ++y) {
-          std::memcpy(
-            img_out->data + y * dst_stride,
-            cap->frame_data.data() + y * src_stride,
-            copy_w * 4);
+        if (!cap->copy_frame_to(*img_out)) {
+          return platf::capture_e::reinit;
         }
 
-        img_out->frame_timestamp = std::chrono::steady_clock::now();
-        cap->frame_available = false;
-        lk.unlock();
+        stream_stats::update_capture_metadata(img_out->frame_metadata);
+        if (!capture_transport_logged) {
+          capture_transport_logged = true;
+          BOOST_LOG(warning) << "portal: capture_transport="sv << platf::from_frame_transport(img_out->frame_metadata.transport)
+                             << " frame_residency="sv << platf::from_frame_residency(img_out->frame_metadata.residency)
+                             << " frame_format="sv << platf::from_frame_format(img_out->frame_metadata.format)
+                             << "; capture will incur an extra CPU-side copy/conversion path"sv;
+        }
+        if (config::video.linux_display.capture_profile) {
+          const auto total_time = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - capture_start);
+          stream_stats::update_capture_profile({
+            .transport = img_out->frame_metadata.transport,
+            .dispatch_time = dispatch_time,
+            .ingest_time = total_time - dispatch_time,
+            .total_time = total_time,
+          });
+        }
 
         if (!push_captured_image_cb(std::move(img_out), true)) {
           return platf::capture_e::ok;
@@ -1139,13 +1100,22 @@ namespace portal {
 
     std::shared_ptr<platf::img_t>
     alloc_img() override {
-      auto img = std::make_shared<platf::img_t>();
+      struct portal_img_t: egl::img_descriptor_t {
+      };
+
+      auto img = std::make_shared<portal_img_t>();
 
       img->width = cfg_width;
       img->height = cfg_height;
       img->pixel_pitch = 4;
       img->row_pitch = cfg_width * 4;
-      img->data = new uint8_t[cfg_height * img->row_pitch]();
+      img->sequence = 0;
+      img->serial = std::numeric_limits<decltype(img->serial)>::max();
+      img->dmabuf_buffer_key = 0;
+      img->sd = {};
+      std::fill_n(img->sd.fds, 4, -1);
+      img->buffer.assign(static_cast<std::size_t>(cfg_height) * static_cast<std::size_t>(img->row_pitch), 0);
+      img->data = img->buffer.data();
 
       BOOST_LOG(info) << "portal: alloc_img "sv << img->width << "x"sv << img->height
                       << " env="sv << this->env_width << "x"sv << this->env_height;
