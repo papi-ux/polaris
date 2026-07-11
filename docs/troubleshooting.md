@@ -70,6 +70,28 @@ private compositor. If the client connects but shows an empty or black desktop w
 that usually means the headless runtime is alive but nothing visible has been launched in it. Use
 Desktop Display mode when you want to stream the already-running host desktop session.
 
+## Portal/PipeWire desktop capture falls back to system memory
+
+For Wayland Desktop Display capture, these messages show that the Portal session and PipeWire stream negotiated successfully:
+
+```text
+portal: PipeWire state: ... -> streaming
+portal: PipeWire format negotiated: <width>x<height> format=<format>
+portal: capture_transport=<shm|dmabuf> frame_residency=<cpu|gpu> frame_format=bgra8
+```
+
+The `capture_transport` line is the authoritative result. A healthy same-GPU path also logs `portal: PipeWire DMA-BUF format negotiated` and reports `capture_transport=dmabuf frame_residency=gpu` without a CPU-copy warning. If the log instead says DMA-BUF was disabled because the capture render node is missing, the encoder adapter is not an explicit canonical render node, the render nodes differ, or EGL exposes no importable modifier, Polaris should negotiate `MemPtr`, report `capture_transport=shm frame_residency=cpu`, and continue through system memory.
+
+For deterministic GPU selection, configure the encoder adapter as an explicit `/dev/dri/renderD*` path. Polaris compares the Portal capture node and encoder node before offering DMA-BUF. CUDA then maps that node to a CUDA ordinal through PCI sysfs identity; an unmappable explicit node fails rather than silently using device 0. On mixed-GPU systems, do not force DMA-BUF across different render nodes—use the system-memory fallback or select matching capture and encode devices.
+
+A log saying `PipeWire capture transport or dimensions changed; reinitializing encoder` is expected when the compositor renegotiates the frame contract. Repeated reinitialization without a stable `format negotiated` line is not expected; include the Portal/PipeWire state, negotiated format, render-node messages, and configured adapter path in the bug report. Do not include Portal tokens or credentials.
+
+### Reset persistent Portal selection
+
+The first real Portal capture may open the system picker. Polaris requests persistent selection and stores any granted restore token in `portal_restore_token.txt` beside the active `polaris.conf`. Do not post or copy the token value into a support report.
+
+To force the picker to appear again, stop Polaris, delete only `portal_restore_token.txt`, and start Polaris again. This resets Polaris' saved auto-selection but does not necessarily revoke the desktop Portal's permission. To revoke permission completely, also use the desktop environment's Privacy or Screen Sharing controls when it exposes them. The exact control varies between KDE, GNOME, and other Portal implementations.
+
 ## Steam Big Picture black screen or tiny window
 
 Clear Steam's HTML cache:

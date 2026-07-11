@@ -45,6 +45,7 @@ what the host is actually doing.
 | Browser Stream | Experimental | Chromium-oriented WebTransport/WebCodecs streaming path for browser testing |
 | HDR / Main10 | Conditional | Main10 SDR can work when requested; true HDR requires real HDR metadata from the active capture path |
 | AMD / VAAPI and software encode | Supported, expanding validation | AMD/Intel VAAPI and software fallback are supported; NVIDIA/NVENC remains the most exercised release target while AMD coverage grows |
+| Wayland Portal/PipeWire desktop capture | Supported; conditional GPU acceleration | Captures real Portal frames through PipeWire, using same-GPU DMA-BUF when the selected render node and modifier are importable and system memory otherwise |
 
 ## Privacy and Local-First Defaults
 

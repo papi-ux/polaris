@@ -7,6 +7,9 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Replaced the Linux Portal capture placeholder with a reusable PipeWire video stream that negotiates real frame formats, dimensions, and buffer ownership while preserving supported system-memory fallback
+- Added fail-closed same-GPU DMA-BUF capture for Portal streams, including exact DRM-render-node-to-CUDA ordinal binding and encoder reinitialization when transport or dimensions change
+
 ## v1.3.0 - 2026-07-11
 
 Feature release focused on self-service stream diagnostics, safer release visibility, display planning, and more resilient Linux capture startup.

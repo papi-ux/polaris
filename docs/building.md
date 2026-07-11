@@ -72,7 +72,7 @@ those less-turnkey paths.
 | Boost | Core libraries |
 | OpenSSL | TLS and pairing |
 | libevdev | Virtual input |
-| PipeWire | Audio capture |
+| PipeWire | Portal desktop video transport and audio capture |
 | Wayland client libs | Linux compositor integration |
 | Node.js 18+ | Web UI build |
 | grim | Dashboard preview capture for labwc/Wayland |

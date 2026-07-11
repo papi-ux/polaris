@@ -59,6 +59,18 @@ Important runtime fields:
 
 Deferred headless encoder capabilities are primed before first launch negotiation so Main10 support is advertised correctly on the first real launch. On Linux, Polaris uses RealtimeKit when available so thread-priority elevation can still succeed when the user service inherits conservative limits.
 
+### Portal/PipeWire desktop capture
+
+On a Wayland desktop, Desktop Display mode can use the XDG Desktop Portal ScreenCast API. The Portal grants a PipeWire remote and node; Polaris then owns the PipeWire video stream and negotiates packed 32-bit `BGRx`, `BGRA`, `RGBx`, or `RGBA` frames at the compositor-provided dimensions.
+
+For a GPU encoder, Polaris offers DMA-BUF only when the Portal reports an explicit capture render node, the configured encoder adapter is an explicit canonical `/dev/dri/renderD*` node on that same device, and EGL reports an importable format/modifier pair. CUDA import also resolves the render node through sysfs PCI identity and binds FFmpeg to that exact CUDA ordinal. An explicit node that cannot be mapped fails closed instead of silently choosing CUDA device 0.
+
+If any same-GPU or modifier check fails, PipeWire negotiates `MemPtr` and Polaris copies the packed frame into owned system memory. That is a supported compatibility path, not a broken stream. DMA-BUF frames remain owned by PipeWire while Polaris references their file descriptors; the capture queue retains only the newest pending, unconsumed frame and returns a replaced pending buffer to PipeWire. Frames already handed downstream keep their own PipeWire buffers until the last image reference is released, so multiple consumed frames may be in flight without early requeue.
+
+Encoder probes use a dummy Portal display and do not open a picker. The first real capture may open the desktop's system screen-sharing picker. Polaris requests persistent selection (`persist_mode=2`) and, when the Portal grants one, stores the restore token as `portal_restore_token.txt` beside the active `polaris.conf`. Later sessions offer that token to the Portal for automatic source selection; the desktop Portal remains the authority and may still ask again. Treat the token as private local state and never include its value in logs or support bundles.
+
+The real display establishes and negotiates the Portal/PipeWire stream before image allocation and encoder-factory selection. If the negotiated dimensions or transport later change, Polaris reinitializes the encoder with the new frame contract.
+
 ## Linux LTS Headless Fallback Matrix
 
 The 1.1.x validation target is the existing labwc Headless Stream architecture, not an Xvfb or gamescope replacement. Use Xvfb/gamescope only as investigation tools if this matrix exposes a real target environment that the current path cannot cover.
