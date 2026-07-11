@@ -3344,6 +3344,32 @@ namespace proc {
       }
       gamepad_isolation_prepared = true;
       gamepad_isolation_plan = platf::gamepad::isolation::prepare_headless_labwc_launch();
+      auto stats = stream_stats::get_current();
+      std::string isolation_mode = "unknown";
+      switch (gamepad_isolation_plan.mode) {
+        case platf::gamepad::isolation::isolation_mode_e::disabled:
+          isolation_mode = "disabled";
+          break;
+        case platf::gamepad::isolation::isolation_mode_e::strict_bwrap:
+          isolation_mode = "strict_bwrap";
+          break;
+        case platf::gamepad::isolation::isolation_mode_e::best_effort_sdl:
+          isolation_mode = "best_effort_sdl";
+          break;
+        case platf::gamepad::isolation::isolation_mode_e::unavailable:
+          isolation_mode = "unavailable";
+          break;
+      }
+      stream_stats::update_controller_input_state(
+        stats.input_virtual_controller_created,
+        stats.input_virtual_controller_number,
+        stats.input_virtual_controller_kind,
+        stats.input_virtual_controller_error,
+        isolation_mode,
+        gamepad_isolation_plan.reason,
+        stats.input_haptics_supported,
+        stats.input_haptics_detail
+      );
     };
 
     auto apply_gamepad_sdl_env = [&](auto &env) {

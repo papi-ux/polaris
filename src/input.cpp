@@ -25,6 +25,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "platform/common.h"
+#include "stream_stats.h"
 #include "thread_pool.h"
 #include "utility.h"
 
@@ -119,6 +120,21 @@ namespace input {
   static int preallocated_gamepad_id {-1};
   static safe::mail_t preallocated_gamepad_mail;
   static platf::feedback_queue_t preallocated_gamepad_feedback_queue;
+
+  void update_controller_diagnostics(bool created,
+                                     int controller_number,
+                                     const std::string &error = {}) {
+    stream_stats::update_controller_input_state(
+      created,
+      created ? controller_number + 1 : 0,
+      config::input.gamepad,
+      error,
+      "unknown",
+      {},
+      config::input.forward_rumble,
+      config::input.forward_rumble ? "Rumble feedback forwarding is enabled for native virtual gamepads." : "Rumble feedback forwarding is disabled in input settings."
+    );
+  }
 
   void free_gamepad(platf::input_t &platf_input, int id) {
     platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
@@ -222,10 +238,12 @@ namespace input {
 
     if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, arrival, input->feedback_queue)) {
       free_id(gamepadMask, id);
+      update_controller_diagnostics(false, controller_number, "Native virtual controller allocation failed.");
       return false;
     }
 
     gamepad.id = id;
+    update_controller_diagnostics(true, controller_number);
     if (reason && *reason) {
       BOOST_LOG(info) << "ControllerNumber ["sv << controller_number << "] allocated for "sv << reason;
     }
@@ -255,12 +273,14 @@ namespace input {
     constexpr int controller_number = 0;
     if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, {}, preallocated_gamepad_feedback_queue)) {
       free_id(gamepadMask, id);
+      update_controller_diagnostics(false, controller_number, "ControllerNumber [0] could not be preallocated before app launch.");
       BOOST_LOG(warning) << "ControllerNumber [0] could not be preallocated before app launch"sv;
       return;
     }
 
     preallocated_controller_number = controller_number;
     preallocated_gamepad_id = id;
+    update_controller_diagnostics(true, controller_number);
     platf::gamepad_update(platf_input, id, {});
     BOOST_LOG(info) << "ControllerNumber [0] preallocated before app launch"sv;
   }

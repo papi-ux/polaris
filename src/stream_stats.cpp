@@ -174,6 +174,16 @@ namespace stream_stats {
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
     j["headless_mode"] = config::video.linux_display.headless_mode;
     j["ai_enabled"] = config::video.ai_optimizer.enabled;
+    j["controller_input"] = {
+      {"virtual_controller_created", input_virtual_controller_created},
+      {"virtual_controller_number", input_virtual_controller_number},
+      {"virtual_controller_kind", input_virtual_controller_kind},
+      {"virtual_controller_error", input_virtual_controller_error},
+      {"host_controller_isolation", input_host_controller_isolation},
+      {"host_controller_isolation_detail", input_host_controller_isolation_detail},
+      {"haptics_supported", input_haptics_supported},
+      {"haptics_detail", input_haptics_detail}
+    };
 
     // Multi-client data
     nlohmann::json clients_json = nlohmann::json::array();
@@ -907,6 +917,25 @@ namespace stream_stats {
     current_stats.hdr_metadata_available = hdr_metadata_available;
     current_stats.stream_hdr_enabled = stream_hdr_enabled;
     current_stats.color_coding = color_coding;
+  }
+
+  void update_controller_input_state(bool virtual_controller_created,
+                                     int virtual_controller_number,
+                                     const std::string &virtual_controller_kind,
+                                     const std::string &virtual_controller_error,
+                                     const std::string &host_controller_isolation,
+                                     const std::string &host_controller_isolation_detail,
+                                     bool haptics_supported,
+                                     const std::string &haptics_detail) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.input_virtual_controller_created = virtual_controller_created;
+    current_stats.input_virtual_controller_number = virtual_controller_number;
+    current_stats.input_virtual_controller_kind = virtual_controller_kind;
+    current_stats.input_virtual_controller_error = virtual_controller_error;
+    current_stats.input_host_controller_isolation = host_controller_isolation.empty() ? "unknown" : host_controller_isolation;
+    current_stats.input_host_controller_isolation_detail = host_controller_isolation_detail;
+    current_stats.input_haptics_supported = haptics_supported;
+    current_stats.input_haptics_detail = haptics_detail;
   }
 
   void update_capture_profile(const capture_profile_sample_t &sample) {

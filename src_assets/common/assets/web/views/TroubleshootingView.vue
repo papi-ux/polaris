@@ -129,6 +129,7 @@
           <div class="mt-3 flex flex-wrap gap-2">
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="refreshControllerSnapshot">Detect controller</button>
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="recordControllerEvent('A / primary button', 1)">Log A press</button>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="controllerRumbleSupported !== true" @click="pulseControllerHaptics">Test rumble</button>
           </div>
           <details class="mt-3 text-xs text-storm">
             <summary class="cursor-pointer text-ice">Advanced evidence</summary>
@@ -468,8 +469,6 @@ const pendingConfirmedAction = ref(null)
 const requestedConfirmAction = ref(null)
 const controllerEvents = ref([])
 const controllerRumbleSupported = ref(null)
-const hostPhysicalControllerIsolation = ref('unknown')
-const virtualControllerStatus = ref({ created: false })
 const nativeNetworkPathProbe = ref(null)
 const lastCompletedStreamStats = ref(null)
 const lastDisconnectReason = ref('')
@@ -738,12 +737,13 @@ const browserGamepads = computed(() => {
   }))
 })
 
+const controllerNativeEvidence = computed(() => streamStats.value?.controller_input || {})
+
 const controllerInputReport = computed(() => buildControllerInputTestReport({
   events: controllerEvents.value,
   gamepads: browserGamepads.value,
-  virtualController: virtualControllerStatus.value,
+  native: controllerNativeEvidence.value,
   rumbleSupported: controllerRumbleSupported.value,
-  hostPhysicalControllerIsolation: hostPhysicalControllerIsolation.value,
 }))
 
 const postSessionReport = computed(() => buildPostSessionStreamReport({
@@ -781,18 +781,28 @@ function recordControllerEvent(label, pad = 1) {
     ...controllerEvents.value.slice(-15),
     { pad, control: label, type: 'manual', at: new Date().toISOString() },
   ]
-  virtualControllerStatus.value = { created: true, number: pad }
 }
 
 function refreshControllerSnapshot() {
   const pads = browserGamepads.value
   if (pads.length) {
-    virtualControllerStatus.value = { created: true, number: pads[0].index + 1 }
     controllerRumbleSupported.value = Boolean(navigator.getGamepads?.()[pads[0].index]?.vibrationActuator)
     recordControllerEvent('Browser gamepad visible', pads[0].index + 1)
   } else {
     recordControllerEvent('Manual button sample', 1)
   }
+}
+
+async function pulseControllerHaptics() {
+  const pad = navigator.getGamepads?.().find((candidate) => candidate?.vibrationActuator)
+  if (!pad?.vibrationActuator?.playEffect) return
+  await pad.vibrationActuator.playEffect('dual-rumble', {
+    duration: 180,
+    strongMagnitude: 0.35,
+    weakMagnitude: 0.25,
+  })
+  controllerRumbleSupported.value = true
+  recordControllerEvent('Optional rumble pulse', pad.index + 1)
 }
 
 function copySupportSelfTests() {

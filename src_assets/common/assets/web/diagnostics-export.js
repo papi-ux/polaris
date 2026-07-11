@@ -508,24 +508,42 @@ export function buildNetworkPathTestReport(input = {}) {
 export function buildControllerInputTestReport(input = {}) {
   const events = Array.isArray(input.events) ? input.events : []
   const gamepads = Array.isArray(input.gamepads) ? input.gamepads : []
-  const virtual = input.virtualController || {}
-  const hostIsolation = lower(input.hostPhysicalControllerIsolation)
+  const native = input.native || input.controllerInput || input.controller_input || {}
+  const virtual = input.virtualController || {
+    created: native.virtualControllerCreated ?? native.virtual_controller_created,
+    number: native.virtualControllerNumber ?? native.virtual_controller_number,
+    kind: native.virtualControllerKind ?? native.virtual_controller_kind,
+    error: native.virtualControllerError ?? native.virtual_controller_error,
+  }
+  const hostIsolationRaw = native.hostControllerIsolation ?? native.host_controller_isolation ?? input.hostPhysicalControllerIsolation
+  const hostIsolation = lower(hostIsolationRaw)
+  const hostIsolationDetail = native.hostControllerIsolationDetail ?? native.host_controller_isolation_detail
+  const hapticsSupported = native.hapticsSupported ?? native.haptics_supported ?? input.rumbleSupported
+  const hapticsDetail = native.hapticsDetail ?? native.haptics_detail
   const pads = new Set(events.map((event) => event.pad ?? event.gamepadIndex ?? 1))
+  const visiblePadCount = Math.max(pads.size, gamepads.length)
+  const virtualPadLabel = virtual.created
+    ? `Native virtual controller${virtual.number ? ` #${virtual.number}` : ''}${virtual.kind ? ` (${virtual.kind})` : ''} is reported created.`
+    : virtual.error
+      ? redactSensitiveText(virtual.error)
+      : 'Host virtual controller creation has not been confirmed yet.'
+  const isolationPass = ['isolated', 'strict_bwrap', 'best_effort_sdl'].includes(hostIsolation)
+  const isolationFail = ['shared', 'leaking', 'unavailable'].includes(hostIsolation)
   const checks = [
     checklistItem('client-events', 'Client button events', events.length ? 'pass' : 'warning', events.length ? `${events.length} client control event${events.length === 1 ? '' : 's'} detected.` : 'No client button or axis events detected yet.', events.length ? 'Input is reaching the browser/client layer.' : 'Press buttons/sticks on the client controller while this panel is open.'),
-    checklistItem('virtual-controller', 'Virtual controller', virtual.created ? 'pass' : virtual.error ? 'fail' : 'warning', virtual.created ? `Virtual controller${virtual.number ? ` #${virtual.number}` : ''} is reported created.` : virtual.error ? redactSensitiveText(virtual.error) : 'Host virtual controller creation has not been confirmed yet.', virtual.created ? 'Launch a game and verify the same controller number is selected.' : 'If games see no pad, check virtual gamepad permissions/driver state.'),
-    checklistItem('multi-pad', 'Controller number / multi-pad', pads.size > 1 || gamepads.length > 1 ? 'pass' : 'warning', `${Math.max(pads.size, gamepads.length)} client pad${Math.max(pads.size, gamepads.length) === 1 ? '' : 's'} visible.`, 'Keep controller order stable before starting split-screen or multi-pad games.'),
-    checklistItem('rumble', 'Rumble / haptics', input.rumbleSupported === true ? 'pass' : input.rumbleSupported === false ? 'warning' : 'warning', input.rumbleSupported === true ? 'Rumble actuator test is available.' : 'Rumble/haptics support is not available or not exposed by this browser/client.', input.rumbleSupported === true ? 'Use the optional rumble pulse only after input is mapped correctly.' : 'Treat missing rumble as non-blocking unless the game requires it.'),
-    checklistItem('host-isolation', 'Host physical controller isolation', hostIsolation === 'isolated' ? 'pass' : hostIsolation === 'shared' || hostIsolation === 'leaking' ? 'fail' : 'warning', hostIsolation === 'isolated' ? 'Host physical controllers are reported isolated from client virtual pads.' : hostIsolation ? `Isolation state: ${input.hostPhysicalControllerIsolation}.` : 'Host physical controller isolation has not been reported yet.', hostIsolation === 'isolated' ? 'No host-side controller conflict stands out.' : 'If inputs double-fire, unplug/disable the host physical controller or isolate it before retesting.'),
+    checklistItem('virtual-controller', 'Native virtual controller', virtual.created ? 'pass' : virtual.error ? 'fail' : 'warning', virtualPadLabel, virtual.created ? 'Launch a game and verify the same controller number is selected.' : 'If games see no pad, check virtual gamepad permissions/driver state.'),
+    checklistItem('multi-pad', 'Controller number / multi-pad', visiblePadCount > 1 ? 'pass' : 'warning', `${visiblePadCount} client pad${visiblePadCount === 1 ? '' : 's'} visible${virtual.number ? `; native virtual pad #${virtual.number}` : ''}.`, 'Keep controller order stable before starting split-screen or multi-pad games.'),
+    checklistItem('rumble', 'Rumble / haptics', hapticsSupported === true ? 'pass' : 'warning', hapticsSupported === true ? (hapticsDetail || 'Rumble/haptics feedback is available for the native virtual controller.') : 'Rumble/haptics support is not available or not exposed by this browser/client.', hapticsSupported === true ? 'Use the optional rumble pulse only after input is mapped correctly.' : 'Treat missing rumble as non-blocking unless the game requires it.'),
+    checklistItem('host-isolation', 'Host physical controller isolation', isolationPass ? 'pass' : isolationFail ? 'fail' : 'warning', isolationPass ? `Isolation state: ${hostIsolationRaw}${hostIsolationDetail ? ` — ${hostIsolationDetail}` : ''}.` : hostIsolation ? `Isolation state: ${hostIsolationRaw}${hostIsolationDetail ? ` — ${hostIsolationDetail}` : ''}.` : 'Host physical controller isolation has not been reported yet.', isolationPass ? 'No host-side controller conflict stands out.' : 'If inputs double-fire, unplug/disable the host physical controller or isolate it before retesting.'),
   ]
   const status = worstStatus(checks.filter((check) => check.key !== 'rumble'))
   return {
     kind: 'controller-input-test',
     status,
     classification: status === 'pass' ? 'clean' : 'client',
-    summary: events.length ? `${events.length} client control event${events.length === 1 ? '' : 's'} captured; virtual pad ${virtual.created ? 'created' : 'not confirmed'}.` : 'Waiting for client controller input.',
+    summary: events.length ? `${events.length} client control event${events.length === 1 ? '' : 's'} captured; native virtual pad ${virtual.created ? `#${virtual.number || '?'}` : 'not confirmed'}.` : 'Waiting for client controller input.',
     checks,
-    advancedEvidence: sanitizeDiagnosticsValue({ events: events.slice(-12), gamepads, virtualController: virtual, hostPhysicalControllerIsolation: input.hostPhysicalControllerIsolation }),
+    advancedEvidence: sanitizeDiagnosticsValue({ events: events.slice(-12), gamepads, native, virtualController: virtual, hostPhysicalControllerIsolation: hostIsolationRaw }),
   }
 }
 
