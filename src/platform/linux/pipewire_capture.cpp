@@ -421,6 +421,11 @@ namespace pipewire_capture {
     };
   }
 
+  bool frame_requires_cpu_copy(const platf::frame_metadata_t &metadata) {
+    return metadata.transport != platf::frame_transport_e::dmabuf ||
+           metadata.residency != platf::frame_residency_e::gpu;
+  }
+
   capture_t::capture_t(capture_options_t options):
       options_(options) {
     if (options_.remote_fd >= 0) {

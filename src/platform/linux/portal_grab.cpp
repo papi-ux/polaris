@@ -1153,11 +1153,11 @@ namespace portal {
         return platf::capture_e::reinit;
       }
 
-      auto info = cap->frame_info();
+      auto frame_info = cap->frame_info();
       pipewire_dmabuf_negotiated = cap->negotiated_dmabuf();
-      if (cap->negotiated() && info.width > 0 && info.height > 0) {
-        cfg_width = info.width;
-        cfg_height = info.height;
+      if (cap->negotiated() && frame_info.width > 0 && frame_info.height > 0) {
+        cfg_width = frame_info.width;
+        cfg_height = frame_info.height;
         this->env_width = cfg_width;
         this->env_height = cfg_height;
         this->width = cfg_width;
@@ -1199,10 +1199,16 @@ namespace portal {
         stream_stats::update_capture_metadata(img_out->frame_metadata);
         if (!capture_transport_logged) {
           capture_transport_logged = true;
-          BOOST_LOG(warning) << "portal: capture_transport="sv << platf::from_frame_transport(img_out->frame_metadata.transport)
-                             << " frame_residency="sv << platf::from_frame_residency(img_out->frame_metadata.residency)
-                             << " frame_format="sv << platf::from_frame_format(img_out->frame_metadata.format)
-                             << "; capture will incur an extra CPU-side copy/conversion path"sv;
+          if (pipewire_capture::frame_requires_cpu_copy(img_out->frame_metadata)) {
+            BOOST_LOG(warning) << "portal: capture_transport="sv << platf::from_frame_transport(img_out->frame_metadata.transport)
+                               << " frame_residency="sv << platf::from_frame_residency(img_out->frame_metadata.residency)
+                               << " frame_format="sv << platf::from_frame_format(img_out->frame_metadata.format)
+                               << "; capture will incur an extra CPU-side copy/conversion path"sv;
+          } else {
+            BOOST_LOG(info) << "portal: capture_transport="sv << platf::from_frame_transport(img_out->frame_metadata.transport)
+                            << " frame_residency="sv << platf::from_frame_residency(img_out->frame_metadata.residency)
+                            << " frame_format="sv << platf::from_frame_format(img_out->frame_metadata.format);
+          }
         }
         if (config::video.linux_display.capture_profile) {
           const auto total_time = std::chrono::duration_cast<std::chrono::microseconds>(

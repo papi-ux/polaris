@@ -133,6 +133,7 @@ namespace pipewire_capture {
 
   platf::frame_metadata_t cpu_frame_metadata();
   platf::frame_metadata_t dmabuf_frame_metadata(std::string render_node);
+  bool frame_requires_cpu_copy(const platf::frame_metadata_t &metadata);
 
   class capture_t: public std::enable_shared_from_this<capture_t> {
   public:

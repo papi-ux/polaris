@@ -168,6 +168,16 @@ TEST(PipeWireCapturePolicyTests, DmaBufFramesReportGpuAndRenderNodeMetadata) {
   EXPECT_EQ(metadata.device, "/dev/dri/renderD128");
 }
 
+TEST(PipeWireCapturePolicyTests, CpuCopyWarningMatchesActualFrameResidency) {
+  EXPECT_TRUE(pipewire_capture::frame_requires_cpu_copy(pipewire_capture::cpu_frame_metadata()));
+  EXPECT_FALSE(pipewire_capture::frame_requires_cpu_copy(
+    pipewire_capture::dmabuf_frame_metadata("/dev/dri/renderD128")));
+
+  auto inconsistent = pipewire_capture::dmabuf_frame_metadata("/dev/dri/renderD128");
+  inconsistent.residency = platf::frame_residency_e::cpu;
+  EXPECT_TRUE(pipewire_capture::frame_requires_cpu_copy(inconsistent));
+}
+
 TEST(PipeWireCapturePolicyTests, RenderNodeValidationAcceptsOnlyCanonicalRenderNodes) {
   EXPECT_EQ(pipewire_capture::canonical_render_node("/dev/dri/renderD128"), "/dev/dri/renderD128");
   EXPECT_EQ(pipewire_capture::canonical_render_node("/dev/dri/renderD0"), "/dev/dri/renderD0");
