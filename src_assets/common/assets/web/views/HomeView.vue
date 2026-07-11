@@ -225,6 +225,20 @@
           <div class="mt-3 text-xs text-storm">
             {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
           </div>
+          <div
+            v-if="displaySession?.environment_repaired"
+            data-display-session-health
+            class="mt-3 rounded-lg border border-green-400/30 bg-green-400/10 px-3 py-2 text-xs text-green-200"
+          >
+            Desktop session environment was repaired automatically from the user service.
+          </div>
+          <div
+            v-else-if="displaySession?.status === 'missing_display_environment'"
+            data-display-session-health
+            class="mt-3 rounded-lg border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs text-amber-100"
+          >
+            Desktop preview environment is missing. Restart Polaris from the desktop session or run the user service so it inherits Wayland/X11.
+          </div>
         </article>
       </div>
     </section>
@@ -344,7 +358,7 @@ import PolarisVersion from '../polaris_version'
 import { buildUpdateCenterState } from '../update-center.js'
 import InfoHint from '../components/InfoHint.vue'
 
-const { gpu, displays, audio, sessionType, loading: systemLoading } = useSystemStats(3000)
+const { gpu, displays, audio, sessionType, displaySession, loading: systemLoading } = useSystemStats(3000)
 
 const version = ref(null)
 const githubVersion = ref(null)

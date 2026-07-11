@@ -30,6 +30,7 @@
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
 #elif __linux__
+  #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
 #endif
 
@@ -231,6 +232,11 @@ int main(int argc, char *argv[]) {
 
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
+
+#ifdef __linux__
+  // Repair manual/SSH launches from the user manager before display, tray, or preview paths touch Wayland.
+  session_manager::repair_desktop_session_environment();
+#endif
 
   // Adding guard here first as it also performs recovery after crash,
   // otherwise people could theoretically end up without display output.

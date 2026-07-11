@@ -19,6 +19,8 @@
 #include "../../config.h"
 #include "../../logging.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -41,6 +43,7 @@ namespace session_manager {
 
   // Edit mode watchdog
   static std::atomic<bool> g_watchdog_running{false};
+  static std::atomic<bool> g_desktop_environment_repaired{false};
   static std::thread g_watchdog_thread;
 
 #ifdef POLARIS_TESTS
@@ -215,11 +218,110 @@ namespace session_manager {
     );
   }
 
+  static constexpr std::array<std::string_view, 8> DESKTOP_SESSION_ENV_VARS {
+    "WAYLAND_DISPLAY"sv,
+    "DISPLAY"sv,
+    "XDG_CURRENT_DESKTOP"sv,
+    "XDG_SESSION_TYPE"sv,
+    "XDG_SESSION_ID"sv,
+    "XAUTHORITY"sv,
+    "XDG_RUNTIME_DIR"sv,
+    "DBUS_SESSION_BUS_ADDRESS"sv,
+  };
+
+  static bool is_desktop_session_env_var(std::string_view key) {
+    return std::any_of(DESKTOP_SESSION_ENV_VARS.begin(), DESKTOP_SESSION_ENV_VARS.end(), [key](std::string_view allowed) {
+      return key == allowed;
+    });
+  }
+
+  static bool env_value_is_empty(const char *value) {
+    return !value || value[0] == '\0';
+  }
+
+  static bool should_import_desktop_session_env(std::string_view key, std::string_view manager_value) {
+    if (manager_value.empty()) {
+      return false;
+    }
+
+    const std::string key_string {key};
+    const char *current_value = std::getenv(key_string.c_str());
+    if (env_value_is_empty(current_value)) {
+      return true;
+    }
+
+    if (key == "XDG_SESSION_TYPE"sv) {
+      const std::string_view current {current_value};
+      return (current == "tty"sv || current == "unspecified"sv) &&
+             (manager_value == "wayland"sv || manager_value == "x11"sv);
+    }
+
+    return false;
+  }
+
+  static std::string join_imported_env_names(const std::vector<std::string> &names) {
+    std::string joined;
+    for (const auto &name : names) {
+      if (!joined.empty()) {
+        joined += ", ";
+      }
+      joined += name;
+    }
+    return joined;
+  }
+
   // -----------------------------------------------------------------------
   // Public API
   // -----------------------------------------------------------------------
 
+  bool repair_desktop_session_environment() {
+    const auto manager_environment = exec("systemctl --user show-environment 2>/dev/null");
+    if (manager_environment.empty()) {
+      BOOST_LOG(debug) << "session_manager: user systemd environment was unavailable for desktop env repair"sv;
+      return false;
+    }
+
+    std::vector<std::string> imported;
+    std::istringstream lines {manager_environment};
+    std::string line;
+    while (std::getline(lines, line)) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+
+      const auto separator = line.find('=');
+      if (separator == std::string::npos || separator == 0) {
+        continue;
+      }
+
+      const std::string key = line.substr(0, separator);
+      const std::string value = line.substr(separator + 1);
+      if (!is_desktop_session_env_var(key) || !should_import_desktop_session_env(key, value)) {
+        continue;
+      }
+
+      if (setenv(key.c_str(), value.c_str(), 1) == 0) {
+        imported.push_back(key);
+      }
+    }
+
+    if (!imported.empty()) {
+      g_desktop_environment_repaired = true;
+      BOOST_LOG(info) << "session_manager: repaired desktop session environment from user systemd manager ["sv
+                      << join_imported_env_names(imported) << ']';
+      return true;
+    }
+
+    return false;
+  }
+
+  bool desktop_session_environment_was_repaired() {
+    return g_desktop_environment_repaired.load();
+  }
+
   bool validate_environment() {
+    repair_desktop_session_environment();
+
     bool ok = true;
     const bool private_headless_runtime =
       config::video.linux_display.headless_mode &&

@@ -22,6 +22,7 @@ namespace {
     bool loginctl_clears_lock = false;
     std::string loginctl_command_that_clears;
     std::string loginctl_list_sessions_output;
+    std::string systemd_environment_output;
     std::vector<std::string> run_commands;
 
     SessionManagerCommandHarness() {
@@ -32,6 +33,9 @@ namespace {
           }
           if (cmd.find("loginctl list-sessions") != std::string::npos) {
             return loginctl_list_sessions_output;
+          }
+          if (cmd.find("systemctl --user show-environment") != std::string::npos) {
+            return systemd_environment_output;
           }
           return std::string {};
         },
@@ -63,6 +67,13 @@ namespace {
     ~SessionManagerCommandHarness() {
       session_manager::reset_command_hooks_for_tests();
       unsetenv("XDG_SESSION_ID");
+      unsetenv("WAYLAND_DISPLAY");
+      unsetenv("DISPLAY");
+      unsetenv("XDG_CURRENT_DESKTOP");
+      unsetenv("XDG_SESSION_TYPE");
+      unsetenv("DBUS_SESSION_BUS_ADDRESS");
+      unsetenv("XDG_RUNTIME_DIR");
+      unsetenv("POLARIS_TEST_SENTINEL");
     }
 
     bool ran(std::string_view needle) const {
@@ -71,6 +82,33 @@ namespace {
       });
     }
   };
+}
+
+TEST(SessionManagerEnvironmentRepairTests, ImportsMissingDesktopSessionVariablesFromUserSystemdEnvironment) {
+  SessionManagerCommandHarness harness;
+  unsetenv("WAYLAND_DISPLAY");
+  unsetenv("DISPLAY");
+  unsetenv("XDG_CURRENT_DESKTOP");
+  setenv("XDG_SESSION_TYPE", "tty", 1);
+  setenv("XDG_RUNTIME_DIR", "/run/user/1000", 1);
+  setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus", 1);
+  harness.systemd_environment_output =
+    "XDG_RUNTIME_DIR=/run/user/1000\n"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\n"
+    "DISPLAY=:0\n"
+    "WAYLAND_DISPLAY=wayland-0\n"
+    "XDG_CURRENT_DESKTOP=KDE\n"
+    "XDG_SESSION_TYPE=wayland\n"
+    "POLARIS_TEST_SENTINEL=must-not-import";
+
+  EXPECT_TRUE(session_manager::repair_desktop_session_environment());
+
+  EXPECT_STREQ("wayland-0", getenv("WAYLAND_DISPLAY"));
+  EXPECT_STREQ(":0", getenv("DISPLAY"));
+  EXPECT_STREQ("KDE", getenv("XDG_CURRENT_DESKTOP"));
+  EXPECT_STREQ("wayland", getenv("XDG_SESSION_TYPE"));
+  EXPECT_EQ(nullptr, getenv("POLARIS_TEST_SENTINEL"));
+  EXPECT_TRUE(session_manager::desktop_session_environment_was_repaired());
 }
 
 TEST(SessionManagerUnlockTests, AlreadyUnlockedSkipsUnlockCommands) {

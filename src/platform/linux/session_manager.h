@@ -46,6 +46,20 @@ namespace session_manager {
   bool validate_environment();
 
   /**
+   * @brief Import missing desktop session variables from the user systemd manager.
+   *
+   * This recovers source/manual launches started from SSH or a tty while the
+   * graphical user manager already knows the active Wayland/X11 session.
+   * @return true when at least one environment variable was repaired
+   */
+  bool repair_desktop_session_environment();
+
+  /**
+   * @brief Whether Polaris repaired desktop session variables during this process lifetime.
+   */
+  bool desktop_session_environment_was_repaired();
+
+  /**
    * @brief Save minimal desktop state before streaming session.
    */
   desktop_state_t save_state();

@@ -8,13 +8,14 @@ import { ref, onMounted, onUnmounted, watch } from 'vue'
  *
  * @param {number} intervalMs - Poll interval in ms (default: 3000)
  * @param {{ shouldPoll?: (() => boolean) | { value: boolean }, pauseWhenHidden?: boolean, maxBackoffMs?: number }} options
- * @returns {{ gpu: Ref, displays: Ref, audio: Ref, sessionType: Ref, loading: Ref<boolean> }}
+ * @returns {{ gpu: Ref, displays: Ref, audio: Ref, sessionType: Ref, displaySession: Ref, loading: Ref<boolean> }}
  */
 export function useSystemStats(intervalMs = 3000, options = {}) {
   const gpu = ref(null)
   const displays = ref([])
   const audio = ref(null)
   const sessionType = ref(null)
+  const displaySession = ref(null)
   const loading = ref(true)
 
   const maxBackoffMs = Math.max(intervalMs, options.maxBackoffMs ?? intervalMs * 8)
@@ -82,6 +83,7 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
           displays.value = data.displays || []
           audio.value = data.audio || null
           sessionType.value = data.session_type || null
+          displaySession.value = data.display_session || null
           ok = true
         }
       } catch {
@@ -147,5 +149,5 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
     }
   })
 
-  return { gpu, displays, audio, sessionType, loading }
+  return { gpu, displays, audio, sessionType, displaySession, loading }
 }
