@@ -327,6 +327,49 @@ describe('support self-service reports', () => {
     expect(report.checks.find((check) => check.key === 'stream-port').status).toBe('fail')
   })
 
+  it('prefers native server-side network probe evidence when available', () => {
+    const report = buildNetworkPathTestReport({
+      nativeProbe: {
+        targetHost: '100.72.10.4',
+        classification: 'vpn',
+        mdnsAvailable: false,
+        hostReachable: true,
+        samples: { latencyMs: [16, 19, 18], jitterMs: 2, packetLossPercent: 0 },
+        ports: [
+          { key: 'control_https', label: 'Web/control HTTPS', port: 47990, transport: 'tcp', status: 'open' },
+          { key: 'rtsp_setup', label: 'RTSP setup', port: 48010, transport: 'tcp', status: 'closed' },
+          { key: 'video_udp', label: 'Video stream', port: 47998, transport: 'udp', status: 'hint' },
+        ],
+      },
+      currentBitrateKbps: 60000,
+    })
+
+    expect(report.summary).toContain('VPN')
+    expect(report.checks.find((check) => check.key === 'host-reachable').status).toBe('pass')
+    expect(report.checks.find((check) => check.key === 'control-port').detail).toContain('47990/tcp')
+    expect(report.checks.find((check) => check.key === 'stream-port').status).toBe('fail')
+    expect(report.advancedEvidence.nativeProbe).toEqual(expect.objectContaining({ classification: 'vpn' }))
+  })
+
+  it('includes redacted native network evidence in support-copy text', () => {
+    const report = buildNetworkPathTestReport({
+      nativeProbe: {
+        targetHost: '192.168.1.44',
+        classification: 'lan',
+        hostReachable: true,
+        ports: [{ key: 'control_https', label: 'Web/control HTTPS', port: 47990, transport: 'tcp', status: 'open' }],
+        notes: ['token=abc123 should never survive copy'],
+      },
+    })
+
+    const copy = buildSupportSelfTestCopy({ network: report })
+
+    expect(copy).toContain('Native evidence')
+    expect(copy).toContain('Web/control HTTPS 47990/tcp: open')
+    expect(copy).toContain(`token=${REDACTED_VALUE}`)
+    expect(copy).not.toContain('abc123')
+  })
+
   it('summarizes controller input events without requiring hardware-level host evidence', () => {
     const report = buildControllerInputTestReport({
       events: [

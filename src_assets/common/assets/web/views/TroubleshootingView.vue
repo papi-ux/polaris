@@ -115,6 +115,7 @@
                 <div>{{ check.detail }}</div>
                 <div class="mt-1 text-ice">{{ check.action }}</div>
               </div>
+              <pre v-if="networkPathReport.nativeEvidenceText" class="whitespace-pre-wrap rounded-lg border border-storm/15 bg-void/50 p-3">{{ networkPathReport.nativeEvidenceText }}</pre>
             </div>
           </details>
         </div>
@@ -469,6 +470,7 @@ const controllerEvents = ref([])
 const controllerRumbleSupported = ref(null)
 const hostPhysicalControllerIsolation = ref('unknown')
 const virtualControllerStatus = ref({ created: false })
+const nativeNetworkPathProbe = ref(null)
 const lastCompletedStreamStats = ref(null)
 const lastDisconnectReason = ref('')
 
@@ -714,6 +716,7 @@ const doctorAdvancedItems = computed(() => {
 })
 
 const networkPathReport = computed(() => buildNetworkPathTestReport({
+  nativeProbe: nativeNetworkPathProbe.value,
   host: streamStats.value?.client_ip || window.location.hostname,
   originHostname: window.location.hostname,
   hostReachable: streamStatsConnected.value,
@@ -907,6 +910,21 @@ function refreshLogs() {
     .catch(error => console.error("Error fetching logs:", error))
 }
 
+function refreshNetworkPathProbe() {
+  fetch("./api/support/network-path-probe", { credentials: 'include' })
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    })
+    .then((probe) => {
+      nativeNetworkPathProbe.value = probe?.status === false ? null : probe
+    })
+    .catch((error) => {
+      console.error("Error fetching network path probe:", error)
+      nativeNetworkPathProbe.value = null
+    })
+}
+
 function closeApp() {
   closeAppPressed.value = true
   return fetch("./api/apps/close", {
@@ -1081,6 +1099,7 @@ async function collectSupportContext() {
     version: version.value || config.version || 'unknown',
     browser_user_agent: navigator.userAgent,
     stream_stats_connected: streamStatsConnected.value,
+    network_path_probe: nativeNetworkPathProbe.value,
     fix_my_stream_checklist: fixMyStreamChecklist.value,
     session_snapshot: streamStats.value,
     client: {
@@ -1243,6 +1262,7 @@ fetch("/api/config")
 
 logInterval = setInterval(() => { refreshLogs() }, 5000)
 refreshLogs()
+refreshNetworkPathProbe()
 
 onBeforeUnmount(() => {
   clearInterval(logInterval)
