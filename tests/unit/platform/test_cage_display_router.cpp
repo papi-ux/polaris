@@ -139,6 +139,63 @@ TEST(CageDisplayRouterPolicyTests, WindowedOverrideDoesNotAttemptHeadlessExtcopy
   ));
 }
 
+TEST(CageDisplayRouterPolicyTests, HeadlessDmabufGpuConversionFailureDisablesExtcopyFallback) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+  const platf::frame_metadata_t metadata {
+    .transport = platf::frame_transport_e::dmabuf,
+    .residency = platf::frame_residency_e::gpu,
+    .format = platf::frame_format_e::bgra8,
+  };
+
+  EXPECT_TRUE(cage_display_router::should_disable_headless_extcopy_after_conversion_failure(
+    runtime_state,
+    metadata
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, NonHeadlessDmabufConversionFailureDoesNotDisableExtcopyFallback) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+  const platf::frame_metadata_t metadata {
+    .transport = platf::frame_transport_e::dmabuf,
+    .residency = platf::frame_residency_e::gpu,
+    .format = platf::frame_format_e::bgra8,
+  };
+
+  EXPECT_FALSE(cage_display_router::should_disable_headless_extcopy_after_conversion_failure(
+    runtime_state,
+    metadata
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, CpuFrameConversionFailureDoesNotDisableExtcopyFallback) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+  const platf::frame_metadata_t metadata {
+    .transport = platf::frame_transport_e::shm,
+    .residency = platf::frame_residency_e::cpu,
+    .format = platf::frame_format_e::bgra8,
+  };
+
+  EXPECT_FALSE(cage_display_router::should_disable_headless_extcopy_after_conversion_failure(
+    runtime_state,
+    metadata
+  ));
+}
+
 TEST(CageDisplayRouterPolicyTests, RequestedHeadlessWithoutOverrideStillReportsHeadlessFallback) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,
@@ -246,6 +303,28 @@ TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeRequiresLiveFrameCo
   EXPECT_FALSE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(false, false));
   EXPECT_FALSE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(true, false));
   EXPECT_TRUE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(true, true));
+}
+
+TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeFailureSuppressesRetry) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+    runtime_state,
+    platf::mem_type_e::cuda
+  ));
+
+  cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+
+  EXPECT_FALSE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+    runtime_state,
+    platf::mem_type_e::cuda
+  ));
 }
 
 TEST(CageDisplayRouterPolicyTests, MangoHudPrefixIsSuppressedForSteamBigPicture) {
