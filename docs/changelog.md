@@ -7,6 +7,21 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.3.0 - 2026-07-11
+
+Feature release focused on self-service stream diagnostics, safer release visibility, display planning, and more resilient Linux capture startup.
+
+- Added a manual Update Center with release metadata, package guidance, and a visible update call to action in the web console
+- Added deterministic Polaris Doctor diagnostics and privacy-safe support reports for host readiness, active streams, and post-session troubleshooting
+- Added optional AI Doctor explanations that translate deterministic findings without replacing the local-first diagnostic source of truth
+- Added native network-path probes for route, latency, packet-loss, and reachability evidence in support workflows
+- Added native controller, isolation, and haptics diagnostics so input-path failures can be separated from client or game behavior
+- Added a display resolution planner that explains requested, host, capture, and output-mode compatibility before launch
+- Expanded Mission Control and Troubleshooting self-tests, support bundles, and issue-draft generation with clearer remediation steps
+- Improved Linux desktop capture startup by self-healing stale Wayland, display, and session-bus environment values
+- Hardened headless DMA-BUF capture so conversion failures fall back cleanly instead of leaving private streams stranded
+- Clarified NVIDIA, AMD/VAAPI, GPU-native, and fallback guidance across the public setup and troubleshooting docs
+
 ## v1.2.1 - 2026-07-10
 
 Patch release focused on CachyOS/Arch Settings reliability, Linux audio/capture diagnostics, and safer Moonlight-compatible host troubleshooting.
