@@ -202,11 +202,142 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   ]
 }
 
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && String(value).trim() !== '') return value
+  }
+  return ''
+}
+
+function formatIssueValue(value, fallback = 'unknown') {
+  const safe = sanitizeDiagnosticsValue(value)
+  if (safe === null || safe === undefined || safe === '') return fallback
+  if (typeof safe === 'object') return JSON.stringify(safe)
+  return String(safe)
+}
+
+function formatIssueNumber(value, digits = 1, fallback = 'unknown') {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric.toFixed(digits) : fallback
+}
+
+function issueDraftLine(label, value, fallback = 'unknown') {
+  return `- ${label}: ${formatIssueValue(value, fallback)}`
+}
+
+function summarizeActiveStream(stats = {}) {
+  if (!stats || Object.keys(stats).length === 0) return 'unknown'
+  const streaming = stats.streaming ? 'yes' : 'no'
+  const fps = formatIssueNumber(stats.fps, 1)
+  const target = formatIssueNumber(stats.session_target_fps || stats.requested_client_fps, 1)
+  const bitrate = formatIssueValue(stats.bitrate_kbps ?? stats.bitrate, 'unknown')
+  const loss = formatIssueNumber(stats.packet_loss, 2)
+  const encode = formatIssueNumber(stats.encode_time_ms, 1)
+  return `${streaming}, ${fps} FPS / ${target} target, ${bitrate} kbps, ${loss}% loss, ${encode} ms encode`
+}
+
+function formatRecentIssues(recentIssues = []) {
+  if (!Array.isArray(recentIssues) || recentIssues.length === 0) return '- No recent warnings/errors were included.'
+  return recentIssues.slice(0, 12).map((entry) => {
+    const prefix = [entry.timestamp, entry.level].filter(Boolean).join(' ')
+    const count = entry.count > 1 ? ` (${entry.count}x)` : ''
+    return `- ${redactSensitiveText(`${prefix}: ${entry.message || entry.detail || ''}${count}`.trim())}`
+  }).join('\n')
+}
+
+function formatChecklist(checklist = []) {
+  if (!Array.isArray(checklist) || checklist.length === 0) return '- No Fix My Stream checklist was included.'
+  return checklist.map((item) => `- ${formatIssueValue(item.label, 'Check')}: ${formatIssueValue(item.status, 'unknown')} — ${formatIssueValue(item.detail, '')}${item.action ? ` Next: ${formatIssueValue(item.action, '')}` : ''}`).join('\n')
+}
+
+function formatDoctorEvidence(doctor = {}) {
+  if (!doctor || !Array.isArray(doctor.evidence) || doctor.evidence.length === 0) return '- No Doctor evidence was included.'
+  return doctor.evidence.slice(0, 8).map((entry) => `- ${formatIssueValue(entry.id || entry.label, 'evidence')}: ${formatIssueValue(entry.detail || entry.value || entry.reason, '')}`).join('\n')
+}
+
+export function buildStreamEvidence(input = {}) {
+  const stats = input.session_snapshot || input.stream_stats || {}
+  const doctor = stats?.doctor || input.doctor || {}
+  return sanitizeDiagnosticsValue({
+    client: input.client || { type: stats.client_type || stats.client_name || 'unknown', name: stats.client_name },
+    launch_mode: stats.launch_mode || stats.stream_display_mode || stats.runtime_backend || input.launch_mode,
+    encoder: stats.encoder || stats.encode_target_device || input.encoder,
+    capture_path: stats.capture_path || stats.capture_transport,
+    capture_path_reason: stats.capture_path_reason,
+    active_stream: summarizeActiveStream(stats),
+    doctor,
+    fix_my_stream_checklist: input.fix_my_stream_checklist || [],
+    recent_issues: input.recent_issues || [],
+  })
+}
+
+export function buildGithubIssueDraft(input = {}) {
+  const safeInput = sanitizeDiagnosticsValue(input)
+  const stats = safeInput.session_snapshot || safeInput.stream_stats || {}
+  const config = safeInput.config || {}
+  const system = safeInput.system_stats || {}
+  const doctor = stats.doctor || safeInput.doctor || {}
+  const client = safeInput.client || {}
+  const gpu = firstNonEmpty(system?.gpu?.name, system?.gpu_name, config.gpu, stats.gpu_name, stats.encode_target_device)
+  const driver = firstNonEmpty(system?.gpu?.driver, system?.driver, config.driver, stats.driver)
+  const distro = firstNonEmpty(system?.os?.distro, system?.distro, config.distro, safeInput.platform)
+  const sessionType = firstNonEmpty(system?.session?.type, system?.session_type, config.session_type, stats.session_type)
+  const compositor = firstNonEmpty(system?.session?.compositor, system?.compositor, config.compositor, stats.compositor)
+  const clientType = firstNonEmpty(client.type, stats.client_type, stats.client_name, 'unknown')
+  const clientName = firstNonEmpty(client.name, stats.client_name)
+  const capture = `${formatIssueValue(stats.capture_path || stats.capture_transport, 'unknown')} — ${formatIssueValue(stats.capture_path_reason, 'unknown')}`
+  const doctorSummary = firstNonEmpty(doctor.simple_state, doctor.summary, doctor.diagnosis, doctor.primary_issue, 'Polaris did not include a Doctor diagnosis yet.')
+
+  return redactSensitiveText([
+    '# Polaris support report',
+    '',
+    '> This report was generated locally from a redacted Polaris support bundle. Nothing was submitted automatically.',
+    '',
+    '## Environment',
+    issueDraftLine('Polaris version', safeInput.version),
+    issueDraftLine('Distro', distro),
+    issueDraftLine('GPU', gpu),
+    issueDraftLine('Driver', driver),
+    issueDraftLine('Session/compositor', `${formatIssueValue(sessionType)} / ${formatIssueValue(compositor)}`),
+    issueDraftLine('Client', `${formatIssueValue(clientType)}${clientName ? ` (${formatIssueValue(clientName)})` : ''}`),
+    '',
+    '## Stream evidence',
+    issueDraftLine('Launch mode', firstNonEmpty(stats.launch_mode, stats.stream_display_mode, stats.runtime_backend)),
+    issueDraftLine('Encoder', firstNonEmpty(stats.encoder, stats.encode_target_device, config.encoder)),
+    issueDraftLine('Capture', capture),
+    issueDraftLine('Active stream', summarizeActiveStream(stats)),
+    '',
+    '## What Polaris thinks happened',
+    formatIssueValue(doctorSummary, 'No Doctor summary was included.'),
+    doctor.primary_issue ? `
+Primary issue: ${formatIssueValue(doctor.primary_issue)}` : '',
+    doctor.safe_recovery_action?.id ? `
+Suggested safe action: ${formatIssueValue(doctor.safe_recovery_action.id)}${doctor.safe_recovery_action.destructive ? ' (destructive)' : ' (non-destructive)'}` : '',
+    '',
+    '## Fix My Stream checklist',
+    formatChecklist(safeInput.fix_my_stream_checklist),
+    '',
+    '## Doctor evidence',
+    formatDoctorEvidence(doctor),
+    '',
+    '## Recent warnings/errors',
+    formatRecentIssues(safeInput.recent_issues),
+    '',
+    '## What I already tried',
+    formatIssueValue(safeInput.user_notes, 'Not provided yet.'),
+  ].filter((line) => line !== '').join('\n'))
+}
+
 export function buildAnonymizedDiagnosticsBundle(input = {}) {
+  const streamEvidence = input.stream_evidence || buildStreamEvidence(input)
+  const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence })
   return sanitizeDiagnosticsValue({
     generated_at: input.generated_at || new Date().toISOString(),
     export_kind: 'polaris-anonymized-diagnostics',
     redaction_notice: 'Fields containing password, token, secret, key, cookie, auth, or credential are redacted client-side before export.',
+    support_bundle_version: 2,
     ...input,
+    stream_evidence: streamEvidence,
+    issue_draft: issueDraft,
   })
 }

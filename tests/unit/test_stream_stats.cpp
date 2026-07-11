@@ -351,3 +351,89 @@ TEST(StreamStatsCapturePathTests, LabelsWindowedDmabufOverridePath) {
   EXPECT_FALSE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));
 }
+
+
+TEST(StreamStatsDoctorTests, ClassifiesGpuNativeStreamAsReady) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+  stats.packet_loss = 0.0;
+
+  const auto json = nlohmann::json::parse(stats.to_json());
+  ASSERT_TRUE(json.contains("doctor"));
+  const auto &doctor = json.at("doctor");
+
+  EXPECT_EQ(doctor.at("simple_state"), "Streaming ready");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
+  EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
+}
+
+TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {
+  LinuxDisplayConfigGuard guard;
+  config::video.adapter_name = "/dev/dri/renderD128";
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = true;
+
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.capture_format = platf::frame_format_e::bgra8;
+  stats.capture_device = "/dev/dri/renderD128";
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_format = platf::frame_format_e::nv12;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  EXPECT_EQ(doctor.at("simple_state"), "Advanced issue detected");
+  EXPECT_EQ(doctor.at("primary_issue"), "gpu_native_requested_shm_fallback");
+  EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
+  EXPECT_TRUE(doctor.at("advanced_evidence").at("raw_fields_redacted"));
+  EXPECT_EQ(
+    doctor.at("advanced_evidence").at("linux_gpu_profile").at("encoder_api"),
+    "vaapi"
+  );
+}
+
+TEST(StreamStatsDoctorTests, KeepsNvidiaHeadlessWarningsInAdvancedEvidence) {
+  LinuxDisplayConfigGuard guard;
+  config::video.encoder = "nvenc";
+  config::video.linux_display.headless_mode = true;
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = false;
+
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.runtime_backend = "labwc";
+  stats.runtime_requested_headless = true;
+  stats.runtime_effective_headless = true;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto &warnings = doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings");
+
+  ASSERT_FALSE(warnings.empty());
+  EXPECT_EQ(warnings.at(0).at("id"), "nvidia_headless_gpu_native_disabled");
+  EXPECT_NE(warnings.at(0).at("message").get<std::string>().find("503"), std::string::npos);
+  EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
+}
+
+TEST(StreamStatsDoctorTests, CaptureMissingNeedsTelemetryBeforeTuning) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  EXPECT_EQ(doctor.at("status"), "unknown");
+  EXPECT_EQ(doctor.at("primary_issue"), "capture_missing");
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Start stream");
+  EXPECT_TRUE(doctor.at("redaction").at("applied"));
+}

@@ -1756,6 +1756,9 @@ namespace nvhttp {
       settings["effective"] = std::move(effective);
       settings["policy"] = policy;
       settings["health"] = health;
+      if (health.contains("doctor")) {
+        settings["doctor"] = health["doctor"];
+      }
       settings["capabilities"] = {
         {"modes", stream_display_mode_options_json()},
         {"display_mode_override", true},
@@ -1765,7 +1768,9 @@ namespace nvhttp {
         {"ai_optimizer_control", true},
         {"client_presentation_reporting", true},
         {"optimizer_sync_reporting", true},
-        {"disconnect_resume_timeout_control", true}
+        {"disconnect_resume_timeout_control", true},
+        {"diagnostics_doctor_v1", true},
+        {"doctor_ai_explanation_v1", false}
       };
       settings["sync_status"] = build_client_settings_sync_status(
         client,
@@ -2253,6 +2258,7 @@ namespace nvhttp {
         adaptive_bitrate::get_state(),
         stats.bitrate_kbps
       );
+      health["doctor"] = stream_stats::build_doctor_json(stats, health);
       return health;
     }
   }  // namespace
@@ -4830,6 +4836,8 @@ namespace nvhttp {
       features["optimizer_sync_v1"] = true;
       features["optimizer_profiles_v1"] = true;
       features["disconnect_resume_v1"] = true;
+      features["diagnostics_doctor_v1"] = true;
+      features["doctor_ai_explanation_v1"] = false;
       features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
 #ifdef __linux__
@@ -5059,6 +5067,7 @@ namespace nvhttp {
         proc::proc.get_last_run_app_name()
       );
       output["health"] = health;
+      output["doctor"] = health.value("doctor", nlohmann::json::object());
       output["auto_quality"] = health.value("recovery_policy", nlohmann::json::object());
       output["profile_state"] = build_live_profile_state_json(
         health,
@@ -5165,6 +5174,7 @@ namespace nvhttp {
         output["status"] = true;
         output["stream_policy"] = build_stream_policy_json(*named_cert_p, stats, health);
         output["health"] = health;
+        output["doctor"] = health.value("doctor", nlohmann::json::object());
 
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
@@ -5368,6 +5378,7 @@ namespace nvhttp {
         output["sync_status"] = output["client_settings"]["sync_status"];
         output["stream_policy"] = output["client_settings"]["policy"];
         output["health"] = health;
+        output["doctor"] = health.value("doctor", nlohmann::json::object());
         write_json(output);
       } catch (std::exception &e) {
         write_json({{"error", e.what()}}, SimpleWeb::StatusCode::server_error_internal_server_error);
