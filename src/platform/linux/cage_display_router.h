@@ -141,6 +141,15 @@ namespace cage_display_router {
   );
 
   /**
+   * @brief Returns whether a live frame conversion failure should disable the
+   *        true-headless ext-image-copy-capture DMA-BUF path and retry with SHM.
+   */
+  bool should_disable_headless_extcopy_after_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    const platf::frame_metadata_t &source_metadata
+  );
+
+  /**
    * @brief Returns the cached result of the windowed GPU-native probe for the
    *        current Polaris process, if one exists.
    */

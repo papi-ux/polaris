@@ -431,6 +431,25 @@ namespace video {
           return {};
       }
     }
+
+    bool handle_headless_extcopy_conversion_failure(const frame_t &frame) {
+      if (!::config::video.linux_display.use_cage_compositor || !cage_display_router::is_running()) {
+        return false;
+      }
+
+      const auto runtime_state = cage_display_router::runtime_state();
+      if (!cage_display_router::should_disable_headless_extcopy_after_conversion_failure(
+            runtime_state,
+            frame.source_metadata
+          )) {
+        return false;
+      }
+
+      cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+      BOOST_LOG(warning)
+        << "Headless ext-image-copy-capture DMA-BUF frame conversion failed; disabling headless DMA-BUF capture and reinitializing with SHM/system-memory fallback"sv;
+      return true;
+    }
 #endif
 
     std::string_view color_coding_label(const sunshine_colorspace_t &colorspace) {
@@ -1359,6 +1378,7 @@ namespace video {
     std::thread capture_thread;
 
     safe::signal_t reinit_event;
+    safe::signal_t reinit_request_event;
     const encoder_t *encoder_p;
     sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;
   };
@@ -2046,6 +2066,7 @@ namespace video {
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
     safe::signal_t &reinit_event,
+    safe::signal_t &reinit_request_event,
     const encoder_t &encoder
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
@@ -2226,6 +2247,11 @@ namespace video {
           return false;
         }
 
+        if (reinit_request_event.peek()) {
+          artificial_reinit = true;
+          return false;
+        }
+
         return true;
       };
 
@@ -2308,6 +2334,7 @@ namespace video {
 
             display_wp = disp;
 
+            reinit_request_event.reset();
             reinit_event.reset();
             continue;
           }
@@ -2944,6 +2971,7 @@ namespace video {
     std::shared_ptr<platf::display_t> disp,
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
+    safe::signal_t &reinit_request_event,
     const encoder_t &encoder,
     void *channel_data,
     packet_queue_t packets
@@ -3133,6 +3161,11 @@ namespace video {
 
           if (session->convert(frame)) {
             BOOST_LOG(error) << "Could not convert image"sv;
+#ifdef __linux__
+            if (handle_headless_extcopy_conversion_failure(frame)) {
+              reinit_request_event.raise(true);
+            }
+#endif
             break;
           }
 
@@ -3502,6 +3535,12 @@ namespace video {
 
           if (frame_captured && frame.valid() && pos->session->convert(frame)) {
             BOOST_LOG(error) << "Could not convert image"sv;
+#ifdef __linux__
+            if (handle_headless_extcopy_conversion_failure(frame)) {
+              ec = platf::capture_e::reinit;
+              return false;
+            }
+#endif
             ctx->shutdown_event->raise(true);
 
             continue;
@@ -3615,7 +3654,7 @@ namespace video {
 
     while (!shutdown_event->peek() && images->running()) {
       // Wait for the main capture event when the display is being reinitialized
-      if (ref->reinit_event.peek()) {
+      if (ref->reinit_event.peek() || ref->reinit_request_event.peek()) {
         std::this_thread::sleep_for(20ms);
         continue;
       }
@@ -3651,6 +3690,7 @@ namespace video {
         display,
         std::move(encode_device),
         ref->reinit_event,
+        ref->reinit_request_event,
         *ref->encoder_p,
         channel_data,
         packets
@@ -4440,6 +4480,7 @@ namespace video {
   int start_capture_async(capture_thread_async_ctx_t &capture_thread_ctx) {
     capture_thread_ctx.encoder_p = chosen_encoder;
     capture_thread_ctx.reinit_event.reset();
+    capture_thread_ctx.reinit_request_event.reset();
 
     capture_thread_ctx.capture_ctx_queue = std::make_shared<safe::queue_t<capture_ctx_t>>(30);
 
@@ -4448,6 +4489,7 @@ namespace video {
       capture_thread_ctx.capture_ctx_queue,
       std::ref(capture_thread_ctx.display_wp),
       std::ref(capture_thread_ctx.reinit_event),
+      std::ref(capture_thread_ctx.reinit_request_event),
       std::ref(*capture_thread_ctx.encoder_p)
     };
 
