@@ -211,9 +211,9 @@ namespace pipewire_capture {
 
   std::vector<std::uint32_t> offered_buffer_data_types(bool may_use_dmabuf) {
     if (may_use_dmabuf) {
-      return {SPA_DATA_DmaBuf, SPA_DATA_MemPtr};
+      return {SPA_DATA_DmaBuf, SPA_DATA_MemFd, SPA_DATA_MemPtr};
     }
-    return {SPA_DATA_MemPtr};
+    return {SPA_DATA_MemFd, SPA_DATA_MemPtr};
   }
 
   bool fill_dmabuf_descriptor(const dmabuf_frame_t &frame, egl::img_descriptor_t &image) {
@@ -396,12 +396,8 @@ namespace pipewire_capture {
     return true;
   }
 
-  bool is_terminal_transition(stream_state_e old_state, stream_state_e new_state) {
-    if (new_state == stream_state_e::error || new_state == stream_state_e::unconnected) {
-      return true;
-    }
-
-    return old_state == stream_state_e::streaming && new_state == stream_state_e::paused;
+  bool is_terminal_transition(stream_state_e, stream_state_e new_state) {
+    return new_state == stream_state_e::error || new_state == stream_state_e::unconnected;
   }
 
   platf::frame_metadata_t cpu_frame_metadata() {
@@ -727,7 +723,10 @@ namespace pipewire_capture {
     if (!data->chunk || (data->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) {
       return false;
     }
-    if (data->type != SPA_DATA_MemPtr && data->type != SPA_DATA_DmaBuf) {
+    const auto accepted_data_types = offered_buffer_data_types(negotiated_dmabuf_);
+    if (std::find(accepted_data_types.begin(), accepted_data_types.end(), data->type) == accepted_data_types.end()) {
+      BOOST_LOG(warning) << "portal: unsupported PipeWire buffer data type="sv << data->type
+                         << " data="sv << (data->data ? "mapped" : "null");
       set_terminal(wait_result_e::reinit);
       return false;
     }
@@ -921,12 +920,15 @@ namespace pipewire_capture {
 
     uint8_t params_buffer[1024];
     spa_pod_builder pb = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-    const auto data_type = negotiated_buffer_data_type(dmabuf_negotiated);
+    std::uint32_t data_type_mask = 0;
+    for (const auto data_type : offered_buffer_data_types(dmabuf_negotiated)) {
+      data_type_mask |= 1u << data_type;
+    }
     const auto *buf_param = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
       &pb,
       SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
       SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
-      SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1 << data_type)));
+      SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(static_cast<int>(data_type_mask))));
 
     pw_stream_update_params(cap->stream_, &buf_param, 1);
   }

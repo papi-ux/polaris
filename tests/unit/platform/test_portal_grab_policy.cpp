@@ -137,13 +137,18 @@ TEST(PipeWireCapturePolicyTests, RejectsNonPositiveStride) {
     source.data(), source.size(), 0, source.size(), 2, 1, -8, SPA_VIDEO_FORMAT_BGRx, destination.data(), 8));
 }
 
-TEST(PipeWireCapturePolicyTests, StreamTransitionRulesOnlyTreatTerminalStatesAsErrors) {
+TEST(PipeWireCapturePolicyTests, StreamPauseDuringBufferRenegotiationIsNonTerminal) {
   using pipewire_capture::stream_state_e;
 
   EXPECT_FALSE(pipewire_capture::is_terminal_transition_for_tests(
     stream_state_e::connecting, stream_state_e::paused));
-  EXPECT_TRUE(pipewire_capture::is_terminal_transition_for_tests(
+  EXPECT_FALSE(pipewire_capture::is_terminal_transition_for_tests(
     stream_state_e::streaming, stream_state_e::paused));
+}
+
+TEST(PipeWireCapturePolicyTests, ErrorAndDisconnectTransitionsAreTerminal) {
+  using pipewire_capture::stream_state_e;
+
   EXPECT_TRUE(pipewire_capture::is_terminal_transition_for_tests(
     stream_state_e::paused, stream_state_e::error));
   EXPECT_TRUE(pipewire_capture::is_terminal_transition_for_tests(
@@ -320,9 +325,11 @@ TEST(PipeWireCapturePolicyTests, DmaBufDescriptorDuplicatesFdAndNormalizesChunkO
   close(pipe_fds[1]);
 }
 
-TEST(PipeWireCapturePolicyTests, BufferDataTypePolicyKeepsMemPtrFallbackRepresented) {
+TEST(PipeWireCapturePolicyTests, BufferDataTypePolicyKeepsMappedCpuFallbacksRepresented) {
   EXPECT_EQ(pipewire_capture::negotiated_buffer_data_type(false), SPA_DATA_MemPtr);
   EXPECT_EQ(pipewire_capture::negotiated_buffer_data_type(true), SPA_DATA_DmaBuf);
-  EXPECT_EQ(pipewire_capture::offered_buffer_data_types(true), (std::vector<std::uint32_t> {SPA_DATA_DmaBuf, SPA_DATA_MemPtr}));
-  EXPECT_EQ(pipewire_capture::offered_buffer_data_types(false), (std::vector<std::uint32_t> {SPA_DATA_MemPtr}));
+  EXPECT_EQ(pipewire_capture::offered_buffer_data_types(true),
+            (std::vector<std::uint32_t> {SPA_DATA_DmaBuf, SPA_DATA_MemFd, SPA_DATA_MemPtr}));
+  EXPECT_EQ(pipewire_capture::offered_buffer_data_types(false),
+            (std::vector<std::uint32_t> {SPA_DATA_MemFd, SPA_DATA_MemPtr}));
 }
