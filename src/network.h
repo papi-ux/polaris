@@ -5,8 +5,12 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -102,4 +106,24 @@ namespace net {
    * @return Hostname-based instance name or "Sunshine" if hostname is invalid.
    */
   std::string mdns_instance_name(const std::string_view &hostname);
+
+  struct network_path_probe_port_t {
+    std::string key;
+    std::string label;
+    std::uint16_t port;
+    std::string transport;
+  };
+
+  /**
+   * @brief Classify a host/address for safe network-path self-test copy.
+   * @details This is intentionally side-effect free; callers may combine it with
+   * bounded probes, but classification itself never opens sockets.
+   */
+  std::string network_path_probe_classification(const std::string_view &host);
+
+  /**
+   * @brief Build the normal-user-safe Polaris/Moonlight port contract.
+   * @param base_port Configured Sunshine/Polaris base port, normally config::sunshine.port.
+   */
+  std::vector<network_path_probe_port_t> network_path_probe_ports(std::uint16_t base_port);
 }  // namespace net
