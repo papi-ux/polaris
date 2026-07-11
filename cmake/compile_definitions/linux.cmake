@@ -123,8 +123,8 @@ if(CUDA_FOUND)
     add_compile_definitions(POLARIS_BUILD_CUDA)
 endif()
 
-# libdrm is required for both DRM (KMS) and Wayland
-if(${POLARIS_ENABLE_DRM} OR ${POLARIS_ENABLE_WAYLAND})
+# libdrm is required for DRM (KMS), Wayland, and Portal capture
+if(${POLARIS_ENABLE_DRM} OR ${POLARIS_ENABLE_WAYLAND} OR ${POLARIS_ENABLE_PORTAL})
     find_package(LIBDRM REQUIRED)
 else()
     set(LIBDRM_FOUND OFF)
@@ -194,7 +194,8 @@ endif()
 if(GIO_FOUND AND PIPEWIRE_FOUND)
     add_compile_definitions(POLARIS_BUILD_PORTAL)
     list(APPEND PLATFORM_TARGET_FILES
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire_capture.cpp")
     message(STATUS "XDG Desktop Portal capture support enabled")
 elseif(GIO_FOUND)
     message(STATUS "XDG Desktop Portal capture not available (libpipewire-0.3 not found)")
