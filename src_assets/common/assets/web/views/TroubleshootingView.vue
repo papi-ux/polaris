@@ -87,6 +87,75 @@
       </div>
     </section>
 
+    <section class="section-card space-y-4" data-support-self-tests>
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div class="section-kicker">Built-in self tests</div>
+          <h2 class="section-title">Network, controller, and post-session report</h2>
+          <p class="section-copy">Quick normal-user checks first; expandable evidence keeps the nerd-sniping below the fold where it belongs.</p>
+        </div>
+        <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="copySupportSelfTests">
+          Copy self-test summary
+        </button>
+      </div>
+
+      <div class="grid gap-3 xl:grid-cols-3">
+        <div class="surface-subtle border p-4" :class="selfTestCardClass(networkPathReport.status)">
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-semibold text-silver">Network Path Tester</div>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="selfTestBadgeClass(networkPathReport.status)">{{ selfTestStatusLabel(networkPathReport.status) }}</span>
+          </div>
+          <p class="mt-2 text-sm leading-relaxed text-storm">{{ networkPathReport.summary }}</p>
+          <p class="mt-3 text-xs leading-relaxed text-ice">Recommended ceiling: {{ networkPathReport.recommendedBitrateKbps }} kbps.</p>
+          <details class="mt-3 text-xs text-storm">
+            <summary class="cursor-pointer text-ice">Advanced evidence</summary>
+            <div class="mt-2 space-y-2">
+              <div v-for="check in networkPathReport.checks" :key="check.key" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
+                <div class="font-medium text-silver">{{ check.label }} · {{ selfTestStatusLabel(check.status) }}</div>
+                <div>{{ check.detail }}</div>
+                <div class="mt-1 text-ice">{{ check.action }}</div>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="surface-subtle border p-4" :class="selfTestCardClass(controllerInputReport.status)">
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-semibold text-silver">Controller/Input Tester</div>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="selfTestBadgeClass(controllerInputReport.status)">{{ selfTestStatusLabel(controllerInputReport.status) }}</span>
+          </div>
+          <p class="mt-2 text-sm leading-relaxed text-storm">{{ controllerInputReport.summary }}</p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="refreshControllerSnapshot">Detect controller</button>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="recordControllerEvent('A / primary button', 1)">Log A press</button>
+          </div>
+          <details class="mt-3 text-xs text-storm">
+            <summary class="cursor-pointer text-ice">Advanced evidence</summary>
+            <div class="mt-2 space-y-2">
+              <div v-for="check in controllerInputReport.checks" :key="check.key" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
+                <div class="font-medium text-silver">{{ check.label }} · {{ selfTestStatusLabel(check.status) }}</div>
+                <div>{{ check.detail }}</div>
+                <div class="mt-1 text-ice">{{ check.action }}</div>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="surface-subtle border p-4" :class="selfTestCardClass(postSessionReport.status)">
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-semibold text-silver">Post-session Stream Report</div>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="selfTestBadgeClass(postSessionReport.status)">{{ postSessionReport.issueOwner }}</span>
+          </div>
+          <p class="mt-2 text-sm leading-relaxed text-storm">{{ postSessionReport.mainIssue }}</p>
+          <p class="mt-3 text-xs leading-relaxed text-ice">Next launch: {{ postSessionReport.suggestedNextLaunchProfile }}</p>
+          <details class="mt-3 text-xs text-storm">
+            <summary class="cursor-pointer text-ice">Advanced evidence</summary>
+            <pre class="mt-2 whitespace-pre-wrap rounded-lg border border-storm/15 bg-void/50 p-3">{{ postSessionReport.copyText }}</pre>
+          </details>
+        </div>
+      </div>
+    </section>
+
     <section class="section-card space-y-4">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
@@ -352,13 +421,21 @@
 </template>
 
 <script setup>
-import { ref, computed, onBeforeUnmount, inject } from 'vue'
+import { ref, computed, onBeforeUnmount, inject, watch } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { requestHostRestart } from '../restart-host.js'
-import { buildAnonymizedDiagnosticsBundle, buildFixMyStreamChecklist, buildGithubIssueDraft } from '../diagnostics-export.js'
+import {
+  buildAnonymizedDiagnosticsBundle,
+  buildControllerInputTestReport,
+  buildFixMyStreamChecklist,
+  buildGithubIssueDraft,
+  buildNetworkPathTestReport,
+  buildPostSessionStreamReport,
+  buildSupportSelfTestCopy,
+} from '../diagnostics-export.js'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 
 const { toast: showToast } = useToast()
@@ -388,6 +465,12 @@ const version = ref("")
 const confirmActionOpen = ref(false)
 const pendingConfirmedAction = ref(null)
 const requestedConfirmAction = ref(null)
+const controllerEvents = ref([])
+const controllerRumbleSupported = ref(null)
+const hostPhysicalControllerIsolation = ref('unknown')
+const virtualControllerStatus = ref({ created: false })
+const lastCompletedStreamStats = ref(null)
+const lastDisconnectReason = ref('')
 
 const confirmedActions = computed(() => ({
   forceClose: {
@@ -629,6 +712,97 @@ const doctorAdvancedItems = computed(() => {
     { label: 'Active stream stats', value: summarizeStreamStats(s) },
   ]
 })
+
+const networkPathReport = computed(() => buildNetworkPathTestReport({
+  host: streamStats.value?.client_ip || window.location.hostname,
+  originHostname: window.location.hostname,
+  hostReachable: streamStatsConnected.value,
+  controlPortOpen: streamStatsConnected.value,
+  streamPortOpen: streamStats.value?.streaming ? true : undefined,
+  mdnsAvailable: window.location.hostname.endsWith('.local'),
+  pingSamplesMs: [streamStats.value?.latency_ms].filter((value) => Number.isFinite(Number(value))),
+  packetLossPercent: streamStats.value?.packet_loss,
+  currentBitrateKbps: streamStats.value?.bitrate_kbps,
+}))
+
+const browserGamepads = computed(() => {
+  if (!navigator.getGamepads) return []
+  return Array.from(navigator.getGamepads()).filter(Boolean).map((pad) => ({
+    index: pad.index,
+    id: pad.id,
+    buttons: pad.buttons?.length || 0,
+    axes: pad.axes?.length || 0,
+  }))
+})
+
+const controllerInputReport = computed(() => buildControllerInputTestReport({
+  events: controllerEvents.value,
+  gamepads: browserGamepads.value,
+  virtualController: virtualControllerStatus.value,
+  rumbleSupported: controllerRumbleSupported.value,
+  hostPhysicalControllerIsolation: hostPhysicalControllerIsolation.value,
+}))
+
+const postSessionReport = computed(() => buildPostSessionStreamReport({
+  stats: lastCompletedStreamStats.value || streamStats.value || {},
+  logs: logs.value,
+  disconnectReason: lastDisconnectReason.value,
+}))
+
+const supportSelfTestCopy = computed(() => buildSupportSelfTestCopy({
+  network: networkPathReport.value,
+  controller: controllerInputReport.value,
+  postSession: postSessionReport.value,
+}))
+
+function selfTestCardClass(status) {
+  if (status === 'pass') return 'border-green-500/20'
+  if (status === 'fail') return 'border-red-500/25'
+  return 'border-amber-300/25'
+}
+
+function selfTestBadgeClass(status) {
+  if (status === 'pass') return 'border border-green-500/30 bg-green-500/10 text-green-300'
+  if (status === 'fail') return 'border border-red-500/30 bg-red-500/10 text-red-200'
+  return 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
+}
+
+function selfTestStatusLabel(status) {
+  if (status === 'pass') return 'Looks good'
+  if (status === 'fail') return 'Fix first'
+  return 'Check'
+}
+
+function recordControllerEvent(label, pad = 1) {
+  controllerEvents.value = [
+    ...controllerEvents.value.slice(-15),
+    { pad, control: label, type: 'manual', at: new Date().toISOString() },
+  ]
+  virtualControllerStatus.value = { created: true, number: pad }
+}
+
+function refreshControllerSnapshot() {
+  const pads = browserGamepads.value
+  if (pads.length) {
+    virtualControllerStatus.value = { created: true, number: pads[0].index + 1 }
+    controllerRumbleSupported.value = Boolean(navigator.getGamepads?.()[pads[0].index]?.vibrationActuator)
+    recordControllerEvent('Browser gamepad visible', pads[0].index + 1)
+  } else {
+    recordControllerEvent('Manual button sample', 1)
+  }
+}
+
+function copySupportSelfTests() {
+  navigator.clipboard.writeText(supportSelfTestCopy.value)
+  showToast('Support self-test summary copied.', 'success')
+}
+
+watch(streamStats, (next, previous) => {
+  if (previous?.streaming && next && !next.streaming) {
+    lastCompletedStreamStats.value = previous
+    lastDisconnectReason.value = 'Stream telemetry changed from active to idle.'
+  }
+}, { deep: true })
 
 function fixMyStreamStatusLabel(status) {
   if (status === 'pass') return i18n.t('troubleshooting.fix_my_stream_status_pass')

@@ -328,6 +328,201 @@ Suggested safe action: ${formatIssueValue(doctor.safe_recovery_action.id)}${doct
   ].filter((line) => line !== '').join('\n'))
 }
 
+function statusRank(status) {
+  if (status === 'fail') return 2
+  if (status === 'warning') return 1
+  return 0
+}
+
+function worstStatus(items = []) {
+  return items.reduce((worst, item) => statusRank(item.status) > statusRank(worst) ? item.status : worst, 'pass')
+}
+
+function average(values = []) {
+  const numeric = values.map(Number).filter(Number.isFinite)
+  if (!numeric.length) return null
+  return numeric.reduce((sum, value) => sum + value, 0) / numeric.length
+}
+
+function jitter(values = []) {
+  const numeric = values.map(Number).filter(Number.isFinite)
+  if (numeric.length < 2) return null
+  const deltas = numeric.slice(1).map((value, index) => Math.abs(value - numeric[index]))
+  return average(deltas)
+}
+
+function isPrivateHost(host = '') {
+  const value = String(host || '').toLowerCase()
+  return value === 'localhost' ||
+    value.endsWith('.local') ||
+    value.startsWith('192.168.') ||
+    value.startsWith('10.') ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(value) ||
+    value.startsWith('fd') ||
+    value.startsWith('fe80:')
+}
+
+function reportLine(label, value) {
+  return `${label}: ${value || '(unknown)'}`
+}
+
+export function buildNetworkPathTestReport(input = {}) {
+  const samples = Array.isArray(input.pingSamplesMs) ? input.pingSamplesMs.map(Number).filter(Number.isFinite) : []
+  const latency = average(samples)
+  const sampleJitter = jitter(samples)
+  const loss = Number(input.packetLossPercent ?? input.packet_loss ?? input.lossPercent)
+  const host = input.host || input.originHostname || input.hostname || ''
+  const lanLike = isPrivateHost(host) || input.lan === true
+  const currentBitrate = Number(input.currentBitrateKbps ?? input.bitrateKbps ?? input.bitrate_kbps)
+  const latencyPenalty = Number.isFinite(latency) && latency > 60 ? 0.55 : Number.isFinite(latency) && latency > 30 ? 0.75 : 1
+  const jitterPenalty = Number.isFinite(sampleJitter) && sampleJitter > 15 ? 0.7 : 1
+  const lossPenalty = Number.isFinite(loss) && loss > 2 ? 0.45 : Number.isFinite(loss) && loss > 0.5 ? 0.7 : 1
+  const fallbackBitrate = lanLike ? 50000 : 30000
+  const bitrateBase = Number.isFinite(currentBitrate) && currentBitrate > 0 ? currentBitrate : fallbackBitrate
+  const recommendedBitrateKbps = Math.max(8000, Math.min(bitrateBase, Math.round(bitrateBase * latencyPenalty * jitterPenalty * lossPenalty / 1000) * 1000))
+
+  const checks = [
+    checklistItem(
+      'host-reachable',
+      'Host reachable',
+      input.hostReachable === false ? 'fail' : samples.length || input.hostReachable === true ? 'pass' : 'warning',
+      samples.length ? `${samples.length} latency sample${samples.length === 1 ? '' : 's'} collected.` : 'Browser-side reachability is inferred from the Web UI session.',
+      samples.length ? 'Keep this host address for the client test.' : 'Open this page from the same client/network you plan to stream from.'
+    ),
+    checklistItem(
+      'control-port',
+      'Control port',
+      input.controlPortOpen === false ? 'fail' : input.controlPortOpen === true ? 'pass' : 'warning',
+      input.controlPortOpen === true ? 'Control/pairing path is reachable.' : input.controlPortOpen === false ? 'Control/pairing port did not respond.' : 'Control port was not directly tested by this browser.',
+      input.controlPortOpen === false ? 'Check host firewall/NAT before pairing.' : 'If pairing fails, verify the HTTPS/control port from the client network.'
+    ),
+    checklistItem(
+      'stream-port',
+      'Stream ports',
+      input.streamPortOpen === false ? 'fail' : input.streamPortOpen === true ? 'pass' : 'warning',
+      input.streamPortOpen === true ? 'Stream ports look reachable.' : input.streamPortOpen === false ? 'One or more stream ports did not respond.' : 'Stream ports were not directly tested by this browser.',
+      input.streamPortOpen === false ? 'Fix firewall/NAT before tuning bitrate.' : 'If video starts then freezes, retest UDP reachability from the client.'
+    ),
+    checklistItem(
+      'discovery-mdns',
+      'Discovery / mDNS',
+      input.mdnsAvailable === false ? 'warning' : input.mdnsAvailable === true || String(input.originHostname || '').endsWith('.local') ? 'pass' : 'warning',
+      input.mdnsAvailable === false ? 'mDNS discovery was not confirmed; manual host add may be needed.' : 'Discovery hints are present or not required.',
+      input.mdnsAvailable === false ? 'Use the host IP directly in Moonlight/Nova if auto-discovery misses it.' : 'Discovery is not the loudest signal right now.'
+    ),
+    checklistItem(
+      'lan-vpn-clue',
+      'LAN / VPN clue',
+      lanLike ? 'pass' : 'warning',
+      lanLike ? 'Host address looks LAN/local.' : 'Host address looks remote/VPN or public.',
+      lanLike ? 'Start with normal LAN bitrate, then tune up.' : 'Expect lower bitrate and higher jitter until VPN/NAT path is proven stable.'
+    ),
+    checklistItem(
+      'latency-jitter-loss',
+      'Latency / jitter / loss',
+      (Number.isFinite(loss) && loss > 2) || (Number.isFinite(sampleJitter) && sampleJitter > 20) ? 'fail' : (Number.isFinite(loss) && loss > 0.5) || (Number.isFinite(latency) && latency > 40) ? 'warning' : 'pass',
+      `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms avg / ${Number.isFinite(sampleJitter) ? sampleJitter.toFixed(1) : 'unknown'} ms jitter / ${Number.isFinite(loss) ? loss.toFixed(1) : 'unknown'}% loss.`,
+      (Number.isFinite(loss) && loss > 0.5) ? 'Lower bitrate one step and prefer wired/5 GHz before changing encoder settings.' : 'Network quality is not the loudest signal right now.'
+    ),
+    checklistItem(
+      'bitrate-ceiling',
+      'Recommended bitrate ceiling',
+      recommendedBitrateKbps < bitrateBase ? 'warning' : 'pass',
+      `Recommended ceiling: ${recommendedBitrateKbps} kbps.`,
+      recommendedBitrateKbps < bitrateBase ? 'Use this as the next launch ceiling, then raise only after a clean session.' : 'Current bitrate target is reasonable for the sampled path.'
+    ),
+  ]
+
+  const status = worstStatus(checks)
+  return {
+    kind: 'network-path-test',
+    status,
+    classification: status === 'pass' ? 'clean' : 'network',
+    summary: `${lanLike ? 'LAN/local' : 'remote/VPN'} path: ${status === 'fail' ? 'fix reachability/loss first' : status === 'warning' ? 'usable with caution' : 'ready'}.`,
+    recommendedBitrateKbps,
+    checks,
+    advancedEvidence: sanitizeDiagnosticsValue({ host, samples, latency, jitter: sampleJitter, packetLossPercent: Number.isFinite(loss) ? loss : null }),
+  }
+}
+
+export function buildControllerInputTestReport(input = {}) {
+  const events = Array.isArray(input.events) ? input.events : []
+  const gamepads = Array.isArray(input.gamepads) ? input.gamepads : []
+  const virtual = input.virtualController || {}
+  const hostIsolation = lower(input.hostPhysicalControllerIsolation)
+  const pads = new Set(events.map((event) => event.pad ?? event.gamepadIndex ?? 1))
+  const checks = [
+    checklistItem('client-events', 'Client button events', events.length ? 'pass' : 'warning', events.length ? `${events.length} client control event${events.length === 1 ? '' : 's'} detected.` : 'No client button or axis events detected yet.', events.length ? 'Input is reaching the browser/client layer.' : 'Press buttons/sticks on the client controller while this panel is open.'),
+    checklistItem('virtual-controller', 'Virtual controller', virtual.created ? 'pass' : virtual.error ? 'fail' : 'warning', virtual.created ? `Virtual controller${virtual.number ? ` #${virtual.number}` : ''} is reported created.` : virtual.error ? redactSensitiveText(virtual.error) : 'Host virtual controller creation has not been confirmed yet.', virtual.created ? 'Launch a game and verify the same controller number is selected.' : 'If games see no pad, check virtual gamepad permissions/driver state.'),
+    checklistItem('multi-pad', 'Controller number / multi-pad', pads.size > 1 || gamepads.length > 1 ? 'pass' : 'warning', `${Math.max(pads.size, gamepads.length)} client pad${Math.max(pads.size, gamepads.length) === 1 ? '' : 's'} visible.`, 'Keep controller order stable before starting split-screen or multi-pad games.'),
+    checklistItem('rumble', 'Rumble / haptics', input.rumbleSupported === true ? 'pass' : input.rumbleSupported === false ? 'warning' : 'warning', input.rumbleSupported === true ? 'Rumble actuator test is available.' : 'Rumble/haptics support is not available or not exposed by this browser/client.', input.rumbleSupported === true ? 'Use the optional rumble pulse only after input is mapped correctly.' : 'Treat missing rumble as non-blocking unless the game requires it.'),
+    checklistItem('host-isolation', 'Host physical controller isolation', hostIsolation === 'isolated' ? 'pass' : hostIsolation === 'shared' || hostIsolation === 'leaking' ? 'fail' : 'warning', hostIsolation === 'isolated' ? 'Host physical controllers are reported isolated from client virtual pads.' : hostIsolation ? `Isolation state: ${input.hostPhysicalControllerIsolation}.` : 'Host physical controller isolation has not been reported yet.', hostIsolation === 'isolated' ? 'No host-side controller conflict stands out.' : 'If inputs double-fire, unplug/disable the host physical controller or isolate it before retesting.'),
+  ]
+  const status = worstStatus(checks.filter((check) => check.key !== 'rumble'))
+  return {
+    kind: 'controller-input-test',
+    status,
+    classification: status === 'pass' ? 'clean' : 'client',
+    summary: events.length ? `${events.length} client control event${events.length === 1 ? '' : 's'} captured; virtual pad ${virtual.created ? 'created' : 'not confirmed'}.` : 'Waiting for client controller input.',
+    checks,
+    advancedEvidence: sanitizeDiagnosticsValue({ events: events.slice(-12), gamepads, virtualController: virtual, hostPhysicalControllerIsolation: input.hostPhysicalControllerIsolation }),
+  }
+}
+
+export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '' } = {}) {
+  const loss = Number(stats.packet_loss)
+  const latency = Number(stats.latency_ms)
+  const encodeTime = Number(stats.encode_time_ms)
+  const dropped = Number(stats.dropped_frame_ratio)
+  const safeLogs = redactSensitiveText(logs)
+  let issueOwner = 'client'
+  let mainIssue = 'Client disconnected or ended the session before Polaris saw a louder host/network signal.'
+  let suggestedNextLaunchProfile = 'Retry the same launch profile once, then collect a support bundle if it repeats.'
+
+  if ((Number.isFinite(loss) && loss > 1) || (Number.isFinite(latency) && latency > 45) || /packet loss|network|udp|timeout/i.test(safeLogs)) {
+    issueOwner = 'network'
+    mainIssue = Number.isFinite(loss) && loss > 1 ? `Network packet loss was ${loss.toFixed(1)}%.` : 'Network latency/transport warnings stood out.'
+    suggestedNextLaunchProfile = 'Lower bitrate one step, prefer wired/5 GHz, then retry the same game.'
+  }
+
+  if ((Number.isFinite(encodeTime) && encodeTime > 12) || stats.capture_cpu_copy || /encoder|capture|shm|dmabuf|vaapi|nvenc/i.test(safeLogs)) {
+    issueOwner = 'host'
+    mainIssue = Number.isFinite(encodeTime) && encodeTime > 12 ? `Host encoder time was ${encodeTime.toFixed(1)} ms.` : 'Host capture/encoder path was the loudest signal.'
+    suggestedNextLaunchProfile = stats.capture_cpu_copy
+      ? 'Try Private Stream (GPU-native) or lower resolution/FPS before changing network settings.'
+      : 'Try the low-latency hardware encoder profile or lower resolution/FPS.'
+  }
+
+  const qualitySummary = `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms latency / ${Number.isFinite(loss) ? loss.toFixed(1) : 'unknown'}% loss / ${Number.isFinite(encodeTime) ? encodeTime.toFixed(1) : 'unknown'} ms encode / ${Number.isFinite(dropped) ? (dropped * 100).toFixed(2) : 'unknown'}% dropped.`
+  const report = {
+    kind: 'post-session-stream-report',
+    status: issueOwner === 'client' ? 'warning' : 'fail',
+    issueOwner,
+    mainIssue,
+    qualitySummary,
+    suggestedNextLaunchProfile,
+    disconnectReason: redactSensitiveText(disconnectReason),
+  }
+  report.copyText = [
+    'Post-session Stream Report',
+    reportLine('Issue owner', issueOwner),
+    reportLine('Main issue', mainIssue),
+    reportLine('Quality', qualitySummary),
+    reportLine('Disconnect reason', report.disconnectReason),
+    reportLine('Suggested next launch', suggestedNextLaunchProfile),
+    ...(safeLogs.trim() ? [reportLine('Recent evidence', safeLogs.trim().split('\n').slice(-3).join(' | '))] : []),
+  ].join('\n')
+  return report
+}
+
+export function buildSupportSelfTestCopy({ network, controller, postSession } = {}) {
+  const sections = []
+  if (network) sections.push(['Network Path Tester', network.summary, `Status: ${network.status}`, `Recommended bitrate: ${network.recommendedBitrateKbps || 'unknown'} kbps`].join('\n'))
+  if (controller) sections.push(['Controller/Input Tester', controller.summary, `Status: ${controller.status}`].join('\n'))
+  if (postSession) sections.push(postSession.copyText || ['Post-session Stream Report', postSession.mainIssue].join('\n'))
+  return redactSensitiveText(sections.join('\n\n'))
+}
+
 export function buildAnonymizedDiagnosticsBundle(input = {}) {
   const streamEvidence = input.stream_evidence || buildStreamEvidence(input)
   const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence })

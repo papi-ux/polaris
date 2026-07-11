@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   REDACTED_VALUE,
   buildAnonymizedDiagnosticsBundle,
+  buildControllerInputTestReport,
   buildFixMyStreamChecklist,
   buildGithubIssueDraft,
+  buildNetworkPathTestReport,
+  buildPostSessionStreamReport,
+  buildSupportSelfTestCopy,
   describeLinuxGpuProfile,
   redactSensitiveText,
   sanitizeDiagnosticsValue,
@@ -290,5 +294,92 @@ describe('Fix My Stream checklist', () => {
     expect(hostConfig.detail).toContain('cold-cache 503')
     expect(hostConfig.action).toContain('linux_prefer_gpu_native_capture = enabled')
     expect(checklist.map((item) => item.key)[1]).toBe('host-config')
+  })
+})
+
+
+describe('support self-service reports', () => {
+  it('classifies a lossy remote network path and recommends a safer bitrate ceiling', () => {
+    const report = buildNetworkPathTestReport({
+      host: '203.0.113.40',
+      originHostname: 'polaris-host.local',
+      controlPortOpen: true,
+      streamPortOpen: false,
+      mdnsAvailable: false,
+      pingSamplesMs: [38, 55, 92, 44],
+      packetLossPercent: 4.5,
+      currentBitrateKbps: 60000,
+    })
+
+    expect(report.status).toBe('fail')
+    expect(report.classification).toBe('network')
+    expect(report.summary).toContain('remote/VPN')
+    expect(report.recommendedBitrateKbps).toBeLessThanOrEqual(30000)
+    expect(report.checks.map((check) => check.key)).toEqual([
+      'host-reachable',
+      'control-port',
+      'stream-port',
+      'discovery-mdns',
+      'lan-vpn-clue',
+      'latency-jitter-loss',
+      'bitrate-ceiling',
+    ])
+    expect(report.checks.find((check) => check.key === 'stream-port').status).toBe('fail')
+  })
+
+  it('summarizes controller input events without requiring hardware-level host evidence', () => {
+    const report = buildControllerInputTestReport({
+      events: [
+        { pad: 1, control: 'A', type: 'buttondown' },
+        { pad: 2, control: 'Left Stick', type: 'axis', value: 0.74 },
+      ],
+      gamepads: [{ index: 0, id: 'Xbox Wireless Controller' }, { index: 1, id: 'DualSense' }],
+      virtualController: { created: true, number: 2 },
+      rumbleSupported: false,
+      hostPhysicalControllerIsolation: 'isolated',
+    })
+
+    expect(report.status).toBe('pass')
+    expect(report.summary).toContain('2 client control events')
+    expect(report.checks.find((check) => check.key === 'multi-pad').detail).toContain('2 client pads')
+    expect(report.checks.find((check) => check.key === 'rumble').status).toBe('warning')
+    expect(report.checks.find((check) => check.key === 'host-isolation').status).toBe('pass')
+  })
+
+  it('builds a post-session report with issue owner and next launch profile', () => {
+    const report = buildPostSessionStreamReport({
+      stats: {
+        streaming: false,
+        packet_loss: 0.1,
+        latency_ms: 6.4,
+        encode_time_ms: 15.2,
+        dropped_frame_ratio: 0.02,
+        capture_cpu_copy: true,
+        capture_gpu_native: false,
+        stream_display_mode: 'headless_stream',
+      },
+      logs: 'Warning: encoder queue saturated after capture fell back to SHM',
+      disconnectReason: 'client disconnected',
+    })
+
+    expect(report.issueOwner).toBe('host')
+    expect(report.mainIssue).toContain('encoder')
+    expect(report.suggestedNextLaunchProfile).toContain('Private Stream')
+    expect(report.copyText).toContain('Issue owner: host')
+    expect(report.copyText).not.toContain('token=')
+  })
+
+  it('generates support-copy text for network, controller, and post-session reports', () => {
+    const copy = buildSupportSelfTestCopy({
+      network: buildNetworkPathTestReport({ controlPortOpen: true, streamPortOpen: true, pingSamplesMs: [4, 5], packetLossPercent: 0 }),
+      controller: buildControllerInputTestReport({ events: [{ pad: 1, control: 'A' }], virtualController: { created: true } }),
+      postSession: buildPostSessionStreamReport({ stats: { packet_loss: 3.4, latency_ms: 70 }, logs: 'Warning: packet loss spike token=abc123' }),
+    })
+
+    expect(copy).toContain('Network Path Tester')
+    expect(copy).toContain('Controller/Input Tester')
+    expect(copy).toContain('Post-session Stream Report')
+    expect(copy).toContain(`token=${REDACTED_VALUE}`)
+    expect(copy).not.toContain('abc123')
   })
 })
