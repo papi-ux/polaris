@@ -2506,6 +2506,37 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  void explainDoctorWithAi(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    print_req(request);
+
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      auto body = nlohmann::json::parse(ss.str());
+      ai_optimizer::config_t ai_cfg;
+      const auto provider = body.value("provider", nlohmann::json::object());
+      ai_cfg.enabled = true;
+      ai_cfg.provider = provider.value("provider", std::string {});
+      ai_cfg.model = provider.value("model", std::string {});
+      ai_cfg.auth_mode = provider.value("auth_mode", std::string {});
+      ai_cfg.base_url = provider.value("base_url", std::string {});
+      ai_cfg.timeout_ms = config::video.ai_optimizer.timeout_ms;
+      ai_cfg.cache_ttl_hours = config::video.ai_optimizer.cache_ttl_hours;
+      ai_cfg.api_key = config::video.ai_optimizer.api_key;
+
+      const auto evidence = body.value("evidence", nlohmann::json::object());
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(ai_optimizer::explain_doctor_json_with_config(ai_cfg, evidence.dump()), headers);
+    } catch (const std::exception &e) {
+      nlohmann::json output;
+      output["status"] = false;
+      output["error"] = e.what();
+      send_response(response, output);
+    }
+  }
+
   // ---- Client Profile CRUD API ----
 
   void getClientProfiles(resp_https_t response, req_https_t request) {
@@ -5063,6 +5094,7 @@ namespace confighttp {
     server.resource["^/api/ai/models$"]["POST"] = withCsrf(getAiModels);
     server.resource["^/api/ai/test$"]["POST"] = withCsrf(testAiConfig);
     server.resource["^/api/ai/optimize$"]["POST"] = withCsrf(triggerAiOptimize);
+    server.resource["^/api/ai/explain-doctor$"]["POST"] = withCsrf(explainDoctorWithAi);
     server.resource["^/api/devices$"]["GET"] = getDevices;
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;
     server.resource["^/api/clients/profiles$"]["GET"] = getClientProfiles;

@@ -2218,7 +2218,183 @@ namespace ai_optimizer {
     return future;
   }
 
+  static nlohmann::json doctor_explanation_fallback(const std::string &reason,
+                                                      const nlohmann::json &evidence = nlohmann::json::object()) {
+    nlohmann::json explanation;
+    const auto doctor = evidence.value("doctor", nlohmann::json::object());
+    const auto checklist = evidence.value("fix_my_stream_checklist", nlohmann::json::array());
+
+    std::string likely_cause = "Polaris deterministic Doctor result";
+    if (doctor.is_object()) {
+      likely_cause = doctor.value("simple_state",
+        doctor.value("summary",
+          doctor.value("diagnosis",
+            doctor.value("primary_issue", likely_cause))));
+    }
+
+    nlohmann::json evidence_lines = nlohmann::json::array();
+    nlohmann::json try_first = nlohmann::json::array();
+    if (checklist.is_array()) {
+      for (const auto &item : checklist) {
+        if (!item.is_object()) continue;
+        const auto status = item.value("status", std::string {});
+        if (status == "fail" || status == "warning") {
+          const auto detail = item.value("detail", std::string {});
+          const auto action = item.value("action", std::string {});
+          if (!detail.empty()) evidence_lines.push_back(detail);
+          if (!action.empty()) try_first.push_back(action);
+        }
+      }
+    }
+    if (evidence_lines.empty() && doctor.is_object() && doctor.contains("evidence") && doctor["evidence"].is_array()) {
+      for (const auto &item : doctor["evidence"]) {
+        if (!item.is_object()) continue;
+        const auto detail = item.value("detail", item.value("value", std::string {}));
+        if (!detail.empty()) evidence_lines.push_back(detail);
+      }
+    }
+    if (evidence_lines.empty()) evidence_lines.push_back("AI explanation unavailable; showing deterministic Doctor/support evidence instead.");
+    if (try_first.empty()) try_first.push_back("Review the Fix My Stream checklist and export the anonymized support bundle if you need help.");
+
+    explanation["likely_cause"] = likely_cause;
+    explanation["evidence"] = evidence_lines;
+    explanation["try_first"] = try_first;
+    explanation["advanced_detail"] = reason.empty()
+      ? "Deterministic Doctor output remains the source of truth."
+      : "AI explanation unavailable (" + reason + "); deterministic Doctor output remains the source of truth.";
+    explanation["confidence"] = "deterministic-fallback";
+    explanation["destructive_action_allowed"] = false;
+
+    return {
+      {"status", false},
+      {"provider_error", reason},
+      {"explanation", explanation},
+    };
+  }
+
+  static std::string doctor_explanation_system_prompt() {
+    return "You explain Polaris Stream Doctor evidence in plain language. "
+      "The deterministic Doctor result is the source of truth; do not invent state, metrics, devices, or actions. "
+      "You may rephrase likely causes and recommend safe Polaris UI actions, but you cannot execute recovery actions. "
+      "Never recommend destructive/root/sudo actions. "
+      "Return ONLY JSON with keys likely_cause, evidence, try_first, advanced_detail, confidence, destructive_action_allowed. "
+      "Set destructive_action_allowed to false.";
+  }
+
+  static nlohmann::json doctor_explanation_response_format() {
+    nlohmann::json schema;
+    schema["type"] = "object";
+    schema["additionalProperties"] = false;
+    schema["properties"] = {
+      {"likely_cause", {{"type", "string"}}},
+      {"evidence", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+      {"try_first", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+      {"advanced_detail", {{"type", "string"}}},
+      {"confidence", {{"type", "string"}, {"enum", nlohmann::json::array({"low", "medium", "high"})}}},
+      {"destructive_action_allowed", {{"type", "boolean"}}},
+    };
+    schema["required"] = nlohmann::json::array({"likely_cause", "evidence", "try_first", "advanced_detail", "confidence", "destructive_action_allowed"});
+    return {
+      {"type", "json_schema"},
+      {"json_schema", {
+        {"name", "polaris_doctor_explanation"},
+        {"strict", true},
+        {"schema", schema},
+      }}
+    };
+  }
+
+  static std::optional<std::string> call_doctor_explanation_provider(const config_t &active_cfg,
+                                                                     const std::string &redacted_evidence_json) {
+    if (active_cfg.provider == PROVIDER_ANTHROPIC || active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      BOOST_LOG(warning) << "ai_optimizer: Doctor explanation currently uses OpenAI-compatible local/API endpoints; provider/auth mode not supported for this explanation path"sv;
+      return std::nullopt;
+    }
+
+    nlohmann::json request_body;
+    request_body["model"] = active_cfg.model;
+    request_body["temperature"] = 0;
+    request_body["max_tokens"] = 600;
+    request_body["messages"] = nlohmann::json::array({
+      {{"role", "system"}, {"content", doctor_explanation_system_prompt()}},
+      {{"role", "user"}, {"content", "Redacted Polaris Doctor/support evidence follows. Explain it without adding unsupported facts.\n" + redacted_evidence_json}}
+    });
+    request_body["response_format"] = doctor_explanation_response_format();
+
+    std::vector<std::string> headers;
+    if (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty()) {
+      headers.push_back("Authorization: *** " + active_cfg.api_key);
+    }
+
+    auto response = post_json(join_url(active_cfg.base_url, "/chat/completions"), request_body, active_cfg.timeout_ms, headers);
+    if (response.curl_code != CURLE_OK || response.http_code != 200) {
+      BOOST_LOG(error) << "ai_optimizer: Doctor explanation request failed: curl="sv
+                       << curl_easy_strerror(response.curl_code) << ", HTTP "sv << response.http_code;
+      return std::nullopt;
+    }
+
+    auto api_response = nlohmann::json::parse(response.body);
+    auto content_text = extract_openai_compatible_text(api_response);
+    if (content_text.empty()) {
+      return std::nullopt;
+    }
+    return content_text;
+  }
+
   // ---- Public API ----
+
+  std::string parse_doctor_explanation_json(const std::string &text) {
+    try {
+      auto json_start = text.find('{');
+      auto json_end = text.rfind('}');
+      if (json_start == std::string::npos || json_end == std::string::npos || json_end <= json_start) {
+        return doctor_explanation_fallback("No structured JSON in AI response").dump();
+      }
+      auto parsed = nlohmann::json::parse(text.substr(json_start, json_end - json_start + 1));
+      nlohmann::json explanation;
+      explanation["likely_cause"] = parsed.value("likely_cause", std::string {"Polaris Doctor finding"});
+      explanation["evidence"] = parsed.contains("evidence") && parsed["evidence"].is_array() ? parsed["evidence"] : nlohmann::json::array();
+      explanation["try_first"] = parsed.contains("try_first") && parsed["try_first"].is_array() ? parsed["try_first"] : nlohmann::json::array();
+      explanation["advanced_detail"] = parsed.value("advanced_detail", std::string {});
+      const auto confidence = parsed.value("confidence", std::string {"low"});
+      explanation["confidence"] = (confidence == "medium" || confidence == "high") ? confidence : "low";
+      explanation["destructive_action_allowed"] = false;
+      return nlohmann::json {{"status", true}, {"explanation", explanation}}.dump();
+    } catch (const std::exception &e) {
+      return doctor_explanation_fallback(e.what()).dump();
+    }
+  }
+
+  std::string explain_doctor_json_with_config(const config_t &config,
+                                              const std::string &redacted_evidence_json) {
+    nlohmann::json evidence = nlohmann::json::object();
+    try {
+      if (!redacted_evidence_json.empty()) {
+        evidence = nlohmann::json::parse(redacted_evidence_json);
+      }
+    } catch (const std::exception &e) {
+      return doctor_explanation_fallback(e.what()).dump();
+    }
+
+    auto active_cfg = resolved_config(config);
+    if (!is_config_enabled(active_cfg)) {
+      return doctor_explanation_fallback("AI explanations are disabled or not fully configured.", evidence).dump();
+    }
+
+    try {
+      auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump());
+      if (!provider_text) {
+        return doctor_explanation_fallback("Provider returned no explanation result", evidence).dump();
+      }
+      auto parsed = nlohmann::json::parse(parse_doctor_explanation_json(*provider_text));
+      if (!parsed.value("status", false)) {
+        return doctor_explanation_fallback(parsed.value("provider_error", std::string {"Invalid structured output"}), evidence).dump();
+      }
+      return parsed.dump();
+    } catch (const std::exception &e) {
+      return doctor_explanation_fallback(e.what(), evidence).dump();
+    }
+  }
 
   void init(const config_t &config) {
     cfg = resolved_config(config);

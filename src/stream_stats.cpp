@@ -195,6 +195,7 @@ namespace stream_stats {
     }
     j["clients"] = clients_json;
     j["active_sessions"] = static_cast<int>(clients.size());
+    j["doctor"] = build_doctor_json(*this, nlohmann::json::object());
 
     return j.dump();
   }
@@ -439,6 +440,265 @@ namespace stream_stats {
       return "The client requested HDR, but the active capture display did not expose HDR10 metadata. Polaris is streaming 10-bit SDR, not HDR.";
     }
     return "The client requested HDR, but Polaris did not advertise HDR for this stream. Polaris is streaming 10-bit SDR, not HDR.";
+  }
+
+  namespace {
+    bool doctor_has_capture_metadata(const stats_t &stats) {
+      return stats.capture_transport != platf::frame_transport_e::unknown ||
+        stats.capture_residency != platf::frame_residency_e::unknown ||
+        stats.capture_format != platf::frame_format_e::unknown ||
+        !stats.capture_device.empty();
+    }
+
+    double doctor_target_fps(const stats_t &stats) {
+      if (stats.encode_target_fps > 0.0) return stats.encode_target_fps;
+      if (stats.session_target_fps > 0.0) return stats.session_target_fps;
+      if (stats.requested_client_fps > 0.0) return stats.requested_client_fps;
+      return stats.fps;
+    }
+
+    void append_doctor_evidence(nlohmann::json &evidence,
+                                const std::string &id,
+                                const std::string &label,
+                                const nlohmann::json &value,
+                                const std::string &unit,
+                                const std::string &status,
+                                const std::string &source,
+                                const std::string &detail) {
+      evidence.push_back({
+        {"id", id},
+        {"label", label},
+        {"value", value},
+        {"unit", unit},
+        {"status", status},
+        {"source", source},
+        {"redacted", false},
+        {"detail", detail}
+      });
+    }
+
+    nlohmann::json doctor_recommendation(const std::string &primary_issue,
+                                         const std::string &summary,
+                                         const nlohmann::json &health) {
+      std::string title = "Try this first";
+      std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
+      std::string next_step = "Export diagnostics";
+      std::string expected = "Support gets deterministic telemetry instead of guesswork.";
+
+      if (primary_issue == "none") {
+        title = "Keep playing";
+        body = "Streaming telemetry looks ready. Keep this page open if you are trying to catch an intermittent problem.";
+        next_step = "Keep monitoring";
+        expected = "No recovery action should be needed right now.";
+      } else if (primary_issue == "network_jitter") {
+        body = "Lower bitrate one step or keep Adaptive Bitrate enabled before changing encoder settings.";
+        next_step = "Lower bitrate";
+        expected = "Packet loss and latency spikes should calm down if bandwidth is the bottleneck.";
+      } else if (primary_issue == "encoder_load") {
+        body = "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
+        next_step = "Lower stream load";
+        expected = "Encode time should fall back under the low-latency budget.";
+      } else if (primary_issue == "host_render_limited") {
+        body = "Lower the game render preset, render resolution, or stream FPS before tuning bitrate.";
+        next_step = "Lower game/FPS target";
+        expected = "Game frames should arrive on pace with the stream target.";
+      } else if (primary_issue == "capture_missing" || primary_issue == "no_active_stream") {
+        body = "Start or resume the affected stream so Polaris can classify the real capture and encode path.";
+        next_step = "Start stream";
+        expected = "Doctor can switch from readiness hints to live telemetry evidence.";
+      } else if (primary_issue.find("capture") != std::string::npos ||
+                 primary_issue.find("shm") != std::string::npos ||
+                 primary_issue.find("dmabuf") != std::string::npos ||
+                 primary_issue == "nvenc_cuda_disabled") {
+        body = health.value("summary", summary);
+        next_step = "Review capture evidence";
+        expected = "Advanced evidence will show whether the host is on GPU-native, DMA-BUF, SHM/system-memory, or CPU-copy fallback.";
+      } else {
+        body = health.value("summary", summary);
+        next_step = health.value("relaunch_recommended", false) ? "Plan safe relaunch" : "Open Advanced";
+        expected = "The recommended change should target the loudest deterministic signal first.";
+      }
+
+      return {
+        {"title", title},
+        {"body", body},
+        {"why", summary},
+        {"next_step_label", next_step},
+        {"expected_effect", expected}
+      };
+    }
+
+    nlohmann::json doctor_safe_action(const std::string &primary_issue, const nlohmann::json &health) {
+      std::string id = "none";
+      std::string label = "No automatic action";
+      std::string kind = "none";
+      std::string endpoint;
+      std::string method;
+      nlohmann::json payload = nlohmann::json::object();
+      std::string rollback = "No change is applied by Doctor.";
+
+      if (primary_issue == "network_jitter" || primary_issue == "encoder_load") {
+        id = "lower_bitrate";
+        label = "Apply safer bitrate";
+        kind = "live_tuning";
+        endpoint = "/polaris/v1/client-settings";
+        method = "POST";
+        payload["target_bitrate_kbps"] = health.value("safe_bitrate_kbps", 0);
+        rollback = "Raise bitrate again from the client or Polaris stream settings.";
+      } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
+        id = "export_support_bundle";
+        label = "Export diagnostics";
+        kind = "export";
+        rollback = "Export only; no host settings are changed.";
+      } else if (health.value("relaunch_recommended", false)) {
+        id = "apply_recovery_profile_next_launch";
+        label = "Use safer next launch";
+        kind = "next_launch_profile";
+        rollback = "Restore the previous display, HDR, codec, FPS, or bitrate settings before launching again.";
+        if (health.contains("safe_display_mode")) payload["display_mode"] = health["safe_display_mode"];
+        if (health.contains("safe_bitrate_kbps")) payload["target_bitrate_kbps"] = health["safe_bitrate_kbps"];
+        if (health.contains("safe_target_fps")) payload["target_fps"] = health["safe_target_fps"];
+        if (health.contains("safe_codec")) payload["preferred_codec"] = health["safe_codec"];
+        if (health.contains("safe_hdr")) payload["hdr"] = health["safe_hdr"];
+      }
+
+      return {
+        {"id", id},
+        {"label", label},
+        {"kind", kind},
+        {"destructive", false},
+        {"requires_confirmation", id != "none"},
+        {"requires_owner", id != "none"},
+        {"allowed_in_viewer_mode", id == "export_support_bundle"},
+        {"endpoint", endpoint},
+        {"method", method},
+        {"payload_preview", payload},
+        {"rollback", rollback}
+      };
+    }
+  }  // namespace
+
+  nlohmann::json build_doctor_json(const stats_t &stats, const nlohmann::json &health) {
+    const auto capture_reason = capture_path_reason(stats);
+    const auto capture_path = capture_path_summary(stats);
+    const bool capture_cpu_copy = capture_path_uses_cpu_copy(stats);
+    const bool capture_gpu_native = capture_path_is_gpu_native(stats);
+    const bool capture_known = doctor_has_capture_metadata(stats);
+    const double target_fps = doctor_target_fps(stats);
+    const double fps_gap = target_fps > 0.0 ? std::max(0.0, target_fps - stats.fps) : 0.0;
+    const bool network_fail = stats.packet_loss > 2.0 || stats.latency_ms >= 45.0;
+    const bool network_watch = !network_fail && (stats.packet_loss > 0.5 || stats.latency_ms >= 28.0);
+    const bool encoder_fail = stats.encode_time_ms >= 12.0 || stats.avg_frame_age_ms >= 22.0;
+    const bool encoder_watch = !encoder_fail && (stats.encode_time_ms >= 8.0 || stats.avg_frame_age_ms >= 18.0);
+    const bool pacing_watch = stats.frame_jitter_ms >= 2.2 || stats.duplicate_frame_ratio >= 0.10 || stats.dropped_frame_ratio >= 0.04 || fps_gap >= 4.0;
+
+    std::string primary_issue = health.value("primary_issue", std::string {});
+    if (primary_issue == "steady") primary_issue = "none";
+    if (primary_issue.empty()) {
+      if (!stats.streaming) primary_issue = "no_active_stream";
+      else if (network_fail || network_watch) primary_issue = "network_jitter";
+      else if (encoder_fail || encoder_watch) primary_issue = "encoder_load";
+      else if (capture_cpu_copy) primary_issue = capture_reason;
+      else if (!capture_known) primary_issue = "capture_missing";
+      else if (pacing_watch) primary_issue = "frame_pacing";
+      else primary_issue = "none";
+    }
+
+    std::string traffic = "green";
+    std::string status = "ok";
+    std::string severity = "info";
+    std::string simple_state = "Streaming ready";
+    const auto health_grade = health.value("grade", std::string {});
+    if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
+      traffic = "amber";
+      status = "unknown";
+      severity = "warning";
+      simple_state = "Needs attention";
+    } else if (health_grade == "degraded" || network_fail || encoder_fail) {
+      traffic = "red";
+      status = "needs_action";
+      severity = "critical";
+      simple_state = "Needs attention";
+    } else if (primary_issue != "none" || health_grade == "watch" || capture_cpu_copy || pacing_watch) {
+      traffic = "amber";
+      status = capture_cpu_copy ? "watch" : "needs_action";
+      severity = "warning";
+      simple_state = capture_cpu_copy ? "Advanced issue detected" : "Needs attention";
+    }
+
+    const std::string summary =
+      primary_issue == "none" ? "Streaming telemetry looks ready." :
+      health.contains("summary") ? health.value("summary", std::string {}) :
+      primary_issue == "no_active_stream" ? "No active stream is running, so Doctor cannot verify the live path yet." :
+      primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
+      primary_issue == "network_jitter" ? "Network jitter is the most likely stream issue." :
+      primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
+      primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
+      capture_path_reason_message(capture_reason);
+
+    nlohmann::json evidence = nlohmann::json::array();
+    append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
+    append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
+    append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
+    append_doctor_evidence(evidence, "packet_loss", "Packet loss", stats.packet_loss, "%", network_fail ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Packet loss reported by current stream telemetry.");
+    append_doctor_evidence(evidence, "frame_pacing", "Frame pacing", stats.frame_jitter_ms, "ms jitter", pacing_watch ? "watch" : "pass", "stream_stats", "Frame jitter, duplicate/drop ratios, and target FPS gap classify pacing risk.");
+
+    auto advanced = nlohmann::json::object();
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "frame_jitter_ms"});
+    advanced["capture_decision"] = {
+      {"path", capture_path},
+      {"reason", capture_reason},
+      {"reason_message", capture_path_reason_message(capture_reason)},
+      {"transport", platf::from_frame_transport(stats.capture_transport)},
+      {"residency", platf::from_frame_residency(stats.capture_residency)},
+      {"format", platf::from_frame_format(stats.capture_format)},
+      {"capture_device", stats.capture_device},
+      {"encoder_adapter", config::video.adapter_name},
+      {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
+      {"cpu_copy", capture_cpu_copy},
+      {"gpu_native", capture_gpu_native}
+    };
+    advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
+    advanced["health"] = health;
+    advanced["recent_issue_codes"] = nlohmann::json::array();
+    advanced["raw_fields_redacted"] = true;
+
+    double confidence_score = 0.35;
+    std::string confidence_level = "low";
+    std::string basis = "insufficient_data";
+    if (health.contains("primary_issue")) {
+      confidence_score = 0.92;
+      confidence_level = "high";
+      basis = "direct_telemetry";
+    } else if (stats.streaming && capture_known) {
+      confidence_score = 0.78;
+      confidence_level = "medium";
+      basis = "direct_telemetry";
+    } else if (!stats.streaming) {
+      confidence_score = 0.25;
+      confidence_level = "unknown";
+      basis = "insufficient_data";
+    }
+
+    nlohmann::json doctor;
+    doctor["version"] = 1;
+    doctor["result_id"] = "doctor-v1-" + status + "-" + primary_issue + "-" + capture_reason;
+    doctor["scope"] = "stream";
+    doctor["status"] = status;
+    doctor["traffic_light"] = traffic;
+    doctor["status_color"] = traffic;
+    doctor["severity"] = severity;
+    doctor["simple_state"] = simple_state;
+    doctor["primary_issue"] = primary_issue;
+    doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.streaming ? 1 : 0}, {"seconds", stats.streaming ? 1 : 0}}}};
+    doctor["summary"] = summary;
+    doctor["recommendation"] = doctor_recommendation(primary_issue, summary, health);
+    doctor["evidence"] = std::move(evidence);
+    doctor["advanced_evidence"] = std::move(advanced);
+    doctor["safe_recovery_action"] = doctor_safe_action(primary_issue, health);
+    doctor["redaction"] = {{"policy", "polaris-diagnostics-redaction-v1"}, {"applied", true}, {"redacted_fields", nlohmann::json::array()}, {"notice", "Tokens, cookies, credentials, auth headers, client IPs, and sensitive config fields are redacted before export or AI explanation."}};
+    doctor["ai_explanation"] = {{"enabled", false}, {"provider", "none"}, {"model", ""}, {"generated_at", nullptr}, {"input_redacted", true}, {"source_result_id", doctor["result_id"]}, {"summary", ""}, {"limits", nlohmann::json::array({"AI can explain only; deterministic Doctor owns status, evidence, and actions."})}, {"error", ""}};
+    return doctor;
   }
 
   void update_stream_active(bool active, const std::string &client_name, const std::string &client_ip) {

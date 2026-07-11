@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <optional>
+#include <nlohmann/json.hpp>
 
 namespace {
   ai_optimizer::session_history_t make_session(const std::string &grade,
@@ -534,4 +535,40 @@ TEST(AiOptimizerSafeTargetFps, UpgradesLegacyThirtyCapWhenModerateMissCanHoldFor
     40.0,
     ai_optimizer::effective_history_safe_target_fps("RetroidPocket6", session)
   );
+}
+
+TEST(AiOptimizerDoctorExplanation, ParsesStructuredOutputAndForcesNonDestructive) {
+  auto parsed = nlohmann::json::parse(ai_optimizer::parse_doctor_explanation_json(R"({
+    "likely_cause":"Packet loss",
+    "evidence":["3.4% packet loss"],
+    "try_first":["Lower bitrate"],
+    "advanced_detail":"Network evidence is stronger than encoder speculation.",
+    "confidence":"high",
+    "destructive_action_allowed":true
+  })"));
+
+  ASSERT_TRUE(parsed.value("status", false));
+  const auto explanation = parsed.at("explanation");
+  EXPECT_EQ("Packet loss", explanation.value("likely_cause", ""));
+  EXPECT_EQ("high", explanation.value("confidence", ""));
+  EXPECT_FALSE(explanation.value("destructive_action_allowed", true));
+}
+
+TEST(AiOptimizerDoctorExplanation, DisabledConfigFallsBackToDeterministicEvidence) {
+  ai_optimizer::config_t config;
+  config.enabled = false;
+  config.provider = "local";
+  config.model = "llama3.1";
+  config.auth_mode = "none";
+  config.base_url = "http://127.0.0.1:11434/v1";
+
+  auto result = nlohmann::json::parse(ai_optimizer::explain_doctor_json_with_config(config, R"({
+    "doctor":{"simple_state":"Capture path warning","primary_issue":"gpu_native_requested_shm_fallback"},
+    "fix_my_stream_checklist":[{"status":"warning","detail":"Capture fell back to SHM/system-memory frames.","action":"Review render-node pairing."}]
+  })"));
+
+  EXPECT_FALSE(result.value("status", true));
+  EXPECT_EQ("deterministic-fallback", result.at("explanation").value("confidence", ""));
+  EXPECT_EQ("Capture path warning", result.at("explanation").value("likely_cause", ""));
+  EXPECT_FALSE(result.at("explanation").value("destructive_action_allowed", true));
 }

@@ -161,6 +161,13 @@ namespace stream_stats {
   std::string capture_path_reason_message(const std::string &reason);
 
   /**
+   * @brief Build the deterministic Polaris Doctor result from stream telemetry and optional session health.
+   * @param stats Current stream statistics snapshot.
+   * @param health Existing deterministic health JSON, when available.
+   */
+  nlohmann::json build_doctor_json(const stats_t &stats, const nlohmann::json &health);
+
+  /**
    * @brief Effective dynamic range mode Polaris is advertising for the stream.
    * @param stats Current stream statistics snapshot.
    */

@@ -26,6 +26,48 @@
           {{ $t('troubleshooting.export_anonymized_diagnostics') }}
         </button>
       </div>
+      <div class="surface-subtle border border-storm/20 p-4" data-doctor-diagnosis>
+        <div class="section-kicker">{{ $t('troubleshooting.doctor_plain_diagnosis') }}</div>
+        <h3 class="mt-1 text-lg font-semibold text-silver">{{ doctorPlainDiagnosis.title }}</h3>
+        <p class="mt-2 text-sm leading-relaxed text-storm">{{ doctorPlainDiagnosis.detail }}</p>
+        <p class="mt-3 text-xs leading-relaxed text-ice">{{ doctorPlainDiagnosis.action }}</p>
+        <details class="mt-4 rounded-xl border border-storm/20 bg-deep/35 p-3">
+          <summary class="cursor-pointer text-sm font-medium text-silver">{{ $t('troubleshooting.advanced_diagnostics') }}</summary>
+          <div class="mt-3 grid gap-2 sm:grid-cols-2">
+            <div v-for="item in doctorAdvancedItems" :key="item.label" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
+              <div class="text-[11px] uppercase tracking-wide text-storm">{{ item.label }}</div>
+              <div class="mt-1 break-words text-sm text-silver">{{ item.value }}</div>
+            </div>
+          </div>
+        </details>
+        <div class="mt-4 rounded-xl border border-sky-400/20 bg-sky-400/10 p-3" data-ai-doctor-explanation>
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-200">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
+              <p class="mt-1 text-xs leading-relaxed text-blue-100">{{ $t('troubleshooting.ai_doctor_explanation_privacy') }}</p>
+              <p class="mt-2 text-[11px] leading-relaxed text-storm">{{ aiDoctorCategoriesText }}</p>
+            </div>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="requestingAiDoctorExplanation" @click="requestAiDoctorExplanation">
+              {{ requestingAiDoctorExplanation ? $t('troubleshooting.ai_doctor_explanation_pending') : $t('troubleshooting.ai_doctor_explanation_button') }}
+            </button>
+          </div>
+          <div v-if="aiDoctorExplanation" class="mt-3 rounded-lg border border-storm/15 bg-void/40 p-3 text-sm text-silver">
+            <div class="font-semibold">{{ aiDoctorExplanation.likely_cause }}</div>
+            <ul class="mt-2 list-disc space-y-1 pl-5 text-storm">
+              <li v-for="item in aiDoctorExplanation.evidence" :key="item">{{ item }}</li>
+            </ul>
+            <div class="mt-3 text-xs uppercase tracking-[0.18em] text-ice">{{ $t('troubleshooting.ai_doctor_try_first') }}</div>
+            <ul class="mt-1 list-disc space-y-1 pl-5 text-storm">
+              <li v-for="item in aiDoctorExplanation.try_first" :key="item">{{ item }}</li>
+            </ul>
+            <details class="mt-3">
+              <summary class="cursor-pointer text-xs font-medium text-silver">{{ $t('troubleshooting.advanced_diagnostics') }}</summary>
+              <p class="mt-2 text-xs leading-relaxed text-storm">{{ aiDoctorExplanation.advanced_detail }}</p>
+              <p class="mt-2 text-[11px] text-ice">{{ $t('troubleshooting.ai_doctor_no_actions') }} · {{ aiDoctorExplanation.confidence }}</p>
+            </details>
+          </div>
+        </div>
+      </div>
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         <div
           v-for="item in fixMyStreamChecklist"
@@ -204,7 +246,18 @@
         <div v-else class="mt-4 rounded-xl border border-dashed border-storm/25 bg-deep/35 px-4 py-5 text-sm text-storm">
           {{ $t('troubleshooting.recent_incidents_empty') }}
         </div>
+        <div class="mt-4 rounded-xl border border-blue-400/20 bg-blue-400/10 px-4 py-3 text-sm text-blue-100">
+          {{ $t('troubleshooting.support_redaction_notice') }}
+        </div>
         <div class="mt-4 grid gap-2 sm:grid-cols-2">
+          <button class="focus-ring troubleshooting-action-card" @click="copyIssueDraft" :disabled="generatingIssueDraft">
+            <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.copy_issue_draft') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.copy_issue_draft_desc') }}</div>
+          </button>
+          <button class="focus-ring troubleshooting-action-card" @click="downloadIssueDraft" :disabled="generatingIssueDraft">
+            <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.download_issue_draft') }}</div>
+            <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.download_issue_draft_desc') }}</div>
+          </button>
           <button class="focus-ring troubleshooting-action-card" @click="copyRecentIssues">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.copy_recent_issues') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.copy_recent_issues_desc') }}</div>
@@ -305,7 +358,8 @@ import { useStreamStats } from '../composables/useStreamStats'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { requestHostRestart } from '../restart-host.js'
-import { buildAnonymizedDiagnosticsBundle, buildFixMyStreamChecklist } from '../diagnostics-export.js'
+import { buildAnonymizedDiagnosticsBundle, buildFixMyStreamChecklist, buildGithubIssueDraft } from '../diagnostics-export.js'
+import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -320,6 +374,9 @@ const clearingLogs = ref(false)
 const clearingAiCache = ref(false)
 const cleaningStaleVirtualDisplay = ref(false)
 const downloadingSupportBundle = ref(false)
+const generatingIssueDraft = ref(false)
+const requestingAiDoctorExplanation = ref(false)
+const aiDoctorExplanation = ref(null)
 const logFilter = ref(null)
 const logLevelFilter = ref(null)
 let logInterval = null
@@ -413,6 +470,11 @@ function formatFps(value) {
 function formatResolution(width, height) {
   if (!width || !height) return '(unknown)'
   return `${width}x${height}`
+}
+
+function summarizeStreamStats(s = {}) {
+  if (!s.streaming) return 'No active stream'
+  return `${formatFps(s.fps)} / ${formatFps(s.session_target_fps || s.requested_client_fps)} target · ${s.bitrate_kbps || 0} kbps · ${formatNumber(s.packet_loss, 2)}% loss · ${formatNumber(s.encode_time_ms, 1)} ms encode`
 }
 
 function hasRuntimeOverride(s) {
@@ -524,6 +586,49 @@ const fixMyStreamChecklist = computed(() => buildFixMyStreamChecklist({
   logs: logs.value,
   recentIssues: groupedRecentIssues.value,
 }))
+
+const doctorPayload = computed(() => streamStats.value?.doctor || null)
+const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doctor_categories_prefix')} ${AI_DOCTOR_EXPLANATION_CATEGORIES.join(', ')}`)
+const doctorPlainDiagnosis = computed(() => {
+  const doctor = doctorPayload.value
+  if (doctor?.simple_state || doctor?.summary || doctor?.diagnosis) {
+    return {
+      title: doctor.simple_state || doctor.summary || doctor.diagnosis,
+      detail: doctor.detail || doctor.reason || i18n.t('troubleshooting.doctor_plain_diagnosis_desc'),
+      action: doctor.safe_recovery_action?.label || doctor.safe_recovery_action?.id || i18n.t('troubleshooting.doctor_plain_diagnosis_action'),
+    }
+  }
+
+  const firstProblem = fixMyStreamChecklist.value.find((item) => item.status === 'fail' || item.status === 'warning')
+  if (firstProblem) {
+    return {
+      title: `${firstProblem.label}: ${fixMyStreamStatusLabel(firstProblem.status)}`,
+      detail: firstProblem.detail,
+      action: firstProblem.action,
+    }
+  }
+
+  return {
+    title: i18n.t('troubleshooting.doctor_plain_diagnosis_empty'),
+    detail: i18n.t('troubleshooting.doctor_plain_diagnosis_desc'),
+    action: i18n.t('troubleshooting.doctor_plain_diagnosis_action'),
+  }
+})
+
+const doctorAdvancedItems = computed(() => {
+  const s = streamStats.value || {}
+  const doctor = doctorPayload.value || {}
+  return [
+    { label: 'Doctor issue', value: doctor.primary_issue || 'none' },
+    { label: 'Doctor action', value: doctor.safe_recovery_action?.id || 'none' },
+    { label: 'Client', value: s.client_name || s.client_type || '(unknown)' },
+    { label: 'Runtime', value: s.launch_mode || s.stream_display_mode || s.runtime_backend || '(unknown)' },
+    { label: 'Capture path', value: s.capture_path || s.capture_transport || '(unknown)' },
+    { label: 'Capture reason', value: s.capture_path_reason || '(unknown)' },
+    { label: 'Encoder', value: s.encoder || s.encode_target_device || '(unknown)' },
+    { label: 'Active stream stats', value: summarizeStreamStats(s) },
+  ]
+})
 
 function fixMyStreamStatusLabel(status) {
   if (status === 'pass') return i18n.t('troubleshooting.fix_my_stream_status_pass')
@@ -786,35 +891,107 @@ function cleanupStaleVirtualDisplay() {
     })
 }
 
+async function collectSupportContext() {
+  const [systemStats, aiStatus, aiCache, aiHistory, latestLogs, config] = await Promise.all([
+    safeFetchJson('./api/stats/system'),
+    safeFetchJson('./api/ai/status'),
+    safeFetchJson('./api/ai/cache'),
+    safeFetchJson('./api/ai/history'),
+    safeFetchText('./api/logs'),
+    safeFetchJson('./api/config')
+  ])
+
+  return {
+    generated_at: new Date().toISOString(),
+    platform: platform.value || config.platform || 'unknown',
+    version: version.value || config.version || 'unknown',
+    browser_user_agent: navigator.userAgent,
+    stream_stats_connected: streamStatsConnected.value,
+    fix_my_stream_checklist: fixMyStreamChecklist.value,
+    session_snapshot: streamStats.value,
+    client: {
+      type: streamStats.value?.client_type || streamStats.value?.client_name || 'unknown',
+      name: streamStats.value?.client_name || '',
+    },
+    config,
+    system_stats: systemStats,
+    ai_status: aiStatus,
+    ai_cache: aiCache,
+    ai_history: aiHistory,
+    recent_issues: groupedRecentIssues.value,
+    logs: latestLogs || logs.value
+  }
+}
+
+async function createSupportBundle() {
+  const context = await collectSupportContext()
+  return buildAnonymizedDiagnosticsBundle({
+    ...context,
+    issue_draft: buildGithubIssueDraft(context),
+  })
+}
+
+async function copyIssueDraft() {
+  generatingIssueDraft.value = true
+  try {
+    const context = await collectSupportContext()
+    await navigator.clipboard.writeText(buildGithubIssueDraft(context))
+    showToast(i18n.t('troubleshooting.copy_issue_draft_success') || 'Issue draft copied.', 'success')
+  } catch (error) {
+    console.error(error)
+    showToast(i18n.t('troubleshooting.issue_draft_error') || 'Failed to build issue draft.', 'error')
+  } finally {
+    generatingIssueDraft.value = false
+  }
+}
+
+async function downloadIssueDraft() {
+  generatingIssueDraft.value = true
+  try {
+    const context = await collectSupportContext()
+    const timestamp = new Date().toISOString().replace(/[:]/g, '-')
+    triggerDownload(`polaris-issue-draft-${timestamp}.md`, buildGithubIssueDraft(context), 'text/markdown;charset=utf-8')
+    showToast(i18n.t('troubleshooting.download_issue_draft_success') || 'Issue draft downloaded.', 'success')
+  } catch (error) {
+    console.error(error)
+    showToast(i18n.t('troubleshooting.issue_draft_error') || 'Failed to build issue draft.', 'error')
+  } finally {
+    generatingIssueDraft.value = false
+  }
+}
+
+async function requestAiDoctorExplanation() {
+  requestingAiDoctorExplanation.value = true
+  try {
+    const supportBundle = await createSupportBundle()
+    const config = supportBundle.config || {}
+    const result = await explainDoctorWithAi({
+      aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
+      config,
+      supportBundle,
+      deterministicSummary: doctorPlainDiagnosis.value,
+    })
+    aiDoctorExplanation.value = result.explanation || null
+    if (result.disabled) {
+      showToast(result.error || i18n.t('troubleshooting.ai_doctor_disabled'), 'info')
+    } else if (!result.status) {
+      showToast(i18n.t('troubleshooting.ai_doctor_fallback') || 'AI explanation unavailable; showing deterministic Doctor output.', 'info')
+    } else {
+      showToast(i18n.t('troubleshooting.ai_doctor_success') || 'AI Doctor explanation ready.', 'success')
+    }
+  } catch (error) {
+    console.error(error)
+    showToast(i18n.t('troubleshooting.ai_doctor_error') || 'Failed to request AI Doctor explanation.', 'error')
+  } finally {
+    requestingAiDoctorExplanation.value = false
+  }
+}
+
 async function downloadSupportBundle() {
   downloadingSupportBundle.value = true
 
   try {
-    const [systemStats, aiStatus, aiCache, aiHistory, latestLogs, config] = await Promise.all([
-      safeFetchJson('./api/stats/system'),
-      safeFetchJson('./api/ai/status'),
-      safeFetchJson('./api/ai/cache'),
-      safeFetchJson('./api/ai/history'),
-      safeFetchText('./api/logs'),
-      safeFetchJson('./api/config')
-    ])
-
-    const bundle = buildAnonymizedDiagnosticsBundle({
-      generated_at: new Date().toISOString(),
-      platform: platform.value || 'unknown',
-      version: version.value || 'unknown',
-      browser_user_agent: navigator.userAgent,
-      stream_stats_connected: streamStatsConnected.value,
-      fix_my_stream_checklist: fixMyStreamChecklist.value,
-      session_snapshot: streamStats.value,
-      config,
-      system_stats: systemStats,
-      ai_status: aiStatus,
-      ai_cache: aiCache,
-      ai_history: aiHistory,
-      recent_issues: groupedRecentIssues.value,
-      logs: latestLogs || logs.value
-    })
+    const bundle = await createSupportBundle()
 
     const timestamp = new Date().toISOString().replace(/[:]/g, '-')
     triggerDownload(`polaris-anonymized-diagnostics-${timestamp}.json`, JSON.stringify(bundle, null, 2), 'application/json;charset=utf-8')
