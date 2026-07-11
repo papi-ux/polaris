@@ -137,6 +137,7 @@ namespace portal {
     std::string session_handle;
     uint32_t pw_node_id = 0;
     uint64_t pw_node_serial = 0;
+    std::optional<std::string> capture_render_node;
     int pw_remote_fd = -1;
     std::string restore_token;
     bool ready = false;
@@ -234,6 +235,37 @@ namespace portal {
 
     g_variant_unref(value);
     return result;
+  }
+
+  static std::optional<std::string> lookup_string_property(GVariant *props, const char *name) {
+    if (!props) {
+      return std::nullopt;
+    }
+
+    GVariant *value = g_variant_lookup_value(props, name, G_VARIANT_TYPE_STRING);
+    if (!value) {
+      return std::nullopt;
+    }
+
+    std::string result = g_variant_get_string(value, nullptr);
+    g_variant_unref(value);
+    return result;
+  }
+
+  static std::optional<std::string> lookup_capture_render_node(GVariant *props) {
+    for (const auto *key : {"render-node", "pipewire.render-node", "device.path"}) {
+      const auto value = lookup_string_property(props, key);
+      if (!value) {
+        continue;
+      }
+      if (auto canonical = pipewire_capture::canonical_render_node(*value)) {
+        return canonical;
+      }
+      BOOST_LOG(warning) << "portal: ignoring non-canonical capture render-node property "sv
+                         << key << "=["sv << *value << ']';
+    }
+
+    return std::nullopt;
   }
 
   static int open_pipewire_remote_fd(GDBusConnection *conn, const std::string &session_handle) {
@@ -492,8 +524,10 @@ namespace portal {
           if (session->pw_node_serial == 0) {
             session->pw_node_serial = lookup_uint64_property(props, "pipewire.serial");
           }
+          session->capture_render_node = lookup_capture_render_node(props);
           BOOST_LOG(info) << "portal: PipeWire node ID: "sv << node_id
-                          << " serial="sv << session->pw_node_serial;
+                          << " serial="sv << session->pw_node_serial
+                          << " render_node="sv << session->capture_render_node.value_or("none");
           if (props) g_variant_unref(props);
           g_variant_unref(stream_entry);
           break;
@@ -861,6 +895,10 @@ namespace portal {
   static std::shared_ptr<pipewire_capture::capture_t> g_capture;
   static std::mutex g_capture_mtx;
   static uint32_t g_node_id = 0;
+  static int g_capture_requested_width = 0;
+  static int g_capture_requested_height = 0;
+  static platf::mem_type_e g_capture_mem_type = platf::mem_type_e::system;
+  static std::string g_capture_adapter;
 
   static bool ensure_global_session() {
     // Create the portal D-Bus session once (shows picker on first use)
@@ -879,22 +917,83 @@ namespace portal {
     return true;
   }
 
-  static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(int width, int height) {
+  static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(int width, int height, platf::mem_type_e mem_type) {
     std::lock_guard lock(g_capture_mtx);
 
-    // If capture is running and healthy, reuse it
+    const auto requested_adapter = config::video.adapter_name;
     if (g_capture && g_capture->running()) {
-      return g_capture;
-    }
+      const auto compatible = g_capture_requested_width == width &&
+                              g_capture_requested_height == height &&
+                              g_capture_mem_type == mem_type &&
+                              g_capture_adapter == requested_adapter;
+      if (compatible) {
+        return g_capture;
+      }
 
-    // PipeWire stream died or never created — need a fresh portal session
-    // because the old PipeWire node is no longer valid after disconnect
-    g_capture.reset();
-    g_portal.reset();
-    g_node_id = 0;
+      BOOST_LOG(info) << "portal: capture configuration changed; reconnecting PipeWire before encoder selection"sv;
+      g_capture.reset();
+
+      // A PipeWire remote FD is a protocol connection, not a reusable device
+      // handle. Request a fresh remote for the existing portal session so an
+      // encoder retry does not reopen the picker or reuse a consumed socket.
+      if (g_portal && g_portal->conn && !g_portal->session_handle.empty()) {
+        if (g_portal->pw_remote_fd >= 0) {
+          close(g_portal->pw_remote_fd);
+          g_portal->pw_remote_fd = -1;
+        }
+        g_portal->pw_remote_fd = open_pipewire_remote_fd(g_portal->conn, g_portal->session_handle);
+      }
+      if (!g_portal || g_portal->pw_remote_fd < 0) {
+        g_portal.reset();
+        g_node_id = 0;
+      }
+    } else if (g_capture) {
+      // A dead stream invalidates the node on this private remote. Recreate the
+      // portal session rather than trying to reuse a stale target ID.
+      g_capture.reset();
+      g_portal.reset();
+      g_node_id = 0;
+    }
 
     if (!ensure_global_session()) {
       return nullptr;
+    }
+
+    const auto encoder_render_node = pipewire_capture::canonical_render_node(config::video.adapter_name);
+    std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
+    bool may_use_dmabuf = false;
+    if (!g_portal->capture_render_node) {
+      BOOST_LOG(info) << "portal: DMA-BUF disabled because the portal stream did not provide an explicit capture render node"sv;
+    } else if (!encoder_render_node) {
+      BOOST_LOG(info) << "portal: DMA-BUF disabled because config::video.adapter_name is not an explicit canonical render node"sv;
+    } else if (*g_portal->capture_render_node != *encoder_render_node) {
+      BOOST_LOG(info) << "portal: DMA-BUF disabled because capture render node ["sv << *g_portal->capture_render_node
+                      << "] does not match encoder adapter ["sv << *encoder_render_node << ']';
+    } else if (mem_type != platf::mem_type_e::vaapi && mem_type != platf::mem_type_e::cuda) {
+      BOOST_LOG(info) << "portal: DMA-BUF disabled because encoder memory type is not VAAPI or CUDA"sv;
+    } else {
+      const auto egl_formats = pipewire_capture::query_egl_dmabuf_import_formats(*encoder_render_node);
+      std::vector<std::uint64_t> importable_modifiers;
+      for (const auto &format : egl_formats) {
+        for (const auto modifier : format.modifiers) {
+          if (std::find(format.external_only_modifiers.begin(), format.external_only_modifiers.end(), modifier) == format.external_only_modifiers.end()) {
+            importable_modifiers.push_back(modifier);
+          }
+        }
+      }
+      const auto portal_formats = pipewire_capture::task1_packed_dmabuf_formats(std::move(importable_modifiers));
+      dmabuf_formats = pipewire_capture::filter_importable_dmabuf_formats(portal_formats, egl_formats);
+      const pipewire_capture::dmabuf_eligibility_t eligibility {
+        .capture_render_node = g_portal->capture_render_node,
+        .encoder_render_node = *encoder_render_node,
+        .mem_type = mem_type,
+        .egl_import_supported = !dmabuf_formats.empty(),
+      };
+      may_use_dmabuf = pipewire_capture::may_offer_dmabuf(eligibility);
+      if (!may_use_dmabuf) {
+        BOOST_LOG(info) << "portal: DMA-BUF disabled because EGL reported no importable packed-RGB modifiers for encoder render node ["sv
+                        << *encoder_render_node << ']';
+      }
     }
 
     auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {
@@ -903,17 +1002,36 @@ namespace portal {
       .node_serial = g_portal->pw_node_serial,
       .requested_width = width,
       .requested_height = height,
+      .capture_render_node = g_portal->capture_render_node,
+      .dmabuf_formats = std::move(dmabuf_formats),
+      .mem_type = mem_type,
+      .may_use_dmabuf = may_use_dmabuf,
     });
     if (!capture->start()) {
-      BOOST_LOG(warning) << "portal: Failed to start PipeWire capture"sv;
+      BOOST_LOG(warning) << "portal: Failed to start PipeWire capture; invalidating portal session"sv;
+      capture.reset();
+      g_portal.reset();
+      g_node_id = 0;
       return nullptr;
     }
 
-    // Wait for format negotiation
-    for (int i = 0; i < 100 && !capture->negotiated(); ++i) {
+    // The capture transport determines whether the encoder factory must use
+    // RAM or GPU-resident input, so never select a factory before negotiation.
+    for (int i = 0; i < 100 && capture->running() && !capture->negotiated(); ++i) {
       std::this_thread::sleep_for(100ms);
     }
+    if (!capture->negotiated()) {
+      BOOST_LOG(warning) << "portal: PipeWire format negotiation did not complete; invalidating portal session"sv;
+      capture.reset();
+      g_portal.reset();
+      g_node_id = 0;
+      return nullptr;
+    }
 
+    g_capture_requested_width = width;
+    g_capture_requested_height = height;
+    g_capture_mem_type = mem_type;
+    g_capture_adapter = requested_adapter;
     g_capture = capture;
     return g_capture;
   }
@@ -928,16 +1046,21 @@ namespace portal {
       g_screencopy_stop = true;
     }
 
+    int requested_width = 0;
+    int requested_height = 0;
     int cfg_width = 0;
     int cfg_height = 0;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
+    bool pipewire_dmabuf_negotiated = false;
 
     bool probe_only = false;  // true during encoder probe (skip portal session)
 
     int
     init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-      cfg_width = config.width;
-      cfg_height = config.height;
+      requested_width = config.width;
+      requested_height = config.height;
+      cfg_width = requested_width;
+      cfg_height = requested_height;
       mem_type = hwdevice_type;
 
       if (!probe_only) {
@@ -953,12 +1076,13 @@ namespace portal {
             return -1;
           }
 
-          auto cap = ensure_global_capture(cfg_width, cfg_height);
+          auto cap = ensure_global_capture(requested_width, requested_height, mem_type);
           if (!cap) {
             return -1;
           }
 
           const auto info = cap->frame_info();
+          pipewire_dmabuf_negotiated = cap->negotiated_dmabuf();
           if (cap->negotiated() && info.width > 0 && info.height > 0) {
             cfg_width = info.width;
             cfg_height = info.height;
@@ -1023,13 +1147,14 @@ namespace portal {
         return platf::capture_e::reinit;
       }
 
-      auto cap = ensure_global_capture(cfg_width, cfg_height);
+      auto cap = ensure_global_capture(requested_width, requested_height, mem_type);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
         return platf::capture_e::reinit;
       }
 
       auto info = cap->frame_info();
+      pipewire_dmabuf_negotiated = cap->negotiated_dmabuf();
       if (cap->negotiated() && info.width > 0 && info.height > 0) {
         cfg_width = info.width;
         cfg_height = info.height;
@@ -1067,7 +1192,7 @@ namespace portal {
           return platf::capture_e::interrupted;
         }
 
-        if (!cap->copy_frame_to(*img_out)) {
+        if (!cap->fill_frame(img_out)) {
           return platf::capture_e::reinit;
         }
 
@@ -1114,8 +1239,12 @@ namespace portal {
       img->dmabuf_buffer_key = 0;
       img->sd = {};
       std::fill_n(img->sd.fds, 4, -1);
-      img->buffer.assign(static_cast<std::size_t>(cfg_height) * static_cast<std::size_t>(img->row_pitch), 0);
-      img->data = img->buffer.data();
+      if (pipewire_dmabuf_negotiated) {
+        img->data = nullptr;
+      } else {
+        img->buffer.assign(static_cast<std::size_t>(cfg_height) * static_cast<std::size_t>(img->row_pitch), 0);
+        img->data = img->buffer.data();
+      }
 
       BOOST_LOG(info) << "portal: alloc_img "sv << img->width << "x"sv << img->height
                       << " env="sv << this->env_width << "x"sv << this->env_height;
@@ -1124,7 +1253,19 @@ namespace portal {
 
     int
     dummy_img(platf::img_t *img) override {
-      if (!img || !img->data) return -1;
+      if (!img) return -1;
+      if (pipewire_dmabuf_negotiated) {
+        auto *descriptor = dynamic_cast<egl::img_descriptor_t *>(img);
+        if (!descriptor) return -1;
+        descriptor->sequence = 0;
+        return 0;
+      }
+      if (!img->data) {
+        if (auto *cursor = dynamic_cast<egl::cursor_t *>(img); cursor && !cursor->buffer.empty()) {
+          img->data = cursor->buffer.data();
+        }
+      }
+      if (!img->data) return -1;
       std::memset(img->data, 0, img->height * img->row_pitch);
       return 0;
     }
@@ -1136,11 +1277,17 @@ namespace portal {
 
 #ifdef POLARIS_BUILD_VAAPI
       if (mem_type == platf::mem_type_e::vaapi) {
+        if (pipewire_dmabuf_negotiated) {
+          return va::make_avcodec_encode_device(w, h, 0, 0, true);
+        }
         return va::make_avcodec_encode_device(w, h, false);
       }
 #endif
 #ifdef POLARIS_BUILD_CUDA
       if (mem_type == platf::mem_type_e::cuda) {
+        if (pipewire_dmabuf_negotiated) {
+          return cuda::make_avcodec_gl_encode_device(w, h, 0, 0);
+        }
         if (pix_fmt == platf::pix_fmt_e::nv12) {
           return cuda::make_avcodec_encode_device(w, h, false);
         }
@@ -1159,9 +1306,9 @@ namespace platf {
   std::shared_ptr<display_t>
   portal_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
     auto disp = std::make_shared<portal::portal_display_t>();
-    // Use probe mode for encoder detection at startup.
-    // The real portal session (with window picker) is created lazily on first capture().
-    disp->probe_only = true;
+    // Encoder validation must remain picker-free and use the RAM factory.
+    // Real capture construction negotiates before image-pool/factory selection.
+    disp->probe_only = video::encoder_probe_active();
     if (disp->init(hwdevice_type, display_name, config)) {
       return nullptr;
     }

@@ -20,6 +20,8 @@ TEST(CudaGlEncodeDeviceTests, CudaGlEncodeDeviceInitializesForHeadlessDmabufPath
   ASSERT_NE(eglGetPlatformDisplay, nullptr) << "eglGetPlatformDisplay was not loaded";
   auto device = cuda::make_avcodec_gl_encode_device(1920, 1080, 0, 0);
   ASSERT_NE(device, nullptr) << "GL->CUDA encode device initialization failed";
+  ASSERT_EQ(device->hardware_device_index, std::optional<int> {0})
+    << "GL->CUDA encode device did not preserve the selected CUDA ordinal";
 }
 
 TEST(CudaGlEncodeDeviceTests, CudaGlEncodeDeviceSetFrameInitializesNv12Pipeline) {

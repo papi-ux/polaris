@@ -110,6 +110,7 @@ namespace cuda {
       }
 
       data = (void *) 0x1;
+      hardware_device_index = 0;
 
       width = in_width;
       height = in_height;
@@ -275,6 +276,50 @@ namespace cuda {
     return -1;
   }
 
+  std::optional<int> cuda_device_index_for_render_node(const fs::path &render_node) {
+    if (render_node.parent_path() != "/dev/dri" ||
+        !render_node.filename().string().starts_with("renderD")) {
+      return std::nullopt;
+    }
+
+    std::error_code ec;
+    const auto render_pci_device = fs::canonical(
+      fs::path {"/sys/class/drm"} / render_node.filename() / "device", ec);
+    if (ec) {
+      BOOST_LOG(error) << "Unable to resolve DRM render node ["sv << render_node.string()
+                       << "] to a PCI device: "sv << ec.message();
+      return std::nullopt;
+    }
+
+    int device_count = 0;
+    if (cdf->cuDeviceGetCount(&device_count) != CUDA_SUCCESS) {
+      return std::nullopt;
+    }
+    for (int i = 0; i < device_count; ++i) {
+      CUdevice device;
+      if (cdf->cuDeviceGet(&device, i) != CUDA_SUCCESS) {
+        continue;
+      }
+
+      std::array<char, 13> pci_bus_id {};
+      if (cdf->cuDeviceGetPCIBusId(pci_bus_id.data(), pci_bus_id.size(), device) != CUDA_SUCCESS) {
+        continue;
+      }
+      std::transform(pci_bus_id.begin(), pci_bus_id.end(), pci_bus_id.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+
+      ec.clear();
+      const auto cuda_pci_device = fs::canonical(
+        fs::path {"/sys/bus/pci/devices"} / pci_bus_id.data(), ec);
+      if (!ec && cuda_pci_device == render_pci_device) {
+        return i;
+      }
+    }
+
+    return std::nullopt;
+  }
+
   class gl_cuda_vram_t: public platf::avcodec_encode_device_t {
   public:
     struct rgb_cache_entry_t {
@@ -291,28 +336,50 @@ namespace cuda {
      * @return 0 on success or -1 on failure.
      */
     int init(int in_width, int in_height, int offset_x, int offset_y) {
-      // This must be non-zero to tell the video core that it's a hardware encoding device.
-      data = (void *) 0x1;
-
-      // Select CUDA device by adapter_name config or default to first device
+      // Select the CUDA device by exact render-node PCI identity when a DRM
+      // adapter path is configured. Never silently fall back to CUDA device 0
+      // for an explicit render node: that would violate same-GPU DMA-BUF use.
       int cuda_device_index = 0;
       if (!::config::video.adapter_name.empty()) {
-        int device_count = 0;
-        cdf->cuDeviceGetCount(&device_count);
-        for (int i = 0; i < device_count; i++) {
-          CUdevice dev;
-          if (cdf->cuDeviceGet(&dev, i) == CUDA_SUCCESS) {
-            char name[256];
-            if (cdf->cuDeviceGetName(name, sizeof(name), dev) == CUDA_SUCCESS) {
-              if (::config::video.adapter_name == name) {
+        if (::config::video.adapter_name.starts_with("/dev/dri/renderD")) {
+          const auto selected = cuda_device_index_for_render_node(::config::video.adapter_name);
+          if (!selected) {
+            BOOST_LOG(error) << "Configured render node ["sv << ::config::video.adapter_name
+                             << "] does not map to a CUDA device"sv;
+            return -1;
+          }
+          cuda_device_index = *selected;
+          BOOST_LOG(info) << "Selected CUDA device "sv << cuda_device_index
+                          << " from render node ["sv << ::config::video.adapter_name << ']';
+        } else {
+          bool found = false;
+          int device_count = 0;
+          cdf->cuDeviceGetCount(&device_count);
+          for (int i = 0; i < device_count; i++) {
+            CUdevice dev;
+            if (cdf->cuDeviceGet(&dev, i) == CUDA_SUCCESS) {
+              char name[256];
+              if (cdf->cuDeviceGetName(name, sizeof(name), dev) == CUDA_SUCCESS &&
+                  ::config::video.adapter_name == name) {
                 cuda_device_index = i;
+                found = true;
                 BOOST_LOG(info) << "Selected CUDA device " << i << ": " << name;
                 break;
               }
             }
           }
+          if (!found) {
+            BOOST_LOG(error) << "Configured CUDA adapter ["sv << ::config::video.adapter_name
+                             << "] was not found"sv;
+            return -1;
+          }
         }
       }
+
+      // Keep the historical non-null hardware marker and pass the selected
+      // ordinal explicitly to FFmpeg CUDA context creation.
+      data = (void *) 0x1;
+      hardware_device_index = cuda_device_index;
       file = std::move(open_drm_fd_for_cuda_device(cuda_device_index));
       if (file.el < 0) {
         char string[1024];

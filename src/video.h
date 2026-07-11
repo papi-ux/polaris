@@ -474,6 +474,12 @@ namespace video {
     packet_queue_t packets
   );
 
+  /**
+   * @brief Whether the current display construction is part of encoder probing.
+   * @details Portal capture uses this to avoid opening the picker during probes.
+   */
+  bool encoder_probe_active();
+
   bool validate_encoder(encoder_t &encoder, bool expect_failure);
 
   /**

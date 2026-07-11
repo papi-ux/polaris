@@ -1972,6 +1972,12 @@ namespace video {
   };
 
   static encoder_t *chosen_encoder;
+  static thread_local bool encoder_probe_in_progress = false;
+
+  bool encoder_probe_active() {
+    return encoder_probe_in_progress;
+  }
+
   int active_hevc_mode;
   int active_av1_mode;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
@@ -3807,6 +3813,12 @@ namespace video {
   }
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure) {
+    const auto previous_probe_state = encoder_probe_in_progress;
+    encoder_probe_in_progress = true;
+    auto probe_state_guard = util::fail_guard([previous_probe_state]() {
+      encoder_probe_in_progress = previous_probe_state;
+    });
+
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
 
@@ -4420,7 +4432,18 @@ namespace video {
   util::Either<avcodec_buffer_t, int> cuda_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *encode_device) {
     avcodec_buffer_t hw_device_buf;
 
-    auto status = av_hwdevice_ctx_create(&hw_device_buf, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 1 /* AV_CUDA_USE_PRIMARY_CONTEXT */);
+    std::string cuda_device;
+    if (encode_device && encode_device->hardware_device_index &&
+        *encode_device->hardware_device_index >= 0) {
+      cuda_device = std::to_string(*encode_device->hardware_device_index);
+    }
+
+    auto status = av_hwdevice_ctx_create(
+      &hw_device_buf,
+      AV_HWDEVICE_TYPE_CUDA,
+      cuda_device.empty() ? nullptr : cuda_device.c_str(),
+      nullptr,
+      1 /* AV_CUDA_USE_PRIMARY_CONTEXT */);
     if (status < 0) {
       char string[AV_ERROR_MAX_STRING_SIZE];
       BOOST_LOG(error) << "Failed to create a CUDA device: "sv << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status);
