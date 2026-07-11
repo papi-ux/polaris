@@ -4775,6 +4775,73 @@ namespace confighttp {
     response->write(output.dump(), headers);
   }
 
+  nlohmann::json build_network_path_port_probe(const net::network_path_probe_port_t &port) {
+    nlohmann::json item;
+    item["key"] = port.key;
+    item["label"] = port.label;
+    item["port"] = port.port;
+    item["transport"] = port.transport;
+
+    if (port.transport == "tcp") {
+      try {
+        boost::asio::io_context io;
+        boost::asio::ip::tcp::socket socket {io};
+        socket.connect({boost::asio::ip::make_address("127.0.0.1"), port.port});
+        item["status"] = "open";
+        item["detail"] = "Local Polaris host accepted a TCP connection on the mapped port.";
+      } catch (const std::exception &e) {
+        item["status"] = "closed";
+        item["detail"] = "Local Polaris host did not accept a TCP connection on this mapped port.";
+        item["error"] = e.what();
+      }
+    } else {
+      item["status"] = "hint";
+      item["detail"] = "UDP stream reachability cannot be proven from the Web UI server without sending test media; verify firewall/NAT allows this mapped port.";
+    }
+
+    return item;
+  }
+
+  void getNetworkPathProbe(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    const auto remote_address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    const auto host_header = request->header.find("host");
+    const auto request_host = host_header == request->header.end() ? std::string {} : host_header->second;
+    const auto configured_ports = net::network_path_probe_ports(static_cast<std::uint16_t>(config::sunshine.port));
+
+    nlohmann::json ports = nlohmann::json::array();
+    for (const auto &port : configured_ports) {
+      ports.push_back(build_network_path_port_probe(port));
+    }
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["kind"] = "network-path-probe";
+    output["targetHost"] = remote_address;
+    output["requestHost"] = request_host;
+    output["classification"] = net::network_path_probe_classification(remote_address);
+    output["hostReachable"] = true;
+    output["mdnsAvailable"] = request_host.find(".local") != std::string::npos;
+    output["ports"] = ports;
+    output["samples"] = {
+      {"latencyMs", nlohmann::json::array()},
+      {"jitterMs", nullptr},
+      {"packetLossPercent", nullptr},
+      {"source", "stream telemetry when active; no synthetic packets sent"},
+    };
+    output["notes"] = nlohmann::json::array({
+      "Server-side probe is read-only: it checks the requesting client address, local mapped TCP listeners, and UDP port contract hints.",
+      "WAN/NAT UDP reachability still needs a client-side stream attempt or external port test."
+    });
+
+    send_response(response, output);
+  }
+
   void getStreamStats(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request))
       return;
@@ -5107,6 +5174,7 @@ namespace confighttp {
     server.resource["^/api/stats/system$"]["GET"] = getSystemStats;
     server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
     server.resource["^/api/stats/stream-sse$"]["GET"] = getStreamStatsSSE;
+    server.resource["^/api/support/network-path-probe$"]["GET"] = getNetworkPathProbe;
     server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
     server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);

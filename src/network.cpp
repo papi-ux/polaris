@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 
 // local includes
@@ -222,5 +223,48 @@ namespace net {
     }
 
     return !instancename.empty() ? instancename : "Apollo";
+  }
+
+  std::string network_path_probe_classification(const std::string_view &host) {
+    std::string value {host.data(), host.size()};
+    const auto bracketed_v6_end = value.find(']');
+    if (!value.empty() && value.front() == '[' && bracketed_v6_end != std::string::npos) {
+      value = value.substr(1, bracketed_v6_end - 1);
+    } else if (const auto scheme = value.find("://"); scheme != std::string::npos) {
+      value = value.substr(scheme + 3);
+    }
+    if (const auto slash = value.find('/'); slash != std::string::npos) {
+      value = value.substr(0, slash);
+    }
+    if (const auto colon = value.find(':'); colon != std::string::npos && value.find(':', colon + 1) == std::string::npos) {
+      value = value.substr(0, colon);
+    }
+
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+
+    if (value.ends_with(".local") || value == "localhost") {
+      return "lan";
+    }
+    if (value.ends_with(".ts.net") || value.find("tailscale") != std::string::npos || value.find("zerotier") != std::string::npos) {
+      return "vpn";
+    }
+
+    try {
+      return std::string {to_enum_string(from_address(value))};
+    } catch (const std::exception &) {
+      return "wan";
+    }
+  }
+
+  std::vector<network_path_probe_port_t> network_path_probe_ports(std::uint16_t base_port) {
+    return {
+      {"control_https", "Web/control HTTPS", static_cast<std::uint16_t>(base_port + 1), "tcp"},
+      {"rtsp_setup", "RTSP setup", static_cast<std::uint16_t>(base_port + 21), "tcp"},
+      {"control_udp", "Input/control stream", static_cast<std::uint16_t>(base_port + 10), "udp"},
+      {"video_udp", "Video stream", static_cast<std::uint16_t>(base_port + 9), "udp"},
+      {"audio_udp", "Audio stream", static_cast<std::uint16_t>(base_port + 11), "udp"},
+    };
   }
 }  // namespace net

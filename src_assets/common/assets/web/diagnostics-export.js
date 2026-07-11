@@ -366,13 +366,72 @@ function reportLine(label, value) {
   return `${label}: ${value || '(unknown)'}`
 }
 
+function normalizeProbeStatus(status) {
+  const value = lower(status)
+  if (['open', 'reachable', 'pass', 'ok'].includes(value)) return 'pass'
+  if (['closed', 'blocked', 'timeout', 'fail', 'failed', 'unreachable'].includes(value)) return 'fail'
+  return 'warning'
+}
+
+function nativeProbePort(nativeProbe = {}, keyPattern) {
+  const ports = Array.isArray(nativeProbe.ports) ? nativeProbe.ports : []
+  return ports.find((port) => keyPattern.test(String(port.key || port.label || '')))
+}
+
+function nativeProbePortDetail(port) {
+  if (!port) return ''
+  const endpoint = [port.port, port.transport].filter(Boolean).join('/')
+  const status = port.status || 'hint'
+  const detail = port.detail || port.error || ''
+  return `${port.label || port.key || 'Port'}${endpoint ? ` ${endpoint}` : ''}: ${status}${detail ? ` (${detail})` : ''}`
+}
+
+function nativeProbeSamples(nativeProbe = {}) {
+  const samples = nativeProbe.samples || nativeProbe.latency || {}
+  const latencySamples = Array.isArray(samples.latencyMs)
+    ? samples.latencyMs
+    : Array.isArray(samples.pingSamplesMs)
+      ? samples.pingSamplesMs
+      : Array.isArray(nativeProbe.pingSamplesMs)
+        ? nativeProbe.pingSamplesMs
+        : []
+  return {
+    latencySamples,
+    jitterMs: samples.jitterMs ?? nativeProbe.jitterMs,
+    packetLossPercent: samples.packetLossPercent ?? nativeProbe.packetLossPercent,
+  }
+}
+
+function formatNativeProbeEvidence(nativeProbe = {}) {
+  const ports = Array.isArray(nativeProbe.ports) ? nativeProbe.ports : []
+  const lines = [
+    `Native evidence: ${nativeProbe.classification || 'unknown'}${nativeProbe.targetHost ? ` path to ${nativeProbe.targetHost}` : ''}`,
+    ...ports.map(nativeProbePortDetail),
+    ...(Array.isArray(nativeProbe.notes) ? nativeProbe.notes : []),
+  ].filter(Boolean)
+  return redactSensitiveText(lines.join('\n'))
+}
+
 export function buildNetworkPathTestReport(input = {}) {
-  const samples = Array.isArray(input.pingSamplesMs) ? input.pingSamplesMs.map(Number).filter(Number.isFinite) : []
+  const nativeProbe = input.nativeProbe && typeof input.nativeProbe === 'object' ? input.nativeProbe : null
+  const nativeSamples = nativeProbe ? nativeProbeSamples(nativeProbe) : {}
+  const samples = Array.isArray(nativeSamples.latencySamples) && nativeSamples.latencySamples.length
+    ? nativeSamples.latencySamples.map(Number).filter(Number.isFinite)
+    : Array.isArray(input.pingSamplesMs)
+      ? input.pingSamplesMs.map(Number).filter(Number.isFinite)
+      : []
   const latency = average(samples)
-  const sampleJitter = jitter(samples)
-  const loss = Number(input.packetLossPercent ?? input.packet_loss ?? input.lossPercent)
-  const host = input.host || input.originHostname || input.hostname || ''
-  const lanLike = isPrivateHost(host) || input.lan === true
+  const sampleJitter = Number.isFinite(Number(nativeSamples.jitterMs)) ? Number(nativeSamples.jitterMs) : jitter(samples)
+  const loss = Number(nativeSamples.packetLossPercent ?? input.packetLossPercent ?? input.packet_loss ?? input.lossPercent)
+  const host = nativeProbe?.targetHost || input.host || input.originHostname || input.hostname || ''
+  const nativeClassification = lower(nativeProbe?.classification)
+  const lanLike = nativeClassification ? ['pc', 'lan', 'local'].includes(nativeClassification) : isPrivateHost(host) || input.lan === true
+  const vpnLike = nativeClassification === 'vpn'
+  const pathLabel = lanLike ? 'LAN/local' : vpnLike ? 'VPN' : 'remote/VPN'
+  const controlPort = nativeProbePort(nativeProbe || {}, /(control|https)/i)
+  const streamPorts = Array.isArray(nativeProbe?.ports) ? nativeProbe.ports.filter((port) => /(stream|video|audio|rtsp|udp)/i.test(String(port.key || port.label || ''))) : []
+  const streamPortFailed = streamPorts.some((port) => normalizeProbeStatus(port.status) === 'fail')
+  const streamPortPassed = streamPorts.length > 0 && streamPorts.every((port) => normalizeProbeStatus(port.status) !== 'fail') && streamPorts.some((port) => normalizeProbeStatus(port.status) === 'pass')
   const currentBitrate = Number(input.currentBitrateKbps ?? input.bitrateKbps ?? input.bitrate_kbps)
   const latencyPenalty = Number.isFinite(latency) && latency > 60 ? 0.55 : Number.isFinite(latency) && latency > 30 ? 0.75 : 1
   const jitterPenalty = Number.isFinite(sampleJitter) && sampleJitter > 15 ? 0.7 : 1
@@ -385,36 +444,36 @@ export function buildNetworkPathTestReport(input = {}) {
     checklistItem(
       'host-reachable',
       'Host reachable',
-      input.hostReachable === false ? 'fail' : samples.length || input.hostReachable === true ? 'pass' : 'warning',
-      samples.length ? `${samples.length} latency sample${samples.length === 1 ? '' : 's'} collected.` : 'Browser-side reachability is inferred from the Web UI session.',
-      samples.length ? 'Keep this host address for the client test.' : 'Open this page from the same client/network you plan to stream from.'
+      nativeProbe?.hostReachable === false ? 'fail' : nativeProbe?.hostReachable === true ? 'pass' : input.hostReachable === false ? 'fail' : samples.length || input.hostReachable === true ? 'pass' : 'warning',
+      samples.length ? `${samples.length} latency sample${samples.length === 1 ? '' : 's'} collected.` : nativeProbe ? 'Polaris server returned native reachability evidence for this Web UI request.' : 'Browser-side reachability is inferred from the Web UI session.',
+      samples.length || nativeProbe ? 'Keep this host address for the client test.' : 'Open this page from the same client/network you plan to stream from.'
     ),
     checklistItem(
       'control-port',
       'Control port',
-      input.controlPortOpen === false ? 'fail' : input.controlPortOpen === true ? 'pass' : 'warning',
-      input.controlPortOpen === true ? 'Control/pairing path is reachable.' : input.controlPortOpen === false ? 'Control/pairing port did not respond.' : 'Control port was not directly tested by this browser.',
-      input.controlPortOpen === false ? 'Check host firewall/NAT before pairing.' : 'If pairing fails, verify the HTTPS/control port from the client network.'
+      controlPort ? normalizeProbeStatus(controlPort.status) : input.controlPortOpen === false ? 'fail' : input.controlPortOpen === true ? 'pass' : 'warning',
+      controlPort ? nativeProbePortDetail(controlPort) : input.controlPortOpen === true ? 'Control/pairing path is reachable.' : input.controlPortOpen === false ? 'Control/pairing port did not respond.' : 'Control port was not directly tested by this browser.',
+      (controlPort && normalizeProbeStatus(controlPort.status) === 'fail') || input.controlPortOpen === false ? 'Check host firewall/NAT before pairing.' : 'If pairing fails, verify the HTTPS/control port from the client network.'
     ),
     checklistItem(
       'stream-port',
       'Stream ports',
-      input.streamPortOpen === false ? 'fail' : input.streamPortOpen === true ? 'pass' : 'warning',
-      input.streamPortOpen === true ? 'Stream ports look reachable.' : input.streamPortOpen === false ? 'One or more stream ports did not respond.' : 'Stream ports were not directly tested by this browser.',
-      input.streamPortOpen === false ? 'Fix firewall/NAT before tuning bitrate.' : 'If video starts then freezes, retest UDP reachability from the client.'
+      streamPortFailed ? 'fail' : streamPortPassed ? 'pass' : input.streamPortOpen === false ? 'fail' : input.streamPortOpen === true ? 'pass' : 'warning',
+      streamPorts.length ? streamPorts.map(nativeProbePortDetail).join(' · ') : input.streamPortOpen === true ? 'Stream ports look reachable.' : input.streamPortOpen === false ? 'One or more stream ports did not respond.' : 'Stream ports were not directly tested by this browser.',
+      streamPortFailed || input.streamPortOpen === false ? 'Fix firewall/NAT before tuning bitrate.' : 'If video starts then freezes, retest UDP reachability from the client.'
     ),
     checklistItem(
       'discovery-mdns',
       'Discovery / mDNS',
-      input.mdnsAvailable === false ? 'warning' : input.mdnsAvailable === true || String(input.originHostname || '').endsWith('.local') ? 'pass' : 'warning',
-      input.mdnsAvailable === false ? 'mDNS discovery was not confirmed; manual host add may be needed.' : 'Discovery hints are present or not required.',
-      input.mdnsAvailable === false ? 'Use the host IP directly in Moonlight/Nova if auto-discovery misses it.' : 'Discovery is not the loudest signal right now.'
+      nativeProbe?.mdnsAvailable === false ? 'warning' : input.mdnsAvailable === false ? 'warning' : nativeProbe?.mdnsAvailable === true || input.mdnsAvailable === true || String(input.originHostname || '').endsWith('.local') ? 'pass' : 'warning',
+      nativeProbe?.mdnsAvailable === false || input.mdnsAvailable === false ? 'mDNS discovery was not confirmed; manual host add may be needed.' : 'Discovery hints are present or not required.',
+      nativeProbe?.mdnsAvailable === false || input.mdnsAvailable === false ? 'Use the host IP directly in Moonlight/Nova if auto-discovery misses it.' : 'Discovery is not the loudest signal right now.'
     ),
     checklistItem(
       'lan-vpn-clue',
       'LAN / VPN clue',
-      lanLike ? 'pass' : 'warning',
-      lanLike ? 'Host address looks LAN/local.' : 'Host address looks remote/VPN or public.',
+      lanLike || vpnLike ? 'pass' : 'warning',
+      lanLike ? 'Host address looks LAN/local.' : vpnLike ? 'Host address looks VPN/overlay.' : 'Host address looks remote/VPN or public.',
       lanLike ? 'Start with normal LAN bitrate, then tune up.' : 'Expect lower bitrate and higher jitter until VPN/NAT path is proven stable.'
     ),
     checklistItem(
@@ -438,10 +497,11 @@ export function buildNetworkPathTestReport(input = {}) {
     kind: 'network-path-test',
     status,
     classification: status === 'pass' ? 'clean' : 'network',
-    summary: `${lanLike ? 'LAN/local' : 'remote/VPN'} path: ${status === 'fail' ? 'fix reachability/loss first' : status === 'warning' ? 'usable with caution' : 'ready'}.`,
+    summary: `${pathLabel} path: ${status === 'fail' ? 'fix reachability/loss first' : status === 'warning' ? 'usable with caution' : 'ready'}.`,
     recommendedBitrateKbps,
     checks,
-    advancedEvidence: sanitizeDiagnosticsValue({ host, samples, latency, jitter: sampleJitter, packetLossPercent: Number.isFinite(loss) ? loss : null }),
+    advancedEvidence: sanitizeDiagnosticsValue({ host, samples, latency, jitter: sampleJitter, packetLossPercent: Number.isFinite(loss) ? loss : null, nativeProbe }),
+    nativeEvidenceText: nativeProbe ? formatNativeProbeEvidence(nativeProbe) : '',
   }
 }
 
@@ -517,7 +577,7 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
 
 export function buildSupportSelfTestCopy({ network, controller, postSession } = {}) {
   const sections = []
-  if (network) sections.push(['Network Path Tester', network.summary, `Status: ${network.status}`, `Recommended bitrate: ${network.recommendedBitrateKbps || 'unknown'} kbps`].join('\n'))
+  if (network) sections.push(['Network Path Tester', network.summary, `Status: ${network.status}`, `Recommended bitrate: ${network.recommendedBitrateKbps || 'unknown'} kbps`, network.nativeEvidenceText].filter(Boolean).join('\n'))
   if (controller) sections.push(['Controller/Input Tester', controller.summary, `Status: ${controller.status}`].join('\n'))
   if (postSession) sections.push(postSession.copyText || ['Post-session Stream Report', postSession.mainIssue].join('\n'))
   return redactSensitiveText(sections.join('\n\n'))
