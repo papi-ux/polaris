@@ -8,6 +8,7 @@ import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
 import { resolveClientSettingsSync, resolveStreamDisplayRuntimeNotice } from '../../client-settings-sync'
+import { buildResolutionPlanner } from '../../display-resolution-planner'
 
 const $t = inject('i18n').t;
 
@@ -30,6 +31,13 @@ const currentDriverStatus = computed(() => sudovdaStatus[props.vdisplay])
 const config = ref(props.config)
 const isLinux = computed(() => props.platform === 'linux')
 const isWindows = computed(() => props.platform === 'windows')
+const showDisplayPlannerAdvanced = ref(false)
+const customDisplayScale = ref(1)
+const displayPlanner = computed(() => buildResolutionPlanner({
+  fallbackMode: config.value.fallback_mode,
+  customScale: customDisplayScale.value,
+  showAdvanced: showDisplayPlannerAdvanced.value,
+}))
 
 const streamDisplayModes = [
   {
@@ -245,6 +253,11 @@ function setStreamDisplayMode(mode) {
       setEnabledConfig('linux_prefer_gpu_native_capture', true)
       break
   }
+}
+
+function applyDisplayPlan(choice) {
+  if (!choice?.safe) return
+  config.value.fallback_mode = choice.targetMode
 }
 
 const validateFallbackMode = (event) => {
@@ -624,6 +637,85 @@ pactl info | grep Source</pre>
       </summary>
 
       <div class="settings-disclosure-body settings-inline-stack">
+        <div class="settings-subtle-surface space-y-4" data-display-resolution-planner>
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="section-kicker">Display Planner</div>
+              <h4 class="mt-2 text-sm font-semibold text-silver">{{ displayPlanner.recommendedTitle }}</h4>
+              <div class="mt-1 text-sm leading-relaxed text-storm">
+                Start from the client panel shape, keep the aspect ratio at {{ displayPlanner.sourceAspectRatio }}, and choose a plain-language target before touching raw WxHxFPS values.
+              </div>
+            </div>
+            <div class="rounded-2xl border border-green-400/25 bg-green-400/10 px-3 py-2 text-right text-sm text-green-200">
+              <div class="text-[10px] font-semibold uppercase tracking-[0.16em]">Recommended</div>
+              <div class="mt-1 font-medium">{{ displayPlanner.recommendedMode }}</div>
+            </div>
+          </div>
+
+          <div class="grid gap-3 xl:grid-cols-3">
+            <button
+              v-for="choice in displayPlanner.visibleChoices"
+              :key="choice.id"
+              type="button"
+              class="focus-ring min-h-[126px] rounded-lg border border-storm/30 bg-deep/40 p-4 text-left transition hover:border-storm/70"
+              :class="choice.id === displayPlanner.recommendedId ? 'border-green-400/45 bg-green-400/10' : ''"
+              @click="applyDisplayPlan(choice)"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="text-sm font-semibold text-silver">{{ choice.title }}</div>
+                <span class="shrink-0 rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ choice.badge }}</span>
+              </div>
+              <div class="mt-3 text-sm leading-relaxed text-storm">{{ choice.reason }}</div>
+              <div class="mt-3 rounded-md border border-storm/20 bg-void/25 px-2.5 py-2 font-mono text-xs text-silver">{{ choice.targetMode }}</div>
+            </button>
+          </div>
+
+          <div class="flex flex-col gap-3 rounded-lg border border-ice/15 bg-ice/5 p-4 text-sm text-storm lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div class="font-medium text-silver">Moonlight compatibility stays standard</div>
+              <div class="mt-1">Planner choices only write the existing fallback display mode format. Nova/per-game overrides can layer on top where client-settings support exists.</div>
+            </div>
+            <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-secondary" @click="showDisplayPlannerAdvanced = !showDisplayPlannerAdvanced">
+              {{ showDisplayPlannerAdvanced ? 'Hide Advanced' : 'Show Advanced' }}
+            </button>
+          </div>
+
+          <div v-if="showDisplayPlannerAdvanced" class="settings-subtle-surface space-y-4" data-display-resolution-planner-advanced>
+            <div>
+              <div class="section-kicker">Advanced Display Planner</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">
+                Scale factors are capped to 0.5x–2x and excessive modes stay hidden. Use Custom only when a client/game needs a specific override and the normal recommendation is not right.
+              </div>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+              <button
+                v-for="factor in displayPlanner.advancedScaleFactors"
+                :key="factor.label"
+                type="button"
+                class="focus-ring rounded-lg border px-3 py-3 text-left"
+                :class="factor.safe ? 'border-storm/30 bg-void/25 hover:border-storm/70' : 'border-amber-300/25 bg-amber-300/10 opacity-60'"
+                :disabled="!factor.safe"
+                @click="customDisplayScale = factor.scaleFactor"
+              >
+                <div class="text-sm font-semibold text-silver">{{ factor.label }}</div>
+                <div class="mt-1 font-mono text-xs text-storm">{{ factor.targetMode }}</div>
+                <div class="mt-1 text-[11px]" :class="factor.safe ? 'text-storm' : 'text-amber-100'">{{ factor.safe ? 'Available' : 'Hidden as excessive' }}</div>
+              </button>
+            </div>
+            <label class="block text-sm font-medium text-storm">
+              Custom scale factor
+              <input
+                v-model.number="customDisplayScale"
+                type="number"
+                min="0.5"
+                max="2"
+                step="0.25"
+                class="mt-2 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+              />
+            </label>
+          </div>
+        </div>
+
         <DisplayOutputSelector
           :platform="platform"
           :config="config"
