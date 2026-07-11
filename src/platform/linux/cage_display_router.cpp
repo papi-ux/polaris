@@ -520,7 +520,22 @@ namespace cage_display_router {
       return false;
     }
 
+    if (auto cached_result = cached_headless_extcopy_dmabuf_probe_result();
+        cached_result && !*cached_result) {
+      return false;
+    }
+
     return hwdevice_type == platf::mem_type_e::cuda;
+  }
+
+  bool should_disable_headless_extcopy_after_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    const platf::frame_metadata_t &source_metadata
+  ) {
+    return runtime_state.effective_headless &&
+           !runtime_state.gpu_native_override_active &&
+           source_metadata.transport == platf::frame_transport_e::dmabuf &&
+           source_metadata.residency == platf::frame_residency_e::gpu;
   }
 
   std::optional<bool> cached_windowed_gpu_native_probe_result() {
