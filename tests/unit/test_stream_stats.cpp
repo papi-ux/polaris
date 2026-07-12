@@ -155,6 +155,20 @@ TEST(StreamStatsLinuxGpuProfileTests, DoesNotCallMissingCaptureDeviceAnAdapterMa
   EXPECT_EQ(profile.at("adapter_pairing_device_source"), "none");
 }
 
+TEST(StreamStatsLinuxGpuProfileTests, KeepsIdenticalUnresolvableDevicePairingUnknown) {
+  LinuxDisplayConfigGuard guard;
+  config::video.adapter_name = "/dev/dri/polaris-missing-shared-node";
+
+  stream_stats::stats_t stats {};
+  stats.wayland_main_device = "/dev/dri/polaris-missing-shared-node";
+
+  const auto profile = stream_stats::linux_gpu_profile_json(stats);
+
+  EXPECT_TRUE(profile.at("adapter_matches_wayland_main_device").is_null());
+  EXPECT_EQ(profile.at("adapter_pairing_status"), "unknown");
+  EXPECT_TRUE(profile.at("configuration_warnings").empty());
+}
+
 TEST(StreamStatsLinuxGpuProfileTests, KeepsUnresolvableDevicePairingUnknown) {
   LinuxDisplayConfigGuard guard;
   config::video.adapter_name = "/dev/dri/polaris-missing-encoder-node";

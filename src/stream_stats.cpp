@@ -34,10 +34,6 @@ namespace stream_stats {
     if (lhs.empty() || rhs.empty()) {
       return std::nullopt;
     }
-    if (lhs == rhs) {
-      return true;
-    }
-
     std::error_code ec;
     const bool equivalent = std::filesystem::equivalent(lhs, rhs, ec);
     if (ec) {
