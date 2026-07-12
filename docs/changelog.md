@@ -7,6 +7,16 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.3.1 - 2026-07-12
+
+Security and pairing-state patch focused on current cryptography dependencies, durable client authorization, and clearer paired-device history.
+
+- Updated the Browser Stream helper's Go cryptography and supporting modules, clearing the associated Dependabot alerts
+- Added localized Added and Last seen values for paired clients while keeping unknown timestamps truthful for legacy records
+- Hardened canonical X.509 client identity, revocation, duplicate-state validation, and authenticated request-time authorization snapshots
+- Hardened paired-client persistence across processes with private atomic state replacement on supported POSIX and Windows hosts
+- Improved paired-client controls so failed mutations remain visible instead of reporting false success in the web console
+
 ## v1.3.0 - 2026-07-11
 
 Feature release focused on self-service stream diagnostics, safer release visibility, display planning, and more resilient Linux capture startup.

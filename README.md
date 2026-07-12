@@ -88,16 +88,15 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.3.0
+## What is New in v1.3.1
 
-Polaris v1.3.0 turns the web console into a stronger self-service streaming cockpit: diagnose the host and live path, plan display modes before launch, see updates without spelunking GitHub, and recover more cleanly from Linux capture-environment drift.
+Polaris v1.3.1 is a focused security and pairing-state patch: current Browser Stream cryptography dependencies, stronger client authorization persistence, and clearer paired-device history without changing the streaming workflow.
 
-- **Polaris Doctor and support reports**: deterministic host, stream, and post-session findings now drive privacy-safe support bundles, self-tests, and issue drafts; optional AI explanations translate the evidence without replacing it.
-- **Network and controller truth**: native probes surface route, reachability, latency, packet loss, controller isolation, and haptics evidence so support can stop blaming the nearest random subsystem.
-- **Display planning before launch**: the resolution planner compares client requests, host capabilities, capture constraints, and output modes before a stream starts.
-- **Update Center**: Mission Control can check release metadata and expose package-aware update guidance without silently mutating the host.
-- **More resilient Linux capture**: stale desktop environment values self-heal, while headless DMA-BUF conversion failures fall back instead of stranding the session.
-- **Clearer GPU guidance**: public docs now explain NVIDIA, AMD/VAAPI, GPU-native, and fallback behavior with less vendor-specific fog.
+- **Browser Stream security refresh**: current Go cryptography and supporting modules clear the dependency alerts previously attached to the helper dependency graph.
+- **Added and Last seen timestamps**: newly paired and authenticated clients expose localized history while legacy records remain honestly labeled as not recorded.
+- **Fail-closed client authorization**: canonical certificate identity, revocation, duplicate-state validation, and request-time authorization snapshots are hardened.
+- **Safer state persistence**: paired-client records use private atomic replacement across processes on supported POSIX and Windows hosts.
+- **Truthful client controls**: failed paired-client mutations remain visible instead of being presented as successful in the web console.
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
