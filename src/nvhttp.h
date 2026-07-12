@@ -6,10 +6,11 @@
 #pragma once
 
 // standard includes
-#include <string>
 #include <chrono>
+#include <functional>
 #include <list>
 #include <optional>
+#include <string>
 #include <string_view>
 
 // lib includes
@@ -44,6 +45,12 @@ namespace nvhttp {
 
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using cmd_list_t = std::list<crypto::command_entry_t>;
+
+  enum class client_mutation_result_t {
+    success,
+    not_found,
+    persistence_failed,
+  };
 
   /**
    * @brief The protocol version.
@@ -83,6 +90,27 @@ namespace nvhttp {
    * @return The paired client entry when the certificate is recognized, otherwise null.
    */
   crypto::p_named_cert_t verify_client_cert(SSL *ssl, bool log_errors = true);
+
+  /**
+   * @brief Resolve a TLS-handshake client snapshot against current authorization.
+   * @return The current immutable client record, or null after revocation.
+   */
+  crypto::p_named_cert_t resolve_authorized_client(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path = {}
+  );
+
+  /**
+   * @brief Atomically mutate the shared authorization/credentials state file.
+   *
+   * Serializes the complete read-modify-write transaction across pairing,
+   * credential, and API-key writers so independent updates cannot overwrite
+   * one another with stale snapshots.
+   */
+  bool update_state_file(
+    const std::string &path,
+    const std::function<void(nlohmann::json &)> &mutation
+  );
 
   std::string
   get_arg(const args_t &args, const char *name, const char *default_value = nullptr);
@@ -244,6 +272,7 @@ namespace nvhttp {
    * @examples_end
    */
   bool unpair_client(std::string_view uuid);
+  client_mutation_result_t unpair_client_result(std::string_view uuid);
 
   /**
    * @brief Get all paired clients.
@@ -260,7 +289,7 @@ namespace nvhttp {
    * nvhttp::erase_all_clients();
    * @examples_end
    */
-  void erase_all_clients();
+  bool erase_all_clients();
 
   /**
    * @brief      Stops a session.
@@ -312,6 +341,19 @@ namespace nvhttp {
    * 
    * @return     Whether the update is successful
    */
+  client_mutation_result_t update_device_info_result(
+    const std::string& uuid,
+    const std::string& name,
+    const std::string& display_mode,
+    const int target_bitrate_kbps,
+    const cmd_list_t& do_cmds,
+    const cmd_list_t& undo_cmds,
+    const crypto::PERM newPerm,
+    const bool enable_legacy_ordering,
+    const bool allow_client_commands,
+    const bool always_use_virtual_display
+  );
+
   bool update_device_info(
     const std::string& uuid,
     const std::string& name,
@@ -326,6 +368,15 @@ namespace nvhttp {
   );
 
 #ifdef POLARIS_TESTS
+  enum class pairing_state_write_fault_t {
+    none,
+    open,
+    short_write,
+    flush,
+    rename,
+    post_rename_durability,
+  };
+
   nlohmann::json build_stream_policy_json_for_tests(const crypto::named_cert_t &client,
                                                     const stream_stats::stats_t &stats,
                                                     const nlohmann::json &health);
@@ -348,5 +399,24 @@ namespace nvhttp {
   );
 #endif
   void reset_pairing_state_for_tests();
+  void add_legacy_authorized_client_for_tests(const crypto::p_named_cert_t &named_cert_p);
+  bool add_authorized_client_for_tests(
+    const crypto::p_named_cert_t &named_cert_p,
+    std::optional<crypto::PERM> pairing_perm = std::nullopt
+  );
+  bool game_stream_request_authorized_for_tests(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  );
+  bool record_client_seen_for_tests(std::string_view uuid, std::int64_t seen_at, bool persist = false);
+  bool record_client_pointer_seen_for_tests(const crypto::p_named_cert_t &client, std::int64_t seen_at, bool persist = false);
+  void set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t fault);
+  crypto::p_named_cert_t verify_client_cert_for_tests(X509 *cert, std::int64_t seen_at);
+  crypto::p_named_cert_t resolve_authorized_client_for_tests(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  );
+  bool save_pairing_state_for_tests();
+  void load_pairing_state_for_tests();
 #endif
 }  // namespace nvhttp

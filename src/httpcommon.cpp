@@ -7,6 +7,7 @@
 // standard includes
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <utility>
 
 // lib includes
@@ -49,16 +50,6 @@ namespace http {
     constexpr std::string_view legacy_password_hash_scheme = "sha256"sv;
     constexpr std::string_view modern_password_hash_scheme = "scrypt"sv;
 
-    bool restrict_credentials_file_permissions(const fs::path &path) {
-      std::error_code err_code {};
-      fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, err_code);
-      if (err_code) {
-        BOOST_LOG(error) << "Couldn't change permissions of ["sv << path << "] :"sv << err_code.message();
-        return false;
-      }
-      return true;
-    }
-
     bool hash_password_for_scheme(
       const std::string_view password,
       const std::string_view salt,
@@ -78,16 +69,15 @@ namespace http {
       return true;
     }
 
-    int persist_credentials_json(const fs::path &path, const nlohmann::json &payload) {
-      try {
-        std::ofstream out(path);
-        out << payload.dump(4);
-      } catch (std::exception &e) {
-        BOOST_LOG(error) << "error writing to the credentials file, perhaps try this again as an administrator? Details: "sv << e.what();
+    int persist_credentials_json(
+      const fs::path &path,
+      const std::function<void(nlohmann::json &)> &mutation
+    ) {
+      if (!nvhttp::update_state_file(path.string(), mutation)) {
+        BOOST_LOG(error) << "Error writing the credentials file; verify its directory is writable";
         return -1;
       }
-
-      return restrict_credentials_file_permissions(path) ? 0 : -1;
+      return 0;
     }
   }  // namespace
 
@@ -116,29 +106,18 @@ namespace http {
   }
 
   int save_user_creds(const std::string &file, const std::string &username, const std::string &password, bool run_our_mouth) {
-    nlohmann::json outputTree;
-
-    if (fs::exists(file)) {
-      try {
-        std::ifstream in(file);
-        in >> outputTree;
-      } catch (std::exception &e) {
-        BOOST_LOG(error) << "Couldn't read user credentials: "sv << e.what();
-        return -1;
-      }
-    }
-
     auto salt = crypto::rand_alphabet(16);
     std::string password_hash;
     if (!hash_password_for_scheme(password, salt, modern_password_hash_scheme, password_hash)) {
       BOOST_LOG(error) << "Couldn't derive password hash with the configured KDF";
       return -1;
     }
-    outputTree["username"] = username;
-    outputTree["salt"] = salt;
-    outputTree["password_scheme"] = modern_password_hash_scheme;
-    outputTree["password"] = password_hash;
-    if (persist_credentials_json(file, outputTree) != 0) {
+    if (persist_credentials_json(file, [&](nlohmann::json &outputTree) {
+          outputTree["username"] = username;
+          outputTree["salt"] = salt;
+          outputTree["password_scheme"] = modern_password_hash_scheme;
+          outputTree["password"] = password_hash;
+        }) != 0) {
       return -1;
     }
 
@@ -183,19 +162,11 @@ namespace http {
       config::sunshine.api_key = crypto::rand_alphabet(48,
         std::string_view {"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"});
       BOOST_LOG(info) << "Generated new API key";
-      // Save it back to the credentials file
-      try {
-        nlohmann::json outputTree;
-        if (fs::exists(file)) {
-          std::ifstream in(file);
-          in >> outputTree;
-        }
-        outputTree["api_key"] = config::sunshine.api_key;
-        if (persist_credentials_json(file, outputTree) != 0) {
-          return -1;
-        }
-      } catch (std::exception &e) {
-        BOOST_LOG(error) << "Failed to save auto-generated API key: "sv << e.what();
+      // Save it back without racing pairing/timestamp updates in the shared file.
+      if (persist_credentials_json(file, [&](nlohmann::json &outputTree) {
+            outputTree["api_key"] = config::sunshine.api_key;
+          }) != 0) {
+        return -1;
       }
     }
     return 0;

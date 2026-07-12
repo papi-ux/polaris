@@ -6,8 +6,15 @@
 #include "../tests_common.h"
 
 #include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+  #include <sys/wait.h>
+  #include <unistd.h>
+#endif
 
 #include <src/crypto.h>
 #include <src/config.h>
@@ -16,6 +23,13 @@
 
 using namespace nvhttp;
 using namespace std::literals;
+
+namespace confighttp {
+  bool config_request_authorized_for_tests(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  );
+}
 
 struct pairing_input {
   std::shared_ptr<pair_session_t> session;
@@ -82,6 +96,38 @@ JDRahKutP9rx6RO5OHqsUB+b4jA4W0L9UnXUoLKbjig501AUix0p52FBxu+HJ90r
 HlLs3Vo6nj4Z/PZXrzaz8dtQ/KJMpd/g/9xlo6BKAnRk5SI8KLhO4hW6zG0QA56j
 X4wnh1bwdiidqpcgyuKossLOPxbS786WmsesaAWPnpoY6M8aija+ALwNNuWWmyMg
 9SVDV76xJzM36Uq7Kg3QJYTlY04WmPIdJHkCtXWf9g==
+-----END CERTIFICATE-----)";
+std::string with_crlf_line_endings(std::string_view pem) {
+  std::string converted;
+  converted.reserve(pem.size() + std::count(pem.begin(), pem.end(), '\n'));
+  for (const auto ch : pem) {
+    if (ch == '\n') {
+      converted.push_back('\r');
+    }
+    converted.push_back(ch);
+  }
+  return converted;
+}
+
+const std::string SECOND_PUBLIC_CERT = R"(-----BEGIN CERTIFICATE-----
+MIIDTjCCAjagAwIBAgIBAjANBgkqhkiG9w0BAQsFADA/MQswCQYDVQQGEwJJVDEV
+MBMGA1UECgwMUG9sYXJpc1Rlc3RzMRkwFwYDVQQDDBBsb2NhbGhvc3Qtc2Vjb25k
+MCAXDTI2MDcxMTIyMjg0OVoYDzIxMjYwNjE3MjIyODQ5WjA/MQswCQYDVQQGEwJJ
+VDEVMBMGA1UECgwMUG9sYXJpc1Rlc3RzMRkwFwYDVQQDDBBsb2NhbGhvc3Qtc2Vj
+b25kMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy3jzZVjdOhS5TLo1
+syF/FCAju0lnx+Q15Wn1Y6ccIv1gpHTuhcYsakTRru9cDLyVxWw5TUfH6l9saPnq
+teyd7hSp/qnY5j9y9/G5KsYaCf5wq15Hhsgk0Pg2roOt2WEiXltjJn/iwEef4v31
+mH16UpW3H+VyUDxFrxDaS6lrvjTlOdHSVyBFWKVF0cdvseGW8JB+7VSZveC/gjlM
+oiSkD8loFNmhbMiRsBxX3j30lKX2B6mx2VfyC6WOfVSWoqwcBPfW8f5gbzCO2oQZ
+iU0g7g33yXDw4RReZGWtFJED6z74V3EGkkbYu79FaJxEI/KU0pxmK/ZLVipPdsMQ
+8p/UtwIDAQABo1MwUTAdBgNVHQ4EFgQUqXZBYF/XG9vIeuIBbBo9/ce8h9wwHwYD
+VR0jBBgwFoAUqXZBYF/XG9vIeuIBbBo9/ce8h9wwDwYDVR0TAQH/BAUwAwEB/zAN
+BgkqhkiG9w0BAQsFAAOCAQEAT3rcv1A8m5BcElOXmW2WkzanrcNZUw5wDgjwblcZ
+CTzxChRtvfWbGmkfOd/a9xfuHdugqIrgwLAWU8eEObP0LXKbN3ktEHr4rleVuxP7
+dplWuXJZRtG/ZfGXZs1TF2O8jJEavAmMytjiq0G+57mpncuHeIW068qG+zC0kw0E
+8Ss6gUrr4FRWwe/Im84ocroy/I/pVD4T8le5Q4X9L9Guns0NBiKrYwmFvgSK3fcq
+RZpXyPu5euwhZYzo6fXYcAKjrCoP9OVBxB2B3imNGOHRpcMc+ZpR2LWwV9AktEKq
+t6vriILn8e7Cvkp7GQ98YMzh9NvB4MMJL7u5qhgd5q2C2A==
 -----END CERTIFICATE-----)";
 
 struct PairingTest: testing::TestWithParam<std::tuple<pairing_input, pairing_output>> {
@@ -312,9 +358,31 @@ TEST(CertChainTest, ConcurrentVerifyUsesIndependentOpenSslContexts) {
   EXPECT_EQ(failures.load(std::memory_order_relaxed), 0);
 }
 
+TEST(CertChainTest, CanonicallyEquivalentCertificateReplacesExistingIdentity) {
+  crypto::cert_chain_t chain;
+  auto original = std::make_shared<crypto::named_cert_t>();
+  original->cert = PUBLIC_CERT;
+  original->name = "original";
+  chain.add(original);
+
+  auto replacement = std::make_shared<crypto::named_cert_t>();
+  replacement->cert = with_crlf_line_endings(PUBLIC_CERT);
+  replacement->name = "replacement";
+  chain.add(replacement);
+
+  auto cert = crypto::x509(PUBLIC_CERT);
+  crypto::p_named_cert_t verified;
+  ASSERT_EQ(chain.verify(cert.get(), verified), nullptr);
+  EXPECT_EQ(verified.get(), replacement.get());
+}
+
 struct PairingAccessPresetTest: testing::Test {
   void SetUp() override {
     previous_fresh_state = config::sunshine.flags.test(config::flag::FRESH_STATE);
+    previous_state_path = config::nvhttp.file_state;
+    state_path = std::filesystem::temp_directory_path() /
+                 ("polaris-pairing-fixture-" + uuid_util::uuid_t::generate().string() + ".json");
+    config::nvhttp.file_state = state_path.string();
     config::sunshine.flags.set(config::flag::FRESH_STATE);
     reset_pairing_state_for_tests();
 
@@ -327,12 +395,21 @@ struct PairingAccessPresetTest: testing::Test {
   void TearDown() override {
     reset_pairing_state_for_tests();
     config::sunshine.flags.set(config::flag::FRESH_STATE, previous_fresh_state);
+    config::nvhttp.file_state = previous_state_path;
+    std::error_code ec;
+    std::filesystem::remove(state_path, ec);
+    std::filesystem::remove(state_path.string() + ".lock", ec);
   }
 
   bool previous_fresh_state = false;
+  std::string previous_state_path;
+  std::filesystem::path state_path;
 };
 
-pair_session_t successful_pairing_session(const std::string &unique_id, std::optional<crypto::PERM> pairing_perm = std::nullopt) {
+pair_session_t successful_pairing_session(
+  const std::string &unique_id,
+  std::optional<crypto::PERM> pairing_perm = std::nullopt
+) {
   pair_session_t session {
     .client = {
       .uniqueID = unique_id,
@@ -345,9 +422,7 @@ pair_session_t successful_pairing_session(const std::string &unique_id, std::opt
   return session;
 }
 
-void complete_successful_pairing(pair_session_t &session) {
-  boost::property_tree::ptree tree;
-
+void run_successful_pairing_protocol(pair_session_t &session, boost::property_tree::ptree &tree) {
   getservercert(session, tree, "5338");
   ASSERT_EQ(tree.get<int>("root.paired"), 1);
 
@@ -365,8 +440,44 @@ void complete_successful_pairing(pair_session_t &session) {
                        "9BB74D8DE2FF006C3F47FC45EFDAA97D433783AFAB3ACD85CA7ED2330BB2A7BD18A5B044AF8CAC177116FAE8A6E8E44653A8944A0F8EA138B2E013756D847D2C4FC52F736E2E7E9B4154712B18F8307B2A161E010F0587744163E42ECA9EA548FC435756EDCF1FEB94037631ABB72B29DDAC0EA5E61F2DBFCC3B20AA021473CC85AC98D88052CA6618ED1701EFBF142C18D5E779A3155B84DF65057D4823EC194E6DF14006793E8D7A3DCCE20A911636C4E01ECA8B54B9DE9F256F15DE9A980EA024B30D77579140D45EC220C738164BDEEEBF7364AE94A5FF9B784B40F2E640CE8603017DEEAC7B2AD77B807C643B7B349C110FE15F94C7B3D37FF15FDFBE26",
                        true)
   );
+}
+
+void complete_successful_pairing(pair_session_t &session) {
+  boost::property_tree::ptree tree;
+  run_successful_pairing_protocol(session, tree);
   ASSERT_EQ(tree.get<int>("root.paired"), 1);
 }
+
+struct TemporaryPairingState {
+  explicit TemporaryPairingState(std::string_view label):
+      path {std::filesystem::temp_directory_path() /
+            ("polaris-pairing-" + std::string(label) + "-" + uuid_util::uuid_t::generate().string() + ".json")},
+      previous_path {config::nvhttp.file_state} {
+    config::nvhttp.file_state = path.string();
+  }
+
+  ~TemporaryPairingState() {
+    config::nvhttp.file_state = previous_path;
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(path.string() + ".lock", ec);
+  }
+
+  nlohmann::json read() const {
+    std::ifstream input(path);
+    nlohmann::json state;
+    input >> state;
+    return state;
+  }
+
+  void write(const nlohmann::json &state) const {
+    std::ofstream output(path);
+    output << state.dump(4);
+  }
+
+  std::filesystem::path path;
+  std::string previous_path;
+};
 
 TEST_F(PairingAccessPresetTest, ParsesAccessPresets) {
   const auto standard = pairing_access_preset_from_view("standard");
@@ -401,13 +512,797 @@ TEST_F(PairingAccessPresetTest, StoredAccessPresetOverridesFirstPairFullDefault)
   EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
 }
 
-TEST_F(PairingAccessPresetTest, NovaTrustedPairGetsGameControlForAdditionalClient) {
-  auto first = successful_pairing_session("legacy-first");
-  complete_successful_pairing(first);
+TEST_F(PairingAccessPresetTest, RepairingSameCertificateReplacesAuthorizationWithoutDuplicate) {
+  auto original = successful_pairing_session("duplicate-original", crypto::PERM::_all);
+  complete_successful_pairing(original);
+  const auto initial_clients = get_all_clients();
+  ASSERT_EQ(initial_clients.size(), 1);
+  const auto original_paired_at = initial_clients[0]["paired_at"].get<std::int64_t>();
+  const auto original_uuid = initial_clients[0]["uuid"].get<std::string>();
 
-  auto nova = successful_pairing_session("nova-retroid");
-  nova.client.family_hint = "nova";
-  complete_successful_pairing(nova);
+  auto replacement = successful_pairing_session("duplicate-replacement", crypto::PERM::_game_control);
+  complete_successful_pairing(replacement);
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_NE(clients[0]["uuid"].get<std::string>(), original_uuid);
+  EXPECT_EQ(clients[0]["name"], "test-duplicate-replacement");
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
+  EXPECT_EQ(clients[0]["paired_at"].get<std::int64_t>(), original_paired_at);
+}
+
+TEST_F(PairingAccessPresetTest, CanonicallyEquivalentCertificateReplacesAuthorization) {
+  auto original = std::make_shared<crypto::named_cert_t>();
+  original->cert = PUBLIC_CERT;
+  original->name = "canonical-original";
+  original->uuid = uuid_util::uuid_t::generate().string();
+  ASSERT_TRUE(add_authorized_client_for_tests(original));
+
+  auto replacement = std::make_shared<crypto::named_cert_t>();
+  replacement->cert = with_crlf_line_endings(PUBLIC_CERT);
+  replacement->name = "canonical-replacement";
+  replacement->uuid = uuid_util::uuid_t::generate().string();
+  ASSERT_TRUE(add_authorized_client_for_tests(replacement));
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["uuid"], replacement->uuid);
+}
+
+TEST_F(PairingAccessPresetTest, ImplicitCertificateRepairPreservesExistingPermissions) {
+  auto original = std::make_shared<crypto::named_cert_t>();
+  original->cert = PUBLIC_CERT;
+  original->name = "full-control-original";
+  original->uuid = uuid_util::uuid_t::generate().string();
+  ASSERT_TRUE(add_authorized_client_for_tests(original, crypto::PERM::_all));
+
+  auto replacement = std::make_shared<crypto::named_cert_t>();
+  replacement->cert = with_crlf_line_endings(PUBLIC_CERT);
+  replacement->name = "implicit-repair";
+  replacement->uuid = uuid_util::uuid_t::generate().string();
+  ASSERT_TRUE(add_authorized_client_for_tests(replacement));
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_all));
+}
+
+TEST_F(PairingAccessPresetTest, EstablishedRequestSnapshotIsRejectedAfterRevocation) {
+  auto session = successful_pairing_session("revoked-request");
+  complete_successful_pairing(session);
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+
+  auto cert = crypto::x509(PUBLIC_CERT);
+  auto request_snapshot = verify_client_cert_for_tests(cert.get(), clients[0]["last_seen_at"].get<std::int64_t>() + 1);
+  ASSERT_TRUE(request_snapshot);
+  ASSERT_EQ(unpair_client_result(clients[0]["uuid"].get<std::string>()), client_mutation_result_t::success);
+
+  EXPECT_FALSE(resolve_authorized_client_for_tests(request_snapshot, "/serverinfo"));
+  EXPECT_FALSE(game_stream_request_authorized_for_tests(request_snapshot, "/serverinfo"));
+  EXPECT_FALSE(confighttp::config_request_authorized_for_tests(request_snapshot, "/api/clients/list"));
+}
+
+TEST_F(PairingAccessPresetTest, SameUuidDifferentCertificateRejectsEstablishedRequestSnapshot) {
+  TemporaryPairingState state {"same-uuid-different-certificate"};
+  auto original = std::make_shared<crypto::named_cert_t>();
+  original->cert = PUBLIC_CERT;
+  original->name = "original-certificate";
+  original->uuid = uuid_util::uuid_t::generate().string();
+  ASSERT_TRUE(add_authorized_client_for_tests(original, crypto::PERM::_all));
+
+  nlohmann::json persisted;
+  persisted["root"]["uniqueid"] = http::unique_id;
+  persisted["root"]["named_devices"] = nlohmann::json::array({
+    {
+      {"name", "replacement-certificate"},
+      {"uuid", original->uuid},
+      {"cert", SECOND_PUBLIC_CERT},
+      {"perm", static_cast<uint32_t>(crypto::PERM::_all)}
+    }
+  });
+  state.write(persisted);
+  ASSERT_NO_THROW(load_pairing_state_for_tests());
+  ASSERT_EQ(get_all_clients().size(), 1);
+
+  EXPECT_FALSE(resolve_authorized_client_for_tests(original, "/serverinfo"));
+  EXPECT_FALSE(game_stream_request_authorized_for_tests(original, "/serverinfo"));
+  EXPECT_FALSE(confighttp::config_request_authorized_for_tests(original, "/api/clients/list"));
+  EXPECT_FALSE(record_client_pointer_seen_for_tests(original, 1234));
+}
+
+TEST_F(PairingAccessPresetTest, ParsedPolarisPathPersistsNovaClientFamily) {
+  TemporaryPairingState state {"parsed-family"};
+  auto session = successful_pairing_session("family-client");
+  complete_successful_pairing(session);
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+
+  auto cert = crypto::x509(PUBLIC_CERT);
+  auto request_snapshot = verify_client_cert_for_tests(cert.get(), clients[0]["last_seen_at"].get<std::int64_t>() + 1);
+  auto live = resolve_authorized_client_for_tests(request_snapshot, "/polaris/v1/capabilities");
+
+  ASSERT_TRUE(live);
+  EXPECT_EQ(live->client_family, "nova");
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["client_family"], "nova");
+  reset_pairing_state_for_tests();
+  load_pairing_state_for_tests();
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["client_family"], "nova");
+}
+
+TEST_F(PairingAccessPresetTest, PolarisMutationHandlersRenderTheCommittedLiveClient) {
+  const auto source_path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "src/nvhttp.cpp";
+  std::ifstream source_stream(source_path);
+  ASSERT_TRUE(source_stream.is_open());
+  const std::string source {
+    std::istreambuf_iterator<char>(source_stream),
+    std::istreambuf_iterator<char>()
+  };
+
+  constexpr std::string_view live_resolver_call =
+    "const auto response_client = resolve_authorized_client(named_cert_p, request->path);";
+  const auto first_live_resolver = source.find(live_resolver_call);
+  ASSERT_NE(first_live_resolver, std::string::npos);
+  EXPECT_NE(
+    source.find(live_resolver_call, first_live_resolver + live_resolver_call.size()),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("build_stream_policy_json(*response_client, stats, health)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("build_client_settings_json(*response_client, stats, health)"),
+    std::string::npos
+  );
+}
+
+TEST_F(PairingAccessPresetTest, MutationOutcomesDistinguishMissingFromPersistenceFailure) {
+  TemporaryPairingState state {"mutation-outcomes"};
+  EXPECT_EQ(unpair_client_result("missing"), client_mutation_result_t::not_found);
+  EXPECT_EQ(
+    update_device_info_result("missing", "", "", 0, {}, {}, crypto::PERM::_default, true, true, false),
+    client_mutation_result_t::not_found
+  );
+
+  auto session = successful_pairing_session("mutation-client");
+  complete_successful_pairing(session);
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::rename);
+
+  EXPECT_EQ(unpair_client_result(uuid), client_mutation_result_t::persistence_failed);
+  EXPECT_EQ(
+    update_device_info_result(uuid, "changed", "", 0, {}, {}, crypto::PERM::_default, true, true, false),
+    client_mutation_result_t::persistence_failed
+  );
+}
+
+TEST_F(PairingAccessPresetTest, NewlyPairedClientIncludesAddedAndLastSeenTimestamps) {
+  auto session = successful_pairing_session("timestamped-client");
+
+  complete_successful_pairing(session);
+
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto paired_at = clients[0].value("paired_at", std::int64_t {0});
+  const auto last_seen_at = clients[0].value("last_seen_at", std::int64_t {0});
+  EXPECT_GT(paired_at, 0);
+  EXPECT_EQ(last_seen_at, paired_at);
+}
+
+TEST_F(PairingAccessPresetTest, RecordingClientActivityAdvancesLastSeenWithoutChangingAddedDate) {
+  auto session = successful_pairing_session("returning-client");
+  complete_successful_pairing(session);
+
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+  const auto next_seen_at = paired_at + 120;
+
+  ASSERT_TRUE(record_client_seen_for_tests(uuid, next_seen_at));
+
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["paired_at"].get<std::int64_t>(), paired_at);
+  EXPECT_EQ(clients[0]["last_seen_at"].get<std::int64_t>(), next_seen_at);
+}
+
+TEST_F(PairingAccessPresetTest, AddedAndLastSeenTimestampsSurviveStateRoundTrip) {
+  TemporaryPairingState state {"timestamp-roundtrip"};
+  auto session = successful_pairing_session("persistent-client");
+  complete_successful_pairing(session);
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+  const auto last_seen_at = paired_at + 300;
+  ASSERT_TRUE(record_client_seen_for_tests(clients[0]["uuid"].get<std::string>(), last_seen_at));
+
+  save_pairing_state_for_tests();
+  reset_pairing_state_for_tests();
+  load_pairing_state_for_tests();
+
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["paired_at"].get<std::int64_t>(), paired_at);
+  EXPECT_EQ(clients[0]["last_seen_at"].get<std::int64_t>(), last_seen_at);
+}
+
+TEST_F(PairingAccessPresetTest, VerifiedPairedCertificateAdvancesLastSeen) {
+  TemporaryPairingState state {"verified-certificate"};
+  auto session = successful_pairing_session("verified-client");
+  complete_successful_pairing(session);
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto next_seen_at = clients[0]["paired_at"].get<std::int64_t>() + 120;
+
+  auto cert = crypto::x509(PUBLIC_CERT);
+  auto verified = verify_client_cert_for_tests(cert.get(), next_seen_at);
+
+  ASSERT_TRUE(verified);
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["last_seen_at"].get<std::int64_t>(), next_seen_at);
+}
+
+TEST_F(PairingAccessPresetTest, LastSeenPersistenceIsThrottled) {
+  TemporaryPairingState state {"timestamp-throttle"};
+  auto session = successful_pairing_session("throttled-client");
+  complete_successful_pairing(session);
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+  save_pairing_state_for_tests();
+
+  ASSERT_TRUE(record_client_seen_for_tests(uuid, paired_at + 30, true));
+  auto persisted = state.read();
+  EXPECT_EQ(persisted["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(), paired_at);
+
+  ASSERT_TRUE(record_client_seen_for_tests(uuid, paired_at + 61, true));
+  persisted = state.read();
+  EXPECT_EQ(persisted["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(), paired_at + 61);
+}
+
+TEST_F(PairingAccessPresetTest, AtomicStateWriteFailuresPreservePreviousAuthorizationStore) {
+  TemporaryPairingState state {"atomic-write-failures"};
+  auto session = successful_pairing_session("atomic-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  const auto baseline = state.read();
+#ifndef _WIN32
+  const auto state_permissions = std::filesystem::status(state.path).permissions();
+  EXPECT_EQ(
+    state_permissions & (std::filesystem::perms::group_all | std::filesystem::perms::others_all),
+    std::filesystem::perms::none
+  );
+#endif
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+  ASSERT_TRUE(record_client_seen_for_tests(uuid, paired_at + 120));
+
+  const auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+  for (const auto fault : {
+         pairing_state_write_fault_t::open,
+         pairing_state_write_fault_t::short_write,
+         pairing_state_write_fault_t::flush,
+         pairing_state_write_fault_t::rename,
+       }) {
+    SCOPED_TRACE(static_cast<int>(fault));
+    set_pairing_state_write_fault_for_tests(fault);
+    EXPECT_FALSE(save_pairing_state_for_tests());
+    EXPECT_EQ(state.read(), baseline);
+    const auto temporary_prefix = state.path.filename().string() + ".tmp.";
+    for (const auto &entry : std::filesystem::directory_iterator(state.path.parent_path())) {
+      EXPECT_FALSE(entry.path().filename().string().starts_with(temporary_prefix));
+    }
+  }
+
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  EXPECT_EQ(
+    state.read()["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(),
+    paired_at + 120
+  );
+}
+
+TEST_F(PairingAccessPresetTest, PostRenameDurabilityWarningReportsCommittedState) {
+  TemporaryPairingState state {"post-rename-durability"};
+  auto session = successful_pairing_session("post-rename-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto next_seen_at = clients[0]["paired_at"].get<std::int64_t>() + 120;
+  ASSERT_TRUE(record_client_seen_for_tests(uuid, next_seen_at, false));
+  const auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::post_rename_durability);
+
+  EXPECT_TRUE(save_pairing_state_for_tests());
+  EXPECT_EQ(
+    state.read()["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(),
+    next_seen_at
+  );
+}
+
+TEST_F(PairingAccessPresetTest, CredentialAndPairingWritersPreserveEachOthersState) {
+  TemporaryPairingState state {"credential-pairing-writers"};
+  auto session = successful_pairing_session("shared-state-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+
+  ASSERT_EQ(http::save_user_creds(state.path.string(), "operator", "test-password"), 0);
+  ASSERT_TRUE(record_client_seen_for_tests(uuid, paired_at + 61, true));
+  auto persisted = state.read();
+  EXPECT_EQ(persisted["username"].get<std::string>(), "operator");
+  EXPECT_EQ(
+    persisted["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(),
+    paired_at + 61
+  );
+
+  ASSERT_EQ(http::save_user_creds(state.path.string(), "operator-two", "test-password-two"), 0);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  persisted = state.read();
+  EXPECT_EQ(persisted["username"].get<std::string>(), "operator-two");
+  EXPECT_EQ(
+    persisted["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(),
+    paired_at + 61
+  );
+}
+
+TEST_F(PairingAccessPresetTest, SharedStateMutationsAreSerializedAcrossWriters) {
+  TemporaryPairingState state {"shared-writers"};
+  ASSERT_TRUE(save_pairing_state_for_tests());
+
+  std::atomic<bool> first_entered {false};
+  std::atomic<bool> release_first {false};
+  std::atomic<bool> second_started {false};
+  std::atomic<bool> second_entered {false};
+  bool first_ok = false;
+  bool second_ok = false;
+
+  std::thread first([&]() {
+    first_ok = update_state_file(state.path.string(), [&](nlohmann::json &root) {
+      first_entered.store(true, std::memory_order_release);
+      while (!release_first.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      root["writer_one"] = true;
+    });
+  });
+  while (!first_entered.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  std::thread second([&]() {
+    second_started.store(true, std::memory_order_release);
+    second_ok = update_state_file(state.path.string(), [&](nlohmann::json &root) {
+      second_entered.store(true, std::memory_order_release);
+      root["writer_two"] = true;
+    });
+  });
+  while (!second_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(second_entered.load(std::memory_order_acquire));
+  release_first.store(true, std::memory_order_release);
+  first.join();
+  second.join();
+
+  EXPECT_TRUE(first_ok);
+  EXPECT_TRUE(second_ok);
+  EXPECT_TRUE(second_entered.load(std::memory_order_acquire));
+  const auto persisted = state.read();
+  EXPECT_TRUE(persisted["writer_one"].get<bool>());
+  EXPECT_TRUE(persisted["writer_two"].get<bool>());
+}
+
+TEST_F(PairingAccessPresetTest, PairingPersistenceFailureRejectsAuthorization) {
+  TemporaryPairingState state {"pairing-rollback"};
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  config::sunshine.flags.reset(config::flag::FRESH_STATE);
+  const auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::rename);
+
+  auto session = successful_pairing_session("failed-pairing");
+  boost::property_tree::ptree tree;
+  run_successful_pairing_protocol(session, tree);
+
+  EXPECT_EQ(tree.get<int>("root.paired"), 0);
+  EXPECT_GE(tree.get<int>("root.<xmlattr>.status_code"), 500);
+  EXPECT_TRUE(get_all_clients().empty());
+  auto cert = crypto::x509(PUBLIC_CERT);
+  EXPECT_FALSE(verify_client_cert_for_tests(cert.get(), 1234));
+}
+
+TEST_F(PairingAccessPresetTest, DeviceUpdatePersistenceFailureRollsBackInMemoryState) {
+  TemporaryPairingState state {"update-rollback"};
+  auto session = successful_pairing_session("update-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto original_name = clients[0]["name"].get<std::string>();
+  const auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::rename);
+
+  EXPECT_FALSE(update_device_info(
+    uuid, "must-not-stick", "", 0, {}, {}, crypto::PERM::_default, true, true, false
+  ));
+  const auto after = get_all_clients();
+  ASSERT_EQ(after.size(), 1);
+  EXPECT_EQ(after[0]["name"].get<std::string>(), original_name);
+  EXPECT_EQ(state.read()["root"]["named_devices"][0]["name"].get<std::string>(), original_name);
+}
+
+TEST_F(PairingAccessPresetTest, UnpairPersistenceFailureKeepsClientAuthorizedAndReportsFailure) {
+  TemporaryPairingState state {"unpair-rollback"};
+  auto session = successful_pairing_session("unpair-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::rename);
+
+  EXPECT_FALSE(unpair_client(uuid));
+  ASSERT_EQ(get_all_clients().size(), 1);
+  auto cert = crypto::x509(PUBLIC_CERT);
+  EXPECT_TRUE(verify_client_cert_for_tests(cert.get(), clients[0]["last_seen_at"].get<std::int64_t>() + 1));
+}
+
+TEST_F(PairingAccessPresetTest, EraseAllPersistenceFailureKeepsClientsAuthorizedAndReportsFailure) {
+  TemporaryPairingState state {"erase-all-rollback"};
+  auto session = successful_pairing_session("erase-all-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::rename);
+
+  EXPECT_FALSE(erase_all_clients());
+  ASSERT_EQ(get_all_clients().size(), 1);
+  auto cert = crypto::x509(PUBLIC_CERT);
+  EXPECT_TRUE(verify_client_cert_for_tests(cert.get(), clients[0]["last_seen_at"].get<std::int64_t>() + 1));
+}
+
+TEST_F(PairingAccessPresetTest, MalformedStateClearsAuthorizationWithoutThrowing) {
+  TemporaryPairingState state {"malformed-state"};
+  auto session = successful_pairing_session("malformed-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  state.write({{"root", {{"uniqueid", http::unique_id}, {"named_devices", "not-an-array"}}}});
+
+  EXPECT_NO_THROW(load_pairing_state_for_tests());
+  EXPECT_TRUE(get_all_clients().empty());
+  auto cert = crypto::x509(PUBLIC_CERT);
+  EXPECT_FALSE(verify_client_cert_for_tests(cert.get(), 1234));
+}
+
+TEST_F(PairingAccessPresetTest, CanonicallyEquivalentLegacyCertificatesFailClosed) {
+  TemporaryPairingState state {"duplicate-legacy-state"};
+  nlohmann::json persisted;
+  persisted["root"]["uniqueid"] = http::unique_id;
+  persisted["root"]["devices"] = nlohmann::json::array({
+    {{"certs", nlohmann::json::array({PUBLIC_CERT, with_crlf_line_endings(PUBLIC_CERT)})}}
+  });
+  state.write(persisted);
+
+  EXPECT_NO_THROW(load_pairing_state_for_tests());
+  EXPECT_TRUE(get_all_clients().empty());
+}
+
+TEST_F(PairingAccessPresetTest, MixedLegacyAndNamedCanonicalDuplicateFailsClosed) {
+  TemporaryPairingState state {"duplicate-mixed-state"};
+  nlohmann::json persisted;
+  persisted["root"]["uniqueid"] = http::unique_id;
+  persisted["root"]["devices"] = nlohmann::json::array({
+    {{"certs", nlohmann::json::array({PUBLIC_CERT})}}
+  });
+  persisted["root"]["named_devices"] = nlohmann::json::array({
+    {
+      {"cert", with_crlf_line_endings(PUBLIC_CERT)},
+      {"uuid", uuid_util::uuid_t::generate().string()}
+    }
+  });
+  state.write(persisted);
+
+  EXPECT_NO_THROW(load_pairing_state_for_tests());
+  EXPECT_TRUE(get_all_clients().empty());
+}
+
+TEST_F(PairingAccessPresetTest, DuplicateCertificateStateFailsClosed) {
+  TemporaryPairingState state {"duplicate-state"};
+  auto session = successful_pairing_session("duplicate-state-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+
+  auto persisted = state.read();
+  persisted["root"]["named_devices"].push_back(persisted["root"]["named_devices"][0]);
+  persisted["root"]["named_devices"][1]["uuid"] = uuid_util::uuid_t::generate().string();
+  state.write(persisted);
+
+  reset_pairing_state_for_tests();
+  EXPECT_NO_THROW(load_pairing_state_for_tests());
+  EXPECT_TRUE(get_all_clients().empty());
+}
+
+TEST_F(PairingAccessPresetTest, StaleVerifiedPointerUpdatesCurrentLiveClientAfterReload) {
+  TemporaryPairingState state {"stale-pointer"};
+  auto session = successful_pairing_session("stale-pointer-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+  auto cert = crypto::x509(PUBLIC_CERT);
+  auto stale_pointer = verify_client_cert_for_tests(cert.get(), paired_at + 1);
+  ASSERT_TRUE(stale_pointer);
+  load_pairing_state_for_tests();
+
+  EXPECT_TRUE(record_client_pointer_seen_for_tests(stale_pointer, paired_at + 120));
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["last_seen_at"].get<std::int64_t>(), paired_at + 120);
+}
+
+#ifndef _WIN32
+TEST_F(PairingAccessPresetTest, SharedStateMutationsAreSerializedAcrossProcesses) {
+  TemporaryPairingState state {"process-writers"};
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  int child_entered_pipe[2];
+  int release_child_pipe[2];
+  ASSERT_EQ(::pipe(child_entered_pipe), 0);
+  ASSERT_EQ(::pipe(release_child_pipe), 0);
+
+  const auto child = ::fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    ::close(child_entered_pipe[0]);
+    ::close(release_child_pipe[1]);
+    const bool ok = update_state_file(state.path.string(), [&](nlohmann::json &root) {
+      const char entered = 'E';
+      (void) ::write(child_entered_pipe[1], &entered, 1);
+      char release = 0;
+      (void) ::read(release_child_pipe[0], &release, 1);
+      root["child_writer"] = true;
+    });
+    ::_exit(ok ? 0 : 1);
+  }
+
+  ::close(child_entered_pipe[1]);
+  ::close(release_child_pipe[0]);
+  char entered = 0;
+  ASSERT_EQ(::read(child_entered_pipe[0], &entered, 1), 1);
+  ASSERT_EQ(entered, 'E');
+
+  std::atomic<bool> parent_entered {false};
+  bool parent_ok = false;
+  std::thread parent_writer([&]() {
+    parent_ok = update_state_file(state.path.string(), [&](nlohmann::json &root) {
+      parent_entered.store(true, std::memory_order_release);
+      root["parent_writer"] = true;
+    });
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_FALSE(parent_entered.load(std::memory_order_acquire));
+
+  const char release = 'R';
+  ASSERT_EQ(::write(release_child_pipe[1], &release, 1), 1);
+  int child_status = 0;
+  ASSERT_EQ(::waitpid(child, &child_status, 0), child);
+  parent_writer.join();
+  ::close(child_entered_pipe[0]);
+  ::close(release_child_pipe[1]);
+
+  ASSERT_TRUE(WIFEXITED(child_status));
+  EXPECT_EQ(WEXITSTATUS(child_status), 0);
+  EXPECT_TRUE(parent_ok);
+  const auto persisted = state.read();
+  EXPECT_TRUE(persisted.value("child_writer", false));
+  EXPECT_TRUE(persisted.value("parent_writer", false));
+}
+#endif
+
+TEST_F(PairingAccessPresetTest, FailedTimestampPersistenceRetriesOnNextActivity) {
+  TemporaryPairingState state {"timestamp-retry"};
+  auto session = successful_pairing_session("retry-client");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+  const auto reset_fault = util::fail_guard([]() {
+    set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  });
+
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::rename);
+  ASSERT_TRUE(record_client_seen_for_tests(uuid, paired_at + 61, true));
+  EXPECT_EQ(
+    state.read()["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(),
+    paired_at
+  );
+
+  set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t::none);
+  // A second authentication can occur in the same Unix second. The timestamp
+  // does not advance, but the failed persistence attempt must still retry.
+  EXPECT_FALSE(record_client_seen_for_tests(uuid, paired_at + 61, true));
+  EXPECT_EQ(
+    state.read()["root"]["named_devices"][0]["last_seen_at"].get<std::int64_t>(),
+    paired_at + 61
+  );
+}
+
+TEST_F(PairingAccessPresetTest, LegacyStateWithoutTimestampsLoadsAsUnknown) {
+  TemporaryPairingState state {"legacy-timestamps"};
+  auto session = successful_pairing_session("legacy-client");
+  complete_successful_pairing(session);
+  save_pairing_state_for_tests();
+
+  auto persisted = state.read();
+  auto &device = persisted["root"]["named_devices"][0];
+  device.erase("paired_at");
+  device.erase("last_seen_at");
+  state.write(persisted);
+
+  reset_pairing_state_for_tests();
+  load_pairing_state_for_tests();
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["paired_at"].get<std::int64_t>(), 0);
+  EXPECT_EQ(clients[0]["last_seen_at"].get<std::int64_t>(), 0);
+}
+
+TEST_F(PairingAccessPresetTest, ConcurrentLegacyFirstPairGrantsFullAccessExactlyOnce) {
+  auto first = std::make_shared<crypto::named_cert_t>();
+  first->name = "concurrent-first";
+  first->uuid = uuid_util::uuid_t::generate().string();
+  first->cert = PUBLIC_CERT;
+
+  auto second = std::make_shared<crypto::named_cert_t>();
+  second->name = "concurrent-second";
+  second->uuid = uuid_util::uuid_t::generate().string();
+  second->cert = SECOND_PUBLIC_CERT;
+
+  std::atomic<bool> start {false};
+  std::thread first_pair([&]() {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    add_legacy_authorized_client_for_tests(first);
+  });
+  std::thread second_pair([&]() {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    add_legacy_authorized_client_for_tests(second);
+  });
+
+  start.store(true, std::memory_order_release);
+  first_pair.join();
+  second_pair.join();
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 2);
+  int full_count = 0;
+  int default_count = 0;
+  for (const auto &client : clients) {
+    const auto perm = client["perm"].get<uint32_t>();
+    full_count += perm == static_cast<uint32_t>(crypto::PERM::_all);
+    default_count += perm == static_cast<uint32_t>(crypto::PERM::_default);
+  }
+  EXPECT_EQ(full_count, 1);
+  EXPECT_EQ(default_count, 1);
+}
+
+TEST_F(PairingAccessPresetTest, ConcurrentActivityAndMetadataWritesPersistConsistently) {
+  TemporaryPairingState state {"concurrent-writes"};
+  auto session = successful_pairing_session("concurrent-client");
+  complete_successful_pairing(session);
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const auto paired_at = clients[0]["paired_at"].get<std::int64_t>();
+
+  auto cert = crypto::x509(PUBLIC_CERT);
+  std::atomic<bool> start {false};
+  std::atomic<int> failures {0};
+  std::thread activity([&]() {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 1; i <= 25; ++i) {
+      if (!verify_client_cert_for_tests(cert.get(), paired_at + i * 61)) {
+        failures.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+  std::thread metadata([&]() {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int i = 1; i <= 25; ++i) {
+      if (!update_device_info(
+            uuid,
+            "concurrent-client-" + std::to_string(i),
+            "",
+            i * 1000,
+            {},
+            {},
+            crypto::PERM::_default,
+            true,
+            true,
+            false
+          )) {
+        failures.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  start.store(true, std::memory_order_release);
+  activity.join();
+  metadata.join();
+  ASSERT_EQ(failures.load(std::memory_order_relaxed), 0);
+
+  save_pairing_state_for_tests();
+  const auto persisted = state.read();
+  const auto &device = persisted["root"]["named_devices"][0];
+  EXPECT_EQ(device["paired_at"].get<std::int64_t>(), paired_at);
+  EXPECT_EQ(device["last_seen_at"].get<std::int64_t>(), paired_at + 25 * 61);
+  EXPECT_TRUE(device["name"].get<std::string>().starts_with("concurrent-client-"));
+}
+
+TEST_F(PairingAccessPresetTest, NovaTrustedPairGetsGameControlForAdditionalClient) {
+  auto first = std::make_shared<crypto::named_cert_t>();
+  first->name = "legacy-first";
+  first->uuid = uuid_util::uuid_t::generate().string();
+  first->cert = PUBLIC_CERT;
+  add_legacy_authorized_client_for_tests(first);
+
+  auto nova = std::make_shared<crypto::named_cert_t>();
+  nova->name = "nova-retroid";
+  nova->uuid = uuid_util::uuid_t::generate().string();
+  nova->cert = SECOND_PUBLIC_CERT;
+  nova->client_family = "nova";
+  add_legacy_authorized_client_for_tests(nova);
 
   auto clients = get_all_clients();
   ASSERT_EQ(clients.size(), 2);
@@ -417,11 +1312,17 @@ TEST_F(PairingAccessPresetTest, NovaTrustedPairGetsGameControlForAdditionalClien
   EXPECT_NE(static_cast<uint32_t>(crypto::PERM::_game_control & crypto::PERM::launch), 0U);
 }
 TEST_F(PairingAccessPresetTest, LegacyPairingKeepsFirstFullThenStandardBehavior) {
-  auto first = successful_pairing_session("legacy-first");
-  complete_successful_pairing(first);
+  auto first = std::make_shared<crypto::named_cert_t>();
+  first->name = "legacy-first";
+  first->uuid = uuid_util::uuid_t::generate().string();
+  first->cert = PUBLIC_CERT;
+  add_legacy_authorized_client_for_tests(first);
 
-  auto second = successful_pairing_session("legacy-second");
-  complete_successful_pairing(second);
+  auto second = std::make_shared<crypto::named_cert_t>();
+  second->name = "legacy-second";
+  second->uuid = uuid_util::uuid_t::generate().string();
+  second->cert = SECOND_PUBLIC_CERT;
+  add_legacy_authorized_client_for_tests(second);
 
   auto clients = get_all_clients();
   ASSERT_EQ(clients.size(), 2);

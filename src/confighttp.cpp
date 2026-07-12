@@ -796,8 +796,16 @@ namespace confighttp {
     return true;
   }
 
-  crypto::named_cert_t *getVerifiedClientCert(const req_https_t &request) {
-    return static_cast<crypto::named_cert_t *>(request->userp.get());
+  crypto::p_named_cert_t getVerifiedClientCert(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  ) {
+    return nvhttp::resolve_authorized_client(candidate, request_path);
+  }
+
+  crypto::p_named_cert_t getVerifiedClientCert(const req_https_t &request) {
+    const auto candidate = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    return getVerifiedClientCert(candidate, request->path);
   }
 
   bool hasVerifiedClientCert(const req_https_t &request) {
@@ -2214,7 +2222,7 @@ namespace confighttp {
       auto do_cmds = nvhttp::extract_command_entries(input_tree, "do");
       auto undo_cmds = nvhttp::extract_command_entries(input_tree, "undo");
       auto perm = static_cast<crypto::PERM>(input_tree.value("perm", static_cast<uint32_t>(crypto::PERM::_no)) & static_cast<uint32_t>(crypto::PERM::_all));
-      output_tree["status"] = nvhttp::update_device_info(
+      const auto result = nvhttp::update_device_info_result(
         uuid,
         name,
         display_mode,
@@ -2226,6 +2234,12 @@ namespace confighttp {
         allow_client_commands,
         always_use_virtual_display
       );
+      output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
+      if (result == nvhttp::client_mutation_result_t::not_found) {
+        output_tree["error"] = "Paired client was not found";
+      } else if (result == nvhttp::client_mutation_result_t::persistence_failed) {
+        output_tree["error"] = "Paired-client update could not be persisted";
+      }
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Update Client: "sv << e.what();
@@ -2260,7 +2274,13 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
-      output_tree["status"] = nvhttp::unpair_client(uuid);
+      const auto result = nvhttp::unpair_client_result(uuid);
+      output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
+      if (result == nvhttp::client_mutation_result_t::not_found) {
+        output_tree["error"] = "Paired client was not found";
+      } else if (result == nvhttp::client_mutation_result_t::persistence_failed) {
+        output_tree["error"] = "Paired-client revocation could not be persisted";
+      }
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Unpair: "sv << e.what();
@@ -2282,10 +2302,15 @@ namespace confighttp {
 
     print_req(request);
 
-    nvhttp::erase_all_clients();
-    proc::proc.terminate();
+    const bool erased = nvhttp::erase_all_clients();
+    if (erased) {
+      proc::proc.terminate();
+    }
     nlohmann::json output_tree;
-    output_tree["status"] = true;
+    output_tree["status"] = erased;
+    if (!erased) {
+      output_tree["error"] = "Paired-client revocation could not be persisted";
+    }
     send_response(response, output_tree);
   }
 
@@ -5276,6 +5301,15 @@ namespace confighttp {
   void set_session_state(session_state_e state) {
     s_session_state = state;
   }
+
+#ifdef POLARIS_TESTS
+  bool config_request_authorized_for_tests(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  ) {
+    return getVerifiedClientCert(candidate, request_path) != nullptr;
+  }
+#endif
 
   std::string get_session_state() {
     switch (s_session_state.load()) {
