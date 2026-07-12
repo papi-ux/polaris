@@ -109,11 +109,14 @@ export function describeLinuxGpuProfile(stats = {}) {
   const adapterMatchesCaptureDevice = profile.adapter_matches_capture_device ?? profile.adapterMatchesCaptureDevice
   const adapterPairingStatus = lower(profile.adapter_pairing_status || profile.adapterPairingStatus)
   const adapterPairingSource = lower(profile.adapter_pairing_device_source || profile.adapterPairingDeviceSource)
-  const encoderAdapter = profile.encoder_adapter || profile.encoderAdapter || 'unreported encoder adapter'
-  const waylandMainDevice = profile.wayland_main_device || profile.waylandMainDevice || 'unreported Wayland device'
-  const pairingMismatch = adapterPairingStatus
-    ? adapterPairingStatus === 'mismatched'
-    : adapterMatchesCaptureDevice === false
+  const encoderAdapter = profile.encoder_adapter || profile.encoderAdapter || ''
+  const captureDevice = profile.capture_device || profile.captureDevice || ''
+  const waylandMainDevice = profile.wayland_main_device || profile.waylandMainDevice || ''
+  const pairingDevice = profile.adapter_pairing_device || profile.adapterPairingDevice ||
+    (adapterPairingSource === 'capture_device' ? captureDevice : adapterPairingSource === 'wayland_main_device' ? waylandMainDevice : captureDevice || waylandMainDevice)
+  const pairingMismatch = Boolean(encoderAdapter && pairingDevice && (
+    adapterPairingStatus ? adapterPairingStatus === 'mismatched' : adapterMatchesCaptureDevice === false
+  ))
   const cpuCopy = Boolean(
     stats?.capture_cpu_copy ||
     stats?.capture?.cpu_copy ||
@@ -226,6 +229,29 @@ function formatIssueValue(value, fallback = 'unknown') {
   return String(safe)
 }
 
+function formatGpuNativeProbeAttempt(label, attempt) {
+  if (!attempt || typeof attempt !== 'object' || Object.keys(attempt).length === 0) return ''
+  const result = firstNonEmpty(attempt.result, 'unknown')
+  const stage = firstNonEmpty(attempt.failure_stage, attempt.failureStage)
+  const reason = firstNonEmpty(attempt.failure_reason, attempt.failureReason)
+  const parts = [`result=${formatIssueValue(result)}`]
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(attempt, key)
+  if (hasOwn('attempted')) parts.push(`attempted=${attempt.attempted ? 'yes' : 'no'}`)
+  if (hasOwn('cached')) parts.push(`cached=${attempt.cached ? 'yes' : 'no'}`)
+  if (stage) parts.push(`stage=${formatIssueValue(stage)}`)
+  if (reason) parts.push(`reason=${formatIssueValue(reason)}`)
+  return `${label}[${parts.join(', ')}]`
+}
+
+function formatGpuNativeProbe(probe = {}) {
+  const attempts = [
+    formatGpuNativeProbeAttempt('headless_extcopy', probe.headless_extcopy || probe.headlessExtcopy),
+    formatGpuNativeProbeAttempt('windowed', probe.windowed),
+  ].filter(Boolean)
+  const outcomes = attempts.length > 0 ? attempts.join('; ') : 'outcomes unavailable'
+  return `${outcomes} — selected ${formatIssueValue(probe.selected_strategy || probe.selectedStrategy, 'unknown')}, fallback ${formatIssueValue(probe.fallback, 'none')}`
+}
+
 function formatIssueNumber(value, digits = 1, fallback = 'unknown') {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric.toFixed(digits) : fallback
@@ -298,22 +324,25 @@ export function buildGithubIssueDraft(input = {}) {
   const capture = `${formatIssueValue(stats.capture_path || stats.capture_transport, 'unknown')} — ${formatIssueValue(stats.capture_path_reason, 'unknown')}`
   const gpuProfile = linuxGpuProfile(stats)
   const gpuNativeProbe = stats.gpu_native_probe || stats.gpuNativeProbe || {}
-  const probeReason = firstNonEmpty(
-    gpuNativeProbe?.windowed?.failure_reason,
-    gpuNativeProbe?.windowed?.failureReason,
-    gpuNativeProbe?.headless_extcopy?.failure_reason,
-    gpuNativeProbe?.headlessExtcopy?.failureReason
-  )
-  const probeSummary = `${formatIssueValue(probeReason, 'not reported')} — selected ${formatIssueValue(gpuNativeProbe.selected_strategy || gpuNativeProbe.selectedStrategy, 'unknown')}, fallback ${formatIssueValue(gpuNativeProbe.fallback, 'none')}`
+  const probeSummary = formatGpuNativeProbe(gpuNativeProbe)
   const gpuDiagnosticLines = []
   const encoderAdapter = firstNonEmpty(gpuProfile.encoder_adapter, gpuProfile.encoderAdapter)
   const captureDevice = firstNonEmpty(gpuProfile.capture_device, gpuProfile.captureDevice)
   const waylandMainDevice = firstNonEmpty(gpuProfile.wayland_main_device, gpuProfile.waylandMainDevice)
   const adapterPairing = firstNonEmpty(gpuProfile.adapter_pairing_status, gpuProfile.adapterPairingStatus)
+  const adapterPairingSource = lower(gpuProfile.adapter_pairing_device_source || gpuProfile.adapterPairingDeviceSource)
+  const adapterPairingDevice = firstNonEmpty(
+    gpuProfile.adapter_pairing_device,
+    gpuProfile.adapterPairingDevice,
+    adapterPairingSource === 'capture_device' ? captureDevice : '',
+    adapterPairingSource === 'wayland_main_device' ? waylandMainDevice : '',
+    captureDevice,
+    waylandMainDevice
+  )
   if (encoderAdapter) gpuDiagnosticLines.push(issueDraftLine('Encoder adapter', encoderAdapter))
   if (captureDevice) gpuDiagnosticLines.push(issueDraftLine('Capture device', captureDevice))
   if (waylandMainDevice) gpuDiagnosticLines.push(issueDraftLine('Wayland main device', waylandMainDevice))
-  if (adapterPairing) gpuDiagnosticLines.push(issueDraftLine('Adapter pairing', adapterPairing))
+  if (encoderAdapter && adapterPairingDevice && adapterPairing) gpuDiagnosticLines.push(issueDraftLine('Adapter pairing', adapterPairing))
   if (Object.keys(gpuNativeProbe).length > 0) gpuDiagnosticLines.push(issueDraftLine('GPU-native probe', probeSummary))
   const doctorSummary = firstNonEmpty(doctor.simple_state, doctor.summary, doctor.diagnosis, doctor.primary_issue, 'Polaris did not include a Doctor diagnosis yet.')
 

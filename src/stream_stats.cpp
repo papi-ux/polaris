@@ -30,6 +30,22 @@ namespace stream_stats {
   static std::mutex stats_mutex;
   static stats_t current_stats;
 
+  std::optional<bool> device_nodes_match(const std::string &lhs, const std::string &rhs) {
+    if (lhs.empty() || rhs.empty()) {
+      return std::nullopt;
+    }
+    if (lhs == rhs) {
+      return true;
+    }
+
+    std::error_code ec;
+    const bool equivalent = std::filesystem::equivalent(lhs, rhs, ec);
+    if (ec) {
+      return std::nullopt;
+    }
+    return equivalent;
+  }
+
   namespace {
     constexpr std::size_t CAPTURE_PROFILE_SUMMARY_FRAMES = 600;
     constexpr std::size_t CAPTURE_PROFILE_BUCKET_COUNT =
@@ -42,18 +58,6 @@ namespace stream_stats {
     };
 
     std::array<capture_profile_bucket_t, CAPTURE_PROFILE_BUCKET_COUNT> capture_profile_buckets;
-
-    bool device_nodes_match(const std::string &lhs, const std::string &rhs) {
-      if (lhs.empty() || rhs.empty()) {
-        return false;
-      }
-      if (lhs == rhs) {
-        return true;
-      }
-
-      std::error_code ec;
-      return std::filesystem::equivalent(lhs, rhs, ec) && !ec;
-    }
 
     capture_profile_bucket_t &capture_profile_bucket(platf::frame_transport_e transport) {
       auto index = static_cast<std::size_t>(transport);
@@ -242,14 +246,14 @@ namespace stream_stats {
 
   bool capture_path_has_cross_gpu_dmabuf_risk(const stats_t &stats) {
 #ifdef __linux__
-    return
-      stats.runtime_effective_headless &&
-      config::video.linux_display.use_cage_compositor &&
-      stats.capture_transport == platf::frame_transport_e::dmabuf &&
-      stats.capture_residency == platf::frame_residency_e::gpu &&
-      !stats.capture_device.empty() &&
-      !config::video.adapter_name.empty() &&
-      !device_nodes_match(stats.capture_device, config::video.adapter_name);
+    if (!stats.runtime_effective_headless ||
+        !config::video.linux_display.use_cage_compositor ||
+        stats.capture_transport != platf::frame_transport_e::dmabuf ||
+        stats.capture_residency != platf::frame_residency_e::gpu) {
+      return false;
+    }
+    const auto pairing = device_nodes_match(stats.capture_device, config::video.adapter_name);
+    return pairing.has_value() && !*pairing;
 #else
     return false;
 #endif
@@ -261,28 +265,33 @@ namespace stream_stats {
       stats.gpu_native_probe.requested ||
       stats.runtime_gpu_native_override_active ||
       linux_display.prefer_gpu_native_capture;
+    const auto capture_device_pairing = device_nodes_match(stats.capture_device, config::video.adapter_name);
+    const auto wayland_device_pairing = device_nodes_match(stats.wayland_main_device, config::video.adapter_name);
     nlohmann::json adapter_matches_capture_device = nullptr;
     nlohmann::json adapter_matches_wayland_main_device = nullptr;
-    if (!stats.capture_device.empty() && !config::video.adapter_name.empty()) {
-      adapter_matches_capture_device = device_nodes_match(stats.capture_device, config::video.adapter_name);
+    if (capture_device_pairing.has_value()) {
+      adapter_matches_capture_device = *capture_device_pairing;
     }
-    if (!stats.wayland_main_device.empty() && !config::video.adapter_name.empty()) {
-      adapter_matches_wayland_main_device = device_nodes_match(stats.wayland_main_device, config::video.adapter_name);
+    if (wayland_device_pairing.has_value()) {
+      adapter_matches_wayland_main_device = *wayland_device_pairing;
     }
 
     std::string adapter_pairing_device;
     std::string adapter_pairing_device_source = "none";
+    std::optional<bool> adapter_pairing;
     if (!stats.capture_device.empty()) {
       adapter_pairing_device = stats.capture_device;
       adapter_pairing_device_source = "capture_device";
+      adapter_pairing = capture_device_pairing;
     } else if (!stats.wayland_main_device.empty()) {
       adapter_pairing_device = stats.wayland_main_device;
       adapter_pairing_device_source = "wayland_main_device";
+      adapter_pairing = wayland_device_pairing;
     }
 
     std::string adapter_pairing_status = "unknown";
-    if (!adapter_pairing_device.empty() && !config::video.adapter_name.empty()) {
-      adapter_pairing_status = device_nodes_match(adapter_pairing_device, config::video.adapter_name) ? "matched" : "mismatched";
+    if (adapter_pairing.has_value()) {
+      adapter_pairing_status = *adapter_pairing ? "matched" : "mismatched";
     }
     const bool capture_metadata_reported =
       stats.capture_transport != platf::frame_transport_e::unknown ||
@@ -971,8 +980,12 @@ namespace stream_stats {
     current_stats.wayland_main_device = device;
   }
 
-  void reset_gpu_native_probe(bool requested) {
+  void reset_gpu_native_probe(bool requested, bool reset_capture_identity) {
     std::lock_guard<std::mutex> lock(stats_mutex);
+    if (reset_capture_identity) {
+      current_stats.capture_device.clear();
+      current_stats.wayland_main_device.clear();
+    }
     current_stats.gpu_native_probe = gpu_native_probe_t {};
     current_stats.gpu_native_probe.requested = requested;
   }

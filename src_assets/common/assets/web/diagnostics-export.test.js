@@ -131,7 +131,7 @@ describe('GitHub issue draft support flow', () => {
           adapter_pairing_status: 'mismatched',
         },
         gpu_native_probe: {
-          windowed: { failure_reason: 'no_live_dmabuf_frame' },
+          windowed: { attempted: true, cached: false, result: 'failed', failure_stage: 'first_frame', failure_reason: 'no_live_dmabuf_frame' },
           selected_strategy: 'headless_shm',
           fallback: 'headless_shm',
         },
@@ -164,7 +164,7 @@ describe('GitHub issue draft support flow', () => {
     expect(draft).toContain('- Encoder adapter: /dev/dri/renderD129')
     expect(draft).toContain('- Wayland main device: /dev/dri/renderD128')
     expect(draft).toContain('- Adapter pairing: mismatched')
-    expect(draft).toContain('- GPU-native probe: no_live_dmabuf_frame — selected headless_shm, fallback headless_shm')
+    expect(draft).toContain('- GPU-native probe: windowed[result=failed, attempted=yes, cached=no, stage=first_frame, reason=no_live_dmabuf_frame] — selected headless_shm, fallback headless_shm')
     expect(draft).toContain('- Active stream: yes, 118.5 FPS / 120.0 target, 45000 kbps, 2.40% loss, 9.8 ms encode')
     expect(draft).toContain('## What Polaris thinks happened')
     expect(draft).toContain('Stream is playable, but capture fell back to system memory.')
@@ -178,10 +178,57 @@ describe('GitHub issue draft support flow', () => {
     expect(draft).not.toContain('abc123')
   })
 
+  it('reports successful GPU-native probe outcomes without calling them unreported', () => {
+    const draft = buildGithubIssueDraft({ session_snapshot: { gpu_native_probe: {
+      headless_extcopy: { attempted: true, cached: false, result: 'succeeded', failure_stage: '', failure_reason: '' },
+      selected_strategy: 'headless_extcopy_dmabuf', fallback: 'none',
+    } } })
+    expect(draft).toContain('headless_extcopy[result=succeeded, attempted=yes, cached=no]')
+    expect(draft).not.toContain('GPU-native probe: not reported')
+  })
+
+  it('reports cached probe outcomes as cached rather than live attempts', () => {
+    const draft = buildGithubIssueDraft({ session_snapshot: { gpu_native_probe: {
+      windowed: { attempted: false, cached: true, result: 'succeeded', failure_stage: '', failure_reason: '' },
+      selected_strategy: 'windowed_dmabuf_override', fallback: 'none',
+    } } })
+    expect(draft).toContain('windowed[result=succeeded, attempted=no, cached=yes]')
+  })
+
+  it('preserves explicit not-attempted probe outcomes', () => {
+    const draft = buildGithubIssueDraft({ session_snapshot: { gpu_native_probe: {
+      headless_extcopy: { attempted: false, cached: false, result: 'not_attempted', failure_stage: '', failure_reason: '' },
+      windowed: { attempted: false, cached: false, result: 'not_attempted', failure_stage: '', failure_reason: '' },
+      selected_strategy: 'none', fallback: 'none',
+    } } })
+    expect(draft).toContain('headless_extcopy[result=not_attempted, attempted=no, cached=no]')
+    expect(draft).toContain('windowed[result=not_attempted, attempted=no, cached=no]')
+  })
+
+  it('reports both strategy failures instead of discarding one reason', () => {
+    const draft = buildGithubIssueDraft({ session_snapshot: { gpu_native_probe: {
+      headless_extcopy: { attempted: true, cached: false, result: 'failed', failure_stage: 'capture_init', failure_reason: 'dmabuf_capture_not_initialized' },
+      windowed: { attempted: true, cached: false, result: 'failed', failure_stage: 'first_frame', failure_reason: 'no_live_dmabuf_frame' },
+      selected_strategy: 'headless_shm', fallback: 'headless_shm',
+    } } })
+    expect(draft).toContain('headless_extcopy[result=failed, attempted=yes, cached=no, stage=capture_init, reason=dmabuf_capture_not_initialized]')
+    expect(draft).toContain('windowed[result=failed, attempted=yes, cached=no, stage=first_frame, reason=no_live_dmabuf_frame]')
+  })
+
   it('omits unavailable GPU topology and probe rows instead of fabricating unknown evidence', () => {
     const draft = buildGithubIssueDraft({
       version: '1.2.3-dev',
-      session_snapshot: { capture_path: 'unknown' },
+      session_snapshot: {
+        capture_path: 'unknown',
+        linux_gpu_profile: {
+          encoder_adapter: '/dev/dri/renderD129',
+          capture_device: '',
+          wayland_main_device: '',
+          adapter_pairing_status: 'unknown',
+          adapter_pairing_device: '',
+          adapter_pairing_device_source: 'none',
+        },
+      },
     })
 
     expect(draft).not.toContain('- Encoder adapter: unknown')

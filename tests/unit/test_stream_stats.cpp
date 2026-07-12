@@ -155,14 +155,28 @@ TEST(StreamStatsLinuxGpuProfileTests, DoesNotCallMissingCaptureDeviceAnAdapterMa
   EXPECT_EQ(profile.at("adapter_pairing_device_source"), "none");
 }
 
+TEST(StreamStatsLinuxGpuProfileTests, KeepsUnresolvableDevicePairingUnknown) {
+  LinuxDisplayConfigGuard guard;
+  config::video.adapter_name = "/dev/dri/polaris-missing-encoder-node";
+
+  stream_stats::stats_t stats {};
+  stats.wayland_main_device = "/dev/dri/polaris-missing-wayland-node";
+
+  const auto profile = stream_stats::linux_gpu_profile_json(stats);
+
+  EXPECT_TRUE(profile.at("adapter_matches_wayland_main_device").is_null());
+  EXPECT_EQ(profile.at("adapter_pairing_status"), "unknown");
+  EXPECT_TRUE(profile.at("configuration_warnings").empty());
+}
+
 TEST(StreamStatsLinuxGpuProfileTests, UsesWaylandMainDeviceWhenCaptureFrameDeviceIsUnavailable) {
   LinuxDisplayConfigGuard guard;
-  config::video.adapter_name = "/dev/dri/renderD129";
+  config::video.adapter_name = "/dev/null";
 
   stream_stats::stats_t stats {};
   stats.capture_transport = platf::frame_transport_e::shm;
   stats.capture_residency = platf::frame_residency_e::cpu;
-  stats.wayland_main_device = "/dev/dri/renderD128";
+  stats.wayland_main_device = "/dev/zero";
   stats.encode_target_device = "vaapi";
   stats.encode_target_residency = platf::frame_residency_e::gpu;
 
@@ -171,7 +185,7 @@ TEST(StreamStatsLinuxGpuProfileTests, UsesWaylandMainDeviceWhenCaptureFrameDevic
   EXPECT_TRUE(profile.at("adapter_matches_capture_device").is_null());
   EXPECT_FALSE(profile.at("adapter_matches_wayland_main_device"));
   EXPECT_EQ(profile.at("adapter_pairing_status"), "mismatched");
-  EXPECT_EQ(profile.at("adapter_pairing_device"), "/dev/dri/renderD128");
+  EXPECT_EQ(profile.at("adapter_pairing_device"), "/dev/zero");
   EXPECT_EQ(profile.at("adapter_pairing_device_source"), "wayland_main_device");
 
   const auto &warnings = profile.at("configuration_warnings");
@@ -179,8 +193,8 @@ TEST(StreamStatsLinuxGpuProfileTests, UsesWaylandMainDeviceWhenCaptureFrameDevic
     return warning.value("id", std::string {}) == "linux_gpu_adapter_mismatch";
   });
   ASSERT_NE(mismatch, warnings.end());
-  EXPECT_NE(mismatch->at("message").get<std::string>().find("renderD129"), std::string::npos);
-  EXPECT_NE(mismatch->at("message").get<std::string>().find("renderD128"), std::string::npos);
+  EXPECT_NE(mismatch->at("message").get<std::string>().find("/dev/null"), std::string::npos);
+  EXPECT_NE(mismatch->at("message").get<std::string>().find("/dev/zero"), std::string::npos);
 }
 
 #ifdef __linux__
@@ -355,6 +369,19 @@ TEST(StreamStatsCapturePathTests, SerializesStructuredGpuNativeProbeFailures) {
   EXPECT_FALSE(profile.at("gpu_native_succeeded"));
 }
 
+TEST(StreamStatsGpuNativeProbeTests, ClearsStaleDeviceIdentityForNewCaptureGeneration) {
+  stream_stats::update_capture_metadata(platf::frame_metadata_t {
+    .device = "/dev/dri/renderD130",
+  });
+  stream_stats::update_wayland_main_device("/dev/dri/renderD131");
+
+  stream_stats::reset_gpu_native_probe(true, true);
+  const auto stats = stream_stats::get_current();
+
+  EXPECT_TRUE(stats.capture_device.empty());
+  EXPECT_TRUE(stats.wayland_main_device.empty());
+}
+
 TEST(StreamStatsGpuNativeProbeTests, RecordsCachedFailuresAndResetsForNextDecision) {
   stream_stats::update_wayland_main_device("/dev/dri/renderD128");
   stream_stats::reset_gpu_native_probe(true);
@@ -443,7 +470,7 @@ TEST(StreamStatsCapturePathTests, LabelsHeadlessExtcopyDmabufPath) {
 
 TEST(StreamStatsCapturePathTests, FlagsHeadlessCrossGpuDmabufRisk) {
   LinuxDisplayConfigGuard guard;
-  config::video.adapter_name = "/dev/dri/renderD128";
+  config::video.adapter_name = "/dev/null";
   config::video.linux_display.use_cage_compositor = true;
 
   stream_stats::stats_t stats {};
@@ -453,7 +480,7 @@ TEST(StreamStatsCapturePathTests, FlagsHeadlessCrossGpuDmabufRisk) {
   stats.capture_transport = platf::frame_transport_e::dmabuf;
   stats.capture_residency = platf::frame_residency_e::gpu;
   stats.capture_format = platf::frame_format_e::bgra8;
-  stats.capture_device = "/dev/dri/renderD129";
+  stats.capture_device = "/dev/zero";
   stats.encode_target_residency = platf::frame_residency_e::gpu;
 
 #ifdef __linux__
@@ -464,11 +491,11 @@ TEST(StreamStatsCapturePathTests, FlagsHeadlessCrossGpuDmabufRisk) {
 #endif
 
   const auto json = nlohmann::json::parse(stats.to_json());
-  EXPECT_EQ(json.at("capture_device"), "/dev/dri/renderD129");
+  EXPECT_EQ(json.at("capture_device"), "/dev/zero");
   ASSERT_TRUE(json.contains("capture_decision"));
   const auto &decision = json.at("capture_decision");
-  EXPECT_EQ(decision.at("capture_device"), "/dev/dri/renderD129");
-  EXPECT_EQ(decision.at("encoder_adapter"), "/dev/dri/renderD128");
+  EXPECT_EQ(decision.at("capture_device"), "/dev/zero");
+  EXPECT_EQ(decision.at("encoder_adapter"), "/dev/null");
 #ifdef __linux__
   EXPECT_TRUE(decision.at("cross_gpu_dmabuf_risk"));
   EXPECT_EQ(decision.at("reason"), "headless_extcopy_dmabuf_cross_gpu_risk");

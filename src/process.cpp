@@ -3143,7 +3143,7 @@ namespace proc {
         prefer_gpu_native_capture,
         should_try_gpu_native_cage_probe
       );
-    stream_stats::reset_gpu_native_probe(should_probe_windowed_cage_for_gpu_native);
+    stream_stats::reset_gpu_native_probe(should_probe_windowed_cage_for_gpu_native, rtsp_stream::session_count() == 0);
     const auto cached_windowed_gpu_native_probe_result =
       should_probe_windowed_cage_for_gpu_native ?
         cage_display_router::cached_windowed_gpu_native_probe_result() :

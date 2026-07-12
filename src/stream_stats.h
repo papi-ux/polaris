@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -145,6 +146,12 @@ namespace stream_stats {
      */
     std::string to_json() const;
   };
+
+  /**
+   * @brief Compare two device-node paths by filesystem identity.
+   * @return true/false when both identities resolve, or nullopt when unknown.
+   */
+  std::optional<bool> device_nodes_match(const std::string &lhs, const std::string &rhs);
 
   /**
    * @brief Whether the current capture/encode path requires a CPU-side copy.
@@ -332,7 +339,7 @@ namespace stream_stats {
   void update_wayland_main_device(const std::string &device);
 
   /** @brief Reset GPU-native probe telemetry for a new cage launch decision. */
-  void reset_gpu_native_probe(bool requested);
+  void reset_gpu_native_probe(bool requested, bool reset_capture_identity = false);
 
   /** @brief Record one GPU-native probe strategy result. */
   void update_gpu_native_probe_attempt(const std::string &strategy,
