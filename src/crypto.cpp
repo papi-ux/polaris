@@ -22,11 +22,19 @@ namespace crypto {
       _certs_mutex {}, _certs {} {
   }
   void cert_chain_t::add(p_named_cert_t& named_cert_p) {
-    x509_store_t x509_store { X509_STORE_new() };
+    auto certificate = x509(named_cert_p->cert);
+    const auto fingerprint = x509_fingerprint(certificate.get());
+    x509_store_t x509_store {X509_STORE_new()};
+    if (!certificate || !fingerprint || !x509_store ||
+        X509_STORE_add_cert(x509_store.get(), certificate.get()) != 1) {
+      return;
+    }
 
-    X509_STORE_add_cert(x509_store.get(), x509(named_cert_p->cert).get());
     std::lock_guard lock {_certs_mutex};
-    _certs.emplace_back(std::make_pair(named_cert_p, std::move(x509_store)));
+    std::erase_if(_certs, [&](const cert_entry_t &entry) {
+      return entry.fingerprint == *fingerprint;
+    });
+    _certs.emplace_back(cert_entry_t {*fingerprint, named_cert_p, std::move(x509_store)});
   }
 
   void cert_chain_t::clear() {
@@ -65,7 +73,7 @@ namespace crypto {
   const char * cert_chain_t::verify(x509_t::element_type *cert, p_named_cert_t& named_cert_out) {
     int err_code = 0;
     std::lock_guard lock {_certs_mutex};
-    for (auto &[named_cert_p, x509_store] : _certs) {
+    for (auto &[fingerprint, named_cert_p, x509_store] : _certs) {
       x509_store_ctx_t cert_ctx { X509_STORE_CTX_new() };
       if (!cert_ctx) {
         return "Unable to allocate certificate verification context";
@@ -387,6 +395,25 @@ namespace crypto {
     PEM_read_bio_X509(io.get(), &p, nullptr, nullptr);
 
     return p;
+  }
+
+  std::optional<sha256_t> x509_fingerprint(const X509 *certificate) {
+    if (!certificate) {
+      return std::nullopt;
+    }
+
+    sha256_t fingerprint {};
+    unsigned int fingerprint_size = 0;
+    if (X509_digest(certificate, EVP_sha256(), fingerprint.data(), &fingerprint_size) != 1 ||
+        fingerprint_size != fingerprint.size()) {
+      return std::nullopt;
+    }
+    return fingerprint;
+  }
+
+  std::optional<sha256_t> x509_fingerprint(std::string_view pem_certificate) {
+    auto certificate = x509(pem_certificate);
+    return x509_fingerprint(certificate.get());
   }
 
   pkey_t pkey(const std::string_view &k) {

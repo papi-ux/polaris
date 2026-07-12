@@ -830,7 +830,7 @@
                 </div>
               </div>
 
-              <div class="mt-4 grid gap-2 md:grid-cols-3">
+              <div class="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-5">
                 <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
                   <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.permissions_summary') }}</div>
                   <div class="mt-1.5 text-sm font-medium text-silver">{{ accessPresetLabel(client.perm) }}</div>
@@ -842,6 +842,14 @@
                 <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
                   <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.client_commands_summary') }}</div>
                   <div class="mt-1.5 text-sm font-medium text-silver">{{ clientCommandSummary(client) }}</div>
+                </div>
+                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
+                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.date_added') }}</div>
+                  <div class="mt-1.5 text-sm font-medium text-silver">{{ formatClientTimestamp(client.paired_at, undefined, undefined, $t('pin.not_recorded')) }}</div>
+                </div>
+                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
+                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.last_seen') }}</div>
+                  <div class="mt-1.5 text-sm font-medium text-silver">{{ formatClientTimestamp(client.last_seen_at, undefined, undefined, $t('pin.not_recorded')) }}</div>
                 </div>
               </div>
             </div>
@@ -917,6 +925,7 @@ import Checkbox from '../Checkbox.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
+import { formatClientTimestamp } from '../client-timestamps'
 import {
   useClients,
   permissionMapping, permissionGroups,
@@ -1506,17 +1515,24 @@ function cancelEdit(client) {
 }
 
 function saveClient(client) {
-  client.editing = false
-  currentEditingClient = null
   const profileData = client.editProfile
   saveClientAPI(client)
-    .catch(err => showToast(i18n.t('pin.save_client_error') + err, 'error'))
-  if (profileData) {
-    saveProfile(client.editName || client.name, profileData)
-  }
-  nextTick(() => {
-    lastFocusedElement?.focus?.()
-  })
+    .then(() => {
+      client.editing = false
+      currentEditingClient = null
+      if (profileData) {
+        saveProfile(client.editName || client.name, profileData)
+          .catch(err => showToast(`${i18n.t('pin.save_client_error')} ${err.message || err}`, 'error'))
+      }
+      nextTick(() => {
+        lastFocusedElement?.focus?.()
+      })
+    })
+    .catch(err => {
+      client.editing = true
+      currentEditingClient = client
+      showToast(`${i18n.t('pin.save_client_error')} ${err.message || err}`, 'error')
+    })
 }
 
 function togglePermission(client, permission) {
