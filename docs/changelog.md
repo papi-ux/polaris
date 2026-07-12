@@ -14,7 +14,7 @@ Security and pairing-state patch focused on current cryptography dependencies, d
 - Updated the Browser Stream helper's Go cryptography and supporting modules, clearing the associated Dependabot alerts
 - Added localized Added and Last seen values for paired clients while keeping unknown timestamps truthful for legacy records
 - Hardened canonical X.509 client identity, revocation, duplicate-state validation, and authenticated request-time authorization snapshots
-- Hardened paired-client persistence across processes with private atomic state replacement on supported POSIX and Windows hosts
+- Hardened paired-client persistence with private, cross-process atomic state replacement
 - Improved paired-client controls so failed mutations remain visible instead of reporting false success in the web console
 
 ## v1.3.0 - 2026-07-11
