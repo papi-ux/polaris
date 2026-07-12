@@ -117,11 +117,11 @@ export function useClients() {
           platform.value = data.platform
           clients.value = data.named_certs.map(({
             name, friendly_name, client_family, uuid, display_mode, perm, connected,
-            do: _do, undo, allow_client_commands,
+            paired_at, last_seen_at, do: _do, undo, allow_client_commands,
             always_use_virtual_display, enable_legacy_ordering
           }) => ({
             name, friendly_name, client_family, uuid, display_mode, perm: parseInt(perm, 10), connected,
-            editing: false, wolSending: false, do: _do, undo,
+            paired_at, last_seen_at, editing: false, wolSending: false, do: _do, undo,
             allow_client_commands, enable_legacy_ordering, always_use_virtual_display
           }))
         } else {
@@ -158,9 +158,17 @@ export function useClients() {
       method: 'POST',
       body: JSON.stringify(editedClient)
     })
-      .then(r => r.json())
-      .then(r => { if (r.status) refreshClients() })
-      .finally(() => setTimeout(refreshClients, 1000))
+      .then(requireSuccessfulMutation)
+      .then(data => refreshClients().then(() => data))
+  }
+
+  function requireSuccessfulMutation(response) {
+    return response.json().then(data => {
+      if (response.ok === false || !data.status) {
+        throw new Error(data.error || 'Client authorization update failed')
+      }
+      return data
+    })
   }
 
   function unpairSingle(uuid) {
@@ -169,7 +177,9 @@ export function useClients() {
       headers: { 'Content-Type': 'application/json' },
       method: 'POST',
       body: JSON.stringify({ uuid })
-    }).then(() => refreshClients())
+    })
+      .then(requireSuccessfulMutation)
+      .then(() => refreshClients())
   }
 
   function unpairAll() {
@@ -177,7 +187,9 @@ export function useClients() {
       credentials: 'include',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-    }).then(r => r.json()).then(() => refreshClients())
+    })
+      .then(requireSuccessfulMutation)
+      .then(() => refreshClients())
   }
 
   function disconnectClient(uuid) {

@@ -6,7 +6,9 @@
 
 // standard includes
 #include <array>
+#include <atomic>
 #include <mutex>
+#include <optional>
 
 // lib includes
 #include <list>
@@ -107,6 +109,9 @@ namespace crypto {
     std::string client_family;
     std::string display_mode;
     int target_bitrate_kbps = 0;
+    std::int64_t paired_at = 0;
+    std::atomic<std::int64_t> last_seen_at {0};
+    std::atomic<std::int64_t> last_seen_persisted_at {0};
     std::list<command_entry_t> do_cmds;
     std::list<command_entry_t> undo_cmds;
     PERM perm;
@@ -128,6 +133,8 @@ namespace crypto {
 
   aes_t gen_aes_key(const std::array<uint8_t, 16> &salt, const std::string_view &pin);
   x509_t x509(const std::string_view &x);
+  std::optional<sha256_t> x509_fingerprint(const X509 *certificate);
+  std::optional<sha256_t> x509_fingerprint(std::string_view pem_certificate);
   pkey_t pkey(const std::string_view &k);
   std::string pem(x509_t &x509);
   std::string pem(pkey_t &pkey);
@@ -157,8 +164,14 @@ namespace crypto {
     const char *verify(x509_t::element_type *cert, p_named_cert_t& named_cert_out);
 
   private:
+    struct cert_entry_t {
+      sha256_t fingerprint;
+      p_named_cert_t named_cert;
+      x509_store_t store;
+    };
+
     std::mutex _certs_mutex;
-    std::vector<std::pair<p_named_cert_t, x509_store_t>> _certs;
+    std::vector<cert_entry_t> _certs;
   };
 
   namespace cipher {

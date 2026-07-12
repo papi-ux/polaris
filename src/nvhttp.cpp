@@ -7,6 +7,7 @@
 
 // standard includes
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <chrono>
@@ -21,7 +22,18 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <string>
+#include <vector>
+
+#if defined(_WIN32)
+  #include <windows.h>
+  #include <aclapi.h>
+  #include <sddl.h>
+#else
+  #include <fcntl.h>
+  #include <sys/file.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
+#endif
 
 // lib includes (JSON for last-launched persistence)
 #include <nlohmann/json.hpp>
@@ -2746,6 +2758,12 @@ namespace nvhttp {
   std::unordered_map<std::string, pair_session_t> map_id_sess;
   client_t client_root;
   std::atomic<uint32_t> session_id_counter;
+  // Serializes all access to paired-client metadata and in-process state-file persistence.
+  // Recursive because mutation helpers can call save_state() while holding this lock.
+  std::recursive_mutex client_state_mutex;
+#ifdef POLARIS_TESTS
+  std::atomic<pairing_state_write_fault_t> pairing_state_write_fault {pairing_state_write_fault_t::none};
+#endif
 
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<PolarisHTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<PolarisHTTPS>::Request>;
@@ -2908,20 +2926,565 @@ namespace nvhttp {
     return commands;
   }
 
-  void save_state() {
-    nlohmann::json root = nlohmann::json::object();
-    // If the state file exists, try to read it.
-    if (fs::exists(config::nvhttp.file_state)) {
-      try {
-        std::ifstream in(config::nvhttp.file_state);
-        in >> root;
-      } catch (std::exception &e) {
-        BOOST_LOG(warning) << "Couldn't read existing state "sv << config::nvhttp.file_state
-                           << ": "sv << e.what() << "; rewriting from in-memory state";
-        root = nlohmann::json::object();
+  std::int64_t unix_time_now_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+  }
+
+#if defined(_WIN32)
+  class private_file_security_t {
+  public:
+    private_file_security_t() {
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;FA;;;SY)(A;;FA;;;OW)",
+            SDDL_REVISION_1,
+            &descriptor_,
+            nullptr
+          )) {
+        return;
+      }
+      attributes_.nLength = sizeof(attributes_);
+      attributes_.lpSecurityDescriptor = descriptor_;
+      attributes_.bInheritHandle = FALSE;
+    }
+
+    ~private_file_security_t() {
+      if (descriptor_) {
+        LocalFree(descriptor_);
       }
     }
 
+    private_file_security_t(const private_file_security_t &) = delete;
+    private_file_security_t &operator=(const private_file_security_t &) = delete;
+
+    explicit operator bool() const {
+      return descriptor_ != nullptr;
+    }
+
+    SECURITY_ATTRIBUTES *attributes() {
+      return descriptor_ ? &attributes_ : nullptr;
+    }
+
+    bool apply_to_handle(HANDLE handle) const {
+      PACL dacl = nullptr;
+      BOOL dacl_present = FALSE;
+      BOOL dacl_defaulted = FALSE;
+      if (!descriptor_ ||
+          !GetSecurityDescriptorDacl(descriptor_, &dacl_present, &dacl, &dacl_defaulted) ||
+          !dacl_present || !dacl) {
+        return false;
+      }
+      const auto result = SetSecurityInfo(
+        handle,
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        dacl,
+        nullptr
+      );
+      if (result != ERROR_SUCCESS) {
+        SetLastError(result);
+        return false;
+      }
+      return true;
+    }
+
+    bool restrict_existing(const std::filesystem::path &path) const {
+      auto handle = CreateFileW(
+        path.c_str(),
+        READ_CONTROL | WRITE_DAC,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr
+      );
+      if (handle == INVALID_HANDLE_VALUE) {
+        const auto error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+          return true;
+        }
+        const std::error_code ec(static_cast<int>(error), std::system_category());
+        BOOST_LOG(error) << "Couldn't open existing private state file "sv << path << ": "sv << ec.message();
+        return false;
+      }
+
+      const auto secured = apply_to_handle(handle);
+      const auto security_error = secured ? ERROR_SUCCESS : GetLastError();
+      const auto closed = CloseHandle(handle);
+      const auto close_error = closed ? ERROR_SUCCESS : GetLastError();
+      if (!secured) {
+        const std::error_code ec(static_cast<int>(security_error), std::system_category());
+        BOOST_LOG(error) << "Couldn't restrict existing private state file "sv << path << ": "sv << ec.message();
+        return false;
+      }
+      if (!closed) {
+        const std::error_code ec(static_cast<int>(close_error), std::system_category());
+        BOOST_LOG(error) << "Couldn't close restricted private state file "sv << path << ": "sv << ec.message();
+        return false;
+      }
+      return true;
+    }
+
+  private:
+    PSECURITY_DESCRIPTOR descriptor_ = nullptr;
+    SECURITY_ATTRIBUTES attributes_ {};
+  };
+#endif
+
+  class state_file_lock_t {
+  public:
+    explicit state_file_lock_t(const std::filesystem::path &target) {
+      lock_path_ = target;
+#if defined(_WIN32)
+      lock_path_ += L".lock";
+      private_file_security_t private_security;
+      if (!private_security) {
+        const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+        BOOST_LOG(error) << "Couldn't create private security descriptor for state lock "sv << lock_path_ << ": "sv << ec.message();
+        return;
+      }
+      handle_ = CreateFileW(
+        lock_path_.c_str(),
+        GENERIC_READ | GENERIC_WRITE | WRITE_DAC,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        private_security.attributes(),
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr
+      );
+      if (handle_ == INVALID_HANDLE_VALUE) {
+        const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+        BOOST_LOG(error) << "Couldn't open state lock "sv << lock_path_ << ": "sv << ec.message();
+        return;
+      }
+      if (!private_security.apply_to_handle(handle_)) {
+        const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+        BOOST_LOG(error) << "Couldn't restrict state lock "sv << lock_path_ << ": "sv << ec.message();
+        if (!CloseHandle(handle_)) {
+          const std::error_code close_ec(static_cast<int>(GetLastError()), std::system_category());
+          BOOST_LOG(warning) << "Couldn't close unrestricted state lock handle "sv << lock_path_ << ": "sv << close_ec.message();
+        }
+        handle_ = INVALID_HANDLE_VALUE;
+        return;
+      }
+      if (!LockFileEx(handle_, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &overlapped_)) {
+        const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+        BOOST_LOG(error) << "Couldn't acquire state lock "sv << lock_path_ << ": "sv << ec.message();
+        if (!CloseHandle(handle_)) {
+          const std::error_code close_ec(static_cast<int>(GetLastError()), std::system_category());
+          BOOST_LOG(warning) << "Couldn't close failed state lock handle "sv << lock_path_ << ": "sv << close_ec.message();
+        }
+        handle_ = INVALID_HANDLE_VALUE;
+        return;
+      }
+#else
+      lock_path_ += ".lock";
+      int flags = O_CREAT | O_RDWR;
+#ifdef O_CLOEXEC
+      flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+      flags |= O_NOFOLLOW;
+#endif
+      descriptor_ = ::open(lock_path_.c_str(), flags, S_IRUSR | S_IWUSR);
+      if (descriptor_ < 0) {
+        const std::error_code ec(errno, std::generic_category());
+        BOOST_LOG(error) << "Couldn't open state lock "sv << lock_path_ << ": "sv << ec.message();
+        return;
+      }
+      if (::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
+        const std::error_code ec(errno, std::generic_category());
+        BOOST_LOG(error) << "Couldn't restrict state lock "sv << lock_path_ << ": "sv << ec.message();
+        if (::close(descriptor_) != 0) {
+          const std::error_code close_ec(errno, std::generic_category());
+          BOOST_LOG(warning) << "Couldn't close failed state lock "sv << lock_path_ << ": "sv << close_ec.message();
+        }
+        descriptor_ = -1;
+        return;
+      }
+      while (::flock(descriptor_, LOCK_EX) != 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        const std::error_code ec(errno, std::generic_category());
+        BOOST_LOG(error) << "Couldn't acquire state lock "sv << lock_path_ << ": "sv << ec.message();
+        if (::close(descriptor_) != 0) {
+          const std::error_code close_ec(errno, std::generic_category());
+          BOOST_LOG(warning) << "Couldn't close failed state lock "sv << lock_path_ << ": "sv << close_ec.message();
+        }
+        descriptor_ = -1;
+        return;
+      }
+#endif
+      locked_ = true;
+    }
+
+    state_file_lock_t(const state_file_lock_t &) = delete;
+    state_file_lock_t &operator=(const state_file_lock_t &) = delete;
+
+    ~state_file_lock_t() {
+      if (!locked_) {
+        return;
+      }
+#if defined(_WIN32)
+      if (!UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped_)) {
+        const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+        BOOST_LOG(warning) << "Couldn't unlock state lock "sv << lock_path_ << ": "sv << ec.message();
+      }
+      if (!CloseHandle(handle_)) {
+        const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+        BOOST_LOG(warning) << "Couldn't close state lock "sv << lock_path_ << ": "sv << ec.message();
+      }
+#else
+      int unlock_result;
+      do {
+        unlock_result = ::flock(descriptor_, LOCK_UN);
+      } while (unlock_result != 0 && errno == EINTR);
+      if (unlock_result != 0) {
+        const std::error_code ec(errno, std::generic_category());
+        BOOST_LOG(warning) << "Couldn't unlock state lock "sv << lock_path_ << ": "sv << ec.message();
+      }
+      if (::close(descriptor_) != 0) {
+        const std::error_code ec(errno, std::generic_category());
+        BOOST_LOG(warning) << "Couldn't close state lock "sv << lock_path_ << ": "sv << ec.message();
+      }
+#endif
+    }
+
+    explicit operator bool() const {
+      return locked_;
+    }
+
+  private:
+    std::filesystem::path lock_path_;
+    bool locked_ = false;
+#if defined(_WIN32)
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    OVERLAPPED overlapped_ {};
+#else
+    int descriptor_ = -1;
+#endif
+  };
+
+  bool write_state_atomically(const std::filesystem::path &target, std::string_view payload) {
+#ifdef POLARIS_TESTS
+    const auto injected_fault = pairing_state_write_fault.load(std::memory_order_relaxed);
+    if (injected_fault == pairing_state_write_fault_t::open) {
+      return false;
+    }
+#endif
+#if defined(_WIN32)
+    private_file_security_t private_security;
+    if (!private_security) {
+      const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+      BOOST_LOG(error) << "Couldn't create private security descriptor for "sv << target << ": "sv << ec.message();
+      return false;
+    }
+    if (!private_security.restrict_existing(target)) {
+      return false;
+    }
+
+    std::filesystem::path temporary;
+    HANDLE descriptor = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 32; ++attempt) {
+      temporary = target;
+      temporary += L".tmp.";
+      temporary += std::filesystem::path(crypto::rand_alphabet(16));
+      descriptor = CreateFileW(
+        temporary.c_str(),
+        GENERIC_WRITE | WRITE_DAC,
+        0,
+        private_security.attributes(),
+        CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY,
+        nullptr
+      );
+      if (descriptor != INVALID_HANDLE_VALUE) {
+        break;
+      }
+      const auto error = GetLastError();
+      if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+        const std::error_code ec(static_cast<int>(error), std::system_category());
+        BOOST_LOG(error) << "Couldn't create temporary state file beside "sv << target << ": "sv << ec.message();
+        return false;
+      }
+    }
+    if (descriptor == INVALID_HANDLE_VALUE) {
+      BOOST_LOG(error) << "Couldn't allocate a unique temporary state file beside "sv << target;
+      return false;
+    }
+    auto cleanup_temporary = [&]() {
+      if (descriptor != INVALID_HANDLE_VALUE) {
+        if (!CloseHandle(descriptor)) {
+          const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+          BOOST_LOG(warning) << "Couldn't close temporary state file during cleanup "sv << temporary << ": "sv << ec.message();
+        }
+        descriptor = INVALID_HANDLE_VALUE;
+      }
+      for (int attempt = 0; attempt < 2; ++attempt) {
+        if (DeleteFileW(temporary.c_str())) {
+          return;
+        }
+        const auto cleanup_error = GetLastError();
+        if (cleanup_error == ERROR_FILE_NOT_FOUND || cleanup_error == ERROR_PATH_NOT_FOUND) {
+          return;
+        }
+        const std::error_code ec(static_cast<int>(cleanup_error), std::system_category());
+        if (attempt == 0) {
+          BOOST_LOG(warning) << "Couldn't remove temporary state file on first cleanup attempt "sv
+                             << temporary << ": "sv << ec.message() << "; retrying"sv;
+          Sleep(1);
+          continue;
+        }
+        BOOST_LOG(error) << "Couldn't remove temporary state file after failed persistence "sv
+                         << temporary << ": "sv << ec.message();
+      }
+    };
+    auto cleanup = util::fail_guard(cleanup_temporary);
+    const auto write_bytes = [&](std::size_t byte_count) {
+      std::size_t offset = 0;
+      while (offset < byte_count) {
+        const auto remaining = byte_count - offset;
+        const auto chunk = static_cast<DWORD>(std::min<std::size_t>(remaining, MAXDWORD));
+        DWORD written = 0;
+        if (!WriteFile(descriptor, payload.data() + offset, chunk, &written, nullptr) || written == 0) {
+          const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+          BOOST_LOG(error) << "Couldn't write temporary state file "sv << temporary << ": "sv << ec.message();
+          return false;
+        }
+        offset += written;
+      }
+      return true;
+    };
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::short_write) {
+      (void) write_bytes(payload.size() / 2);
+      return false;
+    }
+#endif
+    if (!write_bytes(payload.size())) {
+      return false;
+    }
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::flush) {
+      return false;
+    }
+#endif
+    if (!FlushFileBuffers(descriptor)) {
+      const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+      BOOST_LOG(error) << "Couldn't flush temporary state file "sv << temporary << ": "sv << ec.message();
+      return false;
+    }
+    if (!CloseHandle(descriptor)) {
+      const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+      descriptor = INVALID_HANDLE_VALUE;
+      BOOST_LOG(error) << "Couldn't close temporary state file "sv << temporary << ": "sv << ec.message();
+      return false;
+    }
+    descriptor = INVALID_HANDLE_VALUE;
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::rename) {
+      return false;
+    }
+#endif
+    if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+      const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+      BOOST_LOG(error) << "Couldn't replace state file "sv << target << ": "sv << ec.message();
+      return false;
+    }
+    cleanup.disable();
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::post_rename_durability) {
+      return true;
+    }
+#endif
+    return true;
+#else
+    // mkstemp creates the file atomically with mode 0600, so authorization and
+    // credential data is never exposed under umask-derived permissions and a
+    // pre-created symlink cannot redirect the write.
+    auto temporary_template = target.string() + ".tmp.XXXXXX";
+    std::vector<char> temporary_buffer(temporary_template.begin(), temporary_template.end());
+    temporary_buffer.push_back('\0');
+#if defined(__linux__) && defined(O_CLOEXEC)
+    int descriptor = ::mkostemp(temporary_buffer.data(), O_CLOEXEC);
+#else
+    int descriptor = ::mkstemp(temporary_buffer.data());
+#endif
+    if (descriptor < 0) {
+      const std::error_code ec(errno, std::generic_category());
+      BOOST_LOG(error) << "Couldn't create temporary state file beside "sv << target << ": "sv << ec.message();
+      return false;
+    }
+    const std::filesystem::path temporary {temporary_buffer.data()};
+    auto cleanup_temporary = [&]() {
+      if (descriptor >= 0) {
+        if (::close(descriptor) != 0) {
+          const std::error_code ec(errno, std::generic_category());
+          BOOST_LOG(warning) << "Couldn't close temporary state file during cleanup "sv << temporary << ": "sv << ec.message();
+        }
+        descriptor = -1;
+      }
+      for (int attempt = 0; attempt < 2; ++attempt) {
+        if (::unlink(temporary.c_str()) == 0 || errno == ENOENT) {
+          return;
+        }
+        const auto cleanup_error = errno;
+        const std::error_code ec(cleanup_error, std::generic_category());
+        if (attempt == 0) {
+          BOOST_LOG(warning) << "Couldn't remove temporary state file on first cleanup attempt "sv
+                             << temporary << ": "sv << ec.message() << "; retrying"sv;
+          continue;
+        }
+        BOOST_LOG(error) << "Couldn't remove temporary state file after failed persistence "sv
+                         << temporary << ": "sv << ec.message();
+      }
+    };
+    auto cleanup = util::fail_guard(cleanup_temporary);
+    const auto write_bytes = [&](std::size_t byte_count) {
+      std::size_t offset = 0;
+      while (offset < byte_count) {
+        const auto written = ::write(descriptor, payload.data() + offset, byte_count - offset);
+        if (written < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          const std::error_code ec(errno, std::generic_category());
+          BOOST_LOG(error) << "Couldn't write temporary state file "sv << temporary << ": "sv << ec.message();
+          return false;
+        }
+        if (written == 0) {
+          BOOST_LOG(error) << "Short write to temporary state file "sv << temporary;
+          return false;
+        }
+        offset += static_cast<std::size_t>(written);
+      }
+      return true;
+    };
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::short_write) {
+      (void) write_bytes(payload.size() / 2);
+      return false;
+    }
+#endif
+    if (!write_bytes(payload.size())) {
+      return false;
+    }
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::flush) {
+      return false;
+    }
+#endif
+    if (::fsync(descriptor) != 0) {
+      const std::error_code ec(errno, std::generic_category());
+      BOOST_LOG(error) << "Couldn't flush temporary state file "sv << temporary << ": "sv << ec.message();
+      return false;
+    }
+    if (::close(descriptor) != 0) {
+      const std::error_code ec(errno, std::generic_category());
+      descriptor = -1;
+      BOOST_LOG(error) << "Couldn't close temporary state file "sv << temporary << ": "sv << ec.message();
+      return false;
+    }
+    descriptor = -1;
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::rename) {
+      return false;
+    }
+#endif
+    std::error_code rename_ec;
+    std::filesystem::rename(temporary, target, rename_ec);
+    if (rename_ec) {
+      BOOST_LOG(error) << "Couldn't replace state file "sv << target << ": "sv << rename_ec.message();
+      return false;
+    }
+    cleanup.disable();
+#ifdef POLARIS_TESTS
+    if (injected_fault == pairing_state_write_fault_t::post_rename_durability) {
+      return true;
+    }
+#endif
+
+    // The rename is already visible and committed at this point. A directory
+    // fsync failure weakens crash durability, but must not be reported as a
+    // pre-commit failure that allegedly preserved the old store.
+    auto directory = target.parent_path();
+    if (directory.empty()) {
+      directory = ".";
+    }
+    int directory_flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    directory_flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+    directory_flags |= O_CLOEXEC;
+#endif
+    const int directory_descriptor = ::open(directory.c_str(), directory_flags);
+    if (directory_descriptor < 0) {
+      const std::error_code ec(errno, std::generic_category());
+      BOOST_LOG(warning) << "State file replaced, but couldn't open its directory for durability flush "sv
+                         << directory << ": "sv << ec.message();
+      return true;
+    }
+    const int directory_flush_result = ::fsync(directory_descriptor);
+    const int directory_flush_errno = errno;
+    const int directory_close_result = ::close(directory_descriptor);
+    const int directory_close_errno = errno;
+    if (directory_flush_result != 0) {
+      const std::error_code ec(directory_flush_errno, std::generic_category());
+      BOOST_LOG(warning) << "State file replaced, but couldn't flush its directory "sv
+                         << directory << ": "sv << ec.message();
+    }
+    if (directory_close_result != 0) {
+      const std::error_code ec(directory_close_errno, std::generic_category());
+      BOOST_LOG(warning) << "State file replaced, but couldn't close its directory "sv
+                         << directory << ": "sv << ec.message();
+    }
+    return true;
+#endif
+  }
+
+  bool update_state_file(
+    const std::string &path,
+    const std::function<void(nlohmann::json &)> &mutation
+  ) {
+    std::lock_guard lock(client_state_mutex);
+    const std::filesystem::path target {path};
+    state_file_lock_t interprocess_lock {target};
+    if (!interprocess_lock) {
+      return false;
+    }
+
+    nlohmann::json root = nlohmann::json::object();
+    if (std::filesystem::exists(target)) {
+      try {
+        std::ifstream input(target, std::ios::binary);
+        if (!input.is_open()) {
+          BOOST_LOG(error) << "Couldn't open state "sv << path;
+          return false;
+        }
+        input >> root;
+      } catch (const std::exception &e) {
+        BOOST_LOG(error) << "Couldn't read state "sv << path << ": "sv << e.what();
+        return false;
+      }
+    }
+
+    try {
+      mutation(root);
+      return write_state_atomically(target, root.dump(4));
+    } catch (const std::exception &e) {
+      BOOST_LOG(error) << "Couldn't update state "sv << path << ": "sv << e.what();
+      return false;
+    }
+  }
+
+  bool save_state() {
+    std::lock_guard lock(client_state_mutex);
+    return update_state_file(config::nvhttp.file_state, [&](nlohmann::json &root) {
     // Erase any previous "root" key.
     root.erase("root");
 
@@ -2932,12 +3495,17 @@ namespace nvhttp {
     client_t &client = client_root;
     nlohmann::json named_cert_nodes = nlohmann::json::array();
 
-    std::unordered_set<std::string> unique_certs;
+    std::vector<crypto::sha256_t> unique_certs;
     std::unordered_map<std::string, int> name_counts;
 
     for (auto &named_cert_p : client.named_devices) {
-      // Only add each unique certificate once.
-      if (unique_certs.insert(named_cert_p->cert).second) {
+      const auto fingerprint = crypto::x509_fingerprint(named_cert_p->cert);
+      if (!fingerprint) {
+        throw std::runtime_error("paired client contains an invalid certificate");
+      }
+      // Only add each canonical X.509 identity once.
+      if (std::find(unique_certs.begin(), unique_certs.end(), *fingerprint) == unique_certs.end()) {
+        unique_certs.push_back(*fingerprint);
         nlohmann::json named_cert_node = nlohmann::json::object();
         std::string base_name = named_cert_p->name;
         // Remove any pending id suffix (e.g., " (2)") if present.
@@ -2953,6 +3521,8 @@ namespace nvhttp {
         named_cert_node["name"] = final_name;
         named_cert_node["cert"] = named_cert_p->cert;
         named_cert_node["uuid"] = named_cert_p->uuid;
+        named_cert_node["paired_at"] = named_cert_p->paired_at;
+        named_cert_node["last_seen_at"] = named_cert_p->last_seen_at.load(std::memory_order_relaxed);
         named_cert_node["client_family"] = named_cert_p->client_family;
         named_cert_node["display_mode"] = named_cert_p->display_mode;
         named_cert_node["target_bitrate_kbps"] = named_cert_p->target_bitrate_kbps;
@@ -2984,114 +3554,259 @@ namespace nvhttp {
     }
 
     root["root"]["named_devices"] = named_cert_nodes;
+    });
+  }
 
-    try {
-      std::ofstream out(config::nvhttp.file_state);
-      out << root.dump(4);  // Pretty-print with an indent of 4 spaces.
-    } catch (std::exception &e) {
-      BOOST_LOG(error) << "Couldn't write "sv << config::nvhttp.file_state << ": "sv << e.what();
-      return;
+  void clear_authorization_state_locked() {
+    client_root = {};
+    cert_chain.clear();
+  }
+
+  void rebuild_cert_chain_locked() {
+    cert_chain.clear();
+    for (auto &named_cert : client_root.named_devices) {
+      cert_chain.add(named_cert);
     }
   }
 
-  void load_state() {
-    if (!fs::exists(config::nvhttp.file_state)) {
-      BOOST_LOG(info) << "File "sv << config::nvhttp.file_state << " doesn't exist"sv;
-      http::unique_id = uuid_util::uuid_t::generate().string();
-      return;
-    }
-
-    nlohmann::json tree;
-    try {
-      std::ifstream in(config::nvhttp.file_state);
-      in >> tree;
-    } catch (std::exception &e) {
-      BOOST_LOG(error) << "Couldn't read "sv << config::nvhttp.file_state << ": "sv << e.what();
-      http::unique_id = uuid_util::uuid_t::generate().string();
-      return;
-    }
-
-    // Check that the file contains a "root.uniqueid" value.
-    if (!tree.contains("root") || !tree["root"].contains("uniqueid")) {
+  bool load_state() {
+    std::lock_guard lock(client_state_mutex);
+    const std::filesystem::path state_path {config::nvhttp.file_state};
+    state_file_lock_t interprocess_lock {state_path};
+    const auto fail_closed = [&](std::string_view reason) {
+      BOOST_LOG(error) << "Refusing authorization state from "sv << state_path << ": "sv << reason;
+      clear_authorization_state_locked();
       http::uuid = uuid_util::uuid_t::generate();
       http::unique_id = http::uuid.string();
-      return;
+      return false;
+    };
+
+    if (!interprocess_lock) {
+      return fail_closed("couldn't acquire the state lock");
+    }
+    if (!fs::exists(state_path)) {
+      BOOST_LOG(info) << "File "sv << state_path << " doesn't exist"sv;
+      clear_authorization_state_locked();
+      http::uuid = uuid_util::uuid_t::generate();
+      http::unique_id = http::uuid.string();
+      return false;
     }
 
-    std::string uid = tree["root"]["uniqueid"];
-    http::uuid = uuid_util::uuid_t::parse(uid);
-    http::unique_id = uid;
+    try {
+      nlohmann::json tree;
+      std::ifstream input(state_path, std::ios::binary);
+      if (!input.is_open()) {
+        return fail_closed("couldn't open the file");
+      }
+      input >> tree;
+      if (!tree.is_object() || !tree.contains("root") || !tree["root"].is_object()) {
+        return fail_closed("root must be an object");
+      }
 
-    nlohmann::json root = tree["root"];
-    client_t client;  // Local client to load into
+      const auto &root = tree["root"];
+      if (!root.contains("uniqueid") || !root["uniqueid"].is_string()) {
+        return fail_closed("root.uniqueid must be a string");
+      }
+      auto uid = root["uniqueid"].get<std::string>();
+      const auto parsed_uuid = uuid_util::uuid_t::parse(uid);
+      client_t imported;
 
-    // Import from the old format if available.
-    if (root.contains("devices")) {
-      for (auto &device_node : root["devices"]) {
-        // For each device, if there is a "certs" array, add a named certificate.
-        if (device_node.contains("certs")) {
-          for (auto &el : device_node["certs"]) {
-            auto named_cert_p = std::make_shared<crypto::named_cert_t>();
-            named_cert_p->name = "";
-            named_cert_p->cert = el.get<std::string>();
-            named_cert_p->uuid = uuid_util::uuid_t::generate().string();
-            named_cert_p->client_family = "";
-            named_cert_p->display_mode = "";
-            named_cert_p->target_bitrate_kbps = 0;
-            named_cert_p->perm = PERM::_all;
-            named_cert_p->enable_legacy_ordering = true;
-            named_cert_p->allow_client_commands = true;
-            named_cert_p->always_use_virtual_display = false;
-            client.named_devices.emplace_back(named_cert_p);
+      const auto certificate_fingerprint = [](const crypto::p_named_cert_t &named_cert) {
+        const auto fingerprint = crypto::x509_fingerprint(named_cert->cert);
+        if (!fingerprint) {
+          throw std::runtime_error("paired client contains an invalid certificate");
+        }
+        return *fingerprint;
+      };
+      std::vector<crypto::sha256_t> loaded_certificates;
+      std::unordered_set<std::string> loaded_uuids;
+      const auto register_identity = [&](const crypto::p_named_cert_t &named_cert) {
+        const auto fingerprint = certificate_fingerprint(named_cert);
+        if (std::find(loaded_certificates.begin(), loaded_certificates.end(), fingerprint) !=
+            loaded_certificates.end()) {
+          throw std::runtime_error("authorization state contains duplicate certificates");
+        }
+        if (!named_cert->uuid.empty() && !loaded_uuids.insert(named_cert->uuid).second) {
+          throw std::runtime_error("authorization state contains duplicate UUIDs");
+        }
+        loaded_certificates.push_back(fingerprint);
+      };
+
+      // Import the legacy devices[].certs[] representation when present.
+      if (root.contains("devices")) {
+        if (!root["devices"].is_array()) {
+          return fail_closed("root.devices must be an array");
+        }
+        for (const auto &device_node : root["devices"]) {
+          if (!device_node.is_object()) {
+            return fail_closed("root.devices entries must be objects");
+          }
+          if (!device_node.contains("certs")) {
+            continue;
+          }
+          if (!device_node["certs"].is_array()) {
+            return fail_closed("root.devices[].certs must be an array");
+          }
+          for (const auto &certificate : device_node["certs"]) {
+            if (!certificate.is_string()) {
+              return fail_closed("legacy certificates must be strings");
+            }
+            auto named_cert = std::make_shared<crypto::named_cert_t>();
+            named_cert->cert = certificate.get<std::string>();
+            named_cert->uuid = uuid_util::uuid_t::generate().string();
+            named_cert->perm = PERM::_all;
+            named_cert->enable_legacy_ordering = true;
+            named_cert->allow_client_commands = true;
+            register_identity(named_cert);
+            imported.named_devices.emplace_back(std::move(named_cert));
           }
         }
       }
-    }
 
-    // Import from the new format.
-    if (root.contains("named_devices")) {
-      for (auto &el : root["named_devices"]) {
-        auto named_cert_p = std::make_shared<crypto::named_cert_t>();
-        named_cert_p->name = el.value("name", "");
-        named_cert_p->cert = el.value("cert", "");
-        named_cert_p->uuid = el.value("uuid", "");
-        named_cert_p->client_family = el.value("client_family", "");
-        named_cert_p->display_mode = el.value("display_mode", "");
-        named_cert_p->target_bitrate_kbps = util::get_non_string_json_value<int>(el, "target_bitrate_kbps", 0);
-        named_cert_p->perm = (PERM)(util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t)PERM::_all)) & PERM::_all;
-        named_cert_p->enable_legacy_ordering = el.value("enable_legacy_ordering", true);
-        named_cert_p->allow_client_commands = el.value("allow_client_commands", true);
-        named_cert_p->always_use_virtual_display = el.value("always_use_virtual_display", false);
-        // Load command entries for "do" and "undo" keys.
-        named_cert_p->do_cmds = extract_command_entries(el, "do");
-        named_cert_p->undo_cmds = extract_command_entries(el, "undo");
-        client.named_devices.emplace_back(named_cert_p);
+      if (root.contains("named_devices")) {
+        if (!root["named_devices"].is_array()) {
+          return fail_closed("root.named_devices must be an array");
+        }
+        for (const auto &entry : root["named_devices"]) {
+          if (!entry.is_object()) {
+            return fail_closed("root.named_devices entries must be objects");
+          }
+          auto named_cert = std::make_shared<crypto::named_cert_t>();
+          named_cert->name = entry.value("name", "");
+          named_cert->cert = entry.value("cert", "");
+          named_cert->uuid = entry.value("uuid", "");
+          named_cert->paired_at = util::get_non_string_json_value<std::int64_t>(entry, "paired_at", 0);
+          const auto last_seen_at = util::get_non_string_json_value<std::int64_t>(entry, "last_seen_at", 0);
+          named_cert->last_seen_at.store(last_seen_at, std::memory_order_relaxed);
+          named_cert->last_seen_persisted_at.store(last_seen_at, std::memory_order_relaxed);
+          named_cert->client_family = entry.value("client_family", "");
+          named_cert->display_mode = entry.value("display_mode", "");
+          named_cert->target_bitrate_kbps = util::get_non_string_json_value<int>(entry, "target_bitrate_kbps", 0);
+          named_cert->perm = (PERM)(util::get_non_string_json_value<uint32_t>(entry, "perm", (uint32_t)PERM::_all)) & PERM::_all;
+          named_cert->enable_legacy_ordering = entry.value("enable_legacy_ordering", true);
+          named_cert->allow_client_commands = entry.value("allow_client_commands", true);
+          named_cert->always_use_virtual_display = entry.value("always_use_virtual_display", false);
+          named_cert->do_cmds = extract_command_entries(entry, "do");
+          named_cert->undo_cmds = extract_command_entries(entry, "undo");
+          register_identity(named_cert);
+          imported.named_devices.emplace_back(std::move(named_cert));
+        }
       }
-    }
 
-    // Clear any existing certificate chain and add the imported certificates.
-    cert_chain.clear();
-    for (auto &named_cert : client.named_devices) {
-      cert_chain.add(named_cert);
+      // Commit only after the entire document and every certificate validate.
+      client_root = std::move(imported);
+      rebuild_cert_chain_locked();
+      http::uuid = parsed_uuid;
+      http::unique_id = uid;
+      return true;
+    } catch (const std::exception &e) {
+      return fail_closed(e.what());
     }
-
-    client_root = client;
   }
 
-  void add_authorized_client(const p_named_cert_t& named_cert_p) {
-    client_t &client = client_root;
-    client.named_devices.push_back(named_cert_p);
-    auto live_named_cert_p = named_cert_p;
-    cert_chain.add(live_named_cert_p);
-
-#if defined POLARIS_TRAY && POLARIS_TRAY >= 1
-    system_tray::update_tray_paired(named_cert_p->name);
-#endif
-
-    if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
-      save_state();
-      load_state();
+  bool same_certificate_identity(
+    const crypto::p_named_cert_t &lhs,
+    const crypto::p_named_cert_t &rhs
+  ) {
+    if (!lhs || !rhs || lhs->cert.empty() || rhs->cert.empty()) {
+      return false;
     }
+    const auto lhs_fingerprint = crypto::x509_fingerprint(lhs->cert);
+    const auto rhs_fingerprint = crypto::x509_fingerprint(rhs->cert);
+    return lhs_fingerprint && rhs_fingerprint && *lhs_fingerprint == *rhs_fingerprint;
+  }
+
+  crypto::p_named_cert_t clone_named_cert(const crypto::p_named_cert_t &source) {
+    if (!source) {
+      return {};
+    }
+    auto clone = std::make_shared<crypto::named_cert_t>();
+    clone->name = source->name;
+    clone->uuid = source->uuid;
+    clone->cert = source->cert;
+    clone->client_family = source->client_family;
+    clone->display_mode = source->display_mode;
+    clone->target_bitrate_kbps = source->target_bitrate_kbps;
+    clone->paired_at = source->paired_at;
+    clone->last_seen_at.store(source->last_seen_at.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    clone->last_seen_persisted_at.store(
+      source->last_seen_persisted_at.load(std::memory_order_relaxed),
+      std::memory_order_relaxed
+    );
+    clone->do_cmds = source->do_cmds;
+    clone->undo_cmds = source->undo_cmds;
+    clone->perm = source->perm;
+    clone->enable_legacy_ordering = source->enable_legacy_ordering;
+    clone->allow_client_commands = source->allow_client_commands;
+    clone->always_use_virtual_display = source->always_use_virtual_display;
+    return clone;
+  }
+
+  bool add_authorized_client(const p_named_cert_t &named_cert, std::optional<PERM> pairing_perm = std::nullopt) {
+    std::lock_guard lock(client_state_mutex);
+    const auto previous_clients = client_root.named_devices;
+    const auto incoming_fingerprint = crypto::x509_fingerprint(named_cert->cert);
+    if (!incoming_fingerprint) {
+      BOOST_LOG(error) << "Refusing authorization for a client with an invalid certificate"sv;
+      return false;
+    }
+    const auto duplicate = std::find_if(
+      previous_clients.begin(),
+      previous_clients.end(),
+      [&](const crypto::p_named_cert_t &current) {
+        const auto current_fingerprint = crypto::x509_fingerprint(current->cert);
+        return current_fingerprint && *current_fingerprint == *incoming_fingerprint;
+      }
+    );
+
+    if (pairing_perm) {
+      named_cert->perm = *pairing_perm;
+    } else if (duplicate != previous_clients.end()) {
+      named_cert->perm = (*duplicate)->perm;
+    } else if (boost::iequals(named_cert->client_family, "nova")) {
+      named_cert->perm = PERM::_game_control;
+    } else {
+      // Permission selection and replacement are one critical section so only
+      // one concurrently paired legacy certificate can become the first full client.
+      named_cert->perm = client_root.named_devices.empty() ? PERM::_all : PERM::_default;
+    }
+
+    if (duplicate != previous_clients.end()) {
+      if ((*duplicate)->paired_at > 0) {
+        named_cert->paired_at = (*duplicate)->paired_at;
+      }
+      named_cert->last_seen_at.store(
+        std::max(
+          named_cert->last_seen_at.load(std::memory_order_relaxed),
+          (*duplicate)->last_seen_at.load(std::memory_order_relaxed)
+        ),
+        std::memory_order_relaxed
+      );
+      named_cert->last_seen_persisted_at.store(
+        (*duplicate)->last_seen_persisted_at.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+      );
+      if (named_cert->client_family.empty()) {
+        named_cert->client_family = (*duplicate)->client_family;
+      }
+      std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &current) {
+        const auto current_fingerprint = crypto::x509_fingerprint(current->cert);
+        return current_fingerprint && *current_fingerprint == *incoming_fingerprint;
+      });
+    }
+    client_root.named_devices.push_back(named_cert);
+
+    if (!config::sunshine.flags[config::flag::FRESH_STATE] && !save_state()) {
+      client_root.named_devices = previous_clients;
+      BOOST_LOG(error) << "Pairing authorization was not persisted; rejecting client "sv << named_cert->name;
+      return false;
+    }
+
+    rebuild_cert_chain_locked();
+#if defined POLARIS_TRAY && POLARIS_TRAY >= 1
+    system_tray::update_tray_paired(named_cert->name);
+#endif
+    return true;
   }
 
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p) {
@@ -3353,8 +4068,6 @@ namespace nvhttp {
     bool same_hash = hash.size() == sess.clienthash.size() && std::equal(hash.begin(), hash.end(), sess.clienthash.begin());
     auto verify = crypto::verify256(crypto::x509(client.cert), secret, sign);
     if (same_hash && verify) {
-      tree.put("root.paired", 1);
-
       auto named_cert_p = std::make_shared<crypto::named_cert_t>();
       named_cert_p->name = client.name;
       for (char& c : named_cert_p->name) {
@@ -3363,32 +4076,30 @@ namespace nvhttp {
       }
       named_cert_p->cert = std::move(client.cert);
       named_cert_p->uuid = uuid_util::uuid_t::generate().string();
+      const auto paired_at = unix_time_now_seconds();
+      named_cert_p->paired_at = paired_at;
+      named_cert_p->last_seen_at.store(paired_at, std::memory_order_relaxed);
+      named_cert_p->last_seen_persisted_at.store(paired_at, std::memory_order_relaxed);
       named_cert_p->client_family = client.family_hint;
-      if (sess.pairing_perm) {
-        named_cert_p->perm = *sess.pairing_perm;
-      } else if (boost::iequals(client.family_hint, "nova")) {
-        // Nova trusted-pair clients are game stream controllers, not passive viewers.
-        named_cert_p->perm = PERM::_game_control;
-      }
-      // If the device is the first one paired with the server, assign full permission.
-      else if (client_root.named_devices.empty()) {
-        named_cert_p->perm = PERM::_all;
-      } else {
-        named_cert_p->perm = PERM::_default;
-      }
-
       named_cert_p->enable_legacy_ordering = true;
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
 
-      add_authorized_client(named_cert_p);
+      if (add_authorized_client(named_cert_p, sess.pairing_perm)) {
+        tree.put("root.paired", 1);
+        tree.put("root.<xmlattr>.status_code", 200);
+      } else {
+        tree.put("root.paired", 0);
+        tree.put("root.<xmlattr>.status_code", 500);
+        tree.put("root.<xmlattr>.status_message", "Pairing authorization could not be persisted");
+      }
     } else {
       tree.put("root.paired", 0);
+      tree.put("root.<xmlattr>.status_code", 200);
       BOOST_LOG(warning) << "Pair attempt failed due to same_hash: " << same_hash << ", verify: " << verify;
     }
 
     remove_session(sess);
-    tree.put("root.<xmlattr>.status_code", 200);
   }
 
   template<class T>
@@ -3404,17 +4115,138 @@ namespace nvhttp {
     static auto constexpr to_string = "NONE"sv;
   };
 
-  inline crypto::named_cert_t* get_verified_cert(req_https_t request) {
-    return (crypto::named_cert_t*)request->userp.get();
+  auto find_live_client_locked(const crypto::p_named_cert_t &candidate) {
+    return std::find_if(
+      client_root.named_devices.begin(),
+      client_root.named_devices.end(),
+      [&](const crypto::p_named_cert_t &current) {
+        return candidate &&
+               (current.get() == candidate.get() ||
+                same_certificate_identity(current, candidate));
+      }
+    );
   }
 
-  void remember_client_family(crypto::named_cert_t *named_cert_p, std::string_view family) {
-    if (!named_cert_p || family.empty() || named_cert_p->client_family == family) {
-      return;
+  crypto::p_named_cert_t resolve_authorized_client(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  ) {
+    if (!candidate) {
+      return {};
+    }
+    std::lock_guard lock(client_state_mutex);
+    auto live_it = find_live_client_locked(candidate);
+    if (live_it == client_root.named_devices.end()) {
+      return {};
     }
 
-    named_cert_p->client_family = std::string(family);
-    save_state();
+    auto live_client = *live_it;
+    if (request_path.rfind("/polaris/v1/", 0) != 0 || live_client->client_family == "nova"sv) {
+      return live_client;
+    }
+
+    auto replacement = clone_named_cert(live_client);
+    replacement->client_family = "nova";
+    *live_it = replacement;
+    if (!save_state()) {
+      *live_it = live_client;
+      BOOST_LOG(error) << "Couldn't persist client-family update for "sv << live_client->name;
+      return live_client;
+    }
+    rebuild_cert_chain_locked();
+    return replacement;
+  }
+
+  inline crypto::p_named_cert_t get_verified_cert(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  ) {
+    return resolve_authorized_client(candidate, request_path);
+  }
+
+  inline crypto::p_named_cert_t get_verified_cert(req_https_t request) {
+    const auto candidate = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    return get_verified_cert(candidate, request->path);
+  }
+
+  bool record_client_seen(const crypto::p_named_cert_t &candidate,
+                          std::int64_t seen_at,
+                          bool persist = true,
+                          crypto::p_named_cert_t *live_client_out = nullptr) {
+    if (live_client_out) {
+      live_client_out->reset();
+    }
+    if (!candidate || seen_at <= 0) {
+      return false;
+    }
+
+    std::lock_guard lock(client_state_mutex);
+    const auto live_it = std::find_if(
+      client_root.named_devices.begin(),
+      client_root.named_devices.end(),
+      [&](const crypto::p_named_cert_t &current) {
+        if (current.get() == candidate.get()) {
+          return true;
+        }
+        return same_certificate_identity(current, candidate);
+      }
+    );
+    if (live_it == client_root.named_devices.end()) {
+      return false;
+    }
+
+    const auto &live_client = *live_it;
+    if (live_client_out) {
+      *live_client_out = live_client;
+    }
+    bool advanced = false;
+    auto previous_seen_at = live_client->last_seen_at.load(std::memory_order_relaxed);
+    while (seen_at > previous_seen_at) {
+      if (live_client->last_seen_at.compare_exchange_weak(
+            previous_seen_at,
+            seen_at,
+            std::memory_order_relaxed
+          )) {
+        advanced = true;
+        break;
+      }
+    }
+
+    constexpr std::int64_t persist_interval_seconds = 60;
+    if (persist) {
+      const auto current_seen_at = live_client->last_seen_at.load(std::memory_order_relaxed);
+      const auto persisted_at = live_client->last_seen_persisted_at.load(std::memory_order_relaxed);
+      const bool persistence_due = current_seen_at > 0 &&
+                                   (persisted_at <= 0 ||
+                                    (current_seen_at > persisted_at &&
+                                     current_seen_at - persisted_at >= persist_interval_seconds));
+      if (persistence_due && save_state()) {
+        // Advance the throttle watermark only after atomic replacement commits.
+        // Duplicate same-second authentications can retry a pre-commit failure.
+        live_client->last_seen_persisted_at.store(current_seen_at, std::memory_order_relaxed);
+      }
+    }
+
+    return advanced;
+  }
+
+  crypto::p_named_cert_t verify_client_x509(X509 *cert, bool log_errors, std::int64_t seen_at) {
+    if (!cert) {
+      return {};
+    }
+
+    p_named_cert_t named_cert_p;
+    auto err_str = cert_chain.verify(cert, named_cert_p);
+    if (err_str) {
+      if (log_errors) {
+        BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
+      }
+      return {};
+    }
+
+    crypto::p_named_cert_t live_client;
+    record_client_seen(named_cert_p, seen_at, true, &live_client);
+    return live_client;
   }
 
   crypto::p_named_cert_t verify_client_cert(SSL *ssl, bool log_errors) {
@@ -3430,20 +4262,7 @@ namespace nvhttp {
 #endif
     };
 
-    if (!x509) {
-      return {};
-    }
-
-    p_named_cert_t named_cert_p;
-    auto err_str = cert_chain.verify(x509.get(), named_cert_p);
-    if (err_str) {
-      if (log_errors) {
-        BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
-      }
-      return {};
-    }
-
-    return named_cert_p;
+    return verify_client_x509(x509.get(), log_errors, unix_time_now_seconds());
   }
 
   template <class T>
@@ -3521,9 +4340,12 @@ namespace nvhttp {
     const bool removed_session = map_id_sess.erase(unique_id) > 0;
 
     bool removed_paired_client = false;
+    bool revocation_failed = false;
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       if (auto named_cert_p = get_verified_cert(request)) {
-        removed_paired_client = unpair_client(named_cert_p->uuid);
+        const auto result = unpair_client_result(named_cert_p->uuid);
+        removed_paired_client = result == client_mutation_result_t::success;
+        revocation_failed = result == client_mutation_result_t::persistence_failed;
       }
     }
 
@@ -3531,9 +4353,12 @@ namespace nvhttp {
                     << " session_removed="sv << removed_session
                     << " paired_client_removed="sv << removed_paired_client;
 
-    tree.put("root.paired", 0);
-    tree.put("root.<xmlattr>.status_code", 200);
-    tree.put("root.<xmlattr>.status_message", "Unpaired");
+    tree.put("root.paired", revocation_failed ? 1 : 0);
+    tree.put("root.<xmlattr>.status_code", revocation_failed ? 500 : 200);
+    tree.put(
+      "root.<xmlattr>.status_message",
+      revocation_failed ? "Paired-client revocation could not be persisted" : "Unpaired"
+    );
   }
 
   template <class T>
@@ -3765,7 +4590,7 @@ namespace nvhttp {
     print_req<T>(request);
 
     auto local_endpoint = request->local_endpoint();
-    const crypto::named_cert_t *named_cert_p = nullptr;
+    crypto::p_named_cert_t named_cert_p;
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       named_cert_p = get_verified_cert(request);
     }
@@ -3880,7 +4705,7 @@ namespace nvhttp {
       tree.put("root.currentgame", current_appid);
       tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
       tree.put("root.state", current_appid > 0 ? "POLARIS_SERVER_BUSY" : "POLARIS_SERVER_FREE");
-      append_current_game_session_fields(tree, named_cert_p);
+      append_current_game_session_fields(tree, named_cert_p.get());
     } else {
       tree.put("root.currentgame", 0);
       tree.put("root.currentgameuuid", "");
@@ -3899,6 +4724,7 @@ namespace nvhttp {
   }
 
   nlohmann::json get_all_clients() {
+    std::lock_guard lock(client_state_mutex);
     nlohmann::json named_cert_nodes = nlohmann::json::array();
     client_t &client = client_root;
     std::list<std::string> connected_uuids = rtsp_stream::get_all_session_uuids();
@@ -3908,6 +4734,8 @@ namespace nvhttp {
       named_cert_node["name"] = named_cert->name;
       named_cert_node["friendly_name"] = device_db::friendly_name(named_cert->name);
       named_cert_node["uuid"] = named_cert->uuid;
+      named_cert_node["paired_at"] = named_cert->paired_at;
+      named_cert_node["last_seen_at"] = named_cert->last_seen_at.load(std::memory_order_relaxed);
       named_cert_node["client_family"] = named_cert->client_family;
       named_cert_node["display_mode"] = named_cert->display_mode;
       named_cert_node["target_bitrate_kbps"] = named_cert->target_bitrate_kbps;
@@ -4141,7 +4969,7 @@ namespace nvhttp {
     }
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p);
+    auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p.get());
     const bool watch_only = launch_session->watch_only;
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
@@ -4423,7 +5251,7 @@ namespace nvhttp {
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
-    auto launch_session = make_launch_session(host_audio, false, args, named_cert_p);
+    auto launch_session = make_launch_session(host_audio, false, args, named_cert_p.get());
     const bool watch_only = launch_session->watch_only;
 
     if (watch_only && no_active_sessions) {
@@ -4760,9 +5588,6 @@ namespace nvhttp {
     https_server.verify = [](req_https_t req, SSL *ssl) {
       if (auto named_cert_p = verify_client_cert(ssl, false)) {
         req->userp = named_cert_p;
-        if (req->path.rfind("/polaris/v1/", 0) == 0) {
-          remember_client_family(named_cert_p.get(), "nova");
-        }
         BOOST_LOG(debug) << named_cert_p->name << " -- verified"sv;
       }
 
@@ -5139,7 +5964,7 @@ namespace nvhttp {
             return;
           }
 
-          const bool updated = update_device_info(
+          const auto update_result = update_device_info_result(
             named_cert_p->uuid,
             named_cert_p->name,
             display_mode,
@@ -5152,27 +5977,41 @@ namespace nvhttp {
             named_cert_p->always_use_virtual_display
           );
 
-          if (!updated) {
+          if (update_result != client_mutation_result_t::success) {
             nlohmann::json err;
-            err["error"] = "paired client not found";
+            err["error"] = update_result == client_mutation_result_t::not_found
+              ? "paired client is no longer authorized"
+              : "paired client update could not be persisted";
             SimpleWeb::CaseInsensitiveMultimap headers;
             headers.emplace("Content-Type", "application/json");
-            response->write(SimpleWeb::StatusCode::client_error_not_found, err.dump(), headers);
+            response->write(
+              update_result == client_mutation_result_t::not_found
+                ? SimpleWeb::StatusCode::client_error_unauthorized
+                : SimpleWeb::StatusCode::server_error_internal_server_error,
+              err.dump(),
+              headers
+            );
             return;
           }
+        }
+
+        const auto response_client = resolve_authorized_client(named_cert_p, request->path);
+        if (!response_client) {
+          response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+          return;
         }
 
         const auto stats = stream_stats::get_current();
         const auto health = build_session_health_json(
           stats,
           proc::proc.virtual_display,
-          named_cert_p->name,
+          response_client->name,
           app_name
         );
 
         nlohmann::json output;
         output["status"] = true;
-        output["stream_policy"] = build_stream_policy_json(*named_cert_p, stats, health);
+        output["stream_policy"] = build_stream_policy_json(*response_client, stats, health);
         output["health"] = health;
         output["doctor"] = health.value("doctor", nlohmann::json::object());
 
@@ -5341,11 +6180,7 @@ namespace nvhttp {
             }
           }
 
-          if (target_bitrate_kbps > 0) {
-            adaptive_bitrate::set_base_bitrate(target_bitrate_kbps);
-          }
-
-          const bool updated = update_device_info(
+          const auto update_result = update_device_info_result(
             named_cert_p->uuid,
             named_cert_p->name,
             display_mode,
@@ -5358,23 +6193,39 @@ namespace nvhttp {
             named_cert_p->always_use_virtual_display
           );
 
-          if (!updated) {
-            write_json({{"error", "paired client not found"}}, SimpleWeb::StatusCode::client_error_not_found);
+          if (update_result != client_mutation_result_t::success) {
+            write_json(
+              {{"error", update_result == client_mutation_result_t::not_found
+                ? "paired client is no longer authorized"
+                : "paired client update could not be persisted"}},
+              update_result == client_mutation_result_t::not_found
+                ? SimpleWeb::StatusCode::client_error_unauthorized
+                : SimpleWeb::StatusCode::server_error_internal_server_error
+            );
             return;
           }
+          if (target_bitrate_kbps > 0) {
+            adaptive_bitrate::set_base_bitrate(target_bitrate_kbps);
+          }
+        }
+
+        const auto response_client = resolve_authorized_client(named_cert_p, request->path);
+        if (!response_client) {
+          write_json({{"error", "paired client is no longer authorized"}}, SimpleWeb::StatusCode::client_error_unauthorized);
+          return;
         }
 
         const auto stats = stream_stats::get_current();
         const auto health = build_session_health_json(
           stats,
           proc::proc.virtual_display,
-          named_cert_p->name,
+          response_client->name,
           proc::proc.get_last_run_app_name()
         );
 
         nlohmann::json output;
         output["status"] = true;
-        output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
+        output["client_settings"] = build_client_settings_json(*response_client, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
         output["stream_policy"] = output["client_settings"]["policy"];
         output["health"] = health;
@@ -6657,6 +7508,7 @@ namespace nvhttp {
 
 #ifdef POLARIS_TESTS
   void reset_pairing_state_for_tests() {
+    std::lock_guard lock(client_state_mutex);
     map_id_sess.clear();
     client_root.named_devices.clear();
     cert_chain.clear();
@@ -6666,15 +7518,80 @@ namespace nvhttp {
     otp_pairing_perm.reset();
     otp_creation_time = {};
   }
+
+  void add_legacy_authorized_client_for_tests(const crypto::p_named_cert_t &named_cert_p) {
+    add_authorized_client(named_cert_p);
+  }
+
+  bool add_authorized_client_for_tests(
+    const crypto::p_named_cert_t &named_cert_p,
+    std::optional<crypto::PERM> pairing_perm
+  ) {
+    return add_authorized_client(named_cert_p, pairing_perm);
+  }
+
+  bool game_stream_request_authorized_for_tests(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  ) {
+    return get_verified_cert(candidate, request_path) != nullptr;
+  }
+
+  bool record_client_seen_for_tests(std::string_view uuid, std::int64_t seen_at, bool persist) {
+    crypto::p_named_cert_t matched_client;
+    {
+      std::lock_guard lock(client_state_mutex);
+      for (const auto &named_cert_p : client_root.named_devices) {
+        if (named_cert_p->uuid == uuid) {
+          matched_client = named_cert_p;
+          break;
+        }
+      }
+    }
+    return record_client_seen(matched_client, seen_at, persist);
+  }
+
+  bool record_client_pointer_seen_for_tests(const crypto::p_named_cert_t &client, std::int64_t seen_at, bool persist) {
+    return record_client_seen(client, seen_at, persist);
+  }
+
+  void set_pairing_state_write_fault_for_tests(pairing_state_write_fault_t fault) {
+    pairing_state_write_fault.store(fault, std::memory_order_relaxed);
+  }
+
+  crypto::p_named_cert_t verify_client_cert_for_tests(X509 *cert, std::int64_t seen_at) {
+    return verify_client_x509(cert, false, seen_at);
+  }
+
+  crypto::p_named_cert_t resolve_authorized_client_for_tests(
+    const crypto::p_named_cert_t &candidate,
+    std::string_view request_path
+  ) {
+    return resolve_authorized_client(candidate, request_path);
+  }
+
+  bool save_pairing_state_for_tests() {
+    return save_state();
+  }
+
+  void load_pairing_state_for_tests() {
+    load_state();
+  }
 #endif
 
-  void
-  erase_all_clients() {
-    client_t client;
-    client_root = client;
+  bool erase_all_clients() {
+    std::lock_guard lock(client_state_mutex);
+    if (client_root.named_devices.empty()) {
+      return true;
+    }
+    auto previous_clients = client_root.named_devices;
+    client_root.named_devices.clear();
+    if (!save_state()) {
+      client_root.named_devices = std::move(previous_clients);
+      return false;
+    }
     cert_chain.clear();
-    save_state();
-    load_state();
+    return true;
   }
 
   void stop_session(stream::session_t& session, bool graceful) {
@@ -6707,6 +7624,52 @@ namespace nvhttp {
     return false;
   }
 
+  client_mutation_result_t update_device_info_result(
+    const std::string& uuid,
+    const std::string& name,
+    const std::string& display_mode,
+    const int target_bitrate_kbps,
+    const cmd_list_t& do_cmds,
+    const cmd_list_t& undo_cmds,
+    const crypto::PERM newPerm,
+    const bool enable_legacy_ordering,
+    const bool allow_client_commands,
+    const bool always_use_virtual_display
+  ) {
+    {
+      std::lock_guard lock(client_state_mutex);
+      const auto it = std::find_if(
+        client_root.named_devices.begin(),
+        client_root.named_devices.end(),
+        [&](const crypto::p_named_cert_t &client) { return client->uuid == uuid; }
+      );
+      if (it == client_root.named_devices.end()) {
+        return client_mutation_result_t::not_found;
+      }
+
+      const auto previous = *it;
+      auto replacement = clone_named_cert(previous);
+      replacement->name = name;
+      replacement->display_mode = display_mode;
+      replacement->target_bitrate_kbps = target_bitrate_kbps;
+      replacement->perm = newPerm;
+      replacement->do_cmds = do_cmds;
+      replacement->undo_cmds = undo_cmds;
+      replacement->enable_legacy_ordering = enable_legacy_ordering;
+      replacement->allow_client_commands = allow_client_commands;
+      replacement->always_use_virtual_display = always_use_virtual_display;
+      *it = replacement;
+      if (!save_state()) {
+        *it = previous;
+        return client_mutation_result_t::persistence_failed;
+      }
+      rebuild_cert_chain_locked();
+    }
+
+    find_and_udpate_session_info(uuid, name, newPerm);
+    return client_mutation_result_t::success;
+  }
+
   bool update_device_info(
     const std::string& uuid,
     const std::string& name,
@@ -6719,56 +7682,49 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display
   ) {
-    find_and_udpate_session_info(uuid, name, newPerm);
+    return update_device_info_result(
+      uuid,
+      name,
+      display_mode,
+      target_bitrate_kbps,
+      do_cmds,
+      undo_cmds,
+      newPerm,
+      enable_legacy_ordering,
+      allow_client_commands,
+      always_use_virtual_display
+    ) == client_mutation_result_t::success;
+  }
 
-    client_t &client = client_root;
-    auto it = client.named_devices.begin();
-    for (; it != client.named_devices.end(); ++it) {
-      auto named_cert_p = *it;
-      if (named_cert_p->uuid == uuid) {
-        named_cert_p->name = name;
-        named_cert_p->display_mode = display_mode;
-        named_cert_p->target_bitrate_kbps = target_bitrate_kbps;
-        named_cert_p->perm = newPerm;
-        named_cert_p->do_cmds = do_cmds;
-        named_cert_p->undo_cmds = undo_cmds;
-        named_cert_p->enable_legacy_ordering = enable_legacy_ordering;
-        named_cert_p->allow_client_commands = allow_client_commands;
-        named_cert_p->always_use_virtual_display = always_use_virtual_display;
-        save_state();
-        return true;
+  client_mutation_result_t unpair_client_result(const std::string_view uuid) {
+    bool no_clients_remain = false;
+    {
+      std::lock_guard lock(client_state_mutex);
+      auto previous_clients = client_root.named_devices;
+      std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &client) {
+        return client->uuid == uuid;
+      });
+      if (client_root.named_devices.size() == previous_clients.size()) {
+        return client_mutation_result_t::not_found;
       }
+      if (!save_state()) {
+        client_root.named_devices = std::move(previous_clients);
+        return client_mutation_result_t::persistence_failed;
+      }
+      rebuild_cert_chain_locked();
+      no_clients_remain = client_root.named_devices.empty();
     }
 
-    return false;
+    if (auto session = rtsp_stream::find_session(std::string(uuid))) {
+      stop_session(*session, true);
+    }
+    if (no_clients_remain) {
+      proc::proc.terminate();
+    }
+    return client_mutation_result_t::success;
   }
 
   bool unpair_client(const std::string_view uuid) {
-    bool removed = false;
-    client_t &client = client_root;
-    for (auto it = client.named_devices.begin(); it != client.named_devices.end();) {
-      if ((*it)->uuid == uuid) {
-        it = client.named_devices.erase(it);
-        removed = true;
-      } else {
-        ++it;
-      }
-    }
-
-    save_state();
-    load_state();
-
-    if (removed) {
-      auto session = rtsp_stream::find_session(uuid);
-      if (session) {
-        stop_session(*session, true);
-      }
-
-      if (client.named_devices.empty()) {
-        proc::proc.terminate();
-      }
-    }
-
-    return removed;
+    return unpair_client_result(uuid) == client_mutation_result_t::success;
   }
 }  // namespace nvhttp
