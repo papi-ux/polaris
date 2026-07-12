@@ -3,7 +3,7 @@
 <img src="docs/screenshots/logo-polaris.svg" width="72" alt="Polaris" />
 
 # Polaris
-**Self-hosted game streaming for Linux.**
+**Linux-only, self-hosted game streaming. Free, open source, and community-driven.**
 
 Stream PC games to Nova and Moonlight clients without letting the stream take
 over your desktop. Polaris combines an isolated Linux compositor runtime,
@@ -27,7 +27,11 @@ what the host is actually doing.
 </div>
 
 > [!IMPORTANT]
-> Polaris is a Linux host today. Fedora 42/43/44 and Arch Linux are the recommended package paths. CachyOS generally follows the Arch package path; Bazzite and Ubuntu 24.04 are tester package paths; openSUSE Tumbleweed builds from source with a dedicated guide.
+> **Polaris is Linux-only by design and will remain that way.** Windows and macOS host ports are not on the roadmap. Linux is not a secondary build target here; it is the reason the project exists.
+>
+> Polaris is and will remain free and open source under GPLv3. It is maintainer-led and community-driven: development happens in public, contributions are welcome, and real Linux hardware testing and user feedback shape the roadmap.
+>
+> Fedora 42/43/44 and Arch Linux are the recommended package paths. CachyOS generally follows the Arch package path; Bazzite and Ubuntu 24.04 are tester package paths; openSUSE Tumbleweed builds from source with a dedicated guide.
 
 > [!NOTE]
 > Start with **Headless Stream** if you want games to launch into a stream-only runtime without changing your KDE, GNOME, or wlroots desktop layout.
@@ -124,7 +128,7 @@ Detailed source builds, local Arch package builds, distro dependency lists, open
 
 | Area | Status | Notes |
 |---|---|---|
-| Linux host OS | Supported | Polaris is Linux-first today |
+| Linux host OS | Supported | Polaris is Linux-only by design; Linux is the product focus, not a secondary target |
 | Fedora 42/43/44 | Recommended | Official RPM assets and most validated release path |
 | Arch Linux | Recommended | Official package asset |
 | CachyOS / Arch derivatives | Expected via Arch package | Pacman-compatible derivatives should start here; report derivative-specific dependency/runtime gaps |
@@ -152,7 +156,7 @@ If you want the smoothest first run, start here:
 
 ## Known Limitations
 
-- Polaris is not a Windows host today. Linux is the supported platform.
+- Polaris is a Linux-only host. Windows and macOS host ports are not planned.
 - Fedora and Arch are the most validated package paths; CachyOS should use the Arch path first, but derivative-specific issues still need reports.
 - Bazzite support is experimental. Desktop Mode has Headless Stream validation on NVIDIA and growing AMD/Mesa VAAPI coverage; real Steam/Game Mode and Steam Deck client flows need more hardware reports.
 - Ubuntu 24.04 DEB packaging is experimental; other Debian-family distros are still source-build oriented.
@@ -462,7 +466,7 @@ trust boundaries, and release quality.
 
 ## Contributing
 
-Contributions are welcome, especially focused fixes, docs, translations, packaging improvements, and careful feature work. Polaris is still a small maintainer-led project, so the easiest pull requests to review are the ones that explain the problem clearly and keep the change scoped.
+Contributions are welcome, especially focused fixes, docs, translations, packaging improvements, real-hardware testing, and careful feature work. Polaris is still a small maintainer-led project, so the easiest pull requests to review are the ones that explain the problem clearly, keep the change scoped, and say what was tested on Linux.
 
 1. Fork the repo and branch from `master`.
 2. Make your changes and test them locally.
@@ -473,7 +477,7 @@ Contributions are welcome, especially focused fixes, docs, translations, packagi
 > [!NOTE]
 > The web UI lives in `src_assets/common/assets/web/` and uses Vue 3 with Tailwind CSS v4. The backend lives in `src/`. CMake builds both together.
 
-Polaris is a spare-time project built to make Linux game streaming safer, clearer, and easier to trust. If it becomes part of your setup, that alone makes my day. Bug reports, testing notes, and thoughtful feedback help too.
+Polaris is a spare-time project and my way of giving something back to Linux gaming and open source. The best donation anyone can give is time: test Polaris on your hardware, write a clear bug report, improve docs or translations, review an issue, contribute a focused fix, or help another open source project that matters to you. No pressure, no guilt; if all you do is use Polaris and enjoy it, that already means a lot.
 
 ## License
 
