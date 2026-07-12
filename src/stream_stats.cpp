@@ -8,6 +8,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <mutex>
 #include <vector>
 
@@ -41,6 +42,18 @@ namespace stream_stats {
     };
 
     std::array<capture_profile_bucket_t, CAPTURE_PROFILE_BUCKET_COUNT> capture_profile_buckets;
+
+    bool device_nodes_match(const std::string &lhs, const std::string &rhs) {
+      if (lhs.empty() || rhs.empty()) {
+        return false;
+      }
+      if (lhs == rhs) {
+        return true;
+      }
+
+      std::error_code ec;
+      return std::filesystem::equivalent(lhs, rhs, ec) && !ec;
+    }
 
     capture_profile_bucket_t &capture_profile_bucket(platf::frame_transport_e transport) {
       auto index = static_cast<std::size_t>(transport);
@@ -108,6 +121,8 @@ namespace stream_stats {
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
     j["capture_device"] = capture_device;
+    j["wayland_main_device"] = wayland_main_device;
+    j["gpu_native_probe"] = gpu_native_probe_json(*this);
     const auto capture_path = capture_path_summary(*this);
     const auto capture_reason = capture_path_reason(*this);
     const auto capture_reason_message = capture_path_reason_message(capture_reason);
@@ -126,6 +141,7 @@ namespace stream_stats {
       {"residency", platf::from_frame_residency(capture_residency)},
       {"format", platf::from_frame_format(capture_format)},
       {"capture_device", capture_device},
+      {"wayland_main_device", wayland_main_device},
       {"encoder_adapter", config::video.adapter_name},
       {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(*this)},
       {"cpu_copy", capture_cpu_copy},
@@ -233,7 +249,7 @@ namespace stream_stats {
       stats.capture_residency == platf::frame_residency_e::gpu &&
       !stats.capture_device.empty() &&
       !config::video.adapter_name.empty() &&
-      stats.capture_device != config::video.adapter_name;
+      !device_nodes_match(stats.capture_device, config::video.adapter_name);
 #else
     return false;
 #endif
@@ -242,12 +258,32 @@ namespace stream_stats {
   nlohmann::json linux_gpu_profile_json(const stats_t &stats) {
     const auto &linux_display = config::video.linux_display;
     const bool gpu_native_requested =
+      stats.gpu_native_probe.requested ||
       stats.runtime_gpu_native_override_active ||
       linux_display.prefer_gpu_native_capture;
-    const bool adapter_matches_capture_device =
-      stats.capture_device.empty() ||
-      config::video.adapter_name.empty() ||
-      stats.capture_device == config::video.adapter_name;
+    nlohmann::json adapter_matches_capture_device = nullptr;
+    nlohmann::json adapter_matches_wayland_main_device = nullptr;
+    if (!stats.capture_device.empty() && !config::video.adapter_name.empty()) {
+      adapter_matches_capture_device = device_nodes_match(stats.capture_device, config::video.adapter_name);
+    }
+    if (!stats.wayland_main_device.empty() && !config::video.adapter_name.empty()) {
+      adapter_matches_wayland_main_device = device_nodes_match(stats.wayland_main_device, config::video.adapter_name);
+    }
+
+    std::string adapter_pairing_device;
+    std::string adapter_pairing_device_source = "none";
+    if (!stats.capture_device.empty()) {
+      adapter_pairing_device = stats.capture_device;
+      adapter_pairing_device_source = "capture_device";
+    } else if (!stats.wayland_main_device.empty()) {
+      adapter_pairing_device = stats.wayland_main_device;
+      adapter_pairing_device_source = "wayland_main_device";
+    }
+
+    std::string adapter_pairing_status = "unknown";
+    if (!adapter_pairing_device.empty() && !config::video.adapter_name.empty()) {
+      adapter_pairing_status = device_nodes_match(adapter_pairing_device, config::video.adapter_name) ? "matched" : "mismatched";
+    }
     const bool capture_metadata_reported =
       stats.capture_transport != platf::frame_transport_e::unknown ||
       stats.capture_residency != platf::frame_residency_e::unknown ||
@@ -269,15 +305,28 @@ namespace stream_stats {
       });
     }
 #endif
+    if (adapter_pairing_status == "mismatched") {
+      configuration_warnings.push_back({
+        {"id", "linux_gpu_adapter_mismatch"},
+        {"severity", "warning"},
+        {"message", "The configured encoder adapter " + config::video.adapter_name + " differs from the " + adapter_pairing_device_source + " render node " + adapter_pairing_device + "; cross-GPU DMA-BUF import can fail or fall back to system memory."},
+        {"action", "Verify the render-node mapping under /dev/dri/by-path, then select the adapter used by the compositor or keep the conservative SHM fallback."}
+      });
+    }
 
     nlohmann::json profile = {
       {"encoder_api", stats.encode_target_device},
       {"encoder_adapter", config::video.adapter_name},
       {"capture_device", stats.capture_device},
+      {"wayland_main_device", stats.wayland_main_device},
       {"adapter_matches_capture_device", adapter_matches_capture_device},
+      {"adapter_matches_wayland_main_device", adapter_matches_wayland_main_device},
+      {"adapter_pairing_status", adapter_pairing_status},
+      {"adapter_pairing_device", adapter_pairing_device},
+      {"adapter_pairing_device_source", adapter_pairing_device_source},
       {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
       {"gpu_native_requested", gpu_native_requested},
-      {"gpu_native_attempted", gpu_native_requested && capture_metadata_reported},
+      {"gpu_native_attempted", stats.gpu_native_probe.headless_extcopy.attempted || stats.gpu_native_probe.windowed.attempted || (gpu_native_requested && capture_metadata_reported)},
       {"gpu_native_succeeded", capture_path_is_gpu_native(stats)},
       {"configuration_warnings", std::move(configuration_warnings)}
     };
@@ -366,6 +415,27 @@ namespace stream_stats {
     }
 
     return "mixed_or_unknown";
+  }
+
+  nlohmann::json gpu_native_probe_json(const stats_t &stats) {
+    auto attempt_json = [](const gpu_native_probe_attempt_t &attempt) {
+      return nlohmann::json {
+        {"attempted", attempt.attempted},
+        {"cached", attempt.cached},
+        {"result", attempt.result},
+        {"failure_stage", attempt.failure_stage},
+        {"failure_reason", attempt.failure_reason}
+      };
+    };
+
+    return {
+      {"requested", stats.gpu_native_probe.requested},
+      {"attempted", stats.gpu_native_probe.headless_extcopy.attempted || stats.gpu_native_probe.windowed.attempted},
+      {"headless_extcopy", attempt_json(stats.gpu_native_probe.headless_extcopy)},
+      {"windowed", attempt_json(stats.gpu_native_probe.windowed)},
+      {"selected_strategy", stats.gpu_native_probe.selected_strategy},
+      {"fallback", stats.gpu_native_probe.fallback}
+    };
   }
 
   std::string capture_path_reason_message(const std::string &reason) {
@@ -663,12 +733,14 @@ namespace stream_stats {
       {"residency", platf::from_frame_residency(stats.capture_residency)},
       {"format", platf::from_frame_format(stats.capture_format)},
       {"capture_device", stats.capture_device},
+      {"wayland_main_device", stats.wayland_main_device},
       {"encoder_adapter", config::video.adapter_name},
       {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
       {"cpu_copy", capture_cpu_copy},
       {"gpu_native", capture_gpu_native}
     };
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
+    advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["health"] = health;
     advanced["recent_issue_codes"] = nlohmann::json::array();
     advanced["raw_fields_redacted"] = true;
@@ -892,6 +964,49 @@ namespace stream_stats {
     current_stats.capture_residency = metadata.residency;
     current_stats.capture_format = metadata.format;
     current_stats.capture_device = metadata.device;
+  }
+
+  void update_wayland_main_device(const std::string &device) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.wayland_main_device = device;
+  }
+
+  void reset_gpu_native_probe(bool requested) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.gpu_native_probe = gpu_native_probe_t {};
+    current_stats.gpu_native_probe.requested = requested;
+  }
+
+  void update_gpu_native_probe_attempt(const std::string &strategy,
+                                       const std::string &result,
+                                       const std::string &failure_stage,
+                                       const std::string &failure_reason,
+                                       bool cached) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    if (!current_stats.gpu_native_probe.requested) {
+      return;
+    }
+    auto *attempt = strategy == "headless_extcopy" ?
+      &current_stats.gpu_native_probe.headless_extcopy :
+      strategy == "windowed" ? &current_stats.gpu_native_probe.windowed : nullptr;
+    if (!attempt) {
+      return;
+    }
+    attempt->attempted = !cached && result != "ineligible" && result != "not_attempted";
+    attempt->cached = cached;
+    attempt->result = result;
+    attempt->failure_stage = failure_stage;
+    attempt->failure_reason = failure_reason;
+  }
+
+  void update_gpu_native_probe_selection(const std::string &selected_strategy,
+                                         const std::string &fallback) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    if (!current_stats.gpu_native_probe.requested) {
+      return;
+    }
+    current_stats.gpu_native_probe.selected_strategy = selected_strategy;
+    current_stats.gpu_native_probe.fallback = fallback;
   }
 
   void update_encode_path_metadata(const std::string &target_device,

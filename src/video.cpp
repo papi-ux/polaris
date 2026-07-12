@@ -446,6 +446,8 @@ namespace video {
       }
 
       cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+      stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "frame_conversion", "live_gpu_frame_conversion_failed");
+      stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
       BOOST_LOG(warning)
         << "Headless ext-image-copy-capture DMA-BUF frame conversion failed; disabling headless DMA-BUF capture and reinitializing with SHM/system-memory fallback"sv;
       return true;

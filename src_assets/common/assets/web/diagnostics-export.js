@@ -107,6 +107,13 @@ export function describeLinuxGpuProfile(stats = {}) {
     stats?.capture?.gpu_native
   )
   const adapterMatchesCaptureDevice = profile.adapter_matches_capture_device ?? profile.adapterMatchesCaptureDevice
+  const adapterPairingStatus = lower(profile.adapter_pairing_status || profile.adapterPairingStatus)
+  const adapterPairingSource = lower(profile.adapter_pairing_device_source || profile.adapterPairingDeviceSource)
+  const encoderAdapter = profile.encoder_adapter || profile.encoderAdapter || 'unreported encoder adapter'
+  const waylandMainDevice = profile.wayland_main_device || profile.waylandMainDevice || 'unreported Wayland device'
+  const pairingMismatch = adapterPairingStatus
+    ? adapterPairingStatus === 'mismatched'
+    : adapterMatchesCaptureDevice === false
   const cpuCopy = Boolean(
     stats?.capture_cpu_copy ||
     stats?.capture?.cpu_copy ||
@@ -116,7 +123,10 @@ export function describeLinuxGpuProfile(stats = {}) {
 
   if (encoderApi !== 'vaapi') return ''
 
-  if (adapterMatchesCaptureDevice === false) {
+  if (pairingMismatch) {
+    if (adapterPairingSource === 'wayland_main_device') {
+      return `AMD/VAAPI is active, but encoder adapter ${encoderAdapter} does not match the Wayland compositor device ${waylandMainDevice}. Verify the /dev/dri/renderD* mapping before blaming the client.`
+    }
     return 'AMD/VAAPI is active, but the capture render node does not match the encoder adapter. Review the /dev/dri/renderD* selection before blaming the client.'
   }
 
@@ -286,6 +296,25 @@ export function buildGithubIssueDraft(input = {}) {
   const clientType = firstNonEmpty(client.type, stats.client_type, stats.client_name, 'unknown')
   const clientName = firstNonEmpty(client.name, stats.client_name)
   const capture = `${formatIssueValue(stats.capture_path || stats.capture_transport, 'unknown')} — ${formatIssueValue(stats.capture_path_reason, 'unknown')}`
+  const gpuProfile = linuxGpuProfile(stats)
+  const gpuNativeProbe = stats.gpu_native_probe || stats.gpuNativeProbe || {}
+  const probeReason = firstNonEmpty(
+    gpuNativeProbe?.windowed?.failure_reason,
+    gpuNativeProbe?.windowed?.failureReason,
+    gpuNativeProbe?.headless_extcopy?.failure_reason,
+    gpuNativeProbe?.headlessExtcopy?.failureReason
+  )
+  const probeSummary = `${formatIssueValue(probeReason, 'not reported')} — selected ${formatIssueValue(gpuNativeProbe.selected_strategy || gpuNativeProbe.selectedStrategy, 'unknown')}, fallback ${formatIssueValue(gpuNativeProbe.fallback, 'none')}`
+  const gpuDiagnosticLines = []
+  const encoderAdapter = firstNonEmpty(gpuProfile.encoder_adapter, gpuProfile.encoderAdapter)
+  const captureDevice = firstNonEmpty(gpuProfile.capture_device, gpuProfile.captureDevice)
+  const waylandMainDevice = firstNonEmpty(gpuProfile.wayland_main_device, gpuProfile.waylandMainDevice)
+  const adapterPairing = firstNonEmpty(gpuProfile.adapter_pairing_status, gpuProfile.adapterPairingStatus)
+  if (encoderAdapter) gpuDiagnosticLines.push(issueDraftLine('Encoder adapter', encoderAdapter))
+  if (captureDevice) gpuDiagnosticLines.push(issueDraftLine('Capture device', captureDevice))
+  if (waylandMainDevice) gpuDiagnosticLines.push(issueDraftLine('Wayland main device', waylandMainDevice))
+  if (adapterPairing) gpuDiagnosticLines.push(issueDraftLine('Adapter pairing', adapterPairing))
+  if (Object.keys(gpuNativeProbe).length > 0) gpuDiagnosticLines.push(issueDraftLine('GPU-native probe', probeSummary))
   const doctorSummary = firstNonEmpty(doctor.simple_state, doctor.summary, doctor.diagnosis, doctor.primary_issue, 'Polaris did not include a Doctor diagnosis yet.')
 
   return redactSensitiveText([
@@ -305,6 +334,7 @@ export function buildGithubIssueDraft(input = {}) {
     issueDraftLine('Launch mode', firstNonEmpty(stats.launch_mode, stats.stream_display_mode, stats.runtime_backend)),
     issueDraftLine('Encoder', firstNonEmpty(stats.encoder, stats.encode_target_device, config.encoder)),
     issueDraftLine('Capture', capture),
+    ...gpuDiagnosticLines,
     issueDraftLine('Active stream', summarizeActiveStream(stats)),
     '',
     '## What Polaris thinks happened',

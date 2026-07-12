@@ -124,6 +124,17 @@ describe('GitHub issue draft support flow', () => {
         bitrate_kbps: 45000,
         packet_loss: 2.4,
         encode_time_ms: 9.8,
+        linux_gpu_profile: {
+          encoder_adapter: '/dev/dri/renderD129',
+          capture_device: '',
+          wayland_main_device: '/dev/dri/renderD128',
+          adapter_pairing_status: 'mismatched',
+        },
+        gpu_native_probe: {
+          windowed: { failure_reason: 'no_live_dmabuf_frame' },
+          selected_strategy: 'headless_shm',
+          fallback: 'headless_shm',
+        },
         doctor: {
           simple_state: 'Stream is playable, but capture fell back to system memory.',
           primary_issue: 'gpu_native_requested_shm_fallback',
@@ -150,6 +161,10 @@ describe('GitHub issue draft support flow', () => {
     expect(draft).toContain('- Launch mode: Private Stream')
     expect(draft).toContain('- Encoder: vaapi')
     expect(draft).toContain('- Capture: shm_cpu_capture — gpu_native_requested_shm_fallback')
+    expect(draft).toContain('- Encoder adapter: /dev/dri/renderD129')
+    expect(draft).toContain('- Wayland main device: /dev/dri/renderD128')
+    expect(draft).toContain('- Adapter pairing: mismatched')
+    expect(draft).toContain('- GPU-native probe: no_live_dmabuf_frame — selected headless_shm, fallback headless_shm')
     expect(draft).toContain('- Active stream: yes, 118.5 FPS / 120.0 target, 45000 kbps, 2.40% loss, 9.8 ms encode')
     expect(draft).toContain('## What Polaris thinks happened')
     expect(draft).toContain('Stream is playable, but capture fell back to system memory.')
@@ -161,6 +176,19 @@ describe('GitHub issue draft support flow', () => {
     expect(draft).toContain('This report was generated locally from a redacted Polaris support bundle. Nothing was submitted automatically.')
     expect(draft).not.toContain('hunter2')
     expect(draft).not.toContain('abc123')
+  })
+
+  it('omits unavailable GPU topology and probe rows instead of fabricating unknown evidence', () => {
+    const draft = buildGithubIssueDraft({
+      version: '1.2.3-dev',
+      session_snapshot: { capture_path: 'unknown' },
+    })
+
+    expect(draft).not.toContain('- Encoder adapter: unknown')
+    expect(draft).not.toContain('- Capture device: unknown')
+    expect(draft).not.toContain('- Wayland main device: unknown')
+    expect(draft).not.toContain('- Adapter pairing: unknown')
+    expect(draft).not.toContain('- GPU-native probe: not reported')
   })
 })
 
@@ -267,6 +295,45 @@ describe('Fix My Stream checklist', () => {
     expect(capture.action).toContain('conservative Private Stream baseline')
     expect(`${capture.detail} ${capture.action}`).not.toContain('CUDA')
     expect(`${capture.detail} ${capture.action}`).not.toContain('NVIDIA')
+  })
+
+  it('reports a Wayland-to-encoder adapter mismatch before generic SHM fallback guidance', () => {
+    const stats = {
+      capture_path: 'shm_cpu_capture',
+      capture_path_reason: 'gpu_native_requested_shm_fallback',
+      capture_cpu_copy: true,
+      capture_gpu_native: false,
+      encode_target_device: 'vaapi',
+      linux_gpu_profile: {
+        encoder_api: 'vaapi',
+        encoder_adapter: '/dev/dri/renderD129',
+        capture_device: '',
+        wayland_main_device: '/dev/dri/renderD128',
+        adapter_matches_capture_device: null,
+        adapter_matches_wayland_main_device: false,
+        adapter_pairing_status: 'mismatched',
+        adapter_pairing_device_source: 'wayland_main_device',
+        gpu_native_requested: true,
+        gpu_native_succeeded: false,
+      },
+      gpu_native_probe: {
+        requested: true,
+        attempted: true,
+        windowed: {
+          result: 'failed',
+          failure_stage: 'first_frame',
+          failure_reason: 'no_live_dmabuf_frame',
+        },
+        selected_strategy: 'headless_shm',
+        fallback: 'headless_shm',
+      },
+    }
+
+    const description = describeLinuxGpuProfile(stats)
+    expect(description).toContain('/dev/dri/renderD129')
+    expect(description).toContain('/dev/dri/renderD128')
+    expect(description).toContain('Wayland compositor')
+    expect(description).not.toContain('NVIDIA')
   })
 
   it('surfaces NVIDIA true-headless GPU-native configuration warnings before capture tuning', () => {
