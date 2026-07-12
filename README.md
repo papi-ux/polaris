@@ -95,7 +95,7 @@ Polaris v1.3.1 is a focused security and pairing-state patch: current Browser St
 - **Browser Stream security refresh**: current Go cryptography and supporting modules clear the dependency alerts previously attached to the helper dependency graph.
 - **Added and Last seen timestamps**: newly paired and authenticated clients expose localized history while legacy records remain honestly labeled as not recorded.
 - **Fail-closed client authorization**: canonical certificate identity, revocation, duplicate-state validation, and request-time authorization snapshots are hardened.
-- **Safer state persistence**: paired-client records use private atomic replacement across processes on supported POSIX and Windows hosts.
+- **Safer state persistence**: paired-client records use private, cross-process atomic state replacement.
 - **Truthful client controls**: failed paired-client mutations remain visible instead of being presented as successful in the web console.
 See the [changelog](docs/changelog.md) for the full release history.
 
