@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,22 @@ namespace stream_stats {
     std::chrono::microseconds total_time {};
   };
 
+  struct gpu_native_probe_attempt_t {
+    bool attempted = false;
+    bool cached = false;
+    std::string result = "not_attempted";
+    std::string failure_stage;
+    std::string failure_reason;
+  };
+
+  struct gpu_native_probe_t {
+    bool requested = false;
+    gpu_native_probe_attempt_t headless_extcopy;
+    gpu_native_probe_attempt_t windowed;
+    std::string selected_strategy = "none";
+    std::string fallback = "none";
+  };
+
   struct stats_t {
     // Stream state
     bool streaming = false;
@@ -66,6 +83,8 @@ namespace stream_stats {
     platf::frame_residency_e capture_residency = platf::frame_residency_e::unknown;
     platf::frame_format_e capture_format = platf::frame_format_e::unknown;
     std::string capture_device;
+    std::string wayland_main_device;
+    gpu_native_probe_t gpu_native_probe;
     std::string encode_target_device;
     platf::frame_residency_e encode_target_residency = platf::frame_residency_e::unknown;
     platf::frame_format_e encode_target_format = platf::frame_format_e::unknown;
@@ -129,6 +148,12 @@ namespace stream_stats {
   };
 
   /**
+   * @brief Compare two device-node paths by filesystem identity.
+   * @return true/false when both identities resolve, or nullopt when unknown.
+   */
+  std::optional<bool> device_nodes_match(const std::string &lhs, const std::string &rhs);
+
+  /**
    * @brief Whether the current capture/encode path requires a CPU-side copy.
    * @param stats Current stream statistics snapshot.
    */
@@ -163,6 +188,9 @@ namespace stream_stats {
    * @param stats Current stream statistics snapshot.
    */
   nlohmann::json linux_gpu_profile_json(const stats_t &stats);
+
+  /** @brief Structured result of GPU-native capture probes for diagnostics. */
+  nlohmann::json gpu_native_probe_json(const stats_t &stats);
 
   /**
    * @brief Human-readable explanation for a capture path reason.
@@ -303,6 +331,26 @@ namespace stream_stats {
    * @param metadata Current frame transport/residency/format metadata.
    */
   void update_capture_metadata(const platf::frame_metadata_t &metadata);
+
+  /**
+   * @brief Update the DRM render node advertised as Wayland DMA-BUF main_device.
+   * @param device Render-node path, or empty when the compositor did not advertise one.
+   */
+  void update_wayland_main_device(const std::string &device);
+
+  /** @brief Reset GPU-native probe telemetry for a new cage launch decision. */
+  void reset_gpu_native_probe(bool requested, bool reset_capture_identity = false);
+
+  /** @brief Record one GPU-native probe strategy result. */
+  void update_gpu_native_probe_attempt(const std::string &strategy,
+                                       const std::string &result,
+                                       const std::string &failure_stage = {},
+                                       const std::string &failure_reason = {},
+                                       bool cached = false);
+
+  /** @brief Record the final capture strategy selected after probing. */
+  void update_gpu_native_probe_selection(const std::string &selected_strategy,
+                                         const std::string &fallback = "none");
 
   /**
    * @brief Update the encode conversion path metadata exposed to the dashboard.

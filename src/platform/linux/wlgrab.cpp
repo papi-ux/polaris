@@ -87,6 +87,7 @@ namespace wl {
       }
 #endif
 
+      stream_stats::update_wayland_main_device({});
       if (display.init(wayland_target)) {
         return -1;
       }
@@ -126,6 +127,8 @@ namespace wl {
       monitor->listen(interface.output_manager);
 
       display.roundtrip();
+      reported_wayland_main_device = interface.dmabuf_feedback.main_device_path;
+      stream_stats::update_wayland_main_device(reported_wayland_main_device);
       interface.consume_output_topology_dirty();
       output = monitor->output;
       offset_x = monitor->viewport.offset_x;
@@ -167,6 +170,11 @@ namespace wl {
         }
       } while (dmabuf.status == dmabuf_t::WAITING);
 
+      if (reported_wayland_main_device != interface.dmabuf_feedback.main_device_path) {
+        reported_wayland_main_device = interface.dmabuf_feedback.main_device_path;
+        stream_stats::update_wayland_main_device(reported_wayland_main_device);
+      }
+
       auto current_frame = dmabuf.current_frame;
       const bool shm_frame_ready = dmabuf.shm_frame_ready && dmabuf.shm_data;
       const auto captured_width = shm_frame_ready ? static_cast<int>(dmabuf.shm_info.width) : static_cast<int>(current_frame->sd.width);
@@ -188,6 +196,7 @@ namespace wl {
     platf::mem_type_e mem_type;
     bool capture_transport_logged = false;
     bool prefer_shm_screencopy = false;
+    std::string reported_wayland_main_device;
     std::chrono::microseconds last_dispatch_time {};
 
     std::chrono::nanoseconds delay;
@@ -749,11 +758,13 @@ namespace platf {
         using_headless_ram_capture = true;
         try_headless_extcopy_dmabuf =
           cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state, hwdevice_type);
-        if (!try_headless_extcopy_dmabuf &&
-            hwdevice_type == platf::mem_type_e::vaapi &&
-            cage_display_router::should_log_headless_ram_capture_warning()) {
-          BOOST_LOG(info)
-            << "wlr: Using RAM capture path for headless labwc because true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"sv;
+        if (!try_headless_extcopy_dmabuf && hwdevice_type == platf::mem_type_e::vaapi) {
+          stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "policy", "vaapi_headless_dmabuf_disabled_for_stability");
+          stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
+          if (cage_display_router::should_log_headless_ram_capture_warning()) {
+            BOOST_LOG(info)
+              << "wlr: Using RAM capture path for headless labwc because true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"sv;
+          }
         }
       } else {
         prefer_ram_capture = true;
@@ -785,24 +796,37 @@ namespace platf {
     }
 
     if (try_headless_extcopy_dmabuf && gpu_native_capture_supported) {
+      bool device_pairing_failed = false;
       auto wlr = std::make_shared<wl::wlr_extcopy_vram_t>();
       if (!wlr->init(hwdevice_type, display_name, config)) {
         const auto capture_render_node = wlr->extcopy.capture_render_node();
+        const auto adapter_pairing = stream_stats::device_nodes_match(capture_render_node, config::video.adapter_name);
         if (!config::video.adapter_name.empty() &&
             !capture_render_node.empty() &&
-            config::video.adapter_name != capture_render_node) {
+            (!adapter_pairing.has_value() || !*adapter_pairing)) {
+          device_pairing_failed = true;
+          const bool identity_resolved = adapter_pairing.has_value();
           BOOST_LOG(warning)
             << "wlr: Disabling true-headless ext-image-copy-capture DMA-BUF because capture render_node=["sv
             << capture_render_node
-            << "] differs from encoder adapter=["sv << config::video.adapter_name
-            << "]; using SHM/system-memory fallback to avoid known cross-GPU black video"sv;
+            << (identity_resolved ? "] differs from encoder adapter=["sv : "] could not be identity-matched to encoder adapter=["sv)
+            << config::video.adapter_name
+            << "]; using SHM/system-memory fallback to avoid unsafe cross-GPU import"sv;
 #ifdef __linux__
           cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
+          stream_stats::update_gpu_native_probe_attempt(
+            "headless_extcopy",
+            "failed",
+            "device_pairing",
+            identity_resolved ? "cross_gpu_adapter_mismatch" : "device_identity_unresolved"
+          );
         } else {
 #ifdef __linux__
           cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
 #endif
+          stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "succeeded");
+          stream_stats::update_gpu_native_probe_selection("headless_extcopy_dmabuf");
           BOOST_LOG(info) << "wlr: Using ext-image-copy-capture DMA-BUF for headless labwc"sv;
           return wlr;
         }
@@ -811,6 +835,10 @@ namespace platf {
 #ifdef __linux__
       cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
+      if (!device_pairing_failed) {
+        stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "capture_init", "dmabuf_capture_not_initialized");
+      }
+      stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
       BOOST_LOG(info) << "wlr: Headless ext-image-copy-capture DMA-BUF unavailable or unsafe; using SHM fallback"sv;
     }
 

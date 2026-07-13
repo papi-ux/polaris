@@ -241,6 +241,10 @@ TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessDoesNotReportWindowedFallbac
 }
 
 #ifdef POLARIS_TESTS
+TEST(WaylandDrmDeviceTests, InvalidDeviceDoesNotFabricateRenderNode) {
+  EXPECT_TRUE(wl::render_node_from_drm_device_for_tests(dev_t {}).empty());
+}
+
 TEST(CageDisplayRouterPolicyTests, WindowedRamCaptureFallbackWarningLogsOnlyOnce) {
   cage_display_router::reset_windowed_ram_capture_warning_for_tests();
 
