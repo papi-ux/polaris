@@ -352,6 +352,95 @@ namespace proc {
              session_state == "paused"sv;
     }
 
+    struct host_pause_session_classification_t {
+      bool network_risk = false;
+      bool pacing_risk = false;
+      bool capture_fallback = false;
+      bool encoder_risk = false;
+      bool hdr_risk = false;
+      bool decoder_risk = false;
+      bool virtual_display_risk = false;
+      bool host_render_limited = false;
+      bool av1_codec = false;
+      std::string capture_path;
+      std::string codec_lower;
+      std::string primary_issue = "steady";
+      std::vector<std::string> issues;
+      std::string health_grade = "good";
+    };
+
+    host_pause_session_classification_t classify_host_pause_session(
+        const stream_stats::stats_t &stats,
+        double target_fps,
+        bool current_virtual_display) {
+      host_pause_session_classification_t classification;
+      const bool meaningful_fps_shortfall =
+        stream_stats::is_meaningful_fps_shortfall(target_fps, stats.fps);
+      classification.network_risk = stats.packet_loss >= 0.35 || stats.latency_ms >= 28.0;
+      classification.pacing_risk =
+        stats.frame_jitter_ms >= 2.2 ||
+        stats.duplicate_frame_ratio >= 0.10 ||
+        stats.dropped_frame_ratio >= 0.04 ||
+        meaningful_fps_shortfall;
+      classification.capture_fallback = stream_stats::capture_path_uses_cpu_copy(stats);
+      classification.capture_path = stream_stats::capture_path_summary(stats);
+      classification.encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
+      classification.hdr_risk = stats.dynamic_range > 0 &&
+                                (classification.pacing_risk || classification.encoder_risk);
+      classification.codec_lower = boost::algorithm::to_lower_copy(stats.codec);
+      classification.av1_codec = classification.codec_lower.find("av1") != std::string::npos;
+      classification.decoder_risk = classification.av1_codec &&
+                                    classification.pacing_risk &&
+                                    !classification.network_risk;
+      classification.virtual_display_risk = current_virtual_display &&
+                                            (classification.pacing_risk ||
+                                             classification.capture_fallback ||
+                                             classification.hdr_risk);
+      classification.host_render_limited =
+        classification.pacing_risk &&
+        !classification.network_risk &&
+        !classification.capture_fallback &&
+        !classification.encoder_risk &&
+        !classification.hdr_risk &&
+        !classification.decoder_risk &&
+        !classification.virtual_display_risk &&
+        (meaningful_fps_shortfall ||
+         stats.duplicate_frame_ratio >= 0.08 ||
+         stats.dropped_frame_ratio >= 0.03);
+
+      if (classification.network_risk) classification.primary_issue = "network_jitter";
+      else if (classification.hdr_risk) classification.primary_issue = "hdr_path";
+      else if (classification.virtual_display_risk) classification.primary_issue = "virtual_display_path";
+      else if (classification.decoder_risk) classification.primary_issue = "decoder_path";
+      else if (classification.capture_fallback) classification.primary_issue = "capture_fallback";
+      else if (classification.host_render_limited) classification.primary_issue = "host_render_limited";
+      else if (classification.pacing_risk) classification.primary_issue = "frame_pacing";
+      else if (classification.encoder_risk) classification.primary_issue = "encoder_load";
+
+      if (classification.network_risk) classification.issues.push_back("network_jitter");
+      if (classification.host_render_limited) classification.issues.push_back("host_render_limited");
+      else if (classification.pacing_risk) classification.issues.push_back("frame_pacing");
+      if (classification.capture_fallback) classification.issues.push_back("capture_fallback");
+      if (classification.encoder_risk) classification.issues.push_back("encoder_load");
+      if (classification.hdr_risk) classification.issues.push_back("hdr_path");
+      if (classification.decoder_risk) classification.issues.push_back("decoder_path");
+      if (classification.virtual_display_risk) classification.issues.push_back("virtual_display_path");
+
+      const int concern_count =
+        static_cast<int>(classification.network_risk) +
+        static_cast<int>(classification.pacing_risk) +
+        static_cast<int>(classification.capture_fallback) +
+        static_cast<int>(classification.encoder_risk) +
+        static_cast<int>(classification.hdr_risk) +
+        static_cast<int>(classification.decoder_risk) +
+        static_cast<int>(classification.virtual_display_risk);
+      classification.health_grade =
+        concern_count >= 2 || classification.hdr_risk || classification.decoder_risk ? "degraded" :
+        concern_count == 1 ? "watch" :
+        "good";
+      return classification;
+    }
+
     void publish_stream_ended_after_terminate_if_needed(bool had_running_app) {
       if (!should_publish_stream_ended_after_terminate(had_running_app, stream::session::active_count(), confighttp::get_session_state())) {
         return;
@@ -2066,6 +2155,22 @@ namespace proc {
 #if defined(POLARIS_TESTS)
   bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state) {
     return should_publish_stream_ended_after_terminate(had_running_app, active_sessions, session_state);
+  }
+
+  nlohmann::json classify_host_pause_session_for_tests(
+      const stream_stats::stats_t &stats,
+      double target_fps,
+      bool current_virtual_display) {
+    const auto classification = classify_host_pause_session(
+      stats,
+      target_fps,
+      current_virtual_display
+    );
+    return {
+      {"health_grade", classification.health_grade},
+      {"primary_issue", classification.primary_issue},
+      {"host_render_limited", classification.host_render_limited}
+    };
   }
 
   std::optional<int> resolve_device_db_launch_bitrate_for_tests(
@@ -4076,40 +4181,21 @@ namespace proc {
           device_profile &&
           (device_profile->type == "handheld" || device_profile->type == "phone");
 
-        const double fps_gap =
-          session.last_target_fps > 0.0 ? std::max(0.0, session.last_target_fps - session.last_fps) : 0.0;
-        const bool network_risk = stats.packet_loss >= 0.35 || stats.latency_ms >= 28.0;
-        const bool pacing_risk =
-          stats.frame_jitter_ms >= 2.2 ||
-          stats.duplicate_frame_ratio >= 0.10 ||
-          stats.dropped_frame_ratio >= 0.04 ||
-          fps_gap >= 4.0;
-        const bool capture_fallback =
-          stream_stats::capture_path_uses_cpu_copy(stats);
-        const auto capture_path = stream_stats::capture_path_summary(stats);
-        const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
-        const bool hdr_risk = stats.dynamic_range > 0 && (pacing_risk || encoder_risk);
-        const std::string codec_lower = boost::algorithm::to_lower_copy(session.last_codec);
-        const bool av1_codec = codec_lower.find("av1") != std::string::npos;
-        const bool decoder_risk = av1_codec && (pacing_risk || fps_gap >= 4.0) && !network_risk;
-        const bool virtual_display_risk = _launch_session->virtual_display && (pacing_risk || capture_fallback || hdr_risk);
-        const double target_gap_threshold =
-          session.last_target_fps > 0.0 ? std::max(2.0, session.last_target_fps * 0.06) : 2.0;
-        const bool sustained_target_miss =
-          session.last_target_fps >= 24.0 &&
-          session.last_fps > 0.0 &&
-          fps_gap >= target_gap_threshold;
-        const bool host_render_limited =
-          pacing_risk &&
-          !network_risk &&
-          !capture_fallback &&
-          !encoder_risk &&
-          !hdr_risk &&
-          !decoder_risk &&
-          !virtual_display_risk &&
-          (sustained_target_miss ||
-           stats.duplicate_frame_ratio >= 0.08 ||
-           stats.dropped_frame_ratio >= 0.03);
+        const auto classification = classify_host_pause_session(
+          stats,
+          session.last_target_fps,
+          _launch_session->virtual_display
+        );
+        const bool network_risk = classification.network_risk;
+        const bool pacing_risk = classification.pacing_risk;
+        const bool capture_fallback = classification.capture_fallback;
+        const auto &capture_path = classification.capture_path;
+        const bool hdr_risk = classification.hdr_risk;
+        const auto &codec_lower = classification.codec_lower;
+        const bool av1_codec = classification.av1_codec;
+        const bool decoder_risk = classification.decoder_risk;
+        const bool virtual_display_risk = classification.virtual_display_risk;
+        const bool host_render_limited = classification.host_render_limited;
 
         session.last_network_risk = network_risk ? "elevated" : "normal";
         session.last_decoder_risk = decoder_risk ? "elevated" : "normal";
@@ -4123,35 +4209,9 @@ namespace proc {
         } else {
           session.last_capture_path = capture_path == "gpu_native" ? "gpu_native" : "desktop";
         }
-        if (network_risk) session.last_primary_issue = "network_jitter";
-        else if (hdr_risk) session.last_primary_issue = "hdr_path";
-        else if (virtual_display_risk) session.last_primary_issue = "virtual_display_path";
-        else if (decoder_risk) session.last_primary_issue = "decoder_path";
-        else if (capture_fallback) session.last_primary_issue = "capture_fallback";
-        else if (host_render_limited) session.last_primary_issue = "host_render_limited";
-        else if (pacing_risk) session.last_primary_issue = "frame_pacing";
-        else if (encoder_risk) session.last_primary_issue = "encoder_load";
-        else session.last_primary_issue = "steady";
-        if (network_risk) session.last_issues.push_back("network_jitter");
-        if (host_render_limited) session.last_issues.push_back("host_render_limited");
-        else if (pacing_risk) session.last_issues.push_back("frame_pacing");
-        if (capture_fallback) session.last_issues.push_back("capture_fallback");
-        if (encoder_risk) session.last_issues.push_back("encoder_load");
-        if (hdr_risk) session.last_issues.push_back("hdr_path");
-        if (decoder_risk) session.last_issues.push_back("decoder_path");
-        if (virtual_display_risk) session.last_issues.push_back("virtual_display_path");
-        const int concern_count =
-          static_cast<int>(network_risk) +
-          static_cast<int>(pacing_risk) +
-          static_cast<int>(capture_fallback) +
-          static_cast<int>(encoder_risk) +
-          static_cast<int>(hdr_risk) +
-          static_cast<int>(decoder_risk) +
-          static_cast<int>(virtual_display_risk);
-        session.last_health_grade =
-          concern_count >= 2 || hdr_risk || decoder_risk ? "degraded" :
-          concern_count == 1 ? "watch" :
-          "good";
+        session.last_primary_issue = classification.primary_issue;
+        session.last_issues = classification.issues;
+        session.last_health_grade = classification.health_grade;
         session.last_safe_bitrate_kbps =
           stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps :
           stats.bitrate_kbps > 0 ? static_cast<int>(std::lround(static_cast<double>(stats.bitrate_kbps) * (session.last_health_grade == "good" ? 1.0 : 0.75))) :
