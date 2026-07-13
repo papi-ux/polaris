@@ -14,8 +14,12 @@
 
 // standard includes
 #include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <unordered_set>
@@ -180,6 +184,119 @@ namespace proc {
     std::chrono::seconds exit_timeout;
   };
 
+  enum class session_stop_outcome_t {
+    allowed,
+    no_active_session,
+    permission_denied,
+    stop_in_progress,
+    viewer_forbidden,
+    uncontrolled_stream,
+    other_owner,
+    token_mismatch,
+    session_changed,
+  };
+
+  struct session_stop_snapshot_t {
+    session_stop_outcome_t outcome = session_stop_outcome_t::no_active_session;
+    int running_app_id = 0;
+    int active_sessions = 0;
+    bool had_running_app = false;
+    bool owned_by_client = false;
+    rtsp_stream::session_role_e requester_role = rtsp_stream::session_role_e::none;
+    bool stop_in_progress = false;
+    bool token_available = false;
+    std::string session_token;
+    std::string game;
+  };
+
+  struct session_stop_result_t {
+    session_stop_snapshot_t snapshot;
+    bool stopped = false;
+  };
+
+  struct session_status_snapshot_t {
+    session_stop_snapshot_t stop;
+    int viewer_count = 0;
+    std::string owner_unique_id;
+    std::string owner_device_name;
+    std::string game;
+    std::string game_uuid;
+    bool client_commands_enabled = false;
+    bool mangohud_configured = false;
+    bool virtual_display = false;
+    bool display_mode_explicit = false;
+  };
+
+  session_stop_outcome_t evaluate_session_stop_request(
+    bool can_launch,
+    bool has_running_app,
+    int active_sessions,
+    bool owned_by_client,
+    rtsp_stream::session_role_e requester_role,
+    bool stop_in_progress,
+    bool token_matches
+  );
+  bool session_token_matches_active(std::string_view expected_token, std::string_view active_token);
+  bool session_stop_token_matches(
+    bool require_exact_token,
+    std::string_view expected_token,
+    std::string_view active_token,
+    const std::vector<std::string> &requester_rtsp_tokens
+  );
+
+  class session_lifecycle_gate_t {
+  public:
+    void begin_launch();
+    std::optional<std::uint64_t> capture_launch_generation() const;
+    bool try_begin_rtsp_launch();
+    bool try_begin_rtsp_launch(std::uint64_t expected_generation);
+    bool begin_stop();
+    bool transition_launch_to_stop();
+    void begin_snapshot();
+    bool try_begin_snapshot();
+    void finish_snapshot();
+    void finish_launch();
+    void finish_stop(bool committed = true);
+    bool stop_in_progress() const;
+
+  private:
+    enum class state_e {
+      idle,
+      launching,
+      snapshotting,
+      stopping,
+    };
+
+    mutable std::mutex _mutex;
+    mutable std::condition_variable _changed;
+    state_e _state = state_e::idle;
+    bool _stop_waiting = false;
+    bool _launch_to_stop_handoff = false;
+    bool _last_stop_committed = false;
+    std::uint64_t _generation = 1;
+  };
+
+  class session_snapshot_guard_t {
+  public:
+    explicit session_snapshot_guard_t(session_lifecycle_gate_t &gate);
+    static session_snapshot_guard_t try_acquire(session_lifecycle_gate_t &gate);
+    ~session_snapshot_guard_t();
+    bool owns_snapshot() const;
+    session_snapshot_guard_t(const session_snapshot_guard_t &) = delete;
+    session_snapshot_guard_t &operator=(const session_snapshot_guard_t &) = delete;
+    session_snapshot_guard_t(session_snapshot_guard_t &&other) noexcept;
+    session_snapshot_guard_t &operator=(session_snapshot_guard_t &&) = delete;
+
+  private:
+    session_snapshot_guard_t() = default;
+    session_lifecycle_gate_t *_gate = nullptr;
+  };
+
+  struct session_status_view_t {
+    session_snapshot_guard_t guard;
+    session_status_snapshot_t snapshot;
+  };
+
   class proc_t {
   public:
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
@@ -205,8 +322,14 @@ namespace proc {
     }
 
     void launch_input_only(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    bool launch_input_only_and_raise(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
 
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    bool raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    std::optional<std::uint64_t> capture_session_launch_generation() const;
+    bool try_begin_session_launch(std::uint64_t expected_generation);
+    void finish_session_launch();
 
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`
@@ -215,8 +338,7 @@ namespace proc {
 
     ~proc_t();
 
-    const std::vector<ctx_t> &get_apps() const;
-    std::vector<ctx_t> &get_apps();
+    std::vector<ctx_t> get_apps() const;
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();
@@ -224,20 +346,59 @@ namespace proc {
     std::string get_session_owner_unique_id();
     std::string get_session_owner_device_name();
     bool is_session_owner(const std::string &unique_id);
+    bool session_uses_virtual_display();
+    bool session_allows_client_commands();
     void mark_client_session_report_recorded(const std::string &unique_id);
     bool client_session_report_recorded() const;
     bool session_display_mode_is_explicit() const;
     bool current_app_has_mangohud() const;
     void set_app_mangohud_configured(const std::string &uuid, bool enabled);
     void set_app_steam_launch_mode_configured(const std::string &uuid, const std::string &mode);
-    void set_session_shutdown_requested(bool requested);
     bool session_shutdown_requested() const;
+    session_status_view_t get_session_status_view(const std::string &unique_id, bool can_launch);
+    session_stop_snapshot_t get_session_stop_snapshot(const std::string &unique_id, bool can_launch);
+    session_stop_result_t request_session_shutdown(
+      const std::string &unique_id,
+      std::string_view expected_token,
+      bool can_launch,
+      bool require_exact_token
+    );
     boost::process::v1::environment get_env();
     void resume();
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
+    void terminate_from_admitted_launch();
+    bool reload_configuration_from_file(const std::string &file_name);
+    void reload_configuration(proc_t &&parsed);
+#if defined(POLARIS_TESTS)
+    std::pair<const void *, const void *> session_lifecycle_identity_for_tests() const;
+    void with_session_lifecycle_lock_for_tests(const std::function<void()> &callback);
+    bool begin_session_stop_for_tests();
+    void finish_session_stop_for_tests(bool committed);
+#endif
 
   private:
+    struct session_lifecycle_sync_t {
+      std::recursive_mutex mutex;
+    };
+
+    void launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int execute_impl(
+      const ctx_t& app,
+      std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+      bool no_active_sessions_at_launch
+    );
+    void terminate_impl(bool immediate, bool needs_refresh);
+    session_lifecycle_sync_t &session_lifecycle_sync() const;
+    session_stop_snapshot_t get_session_stop_snapshot_locked(
+      const std::string &unique_id,
+      bool can_launch,
+      std::string_view expected_token,
+      bool require_exact_token,
+      const rtsp_stream::session_snapshot_t &rtsp_snapshot,
+      bool stop_in_progress
+    );
+
     int _app_id = 0;
     std::string _app_name;
 
@@ -261,7 +422,9 @@ namespace proc {
     std::unordered_set<std::string> _session_env_keys;
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
-    std::shared_ptr<std::atomic_bool> _session_shutdown_requested {std::make_shared<std::atomic_bool>(false)};
+    std::shared_ptr<session_lifecycle_gate_t> _session_lifecycle_gate {std::make_shared<session_lifecycle_gate_t>()};
+    std::shared_ptr<session_lifecycle_sync_t> _session_lifecycle_sync {std::make_shared<session_lifecycle_sync_t>()};
+    std::uint64_t _session_generation = 0;
     bool _client_session_report_recorded = false;
     std::chrono::steady_clock::time_point _client_session_report_recorded_at {};
     std::string _client_session_report_recorded_unique_id;

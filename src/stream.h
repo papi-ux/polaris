@@ -62,6 +62,7 @@ namespace stream {
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
     session_profile_t profile(const session_t& session);
     std::string uuid(const session_t& session);
+    std::string session_token(const session_t& session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);
     bool is_watch_only(const session_t& session);
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm);
@@ -70,6 +71,9 @@ namespace stream {
     void graceful_stop(session_t& session);
     void join(session_t &session);
     state_e state(session_t &session);
+#ifdef POLARIS_TESTS
+    void set_state_for_tests(session_t &session, state_e state);
+#endif
     unsigned active_count();
     inline bool send(session_t& session, const std::string_view &payload);
   }  // namespace session
