@@ -1684,9 +1684,11 @@ namespace nvhttp {
       policy["capture_residency"] = platf::from_frame_residency(stats.capture_residency);
       policy["capture_format"] = platf::from_frame_format(stats.capture_format);
       policy["capture_device"] = stats.capture_device;
+      policy["capture_wayland_main_device"] = stats.wayland_main_device;
       policy["capture_encoder_adapter"] = config::video.adapter_name;
       policy["capture_cross_gpu_dmabuf_risk"] = stream_stats::capture_path_has_cross_gpu_dmabuf_risk(stats);
       policy["linux_gpu_profile"] = stream_stats::linux_gpu_profile_json(stats);
+      policy["gpu_native_probe"] = stream_stats::gpu_native_probe_json(stats);
       policy["capture_decision"] = {
         {"path", capture_path},
         {"reason", capture_reason},
@@ -1695,6 +1697,7 @@ namespace nvhttp {
         {"residency", policy["capture_residency"]},
         {"format", policy["capture_format"]},
         {"capture_device", policy["capture_device"]},
+        {"wayland_main_device", policy["capture_wayland_main_device"]},
         {"encoder_adapter", policy["capture_encoder_adapter"]},
         {"cross_gpu_dmabuf_risk", policy["capture_cross_gpu_dmabuf_risk"]},
         {"cpu_copy", capture_cpu_copy},

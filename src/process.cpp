@@ -3143,6 +3143,7 @@ namespace proc {
         prefer_gpu_native_capture,
         should_try_gpu_native_cage_probe
       );
+    stream_stats::reset_gpu_native_probe(should_probe_windowed_cage_for_gpu_native, rtsp_stream::session_count() == 0);
     const auto cached_windowed_gpu_native_probe_result =
       should_probe_windowed_cage_for_gpu_native ?
         cage_display_router::cached_windowed_gpu_native_probe_result() :
@@ -3152,6 +3153,7 @@ namespace proc {
         cage_display_router::cached_headless_extcopy_dmabuf_probe_result() :
         std::optional<bool> {};
     bool force_windowed_cage_for_gpu_native = false;
+    bool headless_extcopy_dmabuf_selected = false;
     const int cage_refresh_hz = std::max(pacing_target_fps, 1);
 
     const int gpu_native_probe_fps = std::max(pacing_target_fps, 1);
@@ -3210,6 +3212,7 @@ namespace proc {
 
       auto encoder_name = video::active_encoder_name();
       auto encoder_label = encoder_name.empty() ? "unknown" : encoder_name;
+      stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "running");
       BOOST_LOG(info) << "session_manager: Probing headless_extcopy_dmabuf with encoder ["
                       << encoder_label << ']';
 
@@ -3221,6 +3224,7 @@ namespace proc {
 
       if (!start_cage_session("", false, true, false)) {
         cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "compositor_encoder_init", "compositor_or_encoder_init_failed");
         BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe could not initialize the compositor/encoder path"sv;
         return false;
       }
@@ -3228,12 +3232,14 @@ namespace proc {
       const auto runtime_state = cage_display_router::runtime_state();
       if (!runtime_state.effective_headless) {
         cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "runtime_validation", "not_effective_headless");
         BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not start an effective headless runtime"sv;
         return false;
       }
 
       if (!video::active_encoder_runtime_supports_config(gpu_native_probe_config)) {
         cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "encoder_validation", "encoder_config_not_supported");
         BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not validate the active encoder configuration"sv;
         return false;
       }
@@ -3246,14 +3252,24 @@ namespace proc {
       if (!cage_display_router::headless_extcopy_dmabuf_probe_succeeded(extcopy_initialized, live_gpu_frame_converted)) {
         cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
         if (!extcopy_initialized) {
+          const auto gpu_profile = stream_stats::linux_gpu_profile_json(stream_stats::get_current());
+          if (encoder_label.find("vaapi") != std::string::npos) {
+            stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "policy", "vaapi_headless_dmabuf_disabled_for_stability");
+          } else if (gpu_profile.value("adapter_pairing_status", std::string {}) == "mismatched") {
+            stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "device_pairing", "cross_gpu_adapter_mismatch");
+          } else {
+            stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "capture_init", "dmabuf_capture_not_initialized");
+          }
           BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not initialize DMA-BUF capture"sv;
         } else {
+          stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "frame_conversion", "live_gpu_frame_conversion_failed");
           BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not validate live GPU frame conversion"sv;
         }
         return false;
       }
 
       cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+      stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "succeeded");
       BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe succeeded with encoder ["
                       << video::active_encoder_name() << ']';
       return true;
@@ -3266,6 +3282,7 @@ namespace proc {
 
       auto encoder_name = video::active_encoder_name();
       auto encoder_label = encoder_name.empty() ? "unknown" : encoder_name;
+      stream_stats::update_gpu_native_probe_attempt("windowed", "running");
       BOOST_LOG(info) << "session_manager: Probing windowed labwc for GPU-native capture with encoder ["
                       << encoder_label << ']';
 
@@ -3277,17 +3294,20 @@ namespace proc {
 
       if (!start_cage_session("", true, true, false)) {
         cage_display_router::update_windowed_gpu_native_probe_result(false);
+        stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "compositor_encoder_init", "compositor_or_encoder_init_failed");
         BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe could not initialize the compositor/encoder path; staying headless"sv;
         return false;
       }
 
       if (!video::active_encoder_runtime_supports_live_gpu_capture(gpu_native_probe_config)) {
         cage_display_router::update_windowed_gpu_native_probe_result(false);
+        stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "first_frame", "no_live_dmabuf_frame");
         BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe did not deliver a live DMA-BUF frame; staying headless"sv;
         return false;
       }
 
       cage_display_router::update_windowed_gpu_native_probe_result(true);
+      stream_stats::update_gpu_native_probe_attempt("windowed", "succeeded");
       BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe succeeded with encoder ["
                       << video::active_encoder_name() << ']';
       return true;
@@ -3295,11 +3315,13 @@ namespace proc {
 
     auto resolve_windowed_gpu_native_fallback = [&]() -> bool {
       if (cached_windowed_gpu_native_probe_result == std::optional<bool> {true}) {
+        stream_stats::update_gpu_native_probe_attempt("windowed", "succeeded", {}, {}, true);
         BOOST_LOG(info) << "session_manager: Reusing cached windowed_dmabuf_override probe result"sv;
         return true;
       }
 
       if (cached_windowed_gpu_native_probe_result == std::optional<bool> {false}) {
+        stream_stats::update_gpu_native_probe_attempt("windowed", "ineligible", "cache", "cached_unsupported", true);
         BOOST_LOG(info) << "session_manager: Cached windowed_dmabuf_override probe result indicates nested DMA-BUF capture is unavailable on this runtime"sv;
         return false;
       }
@@ -3308,15 +3330,27 @@ namespace proc {
     };
 
     if (cached_headless_extcopy_dmabuf_probe_result == std::optional<bool> {true}) {
+      headless_extcopy_dmabuf_selected = true;
+      stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "succeeded", {}, {}, true);
       BOOST_LOG(info) << "session_manager: Reusing cached headless_extcopy_dmabuf probe result; keeping true headless runtime"sv;
     } else if (cached_headless_extcopy_dmabuf_probe_result == std::optional<bool> {false}) {
+      stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "cache", "cached_unsupported", true);
       BOOST_LOG(info) << "session_manager: Cached headless_extcopy_dmabuf probe result indicates headless DMA-BUF capture is unavailable; evaluating windowed fallback"sv;
       force_windowed_cage_for_gpu_native = resolve_windowed_gpu_native_fallback();
     } else if (probe_headless_extcopy_dmabuf_cage()) {
+      headless_extcopy_dmabuf_selected = true;
       BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf selected; keeping true headless runtime"sv;
     } else if (should_probe_windowed_cage_for_gpu_native) {
       BOOST_LOG(info) << "session_manager: headless_shm_fallback would be used for true headless; evaluating windowed GPU-native fallback"sv;
       force_windowed_cage_for_gpu_native = resolve_windowed_gpu_native_fallback();
+    }
+
+    if (headless_extcopy_dmabuf_selected) {
+      stream_stats::update_gpu_native_probe_selection("headless_extcopy_dmabuf");
+    } else if (force_windowed_cage_for_gpu_native) {
+      stream_stats::update_gpu_native_probe_selection("windowed_dmabuf_override");
+    } else if (should_probe_windowed_cage_for_gpu_native) {
+      stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
     }
 
     auto encoder_name = video::active_encoder_name();
@@ -3396,6 +3430,8 @@ namespace proc {
 
       if (force_windowed_cage_for_gpu_native) {
         cage_display_router::update_windowed_gpu_native_probe_result(false);
+        stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "session_start", "windowed_override_start_failed");
+        stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
         BOOST_LOG(warning) << "session_manager: windowed_dmabuf_override start failed; falling back to headless_shm_fallback if headless DMA-BUF remains unavailable"sv;
         force_windowed_cage_for_gpu_native = false;
       }

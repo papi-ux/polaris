@@ -89,6 +89,7 @@ namespace wl {
     bool available {false};
     bool main_device_valid {false};
     dev_t main_device {};
+    std::string main_device_path;
     std::vector<dmabuf_feedback_tranche_t> tranches;
   };
 
@@ -452,6 +453,9 @@ namespace wl {
   };
 
   std::vector<std::unique_ptr<monitor_t>> monitors(const char *display_name = nullptr);
+#ifdef POLARIS_TESTS
+  std::string render_node_from_drm_device_for_tests(dev_t device);
+#endif
   int init();
 }  // namespace wl
 #else

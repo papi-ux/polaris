@@ -78,6 +78,26 @@ namespace wl {
       return resolved;
     }
 
+    std::string render_node_from_drm_device(dev_t device) {
+      if (device == dev_t {}) {
+        return {};
+      }
+
+      drmDevicePtr drm_device = nullptr;
+      if (drmGetDeviceFromDevId(device, 0, &drm_device) != 0 || !drm_device) {
+        return {};
+      }
+
+      std::string node;
+      if (drm_device->available_nodes & (1 << DRM_NODE_RENDER)) {
+        node = drm_device->nodes[DRM_NODE_RENDER];
+      } else if (drm_device->available_nodes & (1 << DRM_NODE_PRIMARY)) {
+        node = drm_device->nodes[DRM_NODE_PRIMARY];
+      }
+      drmFreeDevice(&drm_device);
+      return node;
+    }
+
     bool decode_dev_id(const wl_array *device_array, dev_t &device_id) {
       if (!device_array || device_array->size != sizeof(device_id) || !device_array->data) {
         return false;
@@ -344,9 +364,14 @@ namespace wl {
     dmabuf_feedback = std::move(pending_dmabuf_feedback);
     pending_dmabuf_feedback = {};
     dmabuf_feedback_update_in_progress = false;
+    if (dmabuf_feedback.main_device_valid) {
+      dmabuf_feedback.main_device_path = render_node_from_drm_device(dmabuf_feedback.main_device);
+    }
 
     BOOST_LOG(info) << "Wayland DMA-BUF feedback ready: main_device_valid="sv
                     << dmabuf_feedback.main_device_valid
+                    << " main_device="sv
+                    << (dmabuf_feedback.main_device_path.empty() ? "unresolved" : dmabuf_feedback.main_device_path)
                     << " tranches="sv << dmabuf_feedback.tranches.size()
                     << " format_table_entries="sv << dmabuf_feedback_table.size();
   }
@@ -1225,27 +1250,13 @@ namespace wl {
 
     cleanup_gbm();
 
-    drmDevicePtr drm_device = nullptr;
-    if (drmGetDeviceFromDevId(device, 0, &drm_device) != 0 || !drm_device) {
-      BOOST_LOG(error) << "Extcopy DMA-BUF capture could not resolve DRM device for dev_t ["sv << device << ']';
+    const auto node = render_node_from_drm_device(device);
+    if (node.empty()) {
+      BOOST_LOG(error) << "Extcopy DMA-BUF capture could not resolve a renderable DRM node for dev_t ["sv << device << ']';
       return false;
     }
 
-    const char *node = nullptr;
-    if (drm_device->available_nodes & (1 << DRM_NODE_RENDER)) {
-      node = drm_device->nodes[DRM_NODE_RENDER];
-    } else if (drm_device->available_nodes & (1 << DRM_NODE_PRIMARY)) {
-      node = drm_device->nodes[DRM_NODE_PRIMARY];
-    }
-
-    if (!node) {
-      BOOST_LOG(error) << "Extcopy DMA-BUF capture could not find a renderable DRM node"sv;
-      drmFreeDevice(&drm_device);
-      return false;
-    }
-
-    auto drm_fd = open(node, O_RDWR | O_CLOEXEC);
-    drmFreeDevice(&drm_device);
+    auto drm_fd = open(node.c_str(), O_RDWR | O_CLOEXEC);
     if (drm_fd < 0) {
       BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to open DRM node ["sv << node << ']';
       return false;
@@ -1848,6 +1859,12 @@ namespace wl {
     // File descriptors aren't open
     std::fill_n(sd.fds, 4, -1);
   };
+
+#ifdef POLARIS_TESTS
+  std::string render_node_from_drm_device_for_tests(dev_t device) {
+    return render_node_from_drm_device(device);
+  }
+#endif
 
   std::vector<std::unique_ptr<monitor_t>> monitors(const char *display_name) {
     display_t display;
