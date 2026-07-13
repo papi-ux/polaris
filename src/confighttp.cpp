@@ -194,8 +194,10 @@ namespace confighttp {
 
   namespace {
     struct web_session_t {
+      // Wall clock: persisted and used for absolute SESSION_EXPIRE_DURATION.
       std::chrono::system_clock::time_point created_at;
-      std::chrono::system_clock::time_point last_seen_at;
+      // Monotonic: idle timeout only; not persisted (reset on restart).
+      std::chrono::steady_clock::time_point last_seen_at;
     };
 
     constexpr auto SESSION_IDLE_TIMEOUT = 12h;
@@ -631,8 +633,12 @@ namespace confighttp {
       return util::hex(crypto::hash(std::string {raw_cookie} + config::sunshine.salt)).to_string();
     }
 
-    bool session_expired(const web_session_t &session, const std::chrono::system_clock::time_point now) {
-      return (now - session.created_at) > SESSION_EXPIRE_DURATION || (now - session.last_seen_at) > SESSION_IDLE_TIMEOUT;
+    bool session_expired(
+      const web_session_t &session,
+      const std::chrono::system_clock::time_point wall_now,
+      const std::chrono::steady_clock::time_point mono_now
+    ) {
+      return (wall_now - session.created_at) > SESSION_EXPIRE_DURATION || (mono_now - session.last_seen_at) > SESSION_IDLE_TIMEOUT;
     }
 
     void save_web_sessions_locked() {
@@ -645,14 +651,33 @@ namespace confighttp {
       }
 
       const auto path = web_sessions_path();
-      if (file_handler::write_file(path.string().c_str(), root.dump()) != 0) {
-        BOOST_LOG(warning) << "Failed to persist web UI sessions to "sv << path.string();
+      std::error_code ec;
+      fs::create_directories(path.parent_path(), ec);
+      if (ec) {
+        BOOST_LOG(warning) << "Failed to create directory for web UI sessions "sv << path.parent_path().string() << ": "sv << ec.message();
+        return;
+      }
+
+      // Write to a temp file then rename so a crash mid-write cannot leave a truncated sessions file.
+      const auto tmp_path = fs::path {path.string() + ".tmp"};
+      if (file_handler::write_file(tmp_path.string().c_str(), root.dump()) != 0) {
+        BOOST_LOG(warning) << "Failed to persist web UI sessions to "sv << tmp_path.string();
         return;
       }
 #ifndef _WIN32
-      std::error_code ec;
-      fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+      fs::permissions(tmp_path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
 #endif
+      fs::rename(tmp_path, path, ec);
+      if (ec) {
+        // Windows (and some platforms) refuse to rename over an existing file.
+        std::error_code remove_ec;
+        fs::remove(path, remove_ec);
+        fs::rename(tmp_path, path, ec);
+      }
+      if (ec) {
+        BOOST_LOG(warning) << "Failed to replace web UI sessions file "sv << path.string() << ": "sv << ec.message();
+        fs::remove(tmp_path, ec);
+      }
     }
 
     void load_web_sessions() {
@@ -669,7 +694,8 @@ namespace confighttp {
           return;
         }
 
-        const auto now = std::chrono::system_clock::now();
+        const auto wall_now = std::chrono::system_clock::now();
+        const auto mono_now = std::chrono::steady_clock::now();
         std::size_t loaded = 0;
         std::size_t skipped = 0;
         std::lock_guard lock(s_web_sessions_mutex);
@@ -684,19 +710,26 @@ namespace confighttp {
             continue;
           }
 
-          std::chrono::system_clock::time_point created_at = now;
+          // Missing created_at: treat as created now so absolute expiry still starts from restore.
+          std::chrono::system_clock::time_point created_at = wall_now;
           if (entry.contains("created_at") && entry["created_at"].is_number_integer()) {
             created_at = std::chrono::system_clock::time_point {
               std::chrono::seconds {entry["created_at"].get<std::int64_t>()}
             };
           }
 
+          // Reject future timestamps (clock skew / tampering) so absolute lifetime cannot be extended.
+          if (created_at > wall_now) {
+            ++skipped;
+            continue;
+          }
+
           web_session_t session {
             .created_at = created_at,
             // Reset idle clock on restart so restart itself does not expire an otherwise-valid cookie.
-            .last_seen_at = now,
+            .last_seen_at = mono_now,
           };
-          if (session_expired(session, now)) {
+          if (session_expired(session, wall_now, mono_now)) {
             ++skipped;
             continue;
           }
@@ -720,12 +753,13 @@ namespace confighttp {
 
     std::string create_web_session() {
       const auto raw_cookie = crypto::rand_alphabet(64);
-      const auto now = std::chrono::system_clock::now();
+      const auto wall_now = std::chrono::system_clock::now();
+      const auto mono_now = std::chrono::steady_clock::now();
       {
         std::lock_guard lock(s_web_sessions_mutex);
         s_web_sessions[session_cookie_hash(raw_cookie)] = web_session_t {
-          .created_at = now,
-          .last_seen_at = now,
+          .created_at = wall_now,
+          .last_seen_at = mono_now,
         };
         save_web_sessions_locked();
       }
@@ -738,12 +772,13 @@ namespace confighttp {
       }
 
       const auto session_id = session_cookie_hash(raw_cookie);
-      const auto now = std::chrono::system_clock::now();
+      const auto wall_now = std::chrono::system_clock::now();
+      const auto mono_now = std::chrono::steady_clock::now();
       std::lock_guard lock(s_web_sessions_mutex);
 
       bool pruned = false;
       for (auto it = s_web_sessions.begin(); it != s_web_sessions.end();) {
-        if (session_expired(it->second, now)) {
+        if (session_expired(it->second, wall_now, mono_now)) {
           it = s_web_sessions.erase(it);
           pruned = true;
         } else {
@@ -759,7 +794,7 @@ namespace confighttp {
         return false;
       }
 
-      it->second.last_seen_at = now;
+      it->second.last_seen_at = mono_now;
       return true;
     }
 
