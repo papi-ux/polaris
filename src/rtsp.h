@@ -6,8 +6,10 @@
 
 // standard includes
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <list>
+#include <vector>
 
 // local includes
 #include "crypto.h"
@@ -25,6 +27,20 @@ namespace stream {
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 21;
 
+  enum class session_role_e {
+    none,
+    viewer,
+    controller,
+  };
+
+  struct session_snapshot_t {
+    int active_sessions = 0;
+    int pending_sessions = 0;
+    int viewer_count = 0;
+    session_role_e requester_role = session_role_e::none;
+    std::vector<std::string> requester_session_tokens;
+  };
+
   struct launch_session_t {
     uint32_t id;
 
@@ -39,6 +55,50 @@ namespace rtsp_stream {
     std::string session_token;
     crypto::PERM perm;
     bool watch_only;
+
+    enum class setup_state_e : std::uint8_t {
+      pending,
+      handoff,
+      started,
+      cancelled,
+    };
+
+    bool try_begin_setup_handoff() {
+      auto expected = setup_state_e::pending;
+      return setup_state.compare_exchange_strong(expected, setup_state_e::handoff);
+    }
+
+    bool commit_setup_start() {
+      auto expected = setup_state_e::handoff;
+      return setup_state.compare_exchange_strong(expected, setup_state_e::started);
+    }
+
+    bool cancel_for_timeout() {
+      auto expected = setup_state.load();
+      while (expected == setup_state_e::pending || expected == setup_state_e::handoff) {
+        if (setup_state.compare_exchange_weak(expected, setup_state_e::cancelled)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    void cancel() {
+      setup_state.store(setup_state_e::cancelled);
+    }
+
+    bool is_pending() const {
+      return setup_state.load() == setup_state_e::pending;
+    }
+
+    bool is_pending_or_handoff() const {
+      const auto state = setup_state.load();
+      return state == setup_state_e::pending || state == setup_state_e::handoff;
+    }
+
+    bool is_cancelled() const {
+      return setup_state.load() == setup_state_e::cancelled;
+    }
 
     bool input_only;
     bool host_audio;
@@ -71,6 +131,7 @@ namespace rtsp_stream {
     int optimization_recommendation_version = 0;
     std::string pacing_policy;
 
+    std::atomic<setup_state_e> setup_state {setup_state_e::pending};
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
     std::string rtsp_url_scheme;
     uint32_t rtsp_iv_counter;
@@ -83,7 +144,7 @@ namespace rtsp_stream {
   #endif
   };
 
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
 
   /**
    * @brief Clear state for the specified launch session.
@@ -100,6 +161,35 @@ namespace rtsp_stream {
 
   std::shared_ptr<stream::session_t>
   find_session(const std::string_view& uuid);
+
+  session_snapshot_t session_snapshot(const std::string_view& uuid);
+
+#ifdef POLARIS_TESTS
+  session_role_e merge_session_role_for_tests(session_role_e current, bool watch_only);
+  void accumulate_session_snapshot_for_tests(
+    session_snapshot_t &snapshot,
+    bool requester_matches,
+    bool watch_only
+  );
+  std::uint64_t launch_timer_generation_for_tests();
+  bool expire_pending_launch_for_tests(uint32_t launch_session_id, std::uint64_t timer_generation);
+  void reset_cleanup_call_count_for_tests();
+  unsigned cleanup_call_count_for_tests();
+  void set_cleanup_unlocked_probe_for_tests(std::function<void()> probe);
+  void set_cleanup_session_probe_for_tests(std::function<void()> probe);
+  void run_cleanup_for_tests();
+  enum class setup_insert_result_e {
+    started,
+    cancelled,
+    failed,
+  };
+  setup_insert_result_e run_setup_insert_for_tests(
+    launch_session_t &launch_session,
+    bool cancel_after_insert,
+    int start_result
+  );
+  void add_session_for_tests(launch_session_t &launch_session, bool stopping);
+#endif
 
   std::list<std::string>
   get_all_session_uuids();

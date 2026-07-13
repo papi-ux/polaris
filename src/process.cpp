@@ -94,6 +94,235 @@ namespace proc {
   int terminate_app_id = -1;
   std::string terminate_app_id_str;
 
+  session_stop_outcome_t evaluate_session_stop_request(
+    bool can_launch,
+    bool has_running_app,
+    int active_sessions,
+    bool owned_by_client,
+    rtsp_stream::session_role_e requester_role,
+    bool stop_in_progress,
+    bool token_matches
+  ) {
+    if (!can_launch) {
+      return session_stop_outcome_t::permission_denied;
+    }
+    if (stop_in_progress) {
+      return session_stop_outcome_t::stop_in_progress;
+    }
+    if (!has_running_app && active_sessions <= 0) {
+      return session_stop_outcome_t::no_active_session;
+    }
+    if (requester_role == rtsp_stream::session_role_e::viewer) {
+      return session_stop_outcome_t::viewer_forbidden;
+    }
+    if (has_running_app && !owned_by_client) {
+      return session_stop_outcome_t::other_owner;
+    }
+    if (!has_running_app && requester_role != rtsp_stream::session_role_e::controller) {
+      return session_stop_outcome_t::uncontrolled_stream;
+    }
+    if (!token_matches) {
+      return session_stop_outcome_t::token_mismatch;
+    }
+    return session_stop_outcome_t::allowed;
+  }
+
+  bool session_token_matches_active(std::string_view expected_token, std::string_view active_token) {
+    return !expected_token.empty() &&
+           !active_token.empty() &&
+           crypto::constant_time_equals(expected_token, active_token);
+  }
+
+  bool session_stop_token_matches(
+    bool require_exact_token,
+    std::string_view expected_token,
+    std::string_view active_token,
+    const std::vector<std::string> &requester_rtsp_tokens
+  ) {
+    if (!require_exact_token) {
+      return true;
+    }
+    if (session_token_matches_active(expected_token, active_token)) {
+      return true;
+    }
+    return std::any_of(
+      requester_rtsp_tokens.begin(),
+      requester_rtsp_tokens.end(),
+      [expected_token](const std::string &candidate) {
+        return session_token_matches_active(expected_token, candidate);
+      }
+    );
+  }
+
+  void session_lifecycle_gate_t::begin_launch() {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _state == state_e::idle && !_stop_waiting && !_launch_to_stop_handoff;
+    });
+    _state = state_e::launching;
+  }
+
+  std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation() const {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+    });
+    if (_state != state_e::idle || _stop_waiting) {
+      return std::nullopt;
+    }
+    return _generation;
+  }
+
+  bool session_lifecycle_gate_t::try_begin_rtsp_launch() {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+    });
+    if (_state != state_e::idle || _stop_waiting) {
+      return false;
+    }
+    _state = state_e::launching;
+    return true;
+  }
+
+  bool session_lifecycle_gate_t::try_begin_rtsp_launch(std::uint64_t expected_generation) {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+    });
+    if (_state != state_e::idle || _stop_waiting || _generation != expected_generation) {
+      return false;
+    }
+    _state = state_e::launching;
+    return true;
+  }
+
+  bool session_lifecycle_gate_t::begin_stop() {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+    });
+    if (_state == state_e::stopping || _stop_waiting) {
+      return false;
+    }
+    _stop_waiting = true;
+    _last_stop_committed = false;
+    ++_generation;
+    _changed.notify_all();
+    _changed.wait(lock, [this]() {
+      return _state != state_e::launching;
+    });
+    _stop_waiting = false;
+    _state = state_e::stopping;
+    return true;
+  }
+
+  bool session_lifecycle_gate_t::transition_launch_to_stop() {
+    std::unique_lock lock(_mutex);
+    if (_state != state_e::launching) {
+      return false;
+    }
+    if (_stop_waiting) {
+      _launch_to_stop_handoff = true;
+      _state = state_e::idle;
+      _changed.notify_all();
+      _changed.wait(lock, [this]() {
+        return _state == state_e::idle && !_stop_waiting;
+      });
+      if (_last_stop_committed) {
+        _launch_to_stop_handoff = false;
+        _changed.notify_all();
+        return false;
+      }
+      ++_generation;
+      _state = state_e::stopping;
+      _launch_to_stop_handoff = false;
+      _changed.notify_all();
+      return true;
+    }
+    ++_generation;
+    _state = state_e::stopping;
+    return true;
+  }
+
+  void session_lifecycle_gate_t::begin_snapshot() {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _state == state_e::idle && !_stop_waiting && !_launch_to_stop_handoff;
+    });
+    _state = state_e::snapshotting;
+  }
+
+  bool session_lifecycle_gate_t::try_begin_snapshot() {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _stop_waiting ||
+             _launch_to_stop_handoff ||
+             (_state != state_e::launching && _state != state_e::snapshotting);
+    });
+    if (_state != state_e::idle || _stop_waiting || _launch_to_stop_handoff) {
+      return false;
+    }
+    _state = state_e::snapshotting;
+    return true;
+  }
+
+  void session_lifecycle_gate_t::finish_snapshot() {
+    std::lock_guard lock(_mutex);
+    if (_state == state_e::snapshotting) {
+      _state = state_e::idle;
+      _changed.notify_all();
+    }
+  }
+
+  session_snapshot_guard_t::session_snapshot_guard_t(session_lifecycle_gate_t &gate):
+      _gate(&gate) {
+    _gate->begin_snapshot();
+  }
+
+  session_snapshot_guard_t session_snapshot_guard_t::try_acquire(session_lifecycle_gate_t &gate) {
+    session_snapshot_guard_t guard;
+    if (gate.try_begin_snapshot()) {
+      guard._gate = &gate;
+    }
+    return guard;
+  }
+
+  bool session_snapshot_guard_t::owns_snapshot() const {
+    return _gate != nullptr;
+  }
+
+  session_snapshot_guard_t::~session_snapshot_guard_t() {
+    if (_gate) {
+      _gate->finish_snapshot();
+    }
+  }
+
+  session_snapshot_guard_t::session_snapshot_guard_t(session_snapshot_guard_t &&other) noexcept:
+      _gate(std::exchange(other._gate, nullptr)) {}
+
+  void session_lifecycle_gate_t::finish_launch() {
+    std::lock_guard lock(_mutex);
+    if (_state == state_e::launching) {
+      _state = state_e::idle;
+      _changed.notify_all();
+    }
+  }
+
+  void session_lifecycle_gate_t::finish_stop(bool committed) {
+    std::lock_guard lock(_mutex);
+    if (_state == state_e::stopping) {
+      _last_stop_committed = committed;
+      _state = state_e::idle;
+      _changed.notify_all();
+    }
+  }
+
+  bool session_lifecycle_gate_t::stop_in_progress() const {
+    std::lock_guard lock(_mutex);
+    return _state == state_e::stopping || _stop_waiting || _launch_to_stop_handoff;
+  }
+
   std::string normalize_steam_launch_mode(std::string mode) {
     boost::trim(mode);
     boost::to_lower(mode);
@@ -2159,6 +2388,22 @@ namespace proc {
   }
 
   void proc_t::launch_input_only(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    _session_lifecycle_gate->begin_launch();
+    auto release_launch = util::fail_guard([this]() {
+      _session_lifecycle_gate->finish_launch();
+    });
+    launch_input_only_impl(std::move(launch_session));
+  }
+
+  bool proc_t::launch_input_only_and_raise(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    launch_input_only_impl(launch_session);
+    return rtsp_stream::launch_session_raise(std::move(launch_session));
+  }
+
+  void proc_t::launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    ++_session_generation;
     _app_id = input_only_app_id;
     _app_name = "Remote Input";
     _app.uuid = REMOTE_INPUT_UUID;
@@ -2179,14 +2424,65 @@ namespace proc {
   }
 
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    _session_lifecycle_gate->begin_launch();
+    auto release_launch = util::fail_guard([this]() {
+      _session_lifecycle_gate->finish_launch();
+    });
+    const bool no_active_sessions_at_launch = rtsp_stream::session_count() == 0;
+    return execute_impl(app, std::move(launch_session), no_active_sessions_at_launch);
+  }
+
+  int proc_t::execute_and_raise(
+    const ctx_t& app,
+    std::shared_ptr<rtsp_stream::launch_session_t> launch_session
+  ) {
+    const bool no_active_sessions_at_launch = rtsp_stream::session_count() == 0;
+    const auto err = execute_impl(app, launch_session, no_active_sessions_at_launch);
+    if (!err) {
+      return rtsp_stream::launch_session_raise(std::move(launch_session)) ? 0 : 409;
+    }
+    return err;
+  }
+
+  bool proc_t::raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    return rtsp_stream::launch_session_raise(std::move(launch_session));
+  }
+
+  std::optional<std::uint64_t> proc_t::capture_session_launch_generation() const {
+    return _session_lifecycle_gate->capture_launch_generation();
+  }
+
+  bool proc_t::try_begin_session_launch(std::uint64_t expected_generation) {
+    if (!_session_lifecycle_gate->try_begin_rtsp_launch(expected_generation)) {
+      return false;
+    }
+    if (rtsp_stream::session_snapshot({}).pending_sessions > 0) {
+      _session_lifecycle_gate->finish_launch();
+      return false;
+    }
+    return true;
+  }
+
+  void proc_t::finish_session_launch() {
+    _session_lifecycle_gate->finish_launch();
+  }
+
+  int proc_t::execute_impl(
+    const ctx_t& app,
+    std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+    bool no_active_sessions_at_launch
+  ) {
+    auto &sync = session_lifecycle_sync();
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex);
     if (_app_id == input_only_app_id) {
-      terminate(false, false);
+      terminate_impl(false, false);
       std::this_thread::sleep_for(1s);
     } else {
       // Ensure starting from a clean slate
-      terminate(false, false);
+      terminate_impl(false, false);
     }
 
+    ++_session_generation;
     _app = app;
     _app_id = util::from_view(app.id);
     _app_name = app.name;
@@ -2597,7 +2893,7 @@ namespace proc {
       if (this->initial_video_config_saved) {
         config::video.adaptive_bitrate.max_bitrate_kbps = this->initial_adaptive_max_bitrate;
       }
-      terminate();
+      terminate_impl(false, true);
       display_device::revert_configuration();
 #ifdef __linux__
       confighttp::set_session_state(confighttp::session_state_e::tearing_down);
@@ -2829,7 +3125,7 @@ namespace proc {
     constexpr bool delay_encoder_probe_until_cage = false;
 #endif
     if (!delay_encoder_probe_until_cage &&
-        rtsp_stream::session_count() == 0 &&
+        no_active_sessions_at_launch &&
         video::probe_encoders()) {
       if (config::video.ignore_encoder_probe_failure) {
         BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
@@ -3091,7 +3387,7 @@ namespace proc {
     bool cage_started_with_detached_client = false;
 
     auto reprobe_encoders_for_cage = [&](bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
-      if (!config::video.linux_display.use_cage_compositor || rtsp_stream::session_count() != 0) {
+      if (!config::video.linux_display.use_cage_compositor || !no_active_sessions_at_launch) {
         return true;
       }
 
@@ -3143,7 +3439,7 @@ namespace proc {
         prefer_gpu_native_capture,
         should_try_gpu_native_cage_probe
       );
-    stream_stats::reset_gpu_native_probe(should_probe_windowed_cage_for_gpu_native, rtsp_stream::session_count() == 0);
+    stream_stats::reset_gpu_native_probe(should_probe_windowed_cage_for_gpu_native, no_active_sessions_at_launch);
     const auto cached_windowed_gpu_native_probe_result =
       should_probe_windowed_cage_for_gpu_native ?
         cage_display_router::cached_windowed_gpu_native_probe_result() :
@@ -3206,7 +3502,7 @@ namespace proc {
     };
 
     auto probe_headless_extcopy_dmabuf_cage = [&]() -> bool {
-      if (!should_probe_windowed_cage_for_gpu_native || rtsp_stream::session_count() != 0) {
+      if (!should_probe_windowed_cage_for_gpu_native || !no_active_sessions_at_launch) {
         return false;
       }
 
@@ -3276,7 +3572,7 @@ namespace proc {
     };
 
     auto probe_windowed_gpu_native_cage = [&]() -> bool {
-      if (!should_probe_windowed_cage_for_gpu_native || rtsp_stream::session_count() != 0) {
+      if (!should_probe_windowed_cage_for_gpu_native || !no_active_sessions_at_launch) {
         return false;
       }
 
@@ -3640,6 +3936,8 @@ namespace proc {
   }
 
   int proc_t::running() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
 #ifndef _WIN32
     // On POSIX OSes, we must periodically wait for our children to avoid
     // them becoming zombies. This must be synchronized carefully with
@@ -3674,13 +3972,15 @@ namespace proc {
 
     // Perform cleanup actions now if needed
     if (_process) {
-      terminate();
+      terminate_impl(false, true);
     }
 
     return 0;
   }
 
   void proc_t::resume() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
     _client_session_report_recorded = false;
     _client_session_report_recorded_at = {};
@@ -3728,13 +4028,17 @@ namespace proc {
   }
 
   void proc_t::pause() {
-    if (!running()) {
+    auto &sync = session_lifecycle_sync();
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    if (_app_id <= 0) {
       BOOST_LOG(info) << "Session already stopped, do not run pause commands.";
       return;
     }
 
     if (_app.terminate_on_pause) {
-      BOOST_LOG(info) << "Terminating app [" << _app_name << "] when all clients are disconnected. Pause commands are skipped.";
+      const auto app_name = _app_name;
+      lifecycle_lock.unlock();
+      BOOST_LOG(info) << "Terminating app [" << app_name << "] when all clients are disconnected. Pause commands are skipped.";
       terminate();
       return;
     }
@@ -3934,6 +4238,28 @@ namespace proc {
   }
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
+    if (!_session_lifecycle_gate->begin_stop()) {
+      return;
+    }
+    auto release_stop = util::fail_guard([this]() {
+      _session_lifecycle_gate->finish_stop();
+    });
+    terminate_impl(immediate, needs_refresh);
+  }
+
+  void proc_t::terminate_from_admitted_launch() {
+    if (!_session_lifecycle_gate->transition_launch_to_stop()) {
+      return;
+    }
+    auto release_stop = util::fail_guard([this]() {
+      _session_lifecycle_gate->finish_stop();
+    });
+    terminate_impl(false, true);
+  }
+
+  void proc_t::terminate_impl(bool immediate, bool needs_refresh) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     std::error_code ec;
     placebo = false;
 
@@ -4114,7 +4440,6 @@ namespace proc {
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;
-    _session_shutdown_requested->store(false, std::memory_order_relaxed);
     allow_client_commands = false;
 
     if (_saved_input_config) {
@@ -4127,15 +4452,49 @@ namespace proc {
     publish_stream_ended_after_terminate_if_needed(has_run);
 
     if (needs_refresh) {
-      refresh(config::stream.file_apps, false);
+      reload_configuration_from_file(config::stream.file_apps);
     }
   }
 
-  const std::vector<ctx_t> &proc_t::get_apps() const {
-    return _apps;
+  bool proc_t::reload_configuration_from_file(const std::string &file_name) {
+    auto parsed = parse(file_name);
+    if (!parsed) {
+      return false;
+    }
+    reload_configuration(std::move(*parsed));
+    return true;
   }
 
-  std::vector<ctx_t> &proc_t::get_apps() {
+  void proc_t::reload_configuration(proc_t &&parsed) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _env = std::move(parsed._env);
+    _apps = std::move(parsed._apps);
+  }
+
+#if defined(POLARIS_TESTS)
+  std::pair<const void *, const void *> proc_t::session_lifecycle_identity_for_tests() const {
+    return {_session_lifecycle_gate.get(), _session_lifecycle_sync.get()};
+  }
+
+  void proc_t::with_session_lifecycle_lock_for_tests(const std::function<void()> &callback) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    callback();
+  }
+
+  bool proc_t::begin_session_stop_for_tests() {
+    return _session_lifecycle_gate->begin_stop();
+  }
+
+  void proc_t::finish_session_stop_for_tests(bool committed) {
+    _session_lifecycle_gate->finish_stop(committed);
+  }
+#endif
+
+  std::vector<ctx_t> proc_t::get_apps() const {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _apps;
   }
 
@@ -4153,30 +4512,56 @@ namespace proc {
   }
 
   std::string proc_t::get_last_run_app_name() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _app_name;
   }
 
   std::string proc_t::get_running_app_uuid() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _app.uuid;
   }
 
   std::string proc_t::get_session_token() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _launch_session ? _launch_session->session_token : std::string {};
   }
 
   std::string proc_t::get_session_owner_unique_id() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _launch_session ? _launch_session->unique_id : std::string {};
   }
 
   std::string proc_t::get_session_owner_device_name() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _launch_session ? _launch_session->device_name : std::string {};
   }
 
   bool proc_t::is_session_owner(const std::string &unique_id) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return !_launch_session || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id;
   }
 
+  bool proc_t::session_uses_virtual_display() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    return virtual_display;
+  }
+
+  bool proc_t::session_allows_client_commands() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    return allow_client_commands;
+  }
+
   void proc_t::mark_client_session_report_recorded(const std::string &unique_id) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     if (!_launch_session) {
       return;
     }
@@ -4189,14 +4574,20 @@ namespace proc {
   }
 
   bool proc_t::client_session_report_recorded() const {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _client_session_report_recorded;
   }
 
   bool proc_t::session_display_mode_is_explicit() const {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _launch_session && _launch_session->user_locked_virtual_display;
   }
 
   bool proc_t::current_app_has_mangohud() const {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     if (_app.uuid.empty()) {
       return false;
     }
@@ -4205,6 +4596,8 @@ namespace proc {
   }
 
   void proc_t::set_app_mangohud_configured(const std::string &uuid, bool enabled) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     auto apply = [enabled](ctx_t &app) {
       if (enabled) {
         app.env_vars["MANGOHUD"] = "1";
@@ -4225,6 +4618,8 @@ namespace proc {
   }
 
   void proc_t::set_app_steam_launch_mode_configured(const std::string &uuid, const std::string &mode) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     const auto normalized = normalize_steam_launch_mode(mode);
     auto apply = [&normalized](ctx_t &app) {
       app.steam_launch_mode = normalized;
@@ -4242,12 +4637,159 @@ namespace proc {
     }
   }
 
-  void proc_t::set_session_shutdown_requested(bool requested) {
-    _session_shutdown_requested->store(requested, std::memory_order_relaxed);
+  proc_t::session_lifecycle_sync_t &proc_t::session_lifecycle_sync() const {
+    return *_session_lifecycle_sync;
+  }
+
+  session_stop_snapshot_t proc_t::get_session_stop_snapshot_locked(
+    const std::string &unique_id,
+    bool can_launch,
+    std::string_view expected_token,
+    bool require_exact_token,
+    const rtsp_stream::session_snapshot_t &rtsp_snapshot,
+    bool stop_in_progress
+  ) {
+    session_stop_snapshot_t snapshot;
+    snapshot.running_app_id = running();
+    snapshot.had_running_app = snapshot.running_app_id > 0;
+    snapshot.active_sessions = rtsp_snapshot.active_sessions + rtsp_snapshot.pending_sessions;
+    snapshot.requester_role = rtsp_snapshot.requester_role;
+    snapshot.stop_in_progress = stop_in_progress;
+    snapshot.session_token = _launch_session ? _launch_session->session_token : std::string {};
+    snapshot.token_available =
+      !snapshot.session_token.empty() ||
+      std::any_of(
+        rtsp_snapshot.requester_session_tokens.begin(),
+        rtsp_snapshot.requester_session_tokens.end(),
+        [](const std::string &token) {
+          return !token.empty();
+        }
+      );
+    snapshot.owned_by_client =
+      _launch_session &&
+      !unique_id.empty() &&
+      !_launch_session->unique_id.empty() &&
+      _launch_session->unique_id == unique_id;
+    snapshot.game = _app_name;
+    const bool token_matches = session_stop_token_matches(
+      require_exact_token,
+      expected_token,
+      snapshot.session_token,
+      rtsp_snapshot.requester_session_tokens
+    );
+    snapshot.outcome = evaluate_session_stop_request(
+      can_launch,
+      snapshot.had_running_app,
+      snapshot.active_sessions,
+      snapshot.owned_by_client,
+      snapshot.requester_role,
+      snapshot.stop_in_progress,
+      token_matches
+    );
+    return snapshot;
+  }
+
+  session_status_view_t proc_t::get_session_status_view(const std::string &unique_id, bool can_launch) {
+    auto guard = session_snapshot_guard_t::try_acquire(*_session_lifecycle_gate);
+    const bool stop_observed = !guard.owns_snapshot();
+    const auto rtsp_snapshot = rtsp_stream::session_snapshot(unique_id);
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+
+    session_status_snapshot_t snapshot;
+    snapshot.stop = get_session_stop_snapshot_locked(
+      unique_id,
+      can_launch,
+      {},
+      false,
+      rtsp_snapshot,
+      stop_observed
+    );
+    snapshot.viewer_count = rtsp_snapshot.viewer_count;
+    snapshot.owner_unique_id = _launch_session ? _launch_session->unique_id : std::string {};
+    snapshot.owner_device_name = _launch_session ? _launch_session->device_name : std::string {};
+    snapshot.game = _app_name;
+    snapshot.game_uuid = _app.uuid;
+    snapshot.client_commands_enabled = allow_client_commands;
+    snapshot.mangohud_configured = !_app.uuid.empty() && env_flag_enabled(_app, _env, "MANGOHUD");
+    snapshot.virtual_display = virtual_display;
+    snapshot.display_mode_explicit = _launch_session && _launch_session->user_locked_virtual_display;
+    return {std::move(guard), std::move(snapshot)};
+  }
+
+  session_stop_snapshot_t proc_t::get_session_stop_snapshot(const std::string &unique_id, bool can_launch) {
+    auto view = get_session_status_view(unique_id, can_launch);
+    return std::move(view.snapshot.stop);
+  }
+
+  session_stop_result_t proc_t::request_session_shutdown(
+    const std::string &unique_id,
+    std::string_view expected_token,
+    bool can_launch,
+    bool require_exact_token
+  ) {
+    session_stop_result_t result;
+    if (!can_launch) {
+      result.snapshot.outcome = session_stop_outcome_t::permission_denied;
+      return result;
+    }
+    if (!_session_lifecycle_gate->begin_stop()) {
+      result.snapshot.outcome = session_stop_outcome_t::stop_in_progress;
+      result.snapshot.stop_in_progress = true;
+      return result;
+    }
+    bool stop_committed = false;
+    auto release_stop = util::fail_guard([this, &stop_committed]() {
+      _session_lifecycle_gate->finish_stop(stop_committed);
+    });
+
+    const auto rtsp_snapshot = rtsp_stream::session_snapshot(unique_id);
+    std::uint64_t claimed_generation = 0;
+    {
+      auto &sync = session_lifecycle_sync();
+      std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+      result.snapshot = get_session_stop_snapshot_locked(
+        unique_id,
+        can_launch,
+        expected_token,
+        require_exact_token,
+        rtsp_snapshot,
+        false
+      );
+      if (result.snapshot.outcome != session_stop_outcome_t::allowed) {
+        return result;
+      }
+      claimed_generation = _session_generation;
+    }
+
+    if (result.snapshot.had_running_app || result.snapshot.active_sessions > 0) {
+      confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+      confighttp::emit_session_event("stream_stopping", "Stopping session");
+    }
+    rtsp_stream::terminate_sessions();
+
+    {
+      auto &sync = session_lifecycle_sync();
+      std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+      if (_session_generation != claimed_generation) {
+        result.snapshot.outcome = session_stop_outcome_t::session_changed;
+        return result;
+      }
+      if (result.snapshot.had_running_app && running() > 0) {
+        terminate_impl(false, true);
+      }
+      display_device::revert_configuration();
+      result.stopped = result.snapshot.had_running_app || result.snapshot.active_sessions > 0;
+    }
+
+    stop_committed = true;
+    _session_lifecycle_gate->finish_stop(stop_committed);
+    release_stop.disable();
+    return result;
   }
 
   bool proc_t::session_shutdown_requested() const {
-    return _session_shutdown_requested->load(std::memory_order_relaxed);
+    return _session_lifecycle_gate->stop_in_progress();
   }
 
   boost::process::environment proc_t::get_env() {
@@ -5210,10 +5752,6 @@ namespace proc {
     }
   #endif
 
-    auto proc_opt = proc::parse(file_name);
-
-    if (proc_opt) {
-      proc = std::move(*proc_opt);
-    }
+    proc.reload_configuration_from_file(file_name);
   }
 }  // namespace proc

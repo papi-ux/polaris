@@ -461,6 +461,7 @@ namespace stream {
     std::uint32_t launch_session_id;
     std::string device_name;
     std::string device_uuid;
+    std::string session_token;
     bool watch_only;
     int requested_fps = 0;
     int session_target_fps = 0;
@@ -2087,12 +2088,22 @@ namespace stream {
       return session.state.load(std::memory_order_relaxed);
     }
 
+#ifdef POLARIS_TESTS
+    void set_state_for_tests(session_t &session, state_e state) {
+      session.state.store(state, std::memory_order_relaxed);
+    }
+#endif
+
     inline bool send(session_t& session, const std::string_view &payload) {
       return session.broadcast_ref->control_server.send(payload, session.control.peer);
     }
 
     std::string uuid(const session_t& session) {
       return session.device_uuid;
+    }
+
+    std::string session_token(const session_t& session) {
+      return session.session_token;
     }
 
     bool uuid_match(const session_t &session, const std::string_view& uuid) {
@@ -2384,6 +2395,7 @@ namespace stream {
       session->launch_session_id = launch_session.id;
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
+      session->session_token = launch_session.session_token;
       session->requested_fps = launch_session.requested_fps;
       session->session_target_fps = launch_session.fps;
       session->pacing_policy = launch_session.pacing_policy;
