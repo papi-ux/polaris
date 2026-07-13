@@ -4,6 +4,7 @@
  */
 
 #include "src/ai_optimizer.h"
+#include "src/stream_stats.h"
 
 #include <gtest/gtest.h>
 
@@ -92,6 +93,16 @@ TEST(AiOptimizerSessionFeedback, MissingMetricsAreIgnored) {
   EXPECT_EQ("missing_quality_metrics", policy.ignored_reason);
 }
 
+TEST(AiOptimizerSessionGrading, UsesRelativeToleranceForMeaningfulFpsShortfall) {
+  EXPECT_FALSE(stream_stats::is_meaningful_fps_shortfall(120.0, 115.6));
+  EXPECT_FALSE(stream_stats::is_meaningful_fps_shortfall(120.0, 114.0));
+  EXPECT_TRUE(stream_stats::is_meaningful_fps_shortfall(120.0, 113.9));
+  EXPECT_TRUE(stream_stats::is_meaningful_fps_shortfall(60.0, 54.0));
+  EXPECT_TRUE(stream_stats::is_meaningful_fps_shortfall(30.0, 28.0));
+  EXPECT_FALSE(stream_stats::is_meaningful_fps_shortfall(0.0, 115.6));
+  EXPECT_FALSE(stream_stats::is_meaningful_fps_shortfall(120.0, 0.0));
+}
+
 TEST(AiOptimizerSessionGrading, TreatsIsolatedMinDipAsMildWhenSustainedPacingIsHealthy) {
   auto session = make_session("D", "disconnect", 362, 358);
   session.avg_fps = 56.4689;
@@ -132,6 +143,107 @@ TEST(AiOptimizerHistorySanitization, ResetsCorruptedCounters) {
   EXPECT_EQ(0, sanitized.poor_outcome_count);
   EXPECT_EQ(0, sanitized.consecutive_poor_outcomes);
   EXPECT_EQ("B", sanitized.last_quality_grade);
+}
+
+TEST(AiOptimizerHistorySanitization, RepairsHealthyNearTargetHostLimit) {
+  auto session = make_session("A", "disconnect", 130, 11);
+  session.avg_fps = 115.6;
+  session.last_fps = session.avg_fps;
+  session.last_target_fps = 120.0;
+  session.avg_latency_ms = 0.0;
+  session.packet_loss_pct = 0.0;
+  session.last_low_1_percent_fps = 110.78;
+  session.last_min_fps = 110.78;
+  session.last_frame_pacing_bad_pct = 0.0;
+  session.last_health_grade = "watch";
+  session.last_primary_issue = "host_render_limited";
+  session.last_issues = {"host_render_limited", "frame_pacing"};
+  session.last_safe_target_fps = 60.0;
+  session.last_relaunch_recommended = true;
+
+  auto sanitized = ai_optimizer::sanitize_session_history(session);
+
+  EXPECT_EQ("A", ai_optimizer::grade_session_quality(sanitized));
+  EXPECT_EQ("good", sanitized.last_health_grade);
+  EXPECT_EQ("steady", sanitized.last_primary_issue);
+  EXPECT_TRUE(sanitized.last_issues.empty());
+  EXPECT_DOUBLE_EQ(0.0, sanitized.last_safe_target_fps);
+  EXPECT_FALSE(sanitized.last_relaunch_recommended);
+  EXPECT_DOUBLE_EQ(
+    0.0,
+    ai_optimizer::effective_history_safe_target_fps("RetroidPocket6", sanitized)
+  );
+}
+
+TEST(AiOptimizerHistorySanitization, KeepsHostLimitWhenTargetTelemetryIsMissing) {
+  auto session = make_session("A", "end", 130, 11);
+  session.avg_fps = 115.6;
+  session.last_fps = 115.6;
+  session.last_target_fps = 0.0;
+  session.last_low_1_percent_fps = 110.8;
+  session.last_min_fps = 110.8;
+  session.last_frame_pacing_bad_pct = 0.0;
+  session.last_health_grade = "watch";
+  session.last_primary_issue = "host_render_limited";
+  session.last_issues = {"frame_pacing", "host_render_limited"};
+  session.last_safe_target_fps = 60.0;
+  session.last_relaunch_recommended = true;
+
+  const auto sanitized = ai_optimizer::sanitize_session_history(session);
+
+  EXPECT_EQ("host_render_limited", sanitized.last_primary_issue);
+  EXPECT_DOUBLE_EQ(60.0, sanitized.last_safe_target_fps);
+  EXPECT_TRUE(sanitized.last_relaunch_recommended);
+}
+
+TEST(AiOptimizerHistorySanitization, KeepsCorroboratedPacingFailureAtHighRefresh) {
+  auto session = make_session("C", "disconnect", 130, 100);
+  session.avg_fps = 115.6;
+  session.last_fps = session.avg_fps;
+  session.last_target_fps = 120.0;
+  session.avg_latency_ms = 8.0;
+  session.packet_loss_pct = 0.0;
+  session.last_low_1_percent_fps = 72.0;
+  session.last_min_fps = 45.0;
+  session.last_frame_pacing_bad_pct = 10.0;
+  session.last_health_grade = "watch";
+  session.last_primary_issue = "frame_pacing";
+  session.last_issues = {"frame_pacing"};
+  session.last_safe_target_fps = 60.0;
+  session.last_relaunch_recommended = true;
+
+  auto sanitized = ai_optimizer::sanitize_session_history(session);
+
+  EXPECT_EQ("D", ai_optimizer::grade_session_quality(sanitized));
+  EXPECT_EQ("watch", sanitized.last_health_grade);
+  EXPECT_EQ("frame_pacing", sanitized.last_primary_issue);
+  EXPECT_EQ(std::vector<std::string>({"frame_pacing"}), sanitized.last_issues);
+  EXPECT_DOUBLE_EQ(60.0, sanitized.last_safe_target_fps);
+  EXPECT_TRUE(sanitized.last_relaunch_recommended);
+}
+
+TEST(AiOptimizerSafeTargetFps, KeepsMeaningfulSixtyFpsShortfallRecoverable) {
+  auto session = make_session("B", "disconnect", 130, 100);
+  session.avg_fps = 54.0;
+  session.last_fps = session.avg_fps;
+  session.last_target_fps = 60.0;
+  session.last_low_1_percent_fps = 45.0;
+  session.last_min_fps = 42.0;
+  session.last_frame_pacing_bad_pct = 5.0;
+
+  EXPECT_DOUBLE_EQ(
+    40.0,
+    ai_optimizer::derive_safe_target_fps(
+      session.last_target_fps,
+      session.last_fps,
+      session.last_low_1_percent_fps,
+      session.last_min_fps,
+      session.last_frame_pacing_bad_pct,
+      true,
+      false,
+      true
+    )
+  );
 }
 
 TEST(AiOptimizerHistorySanitization, ClearsLowConfidenceSoftEndRecoveryBias) {

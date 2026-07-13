@@ -8,6 +8,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <mutex>
 #include <vector>
@@ -26,6 +27,17 @@
 #endif
 
 namespace stream_stats {
+
+  bool is_meaningful_fps_shortfall(double target_fps, double delivered_fps) {
+    if (!std::isfinite(target_fps) || !std::isfinite(delivered_fps) ||
+        target_fps < 24.0 || delivered_fps <= 0.0 || delivered_fps >= target_fps) {
+      return false;
+    }
+
+    const double fps_gap = target_fps - delivered_fps;
+    const double fps_ratio = delivered_fps / target_fps;
+    return fps_gap >= 2.0 && fps_ratio < 0.95;
+  }
 
   static std::mutex stats_mutex;
   static stats_t current_stats;
@@ -670,12 +682,16 @@ namespace stream_stats {
     const bool capture_gpu_native = capture_path_is_gpu_native(stats);
     const bool capture_known = doctor_has_capture_metadata(stats);
     const double target_fps = doctor_target_fps(stats);
-    const double fps_gap = target_fps > 0.0 ? std::max(0.0, target_fps - stats.fps) : 0.0;
+    const bool meaningful_fps_shortfall = is_meaningful_fps_shortfall(target_fps, stats.fps);
     const bool network_fail = stats.packet_loss > 2.0 || stats.latency_ms >= 45.0;
     const bool network_watch = !network_fail && (stats.packet_loss > 0.5 || stats.latency_ms >= 28.0);
     const bool encoder_fail = stats.encode_time_ms >= 12.0 || stats.avg_frame_age_ms >= 22.0;
     const bool encoder_watch = !encoder_fail && (stats.encode_time_ms >= 8.0 || stats.avg_frame_age_ms >= 18.0);
-    const bool pacing_watch = stats.frame_jitter_ms >= 2.2 || stats.duplicate_frame_ratio >= 0.10 || stats.dropped_frame_ratio >= 0.04 || fps_gap >= 4.0;
+    const bool pacing_watch =
+      stats.frame_jitter_ms >= 2.2 ||
+      stats.duplicate_frame_ratio >= 0.10 ||
+      stats.dropped_frame_ratio >= 0.04 ||
+      meaningful_fps_shortfall;
 
     std::string primary_issue = health.value("primary_issue", std::string {});
     if (primary_issue == "steady") primary_issue = "none";

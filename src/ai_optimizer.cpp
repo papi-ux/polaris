@@ -8,6 +8,7 @@
 #include "game_classifier.h"
 #include "logging.h"
 #include "platform/common.h"
+#include "stream_stats.h"
 
 #include <algorithm>
 #include <cctype>
@@ -497,6 +498,37 @@ namespace ai_optimizer {
       session.last_safe_target_fps = 0.0;
     }
 
+    const double reported_target_fps = session.last_target_fps;
+    const double reported_fps = session.last_fps > 0.0 ? session.last_fps : session.avg_fps;
+    const bool detailed_near_target_evidence =
+      grade_session_quality(session) == "A" &&
+      reported_target_fps >= 24.0 &&
+      reported_fps > 0.0 &&
+      reported_fps / reported_target_fps >= 0.95 &&
+      session.last_low_1_percent_fps > 0.0 &&
+      session.last_low_1_percent_fps / reported_target_fps >= 0.85 &&
+      session.last_min_fps > 0.0 &&
+      session.last_min_fps / reported_target_fps >= 0.60 &&
+      session.last_frame_pacing_bad_pct < 5.0 &&
+      session.poor_outcome_count <= 0 &&
+      session.consecutive_poor_outcomes <= 0 &&
+      to_lower_copy(session.last_network_risk) != "elevated" &&
+      to_lower_copy(session.last_decoder_risk) != "elevated" &&
+      to_lower_copy(session.last_hdr_risk) != "elevated";
+    const bool primary_issue_is_frame_or_host =
+      is_frame_or_host_pacing_issue(session.last_primary_issue);
+    if (primary_issue_is_frame_or_host && detailed_near_target_evidence) {
+      std::erase_if(session.last_issues, [](const std::string &issue) {
+        return is_frame_or_host_pacing_issue(issue);
+      });
+      session.last_primary_issue = session.last_issues.empty() ? "steady" : session.last_issues.front();
+      if (session.last_issues.empty()) {
+        session.last_health_grade = "good";
+        session.last_safe_target_fps = 0.0;
+        session.last_relaunch_recommended = false;
+      }
+    }
+
     if (is_low_confidence_soft_end_without_confirming_signal(session)) {
       session.last_safe_target_fps = 0.0;
       session.last_relaunch_recommended = false;
@@ -515,7 +547,9 @@ namespace ai_optimizer {
       before.consecutive_poor_outcomes != after.consecutive_poor_outcomes ||
       before.last_safe_target_fps != after.last_safe_target_fps ||
       before.last_relaunch_recommended != after.last_relaunch_recommended ||
-      before.last_health_grade != after.last_health_grade;
+      before.last_health_grade != after.last_health_grade ||
+      before.last_primary_issue != after.last_primary_issue ||
+      before.last_issues != after.last_issues;
   }
 
   static bool is_control_shell_app(const std::string &app_name) {
@@ -756,7 +790,6 @@ namespace ai_optimizer {
       history_fps > 0.0 && session.last_fps > 0.0 ? std::min(session.last_fps, history_fps) :
       history_fps > 0.0 ? history_fps :
       session.last_fps;
-    const double fps_gap = target_fps > 0.0 ? std::max(0.0, target_fps - session.last_fps) : 0.0;
     const double fps_ratio =
       (target_fps > 0.0 && session.last_fps > 0.0) ? std::clamp(session.last_fps / target_fps, 0.0, 1.5) : 0.0;
     const bool prior_frame_pacing = has_frame_or_host_pacing_issue(session);
@@ -767,7 +800,7 @@ namespace ai_optimizer {
        session.last_min_fps < target_fps * 0.60) ||
       session.last_frame_pacing_bad_pct >= 8.0;
     const bool pacing_risk =
-      fps_gap >= 4.0 ||
+      stream_stats::is_meaningful_fps_shortfall(target_fps, session.last_fps) ||
       (target_fps > 0.0 && fps_ratio < 0.88) ||
       client_pacing_risk ||
       prior_frame_pacing ||
@@ -826,7 +859,7 @@ namespace ai_optimizer {
        session.last_min_fps < target_fps * 0.60) ||
       session.last_frame_pacing_bad_pct >= 8.0;
     const bool pacing_risk =
-      fps_gap >= 4.0 ||
+      stream_stats::is_meaningful_fps_shortfall(target_fps, session.last_fps) ||
       (target_fps > 0.0 && fps_ratio < 0.88) ||
       client_pacing_risk ||
       prior_frame_pacing ||
@@ -835,7 +868,7 @@ namespace ai_optimizer {
     const auto active_codec_family = codec_family(latest_codec(session));
     const bool decoder_risk =
       ((active_codec_family == "av1") || (mobile_client && active_codec_family == "hevc" && fps_gap >= 8.0)) &&
-      (pacing_risk || fps_gap >= 4.0) &&
+      pacing_risk &&
       !network_risk;
 
     bool capture_fallback = false;
