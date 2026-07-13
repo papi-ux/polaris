@@ -194,8 +194,8 @@ namespace confighttp {
 
   namespace {
     struct web_session_t {
-      std::chrono::steady_clock::time_point created_at;
-      std::chrono::steady_clock::time_point last_seen_at;
+      std::chrono::system_clock::time_point created_at;
+      std::chrono::system_clock::time_point last_seen_at;
     };
 
     constexpr auto SESSION_IDLE_TIMEOUT = 12h;
@@ -621,23 +621,113 @@ namespace confighttp {
       append_common_security_headers(headers);
     }
 
+    // Persist hashed sessions under appdata so the auth cookie survives process restart.
+    // Cookie Max-Age is already 30d; without this the in-memory map is empty after every restart.
+    fs::path web_sessions_path() {
+      return platf::appdata() / "web_sessions.json";
+    }
+
     std::string session_cookie_hash(const std::string_view raw_cookie) {
       return util::hex(crypto::hash(std::string {raw_cookie} + config::sunshine.salt)).to_string();
     }
 
-    bool session_expired(const web_session_t &session, const std::chrono::steady_clock::time_point now) {
+    bool session_expired(const web_session_t &session, const std::chrono::system_clock::time_point now) {
       return (now - session.created_at) > SESSION_EXPIRE_DURATION || (now - session.last_seen_at) > SESSION_IDLE_TIMEOUT;
+    }
+
+    void save_web_sessions_locked() {
+      nlohmann::json root = nlohmann::json::array();
+      for (const auto &[id, session] : s_web_sessions) {
+        root.push_back({
+          {"id", id},
+          {"created_at", std::chrono::duration_cast<std::chrono::seconds>(session.created_at.time_since_epoch()).count()},
+        });
+      }
+
+      const auto path = web_sessions_path();
+      if (file_handler::write_file(path.string().c_str(), root.dump()) != 0) {
+        BOOST_LOG(warning) << "Failed to persist web UI sessions to "sv << path.string();
+        return;
+      }
+#ifndef _WIN32
+      std::error_code ec;
+      fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+#endif
+    }
+
+    void load_web_sessions() {
+      const auto path = web_sessions_path();
+      const auto content = file_handler::read_file(path.string().c_str());
+      if (content.empty()) {
+        return;
+      }
+
+      try {
+        const auto root = nlohmann::json::parse(content);
+        if (!root.is_array()) {
+          BOOST_LOG(warning) << "Ignoring malformed web UI sessions file "sv << path.string();
+          return;
+        }
+
+        const auto now = std::chrono::system_clock::now();
+        std::size_t loaded = 0;
+        std::size_t skipped = 0;
+        std::lock_guard lock(s_web_sessions_mutex);
+        for (const auto &entry : root) {
+          if (!entry.is_object() || !entry.contains("id") || !entry["id"].is_string()) {
+            ++skipped;
+            continue;
+          }
+          const auto id = entry["id"].get<std::string>();
+          if (id.empty()) {
+            ++skipped;
+            continue;
+          }
+
+          std::chrono::system_clock::time_point created_at = now;
+          if (entry.contains("created_at") && entry["created_at"].is_number_integer()) {
+            created_at = std::chrono::system_clock::time_point {
+              std::chrono::seconds {entry["created_at"].get<std::int64_t>()}
+            };
+          }
+
+          web_session_t session {
+            .created_at = created_at,
+            // Reset idle clock on restart so restart itself does not expire an otherwise-valid cookie.
+            .last_seen_at = now,
+          };
+          if (session_expired(session, now)) {
+            ++skipped;
+            continue;
+          }
+
+          s_web_sessions[id] = session;
+          ++loaded;
+        }
+
+        // Drop expired / invalid entries from disk so the file does not grow forever.
+        if (skipped > 0) {
+          save_web_sessions_locked();
+        }
+
+        if (loaded > 0) {
+          BOOST_LOG(info) << "Restored "sv << loaded << " web UI session(s) from "sv << path.string();
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "Failed to load web UI sessions from "sv << path.string() << ": "sv << e.what();
+      }
     }
 
     std::string create_web_session() {
       const auto raw_cookie = crypto::rand_alphabet(64);
-      const auto now = std::chrono::steady_clock::now();
+      const auto now = std::chrono::system_clock::now();
       {
         std::lock_guard lock(s_web_sessions_mutex);
         s_web_sessions[session_cookie_hash(raw_cookie)] = web_session_t {
           .created_at = now,
           .last_seen_at = now,
         };
+        save_web_sessions_locked();
       }
       return raw_cookie;
     }
@@ -648,15 +738,20 @@ namespace confighttp {
       }
 
       const auto session_id = session_cookie_hash(raw_cookie);
-      const auto now = std::chrono::steady_clock::now();
+      const auto now = std::chrono::system_clock::now();
       std::lock_guard lock(s_web_sessions_mutex);
 
+      bool pruned = false;
       for (auto it = s_web_sessions.begin(); it != s_web_sessions.end();) {
         if (session_expired(it->second, now)) {
           it = s_web_sessions.erase(it);
+          pruned = true;
         } else {
           ++it;
         }
+      }
+      if (pruned) {
+        save_web_sessions_locked();
       }
 
       const auto it = s_web_sessions.find(session_id);
@@ -675,11 +770,13 @@ namespace confighttp {
 
       std::lock_guard lock(s_web_sessions_mutex);
       s_web_sessions.erase(session_cookie_hash(raw_cookie));
+      save_web_sessions_locked();
     }
 
     void invalidate_all_web_sessions() {
       std::lock_guard lock(s_web_sessions_mutex);
       s_web_sessions.clear();
+      save_web_sessions_locked();
     }
 
     SimpleWeb::CaseInsensitiveMultimap make_auth_cookie_headers(std::string_view raw_cookie) {
@@ -4982,6 +5079,8 @@ namespace confighttp {
     csrfToken = crypto::rand_alphabet(48,
       std::string_view {"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"});
     BOOST_LOG(info) << "CSRF token generated for web UI session";
+
+    load_web_sessions();
 
     // Initialize AI optimizer with config
     {
