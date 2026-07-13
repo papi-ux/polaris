@@ -581,6 +581,27 @@ TEST(StreamStatsDoctorTests, ClassifiesGpuNativeStreamAsReady) {
   EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
 }
 
+TEST(StreamStatsDoctorTests, KeepsNearTargetHighRefreshPacingGreen) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 115.6;
+  stats.encode_target_fps = 120;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+  stats.packet_loss = 0.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "steady"}, {"grade", "good"}}
+  );
+
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("status"), "ok");
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+}
+
 TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {
   LinuxDisplayConfigGuard guard;
   config::video.adapter_name = "/dev/dri/renderD128";

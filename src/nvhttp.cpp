@@ -2048,13 +2048,15 @@ namespace nvhttp {
         stats.requested_client_fps > 0 ? stats.requested_client_fps :
         stats.fps;
       const double fps_gap = target_fps > 0 ? std::max(0.0, target_fps - stats.fps) : 0.0;
+      const bool meaningful_fps_shortfall =
+        stream_stats::is_meaningful_fps_shortfall(target_fps, stats.fps);
 
       const bool network_risk = stats.packet_loss >= 0.35 || stats.latency_ms >= 28.0;
       const bool pacing_risk =
         stats.frame_jitter_ms >= 2.2 ||
         stats.duplicate_frame_ratio >= 0.10 ||
         stats.dropped_frame_ratio >= 0.04 ||
-        fps_gap >= 4.0;
+        meaningful_fps_shortfall;
       const bool capture_fallback =
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
@@ -2072,15 +2074,12 @@ namespace nvhttp {
       const bool hdr_risk = stats.stream_hdr_enabled && (pacing_risk || encoder_risk);
       const bool decoder_risk =
         (active_codec_family == "av1" || stats.encode_target_format == platf::frame_format_e::p010) &&
-        (pacing_risk || fps_gap >= 4.0) &&
+        pacing_risk &&
         !network_risk;
       const bool virtual_display_risk =
         current_virtual_display &&
         (pacing_risk || capture_fallback || hdr_risk);
-      const bool sustained_target_miss =
-        target_fps >= 24.0 &&
-        stats.fps > 0.0 &&
-        fps_gap >= std::max(2.0, target_fps * 0.06);
+      const bool sustained_target_miss = meaningful_fps_shortfall;
       const bool host_render_limited =
         pacing_risk &&
         !network_risk &&

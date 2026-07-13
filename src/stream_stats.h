@@ -24,6 +24,15 @@
 namespace stream_stats {
 
   /**
+   * @brief Return true when delivered FPS is materially below target.
+   *
+   * Uses the same 95% healthy boundary as session grading while requiring at
+   * least a 2 FPS absolute gap so low-rate telemetry noise does not trigger
+   * recovery.
+   */
+  bool is_meaningful_fps_shortfall(double target_fps, double delivered_fps);
+
+  /**
    * @brief Per-client statistics for multi-session tracking.
    */
   struct client_stats_t {
