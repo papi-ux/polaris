@@ -2699,7 +2699,7 @@ namespace confighttp {
     if (stats.streaming) {
       if (stats.runtime_gpu_native_override_active) {
         effective_mode = "windowed_stream";
-      } else if (proc::proc.virtual_display) {
+      } else if (proc::proc.session_uses_virtual_display()) {
         effective_mode = "host_virtual_display";
       } else if (configured_mode == "windowed_stream" && stats.runtime_effective_headless) {
         effective_mode = "windowed_stream";

@@ -50,6 +50,24 @@ namespace rtsp_stream {
   }
 
   namespace {
+    session_role_e merge_session_role(session_role_e current, bool watch_only) {
+      if (current == session_role_e::controller || !watch_only) {
+        return session_role_e::controller;
+      }
+      return session_role_e::viewer;
+    }
+
+    void accumulate_session_snapshot(
+      session_snapshot_t &snapshot,
+      bool requester_matches,
+      bool watch_only
+    ) {
+      snapshot.viewer_count += watch_only ? 1 : 0;
+      if (requester_matches) {
+        snapshot.requester_role = merge_session_role(snapshot.requester_role, watch_only);
+      }
+    }
+
     std::string_view codec_name_for_video_format(int video_format) {
       switch (video_format) {
         case 1:
@@ -477,6 +495,12 @@ namespace rtsp_stream {
     std::shared_ptr<launch_session_t> session;
   };
 
+#ifdef POLARIS_TESTS
+  std::atomic_uint cleanup_call_counter_for_tests {0};
+  std::function<void()> cleanup_unlocked_probe_for_tests;
+  std::function<void()> cleanup_session_probe_for_tests;
+#endif
+
   class rtsp_server_t {
   public:
     ~rtsp_server_t() {
@@ -536,7 +560,7 @@ namespace rtsp_stream {
       auto socket = std::move(next_socket);
 
       auto launch_session {launch_event.view(0s)};
-      if (launch_session) {
+      if (launch_session && launch_session->is_pending()) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
@@ -568,25 +592,47 @@ namespace rtsp_stream {
      *       the session will be discarded.
      * @param launch_session Streaming session information.
      */
-    void session_raise(std::shared_ptr<launch_session_t> launch_session) {
-      // If a launch event is still pending, don't overwrite it.
-      if (launch_event.view(0s)) {
-        return;
+    bool expire_pending_launch(uint32_t launch_session_id, std::uint64_t timer_generation) {
+      std::lock_guard timer_lock(_launch_timer_mutex);
+      if (_raised_timer_generation.load() != timer_generation) {
+        return false;
       }
 
-      // Raise the new launch session to prepare for the RTSP handshake
-      launch_event.raise(std::move(launch_session));
+      auto pending = launch_event.view(0s);
+      if (!pending || pending->id != launch_session_id) {
+        return false;
+      }
 
-      // Arm the timer to expire this launch session if the client times out
+      const bool cancelled = pending->cancel_for_timeout();
+      auto discarded = launch_event.pop_if([launch_session_id](const auto &candidate) {
+        return candidate && candidate->id == launch_session_id;
+      });
+      if (cancelled && discarded) {
+        BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
+      }
+      return cancelled && static_cast<bool>(discarded);
+    }
+
+    std::uint64_t launch_timer_generation() const {
+      return _raised_timer_generation.load();
+    }
+
+    bool session_raise(std::shared_ptr<launch_session_t> launch_session) {
+      std::lock_guard timer_lock(_launch_timer_mutex);
+      const auto launch_session_id = launch_session->id;
+      if (!launch_event.raise_if_empty(std::move(launch_session))) {
+        return false;
+      }
+
+      const auto timer_generation = ++_raised_timer_generation;
+      raised_timer.cancel();
       raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this](const boost::system::error_code &ec) {
+      raised_timer.async_wait([this, launch_session_id, timer_generation](const boost::system::error_code &ec) {
         if (!ec) {
-          auto discarded = launch_event.pop(0s);
-          if (discarded) {
-            BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
-          }
+          expire_pending_launch(launch_session_id, timer_generation);
         }
       });
+      return true;
     }
 
     /**
@@ -594,6 +640,7 @@ namespace rtsp_stream {
      * @param launch_session_id The ID of the session to clear.
      */
     void session_clear(uint32_t launch_session_id) {
+      std::lock_guard timer_lock(_launch_timer_mutex);
       // We currently only support a single pending RTSP session,
       // so the ID should always match the one for that session.
       auto launch_session = launch_event.view(0s);
@@ -601,9 +648,20 @@ namespace rtsp_stream {
         if (launch_session->id != launch_session_id) {
           BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
         } else {
+          ++_raised_timer_generation;
           raised_timer.cancel();
           launch_event.pop();
         }
+      }
+    }
+
+    void cancel_pending_session() {
+      std::lock_guard timer_lock(_launch_timer_mutex);
+      ++_raised_timer_generation;
+      raised_timer.cancel();
+      auto launch_session = launch_event.pop(0s);
+      if (launch_session) {
+        launch_session->cancel();
       }
     }
 
@@ -633,18 +691,36 @@ namespace rtsp_stream {
      * @examples_end
      */
     void clear(bool all = true) {
-      auto lg = _session_slots.lock();
-
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
-
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+#ifdef POLARIS_TESTS
+      ++cleanup_call_counter_for_tests;
+#endif
+      std::vector<std::shared_ptr<stream::session_t>> sessions_to_join;
+      {
+        auto lg = _session_slots.lock();
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          const auto &slot = *i;
+          if (slot && (all || stream::session::state(*slot) == stream::session::state_e::STOPPING)) {
+            sessions_to_join.emplace_back(slot);
+            i = _session_slots->erase(i);
+          } else {
+            ++i;
+          }
         }
+      }
+#ifdef POLARIS_TESTS
+      if (cleanup_unlocked_probe_for_tests) {
+        cleanup_unlocked_probe_for_tests();
+      }
+#endif
+      for (auto &slot : sessions_to_join) {
+#ifdef POLARIS_TESTS
+        if (cleanup_session_probe_for_tests) {
+          cleanup_session_probe_for_tests();
+          continue;
+        }
+#endif
+        stream::session::stop(*slot);
+        stream::session::join(*slot);
       }
     }
 
@@ -661,11 +737,81 @@ namespace rtsp_stream {
      * @brief Inserts the provided session into the set of sessions.
      * @param session The session to insert.
      */
-    void insert(const std::shared_ptr<stream::session_t> &session) {
+    enum class insert_start_result_e {
+      started,
+      cancelled,
+      failed,
+    };
+
+    insert_start_result_e insert_and_start_if_not_cancelled(
+      const std::shared_ptr<stream::session_t> &session,
+      launch_session_t &launch_session,
+      const std::string &remote_address
+#ifdef POLARIS_TESTS
+      , const std::function<void()> &after_insert = {}
+      , const std::function<int()> &start_override = {}
+#endif
+    ) {
+      if (!launch_session.try_begin_setup_handoff()) {
+        return insert_start_result_e::cancelled;
+      }
+
       auto lg = _session_slots.lock();
       _session_slots->emplace(session);
+#ifdef POLARIS_TESTS
+      if (after_insert) {
+        after_insert();
+      }
+#endif
+      if (!launch_session.commit_setup_start()) {
+        _session_slots->erase(session);
+        return insert_start_result_e::cancelled;
+      }
+      int start_result;
+#ifdef POLARIS_TESTS
+      if (start_override) {
+        start_result = start_override();
+      } else
+#endif
+      {
+        start_result = stream::session::start(*session, remote_address);
+      }
+      if (start_result) {
+        launch_session.cancel();
+        _session_slots->erase(session);
+        return insert_start_result_e::failed;
+      }
       BOOST_LOG(info) << "New streaming session started [active sessions: "sv << _session_slots->size() << ']';
+      return insert_start_result_e::started;
     }
+
+#ifdef POLARIS_TESTS
+    int run_setup_insert_for_tests(
+      const std::shared_ptr<stream::session_t> &session,
+      launch_session_t &launch_session,
+      bool cancel_after_insert,
+      int start_result
+    ) {
+      return static_cast<int>(insert_and_start_if_not_cancelled(
+        session,
+        launch_session,
+        "127.0.0.1",
+        [&launch_session, cancel_after_insert]() {
+          if (cancel_after_insert) {
+            launch_session.cancel();
+          }
+        },
+        [start_result]() {
+          return start_result;
+        }
+      ));
+    }
+
+    void add_session_for_tests(const std::shared_ptr<stream::session_t> &session) {
+      auto lg = _session_slots.lock();
+      _session_slots->emplace(session);
+    }
+#endif
 
     /**
      * @brief Runs an iteration of the RTSP server loop
@@ -702,6 +848,35 @@ namespace rtsp_stream {
       return nullptr;
     }
 
+    session_snapshot_t session_snapshot(const std::string_view& uuid) {
+      session_snapshot_t snapshot;
+      auto lg = _session_slots.lock();
+
+      for (auto &slot : *_session_slots) {
+        if (!slot || stream::session::state(*slot) == stream::session::state_e::STOPPING) {
+          continue;
+        }
+        ++snapshot.active_sessions;
+        const bool watch_only = stream::session::is_watch_only(*slot);
+        const bool requester_matches = stream::session::uuid_match(*slot, uuid);
+        accumulate_session_snapshot(snapshot, requester_matches, watch_only);
+        if (requester_matches) {
+          snapshot.requester_session_tokens.emplace_back(stream::session::session_token(*slot));
+        }
+      }
+
+      auto pending = launch_event.view(0s);
+      if (pending && pending->is_pending_or_handoff()) {
+        snapshot.pending_sessions = 1;
+        if (pending->unique_id == uuid) {
+          snapshot.requester_role = merge_session_role(snapshot.requester_role, pending->watch_only);
+          snapshot.requester_session_tokens.emplace_back(pending->session_token);
+        }
+      }
+
+      return snapshot;
+    }
+
     std::list<std::string>
     get_all_session_uuids() {
       std::list<std::string> uuids;
@@ -722,14 +897,16 @@ namespace rtsp_stream {
     boost::asio::io_context io_context;
     tcp::acceptor acceptor {io_context};
     boost::asio::steady_timer raised_timer {io_context};
+    std::mutex _launch_timer_mutex;
+    std::atomic<std::uint64_t> _raised_timer_generation {0};
 
     std::shared_ptr<socket_t> next_socket;
   };
 
   rtsp_server_t server {};
 
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
-    server.session_raise(std::move(launch_session));
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
+    return server.session_raise(std::move(launch_session));
   }
 
   void launch_session_clear(uint32_t launch_session_id) {
@@ -752,11 +929,95 @@ namespace rtsp_stream {
     return server.find_session(uuid);
   }
 
+  session_snapshot_t session_snapshot(const std::string_view& uuid) {
+    return server.session_snapshot(uuid);
+  }
+
+#ifdef POLARIS_TESTS
+  session_role_e merge_session_role_for_tests(session_role_e current, bool watch_only) {
+    return merge_session_role(current, watch_only);
+  }
+
+  void accumulate_session_snapshot_for_tests(
+    session_snapshot_t &snapshot,
+    bool requester_matches,
+    bool watch_only
+  ) {
+    accumulate_session_snapshot(snapshot, requester_matches, watch_only);
+  }
+
+  std::uint64_t launch_timer_generation_for_tests() {
+    return server.launch_timer_generation();
+  }
+
+  bool expire_pending_launch_for_tests(uint32_t launch_session_id, std::uint64_t timer_generation) {
+    return server.expire_pending_launch(launch_session_id, timer_generation);
+  }
+
+  void reset_cleanup_call_count_for_tests() {
+    cleanup_call_counter_for_tests.store(0);
+  }
+
+  unsigned cleanup_call_count_for_tests() {
+    return cleanup_call_counter_for_tests.load();
+  }
+
+  void set_cleanup_unlocked_probe_for_tests(std::function<void()> probe) {
+    cleanup_unlocked_probe_for_tests = std::move(probe);
+  }
+
+  void set_cleanup_session_probe_for_tests(std::function<void()> probe) {
+    cleanup_session_probe_for_tests = std::move(probe);
+  }
+
+  void run_cleanup_for_tests() {
+    server.clear(false);
+  }
+
+  setup_insert_result_e run_setup_insert_for_tests(
+    launch_session_t &launch_session,
+    bool cancel_after_insert,
+    int start_result
+  ) {
+    if (launch_session.iv.size() < sizeof(std::uint32_t)) {
+      launch_session.iv.resize(16);
+    }
+    if (launch_session.gcm_key.empty()) {
+      launch_session.gcm_key.resize(16);
+    }
+    stream::config_t config {};
+    auto session = stream::session::alloc(config, launch_session);
+    return static_cast<setup_insert_result_e>(server.run_setup_insert_for_tests(
+      session,
+      launch_session,
+      cancel_after_insert,
+      start_result
+    ));
+  }
+
+  void add_session_for_tests(launch_session_t &launch_session, bool stopping) {
+    if (launch_session.iv.size() < sizeof(std::uint32_t)) {
+      launch_session.iv.resize(16);
+    }
+    if (launch_session.gcm_key.empty()) {
+      launch_session.gcm_key.resize(16);
+    }
+    stream::config_t config {};
+    auto session = stream::session::alloc(config, launch_session);
+    stream::session::set_state_for_tests(
+      *session,
+      stopping ? stream::session::state_e::STOPPING : stream::session::state_e::RUNNING
+    );
+    server.add_session_for_tests(session);
+  }
+#endif
+
   std::list<std::string> get_all_session_uuids() {
     return server.get_all_session_uuids();
   }
 
   void terminate_sessions() {
+    server.cancel_pending_session();
     server.clear(true);
   }
 
@@ -1294,13 +1555,22 @@ namespace rtsp_stream {
       return;
     }
 
+    if (session.is_cancelled()) {
+      BOOST_LOG(info) << "Rejecting RTSP setup for a cancelled launch session"sv;
+      respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
+      return;
+    }
+
     auto stream_session = stream::session::alloc(config, session);
-    server->insert(stream_session);
-
-    if (stream::session::start(*stream_session, sock.remote_endpoint().address().to_string())) {
+    const auto remote_address = sock.remote_endpoint().address().to_string();
+    const auto start_result = server->insert_and_start_if_not_cancelled(stream_session, session, remote_address);
+    if (start_result == rtsp_server_t::insert_start_result_e::cancelled) {
+      BOOST_LOG(info) << "Rejecting RTSP setup cancelled during session handoff"sv;
+      respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
+      return;
+    }
+    if (start_result == rtsp_server_t::insert_start_result_e::failed) {
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
-
-      server->remove(stream_session);
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }

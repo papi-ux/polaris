@@ -79,6 +79,32 @@ namespace safe {
       return val;
     }
 
+    template<class Predicate>
+    status_t pop_if(Predicate &&predicate) {
+      std::unique_lock ul {_lock};
+      if (!_continue || !_status || !std::invoke(std::forward<Predicate>(predicate), _status)) {
+        return util::false_v<status_t>;
+      }
+      auto val = std::move(_status);
+      _status = util::false_v<status_t>;
+      return val;
+    }
+
+    template<class... Args>
+    bool raise_if_empty(Args &&...args) {
+      std::lock_guard lg {_lock};
+      if (!_continue || _status) {
+        return false;
+      }
+      if constexpr (std::is_same_v<std::optional<T>, status_t>) {
+        _status = std::make_optional<T>(std::forward<Args>(args)...);
+      } else {
+        _status = status_t {std::forward<Args>(args)...};
+      }
+      _cv.notify_all();
+      return true;
+    }
+
     // pop and view should not be used interchangeably
     status_t view() {
       std::unique_lock ul {_lock};
