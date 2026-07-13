@@ -10,7 +10,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <future>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -35,6 +38,14 @@ namespace {
       stop_in_progress,
       token_matches
     );
+  }
+
+  std::string read_rtsp_source_for_contract() {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/rtsp.cpp";
+    std::ifstream in(path);
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
   }
 }
 
@@ -333,6 +344,37 @@ TEST(RtspLaunchHandoffTests, TimeoutAndSetupHandoffHaveOneAtomicWinner) {
   EXPECT_TRUE(setup_wins.commit_setup_start());
   EXPECT_FALSE(setup_wins.cancel_for_timeout());
   EXPECT_FALSE(setup_wins.is_cancelled());
+}
+
+TEST(RtspLaunchHandoffTests, FollowupControlConnectionsRemainAdmissibleAfterSetupStarts) {
+  rtsp_stream::launch_session_t session {};
+  EXPECT_TRUE(session.accepts_control_connection());
+
+  ASSERT_TRUE(session.try_begin_setup_handoff());
+  EXPECT_TRUE(session.accepts_control_connection());
+
+  ASSERT_TRUE(session.commit_setup_start());
+  EXPECT_TRUE(session.accepts_control_connection());
+
+  session.cancel();
+  EXPECT_FALSE(session.accepts_control_connection());
+}
+
+TEST(RtspLaunchHandoffTests, CancelledAcceptedSocketsAreRejectedBeforeCommandDispatch) {
+  const auto source = read_rtsp_source_for_contract();
+  ASSERT_FALSE(source.empty());
+
+  const auto handle_start = source.find("void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req)");
+  const auto handle_end = source.find("void handle_accept(const boost::system::error_code &ec)", handle_start);
+  ASSERT_NE(handle_start, std::string::npos);
+  ASSERT_NE(handle_end, std::string::npos);
+
+  const auto handle_body = source.substr(handle_start, handle_end - handle_start);
+  const auto cancelled_gate = handle_body.find("if (!session.accepts_control_connection())");
+  const auto command_dispatch = handle_body.find("_map_cmd_cb.find");
+  ASSERT_NE(cancelled_gate, std::string::npos);
+  ASSERT_NE(command_dispatch, std::string::npos);
+  EXPECT_LT(cancelled_gate, command_dispatch);
 }
 
 TEST(RtspLaunchHandoffTests, SnapshotAndTeardownRetainClaimedHandoffBeforeSlotInsertion) {

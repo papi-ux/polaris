@@ -537,6 +537,13 @@ namespace rtsp_stream {
     }
 
     void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+      if (!session.accepts_control_connection()) {
+        BOOST_LOG(debug) << "Rejecting RTSP command for cancelled launch session"sv;
+        boost::system::error_code ec;
+        sock.close(ec);
+        return;
+      }
+
       auto func = _map_cmd_cb.find(req->message.request.command);
       if (func != std::end(_map_cmd_cb)) {
         func->second(this, sock, session, std::move(req));
@@ -560,15 +567,15 @@ namespace rtsp_stream {
       auto socket = std::move(next_socket);
 
       auto launch_session {launch_event.view(0s)};
-      if (launch_session && launch_session->is_pending()) {
+      if (launch_session && launch_session->accepts_control_connection()) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
       } else {
         // This can happen due to normal things like port scanning, so let's not make these visible by default
-        BOOST_LOG(debug) << "No pending session for incoming RTSP connection"sv;
+        BOOST_LOG(debug) << "No admissible launch session for incoming RTSP connection"sv;
 
-        // If there is no session pending, close the connection immediately
+        // If there is no admissible launch session, close the connection immediately
         boost::system::error_code ec;
         socket->sock.close(ec);
       }

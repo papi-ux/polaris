@@ -100,6 +100,11 @@ namespace rtsp_stream {
       return setup_state.load() == setup_state_e::cancelled;
     }
 
+    // Moonlight sends SETUP and PLAY over separate TCP connections, so started sessions remain admissible.
+    bool accepts_control_connection() const {
+      return setup_state.load() != setup_state_e::cancelled;
+    }
+
     bool input_only;
     bool host_audio;
     int requested_width;
