@@ -10,7 +10,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <future>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -35,6 +38,14 @@ namespace {
       stop_in_progress,
       token_matches
     );
+  }
+
+  std::string read_rtsp_source_for_contract() {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/rtsp.cpp";
+    std::ifstream in(path);
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
   }
 }
 
@@ -333,6 +344,105 @@ TEST(RtspLaunchHandoffTests, TimeoutAndSetupHandoffHaveOneAtomicWinner) {
   EXPECT_TRUE(setup_wins.commit_setup_start());
   EXPECT_FALSE(setup_wins.cancel_for_timeout());
   EXPECT_FALSE(setup_wins.is_cancelled());
+}
+
+TEST(RtspLaunchHandoffTests, FollowupControlConnectionsRemainAdmissibleAfterSetupStarts) {
+  rtsp_stream::launch_session_t session {};
+  EXPECT_TRUE(session.accepts_control_connection());
+
+  ASSERT_TRUE(session.try_begin_setup_handoff());
+  EXPECT_TRUE(session.accepts_control_connection());
+
+  ASSERT_TRUE(session.commit_setup_start());
+  EXPECT_TRUE(session.accepts_control_connection());
+
+  session.cancel();
+  EXPECT_FALSE(session.accepts_control_connection());
+}
+
+TEST(RtspLaunchHandoffTests, StartedControlCommandsRequireMatchingLiveSessionSlot) {
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::launch_session_t session {};
+  session.id = 5103;
+  session.unique_id = "started-command-admission";
+  session.session_token = "started-command-admission-token";
+
+  ASSERT_TRUE(session.try_begin_setup_handoff());
+  ASSERT_TRUE(session.commit_setup_start());
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+
+  rtsp_stream::launch_session_t reconnect {};
+  reconnect.id = 5104;
+  reconnect.unique_id = session.unique_id;
+  reconnect.session_token = session.session_token;
+  ASSERT_TRUE(reconnect.try_begin_setup_handoff());
+  ASSERT_TRUE(reconnect.commit_setup_start());
+  rtsp_stream::add_session_for_tests(reconnect, false);
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::set_cleanup_session_probe_for_tests({});
+
+  rtsp_stream::add_session_for_tests(session, true);
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::set_cleanup_session_probe_for_tests({});
+
+  rtsp_stream::add_session_for_tests(session, false);
+  EXPECT_TRUE(rtsp_stream::control_command_admissible_for_tests(session));
+
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::set_cleanup_session_probe_for_tests({});
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+}
+
+TEST(RtspLaunchHandoffTests, CancelledControlCommandRejectsWithoutInvokingHandler) {
+  rtsp_stream::launch_session_t session {};
+  session.cancel();
+  bool handler_invoked = false;
+  bool rejection_invoked = false;
+
+  EXPECT_FALSE(rtsp_stream::dispatch_control_command_for_tests(
+    session,
+    [&handler_invoked]() {
+      handler_invoked = true;
+    },
+    [&rejection_invoked]() {
+      rejection_invoked = true;
+    }
+  ));
+  EXPECT_FALSE(handler_invoked);
+  EXPECT_TRUE(rejection_invoked);
+}
+
+TEST(RtspLaunchHandoffTests, AcceptAndDispatchUseSlotAwareCommandAdmission) {
+  const auto source = read_rtsp_source_for_contract();
+  ASSERT_FALSE(source.empty());
+
+  const auto handle_start = source.find("void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req)");
+  const auto handle_end = source.find("void handle_accept(const boost::system::error_code &ec)", handle_start);
+  ASSERT_NE(handle_start, std::string::npos);
+  ASSERT_NE(handle_end, std::string::npos);
+
+  const auto handle_body = source.substr(handle_start, handle_end - handle_start);
+  const auto dispatch_gate = handle_body.find("if (!dispatch_control_command(");
+  const auto command_dispatch = handle_body.find("_map_cmd_cb.find");
+  EXPECT_NE(dispatch_gate, std::string::npos);
+  ASSERT_NE(command_dispatch, std::string::npos);
+  if (dispatch_gate != std::string::npos) {
+    EXPECT_LT(dispatch_gate, command_dispatch);
+  }
+
+  const auto accept_start = handle_end;
+  const auto accept_end = source.find("void map(const std::string_view &type, cmd_func_t cb)", accept_start);
+  ASSERT_NE(accept_end, std::string::npos);
+  const auto accept_body = source.substr(accept_start, accept_end - accept_start);
+  EXPECT_NE(
+    accept_body.find("if (launch_session && control_command_admissible(*launch_session))"),
+    std::string::npos
+  );
 }
 
 TEST(RtspLaunchHandoffTests, SnapshotAndTeardownRetainClaimedHandoffBeforeSlotInsertion) {

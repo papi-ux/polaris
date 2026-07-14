@@ -536,12 +536,59 @@ namespace rtsp_stream {
       return 0;
     }
 
+    bool control_command_admissible(const launch_session_t &session) {
+      if (!session.accepts_control_connection()) {
+        return false;
+      }
+      if (session.is_pending_or_handoff()) {
+        return true;
+      }
+      if (session.session_token.empty()) {
+        return false;
+      }
+
+      auto lg = _session_slots.lock();
+      return std::any_of(_session_slots->begin(), _session_slots->end(), [&session](const auto &slot) {
+        return slot &&
+               stream::session::state(*slot) != stream::session::state_e::STOPPING &&
+               stream::session::launch_session_id(*slot) == session.id &&
+               stream::session::session_token(*slot) == session.session_token;
+      });
+    }
+
+    template<class Dispatch, class Reject>
+    bool dispatch_control_command(
+      launch_session_t &session,
+      Dispatch &&on_dispatch,
+      Reject &&on_reject
+    ) {
+      if (!control_command_admissible(session)) {
+        std::forward<Reject>(on_reject)();
+        return false;
+      }
+
+      std::forward<Dispatch>(on_dispatch)();
+      return true;
+    }
+
     void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
-      auto func = _map_cmd_cb.find(req->message.request.command);
-      if (func != std::end(_map_cmd_cb)) {
-        func->second(this, sock, session, std::move(req));
-      } else {
-        cmd_not_found(sock, session, std::move(req));
+      if (!dispatch_control_command(
+            session,
+            [&]() {
+              auto func = _map_cmd_cb.find(req->message.request.command);
+              if (func != std::end(_map_cmd_cb)) {
+                func->second(this, sock, session, std::move(req));
+              } else {
+                cmd_not_found(sock, session, std::move(req));
+              }
+            },
+            [&sock]() {
+              BOOST_LOG(debug) << "Rejecting RTSP command for an inadmissible launch session"sv;
+              boost::system::error_code ec;
+              sock.close(ec);
+            }
+          )) {
+        return;
       }
 
       boost::system::error_code ec;
@@ -560,15 +607,15 @@ namespace rtsp_stream {
       auto socket = std::move(next_socket);
 
       auto launch_session {launch_event.view(0s)};
-      if (launch_session && launch_session->is_pending()) {
+      if (launch_session && control_command_admissible(*launch_session)) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
       } else {
         // This can happen due to normal things like port scanning, so let's not make these visible by default
-        BOOST_LOG(debug) << "No pending session for incoming RTSP connection"sv;
+        BOOST_LOG(debug) << "No admissible launch session for incoming RTSP connection"sv;
 
-        // If there is no session pending, close the connection immediately
+        // If there is no admissible launch session, close the connection immediately
         boost::system::error_code ec;
         socket->sock.close(ec);
       }
@@ -952,6 +999,22 @@ namespace rtsp_stream {
 
   bool expire_pending_launch_for_tests(uint32_t launch_session_id, std::uint64_t timer_generation) {
     return server.expire_pending_launch(launch_session_id, timer_generation);
+  }
+
+  bool control_command_admissible_for_tests(const launch_session_t &launch_session) {
+    return server.control_command_admissible(launch_session);
+  }
+
+  bool dispatch_control_command_for_tests(
+    launch_session_t &launch_session,
+    std::function<void()> on_dispatch,
+    std::function<void()> on_reject
+  ) {
+    return server.dispatch_control_command(
+      launch_session,
+      std::move(on_dispatch),
+      std::move(on_reject)
+    );
   }
 
   void reset_cleanup_call_count_for_tests() {

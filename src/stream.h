@@ -63,6 +63,7 @@ namespace stream {
     session_profile_t profile(const session_t& session);
     std::string uuid(const session_t& session);
     std::string session_token(const session_t& session);
+    std::uint32_t launch_session_id(const session_t& session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);
     bool is_watch_only(const session_t& session);
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm);
