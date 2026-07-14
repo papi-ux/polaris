@@ -509,7 +509,16 @@ namespace cage_display_router {
   }
 
   bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state) {
-    return runtime_state.gpu_native_override_active;
+    if (!runtime_state.gpu_native_override_active) {
+      return false;
+    }
+
+    if (auto cached_result = cached_windowed_gpu_native_probe_result();
+        cached_result && !*cached_result) {
+      return false;
+    }
+
+    return true;
   }
 
   bool should_attempt_headless_extcopy_dmabuf(
@@ -534,6 +543,15 @@ namespace cage_display_router {
   ) {
     return runtime_state.effective_headless &&
            !runtime_state.gpu_native_override_active &&
+           source_metadata.transport == platf::frame_transport_e::dmabuf &&
+           source_metadata.residency == platf::frame_residency_e::gpu;
+  }
+
+  bool should_disable_windowed_gpu_native_after_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    const platf::frame_metadata_t &source_metadata
+  ) {
+    return runtime_state.gpu_native_override_active &&
            source_metadata.transport == platf::frame_transport_e::dmabuf &&
            source_metadata.residency == platf::frame_residency_e::gpu;
   }

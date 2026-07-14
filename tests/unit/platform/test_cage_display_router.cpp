@@ -177,6 +177,59 @@ TEST(CageDisplayRouterPolicyTests, NonHeadlessDmabufConversionFailureDoesNotDisa
   ));
 }
 
+TEST(CageDisplayRouterPolicyTests, WindowedDmabufGpuConversionFailureDisablesGpuNativeOverride) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+  const platf::frame_metadata_t metadata {
+    .transport = platf::frame_transport_e::dmabuf,
+    .residency = platf::frame_residency_e::gpu,
+    .format = platf::frame_format_e::bgra8,
+  };
+
+  EXPECT_TRUE(cage_display_router::should_disable_windowed_gpu_native_after_conversion_failure(
+    runtime_state,
+    metadata
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, CpuFrameDoesNotDisableWindowedGpuNativeOverride) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+  const platf::frame_metadata_t metadata {
+    .transport = platf::frame_transport_e::shm,
+    .residency = platf::frame_residency_e::cpu,
+    .format = platf::frame_format_e::bgra8,
+  };
+
+  EXPECT_FALSE(cage_display_router::should_disable_windowed_gpu_native_after_conversion_failure(
+    runtime_state,
+    metadata
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, CachedWindowedProbeFailureSuppressesGpuNativeCapture) {
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
+  cage_display_router::update_windowed_gpu_native_probe_result(false);
+  EXPECT_FALSE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
+  cage_display_router::reset_windowed_ram_capture_warning_for_tests();
+}
+
 TEST(CageDisplayRouterPolicyTests, CpuFrameConversionFailureDoesNotDisableExtcopyFallback) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,
