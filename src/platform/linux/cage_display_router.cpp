@@ -638,6 +638,15 @@ namespace cage_display_router {
            source_metadata.residency == platf::frame_residency_e::gpu;
   }
 
+  bool should_disable_windowed_gpu_native_after_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    const platf::frame_metadata_t &source_metadata
+  ) {
+    return runtime_state.gpu_native_override_active &&
+           source_metadata.transport == platf::frame_transport_e::dmabuf &&
+           source_metadata.residency == platf::frame_residency_e::gpu;
+  }
+
   std::optional<bool> cached_windowed_gpu_native_probe_result() {
     return windowed_gpu_native_probe.get();
   }

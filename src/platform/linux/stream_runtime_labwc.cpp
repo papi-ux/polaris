@@ -108,6 +108,16 @@ namespace stream_runtime {
       );
     }
 
+    bool should_disable_windowed_gpu_native_after_conversion_failure(
+      const platf::runtime_state_t &runtime_state,
+      const platf::frame_metadata_t &source_metadata
+    ) {
+      return cage_display_router::should_disable_windowed_gpu_native_after_conversion_failure(
+        runtime_state,
+        source_metadata
+      );
+    }
+
     std::optional<bool> cached_windowed_gpu_native_probe_result() {
       return cage_display_router::cached_windowed_gpu_native_probe_result();
     }
