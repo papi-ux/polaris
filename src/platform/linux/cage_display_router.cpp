@@ -615,7 +615,21 @@ namespace cage_display_router {
     const platf::runtime_state_t &runtime_state,
     platf::mem_type_e hwdevice_type
   ) {
-    return runtime_state.gpu_native_override_active && gpu_native_dmabuf_is_safe(hwdevice_type);
+    if (!runtime_state.gpu_native_override_active) {
+      return false;
+    }
+
+    // Two independent refusals, and both are wanted. The probe result retires a
+    // path that failed for this host in this process, whatever the encoder — a
+    // conversion that already failed once is not worth retrying every session.
+    // The memory-type policy refuses an import Polaris does not consider safe at
+    // all, which is a statement about the encoder rather than about this host.
+    if (auto cached_result = cached_windowed_gpu_native_probe_result();
+        cached_result && !*cached_result) {
+      return false;
+    }
+
+    return gpu_native_dmabuf_is_safe(hwdevice_type);
   }
 
   bool should_disable_headless_extcopy_after_conversion_failure(
@@ -624,6 +638,15 @@ namespace cage_display_router {
   ) {
     return runtime_state.effective_headless &&
            !runtime_state.gpu_native_override_active &&
+           source_metadata.transport == platf::frame_transport_e::dmabuf &&
+           source_metadata.residency == platf::frame_residency_e::gpu;
+  }
+
+  bool should_disable_windowed_gpu_native_after_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    const platf::frame_metadata_t &source_metadata
+  ) {
+    return runtime_state.gpu_native_override_active &&
            source_metadata.transport == platf::frame_transport_e::dmabuf &&
            source_metadata.residency == platf::frame_residency_e::gpu;
   }
