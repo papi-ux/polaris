@@ -20,6 +20,7 @@
 #include <pulse/error.h>
 #include <pulse/pulseaudio.h>
 #include <pulse/simple.h>
+#include <pulse/thread-mainloop.h>
 
 #ifdef POLARIS_BUILD_PIPEWIRE
   #include <filesystem>
@@ -634,10 +635,36 @@ namespace platf {
       pa_xfree(p);
     }
 
+    void threaded_mainloop_free(pa_threaded_mainloop *loop) {
+      pa_threaded_mainloop_free(loop);
+    }
+
     using ctx_t = util::safe_ptr<pa_context, pa_context_unref>;
-    using loop_t = util::safe_ptr<pa_mainloop, pa_mainloop_free>;
+    using loop_t = util::safe_ptr<pa_threaded_mainloop, threaded_mainloop_free>;
     using op_t = util::safe_ptr<pa_operation, pa_operation_unref>;
     using string_t = util::safe_ptr<char, pa_free<char>>;
+
+    class mainloop_lock_t {
+    public:
+      explicit mainloop_lock_t(loop_t::pointer loop):
+          loop {loop} {
+        pa_threaded_mainloop_lock(loop);
+      }
+
+      mainloop_lock_t(const mainloop_lock_t &) = delete;
+      mainloop_lock_t &operator=(const mainloop_lock_t &) = delete;
+
+      ~mainloop_lock_t() {
+        pa_threaded_mainloop_unlock(loop);
+      }
+
+    private:
+      loop_t::pointer loop;
+    };
+
+    void operation_state_cb(pa_operation *, void *userdata) {
+      pa_threaded_mainloop_signal(static_cast<pa_threaded_mainloop *>(userdata), 0);
+    }
 
     template<class T>
     using cb_simple_t = std::function<void(ctx_t::pointer, add_const_t<T> i)>;
@@ -720,12 +747,6 @@ namespace platf {
     }
 
     class server_t: public audio_control_t {
-      enum ctx_event_e : int {
-        ready,
-        terminated,
-        failed
-      };
-
     public:
       loop_t loop;
       ctx_t ctx;
@@ -737,18 +758,15 @@ namespace platf {
         std::uint32_t surround71 = PA_INVALID_INDEX;
       } index;
 
-      std::unique_ptr<safe::event_t<ctx_event_e>> events;
-      std::unique_ptr<std::function<void(ctx_t::pointer)>> events_cb;
-
-      std::thread worker;
+      std::unique_ptr<std::function<void(ctx_t::pointer)>> state_cb;
+      bool mainloop_started = false;
+      bool context_connected = false;
 
 #ifdef POLARIS_BUILD_PIPEWIRE
       bool use_pipewire = false;
 #endif
 
       int init() {
-        events = std::make_unique<safe::event_t<ctx_event_e>>();
-
 #ifdef POLARIS_BUILD_PIPEWIRE
         // Attempt to detect and configure PipeWire environment before
         // connecting to PulseAudio. This fixes the most common failure
@@ -760,21 +778,27 @@ namespace platf {
         }
 #endif
 
-        loop.reset(pa_mainloop_new());
-        ctx.reset(pa_context_new(pa_mainloop_get_api(loop.get()), "sunshine"));
+        loop.reset(pa_threaded_mainloop_new());
+        if (!loop) {
+          BOOST_LOG(error) << "Couldn't create pulseaudio threaded main loop"sv;
+          return -1;
+        }
 
-        events_cb = std::make_unique<std::function<void(ctx_t::pointer)>>([this](ctx_t::pointer ctx) {
+        ctx.reset(pa_context_new(pa_threaded_mainloop_get_api(loop.get()), "sunshine"));
+        if (!ctx) {
+          BOOST_LOG(error) << "Couldn't create pulseaudio context"sv;
+          return -1;
+        }
+
+        state_cb = std::make_unique<std::function<void(ctx_t::pointer)>>([this](ctx_t::pointer ctx) {
           switch (pa_context_get_state(ctx)) {
             case PA_CONTEXT_READY:
-              events->raise(ready);
               break;
             case PA_CONTEXT_TERMINATED:
-              BOOST_LOG(debug) << "Pulseadio context terminated"sv;
-              events->raise(terminated);
+              BOOST_LOG(debug) << "PulseAudio context terminated"sv;
               break;
             case PA_CONTEXT_FAILED:
-              BOOST_LOG(debug) << "Pulseadio context failed"sv;
-              events->raise(failed);
+              BOOST_LOG(debug) << "PulseAudio context failed"sv;
               break;
             case PA_CONTEXT_CONNECTING:
               BOOST_LOG(debug) << "Connecting to pulseaudio"sv;
@@ -783,39 +807,63 @@ namespace platf {
             case PA_CONTEXT_SETTING_NAME:
               break;
           }
+
+          pa_threaded_mainloop_signal(loop.get(), 0);
         });
 
-        pa_context_set_state_callback(ctx.get(), ctx_state_cb, events_cb.get());
+        pa_context_set_state_callback(ctx.get(), ctx_state_cb, state_cb.get());
 
-        auto status = pa_context_connect(ctx.get(), nullptr, PA_CONTEXT_NOFLAGS, nullptr);
+        if (pa_threaded_mainloop_start(loop.get()) < 0) {
+          BOOST_LOG(error) << "Couldn't start pulseaudio threaded main loop"sv;
+          return -1;
+        }
+        mainloop_started = true;
+
+        mainloop_lock_t lock {loop.get()};
+        const auto status = pa_context_connect(ctx.get(), nullptr, PA_CONTEXT_NOFLAGS, nullptr);
         if (status) {
-          BOOST_LOG(error) << "Couldn't connect to pulseaudio: "sv << pa_strerror(status);
+          BOOST_LOG(error) << "Couldn't connect to pulseaudio: "sv << pa_strerror(pa_context_errno(ctx.get()));
           return -1;
         }
+        context_connected = true;
 
-        worker = std::thread {
-          [](loop_t::pointer loop) {
-            int retval;
-            auto status = pa_mainloop_run(loop, &retval);
+        while (true) {
+          const auto state = pa_context_get_state(ctx.get());
+          if (state == PA_CONTEXT_READY) {
+            return 0;
+          }
+          if (!PA_CONTEXT_IS_GOOD(state)) {
+            BOOST_LOG(error) << "Pulseaudio context failed while connecting: "sv
+                             << pa_strerror(pa_context_errno(ctx.get()));
+            return -1;
+          }
 
-            if (status < 0) {
-              BOOST_LOG(error) << "Couldn't run pulseaudio main loop"sv;
-              return;
-            }
-          },
-          loop.get()
-        };
-
-        auto event = events->pop();
-        if (event == failed) {
-          return -1;
+          pa_threaded_mainloop_wait(loop.get());
         }
+      }
 
-        return 0;
+      // The caller must hold mainloop_lock_t. pa_threaded_mainloop_wait()
+      // atomically releases and reacquires that lock around callback dispatch.
+      bool wait_for_operation(op_t &op) {
+        pa_operation_set_state_callback(op.get(), operation_state_cb, loop.get());
+        while (pa_operation_get_state(op.get()) == PA_OPERATION_RUNNING) {
+          if (!PA_CONTEXT_IS_GOOD(pa_context_get_state(ctx.get()))) {
+            pa_operation_cancel(op.get());
+            return false;
+          }
+          pa_threaded_mainloop_wait(loop.get());
+        }
+        return pa_operation_get_state(op.get()) == PA_OPERATION_DONE;
+      }
+
+      int context_errno() {
+        mainloop_lock_t lock {loop.get()};
+        return pa_context_errno(ctx.get());
       }
 
       int load_null(const char *name, const std::uint8_t *channel_mapping, int channels) {
         auto alarm = safe::make_alarm<int>();
+        mainloop_lock_t lock {loop.get()};
 
         op_t op {
           pa_context_load_module(
@@ -827,7 +875,16 @@ namespace platf {
           ),
         };
 
-        alarm->wait();
+        if (!op) {
+          BOOST_LOG(error) << "Couldn't create null-sink load operation: "sv
+                           << pa_strerror(pa_context_errno(ctx.get()));
+          return -1;
+        }
+
+        if (!wait_for_operation(op) || !alarm->status()) {
+          BOOST_LOG(error) << "Null-sink load operation was cancelled"sv;
+          return -1;
+        }
         return *alarm->status();
       }
 
@@ -837,12 +894,22 @@ namespace platf {
         }
 
         auto alarm = safe::make_alarm<int>();
+        mainloop_lock_t lock {loop.get()};
 
         op_t op {
           pa_context_unload_module(ctx.get(), i, success_cb, alarm.get())
         };
 
-        alarm->wait();
+        if (!op) {
+          BOOST_LOG(error) << "Couldn't create null-sink unload operation: "sv
+                           << pa_strerror(pa_context_errno(ctx.get()));
+          return -1;
+        }
+
+        if (!wait_for_operation(op) || !alarm->status()) {
+          BOOST_LOG(error) << "Null-sink unload operation was cancelled for index ["sv << i << ']';
+          return -1;
+        }
 
         if (*alarm->status()) {
           BOOST_LOG(error) << "Couldn't unload null-sink with index ["sv << i << "]: "sv << pa_strerror(pa_context_errno(ctx.get()));
@@ -892,17 +959,20 @@ namespace platf {
           }
         };
 
-        op_t op {pa_context_get_sink_info_list(ctx.get(), cb<pa_sink_info *>, &f)};
+        bool sink_list_completed = false;
+        {
+          mainloop_lock_t lock {loop.get()};
+          op_t op {pa_context_get_sink_info_list(ctx.get(), cb<pa_sink_info *>, &f)};
 
-        if (!op) {
-          BOOST_LOG(error) << "Couldn't create card info operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          if (!op) {
+            BOOST_LOG(error) << "Couldn't create card info operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+            return std::nullopt;
+          }
 
-          return std::nullopt;
+          sink_list_completed = wait_for_operation(op);
         }
 
-        alarm->wait();
-
-        if (*alarm->status()) {
+        if (!sink_list_completed || !alarm->status() || *alarm->status()) {
           return std::nullopt;
         }
 
@@ -912,7 +982,7 @@ namespace platf {
         if (index.stereo == PA_INVALID_INDEX) {
           index.stereo = load_null(stereo, speaker::map_stereo, sizeof(speaker::map_stereo));
           if (index.stereo == PA_INVALID_INDEX) {
-            BOOST_LOG(warning) << "Couldn't create virtual sink for stereo: "sv << pa_strerror(pa_context_errno(ctx.get()));
+            BOOST_LOG(warning) << "Couldn't create virtual sink for stereo: "sv << pa_strerror(context_errno());
           } else {
             ++nullcount;
           }
@@ -921,7 +991,7 @@ namespace platf {
         if (index.surround51 == PA_INVALID_INDEX) {
           index.surround51 = load_null(surround51, speaker::map_surround51, sizeof(speaker::map_surround51));
           if (index.surround51 == PA_INVALID_INDEX) {
-            BOOST_LOG(warning) << "Couldn't create virtual sink for surround-51: "sv << pa_strerror(pa_context_errno(ctx.get()));
+            BOOST_LOG(warning) << "Couldn't create virtual sink for surround-51: "sv << pa_strerror(context_errno());
           } else {
             ++nullcount;
           }
@@ -930,7 +1000,7 @@ namespace platf {
         if (index.surround71 == PA_INVALID_INDEX) {
           index.surround71 = load_null(surround71, speaker::map_surround71, sizeof(speaker::map_surround71));
           if (index.surround71 == PA_INVALID_INDEX) {
-            BOOST_LOG(warning) << "Couldn't create virtual sink for surround-71: "sv << pa_strerror(pa_context_errno(ctx.get()));
+            BOOST_LOG(warning) << "Couldn't create virtual sink for surround-71: "sv << pa_strerror(context_errno());
           } else {
             ++nullcount;
           }
@@ -970,6 +1040,7 @@ namespace platf {
           if (!server_info) {
             BOOST_LOG(error) << "Couldn't get pulseaudio server info: "sv << pa_strerror(pa_context_errno(ctx));
             alarm->ring(-1);
+            return;
           }
 
           if (server_info->default_sink_name) {
@@ -978,8 +1049,14 @@ namespace platf {
           alarm->ring(0);
         };
 
+        mainloop_lock_t lock {loop.get()};
         op_t server_op {pa_context_get_server_info(ctx.get(), cb<pa_server_info *>, &server_f)};
-        alarm->wait();
+        if (!server_op) {
+          BOOST_LOG(error) << "Couldn't create pulseaudio server info operation: "sv
+                           << pa_strerror(pa_context_errno(ctx.get()));
+          return sink_name;
+        }
+        wait_for_operation(server_op);
         // No need to check status. If it failed just return default name.
         return sink_name;
       }
@@ -1007,9 +1084,15 @@ namespace platf {
           monitor_name = sink_info->monitor_source_name;
         };
 
+        mainloop_lock_t lock {loop.get()};
         op_t sink_op {pa_context_get_sink_info_by_name(ctx.get(), sink_name.c_str(), cb<pa_sink_info *>, &sink_f)};
+        if (!sink_op) {
+          BOOST_LOG(error) << "Couldn't create monitor lookup operation for ["sv << sink_name
+                           << "]: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          return monitor_name;
+        }
 
-        alarm->wait();
+        wait_for_operation(sink_op);
         // No need to check status. If it failed just return default name.
         BOOST_LOG(info) << "Found default monitor by name: "sv << monitor_name;
         return monitor_name;
@@ -1038,6 +1121,7 @@ namespace platf {
           sink_index = sink_info->index;
         };
 
+        mainloop_lock_t lock {loop.get()};
         op_t sink_op {pa_context_get_sink_info_by_name(ctx.get(), sink_name.c_str(), cb<pa_sink_info *>, &sink_f)};
 
         if (!sink_op) {
@@ -1046,8 +1130,7 @@ namespace platf {
           return std::nullopt;
         }
 
-        alarm->wait();
-        if (*alarm->status()) {
+        if (!wait_for_operation(sink_op) || !alarm->status() || *alarm->status()) {
           return std::nullopt;
         }
 
@@ -1110,14 +1193,18 @@ namespace platf {
           });
         };
 
-        op_t list_op {pa_context_get_sink_input_info_list(ctx.get(), cb<pa_sink_input_info *>, &input_f)};
-        if (!list_op) {
-          BOOST_LOG(error) << "Couldn't create sink input list operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
-          return;
-        }
+        bool sink_inputs_completed = false;
+        {
+          mainloop_lock_t lock {loop.get()};
+          op_t list_op {pa_context_get_sink_input_info_list(ctx.get(), cb<pa_sink_input_info *>, &input_f)};
+          if (!list_op) {
+            BOOST_LOG(error) << "Couldn't create sink input list operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+            return;
+          }
 
-        alarm->wait();
-        if (*alarm->status()) {
+          sink_inputs_completed = wait_for_operation(list_op);
+        }
+        if (!sink_inputs_completed || !alarm->status() || *alarm->status()) {
           return;
         }
 
@@ -1129,6 +1216,7 @@ namespace platf {
                           << " to ["sv << sink << ']';
 
           auto move_alarm = safe::make_alarm<int>();
+          mainloop_lock_t lock {loop.get()};
           op_t move_op {
             pa_context_move_sink_input_by_name(
               ctx.get(),
@@ -1145,8 +1233,8 @@ namespace platf {
             continue;
           }
 
-          move_alarm->wait();
-          if (*move_alarm->status()) {
+          const bool move_completed = wait_for_operation(move_op);
+          if (!move_completed || !move_alarm->status() || *move_alarm->status()) {
             BOOST_LOG(warning) << "Linux audio isolation: failed to move session audio stream ["sv
                                << route.app_name << "] pid="sv << route.pid
                                << " to ["sv << sink << "]: "sv << pa_strerror(pa_context_errno(ctx.get()));
@@ -1199,6 +1287,7 @@ namespace platf {
 
       int set_sink(const std::string &sink) override {
         auto alarm = safe::make_alarm<int>();
+        mainloop_lock_t lock {loop.get()};
 
         BOOST_LOG(info) << "Setting default sink to: ["sv << sink << "]"sv;
         op_t op {
@@ -1215,7 +1304,10 @@ namespace platf {
           return -1;
         }
 
-        alarm->wait();
+        if (!wait_for_operation(op) || !alarm->status()) {
+          BOOST_LOG(error) << "Set default-sink operation was cancelled for ["sv << sink << ']';
+          return -1;
+        }
         if (*alarm->status()) {
           BOOST_LOG(error) << "Couldn't set default-sink ["sv << sink << "]: "sv << pa_strerror(pa_context_errno(ctx.get()));
 
@@ -1228,19 +1320,19 @@ namespace platf {
       }
 
       ~server_t() override {
-        unload_null(index.stereo);
-        unload_null(index.surround51);
-        unload_null(index.surround71);
+        if (mainloop_started) {
+          unload_null(index.stereo);
+          unload_null(index.surround51);
+          unload_null(index.surround71);
 
-        if (worker.joinable()) {
-          pa_context_disconnect(ctx.get());
+          if (context_connected) {
+            mainloop_lock_t lock {loop.get()};
+            pa_context_disconnect(ctx.get());
+            context_connected = false;
+          }
 
-          KITTY_WHILE_LOOP(auto event = events->pop(), event != terminated && event != failed, {
-            event = events->pop();
-          })
-
-          pa_mainloop_quit(loop.get(), 0);
-          worker.join();
+          pa_threaded_mainloop_stop(loop.get());
+          mainloop_started = false;
         }
       }
     };

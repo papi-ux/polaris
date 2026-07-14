@@ -2106,6 +2106,10 @@ namespace stream {
       return session.session_token;
     }
 
+    std::uint32_t launch_session_id(const session_t& session) {
+      return session.launch_session_id;
+    }
+
     bool uuid_match(const session_t &session, const std::string_view& uuid) {
       return session.device_uuid == uuid;
     }
