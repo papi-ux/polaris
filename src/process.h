@@ -129,6 +129,8 @@ namespace proc {
     open_dispatch_retry,
     teardown_while_closed,
     truncation_while_closed,
+    replacement_with_stale_records_while_closed,
+    replacement_before_watcher_start,
   };
 
   bool steam_big_picture_input_guard_enabled_for_tests(
@@ -136,6 +138,12 @@ namespace proc {
     bool use_cage_compositor,
     bool mirror_desktop
   );
+  std::string steam_big_picture_log_path_for_tests(
+    const struct ctx_t &app,
+    const boost::process::v1::environment &env
+  );
+  bool steam_big_picture_atomic_snapshot_survives_path_replacement_for_tests();
+  bool steam_big_picture_pinned_stream_survives_path_replacement_for_tests();
   steam_game_process_event_t parse_steam_game_process_event_for_tests(std::string_view line);
   steam_big_picture_guard_transition_t apply_steam_big_picture_guard_event_for_tests(
     std::unordered_set<std::string> &active_appids,

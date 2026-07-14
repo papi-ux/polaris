@@ -815,6 +815,26 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsScopedToPrivateCompat
   EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(compatibility_game, true, false));
 }
 
+TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardUsesAppHomeForLogPath) {
+  proc::ctx_t app {};
+  app.env_vars["HOME"] = "/tmp/polaris-app-home";
+  boost::process::v1::environment host_env;
+  host_env["HOME"] = "/tmp/polaris-host-home";
+
+  EXPECT_EQ(
+    proc::steam_big_picture_log_path_for_tests(app, host_env),
+    "/tmp/polaris-app-home/.local/share/Steam/logs/gameprocess_log.txt"
+  );
+}
+
+TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardSnapshotsIdentityAndEofFromOneDescriptor) {
+  EXPECT_TRUE(proc::steam_big_picture_atomic_snapshot_survives_path_replacement_for_tests());
+}
+
+TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardBindsWatcherStreamToPinnedDescriptor) {
+  EXPECT_TRUE(proc::steam_big_picture_pinned_stream_survives_path_replacement_for_tests());
+}
+
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardParsesOnlyPositiveGameLifecycleRecords) {
   const auto started = proc::parse_steam_game_process_event_for_tests(
     "[2026-07-14 16:23:37] AppID 2416450 adding PID 938289 as a tracked process \"SteamLaunch AppId=2416450 -- steam-launch-wrapper --\""
@@ -899,7 +919,7 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardRetriesFailedCloseDispa
   );
   EXPECT_EQ(
     actions,
-    (std::vector<std::string> {"close/bigpicture", "close/bigpicture", "open/bigpicture"})
+    (std::vector<std::string> {"close/bigpicture", "close/bigpicture"})
   );
 }
 
@@ -913,11 +933,11 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardRetriesFailedOpenDispat
   );
 }
 
-TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardRestoresBeforeSessionTeardown) {
+TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardDoesNotReopenBeforeIsolatedSteamCleanup) {
   const auto actions = proc::run_steam_big_picture_guard_file_scenario_for_tests(
     proc::steam_big_picture_guard_file_scenario_e::teardown_while_closed
   );
-  EXPECT_EQ(actions, (std::vector<std::string> {"close/bigpicture", "open/bigpicture"}));
+  EXPECT_EQ(actions, (std::vector<std::string> {"close/bigpicture"}));
 }
 
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardRestoresAfterLogTruncation) {
@@ -925,6 +945,20 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardRestoresAfterLogTruncat
     proc::steam_big_picture_guard_file_scenario_e::truncation_while_closed
   );
   EXPECT_EQ(actions, (std::vector<std::string> {"close/bigpicture", "open/bigpicture"}));
+}
+
+TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardDisablesAfterLogReplacementWithoutReplayingStaleRecords) {
+  const auto actions = proc::run_steam_big_picture_guard_file_scenario_for_tests(
+    proc::steam_big_picture_guard_file_scenario_e::replacement_with_stale_records_while_closed
+  );
+  EXPECT_EQ(actions, (std::vector<std::string> {"close/bigpicture", "open/bigpicture"}));
+}
+
+TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardDisablesIfLogChangesBeforeWatcherStarts) {
+  const auto actions = proc::run_steam_big_picture_guard_file_scenario_for_tests(
+    proc::steam_big_picture_guard_file_scenario_e::replacement_before_watcher_start
+  );
+  EXPECT_TRUE(actions.empty());
 }
 
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsideProcessLifetime) {
@@ -944,15 +978,27 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsi
   const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
   const auto snapshot_guard = execute.find("snapshot_steam_big_picture_input_guard(");
   const auto first_prep_launch = execute.find("platf::run_command(cmd.elevated, true, cmd.do_cmd");
+  const auto failed_launch_guard = execute.find("stop_guard_on_failed_launch = util::fail_guard");
+  const auto failed_launch_stop = execute.find("stop_steam_big_picture_input_guard();", failed_launch_guard);
   const auto first_cage_launch = execute.find("start_cage_with_runtime_fallback(game_cmd)");
+  const auto first_main_launch = execute.find("_process = platf::run_command(");
   const auto start_guard = execute.find("start_steam_big_picture_input_guard(");
+  const auto launch_committed = execute.find("stop_guard_on_failed_launch.disable()");
   ASSERT_NE(snapshot_guard, std::string::npos);
   ASSERT_NE(first_prep_launch, std::string::npos);
+  ASSERT_NE(failed_launch_guard, std::string::npos);
+  ASSERT_NE(failed_launch_stop, std::string::npos);
   ASSERT_NE(first_cage_launch, std::string::npos);
+  ASSERT_NE(first_main_launch, std::string::npos);
   ASSERT_NE(start_guard, std::string::npos);
+  ASSERT_NE(launch_committed, std::string::npos);
   EXPECT_LT(snapshot_guard, first_prep_launch);
-  EXPECT_LT(snapshot_guard, first_cage_launch);
   EXPECT_LT(snapshot_guard, start_guard);
+  EXPECT_LT(failed_launch_guard, failed_launch_stop);
+  EXPECT_LT(failed_launch_stop, start_guard);
+  EXPECT_LT(start_guard, first_cage_launch);
+  EXPECT_LT(start_guard, first_main_launch);
+  EXPECT_LT(first_main_launch, launch_committed);
   const auto stop_guard = terminate.find("stop_steam_big_picture_input_guard()");
   const auto stop_cage = terminate.find("cage_display_router::stop()");
   ASSERT_NE(stop_guard, std::string::npos);
