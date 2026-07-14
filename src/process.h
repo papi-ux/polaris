@@ -52,6 +52,11 @@
 namespace proc {
   using file_t = util::safe_ptr_v2<FILE, int, fclose>;
 
+#ifdef __linux__
+  struct steam_big_picture_guard_runtime_t;
+  struct steam_big_picture_guard_snapshot_t;
+#endif
+
 #ifdef _WIN32
   extern VDISPLAY::DRIVER_STATUS vDisplayDriverStatus;
 #endif
@@ -100,6 +105,45 @@ namespace proc {
 #endif
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
+
+  enum class steam_game_process_event_kind_e {
+    none,
+    started,
+    stopped,
+  };
+
+  struct steam_game_process_event_t {
+    steam_game_process_event_kind_e kind = steam_game_process_event_kind_e::none;
+    std::string appid;
+  };
+
+  struct steam_big_picture_guard_transition_t {
+    bool close_big_picture = false;
+    bool open_big_picture = false;
+    std::size_t active_games = 0;
+  };
+
+  enum class steam_big_picture_guard_file_scenario_e {
+    appended_lifecycle,
+    close_dispatch_retry,
+    open_dispatch_retry,
+    teardown_while_closed,
+    truncation_while_closed,
+  };
+
+  bool steam_big_picture_input_guard_enabled_for_tests(
+    const struct ctx_t &app,
+    bool use_cage_compositor,
+    bool mirror_desktop
+  );
+  steam_game_process_event_t parse_steam_game_process_event_for_tests(std::string_view line);
+  steam_big_picture_guard_transition_t apply_steam_big_picture_guard_event_for_tests(
+    std::unordered_set<std::string> &active_appids,
+    std::string_view line
+  );
+  std::vector<std::string> run_steam_big_picture_guard_file_scenario_for_tests(
+    steam_big_picture_guard_file_scenario_e scenario
+  );
 
   desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_for_tests(
     bool private_stream_requested,
@@ -389,6 +433,17 @@ namespace proc {
       bool no_active_sessions_at_launch
     );
     void terminate_impl(bool immediate, bool needs_refresh);
+#ifdef __linux__
+    std::shared_ptr<const steam_big_picture_guard_snapshot_t> snapshot_steam_big_picture_input_guard(
+      bool use_cage_compositor,
+      bool mirror_desktop
+    ) const;
+    void start_steam_big_picture_input_guard(
+      const boost::process::v1::environment &launch_env,
+      std::shared_ptr<const steam_big_picture_guard_snapshot_t> snapshot
+    );
+    void stop_steam_big_picture_input_guard();
+#endif
     session_lifecycle_sync_t &session_lifecycle_sync() const;
     session_stop_snapshot_t get_session_stop_snapshot_locked(
       const std::string &unique_id,
@@ -420,6 +475,9 @@ namespace proc {
 
     file_t _pipe;
     std::unordered_set<std::string> _session_env_keys;
+#ifdef __linux__
+    std::shared_ptr<steam_big_picture_guard_runtime_t> _steam_big_picture_guard;
+#endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
     std::shared_ptr<session_lifecycle_gate_t> _session_lifecycle_gate {std::make_shared<session_lifecycle_gate_t>()};

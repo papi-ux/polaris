@@ -71,6 +71,7 @@
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <signal.h>
+  #include <sys/stat.h>
   #include <unistd.h>
 #elif __APPLE__
   #include <mach-o/dyld.h>
@@ -2133,6 +2134,203 @@ namespace proc {
       return true;
     }
 
+    enum class steam_game_process_event_kind_internal_e {
+      none,
+      started,
+      stopped,
+    };
+
+    struct steam_game_process_event_internal_t {
+      steam_game_process_event_kind_internal_e kind = steam_game_process_event_kind_internal_e::none;
+      std::string appid;
+    };
+
+    struct steam_big_picture_guard_transition_internal_t {
+      bool close_big_picture = false;
+      bool open_big_picture = false;
+      std::size_t active_games = 0;
+    };
+
+    std::optional<std::string> decimal_token_after(std::string_view line, std::string_view marker) {
+      const auto marker_pos = line.find(marker);
+      if (marker_pos == std::string_view::npos) {
+        return std::nullopt;
+      }
+
+      const auto begin = marker_pos + marker.size();
+      auto end = begin;
+      while (end < line.size() && std::isdigit(static_cast<unsigned char>(line[end]))) {
+        ++end;
+      }
+      if (end == begin) {
+        return std::nullopt;
+      }
+      return std::string {line.substr(begin, end - begin)};
+    }
+
+    steam_game_process_event_internal_t parse_steam_game_process_event(std::string_view line) {
+      auto payload = line;
+      if (line.starts_with('[')) {
+        const auto timestamp_end = line.find("] "sv);
+        if (timestamp_end == std::string_view::npos) {
+          return {};
+        }
+        payload = line.substr(timestamp_end + 2);
+      }
+
+      if (const auto removed_appid = decimal_token_after(payload, "Remove "sv); removed_appid) {
+        const auto marker = "Remove "s + *removed_appid + " from running list";
+        if (payload == marker || payload == marker + '\r') {
+          return {steam_game_process_event_kind_internal_e::stopped, *removed_appid};
+        }
+      }
+
+      const auto tracked_appid = decimal_token_after(payload, "AppID "sv);
+      const auto tracked_prefix = tracked_appid ? "AppID "s + *tracked_appid + " adding PID " : ""s;
+      if (!tracked_appid || !payload.starts_with(tracked_prefix) ||
+          payload.find("steam-launch-wrapper"sv) == std::string_view::npos) {
+        return {};
+      }
+
+      const auto launched_appid = decimal_token_after(line, "SteamLaunch AppId="sv);
+      if (!launched_appid || *launched_appid != *tracked_appid) {
+        return {};
+      }
+
+      return {steam_game_process_event_kind_internal_e::started, *tracked_appid};
+    }
+
+    steam_big_picture_guard_transition_internal_t apply_steam_big_picture_guard_event(
+      std::unordered_set<std::string> &active_appids,
+      std::string_view line
+    ) {
+      steam_big_picture_guard_transition_internal_t transition;
+      const auto event = parse_steam_game_process_event(line);
+      if (event.kind == steam_game_process_event_kind_internal_e::started) {
+        const bool was_empty = active_appids.empty();
+        const bool inserted = active_appids.emplace(event.appid).second;
+        transition.close_big_picture = inserted && was_empty;
+      } else if (event.kind == steam_game_process_event_kind_internal_e::stopped) {
+        const bool removed = active_appids.erase(event.appid) > 0;
+        transition.open_big_picture = removed && active_appids.empty();
+      }
+      transition.active_games = active_appids.size();
+      return transition;
+    }
+
+    bool steam_big_picture_input_guard_enabled(
+      const proc::ctx_t &app,
+      bool use_cage_compositor,
+      bool mirror_desktop
+    ) {
+      return use_cage_compositor &&
+             !mirror_desktop &&
+             (is_steam_big_picture_app(app) ||
+              proc::steam_launch_mode_is_big_picture(app.steam_launch_mode));
+    }
+
+    struct steam_game_process_log_identity_t {
+      dev_t device = 0;
+      ino_t inode = 0;
+
+      bool operator==(const steam_game_process_log_identity_t &other) const {
+        return device == other.device && inode == other.inode;
+      }
+    };
+
+    std::optional<steam_game_process_log_identity_t> steam_game_process_log_identity(
+      const std::filesystem::path &path
+    ) {
+      struct stat info {};
+      if (::stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) {
+        return std::nullopt;
+      }
+      return steam_game_process_log_identity_t {info.st_dev, info.st_ino};
+    }
+
+    std::filesystem::path steam_game_process_log_path(
+      const boost::process::v1::environment &env
+    ) {
+      std::string home;
+      if (const auto it = env.find("HOME"); it != env.end()) {
+        home = it->to_string();
+      }
+      if (home.empty()) {
+        if (const char *current_home = std::getenv("HOME"); current_home && *current_home) {
+          home = current_home;
+        }
+      }
+      if (home.empty()) {
+        return {};
+      }
+
+      const std::array candidates {
+        std::filesystem::path {home} / ".local/share/Steam/logs/gameprocess_log.txt",
+        std::filesystem::path {home} / ".steam/steam/logs/gameprocess_log.txt",
+      };
+      for (const auto &candidate : candidates) {
+        if (steam_game_process_log_identity(candidate)) {
+          return candidate;
+        }
+      }
+      return candidates.front();
+    }
+
+    bool dispatch_steam_big_picture_action(
+      const std::string &reference_command,
+      std::string_view action,
+      const boost::process::v1::environment &env
+    ) {
+      const auto command = canonical_steam_big_picture_command(reference_command, action);
+      try {
+        std::error_code ec;
+        boost::filesystem::path working_dir;
+        auto child = platf::run_command(
+          false,
+          true,
+          command,
+          working_dir,
+          env,
+          nullptr,
+          ec,
+          nullptr
+        );
+        if (ec) {
+          BOOST_LOG(warning) << "steam_input_guard: failed to dispatch ["sv << command
+                             << "]: "sv << ec.message();
+          return false;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (child.running(ec) && !ec && std::chrono::steady_clock::now() < deadline) {
+          std::this_thread::sleep_for(50ms);
+        }
+        if (!ec && child.running(ec)) {
+          std::error_code terminate_ec;
+          child.terminate(terminate_ec);
+          child.detach();
+          BOOST_LOG(warning) << "steam_input_guard: timed out dispatching ["sv << command << ']';
+          return false;
+        }
+        if (ec || child.exit_code() != 0) {
+          BOOST_LOG(warning) << "steam_input_guard: dispatch failed ["sv << command
+                             << "] exit="sv << child.exit_code()
+                             << (ec ? " error="s + ec.message() : ""s);
+          return false;
+        }
+
+        BOOST_LOG(info) << "steam_input_guard: completed ["sv << command << ']';
+        return true;
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "steam_input_guard: dispatch threw for ["sv << command
+                           << "]: "sv << e.what();
+        return false;
+      } catch (...) {
+        BOOST_LOG(warning) << "steam_input_guard: dispatch threw for ["sv << command << ']';
+        return false;
+      }
+    }
+
     void strip_mangohud_env(boost::process::v1::environment &env) {
       for (const char *key : {"MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG"}) {
         env.erase(key);
@@ -2152,7 +2350,317 @@ namespace proc {
     }
   }  // namespace
 
+#ifdef __linux__
+  struct steam_big_picture_guard_runtime_t {
+    std::atomic<bool> stop_requested {false};
+    std::thread worker;
+  };
+
+  struct steam_big_picture_guard_snapshot_t {
+    std::filesystem::path log_path;
+    std::optional<steam_game_process_log_identity_t> identity;
+    std::uintmax_t offset = 0;
+  };
+
+  namespace {
+    using steam_big_picture_action_dispatch_t = std::function<bool(std::string_view)>;
+
+    void run_steam_big_picture_input_guard(
+      const std::shared_ptr<steam_big_picture_guard_runtime_t> &runtime,
+      const std::filesystem::path &log_path,
+      std::optional<steam_game_process_log_identity_t> initial_identity,
+      std::uintmax_t initial_offset,
+      const steam_big_picture_action_dispatch_t &dispatch_action
+    ) {
+      std::ifstream log;
+      auto expected_identity = initial_identity;
+      std::uintmax_t cursor = initial_offset;
+      std::unordered_set<std::string> active_appids;
+      bool big_picture_closed = false;
+      bool first_open = true;
+      auto next_close_attempt = std::chrono::steady_clock::time_point {};
+      auto next_restore_attempt = std::chrono::steady_clock::time_point {};
+
+      auto close_big_picture = [&]() {
+        if (big_picture_closed || active_appids.empty()) {
+          return true;
+        }
+        if (!dispatch_action("close/bigpicture"sv)) {
+          next_close_attempt = std::chrono::steady_clock::now() + 1s;
+          return false;
+        }
+        big_picture_closed = true;
+        BOOST_LOG(info) << "steam_input_guard: closed Big Picture after Steam started a tracked game"sv;
+        return true;
+      };
+
+      auto restore_big_picture = [&]() {
+        if (!big_picture_closed) {
+          return true;
+        }
+        if (!dispatch_action("open/bigpicture"sv)) {
+          next_restore_attempt = std::chrono::steady_clock::now() + 1s;
+          return false;
+        }
+        big_picture_closed = false;
+        BOOST_LOG(info) << "steam_input_guard: restored Big Picture after tracked game exit"sv;
+        return true;
+      };
+
+      try {
+        BOOST_LOG(info) << "steam_input_guard: monitoring new Steam game lifecycle records in ["
+                        << log_path.string() << ']';
+        while (!runtime->stop_requested.load(std::memory_order_acquire)) {
+          if (!log.is_open()) {
+            const auto current_identity = steam_game_process_log_identity(log_path);
+            if (!current_identity) {
+              std::this_thread::sleep_for(100ms);
+              continue;
+            }
+
+            log.open(log_path);
+            if (!log) {
+              log.clear();
+              std::this_thread::sleep_for(250ms);
+              continue;
+            }
+
+            if (first_open && expected_identity && *current_identity == *expected_identity) {
+              log.seekg(static_cast<std::streamoff>(initial_offset), std::ios::beg);
+              cursor = initial_offset;
+            } else {
+              log.seekg(0, std::ios::beg);
+              cursor = 0;
+            }
+            first_open = false;
+            expected_identity = current_identity;
+          }
+
+          std::string line;
+          while (!runtime->stop_requested.load(std::memory_order_acquire) && std::getline(log, line)) {
+            cursor += line.size() + 1;
+            const auto transition = apply_steam_big_picture_guard_event(active_appids, line);
+            if (transition.close_big_picture) {
+              close_big_picture();
+            }
+            if (transition.open_big_picture) {
+              restore_big_picture();
+            }
+          }
+          const bool log_read_failed = log.bad();
+          log.clear();
+
+          std::error_code file_size_ec;
+          const auto current_identity = steam_game_process_log_identity(log_path);
+          const auto current_size = current_identity ? std::filesystem::file_size(log_path, file_size_ec) : 0;
+          const bool log_replaced = !current_identity || !expected_identity ||
+                                    *current_identity != *expected_identity;
+          const bool log_truncated = current_identity && !file_size_ec && current_size < cursor;
+          if (log_replaced || log_truncated || log_read_failed || file_size_ec) {
+            if (big_picture_closed) {
+              BOOST_LOG(warning) << "steam_input_guard: Steam game log changed while a game was tracked; restoring Big Picture fail-open"sv;
+              restore_big_picture();
+            }
+            active_appids.clear();
+            log.close();
+            log.clear();
+            expected_identity.reset();
+            cursor = 0;
+            continue;
+          }
+
+          if (!big_picture_closed && !active_appids.empty() &&
+              std::chrono::steady_clock::now() >= next_close_attempt) {
+            close_big_picture();
+          }
+          if (big_picture_closed && active_appids.empty() &&
+              std::chrono::steady_clock::now() >= next_restore_attempt) {
+            restore_big_picture();
+          }
+          std::this_thread::sleep_for(100ms);
+        }
+        if (big_picture_closed) {
+          BOOST_LOG(info) << "steam_input_guard: restoring Big Picture before session teardown"sv;
+          restore_big_picture();
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(error) << "steam_input_guard: watcher failed: "sv << e.what();
+        if (big_picture_closed) {
+          restore_big_picture();
+        }
+      } catch (...) {
+        BOOST_LOG(error) << "steam_input_guard: watcher failed with an unknown exception"sv;
+        if (big_picture_closed) {
+          restore_big_picture();
+        }
+      }
+    }
+  }  // namespace
+#endif
+
 #if defined(POLARIS_TESTS)
+#ifdef __linux__
+  bool steam_big_picture_input_guard_enabled_for_tests(
+    const proc::ctx_t &app,
+    bool use_cage_compositor,
+    bool mirror_desktop
+  ) {
+    return steam_big_picture_input_guard_enabled(app, use_cage_compositor, mirror_desktop);
+  }
+
+  steam_game_process_event_t parse_steam_game_process_event_for_tests(std::string_view line) {
+    const auto parsed = parse_steam_game_process_event(line);
+    steam_game_process_event_kind_e kind = steam_game_process_event_kind_e::none;
+    if (parsed.kind == steam_game_process_event_kind_internal_e::started) {
+      kind = steam_game_process_event_kind_e::started;
+    } else if (parsed.kind == steam_game_process_event_kind_internal_e::stopped) {
+      kind = steam_game_process_event_kind_e::stopped;
+    }
+    return {kind, parsed.appid};
+  }
+
+  steam_big_picture_guard_transition_t apply_steam_big_picture_guard_event_for_tests(
+    std::unordered_set<std::string> &active_appids,
+    std::string_view line
+  ) {
+    const auto transition = apply_steam_big_picture_guard_event(active_appids, line);
+    return {
+      transition.close_big_picture,
+      transition.open_big_picture,
+      transition.active_games,
+    };
+  }
+
+  std::vector<std::string> run_steam_big_picture_guard_file_scenario_for_tests(
+    steam_big_picture_guard_file_scenario_e scenario
+  ) {
+    static std::atomic<std::uint64_t> sequence {0};
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("polaris-steam-input-guard-"s + std::to_string(::getpid()) + '-' +
+                       std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) + ".log");
+    const auto start_line =
+      "[2026-07-14 12:09:51] AppID 2416450 adding PID 1741315 as a tracked process "
+      "\"/steam/steam-launch-wrapper -- /steam/reaper SteamLaunch AppId=2416450 -- MOUSE.exe\""s;
+    const auto stop_line = "[2026-07-14 12:20:00] Remove 2416450 from running list"s;
+
+    {
+      std::ofstream initial(path, std::ios::trunc);
+      if (!initial) {
+        throw std::runtime_error("could not create Steam guard test log");
+      }
+      initial << start_line << '\n';
+    }
+
+    const auto initial_identity = steam_game_process_log_identity(path);
+    std::error_code size_ec;
+    const auto initial_offset = std::filesystem::file_size(path, size_ec);
+    if (!initial_identity || size_ec) {
+      std::filesystem::remove(path, size_ec);
+      throw std::runtime_error("could not snapshot Steam guard test log");
+    }
+
+    auto runtime = std::make_shared<steam_big_picture_guard_runtime_t>();
+    std::mutex actions_mutex;
+    std::condition_variable actions_changed;
+    std::vector<std::string> actions;
+    bool rejected_first_close = false;
+    bool rejected_first_open = false;
+    const steam_big_picture_action_dispatch_t dispatch_action = [&](std::string_view action) {
+      bool accept = true;
+      {
+        std::lock_guard lock(actions_mutex);
+        actions.emplace_back(action);
+        if (scenario == steam_big_picture_guard_file_scenario_e::close_dispatch_retry &&
+            action == "close/bigpicture"sv && !rejected_first_close) {
+          rejected_first_close = true;
+          accept = false;
+        }
+        if (scenario == steam_big_picture_guard_file_scenario_e::open_dispatch_retry &&
+            action == "open/bigpicture"sv && !rejected_first_open) {
+          rejected_first_open = true;
+          accept = false;
+        }
+      }
+      actions_changed.notify_all();
+      return accept;
+    };
+
+    auto stop_and_join = [&]() {
+      runtime->stop_requested.store(true, std::memory_order_release);
+      if (runtime->worker.joinable()) {
+        runtime->worker.join();
+      }
+    };
+    auto cleanup = [&]() {
+      std::error_code cleanup_ec;
+      std::filesystem::remove(path, cleanup_ec);
+    };
+    auto wait_for_actions = [&](std::size_t count) {
+      std::unique_lock lock(actions_mutex);
+      if (!actions_changed.wait_for(lock, 3s, [&]() { return actions.size() >= count; })) {
+        throw std::runtime_error("Steam guard test action timeout");
+      }
+    };
+
+    try {
+      runtime->worker = std::thread([
+        runtime,
+        path,
+        initial_identity,
+        initial_offset,
+        dispatch_action
+      ]() {
+        run_steam_big_picture_input_guard(
+          runtime,
+          path,
+          initial_identity,
+          initial_offset,
+          dispatch_action
+        );
+      });
+
+      {
+        std::unique_lock lock(actions_mutex);
+        if (actions_changed.wait_for(lock, 300ms, [&]() { return !actions.empty(); })) {
+          throw std::runtime_error("Steam guard consumed a stale lifecycle record");
+        }
+      }
+      {
+        std::ofstream append(path, std::ios::app);
+        append << start_line << '\n';
+      }
+      wait_for_actions(1);
+
+      if (scenario == steam_big_picture_guard_file_scenario_e::close_dispatch_retry) {
+        wait_for_actions(2);
+      } else if (scenario == steam_big_picture_guard_file_scenario_e::open_dispatch_retry) {
+        std::ofstream append(path, std::ios::app);
+        append << stop_line << '\n';
+        append.close();
+        wait_for_actions(3);
+      } else if (scenario == steam_big_picture_guard_file_scenario_e::appended_lifecycle) {
+        std::ofstream append(path, std::ios::app);
+        append << stop_line << '\n';
+        append.close();
+        wait_for_actions(2);
+      } else if (scenario == steam_big_picture_guard_file_scenario_e::truncation_while_closed) {
+        std::ofstream truncate(path, std::ios::trunc);
+        truncate.close();
+        wait_for_actions(2);
+      }
+
+      stop_and_join();
+      cleanup();
+      std::lock_guard lock(actions_mutex);
+      return actions;
+    } catch (...) {
+      stop_and_join();
+      cleanup();
+      throw;
+    }
+  }
+#endif
+
   bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state) {
     return should_publish_stream_ended_after_terminate(had_running_app, active_sessions, session_state);
   }
@@ -2572,6 +3080,84 @@ namespace proc {
     _session_lifecycle_gate->finish_launch();
   }
 
+#ifdef __linux__
+  void proc_t::stop_steam_big_picture_input_guard() {
+    auto runtime = std::move(_steam_big_picture_guard);
+    if (!runtime) {
+      return;
+    }
+
+    runtime->stop_requested.store(true, std::memory_order_release);
+    if (runtime->worker.joinable()) {
+      runtime->worker.join();
+    }
+    BOOST_LOG(info) << "steam_input_guard: stopped"sv;
+  }
+
+  std::shared_ptr<const steam_big_picture_guard_snapshot_t> proc_t::snapshot_steam_big_picture_input_guard(
+    bool use_cage_compositor,
+    bool mirror_desktop
+  ) const {
+    if (!steam_big_picture_input_guard_enabled(_app, use_cage_compositor, mirror_desktop)) {
+      return {};
+    }
+
+    auto snapshot = std::make_shared<steam_big_picture_guard_snapshot_t>();
+    snapshot->log_path = steam_game_process_log_path(_env);
+    if (snapshot->log_path.empty()) {
+      BOOST_LOG(warning) << "steam_input_guard: HOME is unavailable; compatibility guard disabled"sv;
+      return {};
+    }
+    snapshot->identity = steam_game_process_log_identity(snapshot->log_path);
+    if (snapshot->identity) {
+      std::error_code size_ec;
+      snapshot->offset = std::filesystem::file_size(snapshot->log_path, size_ec);
+      if (size_ec) {
+        BOOST_LOG(warning) << "steam_input_guard: could not snapshot Steam log EOF; compatibility guard disabled: "sv
+                           << size_ec.message();
+        return {};
+      }
+    }
+    return snapshot;
+  }
+
+  void proc_t::start_steam_big_picture_input_guard(
+    const boost::process::v1::environment &launch_env,
+    std::shared_ptr<const steam_big_picture_guard_snapshot_t> snapshot
+  ) {
+    stop_steam_big_picture_input_guard();
+    if (!snapshot) {
+      return;
+    }
+
+    const auto reference_command = !_app.detached.empty() ? _app.detached.front() :
+                                   !_app.cmd.empty() ? _app.cmd : "steam"s;
+    auto runtime = std::make_shared<steam_big_picture_guard_runtime_t>();
+    const steam_big_picture_action_dispatch_t dispatch_action = [reference_command, launch_env](std::string_view action) {
+      return dispatch_steam_big_picture_action(reference_command, action, launch_env);
+    };
+    try {
+      runtime->worker = std::thread([runtime, snapshot, dispatch_action]() {
+        run_steam_big_picture_input_guard(
+          runtime,
+          snapshot->log_path,
+          snapshot->identity,
+          snapshot->offset,
+          dispatch_action
+        );
+      });
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "steam_input_guard: could not start watcher; compatibility guard disabled: "sv
+                         << e.what();
+      return;
+    } catch (...) {
+      BOOST_LOG(warning) << "steam_input_guard: could not start watcher; compatibility guard disabled"sv;
+      return;
+    }
+    _steam_big_picture_guard = std::move(runtime);
+  }
+#endif
+
   int proc_t::execute_impl(
     const ctx_t& app,
     std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
@@ -2611,6 +3197,10 @@ namespace proc {
     if (use_cage_compositor_for_session) {
       terminate_isolated_session_processes("before launching isolated cage session"sv);
     }
+    const auto steam_guard_snapshot = snapshot_steam_big_picture_input_guard(
+      use_cage_compositor_for_session,
+      launch_session && launch_session->mirror_desktop
+    );
 #endif
 
     this->initial_display = config::video.output_name;
@@ -3973,6 +4563,22 @@ namespace proc {
       }
     }
 
+#ifdef __linux__
+    auto steam_guard_env = _env;
+    if (use_cage_compositor_for_session && cage_display_router::is_running()) {
+      const auto cage_socket = cage_display_router::get_wayland_socket();
+      if (!cage_socket.empty()) {
+        steam_guard_env["WAYLAND_DISPLAY"] = cage_socket;
+        steam_guard_env["AT_SPI_BUS_ADDRESS"] = "";
+      }
+      const auto cage_display = cage_display_router::get_x11_display();
+      if (!cage_display.empty()) {
+        steam_guard_env["DISPLAY"] = cage_display;
+      }
+    }
+    start_steam_big_picture_input_guard(steam_guard_env, steam_guard_snapshot);
+#endif
+
     _app_launch_time = std::chrono::steady_clock::now();
 
   #ifdef _WIN32
@@ -4322,6 +4928,10 @@ namespace proc {
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     std::error_code ec;
     placebo = false;
+
+#ifdef __linux__
+    stop_steam_big_picture_input_guard();
+#endif
 
     if (!immediate) {
       terminate_process_group(_process, _process_group, _app.exit_timeout);
