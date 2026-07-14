@@ -556,19 +556,39 @@ namespace rtsp_stream {
       });
     }
 
-    void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+    template<class Dispatch, class Reject>
+    bool dispatch_control_command(
+      launch_session_t &session,
+      Dispatch &&on_dispatch,
+      Reject &&on_reject
+    ) {
       if (!control_command_admissible(session)) {
-        BOOST_LOG(debug) << "Rejecting RTSP command for an inadmissible launch session"sv;
-        boost::system::error_code ec;
-        sock.close(ec);
-        return;
+        std::forward<Reject>(on_reject)();
+        return false;
       }
 
-      auto func = _map_cmd_cb.find(req->message.request.command);
-      if (func != std::end(_map_cmd_cb)) {
-        func->second(this, sock, session, std::move(req));
-      } else {
-        cmd_not_found(sock, session, std::move(req));
+      std::forward<Dispatch>(on_dispatch)();
+      return true;
+    }
+
+    void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+      if (!dispatch_control_command(
+            session,
+            [&]() {
+              auto func = _map_cmd_cb.find(req->message.request.command);
+              if (func != std::end(_map_cmd_cb)) {
+                func->second(this, sock, session, std::move(req));
+              } else {
+                cmd_not_found(sock, session, std::move(req));
+              }
+            },
+            [&sock]() {
+              BOOST_LOG(debug) << "Rejecting RTSP command for an inadmissible launch session"sv;
+              boost::system::error_code ec;
+              sock.close(ec);
+            }
+          )) {
+        return;
       }
 
       boost::system::error_code ec;
@@ -983,6 +1003,18 @@ namespace rtsp_stream {
 
   bool control_command_admissible_for_tests(const launch_session_t &launch_session) {
     return server.control_command_admissible(launch_session);
+  }
+
+  bool dispatch_control_command_for_tests(
+    launch_session_t &launch_session,
+    std::function<void()> on_dispatch,
+    std::function<void()> on_reject
+  ) {
+    return server.dispatch_control_command(
+      launch_session,
+      std::move(on_dispatch),
+      std::move(on_reject)
+    );
   }
 
   void reset_cleanup_call_count_for_tests() {

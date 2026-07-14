@@ -10,6 +10,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
   std::string read_linux_audio_source() {
@@ -24,14 +25,105 @@ namespace {
     return out.str();
   }
 
-  std::size_t count_occurrences(const std::string &text, const std::string &needle) {
-    std::size_t count = 0;
-    std::size_t pos = 0;
-    while ((pos = text.find(needle, pos)) != std::string::npos) {
-      ++count;
-      pos += needle.size();
+  std::size_t leading_spaces(const std::string &line) {
+    return line.find_first_not_of(' ');
+  }
+
+  std::vector<std::string> operation_contract_violations(const std::string &source) {
+    std::vector<std::string> lines;
+    std::istringstream input {source};
+    for (std::string line; std::getline(input, line);) {
+      lines.emplace_back(std::move(line));
     }
-    return count;
+
+    std::vector<std::string> violations;
+    const std::regex operation_declaration {R"(^([ ]*)op_t[ ]+([A-Za-z_][A-Za-z0-9_]*)[ ]*\{)"};
+    std::size_t operation_count = 0;
+
+    for (std::size_t line_index = 0; line_index < lines.size(); ++line_index) {
+      std::smatch match;
+      if (!std::regex_search(lines[line_index], match, operation_declaration)) {
+        continue;
+      }
+
+      ++operation_count;
+      const auto indentation = match[1].str().size();
+      const auto variable = match[2].str();
+
+      std::size_t scope_begin = 0;
+      for (auto previous = line_index; previous > 0; --previous) {
+        const auto &line = lines[previous - 1];
+        const auto previous_indentation = leading_spaces(line);
+        if (previous_indentation != std::string::npos &&
+            previous_indentation < indentation &&
+            line.find('{') != std::string::npos) {
+          scope_begin = previous;
+          break;
+        }
+      }
+
+      std::size_t scope_end = lines.size();
+      for (auto following = line_index + 1; following < lines.size(); ++following) {
+        const auto following_indentation = leading_spaces(lines[following]);
+        if (following_indentation != std::string::npos && following_indentation < indentation) {
+          scope_end = following;
+          break;
+        }
+      }
+
+      std::size_t lock_count = 0;
+      for (auto candidate = scope_begin; candidate < line_index; ++candidate) {
+        if (leading_spaces(lines[candidate]) == indentation &&
+            lines[candidate].find("mainloop_lock_t ") != std::string::npos) {
+          ++lock_count;
+        }
+      }
+      if (lock_count != 1) {
+        violations.emplace_back(
+          "operation '" + variable + "' on line " + std::to_string(line_index + 1) +
+          " must have exactly one preceding same-scope mainloop lock"
+        );
+      }
+
+      const std::regex matching_wait {
+        "wait_for_operation[ ]*\\([ ]*" + variable + "[ ]*\\)"
+      };
+      std::size_t wait_count = 0;
+      for (auto candidate = line_index + 1; candidate < scope_end; ++candidate) {
+        wait_count += std::distance(
+          std::sregex_iterator(lines[candidate].begin(), lines[candidate].end(), matching_wait),
+          std::sregex_iterator()
+        );
+      }
+      if (wait_count != 1) {
+        violations.emplace_back(
+          "operation '" + variable + "' on line " + std::to_string(line_index + 1) +
+          " must have exactly one matching same-scope wait"
+        );
+      }
+    }
+
+    if (operation_count == 0) {
+      violations.emplace_back("no PulseAudio operations found");
+    }
+
+    const std::regex wait_recheck_loop {
+      R"(while[ ]*\([ ]*pa_operation_get_state[ ]*\([ ]*op\.get\(\)[ ]*\)[ ]*==[ ]*PA_OPERATION_RUNNING[ ]*\))"
+    };
+    if (!std::regex_search(source, wait_recheck_loop)) {
+      violations.emplace_back("wait_for_operation must recheck PA_OPERATION_RUNNING in a while loop");
+    }
+
+    return violations;
+  }
+
+  std::string replace_once(std::string source, const std::string &needle, const std::string &replacement) {
+    const auto position = source.find(needle);
+    if (position == std::string::npos || source.find(needle, position + needle.size()) != std::string::npos) {
+      return {};
+    }
+    source.replace(position, needle.size(), replacement);
+    return source;
   }
 }
 
@@ -57,11 +149,60 @@ TEST(PulseAudioMainloopContractTest, SerializesContextAndOperationAccessWithThre
   EXPECT_EQ(server_source.find("alarm->wait()"), std::string::npos);
   EXPECT_EQ(server_source.find("move_alarm->wait()"), std::string::npos);
 
-  const std::regex operation_local {R"(\bop_t\s+[A-Za-z_][A-Za-z0-9_]*\s*\{)"};
-  const auto operation_locals = std::distance(
-    std::sregex_iterator(server_source.begin(), server_source.end(), operation_local),
-    std::sregex_iterator()
+  const auto violations = operation_contract_violations(server_source);
+  EXPECT_TRUE(violations.empty()) << (violations.empty() ? "" : violations.front());
+}
+
+TEST(PulseAudioMainloopContractTest, RejectsOperationWithoutSameScopeLock) {
+  const auto source = read_linux_audio_source();
+  ASSERT_FALSE(source.empty());
+
+  const auto mutant = replace_once(
+    source,
+    "      int load_null(const char *name, const std::uint8_t *channel_mapping, int channels) {\n"
+    "        auto alarm = safe::make_alarm<int>();\n"
+    "        mainloop_lock_t lock {loop.get()};\n\n"
+    "        op_t op {",
+    "      int load_null(const char *name, const std::uint8_t *channel_mapping, int channels) {\n"
+    "        auto alarm = safe::make_alarm<int>();\n\n"
+    "        op_t op {"
   );
-  const auto operation_waits = count_occurrences(server_source, "wait_for_operation(") - 1;
-  EXPECT_EQ(operation_locals, operation_waits);
+  ASSERT_FALSE(mutant.empty());
+  EXPECT_FALSE(operation_contract_violations(mutant).empty());
+}
+
+TEST(PulseAudioMainloopContractTest, RejectsOneShotOperationWait) {
+  const auto source = read_linux_audio_source();
+  ASSERT_FALSE(source.empty());
+
+  const auto mutant = replace_once(
+    source,
+    "while (pa_operation_get_state(op.get()) == PA_OPERATION_RUNNING) {",
+    "if (pa_operation_get_state(op.get()) == PA_OPERATION_RUNNING) {"
+  );
+  ASSERT_FALSE(mutant.empty());
+  EXPECT_FALSE(operation_contract_violations(mutant).empty());
+}
+
+TEST(PulseAudioMainloopContractTest, RejectsDuplicateAndMissingOperationWaits) {
+  const auto source = read_linux_audio_source();
+  ASSERT_FALSE(source.empty());
+
+  auto mutant = replace_once(
+    source,
+    "if (!wait_for_operation(op) || !alarm->status()) {\n"
+    "          BOOST_LOG(error) << \"Null-sink load operation was cancelled\"sv;",
+    "if (!wait_for_operation(op) || !wait_for_operation(op) || !alarm->status()) {\n"
+    "          BOOST_LOG(error) << \"Null-sink load operation was cancelled\"sv;"
+  );
+  ASSERT_FALSE(mutant.empty());
+  mutant = replace_once(
+    std::move(mutant),
+    "if (!wait_for_operation(op) || !alarm->status()) {\n"
+    "          BOOST_LOG(error) << \"Null-sink unload operation was cancelled for index [\"sv << i << ']';",
+    "if (!alarm->status()) {\n"
+    "          BOOST_LOG(error) << \"Null-sink unload operation was cancelled for index [\"sv << i << ']';"
+  );
+  ASSERT_FALSE(mutant.empty());
+  EXPECT_GE(operation_contract_violations(mutant).size(), 2u);
 }

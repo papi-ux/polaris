@@ -398,6 +398,25 @@ TEST(RtspLaunchHandoffTests, StartedControlCommandsRequireMatchingLiveSessionSlo
   EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
 }
 
+TEST(RtspLaunchHandoffTests, CancelledControlCommandRejectsWithoutInvokingHandler) {
+  rtsp_stream::launch_session_t session {};
+  session.cancel();
+  bool handler_invoked = false;
+  bool rejection_invoked = false;
+
+  EXPECT_FALSE(rtsp_stream::dispatch_control_command_for_tests(
+    session,
+    [&handler_invoked]() {
+      handler_invoked = true;
+    },
+    [&rejection_invoked]() {
+      rejection_invoked = true;
+    }
+  ));
+  EXPECT_FALSE(handler_invoked);
+  EXPECT_TRUE(rejection_invoked);
+}
+
 TEST(RtspLaunchHandoffTests, AcceptAndDispatchUseSlotAwareCommandAdmission) {
   const auto source = read_rtsp_source_for_contract();
   ASSERT_FALSE(source.empty());
@@ -408,7 +427,7 @@ TEST(RtspLaunchHandoffTests, AcceptAndDispatchUseSlotAwareCommandAdmission) {
   ASSERT_NE(handle_end, std::string::npos);
 
   const auto handle_body = source.substr(handle_start, handle_end - handle_start);
-  const auto dispatch_gate = handle_body.find("if (!control_command_admissible(session))");
+  const auto dispatch_gate = handle_body.find("if (!dispatch_control_command(");
   const auto command_dispatch = handle_body.find("_map_cmd_cb.find");
   EXPECT_NE(dispatch_gate, std::string::npos);
   ASSERT_NE(command_dispatch, std::string::npos);

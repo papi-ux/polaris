@@ -179,6 +179,11 @@ namespace rtsp_stream {
   std::uint64_t launch_timer_generation_for_tests();
   bool expire_pending_launch_for_tests(uint32_t launch_session_id, std::uint64_t timer_generation);
   bool control_command_admissible_for_tests(const launch_session_t &launch_session);
+  bool dispatch_control_command_for_tests(
+    launch_session_t &launch_session,
+    std::function<void()> on_dispatch,
+    std::function<void()> on_reject
+  );
   void reset_cleanup_call_count_for_tests();
   unsigned cleanup_call_count_for_tests();
   void set_cleanup_unlocked_probe_for_tests(std::function<void()> probe);
