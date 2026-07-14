@@ -360,7 +360,45 @@ TEST(RtspLaunchHandoffTests, FollowupControlConnectionsRemainAdmissibleAfterSetu
   EXPECT_FALSE(session.accepts_control_connection());
 }
 
-TEST(RtspLaunchHandoffTests, CancelledAcceptedSocketsAreRejectedBeforeCommandDispatch) {
+TEST(RtspLaunchHandoffTests, StartedControlCommandsRequireMatchingLiveSessionSlot) {
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::launch_session_t session {};
+  session.id = 5103;
+  session.unique_id = "started-command-admission";
+  session.session_token = "started-command-admission-token";
+
+  ASSERT_TRUE(session.try_begin_setup_handoff());
+  ASSERT_TRUE(session.commit_setup_start());
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+
+  rtsp_stream::launch_session_t reconnect {};
+  reconnect.id = 5104;
+  reconnect.unique_id = session.unique_id;
+  reconnect.session_token = session.session_token;
+  ASSERT_TRUE(reconnect.try_begin_setup_handoff());
+  ASSERT_TRUE(reconnect.commit_setup_start());
+  rtsp_stream::add_session_for_tests(reconnect, false);
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::set_cleanup_session_probe_for_tests({});
+
+  rtsp_stream::add_session_for_tests(session, true);
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::set_cleanup_session_probe_for_tests({});
+
+  rtsp_stream::add_session_for_tests(session, false);
+  EXPECT_TRUE(rtsp_stream::control_command_admissible_for_tests(session));
+
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::set_cleanup_session_probe_for_tests({});
+  EXPECT_FALSE(rtsp_stream::control_command_admissible_for_tests(session));
+}
+
+TEST(RtspLaunchHandoffTests, AcceptAndDispatchUseSlotAwareCommandAdmission) {
   const auto source = read_rtsp_source_for_contract();
   ASSERT_FALSE(source.empty());
 
@@ -370,11 +408,22 @@ TEST(RtspLaunchHandoffTests, CancelledAcceptedSocketsAreRejectedBeforeCommandDis
   ASSERT_NE(handle_end, std::string::npos);
 
   const auto handle_body = source.substr(handle_start, handle_end - handle_start);
-  const auto cancelled_gate = handle_body.find("if (!session.accepts_control_connection())");
+  const auto dispatch_gate = handle_body.find("if (!control_command_admissible(session))");
   const auto command_dispatch = handle_body.find("_map_cmd_cb.find");
-  ASSERT_NE(cancelled_gate, std::string::npos);
+  EXPECT_NE(dispatch_gate, std::string::npos);
   ASSERT_NE(command_dispatch, std::string::npos);
-  EXPECT_LT(cancelled_gate, command_dispatch);
+  if (dispatch_gate != std::string::npos) {
+    EXPECT_LT(dispatch_gate, command_dispatch);
+  }
+
+  const auto accept_start = handle_end;
+  const auto accept_end = source.find("void map(const std::string_view &type, cmd_func_t cb)", accept_start);
+  ASSERT_NE(accept_end, std::string::npos);
+  const auto accept_body = source.substr(accept_start, accept_end - accept_start);
+  EXPECT_NE(
+    accept_body.find("if (launch_session && control_command_admissible(*launch_session))"),
+    std::string::npos
+  );
 }
 
 TEST(RtspLaunchHandoffTests, SnapshotAndTeardownRetainClaimedHandoffBeforeSlotInsertion) {

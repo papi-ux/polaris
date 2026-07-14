@@ -536,9 +536,29 @@ namespace rtsp_stream {
       return 0;
     }
 
-    void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+    bool control_command_admissible(const launch_session_t &session) {
       if (!session.accepts_control_connection()) {
-        BOOST_LOG(debug) << "Rejecting RTSP command for cancelled launch session"sv;
+        return false;
+      }
+      if (session.is_pending_or_handoff()) {
+        return true;
+      }
+      if (session.session_token.empty()) {
+        return false;
+      }
+
+      auto lg = _session_slots.lock();
+      return std::any_of(_session_slots->begin(), _session_slots->end(), [&session](const auto &slot) {
+        return slot &&
+               stream::session::state(*slot) != stream::session::state_e::STOPPING &&
+               stream::session::launch_session_id(*slot) == session.id &&
+               stream::session::session_token(*slot) == session.session_token;
+      });
+    }
+
+    void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+      if (!control_command_admissible(session)) {
+        BOOST_LOG(debug) << "Rejecting RTSP command for an inadmissible launch session"sv;
         boost::system::error_code ec;
         sock.close(ec);
         return;
@@ -567,7 +587,7 @@ namespace rtsp_stream {
       auto socket = std::move(next_socket);
 
       auto launch_session {launch_event.view(0s)};
-      if (launch_session && launch_session->accepts_control_connection()) {
+      if (launch_session && control_command_admissible(*launch_session)) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
@@ -959,6 +979,10 @@ namespace rtsp_stream {
 
   bool expire_pending_launch_for_tests(uint32_t launch_session_id, std::uint64_t timer_generation) {
     return server.expire_pending_launch(launch_session_id, timer_generation);
+  }
+
+  bool control_command_admissible_for_tests(const launch_session_t &launch_session) {
+    return server.control_command_admissible(launch_session);
   }
 
   void reset_cleanup_call_count_for_tests() {
