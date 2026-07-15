@@ -1,8 +1,12 @@
 import {
+  AUTH_PROBE_STATE,
+  clearPolarisReloadParam,
   getAuthRedirectPath,
   getIpv4LoopbackUrl,
+  getSafeAuthReturnTarget,
   isDynamicImportError,
   isPublicRoute,
+  probeWebUiAuth,
   redirectToIpv4Loopback,
   wrapFetchWithCsrfToken,
 } from './router-helpers.js'
@@ -70,6 +74,7 @@ describe('router helpers', () => {
     expect(isPublicRoute('/login')).toBe(true)
     expect(isPublicRoute('/welcome')).toBe(true)
     expect(isPublicRoute('/recover')).toBe(true)
+    expect(isPublicRoute('/reconnecting')).toBe(true)
     expect(isPublicRoute('/config')).toBe(false)
   })
 
@@ -81,6 +86,14 @@ describe('router helpers', () => {
     expect(getAuthRedirectPath({
       redirected: true,
       url: 'https://127.0.0.1:47990/login',
+    })).toBe('/login')
+    expect(getAuthRedirectPath({
+      redirected: true,
+      url: 'https://127.0.0.1:47990/WELCOME/',
+    })).toBe('/welcome')
+    expect(getAuthRedirectPath({
+      redirected: true,
+      url: 'https://127.0.0.1:47990/LOGIN/',
     })).toBe('/login')
   })
 
@@ -143,4 +156,95 @@ describe('router helpers', () => {
     expect(calls[2].options.headers['X-CSRF-Token']).toBe('csrf-456')
     expect(document.querySelector('meta[name="csrf-token"]').content).toBe('csrf-456')
   })
+
+  it('cancels an indeterminate response body before retrying later', async () => {
+    const cancel = vi.fn(async () => {})
+    const result = await probeWebUiAuth(async () => ({
+      body: { cancel },
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      ok: false,
+      redirected: false,
+      status: 503,
+      url: 'https://127.0.0.1:47990/api/config',
+    }))
+
+    expect(result).toEqual({ state: AUTH_PROBE_STATE.unavailable })
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+
+  it('requires the authenticated config response contract', async () => {
+    const response = (body) => ({
+      body: { cancel: vi.fn(async () => {}) },
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: vi.fn(async () => body),
+      ok: true,
+      redirected: false,
+      status: 200,
+      url: 'https://127.0.0.1:47990/api/config',
+    })
+
+    for (const body of [null, [], {}, { status: false }, { status: 'true' }]) {
+      await expect(probeWebUiAuth(async () => response(body))).resolves.toEqual({
+        state: AUTH_PROBE_STATE.unavailable,
+      })
+    }
+
+    await expect(probeWebUiAuth(async () => ({
+      ...response({ status: true }),
+      json: vi.fn(async () => { throw new SyntaxError('malformed JSON') }),
+    }))).resolves.toEqual({ state: AUTH_PROBE_STATE.unavailable })
+
+    const config = { status: true, platform: 'linux' }
+    await expect(probeWebUiAuth(async () => response(config))).resolves.toEqual({
+      state: AUTH_PROBE_STATE.authenticated,
+      config,
+    })
+  })
+
+  it('accepts only the application/json media type for authenticated config', async () => {
+    const response = (contentType) => ({
+      body: { cancel: vi.fn(async () => {}) },
+      headers: new Headers({ 'content-type': contentType }),
+      json: vi.fn(async () => ({ status: true, platform: 'linux' })),
+      ok: true,
+      redirected: false,
+      status: 200,
+      url: 'https://127.0.0.1:47990/api/config',
+    })
+
+    for (const contentType of ['application/json', 'Application/JSON ; charset=UTF-8']) {
+      await expect(probeWebUiAuth(async () => response(contentType))).resolves.toMatchObject({
+        state: AUTH_PROBE_STATE.authenticated,
+      })
+    }
+
+    for (const contentType of ['application/jsonp', 'application/json-patch+json', 'text/application/json']) {
+      await expect(probeWebUiAuth(async () => response(contentType))).resolves.toEqual({
+        state: AUTH_PROBE_STATE.unavailable,
+      })
+    }
+  })
+
+  it('rejects case and trailing-slash variants of public return targets', () => {
+    for (const target of ['/LOGIN', '/login/', '/Reconnecting', '/reconnecting/', '/WELCOME/', '/Recover/']) {
+      expect(getSafeAuthReturnTarget(target)).toBe('/')
+    }
+    expect(getSafeAuthReturnTarget('//attacker.example')).toBe('/')
+    expect(getSafeAuthReturnTarget('/apps?filter=recent')).toBe('/apps?filter=recent')
+  })
+
+  it('preserves Vue Router history state while removing polarisReload', () => {
+    const replaceState = vi.fn()
+    const routerState = { back: '/login', current: '/apps', forward: null, position: 4 }
+
+    expect(clearPolarisReloadParam(
+      { href: 'https://polaris.test/?foo=1&polarisReload=123#/apps' },
+      replaceState,
+      routerState
+    )).toBe(true)
+
+    expect(replaceState).toHaveBeenCalledWith(routerState, '', '/?foo=1#/apps')
+  })
+
 })

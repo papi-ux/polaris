@@ -180,6 +180,8 @@ import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
 import { cycleTheme, getNextTheme, getTheme, getThemeMeta, initTheme } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
+import { webUiAuthenticated } from './auth-state.js'
+import { isPublicRoute } from './router-helpers.js'
 import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-metadata.js'
 import { buildUpdateCenterState } from './update-center.js'
 
@@ -257,10 +259,8 @@ const sidebarUpdateStatusLightClass = computed(() => {
       return 'bg-green-400 shadow-[0_0_14px_rgba(74,222,128,0.55)]'
   }
 })
-const authRoutes = new Set(['/login', '/welcome', '/recover'])
-
 const showNav = computed(() => {
-  return !authRoutes.has(route.path)
+  return webUiAuthenticated.value && !isPublicRoute(route.path)
 })
 
 async function loadAppVersion() {
@@ -364,8 +364,8 @@ watch(() => route.path, () => { sidebarOpen.value = false })
 onMounted(() => {
   initTheme()
   window.addEventListener('keydown', handleKeydown)
-  void loadAppVersion()
   if (showNav.value) {
+    void loadAppVersion()
     void refreshSidebarUpdateStatus()
   }
 })
