@@ -11,6 +11,11 @@ import {
   markWebUiAuthenticated,
   markWebUiUnauthenticated,
 } from './auth-state.js'
+import {
+  beginWebUiAuthProbeGeneration,
+  isCurrentWebUiAuthProbeGeneration,
+  runWebUiAuthProbeForGeneration,
+} from './auth-probe-coordinator.js'
 
 function redirectToLoginWithReturnTarget(to) {
   return {
@@ -23,13 +28,22 @@ function redirectToLoginWithReturnTarget(to) {
 
 export function createWebUiAuthGuard(probeAuth = probeWebUiAuth) {
   return async function webUiAuthGuard(to) {
+    const generation = beginWebUiAuthProbeGeneration()
     const routePath = normalizeRoutePath(to.path)
     if (routePath === '/reconnecting') {
       return
     }
 
+    const runCurrentProbe = () => runWebUiAuthProbeForGeneration(
+      generation,
+      (signal) => probeAuth(window.fetch, window.location.href, signal)
+    )
+
     if (isPublicRoute(routePath) && routePath !== '/welcome') {
-      const result = await probeAuth()
+      const outcome = await runCurrentProbe()
+      if (!outcome.current || !isCurrentWebUiAuthProbeGeneration(generation)) return false
+      const result = outcome.result
+
       if (result.state === AUTH_PROBE_STATE.welcome) {
         markWebUiUnauthenticated()
         return '/welcome'
@@ -49,7 +63,10 @@ export function createWebUiAuthGuard(probeAuth = probeWebUiAuth) {
     if (!isPublicRoute(routePath)) {
       if (isWebUiAuthenticated()) return
 
-      const result = await probeAuth()
+      const outcome = await runCurrentProbe()
+      if (!outcome.current || !isCurrentWebUiAuthProbeGeneration(generation)) return false
+      const result = outcome.result
+
       if (result.state === AUTH_PROBE_STATE.welcome) {
         markWebUiUnauthenticated()
         return '/welcome'

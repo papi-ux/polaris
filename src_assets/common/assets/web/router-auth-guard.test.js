@@ -56,6 +56,14 @@ function response(status, body = { status: true }, overrides = {}) {
   }
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 async function loadGuard(fetchImpl) {
   vi.resetModules()
   harness.beforeEach.mockClear()
@@ -70,6 +78,75 @@ describe('router authentication guard', () => {
     document.head.innerHTML = '<meta name="csrf-token" content="csrf-test">'
     window.history.replaceState(null, '', '/#/')
     window.__POLARIS_AUTHENTICATED__ = false
+  })
+
+  it('ignores an older authenticated completion after a newer explicit rejection', async () => {
+    vi.resetModules()
+    const older = deferred()
+    const newer = deferred()
+    const probeAuth = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+    const { createWebUiAuthGuard } = await import('./router-auth.js')
+    const guard = createWebUiAuthGuard(probeAuth)
+
+    const olderDecision = guard({ path: '/apps', fullPath: '/apps' }, {})
+    const newerDecision = guard({ path: '/login', fullPath: '/login', query: {} }, {})
+
+    newer.resolve({ state: 'login' })
+    await expect(newerDecision).resolves.toBeUndefined()
+    expect(window.__POLARIS_AUTHENTICATED__).toBe(false)
+
+    older.resolve({ state: 'authenticated', config: { status: true, platform: 'linux' } })
+    await expect(olderDecision).resolves.toBe(false)
+    expect(window.__POLARIS_AUTHENTICATED__).toBe(false)
+  })
+
+  it.each(['login', 'welcome'])(
+    'ignores an older %s completion after a newer authenticated success',
+    async (olderState) => {
+      vi.resetModules()
+      const older = deferred()
+      const newer = deferred()
+      const probeAuth = vi.fn()
+        .mockReturnValueOnce(older.promise)
+        .mockReturnValueOnce(newer.promise)
+      const { createWebUiAuthGuard } = await import('./router-auth.js')
+      const guard = createWebUiAuthGuard(probeAuth)
+
+      const olderDecision = guard({ path: '/login', fullPath: '/login', query: {} }, {})
+      const newerDecision = guard({ path: '/apps', fullPath: '/apps' }, {})
+
+      newer.resolve({ state: 'authenticated', config: { status: true, platform: 'linux' } })
+      await expect(newerDecision).resolves.toBeUndefined()
+      expect(window.__POLARIS_AUTHENTICATED__).toBe(true)
+
+      older.resolve({ state: olderState })
+      await expect(olderDecision).resolves.toBe(false)
+      expect(window.__POLARIS_AUTHENTICATED__).toBe(true)
+    }
+  )
+
+  it('rechecks freshness after the coordinator resolves but before the guard resumes', async () => {
+    vi.resetModules()
+    const older = deferred()
+    const newer = deferred()
+    const probeAuth = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+    const { createWebUiAuthGuard } = await import('./router-auth.js')
+    const guard = createWebUiAuthGuard(probeAuth)
+
+    const olderDecision = guard({ path: '/apps', fullPath: '/apps' }, {})
+    older.resolve({ state: 'authenticated', config: { status: true, platform: 'linux' } })
+    await Promise.resolve()
+
+    const newerDecision = guard({ path: '/login', fullPath: '/login', query: {} }, {})
+    newer.resolve({ state: 'login' })
+
+    await expect(newerDecision).resolves.toBeUndefined()
+    await expect(olderDecision).resolves.toBe(false)
+    expect(window.__POLARIS_AUTHENTICATED__).toBe(false)
   })
 
   it('keeps a transient network failure out of the login flow', async () => {

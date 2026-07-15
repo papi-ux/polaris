@@ -30,7 +30,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   markWebUiAuthenticated,
@@ -42,6 +42,11 @@ import {
   getSafeAuthReturnTarget,
   probeWebUiAuth,
 } from '../router-helpers.js'
+import {
+  beginWebUiAuthProbeGeneration,
+  isCurrentWebUiAuthProbeGeneration,
+  runWebUiAuthProbeForGeneration,
+} from '../auth-probe-coordinator.js'
 
 const RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000]
 
@@ -49,9 +54,9 @@ const route = useRoute()
 const router = useRouter()
 const attempts = ref(0)
 const checking = ref(false)
-const returnTarget = getSafeAuthReturnTarget(route.query.redirect)
+const returnTarget = computed(() => getSafeAuthReturnTarget(route.query.redirect))
 
-let activeProbeController = null
+let viewProbeGeneration = 0
 let retryTimer = null
 let stopped = false
 
@@ -69,30 +74,40 @@ function scheduleRetry() {
 }
 
 async function checkHost() {
-  if (checking.value || stopped) return
+  if (stopped) return
 
   clearRetryTimer()
+  const viewGeneration = ++viewProbeGeneration
+  const target = returnTarget.value
   checking.value = true
   attempts.value += 1
   let retry = false
 
-  const controller = new AbortController()
-  activeProbeController = controller
+  const probeGeneration = beginWebUiAuthProbeGeneration()
   try {
-    const result = await probeWebUiAuth(window.fetch, window.location.href, controller.signal)
-    if (stopped) return
+    const outcome = await runWebUiAuthProbeForGeneration(
+      probeGeneration,
+      (signal) => probeWebUiAuth(window.fetch, window.location.href, signal)
+    )
+    if (
+      stopped
+      || viewGeneration !== viewProbeGeneration
+      || !outcome.current
+      || !isCurrentWebUiAuthProbeGeneration(probeGeneration)
+    ) return
 
+    const result = outcome.result
     if (result.state === AUTH_PROBE_STATE.authenticated) {
       markWebUiAuthenticated(result.config)
       clearPolarisReloadParam()
-      await router.replace(returnTarget)
+      await router.replace(target)
       return
     }
     if (result.state === AUTH_PROBE_STATE.login) {
       markWebUiUnauthenticated()
       await router.replace({
         path: '/login',
-        query: { redirect: returnTarget },
+        query: { redirect: target },
       })
       return
     }
@@ -106,18 +121,28 @@ async function checkHost() {
   } catch {
     retry = true
   } finally {
-    if (activeProbeController === controller) {
-      activeProbeController = null
-    }
+    if (viewGeneration !== viewProbeGeneration) return
     checking.value = false
     if (retry) scheduleRetry()
   }
 }
 
 function retryNow() {
+  if (checking.value) return
   clearRetryTimer()
   void checkHost()
 }
+
+watch(() => route.fullPath, () => {
+  if (stopped) return
+
+  clearRetryTimer()
+  viewProbeGeneration += 1
+  checking.value = false
+  attempts.value = 0
+  beginWebUiAuthProbeGeneration()
+  void checkHost()
+})
 
 onMounted(() => {
   void checkHost()
@@ -125,8 +150,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopped = true
-  activeProbeController?.abort()
-  activeProbeController = null
+  viewProbeGeneration += 1
+  beginWebUiAuthProbeGeneration()
   clearRetryTimer()
 })
 </script>

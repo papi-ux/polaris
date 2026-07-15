@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { initializeWebUiAuthState } from '../auth-state.js'
+import { initializeWebUiAuthState, isWebUiAuthenticated } from '../auth-state.js'
 import ReconnectingView from './ReconnectingView.vue'
 
 const routerHarness = vi.hoisted(() => ({
@@ -164,6 +164,30 @@ describe('ReconnectingView', () => {
 
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(signal.aborted).toBe(true)
+    expect(routerHarness.replace).not.toHaveBeenCalled()
+  })
+
+  it('ignores a late authenticated response after unmount when fetch ignores abort', async () => {
+    let resolveFetch
+    let signal
+    fetch.mockImplementationOnce((_url, options) => {
+      signal = options.signal
+      return new Promise((resolve) => {
+        resolveFetch = resolve
+      })
+    })
+
+    const wrapper = mount(ReconnectingView)
+    await flushPromises()
+    wrapper.unmount()
+
+    expect(signal.aborted).toBe(true)
+    resolveFetch(response(200, { status: true, platform: 'linux' }))
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(8000)
+
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(isWebUiAuthenticated()).toBe(false)
     expect(routerHarness.replace).not.toHaveBeenCalled()
   })
 

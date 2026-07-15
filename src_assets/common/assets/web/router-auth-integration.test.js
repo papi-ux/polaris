@@ -23,12 +23,21 @@ function response(status, body = { status: true }, overrides = {}) {
   }
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 function makeRouter() {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: EmptyView },
       { path: '/apps', component: EmptyView },
+      { path: '/config', component: EmptyView },
       { path: '/login', component: EmptyView },
       { path: '/welcome', component: EmptyView },
       { path: '/recover', component: EmptyView },
@@ -56,6 +65,64 @@ describe('real router auth recovery', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('restarts a reused reconnect view and only navigates to the latest query target', async () => {
+    const older = deferred()
+    const newer = deferred()
+    fetch
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+    const router = makeRouter()
+    const wrapper = await mountRoute(router, '/reconnecting?redirect=/apps')
+
+    try {
+      await router.push('/reconnecting?redirect=/config')
+      await flushPromises()
+      expect(fetch).toHaveBeenCalledTimes(2)
+
+      newer.resolve(response(200, { status: true, platform: 'linux' }))
+      await flushPromises()
+      expect(router.currentRoute.value.fullPath).toBe('/config')
+
+      older.resolve(response(200, { status: true, platform: 'linux' }))
+      await flushPromises()
+      expect(router.currentRoute.value.fullPath).toBe('/config')
+    } finally {
+      older.resolve(response(503))
+      newer.resolve(response(503))
+      wrapper.unmount()
+    }
+  })
+
+  it('restarts a reused reconnect view when a query change keeps the same safe target', async () => {
+    const older = deferred()
+    const newer = deferred()
+    fetch
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+    const router = makeRouter()
+    const wrapper = await mountRoute(router, '/reconnecting')
+
+    try {
+      await router.push('/reconnecting?redirect=/')
+      await flushPromises()
+      expect(fetch).toHaveBeenCalledTimes(2)
+
+      newer.resolve(response(200, { status: true, platform: 'linux' }))
+      await flushPromises()
+      expect(router.currentRoute.value.fullPath).toBe('/')
+      expect(isWebUiAuthenticated()).toBe(true)
+
+      older.resolve(response(401))
+      await flushPromises()
+      expect(router.currentRoute.value.fullPath).toBe('/')
+      expect(isWebUiAuthenticated()).toBe(true)
+    } finally {
+      older.resolve(response(503))
+      newer.resolve(response(503))
+      wrapper.unmount()
+    }
   })
 
   it('hands reconnect success to the protected target without a second probe', async () => {
