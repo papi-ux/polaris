@@ -2,16 +2,16 @@ import './app.css'
 import { createApp } from 'vue'
 import App from './App.vue'
 import DashboardView from './views/DashboardView.vue'
+import ReconnectingView from './views/ReconnectingView.vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import i18n from './locale'
 import {
-  getAuthRedirectPath,
   isDynamicImportError,
-  isPublicRoute,
   redirectToIpv4Loopback,
   wrapFetchWithCsrfToken,
 } from './router-helpers.js'
-import { clearCachedConfig, primeCachedConfig } from './config-cache.js'
+import { initializeWebUiAuthState } from './auth-state.js'
+import { createWebUiAuthGuard } from './router-auth.js'
 
 // CSRF token from server-injected meta tag
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || ''
@@ -45,6 +45,7 @@ const routes = [
   { path: '/welcome', component: () => import(/* webpackChunkName: "welcome" */ './views/WelcomeView.vue') },
   { path: '/login', component: () => import(/* webpackChunkName: "login" */ './views/LoginView.vue') },
   { path: '/recover', component: () => import(/* webpackChunkName: "recover" */ './views/RecoveryView.vue') },
+  { path: '/reconnecting', component: ReconnectingView },
 ]
 
 const router = createRouter({
@@ -58,20 +59,10 @@ const router = createRouter({
   },
 })
 
-// Auth guard - redirect to login if not authenticated
-// Uses a cached auth flag to avoid making a fetch on every navigation,
-// which exhausts server connections when response bodies aren't consumed.
-let authed = false
-window.__POLARIS_AUTHENTICATED__ = false
-
-function redirectToLoginWithReturnTarget(to) {
-  return {
-    path: '/login',
-    query: {
-      redirect: to.fullPath || to.path || '/',
-    },
-  }
-}
+// Auth guard - distinguish confirmed logout from temporary host unavailability.
+// Shared state lets the reconnect view hand a successful probe back to the guard
+// without issuing a second request during route recovery.
+initializeWebUiAuthState()
 
 function dynamicImportReloadKey(to) {
   return `polaris:dynamic-import-reload:${to.fullPath || to.path || '/'}`
@@ -92,60 +83,7 @@ function reloadDynamicImportTarget(to) {
   return true
 }
 
-router.beforeEach(async (to, _from) => {
-  if (isPublicRoute(to.path) && to.path !== '/welcome') {
-    try {
-      const res = await fetch('./api/config', { credentials: 'include' })
-      if (getAuthRedirectPath(res) === '/welcome') {
-        window.__POLARIS_AUTHENTICATED__ = false
-        clearCachedConfig()
-        return '/welcome'
-      }
-    } catch {
-      // Keep public routes reachable if the first-run probe cannot complete.
-    }
-  }
-
-  if (!isPublicRoute(to.path)) {
-    if (authed) return
-    try {
-      const res = await fetch('./api/config', { credentials: 'include' })
-      const authRedirectPath = getAuthRedirectPath(res)
-      if (authRedirectPath === '/welcome') {
-        window.__POLARIS_AUTHENTICATED__ = false
-        clearCachedConfig()
-        return '/welcome'
-      }
-      if (authRedirectPath === '/login') {
-        window.__POLARIS_AUTHENTICATED__ = false
-        clearCachedConfig()
-        return redirectToLoginWithReturnTarget(to)
-      }
-      if (res.status === 401) {
-        window.__POLARIS_AUTHENTICATED__ = false
-        clearCachedConfig()
-        return redirectToLoginWithReturnTarget(to)
-      }
-      if (!res.ok) {
-        window.__POLARIS_AUTHENTICATED__ = false
-        clearCachedConfig()
-        return redirectToLoginWithReturnTarget(to)
-      }
-      const contentType = res.headers.get('content-type') || ''
-      if (contentType.includes('application/json')) {
-        primeCachedConfig(await res.json())
-      } else {
-        await res.text()
-      }
-      authed = true
-      window.__POLARIS_AUTHENTICATED__ = true
-    } catch (e) {
-      window.__POLARIS_AUTHENTICATED__ = false
-      clearCachedConfig()
-      return redirectToLoginWithReturnTarget(to)
-    }
-  }
-})
+router.beforeEach(createWebUiAuthGuard())
 
 router.afterEach((to) => {
   sessionStorage.removeItem(dynamicImportReloadKey(to))
