@@ -38,6 +38,12 @@ namespace web_session_store {
     io_error,
   };
 
+  enum class creation_status_e {
+    created,
+    credential_mismatch,
+    io_error,
+  };
+
   class manager_t {
   public:
     manager_t(std::filesystem::path path, std::string credential_fingerprint, policy_t policy);
@@ -48,6 +54,11 @@ namespace web_session_store {
 
     load_status_e load(clock_snapshot_t now);
     bool create(std::string_view session_id, clock_snapshot_t now);
+    creation_status_e create_for_fingerprint(
+      std::string_view session_id,
+      std::string_view expected_credential_fingerprint,
+      clock_snapshot_t now
+    );
     validation_status_e validate(std::string_view session_id, clock_snapshot_t now);
     bool invalidate(std::string_view session_id);
     bool invalidate_all();

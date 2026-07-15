@@ -87,27 +87,13 @@ namespace web_session_store {
              now.monotonic >= session.absolute_deadline || now.monotonic >= session.idle_deadline;
     }
 
-    bool ensure_parent() const {
-      const auto parent = path.parent_path();
-      if (parent.empty()) {
-        return true;
-      }
-      std::error_code ec;
-      std::filesystem::create_directories(parent, ec);
-      if (ec) {
-        BOOST_LOG(error) << "Couldn't create Web UI session state directory " << parent << ": " << ec.message();
-        return false;
-      }
-      return true;
-    }
-
-    bool persist(
+    private_state_file::write_result_t persist(
       const std::unordered_map<std::string, session_t> &state,
       std::string_view fingerprint
     ) const {
       if (path.empty() || !valid_policy(policy) || !is_valid_sha256_hex(fingerprint) ||
-          state.size() > policy.max_sessions || !ensure_parent()) {
-        return false;
+          state.size() > policy.max_sessions) {
+        return {private_state_file::write_status_e::not_committed};
       }
 
       std::vector<std::pair<std::string, session_t>> ordered(state.begin(), state.end());
@@ -122,7 +108,7 @@ namespace web_session_store {
       };
       for (const auto &[id, session] : ordered) {
         if (!is_valid_sha256_hex(id) || session.created_at < 0 || session.last_seen_at < session.created_at) {
-          return false;
+          return {private_state_file::write_status_e::not_committed};
         }
         root["sessions"].push_back({
           {"id", id},
@@ -133,7 +119,7 @@ namespace web_session_store {
 
       const auto payload = root.dump();
       if (payload.size() > policy.max_file_bytes) {
-        return false;
+        return {private_state_file::write_status_e::not_committed};
       }
       return private_state_file::write_atomic(path, payload);
     }
@@ -239,11 +225,16 @@ namespace web_session_store {
         });
       }
       impl_->sessions = std::move(imported);
-      if (pruned && !impl_->persist(impl_->sessions, impl_->credential_fingerprint)) {
-        BOOST_LOG(error) << "Couldn't durably prune expired Web UI sessions from " << impl_->path;
-        impl_->sessions.clear();
-        impl_->authorization_state_available = false;
-        return load_status_e::io_error;
+      if (pruned) {
+        const auto persisted = impl_->persist(impl_->sessions, impl_->credential_fingerprint);
+        if (persisted.status != private_state_file::write_status_e::committed) {
+          BOOST_LOG(error) << "Couldn't durably prune expired Web UI sessions from " << impl_->path;
+          if (persisted.status == private_state_file::write_status_e::not_committed) {
+            impl_->sessions.clear();
+          }
+          impl_->authorization_state_available = false;
+          return load_status_e::io_error;
+        }
       }
       impl_->authorization_state_available = true;
       return load_status_e::loaded;
@@ -255,28 +246,45 @@ namespace web_session_store {
   }
 
   bool manager_t::create(std::string_view session_id, clock_snapshot_t now) {
+    std::string expected_fingerprint;
+    {
+      std::lock_guard lock(impl_->mutex);
+      expected_fingerprint = impl_->credential_fingerprint;
+    }
+    return create_for_fingerprint(session_id, expected_fingerprint, now) == creation_status_e::created;
+  }
+
+  creation_status_e manager_t::create_for_fingerprint(
+    std::string_view session_id,
+    std::string_view expected_credential_fingerprint,
+    clock_snapshot_t now
+  ) {
     const auto id = canonical_sha256_hex(session_id);
-    if (id.empty()) {
-      return false;
+    const auto expected_fingerprint = canonical_sha256_hex(expected_credential_fingerprint);
+    if (id.empty() || expected_fingerprint.empty()) {
+      return creation_status_e::io_error;
     }
     const auto wall_now = unix_seconds(now.wall);
     if (wall_now < 0) {
-      return false;
+      return creation_status_e::io_error;
     }
 
     std::lock_guard lock(impl_->mutex);
     if (!impl_->configured()) {
-      return false;
+      return creation_status_e::io_error;
+    }
+    if (impl_->credential_fingerprint != expected_fingerprint) {
+      return creation_status_e::credential_mismatch;
     }
     if (std::any_of(impl_->sessions.begin(), impl_->sessions.end(), [&](const auto &entry) {
           return wall_now < entry.second.created_at || wall_now < entry.second.last_seen_at;
         })) {
-      return false;
+      return creation_status_e::io_error;
     }
     impl_->prune(now);
     auto staged = impl_->sessions;
     if (staged.contains(id)) {
-      return false;
+      return creation_status_e::io_error;
     }
     if (staged.size() >= impl_->policy.max_sessions) {
       const auto oldest = std::min_element(staged.begin(), staged.end(), [](const auto &lhs, const auto &rhs) {
@@ -289,7 +297,7 @@ namespace web_session_store {
         return lhs.first < rhs.first;
       });
       if (oldest == staged.end()) {
-        return false;
+        return creation_status_e::io_error;
       }
       staged.erase(oldest);
     }
@@ -301,12 +309,17 @@ namespace web_session_store {
       .idle_deadline = now.monotonic + impl_->policy.idle_timeout,
       .last_persisted_monotonic = now.monotonic,
     });
-    if (!impl_->persist(staged, impl_->credential_fingerprint)) {
-      return false;
+    const auto persisted = impl_->persist(staged, impl_->credential_fingerprint);
+    if (persisted.status != private_state_file::write_status_e::committed) {
+      if (persisted.status == private_state_file::write_status_e::durability_uncertain) {
+        impl_->sessions = std::move(staged);
+        impl_->authorization_state_available = false;
+      }
+      return creation_status_e::io_error;
     }
     impl_->sessions = std::move(staged);
     impl_->authorization_state_available = true;
-    return true;
+    return creation_status_e::created;
   }
 
   validation_status_e manager_t::validate(std::string_view session_id, clock_snapshot_t now) {
@@ -325,10 +338,13 @@ namespace web_session_store {
     const auto pruned = impl_->prune(now);
     auto it = impl_->sessions.find(id);
     if (it == impl_->sessions.end()) {
-      if (pruned && !impl_->persist(impl_->sessions, impl_->credential_fingerprint)) {
-        BOOST_LOG(error) << "Couldn't durably prune expired Web UI sessions from " << impl_->path;
-        impl_->authorization_state_available = false;
-        return validation_status_e::io_error;
+      if (pruned) {
+        const auto persisted = impl_->persist(impl_->sessions, impl_->credential_fingerprint);
+        if (persisted.status != private_state_file::write_status_e::committed) {
+          BOOST_LOG(error) << "Couldn't durably prune expired Web UI sessions from " << impl_->path;
+          impl_->authorization_state_available = false;
+          return validation_status_e::io_error;
+        }
       }
       return validation_status_e::invalid;
     }
@@ -337,8 +353,13 @@ namespace web_session_store {
     if (wall_now < it->second.last_seen_at) {
       auto staged = impl_->sessions;
       staged.erase(id);
-      if (!impl_->persist(staged, impl_->credential_fingerprint)) {
+      const auto persisted = impl_->persist(staged, impl_->credential_fingerprint);
+      if (persisted.status != private_state_file::write_status_e::committed) {
         BOOST_LOG(error) << "Couldn't durably invalidate a Web UI session after wall-clock rollback at " << impl_->path;
+        if (persisted.status == private_state_file::write_status_e::durability_uncertain) {
+          impl_->sessions = std::move(staged);
+          impl_->authorization_state_available = false;
+        }
         return validation_status_e::io_error;
       }
       impl_->sessions = std::move(staged);
@@ -348,11 +369,16 @@ namespace web_session_store {
     it->second.last_seen_at = wall_now;
     it->second.idle_deadline = now.monotonic + impl_->policy.idle_timeout;
     if (pruned || now.monotonic - it->second.last_persisted_monotonic >= impl_->policy.touch_interval) {
-      if (impl_->persist(impl_->sessions, impl_->credential_fingerprint)) {
+      const auto persisted = impl_->persist(impl_->sessions, impl_->credential_fingerprint);
+      if (persisted.status == private_state_file::write_status_e::committed) {
         it->second.last_persisted_monotonic = now.monotonic;
       } else {
         BOOST_LOG(error) << "Couldn't persist refreshed Web UI session activity to " << impl_->path;
-        it->second = previous;
+        if (persisted.status == private_state_file::write_status_e::durability_uncertain) {
+          impl_->authorization_state_available = false;
+        } else {
+          it->second = previous;
+        }
         return validation_status_e::io_error;
       }
     }
@@ -376,7 +402,12 @@ namespace web_session_store {
     }
     auto staged = impl_->sessions;
     staged.erase(id);
-    if (!impl_->persist(staged, impl_->credential_fingerprint)) {
+    const auto persisted = impl_->persist(staged, impl_->credential_fingerprint);
+    if (persisted.status != private_state_file::write_status_e::committed) {
+      if (persisted.status == private_state_file::write_status_e::durability_uncertain) {
+        impl_->sessions = std::move(staged);
+        impl_->authorization_state_available = false;
+      }
       return false;
     }
     impl_->sessions = std::move(staged);
@@ -390,7 +421,12 @@ namespace web_session_store {
       return false;
     }
     const std::unordered_map<std::string, impl_t::session_t> empty;
-    if (!impl_->persist(empty, impl_->credential_fingerprint)) {
+    const auto persisted = impl_->persist(empty, impl_->credential_fingerprint);
+    if (persisted.status != private_state_file::write_status_e::committed) {
+      if (persisted.status == private_state_file::write_status_e::durability_uncertain) {
+        impl_->sessions.clear();
+        impl_->authorization_state_available = false;
+      }
       return false;
     }
     impl_->sessions.clear();
@@ -405,10 +441,24 @@ namespace web_session_store {
     }
     std::lock_guard lock(impl_->mutex);
     if (impl_->credential_fingerprint == credential_fingerprint) {
-      return true;
+      if (impl_->authorization_state_available) {
+        return true;
+      }
+      const auto persisted = impl_->persist(impl_->sessions, credential_fingerprint);
+      if (persisted.status == private_state_file::write_status_e::committed) {
+        impl_->authorization_state_available = true;
+        return true;
+      }
+      return false;
     }
     const std::unordered_map<std::string, impl_t::session_t> empty;
-    if (!impl_->persist(empty, credential_fingerprint)) {
+    const auto persisted = impl_->persist(empty, credential_fingerprint);
+    if (persisted.status != private_state_file::write_status_e::committed) {
+      if (persisted.status == private_state_file::write_status_e::durability_uncertain) {
+        impl_->credential_fingerprint = std::move(credential_fingerprint);
+        impl_->sessions.clear();
+        impl_->authorization_state_available = false;
+      }
       return false;
     }
     impl_->credential_fingerprint = std::move(credential_fingerprint);

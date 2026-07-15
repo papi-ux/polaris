@@ -200,6 +200,8 @@ namespace confighttp {
     constexpr std::size_t SESSION_MAX_COUNT = 128;
     constexpr std::size_t SESSION_MAX_FILE_BYTES = 256 * 1024;
     std::unique_ptr<web_session_store::manager_t> s_web_sessions;
+    bool s_loaded_credentials_available = true;
+    std::recursive_mutex s_credential_lifecycle_mutex;
     std::mutex s_background_tasks_mutex;
     std::vector<std::future<void>> s_background_tasks;
 
@@ -628,10 +630,12 @@ namespace confighttp {
     }
 
     std::string session_cookie_hash(const std::string_view raw_cookie) {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
       return util::hex(crypto::hash(std::string {raw_cookie} + config::sunshine.salt)).to_string();
     }
 
     std::string web_session_credential_fingerprint() {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
       const auto material = std::string {"polaris-web-session-store-v1:"} + config::sunshine.salt;
       return util::hex(crypto::hash(material)).to_string();
     }
@@ -647,6 +651,7 @@ namespace confighttp {
     }
 
     bool ensure_web_session_fingerprint() {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
       if (!s_web_sessions) {
         return false;
       }
@@ -657,6 +662,7 @@ namespace confighttp {
     }
 
     void initialize_web_session_store() {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
       s_web_sessions = std::make_unique<web_session_store::manager_t>(
         platf::appdata() / "web_sessions.json",
         web_session_credential_fingerprint(),
@@ -679,14 +685,28 @@ namespace confighttp {
       }
     }
 
-    std::optional<std::string> create_web_session() {
-      if (!ensure_web_session_fingerprint()) {
+    std::optional<std::string> create_web_session(const std::string_view expected_credential_fingerprint) {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
+      if (!s_web_sessions ||
+          !s_web_sessions->rotate_credentials(
+            std::string {expected_credential_fingerprint},
+            web_session_clock_now()
+          )) {
         return std::nullopt;
       }
       for (int attempt = 0; attempt < 3; ++attempt) {
         auto raw_cookie = crypto::rand_alphabet(64);
-        if (s_web_sessions->create(session_cookie_hash(raw_cookie), web_session_clock_now())) {
+        const auto status = s_web_sessions->create_for_fingerprint(
+          session_cookie_hash(raw_cookie),
+          expected_credential_fingerprint,
+          web_session_clock_now()
+        );
+        if (status == web_session_store::creation_status_e::created) {
           return raw_cookie;
+        }
+        if (status == web_session_store::creation_status_e::credential_mismatch) {
+          BOOST_LOG(warning) << "Refused to create a Web UI session for a stale credential generation";
+          return std::nullopt;
         }
       }
       BOOST_LOG(error) << "Couldn't durably create a Web UI session";
@@ -694,6 +714,7 @@ namespace confighttp {
     }
 
     web_session_store::validation_status_e authenticate_web_session_cookie(const std::string_view raw_cookie) {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
       if (raw_cookie.empty()) {
         return web_session_store::validation_status_e::invalid;
       }
@@ -704,6 +725,7 @@ namespace confighttp {
     }
 
     bool invalidate_web_session_cookie(const std::string_view raw_cookie) {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
       if (raw_cookie.empty()) {
         return true;
       }
@@ -944,8 +966,13 @@ namespace confighttp {
    * It also supports API key authentication via the Authorization: Bearer header.
    */
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
+    std::lock_guard credential_lock {s_credential_lifecycle_mutex};
     if (!checkIPOrigin(response, request))
       return false;
+    if (!s_loaded_credentials_available) {
+      write_session_validation_unavailable(response);
+      return false;
+    }
     // If credentials not set, redirect to welcome.
     if (config::sunshine.username.empty()) {
       send_redirect(response, request, "/welcome");
@@ -3346,6 +3373,7 @@ namespace confighttp {
    * @api_examples{/api/password| POST| {"currentUsername":"admin","currentPassword":"admin","newUsername":"admin","newPassword":"admin","confirmNewPassword":"admin"}}
    */
   void savePassword(resp_https_t response, req_https_t request) {
+    std::lock_guard credential_lock {s_credential_lifecycle_mutex};
     if ((!config::sunshine.username.empty() && !authenticate(response, request)) || !validateContentType(response, request, "application/json"))
       return;
     print_req(request);
@@ -3369,11 +3397,27 @@ namespace confighttp {
           if (newPassword.empty() || newPassword != confirmPassword)
             errors.push_back("Password Mismatch");
           else {
-            if (http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword) != 0 ||
-                http::reload_user_creds(config::sunshine.credentials_file) != 0) {
+            const auto save_result = http::save_user_creds(
+              config::sunshine.credentials_file,
+              newUsername,
+              newPassword
+            );
+            if (save_result != 0) {
               errors.push_back("Failed to persist new credentials");
             } else {
-              const auto session = create_web_session();
+              const auto reload_result = http::reload_user_creds(config::sunshine.credentials_file);
+              if (reload_result != 0) {
+                s_loaded_credentials_available = false;
+                s_web_sessions.reset();
+                write_session_persistence_error(
+                  response,
+                  "Credentials changed, but the Web UI authorization state could not be reloaded. Restart Polaris before signing in again."
+                );
+                return;
+              }
+              s_loaded_credentials_available = true;
+              const auto credential_fingerprint = web_session_credential_fingerprint();
+              const auto session = create_web_session(credential_fingerprint);
               if (!session) {
                 write_session_persistence_error(response, "Credentials changed, but the replacement Web UI session could not be persisted.");
                 return;
@@ -3858,6 +3902,11 @@ namespace confighttp {
       return;
     }
 
+    std::lock_guard credential_lock {s_credential_lifecycle_mutex};
+    if (!s_loaded_credentials_available) {
+      write_session_validation_unavailable(response);
+      return;
+    }
     if (config::sunshine.username.empty()) {
       write_login_error(
         SimpleWeb::StatusCode::client_error_conflict,
@@ -3884,10 +3933,25 @@ namespace confighttp {
       }
 
       if (needs_upgrade) {
-        http::upgrade_user_password_hash(config::sunshine.credentials_file, username, password);
+        const auto upgrade_result = http::upgrade_user_password_hash(
+          config::sunshine.credentials_file,
+          username,
+          password
+        );
+        if (upgrade_result == http::credential_upgrade_status_e::reload_failed) {
+          s_loaded_credentials_available = false;
+          s_web_sessions.reset();
+          write_session_validation_unavailable(response);
+          return;
+        }
+        if (upgrade_result == http::credential_upgrade_status_e::save_failed) {
+          write_session_persistence_error(response, "The Web UI credential upgrade could not be persisted.");
+          return;
+        }
       }
 
-      const auto session = create_web_session();
+      const auto credential_fingerprint = web_session_credential_fingerprint();
+      const auto session = create_web_session(credential_fingerprint);
       if (!session) {
         write_session_persistence_error(response, "The Web UI session could not be persisted.");
         return;

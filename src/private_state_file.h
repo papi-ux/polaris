@@ -26,8 +26,22 @@ namespace private_state_file {
     }
   };
 
+  enum class write_status_e {
+    committed,
+    not_committed,
+    durability_uncertain,
+  };
+
+  struct write_result_t {
+    write_status_e status = write_status_e::not_committed;
+
+    explicit operator bool() const {
+      return status == write_status_e::committed;
+    }
+  };
+
   read_result_t read_secure(const std::filesystem::path &target, std::size_t max_bytes);
-  bool write_atomic(const std::filesystem::path &target, std::string_view payload);
+  write_result_t write_atomic(const std::filesystem::path &target, std::string_view payload);
 
 #ifdef POLARIS_TESTS
   enum class write_fault_e {
@@ -37,9 +51,14 @@ namespace private_state_file {
     flush,
     sync,
     rename,
+    parent_sync,
+    parent_close,
     post_rename_durability,
+    directory_close,
   };
 
   void set_write_fault_for_tests(write_fault_e fault);
+  void set_parent_component_fault_index_for_tests(std::size_t index);
+  void set_parent_eexist_race_for_tests(bool enabled);
 #endif
 }  // namespace private_state_file
