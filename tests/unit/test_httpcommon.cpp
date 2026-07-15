@@ -128,6 +128,46 @@ TEST(HttpCommonCredentialTests, SavesCredentialsWithModernPasswordScheme) {
   std::filesystem::remove(creds_path);
 }
 
+TEST(HttpCommonCredentialTests, ReportsDurableUpgradeWhenRuntimeReloadFails) {
+  const auto snapshot = capture_sunshine_creds();
+  const auto temp_dir = std::filesystem::temp_directory_path() / "polaris-httpcommon-tests";
+  std::filesystem::create_directories(temp_dir);
+  const auto creds_path = temp_dir / "upgrade-reload-failure.json";
+
+  nlohmann::json legacy = {
+    {"username", "legacy"},
+    {"salt", "legacy-salt"},
+    {"password", util::hex(crypto::hash(std::string {"secret"} + "legacy-salt")).to_string()},
+    {"api_key", "existing-api-key"}
+  };
+  {
+    std::ofstream out(creds_path);
+    out << legacy.dump(4);
+  }
+  ASSERT_EQ(http::reload_user_creds(creds_path.string()), 0);
+
+  http::set_credential_upgrade_reload_failure_for_tests(true);
+  const auto outcome = http::upgrade_user_password_hash(creds_path.string(), "legacy", "secret");
+  http::set_credential_upgrade_reload_failure_for_tests(false);
+
+  EXPECT_EQ(
+    static_cast<int>(outcome),
+    static_cast<int>(http::credential_upgrade_status_e::reload_failed)
+  );
+  nlohmann::json stored;
+  {
+    std::ifstream in(creds_path);
+    in >> stored;
+  }
+  EXPECT_EQ(stored.value("password_scheme", ""), "scrypt");
+  bool needs_upgrade = false;
+  EXPECT_TRUE(http::verify_user_password("legacy", "secret", &needs_upgrade));
+  EXPECT_TRUE(needs_upgrade);
+
+  restore_sunshine_creds(snapshot);
+  std::filesystem::remove(creds_path);
+}
+
 TEST(HttpCommonCredentialTests, UpgradesLegacyCredentialsAfterSuccessfulVerification) {
   const auto snapshot = capture_sunshine_creds();
   const auto temp_dir = std::filesystem::temp_directory_path() / "polaris-httpcommon-tests";
@@ -150,7 +190,10 @@ TEST(HttpCommonCredentialTests, UpgradesLegacyCredentialsAfterSuccessfulVerifica
   bool needs_upgrade = false;
   ASSERT_TRUE(http::verify_user_password("legacy", "secret", &needs_upgrade));
   EXPECT_TRUE(needs_upgrade);
-  ASSERT_EQ(http::upgrade_user_password_hash(creds_path.string(), "legacy", "secret"), 0);
+  ASSERT_EQ(
+    http::upgrade_user_password_hash(creds_path.string(), "legacy", "secret"),
+    http::credential_upgrade_status_e::upgraded
+  );
 
   nlohmann::json upgraded;
   {
