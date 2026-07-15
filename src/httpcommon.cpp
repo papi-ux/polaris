@@ -5,6 +5,7 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -49,6 +50,9 @@ namespace http {
   namespace {
     constexpr std::string_view legacy_password_hash_scheme = "sha256"sv;
     constexpr std::string_view modern_password_hash_scheme = "scrypt"sv;
+#ifdef POLARIS_TESTS
+    std::atomic_bool fail_credential_upgrade_reload {false};
+#endif
 
     bool hash_password_for_scheme(
       const std::string_view password,
@@ -195,20 +199,38 @@ namespace http {
     return verified;
   }
 
-  int upgrade_user_password_hash(const std::string &file, const std::string &username, const std::string &password) {
+  credential_upgrade_status_e upgrade_user_password_hash(
+    const std::string &file,
+    const std::string &username,
+    const std::string &password
+  ) {
     if (!boost::iequals(username, config::sunshine.username)) {
-      return -1;
+      return credential_upgrade_status_e::save_failed;
     }
     if (config::sunshine.password_hash_scheme == modern_password_hash_scheme) {
-      return 0;
+      return credential_upgrade_status_e::unchanged;
     }
 
     BOOST_LOG(info) << "Upgrading stored web credentials to the stronger password KDF";
     if (save_user_creds(file, config::sunshine.username, password) != 0) {
-      return -1;
+      return credential_upgrade_status_e::save_failed;
     }
-    return reload_user_creds(file);
+#ifdef POLARIS_TESTS
+    if (fail_credential_upgrade_reload.load(std::memory_order_relaxed)) {
+      return credential_upgrade_status_e::reload_failed;
+    }
+#endif
+    if (reload_user_creds(file) != 0) {
+      return credential_upgrade_status_e::reload_failed;
+    }
+    return credential_upgrade_status_e::upgraded;
   }
+
+#ifdef POLARIS_TESTS
+  void set_credential_upgrade_reload_failure_for_tests(bool enabled) {
+    fail_credential_upgrade_reload.store(enabled, std::memory_order_relaxed);
+  }
+#endif
 
   int create_creds(const std::string &pkey, const std::string &cert) {
     fs::path pkey_path = pkey;
