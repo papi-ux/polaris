@@ -105,7 +105,8 @@ namespace web_session_store {
       const std::unordered_map<std::string, session_t> &state,
       std::string_view fingerprint
     ) const {
-      if (!configured() || !is_valid_sha256_hex(fingerprint) || state.size() > policy.max_sessions || !ensure_parent()) {
+      if (path.empty() || !valid_policy(policy) || !is_valid_sha256_hex(fingerprint) ||
+          state.size() > policy.max_sessions || !ensure_parent()) {
         return false;
       }
 
@@ -153,27 +154,24 @@ namespace web_session_store {
   manager_t::~manager_t() = default;
 
   load_status_e manager_t::load(clock_snapshot_t now) {
+    std::lock_guard lock(impl_->mutex);
     if (!impl_->configured()) {
-      std::lock_guard lock(impl_->mutex);
       impl_->authorization_state_available = false;
       return load_status_e::rejected;
     }
 
     const auto stored = private_state_file::read_secure(impl_->path, impl_->policy.max_file_bytes);
     if (stored.status == private_state_file::read_status_e::missing) {
-      std::lock_guard lock(impl_->mutex);
       impl_->sessions.clear();
       impl_->authorization_state_available = true;
       return load_status_e::missing;
     }
     if (stored.status == private_state_file::read_status_e::rejected) {
-      std::lock_guard lock(impl_->mutex);
       impl_->sessions.clear();
       impl_->authorization_state_available = true;
       return load_status_e::rejected;
     }
     if (stored.status != private_state_file::read_status_e::ok) {
-      std::lock_guard lock(impl_->mutex);
       impl_->sessions.clear();
       impl_->authorization_state_available = false;
       return load_status_e::io_error;
@@ -181,7 +179,6 @@ namespace web_session_store {
 
     try {
       {
-        std::lock_guard lock(impl_->mutex);
         impl_->authorization_state_available = true;
       }
       const auto root = nlohmann::json::parse(stored.payload);
@@ -190,7 +187,6 @@ namespace web_session_store {
           root["version"].get<int>() != SCHEMA_VERSION ||
           !root.contains("credential_fingerprint") || !root["credential_fingerprint"].is_string() ||
           !root.contains("sessions") || !root["sessions"].is_array()) {
-        std::lock_guard lock(impl_->mutex);
         impl_->sessions.clear();
         return load_status_e::rejected;
       }
@@ -198,7 +194,6 @@ namespace web_session_store {
       const auto fingerprint = root["credential_fingerprint"].get<std::string>();
       if (!is_valid_sha256_hex(fingerprint) || fingerprint != impl_->credential_fingerprint ||
           root["sessions"].size() > impl_->policy.max_sessions) {
-        std::lock_guard lock(impl_->mutex);
         impl_->sessions.clear();
         return load_status_e::rejected;
       }
@@ -212,7 +207,6 @@ namespace web_session_store {
             !entry.contains("id") || !entry["id"].is_string() ||
             !entry.contains("created_at") || !entry["created_at"].is_number_integer() ||
             !entry.contains("last_seen_at") || !entry["last_seen_at"].is_number_integer()) {
-          std::lock_guard lock(impl_->mutex);
           impl_->sessions.clear();
           return load_status_e::rejected;
         }
@@ -222,7 +216,6 @@ namespace web_session_store {
         const auto last_seen_at = entry["last_seen_at"].get<std::int64_t>();
         if (!is_valid_sha256_hex(id) || !ids.insert(id).second || created_at < 0 ||
             last_seen_at < created_at || created_at > wall_now || last_seen_at > wall_now) {
-          std::lock_guard lock(impl_->mutex);
           impl_->sessions.clear();
           return load_status_e::rejected;
         }
@@ -245,8 +238,6 @@ namespace web_session_store {
           .last_persisted_monotonic = now.monotonic,
         });
       }
-
-      std::lock_guard lock(impl_->mutex);
       impl_->sessions = std::move(imported);
       if (pruned && !impl_->persist(impl_->sessions, impl_->credential_fingerprint)) {
         BOOST_LOG(error) << "Couldn't durably prune expired Web UI sessions from " << impl_->path;
@@ -258,7 +249,6 @@ namespace web_session_store {
       return load_status_e::loaded;
     } catch (const std::exception &exception) {
       BOOST_LOG(warning) << "Rejected malformed Web UI session state " << impl_->path << ": " << exception.what();
-      std::lock_guard lock(impl_->mutex);
       impl_->sessions.clear();
       return load_status_e::rejected;
     }
@@ -266,7 +256,7 @@ namespace web_session_store {
 
   bool manager_t::create(std::string_view session_id, clock_snapshot_t now) {
     const auto id = canonical_sha256_hex(session_id);
-    if (id.empty() || !impl_->configured()) {
+    if (id.empty()) {
       return false;
     }
     const auto wall_now = unix_seconds(now.wall);
@@ -275,6 +265,9 @@ namespace web_session_store {
     }
 
     std::lock_guard lock(impl_->mutex);
+    if (!impl_->configured()) {
+      return false;
+    }
     if (std::any_of(impl_->sessions.begin(), impl_->sessions.end(), [&](const auto &entry) {
           return wall_now < entry.second.created_at || wall_now < entry.second.last_seen_at;
         })) {
@@ -321,11 +314,10 @@ namespace web_session_store {
     if (id.empty()) {
       return validation_status_e::invalid;
     }
+    std::lock_guard lock(impl_->mutex);
     if (!impl_->configured()) {
       return validation_status_e::io_error;
     }
-
-    std::lock_guard lock(impl_->mutex);
     if (!impl_->authorization_state_available) {
       return validation_status_e::io_error;
     }
@@ -369,10 +361,13 @@ namespace web_session_store {
 
   bool manager_t::invalidate(std::string_view session_id) {
     const auto id = canonical_sha256_hex(session_id);
-    if (id.empty() || !impl_->configured()) {
+    if (id.empty()) {
       return false;
     }
     std::lock_guard lock(impl_->mutex);
+    if (!impl_->configured()) {
+      return false;
+    }
     if (!impl_->authorization_state_available) {
       return false;
     }
@@ -390,10 +385,10 @@ namespace web_session_store {
   }
 
   bool manager_t::invalidate_all() {
+    std::lock_guard lock(impl_->mutex);
     if (!impl_->configured()) {
       return false;
     }
-    std::lock_guard lock(impl_->mutex);
     const std::unordered_map<std::string, impl_t::session_t> empty;
     if (!impl_->persist(empty, impl_->credential_fingerprint)) {
       return false;
@@ -409,13 +404,14 @@ namespace web_session_store {
       return false;
     }
     std::lock_guard lock(impl_->mutex);
+    if (impl_->credential_fingerprint == credential_fingerprint) {
+      return true;
+    }
     const std::unordered_map<std::string, impl_t::session_t> empty;
-    const auto previous_fingerprint = impl_->credential_fingerprint;
-    impl_->credential_fingerprint = credential_fingerprint;
     if (!impl_->persist(empty, credential_fingerprint)) {
-      impl_->credential_fingerprint = previous_fingerprint;
       return false;
     }
+    impl_->credential_fingerprint = std::move(credential_fingerprint);
     impl_->sessions.clear();
     impl_->authorization_state_available = true;
     return true;

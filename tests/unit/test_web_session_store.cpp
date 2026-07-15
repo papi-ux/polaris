@@ -6,9 +6,11 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <filesystem>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -344,4 +346,54 @@ TEST_F(WebSessionStoreTest, CredentialRotationPersistsEmptyNewGeneration) {
   web_session_store::manager_t restarted(target, new_fingerprint, policy);
   EXPECT_EQ(restarted.load(at(1002, 0)), web_session_store::load_status_e::loaded);
   EXPECT_EQ(restarted.size(), 0U);
+}
+
+TEST_F(WebSessionStoreTest, ConcurrentCredentialRotationAndSessionOperationsAreSynchronized) {
+  const auto session = digest('a');
+  web_session_store::manager_t manager(target, fingerprint, policy);
+  std::barrier start {3};
+
+  std::thread rotator([&]() {
+    start.arrive_and_wait();
+    for (int attempt = 0; attempt < 256; ++attempt) {
+      (void) manager.rotate_credentials(attempt % 2 == 0 ? digest('e') : fingerprint, at(1000, attempt));
+    }
+  });
+  std::thread session_worker([&]() {
+    start.arrive_and_wait();
+    for (int attempt = 0; attempt < 256; ++attempt) {
+      (void) manager.create(session, at(1000, attempt));
+      (void) manager.validate(session, at(1000, attempt));
+    }
+  });
+
+  start.arrive_and_wait();
+  rotator.join();
+  session_worker.join();
+  SUCCEED();
+}
+
+TEST_F(WebSessionStoreTest, StaleCredentialReconcileDoesNotDeleteSessionFromWinningRequest) {
+  const auto new_fingerprint = digest('e');
+  const auto winning_session = digest('a');
+  web_session_store::manager_t manager(target, fingerprint, policy);
+
+  // Model two callers that both observed the previous generation. The first caller
+  // rotates and publishes a session before the stale second caller reconciles.
+  ASSERT_FALSE(manager.fingerprint_matches(new_fingerprint));
+  ASSERT_TRUE(manager.rotate_credentials(new_fingerprint, at(1000, 0)));
+  ASSERT_TRUE(manager.create(winning_session, at(1001, 1)));
+
+  ASSERT_TRUE(manager.rotate_credentials(new_fingerprint, at(1002, 2)));
+  EXPECT_EQ(
+    manager.validate(winning_session, at(1002, 2)),
+    web_session_store::validation_status_e::valid
+  );
+
+  web_session_store::manager_t restarted(target, new_fingerprint, policy);
+  ASSERT_EQ(restarted.load(at(1003, 0)), web_session_store::load_status_e::loaded);
+  EXPECT_EQ(
+    restarted.validate(winning_session, at(1003, 0)),
+    web_session_store::validation_status_e::valid
+  );
 }

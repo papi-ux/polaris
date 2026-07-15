@@ -650,9 +650,10 @@ namespace confighttp {
       if (!s_web_sessions) {
         return false;
       }
-      const auto current_fingerprint = web_session_credential_fingerprint();
-      return s_web_sessions->fingerprint_matches(current_fingerprint) ||
-             s_web_sessions->rotate_credentials(current_fingerprint, web_session_clock_now());
+      return s_web_sessions->rotate_credentials(
+        web_session_credential_fingerprint(),
+        web_session_clock_now()
+      );
     }
 
     void initialize_web_session_store() {

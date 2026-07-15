@@ -9,6 +9,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 
 #include <src/private_state_file.h>
@@ -37,6 +38,17 @@ namespace {
     std::filesystem::path directory;
     std::filesystem::path target;
   };
+}
+
+TEST_F(PrivateStateFileTest, DoesNotCarryUnsupportedWindowsSecurityImplementation) {
+  std::ifstream source(std::string {POLARIS_SOURCE_DIR} + "/src/private_state_file.cpp");
+  ASSERT_TRUE(source.is_open());
+  std::ostringstream contents;
+  contents << source.rdbuf();
+
+  EXPECT_EQ(contents.str().find("CreateFileW"), std::string::npos);
+  EXPECT_EQ(contents.str().find("SetSecurityInfo"), std::string::npos);
+  EXPECT_EQ(contents.str().find("MoveFileExW"), std::string::npos);
 }
 
 TEST_F(PrivateStateFileTest, DistinguishesMissingFiles) {
