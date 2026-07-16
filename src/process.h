@@ -207,6 +207,10 @@ namespace proc {
     std::chrono::milliseconds kill_timeout
   );
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id);
+  bool isolated_session_capture_failure_retains_generation_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  );
   bool terminate_session_owned_steam_before_cage_stop_for_tests(
     const struct ctx_t &app,
     bool session_owned_cage,

@@ -1054,11 +1054,14 @@ namespace proc {
         }
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
         const auto timeout_ms = static_cast<int>(std::max<std::int64_t>(1, remaining.count()));
-        int result;
-        do {
-          result = poll(pending.data(), pending.size(), timeout_ms);
-        } while (result < 0 && errno == EINTR);
-        if (result <= 0) {
+        const int result = poll(pending.data(), pending.size(), timeout_ms);
+        if (result < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          return false;
+        }
+        if (result == 0) {
           return false;
         }
       }
@@ -1241,6 +1244,10 @@ namespace proc {
       bool capture_complete = true;
     };
 
+#ifdef POLARIS_TESTS
+    thread_local pid_t forced_isolated_session_capture_failure_pid = -1;
+#endif
+
     isolated_session_process_snapshot_t isolated_session_process_snapshot(
       std::string_view session_instance_id
     ) {
@@ -1270,6 +1277,12 @@ namespace proc {
         if (!proc_environ_matches_isolated_session(environ_before, session_instance_id)) {
           continue;
         }
+#ifdef POLARIS_TESTS
+        if (pid == forced_isolated_session_capture_failure_pid) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+#endif
         const auto identity_before = proc_start_time_ticks(pid);
         if (!identity_before) {
           snapshot.capture_complete = false;
@@ -3163,6 +3176,26 @@ namespace proc {
 
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id) {
     return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv);
+  }
+
+  bool isolated_session_capture_failure_retains_generation_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  ) {
+    const auto previous_failure_pid = forced_isolated_session_capture_failure_pid;
+    forced_isolated_session_capture_failure_pid = forced_capture_failure_pid;
+    auto restore_failure_pid = util::fail_guard([previous_failure_pid]() {
+      forced_isolated_session_capture_failure_pid = previous_failure_pid;
+    });
+    const auto exact_cleanup_complete = terminate_isolated_session_processes(
+      session_instance_id,
+      "during forced incomplete-capture test"sv
+    );
+    return !isolated_session_cleanup_clears_state(
+      true,
+      !session_instance_id.empty(),
+      exact_cleanup_complete
+    );
   }
 
   bool terminate_session_owned_steam_before_cage_stop_for_tests(
