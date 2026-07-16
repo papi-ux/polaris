@@ -73,7 +73,9 @@
   #include <dirent.h>
   #include <fcntl.h>
   #include <signal.h>
+  #include <poll.h>
   #include <sys/stat.h>
+  #include <sys/syscall.h>
   #include <unistd.h>
 #elif __APPLE__
   #include <mach-o/dyld.h>
@@ -824,363 +826,38 @@ namespace proc {
       return sanitized;
     }
 
-    bool is_proc_pid_dir(std::string_view name) {
-      return !name.empty() && std::all_of(name.begin(), name.end(), [](char ch) {
-        return std::isdigit(static_cast<unsigned char>(ch));
-      });
-    }
-
-    std::string read_proc_text(pid_t pid, std::string_view file_name) {
-      std::ifstream file("/proc/" + std::to_string(pid) + "/" + std::string(file_name), std::ios::binary);
-      if (!file) {
-        return {};
+    bool proc_environ_contains_exact_entry(
+      std::string_view environ,
+      std::string_view key,
+      std::string_view value
+    ) {
+      if (key.empty() || value.empty()) {
+        return false;
       }
-
-      std::ostringstream buffer;
-      buffer << file.rdbuf();
-      return buffer.str();
-    }
-
-    std::string proc_text_summary(std::string text, std::size_t limit = 180) {
-      std::replace(text.begin(), text.end(), '\0', ' ');
-      boost::trim(text);
-      if (text.size() > limit) {
-        text.resize(limit);
-        text += "...";
-      }
-      return text;
-    }
-
-    std::string proc_debug_summary(pid_t pid) {
-      auto comm = proc_text_summary(read_proc_text(pid, "comm"), 80);
-      auto cmdline = proc_text_summary(read_proc_text(pid, "cmdline"));
-      if (cmdline.empty()) {
-        cmdline = comm.empty() ? "(unknown)" : comm;
-      }
-
-      std::ostringstream summary;
-      summary << "pid=" << pid;
-      if (const auto pgid = getpgid(pid); pgid > 0) {
-        summary << " pgid=" << pgid;
-      }
-      if (!comm.empty()) {
-        summary << " comm=" << comm;
-      }
-      summary << " cmd=[" << cmdline << ']';
-      return summary.str();
-    }
-
-    std::string proc_debug_summaries(const std::vector<pid_t> &pids, std::size_t limit = 8) {
-      std::ostringstream summaries;
-      for (std::size_t i = 0; i < pids.size() && i < limit; ++i) {
-        if (i > 0) {
-          summaries << "; ";
-        }
-        summaries << proc_debug_summary(pids[i]);
-      }
-      if (pids.size() > limit) {
-        summaries << "; +" << (pids.size() - limit) << " more";
-      }
-      return summaries.str();
-    }
-
-    std::mutex isolated_browser_stream_steam_cleanup_mutex;
-    std::chrono::steady_clock::time_point isolated_browser_stream_steam_settle_until {};
-
-    std::string ascii_lower_copy(std::string_view value) {
-      std::string lowered {value};
-      std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-      });
-      return lowered;
-    }
-
-    std::string proc_argv0_lower(const std::string &cmdline) {
-      const auto end = cmdline.find('\0');
-      return ascii_lower_copy(std::string_view {cmdline.data(), end == std::string::npos ? cmdline.size() : end});
-    }
-
-    std::string proc_argv0_basename(std::string_view argv0_path) {
-      auto argv0 = std::string {argv0_path};
-      if (const auto slash = argv0.find_last_of('/'); slash != std::string::npos) {
-        argv0 = argv0.substr(slash + 1);
-      }
-      return argv0;
-    }
-
-    bool path_ends_with(std::string_view value, std::string_view suffix) {
-      return value.size() >= suffix.size() &&
-             value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-    }
-
-    bool process_is_steam_client(std::string_view comm, std::string_view argv0_path) {
-      const auto argv0 = proc_argv0_basename(argv0_path);
-      return comm == "steam" ||
-             argv0 == "steam" ||
-             argv0 == "steam.sh" ||
-             path_ends_with(argv0_path, "/steam.sh") ||
-             path_ends_with(argv0_path, "/ubuntu12_32/steam");
-    }
-
-    std::vector<pid_t> scan_proc_pids(const std::function<bool(pid_t)> &predicate) {
-      std::vector<pid_t> pids;
-      DIR *dir = opendir("/proc");
-      if (!dir) {
-        return pids;
-      }
-
-      while (auto *entry = readdir(dir)) {
-        const std::string name = entry->d_name;
-        if (!is_proc_pid_dir(name)) {
-          continue;
-        }
-
-        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
-        if (pid <= 1 || pid == getpid()) {
-          continue;
-        }
-
-        if (predicate(pid)) {
-          pids.emplace_back(pid);
-        }
-      }
-
-      closedir(dir);
-      return pids;
-    }
-
-    std::vector<pid_t> transient_steam_client_pids() {
-      return scan_proc_pids([](pid_t pid) {
-        auto comm = ascii_lower_copy(read_proc_text(pid, "comm"));
-        boost::trim(comm);
-
-        const auto cmdline = read_proc_text(pid, "cmdline");
-        const auto argv0 = proc_argv0_lower(cmdline);
-        if (!process_is_steam_client(comm, argv0)) {
+      const auto expected = std::string {key} + "=" + std::string {value};
+      std::size_t start = 0;
+      while (start < environ.size()) {
+        const auto end = environ.find('\0', start);
+        if (end == std::string_view::npos) {
           return false;
         }
-
-        const auto lower_cmdline = ascii_lower_copy(cmdline);
-        return lower_cmdline.find("-shutdown") != std::string::npos ||
-               lower_cmdline.find("-child-update-ui") != std::string::npos ||
-               lower_cmdline.find("-srt-logger-opened") != std::string::npos;
-      });
-    }
-
-    std::vector<pid_t> steam_runtime_probe_pids() {
-      return scan_proc_pids([](pid_t pid) {
-        const auto lower_cmdline = ascii_lower_copy(read_proc_text(pid, "cmdline"));
-        const auto lower_environ = ascii_lower_copy(read_proc_text(pid, "environ"));
-        return lower_cmdline.find("d3ddriverquery") != std::string::npos ||
-               lower_environ.find("d3ddriverquery") != std::string::npos;
-      });
-    }
-
-    bool pid_exists(pid_t pid) {
-      return std::filesystem::exists(std::filesystem::path("/proc") / std::to_string(pid));
-    }
-
-    bool any_pid_exists(const std::vector<pid_t> &pids) {
-      return std::any_of(pids.begin(), pids.end(), pid_exists);
-    }
-
-    void signal_processes_and_groups(const std::vector<pid_t> &pids, int signal) {
-      std::set<pid_t> groups;
-      for (auto pid : pids) {
-        const auto pgid = getpgid(pid);
-        if (pgid > 1 && pgid != getpgrp()) {
-          groups.insert(pgid);
-        }
-      }
-
-      for (auto pgid : groups) {
-        kill(-pgid, signal);
-      }
-      for (auto pid : pids) {
-        kill(pid, signal);
-      }
-    }
-
-    void terminate_steam_runtime_probes(std::string_view reason) {
-      auto pids = steam_runtime_probe_pids();
-      if (pids.empty()) {
-        return;
-      }
-
-      BOOST_LOG(info) << "process: terminating "sv << pids.size()
-                      << " Steam runtime probe process(es) "sv << reason;
-      signal_processes_and_groups(pids, SIGTERM);
-
-      for (int i = 0; i < 10; ++i) {
-        if (!any_pid_exists(pids)) {
-          return;
-        }
-        std::this_thread::sleep_for(100ms);
-      }
-
-      pids = steam_runtime_probe_pids();
-      if (!pids.empty()) {
-        BOOST_LOG(warning) << "process: Steam runtime probe process(es) did not exit after SIGTERM; sending SIGKILL"sv;
-        signal_processes_and_groups(pids, SIGKILL);
-      }
-    }
-
-    bool wait_for_transient_steam_clients(std::chrono::milliseconds timeout, std::string_view reason) {
-      const auto deadline = std::chrono::steady_clock::now() + timeout;
-      bool logged = false;
-
-      while (std::chrono::steady_clock::now() < deadline) {
-        auto pids = transient_steam_client_pids();
-        if (pids.empty()) {
+        if (environ.substr(start, end - start) == expected) {
           return true;
         }
-
-        if (!logged) {
-          BOOST_LOG(info) << "process: waiting for "sv << pids.size()
-                          << " transient Steam client process(es) "sv << reason;
-          logged = true;
-        }
-        std::this_thread::sleep_for(250ms);
+        start = end + 1;
       }
-
-      auto pids = transient_steam_client_pids();
-      if (!pids.empty()) {
-        BOOST_LOG(warning) << "process: "sv << pids.size()
-                           << " transient Steam client process(es) still running after settle window"sv;
-        return false;
-      }
-      return true;
+      return false;
     }
 
-    bool proc_text_contains_steam_appid(const std::string &text, const std::string &appid) {
-      if (appid.empty() || text.empty()) {
-        return false;
-      }
-
-      return text.find("SteamLaunch AppId=" + appid) != std::string::npos ||
-             text.find("SteamAppId=" + appid) != std::string::npos ||
-             text.find("SteamGameId=" + appid) != std::string::npos ||
-             text.find("steam://rungameid/" + appid) != std::string::npos ||
-             (text.find("-applaunch") != std::string::npos && text.find(appid) != std::string::npos);
-    }
-
-    std::vector<pid_t> steam_app_pids(const std::string &appid) {
-      std::vector<pid_t> pids;
-      DIR *dir = opendir("/proc");
-      if (!dir) {
-        return pids;
-      }
-
-      while (auto *entry = readdir(dir)) {
-        const std::string name = entry->d_name;
-        if (!is_proc_pid_dir(name)) {
-          continue;
-        }
-
-        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
-        if (pid <= 1 || pid == getpid()) {
-          continue;
-        }
-
-        if (proc_text_contains_steam_appid(read_proc_text(pid, "cmdline"), appid) ||
-            proc_text_contains_steam_appid(read_proc_text(pid, "environ"), appid)) {
-          pids.emplace_back(pid);
-        }
-      }
-
-      closedir(dir);
-      return pids;
-    }
-
-    bool proc_environ_contains_isolated_session_marker(const std::string &environ) {
-      return environ.find("POLARIS_SESSION_AUDIO_SINK=") != std::string::npos ||
-             environ.find("POLARIS_SESSION_TARGET_FPS=") != std::string::npos ||
-             environ.find("POLARIS_SESSION_REQUESTED_FPS=") != std::string::npos;
-    }
-
-    std::vector<pid_t> isolated_session_pids() {
-      std::vector<pid_t> pids;
-      DIR *dir = opendir("/proc");
-      if (!dir) {
-        return pids;
-      }
-
-      while (auto *entry = readdir(dir)) {
-        const std::string name = entry->d_name;
-        if (!is_proc_pid_dir(name)) {
-          continue;
-        }
-
-        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
-        if (pid <= 1 || pid == getpid()) {
-          continue;
-        }
-
-        if (proc_environ_contains_isolated_session_marker(read_proc_text(pid, "environ"))) {
-          pids.emplace_back(pid);
-        }
-      }
-
-      closedir(dir);
-      return pids;
-    }
-
-    void terminate_isolated_session_processes(std::string_view reason) {
-      auto pids = isolated_session_pids();
-      if (pids.empty()) {
-        return;
-      }
-
-      std::set<pid_t> groups;
-      for (auto pid : pids) {
-        const auto pgid = getpgid(pid);
-        if (pgid > 1 && pgid != getpgrp()) {
-          groups.insert(pgid);
-        }
-      }
-
-      BOOST_LOG(info) << "process: terminating "sv << pids.size()
-                      << " isolated session process(es) "sv << reason
-                      << " process_groups="sv << groups.size();
-
-      for (auto pgid : groups) {
-        kill(-pgid, SIGTERM);
-      }
-      for (auto pid : pids) {
-        kill(pid, SIGTERM);
-      }
-
-      for (int i = 0; i < 20; ++i) {
-        if (isolated_session_pids().empty()) {
-          return;
-        }
-        std::this_thread::sleep_for(100ms);
-      }
-
-      pids = isolated_session_pids();
-      if (pids.empty()) {
-        return;
-      }
-
-      BOOST_LOG(warning) << "process: "sv << pids.size()
-                         << " isolated session process(es) still running "sv
-                         << reason << "; sending SIGKILL survivors=["sv
-                         << proc_debug_summaries(pids) << ']';
-
-      groups.clear();
-      for (auto pid : pids) {
-        const auto pgid = getpgid(pid);
-        if (pgid > 1 && pgid != getpgrp()) {
-          groups.insert(pgid);
-        }
-      }
-
-      for (auto pgid : groups) {
-        kill(-pgid, SIGKILL);
-      }
-      for (auto pid : pids) {
-        kill(pid, SIGKILL);
-      }
+    bool proc_environ_matches_isolated_session(
+      std::string_view environ,
+      std::string_view session_instance_id
+    ) {
+      return proc_environ_contains_exact_entry(
+        environ,
+        "POLARIS_SESSION_INSTANCE_ID"sv,
+        session_instance_id
+      );
     }
 
     std::string steam_appid_for_context(const proc::ctx_t &ctx) {
@@ -1201,65 +878,6 @@ namespace proc {
       return {};
     }
 
-    void terminate_steam_app_processes(const proc::ctx_t &ctx) {
-      const auto appid = steam_appid_for_context(ctx);
-      if (appid.empty()) {
-        return;
-      }
-
-      auto pids = steam_app_pids(appid);
-      if (pids.empty()) {
-        return;
-      }
-
-      std::set<pid_t> groups;
-      for (auto pid : pids) {
-        const auto pgid = getpgid(pid);
-        if (pgid > 1 && pgid != getpgrp()) {
-          groups.insert(pgid);
-        }
-      }
-
-      BOOST_LOG(info) << "process: terminating Steam app ["sv << appid
-                      << "] process groups="sv << groups.size()
-                      << " matched_pids="sv << pids.size();
-
-      for (auto pgid : groups) {
-        kill(-pgid, SIGTERM);
-      }
-      for (auto pid : pids) {
-        kill(pid, SIGTERM);
-      }
-
-      for (int i = 0; i < 20; ++i) {
-        if (steam_app_pids(appid).empty()) {
-          return;
-        }
-        std::this_thread::sleep_for(100ms);
-      }
-
-      pids = steam_app_pids(appid);
-      if (!pids.empty()) {
-        BOOST_LOG(warning) << "process: Steam app ["sv << appid
-                           << "] did not exit after SIGTERM; sending SIGKILL survivors=["sv
-                           << proc_debug_summaries(pids) << ']';
-      }
-
-      groups.clear();
-      for (auto pid : pids) {
-        const auto pgid = getpgid(pid);
-        if (pgid > 1 && pgid != getpgrp()) {
-          groups.insert(pgid);
-        }
-      }
-
-      for (auto pgid : groups) {
-        kill(-pgid, SIGKILL);
-      }
-      for (auto pid : pids) {
-        kill(pid, SIGKILL);
-      }
-    }
 #endif
 
     bool prep_cmd_undo_stops_steam(const proc::cmd_t &cmd) {
@@ -1312,6 +930,175 @@ namespace proc {
       return is_steam_big_picture_app(ctx) ||
              is_steam_library_app(ctx) ||
              !steam_appid_for_context(ctx).empty();
+    }
+
+    bool isolated_session_generation_blocks_launch(
+      bool session_owned_cage,
+      bool generation_available
+    ) {
+      return session_owned_cage || generation_available;
+    }
+
+    bool isolated_session_cleanup_resets_router(
+      bool session_owned_cage,
+      bool generation_available,
+      bool exact_cleanup_complete
+    ) {
+      return session_owned_cage && generation_available && exact_cleanup_complete;
+    }
+
+    bool isolated_session_cleanup_clears_state(
+      bool session_owned_cage,
+      bool generation_available,
+      bool exact_cleanup_complete
+    ) {
+      return !session_owned_cage || (generation_available && exact_cleanup_complete);
+    }
+
+    bool isolated_session_uses_legacy_group_termination(
+      bool session_owned_cage,
+      bool immediate
+    ) {
+      return !session_owned_cage && !immediate;
+    }
+
+    bool isolated_session_detaches_legacy_handles(bool session_owned_cage) {
+      return session_owned_cage;
+    }
+
+    bool should_terminate_session_owned_steam_before_cage_stop(
+      const proc::ctx_t &ctx,
+      bool session_owned_cage,
+      bool session_generation_available,
+      bool session_owned_steam_client_active,
+      bool unowned_steam_client_active,
+      bool ownership_capture_complete
+    ) {
+      return session_owned_cage &&
+             session_generation_available &&
+             context_uses_steam(ctx) &&
+             session_owned_steam_client_active &&
+             !unowned_steam_client_active &&
+             ownership_capture_complete;
+    }
+
+    struct pidfd_handle_t {
+      pid_t pid = -1;
+      int fd = -1;
+
+      pidfd_handle_t() = default;
+      pidfd_handle_t(pid_t process_id, int descriptor): pid(process_id), fd(descriptor) {}
+      pidfd_handle_t(const pidfd_handle_t &) = delete;
+      pidfd_handle_t &operator=(const pidfd_handle_t &) = delete;
+      pidfd_handle_t(pidfd_handle_t &&other) noexcept: pid(other.pid), fd(other.fd) {
+        other.pid = -1;
+        other.fd = -1;
+      }
+      pidfd_handle_t &operator=(pidfd_handle_t &&other) noexcept {
+        if (this != &other) {
+          if (fd >= 0) {
+            close(fd);
+          }
+          pid = other.pid;
+          fd = other.fd;
+          other.pid = -1;
+          other.fd = -1;
+        }
+        return *this;
+      }
+      ~pidfd_handle_t() {
+        if (fd >= 0) {
+          close(fd);
+        }
+      }
+    };
+
+    std::optional<pidfd_handle_t> open_process_pidfd(pid_t pid, int &open_error) {
+      const auto fd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+      if (fd < 0) {
+        open_error = errno;
+        return std::nullopt;
+      }
+      open_error = 0;
+      return pidfd_handle_t {pid, fd};
+    }
+
+    bool pidfd_has_exited(const pidfd_handle_t &handle) {
+      pollfd descriptor {handle.fd, POLLIN, 0};
+      int result;
+      do {
+        result = poll(&descriptor, 1, 0);
+      } while (result < 0 && errno == EINTR);
+      return result == 1 && (descriptor.revents & POLLIN) != 0;
+    }
+
+    bool wait_for_pidfds_exit(
+      const std::vector<pidfd_handle_t> &handles,
+      std::chrono::milliseconds timeout
+    ) {
+      const auto deadline = std::chrono::steady_clock::now() + timeout;
+      for (;;) {
+        std::vector<pollfd> pending;
+        for (const auto &handle : handles) {
+          if (!pidfd_has_exited(handle)) {
+            pending.emplace_back(pollfd {handle.fd, POLLIN, 0});
+          }
+        }
+        if (pending.empty()) {
+          return true;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+          return false;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        const auto timeout_ms = static_cast<int>(std::max<std::int64_t>(1, remaining.count()));
+        int result;
+        do {
+          result = poll(pending.data(), pending.size(), timeout_ms);
+        } while (result < 0 && errno == EINTR);
+        if (result <= 0) {
+          return false;
+        }
+      }
+    }
+
+    bool send_pidfd_signal(const pidfd_handle_t &handle, int signal_number) {
+      if (pidfd_has_exited(handle)) {
+        return true;
+      }
+      if (syscall(SYS_pidfd_send_signal, handle.fd, signal_number, nullptr, 0) == 0) {
+        return true;
+      }
+      return errno == ESRCH;
+    }
+
+    bool terminate_pidfds(
+      std::vector<pidfd_handle_t> &handles,
+      std::chrono::milliseconds graceful_timeout,
+      std::chrono::milliseconds kill_timeout,
+      std::string_view label
+    ) {
+      for (const auto &handle : handles) {
+        if (!send_pidfd_signal(handle, SIGTERM)) {
+          BOOST_LOG(warning) << "process: pidfd SIGTERM failed for "sv << label
+                             << " pid="sv << handle.pid << " error="sv << std::strerror(errno);
+        }
+      }
+      if (wait_for_pidfds_exit(handles, graceful_timeout)) {
+        return true;
+      }
+
+      BOOST_LOG(warning) << "process: "sv << label
+                         << " did not exit after pidfd SIGTERM; sending PID-bound SIGKILL"sv;
+      for (const auto &handle : handles) {
+        if (!send_pidfd_signal(handle, SIGKILL)) {
+          BOOST_LOG(warning) << "process: pidfd SIGKILL failed for "sv << label
+                             << " pid="sv << handle.pid << " error="sv << std::strerror(errno);
+        }
+      }
+      return wait_for_pidfds_exit(handles, kill_timeout);
     }
 
     bool proc_pid_dir_name(std::string_view name) {
@@ -1387,6 +1174,279 @@ namespace proc {
         return value_pos < status.size() && status[value_pos] == static_cast<char>(90);
       }
 
+      return false;
+    }
+
+    bool is_active_steam_shutdown_ownership_process(
+      std::string_view comm,
+      std::string_view argv0_path,
+      std::string_view cmdline,
+      std::string_view status
+    ) {
+      const auto effective_argv0 = argv0_path.empty() ? proc_argv0_from_cmdline(cmdline) : std::string {argv0_path};
+      return is_desktop_steam_client_process(comm, effective_argv0) &&
+             !proc_status_is_zombie(status);
+    }
+
+#ifdef POLARIS_TESTS
+    bool steam_shutdown_process_is_unowned_active(
+      std::string_view comm,
+      std::string_view argv0_path,
+      std::string_view cmdline,
+      std::string_view status,
+      std::string_view environ,
+      std::string_view session_instance_id
+    ) {
+      return is_active_steam_shutdown_ownership_process(comm, argv0_path, cmdline, status) &&
+             !proc_environ_matches_isolated_session(environ, session_instance_id);
+    }
+#endif
+
+    std::optional<std::uint64_t> proc_start_time_from_stat(std::string_view stat) {
+      const auto comm_end = stat.rfind(')');
+      if (comm_end == std::string_view::npos || comm_end + 1 >= stat.size()) {
+        return std::nullopt;
+      }
+
+      std::istringstream fields(std::string {stat.substr(comm_end + 1)});
+      std::string token;
+      if (!(fields >> token)) {
+        return std::nullopt;
+      }
+      for (int field = 4; field <= 21; ++field) {
+        if (!(fields >> token)) {
+          return std::nullopt;
+        }
+      }
+      std::uint64_t start_time = 0;
+      if (!(fields >> start_time)) {
+        return std::nullopt;
+      }
+      return start_time;
+    }
+
+    std::optional<std::uint64_t> proc_start_time_ticks(pid_t pid) {
+      return proc_start_time_from_stat(read_proc_status_file(pid, "stat"));
+    }
+
+    bool steam_pidfd_capture_identity_matches(
+      const std::optional<std::uint64_t> &before,
+      const std::optional<std::uint64_t> &after
+    ) {
+      return before && after && *before == *after;
+    }
+
+    struct isolated_session_process_snapshot_t {
+      std::vector<pidfd_handle_t> owned;
+      bool capture_complete = true;
+    };
+
+    isolated_session_process_snapshot_t isolated_session_process_snapshot(
+      std::string_view session_instance_id
+    ) {
+      isolated_session_process_snapshot_t snapshot;
+      if (session_instance_id.empty()) {
+        snapshot.capture_complete = false;
+        return snapshot;
+      }
+
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        snapshot.capture_complete = false;
+        return snapshot;
+      }
+
+      while (auto *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (!proc_pid_dir_name(name)) {
+          continue;
+        }
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == getpid()) {
+          continue;
+        }
+
+        const auto environ_before = read_proc_status_file(pid, "environ");
+        if (!proc_environ_matches_isolated_session(environ_before, session_instance_id)) {
+          continue;
+        }
+        const auto identity_before = proc_start_time_ticks(pid);
+        if (!identity_before) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+
+        int open_error = 0;
+        auto handle = open_process_pidfd(pid, open_error);
+        if (!handle) {
+          if (open_error != ESRCH) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+
+        const auto environ_after = read_proc_status_file(pid, "environ");
+        const auto identity_after = proc_start_time_ticks(pid);
+        if (!steam_pidfd_capture_identity_matches(identity_before, identity_after) ||
+            !proc_environ_matches_isolated_session(environ_after, session_instance_id)) {
+          if (!pidfd_has_exited(*handle)) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+        snapshot.owned.emplace_back(std::move(*handle));
+      }
+
+      closedir(dir);
+      return snapshot;
+    }
+
+    bool terminate_isolated_session_processes(
+      std::string_view session_instance_id,
+      std::string_view reason
+    ) {
+      if (session_instance_id.empty()) {
+        return false;
+      }
+
+      for (int pass = 0; pass < 2; ++pass) {
+        auto snapshot = isolated_session_process_snapshot(session_instance_id);
+        if (!snapshot.capture_complete) {
+          BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
+        }
+        if (snapshot.owned.empty()) {
+          return snapshot.capture_complete;
+        }
+
+        BOOST_LOG(info) << "process: terminating "sv << snapshot.owned.size()
+                        << " exact-generation isolated process(es) "sv << reason;
+        if (!terminate_pidfds(snapshot.owned, 2s, 1s, "isolated session process"sv)) {
+          BOOST_LOG(warning) << "process: exact-generation isolated processes remained after bounded pidfd cleanup "sv
+                             << reason;
+        }
+      }
+
+      const auto final_snapshot = isolated_session_process_snapshot(session_instance_id);
+      return final_snapshot.capture_complete && final_snapshot.owned.empty();
+    }
+
+    struct steam_client_ownership_snapshot_t {
+      std::vector<pidfd_handle_t> owned;
+      std::vector<pidfd_handle_t> unowned;
+      bool capture_complete = true;
+    };
+
+    steam_client_ownership_snapshot_t steam_client_ownership_snapshot(std::string_view session_instance_id) {
+      steam_client_ownership_snapshot_t snapshot;
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        snapshot.capture_complete = false;
+        return snapshot;
+      }
+
+      while (auto *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (!proc_pid_dir_name(name)) {
+          continue;
+        }
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == getpid()) {
+          continue;
+        }
+
+        const auto identity_before = proc_start_time_ticks(pid);
+        auto comm = boost::to_lower_copy(read_proc_status_file(pid, "comm"));
+        boost::trim(comm);
+        auto cmdline = read_proc_status_file(pid, "cmdline");
+        auto argv0 = proc_argv0_from_cmdline(cmdline);
+        auto status = read_proc_status_file(pid, "status");
+        if (!is_active_steam_shutdown_ownership_process(comm, argv0, cmdline, status)) {
+          continue;
+        }
+        if (!identity_before) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+
+        int open_error = 0;
+        auto handle = open_process_pidfd(pid, open_error);
+        if (!handle) {
+          if (open_error != ESRCH) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+
+        comm = boost::to_lower_copy(read_proc_status_file(pid, "comm"));
+        boost::trim(comm);
+        cmdline = read_proc_status_file(pid, "cmdline");
+        argv0 = proc_argv0_from_cmdline(cmdline);
+        status = read_proc_status_file(pid, "status");
+        const auto identity_after = proc_start_time_ticks(pid);
+        if (!is_active_steam_shutdown_ownership_process(comm, argv0, cmdline, status)) {
+          continue;
+        }
+        if (!steam_pidfd_capture_identity_matches(identity_before, identity_after)) {
+          if (!pidfd_has_exited(*handle)) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+
+        const auto environ = read_proc_status_file(pid, "environ");
+        if (environ.empty() && !pidfd_has_exited(*handle)) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+        if (proc_environ_matches_isolated_session(environ, session_instance_id)) {
+          snapshot.owned.emplace_back(std::move(*handle));
+        } else {
+          snapshot.unowned.emplace_back(std::move(*handle));
+        }
+      }
+
+      closedir(dir);
+      return snapshot;
+    }
+
+    bool terminate_session_owned_steam_before_cage_stop_impl(
+      const proc::ctx_t &app,
+      bool session_owned_cage,
+      std::string_view session_instance_id
+    ) {
+      const bool steam_context = context_uses_steam(app);
+      if (!session_owned_cage || session_instance_id.empty() || !steam_context) {
+        return false;
+      }
+
+      auto ownership = steam_client_ownership_snapshot(session_instance_id);
+      if (!should_terminate_session_owned_steam_before_cage_stop(
+            app,
+            session_owned_cage,
+            !session_instance_id.empty(),
+            !ownership.owned.empty(),
+            !ownership.unowned.empty(),
+            ownership.capture_complete
+          )) {
+        if (!ownership.capture_complete) {
+          BOOST_LOG(warning) << "process: skipping pre-cage private Steam termination because pidfd ownership capture was incomplete"sv;
+        } else if (!ownership.unowned.empty()) {
+          BOOST_LOG(warning) << "process: skipping pre-cage private Steam termination because "sv
+                             << ownership.unowned.size() << " active Steam client process(es) are not session-owned"sv;
+        } else if (ownership.owned.empty()) {
+          BOOST_LOG(info) << "process: skipping pre-cage private Steam termination because no session-owned Steam client is active"sv;
+        }
+        return false;
+      }
+
+      BOOST_LOG(info) << "process: terminating "sv << ownership.owned.size()
+                      << " session-owned Steam process(es) through pidfd before isolated cage stop"sv;
+      if (terminate_pidfds(ownership.owned, 5s, 1s, "private Steam"sv)) {
+        BOOST_LOG(info) << "process: session-owned Steam exited before isolated cage stop"sv;
+        return true;
+      }
+
+      BOOST_LOG(warning) << "process: session-owned Steam remained after bounded pidfd termination; continuing with isolated cage fallback cleanup"sv;
       return false;
     }
 
@@ -1481,51 +1541,13 @@ namespace proc {
       return policy;
     }
 
-    bool should_skip_steam_shutdown_undo_after_cage_cleanup(const proc::ctx_t &ctx,
+    bool should_skip_steam_shutdown_undo_after_cage_cleanup(const proc::ctx_t &,
                                                             const proc::cmd_t &cmd,
-                                                            bool use_cage_compositor) {
-      return use_cage_compositor &&
-             context_uses_steam(ctx) &&
+                                                            bool session_owned_cage) {
+      return session_owned_cage &&
              command_requests_steam_shutdown(cmd.undo_cmd);
     }
 
-    bool is_browser_stream_session(const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session) {
-      return launch_session && launch_session->device_name == "Browser Stream";
-    }
-
-    void settle_isolated_browser_stream_steam_cleanup(const proc::ctx_t &ctx) {
-      if (!context_uses_steam(ctx)) {
-        return;
-      }
-
-      terminate_steam_runtime_probes("after Browser Stream cleanup"sv);
-      wait_for_transient_steam_clients(4s, "after Browser Stream cleanup"sv);
-
-      std::lock_guard lock(isolated_browser_stream_steam_cleanup_mutex);
-      isolated_browser_stream_steam_settle_until = std::chrono::steady_clock::now() + 30s;
-    }
-
-    void settle_recent_browser_stream_steam_cleanup_before_launch(const proc::ctx_t &next_app) {
-      if (!context_uses_steam(next_app)) {
-        return;
-      }
-
-      {
-        std::lock_guard lock(isolated_browser_stream_steam_cleanup_mutex);
-        if (std::chrono::steady_clock::now() >= isolated_browser_stream_steam_settle_until) {
-          return;
-        }
-      }
-
-      BOOST_LOG(info) << "process: settling previous Browser Stream Steam cleanup before launching ["sv
-                      << next_app.name << ']';
-      terminate_steam_runtime_probes("before next Steam launch"sv);
-      wait_for_transient_steam_clients(8s, "before next Steam launch"sv);
-      std::this_thread::sleep_for(500ms);
-
-      std::lock_guard lock(isolated_browser_stream_steam_cleanup_mutex);
-      isolated_browser_stream_steam_settle_until = {};
-    }
 #endif
 
     void normalize_steam_big_picture_app(proc::ctx_t &ctx) {
@@ -2028,6 +2050,14 @@ namespace proc {
                              const std::string &value) {
       env[key] = value;
       platf::set_env(key, value);
+      tracked_keys.insert(key);
+    }
+
+    void set_child_only_session_env_var(boost::process::v1::environment &env,
+                                        std::unordered_set<std::string> &tracked_keys,
+                                        const std::string &key,
+                                        const std::string &value) {
+      env[key] = value;
       tracked_keys.insert(key);
     }
 
@@ -3043,6 +3073,152 @@ namespace proc {
                                                                    bool use_cage_compositor) {
     return should_skip_steam_shutdown_undo_after_cage_cleanup(app, cmd, use_cage_compositor);
   }
+
+  bool should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    const proc::ctx_t &app,
+    bool session_owned_cage,
+    bool session_generation_available,
+    bool session_owned_steam_client_active,
+    bool unowned_steam_client_active,
+    bool ownership_capture_complete
+  ) {
+    return should_terminate_session_owned_steam_before_cage_stop(
+      app,
+      session_owned_cage,
+      session_generation_available,
+      session_owned_steam_client_active,
+      unowned_steam_client_active,
+      ownership_capture_complete
+    );
+  }
+
+  bool steam_shutdown_process_is_unowned_active_for_tests(
+    std::string_view comm,
+    std::string_view argv0_path,
+    std::string_view cmdline,
+    std::string_view status,
+    std::string_view environ,
+    std::string_view session_instance_id
+  ) {
+    return steam_shutdown_process_is_unowned_active(
+      comm, argv0_path, cmdline, status, environ, session_instance_id
+    );
+  }
+
+  bool isolated_session_environ_matches_for_tests(
+    std::string_view environ,
+    std::string_view session_instance_id
+  ) {
+    return proc_environ_matches_isolated_session(environ, session_instance_id);
+  }
+
+  bool session_instance_environment_is_child_only_for_tests(
+    std::string_view session_instance_id
+  ) {
+    constexpr auto key = "POLARIS_SESSION_INSTANCE_ID";
+    const auto original = copy_env_var(key);
+    platf::unset_env(key);
+
+    boost::process::v1::environment env = boost::this_process::environment();
+    std::unordered_set<std::string> tracked_keys;
+    set_child_only_session_env_var(
+      env,
+      tracked_keys,
+      key,
+      std::string {session_instance_id}
+    );
+
+    const bool child_has_exact_value = env[key].to_string() == session_instance_id;
+    const bool parent_is_untouched = std::getenv(key) == nullptr;
+    const bool key_is_tracked = tracked_keys.contains(key);
+    restore_env_var(key, original);
+    return child_has_exact_value && parent_is_untouched && key_is_tracked;
+  }
+
+  std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat) {
+    return proc_start_time_from_stat(stat);
+  }
+
+  bool steam_pidfd_capture_identity_matches_for_tests(
+    std::optional<std::uint64_t> before,
+    std::optional<std::uint64_t> after
+  ) {
+    return steam_pidfd_capture_identity_matches(before, after);
+  }
+
+  bool terminate_pid_with_pidfd_for_tests(
+    pid_t pid,
+    std::chrono::milliseconds graceful_timeout,
+    std::chrono::milliseconds kill_timeout
+  ) {
+    int open_error = 0;
+    auto handle = open_process_pidfd(pid, open_error);
+    if (!handle) {
+      return false;
+    }
+    std::vector<pidfd_handle_t> handles;
+    handles.emplace_back(std::move(*handle));
+    return terminate_pidfds(handles, graceful_timeout, kill_timeout, "test process"sv);
+  }
+
+  bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id) {
+    return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv);
+  }
+
+  bool terminate_session_owned_steam_before_cage_stop_for_tests(
+    const ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id
+  ) {
+    return terminate_session_owned_steam_before_cage_stop_impl(
+      app,
+      session_owned_cage,
+      session_instance_id
+    );
+  }
+
+  bool isolated_session_generation_blocks_launch_for_tests(
+    bool session_owned_cage,
+    bool generation_available
+  ) {
+    return isolated_session_generation_blocks_launch(session_owned_cage, generation_available);
+  }
+
+  bool isolated_session_cleanup_resets_router_for_tests(
+    bool session_owned_cage,
+    bool generation_available,
+    bool exact_cleanup_complete
+  ) {
+    return isolated_session_cleanup_resets_router(
+      session_owned_cage,
+      generation_available,
+      exact_cleanup_complete
+    );
+  }
+
+  bool isolated_session_cleanup_clears_state_for_tests(
+    bool session_owned_cage,
+    bool generation_available,
+    bool exact_cleanup_complete
+  ) {
+    return isolated_session_cleanup_clears_state(
+      session_owned_cage,
+      generation_available,
+      exact_cleanup_complete
+    );
+  }
+
+  bool isolated_session_uses_legacy_group_termination_for_tests(
+    bool session_owned_cage,
+    bool immediate
+  ) {
+    return isolated_session_uses_legacy_group_termination(session_owned_cage, immediate);
+  }
+
+  bool isolated_session_detaches_legacy_handles_for_tests(bool session_owned_cage) {
+    return isolated_session_detaches_legacy_handles(session_owned_cage);
+  }
+
 #endif
 
 #ifdef _WIN32
@@ -3405,7 +3581,21 @@ namespace proc {
       terminate_impl(false, false);
     }
 
+#ifdef __linux__
+    if (isolated_session_generation_blocks_launch(
+          _session_used_cage_compositor,
+          !_session_instance_id.empty()
+        )) {
+      BOOST_LOG(error) << "process: refusing launch while an incompletely cleaned isolated session generation remains"sv;
+      return 503;
+    }
+#endif
+
     ++_session_generation;
+#ifdef __linux__
+    _session_instance_id = generate_session_token();
+    _session_used_cage_compositor = false;
+#endif
     _app = app;
     _app_id = util::from_view(app.id);
     _app_name = app.name;
@@ -3425,10 +3615,6 @@ namespace proc {
     const bool requested_headless_for_session =
       config::video.linux_display.headless_mode &&
       !(launch_session && launch_session->mirror_desktop);
-    settle_recent_browser_stream_steam_cleanup_before_launch(_app);
-    if (use_cage_compositor_for_session) {
-      terminate_isolated_session_processes("before launching isolated cage session"sv);
-    }
     const auto steam_guard_snapshot = snapshot_steam_big_picture_input_guard(
       use_cage_compositor_for_session,
       launch_session && launch_session->mirror_desktop
@@ -3825,10 +4011,8 @@ namespace proc {
 #ifdef __linux__
       confighttp::set_session_state(confighttp::session_state_e::tearing_down);
       confighttp::emit_session_event("session_ending", "Cleaning up");
-      // Stop cage compositor (kills the game running inside it)
-      if (config::video.linux_display.use_cage_compositor) {
-        cage_display_router::stop();
-      }
+      // terminate_impl() owns exact-generation cage cleanup. Do not follow it
+      // with raw PID/group signaling from cage_display_router::stop().
       session_manager::restore_state(session_state);
 #endif
     });
@@ -4211,6 +4395,12 @@ namespace proc {
     _session_env_keys.clear();
 
 #ifdef __linux__
+    set_child_only_session_env_var(
+      _env,
+      _session_env_keys,
+      "POLARIS_SESSION_INSTANCE_ID",
+      _session_instance_id
+    );
     _audio_context = {};
     if (config::audio.stream) {
       _audio_context = audio::get_audio_ctx_ref();
@@ -4410,7 +4600,15 @@ namespace proc {
         cage_display_router::stop();
       }
 
-      if (!cage_display_router::start(render_width, render_height, cage_refresh_hz, startup_cmd, force_windowed, allow_cage_mangohud)) {
+      if (!cage_display_router::start(
+            render_width,
+            render_height,
+            cage_refresh_hz,
+            startup_cmd,
+            force_windowed,
+            allow_cage_mangohud,
+            _session_instance_id
+          )) {
         return false;
       }
 
@@ -4680,6 +4878,7 @@ namespace proc {
         confighttp::emit_session_event("error", "Failed to start cage compositor");
         return 503;
       } else {
+        _session_used_cage_compositor = true;
         cage_started_with_detached_client = true;
         confighttp::set_session_state(confighttp::session_state_e::game_launching);
         confighttp::emit_session_event("game_launching", "Launching " + _app.name);
@@ -4721,6 +4920,7 @@ namespace proc {
         BOOST_LOG(error) << "session_manager: Failed to start cage compositor"sv;
         return 503;
       }
+      _session_used_cage_compositor = true;
     } else
 #endif
     {
@@ -5148,6 +5348,17 @@ namespace proc {
     terminate_impl(false, true);
   }
 
+#ifdef __linux__
+  void proc_t::terminate_session_owned_steam_before_cage_stop() {
+    (void) terminate_session_owned_steam_before_cage_stop_impl(
+      _app,
+      _session_used_cage_compositor,
+      _session_instance_id
+    );
+  }
+
+#endif
+
   void proc_t::terminate_impl(bool immediate, bool needs_refresh) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
@@ -5155,13 +5366,56 @@ namespace proc {
     placebo = false;
 
 #ifdef __linux__
+    bool exact_generation_cleanup_complete = true;
     stop_steam_big_picture_input_guard();
+    if (!immediate) {
+      terminate_session_owned_steam_before_cage_stop();
+    }
+
+    // The immutable launch generation, not mutable config, owns this cleanup.
+    // Capture and terminate every exact-generation process through pidfds before
+    // any legacy child/group handle can signal or be destroyed.
+    if (_session_used_cage_compositor) {
+      exact_generation_cleanup_complete = terminate_isolated_session_processes(
+        _session_instance_id,
+        "after private Steam pre-cage termination"sv
+      );
+      if (isolated_session_cleanup_resets_router(
+            _session_used_cage_compositor,
+            !_session_instance_id.empty(),
+            exact_generation_cleanup_complete
+          )) {
+        cage_display_router::reset_after_external_stop();
+      } else {
+        BOOST_LOG(error) << "process: retaining immutable cage generation because exact-generation cleanup was incomplete"sv;
+      }
+    }
 #endif
 
-    if (!immediate) {
+#ifdef __linux__
+    if (isolated_session_uses_legacy_group_termination(
+          _session_used_cage_compositor,
+          immediate
+        )) {
       terminate_process_group(_process, _process_group, _app.exit_timeout);
     }
 
+    if (isolated_session_detaches_legacy_handles(_session_used_cage_compositor)) {
+      // Boost.Process child/group destructors signal attached processes. The
+      // exact pidfd path above is the only signaling authority for cage-owned
+      // sessions, so detach legacy bookkeeping before resetting its handles.
+      if (_process.joinable()) {
+        _process.detach();
+      }
+      if (_process_group.joinable()) {
+        _process_group.detach();
+      }
+    }
+#else
+    if (!immediate) {
+      terminate_process_group(_process, _process_group, _app.exit_timeout);
+    }
+#endif
     _process = boost::process::v1::child();
     _process_group = boost::process::v1::group();
 
@@ -5177,25 +5431,6 @@ namespace proc {
     }
     _session_env_keys.clear();
     _audio_context = {};
-
-#ifdef __linux__
-    const bool should_settle_browser_stream_steam =
-      is_browser_stream_session(_launch_session) &&
-      config::video.linux_display.use_cage_compositor &&
-      context_uses_steam(_app);
-
-    // Stop labwc compositor — this kills all games running inside it.
-    // Without this, games launched with setsid escape the process group
-    // and keep running after the stream ends.
-    if (config::video.linux_display.use_cage_compositor) {
-      cage_display_router::stop();
-      terminate_isolated_session_processes("after isolated cage stop"sv);
-      terminate_steam_app_processes(_app);
-      if (should_settle_browser_stream_steam) {
-        settle_isolated_browser_stream_steam_cleanup(_app);
-      }
-    }
-#endif
 
     for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {
       auto &cmd = *(_app_prep_it - 1);
@@ -5214,7 +5449,7 @@ namespace proc {
       if (should_skip_steam_shutdown_undo_after_cage_cleanup(
             _app,
             cmd,
-            config::video.linux_display.use_cage_compositor
+            _session_used_cage_compositor
           )) {
         BOOST_LOG(info) << "Skipping Steam shutdown undo after isolated cage Steam cleanup ["sv
                         << cmd.undo_cmd << ']';
@@ -5241,6 +5476,15 @@ namespace proc {
     }
 
 #ifdef __linux__
+    if (isolated_session_cleanup_clears_state(
+          _session_used_cage_compositor,
+          !_session_instance_id.empty(),
+          exact_generation_cleanup_complete
+        )) {
+      _session_instance_id.clear();
+      _session_used_cage_compositor = false;
+    }
+
     // Disable streaming display after undo commands have run.
     // Skip if a virtual display was created (it will be destroyed below).
     if (!linux_vdisplay.has_value() || !linux_vdisplay->active) {

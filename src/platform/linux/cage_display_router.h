@@ -18,7 +18,9 @@
  * The caller (process.cpp) should:
  *   1. Call start() with the client's requested resolution
  *   2. Use wrap_cmd(original_cmd) for the app command
- *   3. Call stop() in the cleanup/fail_guard
+ *   3. For an owned streaming session, terminate exact-generation processes
+ *      through pidfds and call reset_after_external_stop(); stop() remains for
+ *      pre-session probes and startup failures before ownership is committed.
  */
 #pragma once
 
@@ -50,6 +52,8 @@ namespace cage_display_router {
    * @param force_windowed Force the compositor to run windowed even if headless
    *                       mode is configured. Used when GPU-native capture must
    *                       take priority over invisibility.
+   * @param session_instance_id Immutable generation inherited only by the cage
+   *                            child and its descendants; never by Polaris itself.
    * @return true if cage started successfully and wayland socket is available
    */
   bool start(
@@ -58,7 +62,8 @@ namespace cage_display_router {
     int refresh_hz = 60,
     const std::string &game_cmd = "",
     bool force_windowed = false,
-    bool allow_mangohud = true
+    bool allow_mangohud = true,
+    const std::string &session_instance_id = ""
   );
 
   /**
@@ -77,6 +82,18 @@ namespace cage_display_router {
    * Sends SIGTERM, waits up to 3s, then SIGKILL if needed.
    */
   void stop();
+
+  /**
+   * @brief Clear router state after the session owner has pidfd-terminated cage.
+   *
+   * This function never signals cage_pid or its process group. It only performs
+   * a non-blocking reap of the original child and clears cached router state.
+   */
+  void reset_after_external_stop();
+
+#if defined(POLARIS_TESTS)
+  void reset_after_external_stop_for_tests(pid_t pid);
+#endif
 
   /**
    * @brief Returns true if cage is running and its wayland socket exists.
