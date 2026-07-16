@@ -636,7 +636,15 @@ namespace cage_display_router {
   // Public API
   // -----------------------------------------------------------------------
 
-  bool start(int width, int height, int refresh_hz, const std::string &game_cmd, bool force_windowed, bool allow_mangohud) {
+  bool start(
+    int width,
+    int height,
+    int refresh_hz,
+    const std::string &game_cmd,
+    bool force_windowed,
+    bool allow_mangohud,
+    const std::string &session_instance_id
+  ) {
     const auto startup_begin = std::chrono::steady_clock::now();
 
     if (cage_pid > 0 && is_running()) {
@@ -755,6 +763,11 @@ namespace cage_display_router {
     pid_t pid = fork();
     if (pid == 0) {
       // Child: set wlroots environment, detach, exec labwc
+      if (!session_instance_id.empty()) {
+        setenv("POLARIS_SESSION_INSTANCE_ID", session_instance_id.c_str(), 1);
+      } else {
+        unsetenv("POLARIS_SESSION_INSTANCE_ID");
+      }
       set_labwc_process_environment(headless);
       if (headless) {
         // Headless mode: no visible window on desktop, no parent display needed.
@@ -919,6 +932,29 @@ namespace cage_display_router {
       .backend_name = "labwc",
     };
   }
+
+  void reset_after_external_stop() {
+    if (cage_pid > 0) {
+      (void) waitpid(cage_pid, nullptr, WNOHANG);
+    }
+    BOOST_LOG(info) << "labwc: Cleared router state after exact-generation pidfd cleanup"sv;
+    cage_pid = 0;
+    cage_wayland_socket.clear();
+    cage_x11_display.clear();
+    cage_runtime_state = {
+      .requested_headless = false,
+      .effective_headless = false,
+      .gpu_native_override_active = false,
+      .backend_name = "labwc",
+    };
+  }
+
+#if defined(POLARIS_TESTS)
+  void reset_after_external_stop_for_tests(pid_t pid) {
+    cage_pid = pid;
+    reset_after_external_stop();
+  }
+#endif
 
   bool is_running() {
     if (cage_pid <= 0) return false;

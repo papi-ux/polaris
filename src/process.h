@@ -166,6 +166,9 @@ namespace proc {
                                                std::string_view argv0_path,
                                                std::string_view cmdline,
                                                std::string_view status = {});
+  bool desktop_steam_proc_open_error_fails_closed_for_tests();
+  bool desktop_steam_proc_enumeration_error_fails_closed_for_tests();
+  bool desktop_steam_proc_read_error_fails_closed_for_tests(pid_t forced_pid);
 
   bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
                                                    bool use_cage_compositor,
@@ -173,6 +176,121 @@ namespace proc {
   bool should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(const struct ctx_t &app,
                                                                    const config::prep_cmd_t &cmd,
                                                                    bool use_cage_compositor);
+  bool should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    const struct ctx_t &app,
+    bool use_cage_compositor,
+    bool cage_running,
+    bool session_owned_steam_client_active,
+    bool unowned_steam_client_active,
+    bool ownership_capture_complete
+  );
+  bool steam_shutdown_process_is_unowned_active_for_tests(
+    std::string_view comm,
+    std::string_view argv0_path,
+    std::string_view cmdline,
+    std::string_view status,
+    std::string_view environ,
+    std::string_view session_instance_id
+  );
+  bool isolated_session_environ_matches_for_tests(
+    std::string_view environ,
+    std::string_view session_instance_id
+  );
+  bool session_instance_environment_is_child_only_for_tests(
+    std::string_view session_instance_id
+  );
+  std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat);
+  bool steam_pidfd_capture_identity_matches_for_tests(
+    std::optional<std::uint64_t> before,
+    std::optional<std::uint64_t> after
+  );
+  bool terminate_pid_with_pidfd_for_tests(
+    pid_t pid,
+    std::chrono::milliseconds graceful_timeout,
+    std::chrono::milliseconds kill_timeout
+  );
+  bool terminate_pid_with_pidfd_after_wait_entry_for_tests(
+    pid_t pid,
+    std::chrono::milliseconds graceful_timeout,
+    std::chrono::milliseconds kill_timeout,
+    std::atomic<bool> &wait_entered
+  );
+  bool terminate_pid_with_forced_zero_poll_eintr_for_tests(
+    pid_t pid,
+    std::chrono::milliseconds graceful_timeout,
+    std::chrono::milliseconds kill_timeout,
+    int forced_interruptions,
+    std::chrono::milliseconds interruption_delay
+  );
+  bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id);
+  bool exact_generation_proc_enumeration_error_fails_closed_for_tests(
+    std::string_view session_instance_id
+  );
+  bool exact_generation_unknown_ancestry_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_unknown_pid
+  );
+  bool exact_generation_post_capture_enumeration_error_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t captured_pid
+  );
+  bool exact_generation_reused_pid_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t reused_pid
+  );
+  bool exact_generation_pidfd_open_error_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_pid
+  );
+  bool isolated_session_capture_failure_retains_generation_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  );
+  bool terminate_session_owned_steam_before_cage_stop_for_tests(
+    const struct ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id
+  );
+  bool terminate_session_owned_steam_with_forced_capture_failure_for_tests(
+    const struct ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t forced_pid
+  );
+  bool terminate_session_owned_steam_with_pidfd_open_error_for_tests(
+    const struct ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t forced_pid
+  );
+  bool terminate_session_owned_steam_with_post_capture_enumeration_error_for_tests(
+    const struct ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t captured_pid
+  );
+  bool terminate_session_owned_steam_with_reused_pid_for_tests(
+    const struct ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t reused_pid
+  );
+  bool isolated_session_generation_blocks_launch_for_tests(bool session_owned_cage, bool generation_available);
+  bool isolated_session_cleanup_resets_router_for_tests(
+    bool session_owned_cage,
+    bool generation_available,
+    bool exact_cleanup_complete
+  );
+  bool isolated_session_cleanup_clears_state_for_tests(
+    bool session_owned_cage,
+    bool generation_available,
+    bool exact_cleanup_complete
+  );
+  bool isolated_session_uses_legacy_group_termination_for_tests(
+    bool session_owned_cage,
+    bool immediate
+  );
+  bool isolated_session_detaches_legacy_handles_for_tests(bool session_owned_cage);
 #endif
 
   typedef config::prep_cmd_t cmd_t;
@@ -422,6 +540,17 @@ namespace proc {
     void terminate_from_admitted_launch();
     bool reload_configuration_from_file(const std::string &file_name);
     void reload_configuration(proc_t &&parsed);
+#if defined(POLARIS_TESTS) && defined(__linux__)
+    bool isolated_session_capture_failure_retains_generation_for_tests(
+      std::string_view session_instance_id,
+      pid_t forced_capture_failure_pid
+    );
+    bool terminate_session_owned_steam_before_cage_stop_for_tests(
+      const ctx_t &app,
+      bool session_owned_cage,
+      std::string_view session_instance_id
+    );
+#endif
 #if defined(POLARIS_TESTS)
     std::pair<const void *, const void *> session_lifecycle_identity_for_tests() const;
     void with_session_lifecycle_lock_for_tests(const std::function<void()> &callback);
@@ -442,6 +571,9 @@ namespace proc {
     );
     void terminate_impl(bool immediate, bool needs_refresh);
 #ifdef __linux__
+    bool terminate_session_owned_steam_before_cage_stop();
+    void terminate_isolated_session_generation();
+    void finish_isolated_session_generation_cleanup();
     std::shared_ptr<const steam_big_picture_guard_snapshot_t> snapshot_steam_big_picture_input_guard(
       bool use_cage_compositor,
       bool mirror_desktop
@@ -485,6 +617,9 @@ namespace proc {
     std::unordered_set<std::string> _session_env_keys;
 #ifdef __linux__
     std::shared_ptr<steam_big_picture_guard_runtime_t> _steam_big_picture_guard;
+    std::string _session_instance_id;
+    bool _session_used_cage_compositor = false;
+    bool _exact_generation_cleanup_complete = true;
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
