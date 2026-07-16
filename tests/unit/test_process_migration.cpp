@@ -2,6 +2,8 @@
 #include "../tests_paths.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -11,10 +13,134 @@
 #include <src/file_handler.h>
 #include <src/nvhttp.h>
 #include <src/process.h>
+#ifdef __linux__
+  #include <src/platform/linux/cage_display_router.h>
+#endif
 #include <src/stream_stats.h>
+
+#ifdef __linux__
+  #include <csignal>
+  #include <pthread.h>
+  #include <sys/prctl.h>
+  #include <sys/wait.h>
+  #include <unistd.h>
+#endif
 
 namespace {
 #ifdef __linux__
+  volatile std::sig_atomic_t sigusr1_interruptions = 0;
+
+  void record_sigusr1_interrupt(int) {
+    sigusr1_interruptions = sigusr1_interruptions + 1;
+  }
+
+  struct linux_child_guard_t {
+    explicit linux_child_guard_t(pid_t child_pid): pid(child_pid) {}
+    linux_child_guard_t(const linux_child_guard_t &) = delete;
+    linux_child_guard_t &operator=(const linux_child_guard_t &) = delete;
+
+    ~linux_child_guard_t() {
+      terminate_and_reap();
+    }
+
+    pid_t wait(int *status, int options) {
+      if (pid <= 0 || reaped) {
+        errno = ECHILD;
+        return -1;
+      }
+      pid_t result;
+      do {
+        result = waitpid(pid, status, options);
+      } while (result < 0 && errno == EINTR);
+      if (result == pid || (result < 0 && errno == ECHILD)) {
+        reaped = true;
+      }
+      return result;
+    }
+
+    pid_t terminate_and_reap(int *status_out = nullptr) {
+      if (pid <= 0 || reaped) {
+        errno = ECHILD;
+        return -1;
+      }
+      int local_status = 0;
+      int *status = status_out != nullptr ? status_out : &local_status;
+      auto observed = wait(status, WNOHANG);
+      if (observed == 0) {
+        (void) kill(pid, SIGKILL);
+        observed = wait(status, 0);
+      }
+      return observed;
+    }
+
+    pid_t pid = -1;
+    bool reaped = false;
+  };
+
+  struct sigusr1_interrupt_guard_t {
+    sigusr1_interrupt_guard_t() {
+      struct sigaction action {};
+      action.sa_handler = record_sigusr1_interrupt;
+      sigemptyset(&action.sa_mask);
+      action.sa_flags = 0;
+      if (sigaction(SIGUSR1, &action, &previous_action) != 0) {
+        return;
+      }
+
+      sigemptyset(&signal_set);
+      sigaddset(&signal_set, SIGUSR1);
+      if (pthread_sigmask(SIG_UNBLOCK, &signal_set, &previous_mask) != 0) {
+        (void) sigaction(SIGUSR1, &previous_action, nullptr);
+        return;
+      }
+      installed = true;
+    }
+
+    ~sigusr1_interrupt_guard_t() {
+      (void) restore();
+    }
+
+    bool restore() {
+      if (!installed) {
+        return true;
+      }
+      if (pthread_sigmask(SIG_BLOCK, &signal_set, nullptr) != 0) {
+        return false;
+      }
+      const timespec no_wait {};
+      for (;;) {
+        int result = -1;
+        if (forced_drain_interruptions > 0) {
+          --forced_drain_interruptions;
+          errno = EINTR;
+        } else {
+          result = sigtimedwait(&signal_set, nullptr, &no_wait);
+        }
+        if (result == SIGUSR1 || (result < 0 && errno == EINTR)) {
+          continue;
+        }
+        if (result < 0 && errno == EAGAIN) {
+          break;
+        }
+        return false;
+      }
+      if (sigaction(SIGUSR1, &previous_action, nullptr) != 0) {
+        return false;
+      }
+      if (pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr) != 0) {
+        return false;
+      }
+      installed = false;
+      return true;
+    }
+
+    bool installed = false;
+    int forced_drain_interruptions = 1;
+    sigset_t signal_set {};
+    sigset_t previous_mask {};
+    struct sigaction previous_action {};
+  };
+
   struct linux_cage_compositor_guard_t {
     linux_cage_compositor_guard_t():
         adapter_name(config::video.adapter_name),
@@ -961,6 +1087,894 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardDisablesIfLogChangesBef
   EXPECT_TRUE(actions.empty());
 }
 
+TEST(ProcessRuntimeConfigTests, PreCageSteamTerminationRequiresImmutableCageAndExactSessionOwnership) {
+  proc::ctx_t steam_app {};
+  steam_app.source = "steam";
+  steam_app.steam_appid = "2416450";
+  steam_app.detached = {"setsid steam steam://rungameid/2416450"};
+
+  EXPECT_TRUE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, true, true, false, true
+  ));
+  EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, true, true, true, true
+  ));
+  EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, true, true, false, false
+  ));
+  EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, false, true, true, false, true
+  ));
+  EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, false, true, false, true
+  ));
+  EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, true, false, false, true
+  ));
+
+  proc::ctx_t non_steam_app {};
+  non_steam_app.name = "Native Game";
+  non_steam_app.cmd = "/usr/bin/native-game";
+  EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+    non_steam_app, true, true, true, false, true
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, IsolatedSessionOwnershipRequiresExactNulDelimitedGeneration) {
+  const std::string token = "private-generation-42";
+  const std::string exact = std::string("HOME=/tmp") + char(0) +
+                            "POLARIS_SESSION_INSTANCE_ID=" + token + char(0) +
+                            "DISPLAY=:9" + char(0);
+  EXPECT_TRUE(proc::isolated_session_environ_matches_for_tests(exact, token));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests(exact, "other-generation"));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests(
+    "POLARIS_SESSION_INSTANCE_ID=" + token + "-suffix" + char(0), token
+  ));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests(
+    "NOT_POLARIS_SESSION_INSTANCE_ID=" + token + char(0), token
+  ));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests(
+    "PAYLOAD=POLARIS_SESSION_INSTANCE_ID=" + token + char(0), token
+  ));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests(
+    "POLARIS_SESSION_INSTANCE_ID=" + token, token
+  ));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests("", token));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests(exact, ""));
+  EXPECT_FALSE(proc::isolated_session_environ_matches_for_tests(
+    std::string("POLARIS_SESSION_INSTANCE_ID=") + char(0), ""
+  ));
+  EXPECT_TRUE(proc::session_instance_environment_is_child_only_for_tests(token));
+}
+
+TEST(ProcessRuntimeConfigTests, ProcStartTimeParserHandlesParenthesizedNames) {
+  std::ostringstream stat;
+  stat << "123 (steam helper (private)) S";
+  for (int field = 4; field <= 21; ++field) {
+    stat << " 0";
+  }
+  stat << " 4242";
+  EXPECT_EQ(proc::proc_start_time_from_stat_for_tests(stat.str()), std::optional<std::uint64_t> {4242});
+  EXPECT_EQ(proc::proc_start_time_from_stat_for_tests("malformed"), std::nullopt);
+}
+
+TEST(ProcessRuntimeConfigTests, SteamPidfdCaptureRejectsStartTimeMismatch) {
+  EXPECT_TRUE(proc::steam_pidfd_capture_identity_matches_for_tests(4242, 4242));
+  EXPECT_FALSE(proc::steam_pidfd_capture_identity_matches_for_tests(4242, 4243));
+  EXPECT_FALSE(proc::steam_pidfd_capture_identity_matches_for_tests(std::nullopt, 4242));
+  EXPECT_FALSE(proc::steam_pidfd_capture_identity_matches_for_tests(4242, std::nullopt));
+}
+
+TEST(ProcessRuntimeConfigTests, SteamShutdownOwnershipRejectsUnmarkedActiveClients) {
+  const std::string running_status = "Name:\tsteam\nState:\tS (sleeping)\n";
+  const std::string zombie_status = "Name:\tsteam\nState:\tZ (zombie)\n";
+  const std::string token = "private-generation-42";
+  const std::string marker = "POLARIS_SESSION_INSTANCE_ID=" + token + char(0);
+
+  EXPECT_TRUE(proc::steam_shutdown_process_is_unowned_active_for_tests(
+    "steamwebhelper", "/opt/steam/steamwebhelper", "/opt/steam/steamwebhelper", running_status, "", token
+  ));
+  EXPECT_FALSE(proc::steam_shutdown_process_is_unowned_active_for_tests(
+    "steam", "/opt/steam/ubuntu12_32/steam", "/opt/steam/ubuntu12_32/steam", running_status, marker, token
+  ));
+  EXPECT_TRUE(proc::steam_shutdown_process_is_unowned_active_for_tests(
+    "steam", "/opt/steam/ubuntu12_32/steam", "/opt/steam/ubuntu12_32/steam", running_status,
+    "POLARIS_SESSION_INSTANCE_ID=" + token + "-stale" + char(0), token
+  ));
+  EXPECT_FALSE(proc::steam_shutdown_process_is_unowned_active_for_tests(
+    "steam", "/opt/steam/ubuntu12_32/steam", "/opt/steam/ubuntu12_32/steam", zombie_status, "", token
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, PidfdSteamTerminationSignalsOnlyCapturedChild) {
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    std::signal(SIGTERM, SIG_DFL);
+    const char ready = '1';
+    (void) write(ready_pipe[1], &ready, 1);
+    for (;;) pause();
+  }
+  linux_child_guard_t child_guard {child};
+
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+  const bool terminated = proc::terminate_pid_with_pidfd_for_tests(
+    child, std::chrono::milliseconds(500), std::chrono::milliseconds(500)
+  );
+  if (!terminated) {
+    child_guard.terminate_and_reap();
+  }
+  int status = 0;
+  ASSERT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(terminated);
+  ASSERT_TRUE(WIFSIGNALED(status));
+  EXPECT_EQ(WTERMSIG(status), SIGTERM);
+}
+
+TEST(ProcessRuntimeConfigTests, PidfdSteamTerminationBoundsGracefulWaitAndKillsSurvivor) {
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    std::signal(SIGTERM, SIG_IGN);
+    const char ready = '1';
+    (void) write(ready_pipe[1], &ready, 1);
+    for (;;) pause();
+  }
+  linux_child_guard_t child_guard {child};
+
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+  const auto started = std::chrono::steady_clock::now();
+  const bool terminated = proc::terminate_pid_with_pidfd_for_tests(
+    child, std::chrono::milliseconds(100), std::chrono::milliseconds(500)
+  );
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  if (!terminated) {
+    child_guard.terminate_and_reap();
+  }
+  int status = 0;
+  ASSERT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(terminated);
+  EXPECT_LT(elapsed, std::chrono::seconds(2));
+  ASSERT_TRUE(WIFSIGNALED(status));
+  EXPECT_EQ(WTERMSIG(status), SIGKILL);
+}
+
+TEST(ProcessRuntimeConfigTests, PidfdSteamTerminationDeadlineSurvivesRepeatedEintr) {
+#ifdef __linux__
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    std::signal(SIGTERM, SIG_IGN);
+    const char ready = '1';
+    (void) write(ready_pipe[1], &ready, 1);
+    for (;;) pause();
+  }
+  linux_child_guard_t child_guard {child};
+
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+
+  sigusr1_interruptions = 0;
+  sigusr1_interrupt_guard_t signal_guard;
+  ASSERT_TRUE(signal_guard.installed);
+  const auto test_thread = pthread_self();
+  std::atomic<bool> sender_ready {false};
+  std::atomic<bool> call_active {false};
+  std::atomic<bool> production_wait_entered {false};
+  std::atomic<int> signals_sent_while_call_active {0};
+  std::jthread interrupter([
+    test_thread,
+    &sender_ready,
+    &call_active,
+    &production_wait_entered,
+    &signals_sent_while_call_active
+  ](std::stop_token stop_token) {
+    sender_ready.store(true, std::memory_order_release);
+    while (!stop_token.stop_requested() && !production_wait_entered.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    const auto stop_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(350);
+    while (!stop_token.stop_requested() &&
+           call_active.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < stop_at) {
+      if (pthread_kill(test_thread, SIGUSR1) == 0 && call_active.load(std::memory_order_acquire)) {
+        signals_sent_while_call_active.fetch_add(1, std::memory_order_relaxed);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  });
+  while (!sender_ready.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  const auto handled_before_call = sigusr1_interruptions;
+  call_active.store(true, std::memory_order_release);
+  const auto started = std::chrono::steady_clock::now();
+  const bool terminated = proc::terminate_pid_with_pidfd_after_wait_entry_for_tests(
+    child,
+    std::chrono::milliseconds(100),
+    std::chrono::milliseconds(500),
+    production_wait_entered
+  );
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  const auto handled_at_return = sigusr1_interruptions;
+  call_active.store(false, std::memory_order_release);
+  interrupter.request_stop();
+  interrupter.join();
+  EXPECT_TRUE(production_wait_entered.load(std::memory_order_acquire));
+  EXPECT_GT(signals_sent_while_call_active.load(std::memory_order_relaxed), 0);
+  EXPECT_GT(handled_at_return, handled_before_call)
+    << "SIGUSR1 must be handled after production enters pidfd wait and before it returns";
+  EXPECT_TRUE(signal_guard.restore())
+    << "signal disposition, mask, and pending state must restore explicitly";
+
+  if (!terminated) {
+    child_guard.terminate_and_reap();
+  }
+  int status = 0;
+  ASSERT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(terminated);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(250));
+  ASSERT_TRUE(WIFSIGNALED(status));
+  EXPECT_EQ(WTERMSIG(status), SIGKILL);
+#else
+  GTEST_SKIP() << "Linux-only pidfd interruption deadline";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, PidfdSteamTerminationDeadlineSurvivesZeroPollEintr) {
+#ifdef __linux__
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    std::signal(SIGTERM, SIG_IGN);
+    const char ready = '1';
+    (void) write(ready_pipe[1], &ready, 1);
+    for (;;) pause();
+  }
+  linux_child_guard_t child_guard {child};
+
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+
+  const auto started = std::chrono::steady_clock::now();
+  const bool terminated = proc::terminate_pid_with_forced_zero_poll_eintr_for_tests(
+    child,
+    std::chrono::milliseconds(50),
+    std::chrono::milliseconds(50),
+    80,
+    std::chrono::milliseconds(5)
+  );
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+
+  int status = 0;
+  const auto reaped = terminated ? child_guard.wait(&status, 0) : child_guard.terminate_and_reap(&status);
+  ASSERT_EQ(reaped, child);
+  EXPECT_FALSE(terminated);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(200));
+  ASSERT_TRUE(WIFSIGNALED(status));
+  EXPECT_EQ(WTERMSIG(status), SIGKILL);
+#else
+  GTEST_SKIP() << "Linux-only pidfd zero-poll interruption deadline";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownUsesImmutableExactGeneration) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t config_guard;
+  const std::string token = "production-wiring-generation";
+  proc::ctx_t steam_app {};
+  steam_app.name = "Steam Big Picture";
+  steam_app.cmd = "steam -gamepadui";
+
+  auto spawn_steam_like = [&](bool marked) {
+    const auto child = fork();
+    EXPECT_GE(child, 0);
+    if (child == 0) {
+      if (marked) {
+        setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      } else {
+        unsetenv("POLARIS_SESSION_INSTANCE_ID");
+      }
+      execl("/bin/sleep", "steam", "60", nullptr);
+      _exit(127);
+    }
+    return child;
+  };
+  auto wait_for_token = [&](pid_t pid) {
+    const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+      std::ifstream environ("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+      std::ostringstream bytes;
+      bytes << environ.rdbuf();
+      if (bytes.str().find(expected) != std::string::npos) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+  };
+  auto owned = spawn_steam_like(true);
+  linux_child_guard_t owned_guard {owned};
+  ASSERT_GT(owned, 0);
+  ASSERT_TRUE(wait_for_token(owned));
+  config::video.linux_display.use_cage_compositor = false;
+  EXPECT_TRUE(proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, token
+  ));
+  int status = 0;
+  const auto owned_wait = owned_guard.wait(&status, WNOHANG);
+  EXPECT_EQ(owned_wait, owned);
+  if (owned_wait == 0) {
+    EXPECT_EQ(owned_guard.terminate_and_reap(&status), owned);
+  }
+
+  auto faulted_owned = spawn_steam_like(true);
+  linux_child_guard_t faulted_guard {faulted_owned};
+  auto faulted_control = spawn_steam_like(true);
+  linux_child_guard_t faulted_control_guard {faulted_control};
+  ASSERT_GT(faulted_owned, 0);
+  ASSERT_GT(faulted_control, 0);
+  ASSERT_TRUE(wait_for_token(faulted_owned));
+  ASSERT_TRUE(wait_for_token(faulted_control));
+  EXPECT_FALSE(proc::terminate_session_owned_steam_with_forced_capture_failure_for_tests(
+    steam_app, true, token, faulted_owned
+  ));
+  EXPECT_EQ(faulted_guard.wait(&status, WNOHANG), 0)
+    << "pre-cage ownership capture failure must preserve the faulted Steam process";
+  EXPECT_EQ(faulted_control_guard.wait(&status, WNOHANG), 0)
+    << "incomplete ownership capture must preserve other captured Steam processes";
+  EXPECT_FALSE(proc::terminate_session_owned_steam_with_pidfd_open_error_for_tests(
+    steam_app, true, token, faulted_owned
+  ));
+  EXPECT_EQ(faulted_guard.wait(&status, WNOHANG), 0)
+    << "non-ESRCH pidfd_open failure must preserve the target Steam process";
+  EXPECT_EQ(faulted_control_guard.wait(&status, WNOHANG), 0)
+    << "non-ESRCH pidfd_open failure must preserve every captured Steam process";
+  EXPECT_FALSE(proc::terminate_session_owned_steam_with_post_capture_enumeration_error_for_tests(
+    steam_app, true, token, faulted_owned
+  ));
+  EXPECT_EQ(faulted_guard.wait(&status, WNOHANG), 0)
+    << "post-capture proc enumeration failure must not authorize pre-cage signaling";
+  EXPECT_EQ(faulted_control_guard.wait(&status, WNOHANG), 0)
+    << "partial enumeration must preserve every captured Steam process";
+  EXPECT_FALSE(proc::terminate_session_owned_steam_with_reused_pid_for_tests(
+    steam_app, true, token, faulted_owned
+  ));
+  EXPECT_EQ(faulted_guard.wait(&status, WNOHANG), 0)
+    << "an active Steam replacement at a reused PID must keep ownership capture incomplete";
+  EXPECT_EQ(faulted_control_guard.wait(&status, WNOHANG), 0)
+    << "reused-PID ambiguity must preserve other captured Steam processes";
+  EXPECT_TRUE(proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, token
+  ));
+  const auto faulted_wait = faulted_guard.wait(&status, WNOHANG);
+  EXPECT_EQ(faulted_wait, faulted_owned);
+  if (faulted_wait == 0) {
+    EXPECT_EQ(faulted_guard.terminate_and_reap(&status), faulted_owned);
+  }
+  const auto control_wait = faulted_control_guard.wait(&status, WNOHANG);
+  EXPECT_EQ(control_wait, faulted_control);
+  if (control_wait == 0) {
+    EXPECT_EQ(faulted_control_guard.terminate_and_reap(&status), faulted_control);
+  }
+
+  auto mirror_owned = spawn_steam_like(true);
+  linux_child_guard_t mirror_guard {mirror_owned};
+  ASSERT_GT(mirror_owned, 0);
+  ASSERT_TRUE(wait_for_token(mirror_owned));
+  config::video.linux_display.use_cage_compositor = true;
+  EXPECT_FALSE(proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, false, token
+  ));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(mirror_guard.wait(&status, WNOHANG), 0);
+#else
+  GTEST_SKIP() << "Linux-only immutable private Steam teardown wiring";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownRejectsMixedOwnedAndUnownedSteam) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t config_guard;
+  const std::string token = "mixed-production-wiring-generation";
+  proc::ctx_t steam_app {};
+  steam_app.name = "Steam Big Picture";
+  steam_app.cmd = "steam -gamepadui";
+
+  auto spawn_steam_like = [&](bool marked) {
+    const auto child = fork();
+    EXPECT_GE(child, 0);
+    if (child == 0) {
+      if (marked) {
+        setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      } else {
+        unsetenv("POLARIS_SESSION_INSTANCE_ID");
+      }
+      execl("/bin/sleep", "steam", "60", nullptr);
+      _exit(127);
+    }
+    return child;
+  };
+  auto wait_for_steam_like = [&](pid_t pid, bool marked) {
+    const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+      std::ifstream cmdline_file("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+      const std::string cmdline(
+        (std::istreambuf_iterator<char>(cmdline_file)),
+        std::istreambuf_iterator<char>()
+      );
+      std::ifstream environ_file("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+      const std::string environ(
+        (std::istreambuf_iterator<char>(environ_file)),
+        std::istreambuf_iterator<char>()
+      );
+      const bool marker_matches = environ.find(expected) != std::string::npos;
+      if (cmdline.starts_with(std::string("steam\0", 6)) && marker_matches == marked) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+  };
+  const auto owned = spawn_steam_like(true);
+  linux_child_guard_t owned_guard {owned};
+  const auto unowned = spawn_steam_like(false);
+  linux_child_guard_t unowned_guard {unowned};
+  ASSERT_GT(owned, 0);
+  ASSERT_GT(unowned, 0);
+  ASSERT_TRUE(wait_for_steam_like(owned, true));
+  ASSERT_TRUE(wait_for_steam_like(unowned, false));
+
+  EXPECT_FALSE(proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, token
+  ));
+  int owned_status = 0;
+  const auto owned_wait = owned_guard.wait(&owned_status, WNOHANG);
+  EXPECT_EQ(owned_wait, 0)
+    << "mixed ownership must preserve the exact-generation Steam process";
+  int unowned_status = 0;
+  const auto unowned_wait = unowned_guard.wait(&unowned_status, WNOHANG);
+  EXPECT_EQ(unowned_wait, 0)
+    << "mixed ownership must preserve the unowned Steam process";
+
+#else
+  GTEST_SKIP() << "Linux-only mixed private/desktop Steam ownership";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCageGeneration) {
+#ifdef __linux__
+  EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(true, true));
+  EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(true, false));
+  EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(false, true));
+  EXPECT_FALSE(proc::isolated_session_generation_blocks_launch_for_tests(false, false));
+
+  EXPECT_FALSE(proc::isolated_session_cleanup_resets_router_for_tests(true, true, false));
+  EXPECT_FALSE(proc::isolated_session_cleanup_clears_state_for_tests(true, true, false));
+  EXPECT_FALSE(proc::isolated_session_cleanup_resets_router_for_tests(true, false, true));
+  EXPECT_FALSE(proc::isolated_session_cleanup_clears_state_for_tests(true, false, true));
+
+  EXPECT_TRUE(proc::isolated_session_cleanup_resets_router_for_tests(true, true, true));
+  EXPECT_TRUE(proc::isolated_session_cleanup_clears_state_for_tests(true, true, true));
+
+  // Mirror/non-cage launches still receive a generation token, but no cage state
+  // is owned; teardown must clear that token without touching the cage router.
+  EXPECT_FALSE(proc::isolated_session_cleanup_resets_router_for_tests(false, true, true));
+  EXPECT_TRUE(proc::isolated_session_cleanup_clears_state_for_tests(false, true, true));
+
+  EXPECT_FALSE(proc::isolated_session_uses_legacy_group_termination_for_tests(true, false));
+  EXPECT_TRUE(proc::isolated_session_uses_legacy_group_termination_for_tests(false, false));
+  EXPECT_FALSE(proc::isolated_session_uses_legacy_group_termination_for_tests(false, true));
+  EXPECT_TRUE(proc::isolated_session_detaches_legacy_handles_for_tests(true));
+  EXPECT_FALSE(proc::isolated_session_detaches_legacy_handles_for_tests(false));
+#else
+  GTEST_SKIP() << "Linux-only isolated session generation policy";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExternalCageRouterResetDoesNotSignalLiveProcess) {
+#ifdef __linux__
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  cage_display_router::reset_after_external_stop_for_tests(child);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "router reset must not signal or reap a live externally-owned process";
+#else
+  GTEST_SKIP() << "Linux-only cage router signal safety";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationCleanupLeavesUnownedControlProcessAlive) {
+  const std::string token = "test-private-generation-4242";
+  const auto spawn_sleep = [&](bool owned) {
+    const auto child = fork();
+    if (child == 0) {
+      if (owned) {
+        setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      } else {
+        unsetenv("POLARIS_SESSION_INSTANCE_ID");
+      }
+      execl("/bin/sleep", "sleep", "60", static_cast<char *>(nullptr));
+      _exit(127);
+    }
+    return child;
+  };
+
+  const auto owned = spawn_sleep(true);
+  linux_child_guard_t owned_guard {owned};
+  const auto control = spawn_sleep(false);
+  linux_child_guard_t control_guard {control};
+  if (owned <= 0 || control <= 0) {
+    FAIL() << "failed to spawn exact-generation cleanup test children";
+    return;
+  }
+
+  const auto owned_environ = "/proc/" + std::to_string(owned) + "/environ";
+  bool token_visible = false;
+  for (int i = 0; i < 40 && !token_visible; ++i) {
+    std::ifstream in(owned_environ, std::ios::binary);
+    const std::string environ((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    token_visible = environ.find("POLARIS_SESSION_INSTANCE_ID=" + token) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  if (!token_visible) {
+    FAIL() << "exact generation token did not become visible in child environ";
+    return;
+  }
+
+  EXPECT_TRUE(proc::terminate_exact_generation_processes_for_tests(token));
+
+  int owned_status = 0;
+  EXPECT_EQ(owned_guard.wait(&owned_status, 0), owned);
+  EXPECT_TRUE(WIFSIGNALED(owned_status));
+
+  int control_status = 0;
+  EXPECT_EQ(control_guard.wait(&control_status, WNOHANG), 0)
+    << "unowned control process must remain alive";
+  EXPECT_EQ(control_guard.terminate_and_reap(&control_status), control);
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationCaptureFailureRetainsGenerationAndLeavesChildUnsignaled) {
+#ifdef __linux__
+  const std::string token = "forced-incomplete-generation-capture";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  EXPECT_TRUE(proc::isolated_session_capture_failure_retains_generation_for_tests(token, child));
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "an incompletely captured exact-generation child must not be signaled";
+
+  EXPECT_TRUE(proc::exact_generation_pidfd_open_error_fails_closed_for_tests(token, child));
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "non-ESRCH pidfd_open failure must not authorize exact-generation signaling";
+
+  EXPECT_TRUE(proc::exact_generation_post_capture_enumeration_error_fails_closed_for_tests(token, child));
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "a post-capture proc enumeration error must fail before signaling captured children";
+
+  EXPECT_TRUE(proc::exact_generation_reused_pid_fails_closed_for_tests(token, child));
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "a reused exact-generation PID must keep capture incomplete without signaling the replacement";
+
+  EXPECT_TRUE(proc::terminate_exact_generation_processes_for_tests(token));
+  EXPECT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(WIFSIGNALED(status));
+#else
+  GTEST_SKIP() << "Linux-only exact-generation capture fault propagation";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationUnreadableEnvironFailsClosedAndLeavesChildUnsignaled) {
+#ifdef __linux__
+  const std::string token = "unreadable-exact-generation-environ";
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    if (prctl(PR_SET_DUMPABLE, 0) != 0) {
+      _exit(126);
+    }
+    const char ready = '1';
+    (void) write(ready_pipe[1], &ready, 1);
+    close(ready_pipe[1]);
+    for (;;) pause();
+  }
+  linux_child_guard_t child_guard {child};
+
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+
+  EXPECT_FALSE(proc::terminate_exact_generation_processes_for_tests(token));
+  EXPECT_TRUE(proc::exact_generation_unknown_ancestry_fails_closed_for_tests(token, child));
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "an unreadable same-UID process must not be silently excluded or signaled";
+#else
+  GTEST_SKIP() << "Linux-only unreadable exact-generation environ handling";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationProcEnumerationErrorFailsClosedAndLeavesChildUnsignaled) {
+#ifdef __linux__
+  const std::string token = "private-steam-enumeration-error-test";
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    const char ready = '1';
+    (void) write(ready_pipe[1], &ready, 1);
+    close(ready_pipe[1]);
+    for (;;) pause();
+  }
+  linux_child_guard_t child_guard {child};
+
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+
+  EXPECT_TRUE(proc::exact_generation_proc_enumeration_error_fails_closed_for_tests(token));
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "enumeration failure must never authorize signals";
+#else
+  GTEST_SKIP() << "Linux-only exact-generation /proc enumeration handling";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBeforeImmutableCageCleanup) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto cage_source = read_source_file_for_contract("src/platform/linux/cage_display_router.cpp");
+  ASSERT_FALSE(source.empty());
+  ASSERT_FALSE(cage_source.empty());
+
+  const auto implementation_start = source.find("bool terminate_session_owned_steam_before_cage_stop_impl(");
+  const auto implementation_end = source.find("bool is_active_desktop_steam_client_process(", implementation_start);
+  const auto helper_start = source.find("bool proc_t::terminate_session_owned_steam_before_cage_stop(");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
+  const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  const auto execute_end = source.find("int proc_t::running()", execute_start);
+  ASSERT_NE(implementation_start, std::string::npos);
+  ASSERT_NE(implementation_end, std::string::npos);
+  ASSERT_NE(helper_start, std::string::npos);
+  ASSERT_NE(terminate_start, std::string::npos);
+  ASSERT_NE(terminate_end, std::string::npos);
+  ASSERT_NE(execute_start, std::string::npos);
+  ASSERT_NE(execute_end, std::string::npos);
+  ASSERT_LT(helper_start, terminate_start);
+
+  const auto implementation = source.substr(
+    implementation_start, implementation_end - implementation_start
+  );
+  const auto helper = source.substr(helper_start, terminate_start - helper_start);
+  EXPECT_NE(helper.find("terminate_session_owned_steam_before_cage_stop_impl("), std::string::npos);
+  EXPECT_NE(helper.find("_app"), std::string::npos);
+  EXPECT_NE(helper.find("_session_used_cage_compositor"), std::string::npos);
+  EXPECT_NE(helper.find("_session_instance_id"), std::string::npos);
+  const auto ownership_scan = implementation.find("steam_client_ownership_snapshot(session_instance_id)");
+  const auto immutable_cage_gate = implementation.find("session_owned_cage");
+  const auto generation_gate = implementation.find("session_instance_id.empty()");
+  const auto capture_gate = implementation.find("ownership.capture_complete");
+  const auto mixed_ownership_gate = implementation.find("ownership.unowned.empty()");
+  const auto pidfd_termination = implementation.find("terminate_pidfds(");
+  ASSERT_NE(ownership_scan, std::string::npos);
+  ASSERT_NE(immutable_cage_gate, std::string::npos);
+  ASSERT_NE(generation_gate, std::string::npos);
+  ASSERT_NE(capture_gate, std::string::npos);
+  ASSERT_NE(mixed_ownership_gate, std::string::npos);
+  ASSERT_NE(pidfd_termination, std::string::npos);
+  EXPECT_LT(ownership_scan, capture_gate);
+  EXPECT_LT(capture_gate, pidfd_termination);
+  EXPECT_LT(mixed_ownership_gate, pidfd_termination);
+  EXPECT_EQ(implementation.find("config::video.linux_display.use_cage_compositor"), std::string::npos);
+  EXPECT_EQ(implementation.find("cage_display_router::is_running()"), std::string::npos);
+  EXPECT_EQ(implementation.find("platf::run_command("), std::string::npos);
+  EXPECT_EQ(implementation.find("_env"), std::string::npos);
+  EXPECT_EQ(implementation.find("child.wait"), std::string::npos);
+  EXPECT_EQ(implementation.find("steam -shutdown"), std::string::npos);
+
+  EXPECT_NE(source.find("SYS_pidfd_open"), std::string::npos);
+  EXPECT_NE(source.find("SYS_pidfd_send_signal"), std::string::npos);
+  EXPECT_NE(source.find("poll("), std::string::npos);
+  EXPECT_NE(source.find("proc_environ_contains_exact_entry("), std::string::npos);
+  EXPECT_NE(
+    source.find("return final_snapshot.capture_complete && final_snapshot.owned.empty();"),
+    std::string::npos
+  );
+  EXPECT_EQ(source.find("proc_environ_contains_isolated_session_marker("), std::string::npos);
+
+  const auto execute = source.substr(execute_start, execute_end - execute_start);
+  const auto refuse_stale_generation = execute.find(
+    "refusing launch while an incompletely cleaned isolated session generation remains"
+  );
+  const auto generate_instance = execute.find("_session_instance_id = generate_session_token()");
+  const auto inject_instance = execute.find("set_child_only_session_env_var(");
+  const auto start_cage = execute.find("start_cage_with_runtime_fallback(");
+  const auto remember_cage = execute.find("_session_used_cage_compositor = true", start_cage);
+  ASSERT_NE(refuse_stale_generation, std::string::npos);
+  EXPECT_NE(
+    execute.find("isolated_session_generation_blocks_launch("),
+    std::string::npos
+  );
+  ASSERT_NE(generate_instance, std::string::npos);
+  ASSERT_NE(inject_instance, std::string::npos);
+  ASSERT_NE(start_cage, std::string::npos);
+  ASSERT_NE(remember_cage, std::string::npos);
+  EXPECT_LT(refuse_stale_generation, generate_instance);
+  EXPECT_LT(generate_instance, inject_instance);
+  EXPECT_LT(inject_instance, start_cage);
+  EXPECT_LT(start_cage, remember_cage);
+  EXPECT_EQ(execute.find("terminate_isolated_session_processes(\"before launching"), std::string::npos);
+  const auto cage_child_start = cage_source.find("if (pid == 0)");
+  const auto cage_child_end = cage_source.find("set_labwc_process_environment(headless)", cage_child_start);
+  ASSERT_NE(cage_child_start, std::string::npos);
+  ASSERT_NE(cage_child_end, std::string::npos);
+  const auto cage_child = cage_source.substr(cage_child_start, cage_child_end - cage_child_start);
+  EXPECT_NE(
+    cage_child.find("\n        setenv(\"POLARIS_SESSION_INSTANCE_ID\""),
+    std::string::npos
+  );
+  const auto fail_guard_start = execute.find("auto fg = util::fail_guard(");
+  const auto fail_guard_end = execute.find("if (!app.gamepad.empty()", fail_guard_start);
+  ASSERT_NE(fail_guard_start, std::string::npos);
+  ASSERT_NE(fail_guard_end, std::string::npos);
+  const auto fail_guard = execute.substr(fail_guard_start, fail_guard_end - fail_guard_start);
+  EXPECT_EQ(fail_guard.find("cage_display_router::stop();"), std::string::npos)
+    << "execute failure cleanup must not bypass exact-generation pidfd cleanup";
+
+  const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
+  const auto terminate_private_steam = terminate.find("terminate_session_owned_steam_before_cage_stop(");
+  const auto terminate_generation = terminate.find("terminate_isolated_session_generation();");
+  const auto terminate_main = terminate.find("terminate_process_group(");
+  const auto legacy_group_gate = terminate.find(
+    "isolated_session_uses_legacy_group_termination("
+  );
+  const auto legacy_detach_gate = terminate.find(
+    "isolated_session_detaches_legacy_handles("
+  );
+  const auto detach_legacy_child = terminate.find("_process.detach();");
+  const auto detach_legacy_group = terminate.find("_process_group.detach();");
+  const auto clear_legacy_child = terminate.find("_process = boost::process::v1::child();");
+  const auto immutable_undo_guard = terminate.find("_session_used_cage_compositor", clear_legacy_child);
+  const auto finish_generation = terminate.find("finish_isolated_session_generation_cleanup();");
+  ASSERT_NE(terminate_private_steam, std::string::npos);
+  ASSERT_NE(terminate_generation, std::string::npos);
+  ASSERT_NE(terminate_main, std::string::npos);
+  ASSERT_NE(legacy_group_gate, std::string::npos);
+  ASSERT_NE(legacy_detach_gate, std::string::npos);
+  ASSERT_NE(detach_legacy_child, std::string::npos);
+  ASSERT_NE(detach_legacy_group, std::string::npos);
+  ASSERT_NE(clear_legacy_child, std::string::npos);
+  ASSERT_NE(immutable_undo_guard, std::string::npos);
+  ASSERT_NE(finish_generation, std::string::npos);
+  EXPECT_LT(terminate_private_steam, terminate_generation);
+  EXPECT_LT(terminate_generation, terminate_main);
+  EXPECT_LT(terminate_generation, legacy_group_gate);
+  EXPECT_LT(legacy_group_gate, legacy_detach_gate);
+  EXPECT_LT(legacy_detach_gate, detach_legacy_child);
+  EXPECT_LT(detach_legacy_child, detach_legacy_group);
+  EXPECT_LT(detach_legacy_group, clear_legacy_child);
+  EXPECT_LT(clear_legacy_child, immutable_undo_guard);
+  EXPECT_LT(immutable_undo_guard, finish_generation);
+  EXPECT_EQ(terminate.find("exact_generation_cleanup_complete"), std::string::npos)
+    << "terminate_impl must not be able to replace captured completeness with a literal";
+
+  const auto generation_cleanup_start = source.find("void proc_t::terminate_isolated_session_generation()");
+  const auto generation_finish_start = source.find("void proc_t::finish_isolated_session_generation_cleanup()");
+  const auto generation_finish_end = source.find("#endif", generation_finish_start);
+  ASSERT_NE(generation_cleanup_start, std::string::npos);
+  ASSERT_NE(generation_finish_start, std::string::npos);
+  ASSERT_NE(generation_finish_end, std::string::npos);
+  const auto generation_cleanup = source.substr(
+    generation_cleanup_start,
+    generation_finish_start - generation_cleanup_start
+  );
+  const auto generation_finish = source.substr(
+    generation_finish_start,
+    generation_finish_end - generation_finish_start
+  );
+  const auto cleanup_result = generation_cleanup.find(
+    "_exact_generation_cleanup_complete = terminate_isolated_session_processes("
+  );
+  const auto cleanup_success_gate = generation_cleanup.find("isolated_session_cleanup_resets_router(");
+  const auto reset_cage = generation_cleanup.find("cage_display_router::reset_after_external_stop()");
+  const auto retain_generation = generation_cleanup.find(
+    "retaining immutable cage generation because exact-generation cleanup was incomplete"
+  );
+  const auto cleanup_clear_gate = generation_finish.find("isolated_session_cleanup_clears_state(");
+  const auto clear_generation = generation_finish.find("_session_instance_id.clear()");
+  ASSERT_NE(cleanup_result, std::string::npos);
+  ASSERT_NE(cleanup_success_gate, std::string::npos);
+  ASSERT_NE(reset_cage, std::string::npos);
+  ASSERT_NE(retain_generation, std::string::npos);
+  ASSERT_NE(cleanup_clear_gate, std::string::npos);
+  ASSERT_NE(clear_generation, std::string::npos);
+  EXPECT_LT(cleanup_result, cleanup_success_gate);
+  EXPECT_LT(cleanup_success_gate, reset_cage);
+  EXPECT_LT(reset_cage, retain_generation);
+  EXPECT_LT(cleanup_clear_gate, clear_generation);
+  EXPECT_EQ(terminate.find("config::video.linux_display.use_cage_compositor"), std::string::npos);
+  EXPECT_EQ(terminate.find("cage_display_router::stop()"), std::string::npos);
+  EXPECT_EQ(terminate.find("terminate_steam_app_processes("), std::string::npos);
+  EXPECT_EQ(terminate.find("settle_isolated_browser_stream_steam_cleanup("), std::string::npos);
+
+  const auto reset_start = cage_source.find("void reset_after_external_stop()");
+  const auto reset_end = cage_source.find("bool is_running()", reset_start);
+  ASSERT_NE(reset_start, std::string::npos);
+  ASSERT_NE(reset_end, std::string::npos);
+  const auto reset = cage_source.substr(reset_start, reset_end - reset_start);
+  EXPECT_NE(reset.find("waitpid("), std::string::npos);
+  EXPECT_NE(reset.find("WNOHANG"), std::string::npos);
+  EXPECT_EQ(reset.find("kill("), std::string::npos);
+  EXPECT_EQ(reset.find("SIGTERM"), std::string::npos);
+  EXPECT_EQ(reset.find("SIGKILL"), std::string::npos);
+}
+
+
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsideProcessLifetime) {
   const auto source = read_source_file_for_contract("src/process.cpp");
   ASSERT_FALSE(source.empty());
@@ -1000,10 +2014,13 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsi
   EXPECT_LT(start_guard, first_main_launch);
   EXPECT_LT(first_main_launch, launch_committed);
   const auto stop_guard = terminate.find("stop_steam_big_picture_input_guard()");
-  const auto stop_cage = terminate.find("cage_display_router::stop()");
+  const auto cleanup_generation = terminate.find("terminate_isolated_session_generation();");
+  const auto finish_generation = terminate.find("finish_isolated_session_generation_cleanup();");
   ASSERT_NE(stop_guard, std::string::npos);
-  ASSERT_NE(stop_cage, std::string::npos);
-  EXPECT_LT(stop_guard, stop_cage);
+  ASSERT_NE(cleanup_generation, std::string::npos);
+  ASSERT_NE(finish_generation, std::string::npos);
+  EXPECT_LT(stop_guard, cleanup_generation);
+  EXPECT_LT(cleanup_generation, finish_generation);
 }
 
 TEST(ProcessRuntimeConfigTests, HeadlessCageSteamBigPictureSkipsHostShutdownUndo) {
@@ -1019,6 +2036,13 @@ TEST(ProcessRuntimeConfigTests, HeadlessCageSteamBigPictureSkipsHostShutdownUndo
 
   EXPECT_TRUE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, true));
   EXPECT_FALSE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, false));
+
+  proc::ctx_t unclassified_app {};
+  unclassified_app.name = "Custom Cage App";
+  unclassified_app.cmd = "/usr/bin/custom-launcher";
+  EXPECT_TRUE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(
+    unclassified_app, shutdown_undo, true
+  )) << "immutable cage ownership plus an explicit Steam shutdown undo must fail closed";
 }
 
 
@@ -1045,6 +2069,44 @@ TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresZombieShutdownRemnant
     "",
     "Name:\tsteam\nState:\tZ (zombie)\nPPid:\t275560\n"
   ));
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorFailsClosedOnProcOpenError) {
+#ifdef __linux__
+  EXPECT_TRUE(proc::desktop_steam_proc_open_error_fails_closed_for_tests());
+#else
+  GTEST_SKIP() << "Linux-only desktop Steam proc scanner";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorFailsClosedOnProcEnumerationError) {
+#ifdef __linux__
+  EXPECT_TRUE(proc::desktop_steam_proc_enumeration_error_fails_closed_for_tests());
+#else
+  GTEST_SKIP() << "Linux-only desktop Steam proc scanner";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorFailsClosedOnProcReadError) {
+#ifdef __linux__
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    std::ifstream status("/proc/" + std::to_string(child) + "/status");
+    if (status.good()) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  EXPECT_TRUE(proc::desktop_steam_proc_read_error_fails_closed_for_tests(child));
+#else
+  GTEST_SKIP() << "Linux-only desktop Steam proc scanner";
+#endif
 }
 
 TEST(ProcessRuntimeConfigTests, DesktopSteamActiveOffersExplicitForcePrivateShutdown) {
