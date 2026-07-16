@@ -1013,7 +1013,18 @@ namespace proc {
       }
     };
 
+#ifdef POLARIS_TESTS
+    thread_local pid_t forced_pidfd_open_failure_pid = -1;
+    thread_local std::atomic<bool> *pidfd_wait_entered_for_tests = nullptr;
+#endif
+
     std::optional<pidfd_handle_t> open_process_pidfd(pid_t pid, int &open_error) {
+#ifdef POLARIS_TESTS
+      if (pid == forced_pidfd_open_failure_pid) {
+        open_error = EACCES;
+        return std::nullopt;
+      }
+#endif
       const auto fd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
       if (fd < 0) {
         open_error = errno;
@@ -1023,12 +1034,26 @@ namespace proc {
       return pidfd_handle_t {pid, fd};
     }
 
+#ifdef POLARIS_TESTS
+    thread_local int forced_pidfd_zero_poll_interruptions = 0;
+    thread_local std::chrono::milliseconds forced_pidfd_zero_poll_interruption_delay {0};
+#endif
+
+    int poll_pidfd_now(pollfd &descriptor) {
+#ifdef POLARIS_TESTS
+      if (forced_pidfd_zero_poll_interruptions > 0) {
+        --forced_pidfd_zero_poll_interruptions;
+        std::this_thread::sleep_for(forced_pidfd_zero_poll_interruption_delay);
+        errno = EINTR;
+        return -1;
+      }
+#endif
+      return poll(&descriptor, 1, 0);
+    }
+
     bool pidfd_has_exited(const pidfd_handle_t &handle) {
       pollfd descriptor {handle.fd, POLLIN, 0};
-      int result;
-      do {
-        result = poll(&descriptor, 1, 0);
-      } while (result < 0 && errno == EINTR);
+      const int result = poll_pidfd_now(descriptor);
       return result == 1 && (descriptor.revents & POLLIN) != 0;
     }
 
@@ -1054,6 +1079,11 @@ namespace proc {
         }
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
         const auto timeout_ms = static_cast<int>(std::max<std::int64_t>(1, remaining.count()));
+#ifdef POLARIS_TESTS
+        if (pidfd_wait_entered_for_tests != nullptr) {
+          pidfd_wait_entered_for_tests->store(true, std::memory_order_release);
+        }
+#endif
         const int result = poll(pending.data(), pending.size(), timeout_ms);
         if (result < 0) {
           if (errno == EINTR) {
@@ -1110,15 +1140,50 @@ namespace proc {
       });
     }
 
-    std::string read_proc_status_file(pid_t pid, std::string_view name) {
-      std::ifstream file("/proc/" + std::to_string(pid) + "/" + std::string {name}, std::ios::binary);
-      if (!file) {
-        return {};
-      }
+    struct proc_file_read_result_t {
+      std::string bytes;
+      int error = 0;
 
-      std::ostringstream buffer;
-      buffer << file.rdbuf();
-      return buffer.str();
+      bool ok() const {
+        return error == 0;
+      }
+    };
+
+    proc_file_read_result_t read_proc_status_file_result(pid_t pid, std::string_view name) {
+      const auto path = "/proc/" + std::to_string(pid) + "/" + std::string {name};
+      const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0) {
+        return {{}, errno};
+      }
+      auto close_fd = util::fail_guard([fd]() {
+        close(fd);
+      });
+
+      std::string bytes;
+      char chunk[4096];
+      for (;;) {
+        const auto bytes_read = read(fd, chunk, sizeof(chunk));
+        if (bytes_read > 0) {
+          bytes.append(chunk, static_cast<std::size_t>(bytes_read));
+          continue;
+        }
+        if (bytes_read == 0) {
+          return {std::move(bytes), 0};
+        }
+        const int error = errno;
+        if (error == EINTR) {
+          continue;
+        }
+        return {{}, error};
+      }
+    }
+
+    std::string read_proc_status_file(pid_t pid, std::string_view name) {
+      return read_proc_status_file_result(pid, name).bytes;
+    }
+
+    bool process_vanished_during_proc_read(int error) {
+      return error == ENOENT || error == ESRCH;
     }
 
     std::string proc_argv0_from_cmdline(std::string_view cmdline) {
@@ -1232,6 +1297,48 @@ namespace proc {
       return proc_start_time_from_stat(read_proc_status_file(pid, "stat"));
     }
 
+    std::optional<pid_t> proc_parent_pid_from_stat(std::string_view stat) {
+      const auto comm_end = stat.rfind(')');
+      if (comm_end == std::string_view::npos || comm_end + 1 >= stat.size()) {
+        return std::nullopt;
+      }
+      std::istringstream fields(std::string {stat.substr(comm_end + 1)});
+      std::string state;
+      pid_t parent_pid = -1;
+      if (!(fields >> state >> parent_pid) || parent_pid < 0) {
+        return std::nullopt;
+      }
+      return parent_pid;
+    }
+
+#ifdef POLARIS_TESTS
+    thread_local pid_t forced_proc_ancestry_unknown_pid = -1;
+#endif
+
+    std::optional<bool> proc_pid_descends_from(pid_t pid, pid_t ancestor_pid) {
+      std::set<pid_t> visited;
+      auto current = pid;
+      while (current > 1) {
+        if (!visited.insert(current).second) {
+          return std::nullopt;
+        }
+#ifdef POLARIS_TESTS
+        if (current == forced_proc_ancestry_unknown_pid) {
+          return std::nullopt;
+        }
+#endif
+        const auto parent = proc_parent_pid_from_stat(read_proc_status_file(current, "stat"));
+        if (!parent) {
+          return std::nullopt;
+        }
+        if (*parent == ancestor_pid) {
+          return true;
+        }
+        current = *parent;
+      }
+      return false;
+    }
+
     bool steam_pidfd_capture_identity_matches(
       const std::optional<std::uint64_t> &before,
       const std::optional<std::uint64_t> &after
@@ -1246,7 +1353,23 @@ namespace proc {
 
 #ifdef POLARIS_TESTS
     thread_local pid_t forced_isolated_session_capture_failure_pid = -1;
+    thread_local bool forced_proc_directory_enumeration_error = false;
+    thread_local pid_t forced_proc_directory_error_after_capture_pid = -1;
+    thread_local pid_t forced_reused_exact_generation_pid = -1;
+    thread_local pid_t forced_steam_ownership_capture_failure_pid = -1;
 #endif
+
+    dirent *read_next_proc_entry(DIR *directory) {
+      errno = 0;
+#ifdef POLARIS_TESTS
+      if (forced_proc_directory_enumeration_error) {
+        forced_proc_directory_enumeration_error = false;
+        errno = EIO;
+        return nullptr;
+      }
+#endif
+      return readdir(directory);
+    }
 
     isolated_session_process_snapshot_t isolated_session_process_snapshot(
       std::string_view session_instance_id
@@ -1263,7 +1386,14 @@ namespace proc {
         return snapshot;
       }
 
-      while (auto *entry = readdir(dir)) {
+      for (;;) {
+        auto *entry = read_next_proc_entry(dir);
+        if (entry == nullptr) {
+          if (errno != 0) {
+            snapshot.capture_complete = false;
+          }
+          break;
+        }
         const std::string name = entry->d_name;
         if (!proc_pid_dir_name(name)) {
           continue;
@@ -1273,8 +1403,19 @@ namespace proc {
           continue;
         }
 
-        const auto environ_before = read_proc_status_file(pid, "environ");
-        if (!proc_environ_matches_isolated_session(environ_before, session_instance_id)) {
+        const auto environ_before = read_proc_status_file_result(pid, "environ");
+        if (!environ_before.ok()) {
+          if (process_vanished_during_proc_read(environ_before.error) ||
+              proc_status_is_zombie(read_proc_status_file(pid, "status"))) {
+            continue;
+          }
+          const auto descends_from_polaris = proc_pid_descends_from(pid, getpid());
+          if (!descends_from_polaris || *descends_from_polaris) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+        if (!proc_environ_matches_isolated_session(environ_before.bytes, session_instance_id)) {
           continue;
         }
 #ifdef POLARIS_TESTS
@@ -1298,16 +1439,39 @@ namespace proc {
           continue;
         }
 
-        const auto environ_after = read_proc_status_file(pid, "environ");
-        const auto identity_after = proc_start_time_ticks(pid);
-        if (!steam_pidfd_capture_identity_matches(identity_before, identity_after) ||
-            !proc_environ_matches_isolated_session(environ_after, session_instance_id)) {
-          if (!pidfd_has_exited(*handle)) {
+        const auto environ_after = read_proc_status_file_result(pid, "environ");
+        auto identity_after = proc_start_time_ticks(pid);
+#ifdef POLARIS_TESTS
+        if (pid == forced_reused_exact_generation_pid && identity_after) {
+          ++*identity_after;
+        }
+#endif
+        const bool identity_matches = steam_pidfd_capture_identity_matches(identity_before, identity_after);
+        const bool environment_matches = environ_after.ok() &&
+                                         proc_environ_matches_isolated_session(
+                                           environ_after.bytes,
+                                           session_instance_id
+                                         );
+        if (!identity_matches || !environment_matches) {
+          bool captured_process_exited = pidfd_has_exited(*handle);
+#ifdef POLARIS_TESTS
+          if (pid == forced_reused_exact_generation_pid) {
+            captured_process_exited = true;
+          }
+#endif
+          const bool replacement_may_be_exact_generation =
+            !identity_matches && identity_after && (!environ_after.ok() || environment_matches);
+          if (!captured_process_exited || replacement_may_be_exact_generation) {
             snapshot.capture_complete = false;
           }
           continue;
         }
         snapshot.owned.emplace_back(std::move(*handle));
+#ifdef POLARIS_TESTS
+        if (pid == forced_proc_directory_error_after_capture_pid) {
+          forced_proc_directory_enumeration_error = true;
+        }
+#endif
       }
 
       closedir(dir);
@@ -1326,9 +1490,10 @@ namespace proc {
         auto snapshot = isolated_session_process_snapshot(session_instance_id);
         if (!snapshot.capture_complete) {
           BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
+          return false;
         }
         if (snapshot.owned.empty()) {
-          return snapshot.capture_complete;
+          return true;
         }
 
         BOOST_LOG(info) << "process: terminating "sv << snapshot.owned.size()
@@ -1357,7 +1522,14 @@ namespace proc {
         return snapshot;
       }
 
-      while (auto *entry = readdir(dir)) {
+      for (;;) {
+        auto *entry = read_next_proc_entry(dir);
+        if (entry == nullptr) {
+          if (errno != 0) {
+            snapshot.capture_complete = false;
+          }
+          break;
+        }
         const std::string name = entry->d_name;
         if (!proc_pid_dir_name(name)) {
           continue;
@@ -1368,14 +1540,41 @@ namespace proc {
         }
 
         const auto identity_before = proc_start_time_ticks(pid);
-        auto comm = boost::to_lower_copy(read_proc_status_file(pid, "comm"));
+        const auto comm_before = read_proc_status_file_result(pid, "comm");
+        const auto cmdline_before = read_proc_status_file_result(pid, "cmdline");
+        const auto status_before = read_proc_status_file_result(pid, "status");
+        auto comm = boost::to_lower_copy(comm_before.bytes);
         boost::trim(comm);
-        auto cmdline = read_proc_status_file(pid, "cmdline");
+        auto cmdline = cmdline_before.bytes;
         auto argv0 = proc_argv0_from_cmdline(cmdline);
-        auto status = read_proc_status_file(pid, "status");
+        auto status = status_before.bytes;
+        const bool before_reads_complete = comm_before.ok() && cmdline_before.ok() && status_before.ok();
+        if (!before_reads_complete) {
+          const auto read_is_ok_or_vanished = [](const proc_file_read_result_t &result) {
+            return result.ok() || process_vanished_during_proc_read(result.error);
+          };
+          const bool all_failures_are_vanished =
+            read_is_ok_or_vanished(comm_before) &&
+            read_is_ok_or_vanished(cmdline_before) &&
+            read_is_ok_or_vanished(status_before);
+          if (!all_failures_are_vanished) {
+            const auto descends_from_polaris = proc_pid_descends_from(pid, getpid());
+            if (is_desktop_steam_client_process(comm, argv0) ||
+                !descends_from_polaris || *descends_from_polaris) {
+              snapshot.capture_complete = false;
+            }
+          }
+          continue;
+        }
         if (!is_active_steam_shutdown_ownership_process(comm, argv0, cmdline, status)) {
           continue;
         }
+#ifdef POLARIS_TESTS
+        if (pid == forced_steam_ownership_capture_failure_pid) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+#endif
         if (!identity_before) {
           snapshot.capture_complete = false;
           continue;
@@ -1390,32 +1589,62 @@ namespace proc {
           continue;
         }
 
-        comm = boost::to_lower_copy(read_proc_status_file(pid, "comm"));
+        const auto comm_after = read_proc_status_file_result(pid, "comm");
+        const auto cmdline_after = read_proc_status_file_result(pid, "cmdline");
+        const auto status_after = read_proc_status_file_result(pid, "status");
+        comm = boost::to_lower_copy(comm_after.bytes);
         boost::trim(comm);
-        cmdline = read_proc_status_file(pid, "cmdline");
+        cmdline = cmdline_after.bytes;
         argv0 = proc_argv0_from_cmdline(cmdline);
-        status = read_proc_status_file(pid, "status");
-        const auto identity_after = proc_start_time_ticks(pid);
+        status = status_after.bytes;
+        const bool after_reads_complete = comm_after.ok() && cmdline_after.ok() && status_after.ok();
+        if (!after_reads_complete) {
+          const auto current_identity = proc_start_time_ticks(pid);
+          if (!pidfd_has_exited(*handle) ||
+              (current_identity && !steam_pidfd_capture_identity_matches(identity_before, current_identity))) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
         if (!is_active_steam_shutdown_ownership_process(comm, argv0, cmdline, status)) {
           continue;
         }
+        auto identity_after = proc_start_time_ticks(pid);
+#ifdef POLARIS_TESTS
+        if (pid == forced_reused_exact_generation_pid && identity_after) {
+          ++*identity_after;
+        }
+#endif
         if (!steam_pidfd_capture_identity_matches(identity_before, identity_after)) {
-          if (!pidfd_has_exited(*handle)) {
+          bool captured_process_exited = pidfd_has_exited(*handle);
+#ifdef POLARIS_TESTS
+          if (pid == forced_reused_exact_generation_pid) {
+            captured_process_exited = true;
+          }
+#endif
+          if (!captured_process_exited || identity_after) {
             snapshot.capture_complete = false;
           }
           continue;
         }
 
-        const auto environ = read_proc_status_file(pid, "environ");
-        if (environ.empty() && !pidfd_has_exited(*handle)) {
-          snapshot.capture_complete = false;
+        const auto environ = read_proc_status_file_result(pid, "environ");
+        if (!environ.ok() || environ.bytes.empty()) {
+          if (!pidfd_has_exited(*handle)) {
+            snapshot.capture_complete = false;
+          }
           continue;
         }
-        if (proc_environ_matches_isolated_session(environ, session_instance_id)) {
+        if (proc_environ_matches_isolated_session(environ.bytes, session_instance_id)) {
           snapshot.owned.emplace_back(std::move(*handle));
         } else {
           snapshot.unowned.emplace_back(std::move(*handle));
         }
+#ifdef POLARIS_TESTS
+        if (pid == forced_proc_directory_error_after_capture_pid) {
+          forced_proc_directory_enumeration_error = true;
+        }
+#endif
       }
 
       closedir(dir);
@@ -1474,14 +1703,36 @@ namespace proc {
              !is_transient_steam_client_cmdline(cmdline);
     }
 
+#ifdef POLARIS_TESTS
+    thread_local bool forced_desktop_steam_proc_open_error = false;
+    thread_local pid_t forced_desktop_steam_proc_read_error_pid = -1;
+    thread_local pid_t forced_desktop_steam_scan_only_pid = -1;
+#endif
+
     bool desktop_steam_client_active_impl() {
-      DIR *dir = opendir("/proc");
-      if (!dir) {
-        return false;
+      DIR *dir = nullptr;
+#ifdef POLARIS_TESTS
+      if (forced_desktop_steam_proc_open_error) {
+        errno = EACCES;
+      } else {
+        dir = opendir("/proc");
       }
+#else
+      dir = opendir("/proc");
+#endif
+      if (!dir) {
+        return true;
+      }
+      auto close_dir = util::fail_guard([dir]() {
+        closedir(dir);
+      });
 
       const auto this_pid = getpid();
-      while (auto *entry = readdir(dir)) {
+      for (;;) {
+        auto *entry = read_next_proc_entry(dir);
+        if (entry == nullptr) {
+          return errno != 0;
+        }
         const std::string name = entry->d_name;
         if (!proc_pid_dir_name(name)) {
           continue;
@@ -1491,23 +1742,44 @@ namespace proc {
         if (pid <= 1 || pid == this_pid) {
           continue;
         }
-
-        auto comm = boost::to_lower_copy(read_proc_status_file(pid, "comm"));
-        while (!comm.empty() && (comm.back() == '\n' || comm.back() == '\r')) {
-          comm.pop_back();
+#ifdef POLARIS_TESTS
+        if (forced_desktop_steam_scan_only_pid > 0 && pid != forced_desktop_steam_scan_only_pid) {
+          continue;
         }
+#endif
 
-        const auto cmdline = read_proc_status_file(pid, "cmdline");
+        auto comm_result = read_proc_status_file_result(pid, "comm");
+        auto cmdline_result = read_proc_status_file_result(pid, "cmdline");
+        auto status_result = read_proc_status_file_result(pid, "status");
+#ifdef POLARIS_TESTS
+        if (pid == forced_desktop_steam_proc_read_error_pid) {
+          comm_result = {{}, EACCES};
+        }
+#endif
+        auto comm = boost::to_lower_copy(comm_result.bytes);
+        boost::trim(comm);
+        const auto cmdline = cmdline_result.bytes;
         const auto argv0 = proc_argv0_from_cmdline(cmdline);
-        const auto status = read_proc_status_file(pid, "status");
+        const auto status = status_result.bytes;
+        const bool reads_complete = comm_result.ok() && cmdline_result.ok() && status_result.ok();
+        if (!reads_complete) {
+          if (is_active_desktop_steam_client_process(comm, argv0, cmdline, status)) {
+            return true;
+          }
+          const auto read_is_ok_or_vanished = [](const proc_file_read_result_t &result) {
+            return result.ok() || process_vanished_during_proc_read(result.error);
+          };
+          if (!read_is_ok_or_vanished(comm_result) ||
+              !read_is_ok_or_vanished(cmdline_result) ||
+              !read_is_ok_or_vanished(status_result)) {
+            return true;
+          }
+          continue;
+        }
         if (is_active_desktop_steam_client_process(comm, argv0, cmdline, status)) {
-          closedir(dir);
           return true;
         }
       }
-
-      closedir(dir);
-      return false;
     }
 
     proc::desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_impl(
@@ -3075,6 +3347,36 @@ namespace proc {
     return is_active_desktop_steam_client_process(comm, argv0_path, cmdline, status);
   }
 
+  bool desktop_steam_proc_open_error_fails_closed_for_tests() {
+    const auto previous = forced_desktop_steam_proc_open_error;
+    auto restore = util::fail_guard([previous]() {
+      forced_desktop_steam_proc_open_error = previous;
+    });
+    forced_desktop_steam_proc_open_error = true;
+    return desktop_steam_client_active_impl();
+  }
+
+  bool desktop_steam_proc_enumeration_error_fails_closed_for_tests() {
+    const auto previous = forced_proc_directory_enumeration_error;
+    auto restore = util::fail_guard([previous]() {
+      forced_proc_directory_enumeration_error = previous;
+    });
+    forced_proc_directory_enumeration_error = true;
+    return desktop_steam_client_active_impl();
+  }
+
+  bool desktop_steam_proc_read_error_fails_closed_for_tests(pid_t forced_pid) {
+    const auto previous_error_pid = forced_desktop_steam_proc_read_error_pid;
+    const auto previous_only_pid = forced_desktop_steam_scan_only_pid;
+    auto restore = util::fail_guard([previous_error_pid, previous_only_pid]() {
+      forced_desktop_steam_proc_read_error_pid = previous_error_pid;
+      forced_desktop_steam_scan_only_pid = previous_only_pid;
+    });
+    forced_desktop_steam_proc_read_error_pid = forced_pid;
+    forced_desktop_steam_scan_only_pid = forced_pid;
+    return desktop_steam_client_active_impl();
+  }
+
   bool cage_mangohud_allowed_for_session_for_tests(const proc::ctx_t &app,
                                                    bool use_cage_compositor,
                                                    bool requested_headless) {
@@ -3174,27 +3476,175 @@ namespace proc {
     return terminate_pidfds(handles, graceful_timeout, kill_timeout, "test process"sv);
   }
 
+  bool terminate_pid_with_pidfd_after_wait_entry_for_tests(
+    pid_t pid,
+    std::chrono::milliseconds graceful_timeout,
+    std::chrono::milliseconds kill_timeout,
+    std::atomic<bool> &wait_entered
+  ) {
+    const auto previous = pidfd_wait_entered_for_tests;
+    auto restore = util::fail_guard([previous]() {
+      pidfd_wait_entered_for_tests = previous;
+    });
+    pidfd_wait_entered_for_tests = &wait_entered;
+    return terminate_pid_with_pidfd_for_tests(pid, graceful_timeout, kill_timeout);
+  }
+
+  bool terminate_pid_with_forced_zero_poll_eintr_for_tests(
+    pid_t pid,
+    std::chrono::milliseconds graceful_timeout,
+    std::chrono::milliseconds kill_timeout,
+    int forced_interruptions,
+    std::chrono::milliseconds interruption_delay
+  ) {
+    const auto previous_interruptions = forced_pidfd_zero_poll_interruptions;
+    const auto previous_delay = forced_pidfd_zero_poll_interruption_delay;
+    forced_pidfd_zero_poll_interruptions = forced_interruptions;
+    forced_pidfd_zero_poll_interruption_delay = interruption_delay;
+    auto restore_fault = util::fail_guard([previous_interruptions, previous_delay]() {
+      forced_pidfd_zero_poll_interruptions = previous_interruptions;
+      forced_pidfd_zero_poll_interruption_delay = previous_delay;
+    });
+    return terminate_pid_with_pidfd_for_tests(pid, graceful_timeout, kill_timeout);
+  }
+
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id) {
     return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv);
+  }
+
+  bool exact_generation_proc_enumeration_error_fails_closed_for_tests(
+    std::string_view session_instance_id
+  ) {
+    const auto previous = forced_proc_directory_enumeration_error;
+    auto restore = util::fail_guard([previous]() {
+      forced_proc_directory_enumeration_error = previous;
+    });
+    forced_proc_directory_enumeration_error = true;
+    return !terminate_isolated_session_processes(session_instance_id, "during enumeration-error test"sv);
+  }
+
+  bool exact_generation_unknown_ancestry_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_unknown_pid
+  ) {
+    const auto previous = forced_proc_ancestry_unknown_pid;
+    auto restore = util::fail_guard([previous]() {
+      forced_proc_ancestry_unknown_pid = previous;
+    });
+    forced_proc_ancestry_unknown_pid = forced_unknown_pid;
+    return !terminate_isolated_session_processes(session_instance_id, "during unknown-ancestry test"sv);
+  }
+
+  bool exact_generation_post_capture_enumeration_error_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t captured_pid
+  ) {
+    const auto previous_after_pid = forced_proc_directory_error_after_capture_pid;
+    const auto previous_error = forced_proc_directory_enumeration_error;
+    auto restore = util::fail_guard([previous_after_pid, previous_error]() {
+      forced_proc_directory_error_after_capture_pid = previous_after_pid;
+      forced_proc_directory_enumeration_error = previous_error;
+    });
+    forced_proc_directory_error_after_capture_pid = captured_pid;
+    return !terminate_isolated_session_processes(
+      session_instance_id,
+      "during post-capture enumeration-error test"sv
+    );
+  }
+
+  bool exact_generation_reused_pid_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t reused_pid
+  ) {
+    const auto previous = forced_reused_exact_generation_pid;
+    auto restore = util::fail_guard([previous]() {
+      forced_reused_exact_generation_pid = previous;
+    });
+    forced_reused_exact_generation_pid = reused_pid;
+    return !terminate_isolated_session_processes(session_instance_id, "during reused-pid test"sv);
+  }
+
+  bool exact_generation_pidfd_open_error_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_pid
+  ) {
+    const auto previous = forced_pidfd_open_failure_pid;
+    auto restore = util::fail_guard([previous]() {
+      forced_pidfd_open_failure_pid = previous;
+    });
+    forced_pidfd_open_failure_pid = forced_pid;
+    return !terminate_isolated_session_processes(session_instance_id, "during pidfd-open-error test"sv);
+  }
+
+  bool proc_t::isolated_session_capture_failure_retains_generation_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  ) {
+    const auto previous_failure_pid = forced_isolated_session_capture_failure_pid;
+    const auto previous_instance_id = _session_instance_id;
+    const auto previous_used_cage = _session_used_cage_compositor;
+    const auto previous_cleanup_complete = _exact_generation_cleanup_complete;
+    forced_isolated_session_capture_failure_pid = forced_capture_failure_pid;
+    _session_instance_id = session_instance_id;
+    _session_used_cage_compositor = true;
+    _exact_generation_cleanup_complete = true;
+    auto restore_state = util::fail_guard([
+      this,
+      previous_failure_pid,
+      previous_instance_id,
+      previous_used_cage,
+      previous_cleanup_complete
+    ]() {
+      forced_isolated_session_capture_failure_pid = previous_failure_pid;
+      _session_instance_id = previous_instance_id;
+      _session_used_cage_compositor = previous_used_cage;
+      _exact_generation_cleanup_complete = previous_cleanup_complete;
+    });
+
+    terminate_isolated_session_generation();
+    finish_isolated_session_generation_cleanup();
+    return !_exact_generation_cleanup_complete &&
+           _session_used_cage_compositor &&
+           _session_instance_id == session_instance_id &&
+           isolated_session_generation_blocks_launch(
+             _session_used_cage_compositor,
+             !_session_instance_id.empty()
+           );
+  }
+
+  bool proc_t::terminate_session_owned_steam_before_cage_stop_for_tests(
+    const ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id
+  ) {
+    const auto previous_app = _app;
+    const auto previous_used_cage = _session_used_cage_compositor;
+    const auto previous_instance_id = _session_instance_id;
+    _app = app;
+    _session_used_cage_compositor = session_owned_cage;
+    _session_instance_id = session_instance_id;
+    auto restore_state = util::fail_guard([
+      this,
+      previous_app,
+      previous_used_cage,
+      previous_instance_id
+    ]() {
+      _app = previous_app;
+      _session_used_cage_compositor = previous_used_cage;
+      _session_instance_id = previous_instance_id;
+    });
+    return terminate_session_owned_steam_before_cage_stop();
   }
 
   bool isolated_session_capture_failure_retains_generation_for_tests(
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid
   ) {
-    const auto previous_failure_pid = forced_isolated_session_capture_failure_pid;
-    forced_isolated_session_capture_failure_pid = forced_capture_failure_pid;
-    auto restore_failure_pid = util::fail_guard([previous_failure_pid]() {
-      forced_isolated_session_capture_failure_pid = previous_failure_pid;
-    });
-    const auto exact_cleanup_complete = terminate_isolated_session_processes(
+    boost::process::v1::environment env = boost::this_process::environment();
+    proc_t test_process {std::move(env), {}};
+    return test_process.isolated_session_capture_failure_retains_generation_for_tests(
       session_instance_id,
-      "during forced incomplete-capture test"sv
-    );
-    return !isolated_session_cleanup_clears_state(
-      true,
-      !session_instance_id.empty(),
-      exact_cleanup_complete
+      forced_capture_failure_pid
     );
   }
 
@@ -3203,7 +3653,83 @@ namespace proc {
     bool session_owned_cage,
     std::string_view session_instance_id
   ) {
-    return terminate_session_owned_steam_before_cage_stop_impl(
+    boost::process::v1::environment env = boost::this_process::environment();
+    proc_t test_process {std::move(env), {}};
+    return test_process.terminate_session_owned_steam_before_cage_stop_for_tests(
+      app,
+      session_owned_cage,
+      session_instance_id
+    );
+  }
+
+  bool terminate_session_owned_steam_with_forced_capture_failure_for_tests(
+    const ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t forced_pid
+  ) {
+    const auto previous = forced_steam_ownership_capture_failure_pid;
+    auto restore = util::fail_guard([previous]() {
+      forced_steam_ownership_capture_failure_pid = previous;
+    });
+    forced_steam_ownership_capture_failure_pid = forced_pid;
+    return terminate_session_owned_steam_before_cage_stop_for_tests(
+      app,
+      session_owned_cage,
+      session_instance_id
+    );
+  }
+
+  bool terminate_session_owned_steam_with_pidfd_open_error_for_tests(
+    const ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t forced_pid
+  ) {
+    const auto previous = forced_pidfd_open_failure_pid;
+    auto restore = util::fail_guard([previous]() {
+      forced_pidfd_open_failure_pid = previous;
+    });
+    forced_pidfd_open_failure_pid = forced_pid;
+    return terminate_session_owned_steam_before_cage_stop_for_tests(
+      app,
+      session_owned_cage,
+      session_instance_id
+    );
+  }
+
+  bool terminate_session_owned_steam_with_post_capture_enumeration_error_for_tests(
+    const ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t captured_pid
+  ) {
+    const auto previous_after_pid = forced_proc_directory_error_after_capture_pid;
+    const auto previous_error = forced_proc_directory_enumeration_error;
+    auto restore = util::fail_guard([previous_after_pid, previous_error]() {
+      forced_proc_directory_error_after_capture_pid = previous_after_pid;
+      forced_proc_directory_enumeration_error = previous_error;
+    });
+    forced_proc_directory_error_after_capture_pid = captured_pid;
+    return terminate_session_owned_steam_before_cage_stop_for_tests(
+      app,
+      session_owned_cage,
+      session_instance_id
+    );
+  }
+
+  bool terminate_session_owned_steam_with_reused_pid_for_tests(
+    const ctx_t &app,
+    bool session_owned_cage,
+    std::string_view session_instance_id,
+    pid_t reused_pid
+  ) {
+    const auto previous = forced_reused_exact_generation_pid;
+    auto restore = util::fail_guard([previous]() {
+      forced_reused_exact_generation_pid = previous;
+    });
+    forced_reused_exact_generation_pid = reused_pid;
+    return terminate_session_owned_steam_before_cage_stop_for_tests(
       app,
       session_owned_cage,
       session_instance_id
@@ -5382,12 +5908,44 @@ namespace proc {
   }
 
 #ifdef __linux__
-  void proc_t::terminate_session_owned_steam_before_cage_stop() {
-    (void) terminate_session_owned_steam_before_cage_stop_impl(
+  bool proc_t::terminate_session_owned_steam_before_cage_stop() {
+    return terminate_session_owned_steam_before_cage_stop_impl(
       _app,
       _session_used_cage_compositor,
       _session_instance_id
     );
+  }
+
+  void proc_t::terminate_isolated_session_generation() {
+    _exact_generation_cleanup_complete = true;
+    if (!_session_used_cage_compositor) {
+      return;
+    }
+
+    _exact_generation_cleanup_complete = terminate_isolated_session_processes(
+      _session_instance_id,
+      "after private Steam pre-cage termination"sv
+    );
+    if (isolated_session_cleanup_resets_router(
+          _session_used_cage_compositor,
+          !_session_instance_id.empty(),
+          _exact_generation_cleanup_complete
+        )) {
+      cage_display_router::reset_after_external_stop();
+    } else {
+      BOOST_LOG(error) << "process: retaining immutable cage generation because exact-generation cleanup was incomplete"sv;
+    }
+  }
+
+  void proc_t::finish_isolated_session_generation_cleanup() {
+    if (isolated_session_cleanup_clears_state(
+          _session_used_cage_compositor,
+          !_session_instance_id.empty(),
+          _exact_generation_cleanup_complete
+        )) {
+      _session_instance_id.clear();
+      _session_used_cage_compositor = false;
+    }
   }
 
 #endif
@@ -5399,7 +5957,6 @@ namespace proc {
     placebo = false;
 
 #ifdef __linux__
-    bool exact_generation_cleanup_complete = true;
     stop_steam_big_picture_input_guard();
     if (!immediate) {
       terminate_session_owned_steam_before_cage_stop();
@@ -5408,21 +5965,7 @@ namespace proc {
     // The immutable launch generation, not mutable config, owns this cleanup.
     // Capture and terminate every exact-generation process through pidfds before
     // any legacy child/group handle can signal or be destroyed.
-    if (_session_used_cage_compositor) {
-      exact_generation_cleanup_complete = terminate_isolated_session_processes(
-        _session_instance_id,
-        "after private Steam pre-cage termination"sv
-      );
-      if (isolated_session_cleanup_resets_router(
-            _session_used_cage_compositor,
-            !_session_instance_id.empty(),
-            exact_generation_cleanup_complete
-          )) {
-        cage_display_router::reset_after_external_stop();
-      } else {
-        BOOST_LOG(error) << "process: retaining immutable cage generation because exact-generation cleanup was incomplete"sv;
-      }
-    }
+    terminate_isolated_session_generation();
 #endif
 
 #ifdef __linux__
@@ -5509,14 +6052,7 @@ namespace proc {
     }
 
 #ifdef __linux__
-    if (isolated_session_cleanup_clears_state(
-          _session_used_cage_compositor,
-          !_session_instance_id.empty(),
-          exact_generation_cleanup_complete
-        )) {
-      _session_instance_id.clear();
-      _session_used_cage_compositor = false;
-    }
+    finish_isolated_session_generation_cleanup();
 
     // Disable streaming display after undo commands have run.
     // Skip if a virtual display was created (it will be destroyed below).
