@@ -259,12 +259,10 @@ async function verifyAuthenticatedRoutes(page, baseURL, options) {
     throw new Error(`Login failed with ${loginResponse.status()}: ${await loginResponse.text().catch(() => '')}`)
   }
 
-  await page.goto(`${baseURL}/#/`)
-  await expect(page.getByRole('navigation')).toBeVisible({ timeout: 15000 })
-
   for (const [index, route] of routes.entries()) {
     if (index === 0) {
       await page.goto(`${baseURL}/?smoke=${Date.now()}-${index}${route.hash}`)
+      await expect(page.getByRole('navigation')).toBeVisible({ timeout: 15000 })
     } else {
       await page.evaluate((hash) => {
         window.location.hash = hash
