@@ -240,7 +240,7 @@ namespace virtual_display {
      * This creates a valid EDID 1.4 block with:
      *   - Manufacturer ID "VRT" (Virtual)
      *   - A detailed timing descriptor for the requested mode
-     *   - Monitor name "Apollo Virtual"
+     *   - Monitor name "Polaris VDD"
      */
     static std::vector<unsigned char> generate_edid(int width, int height, int fps) {
       // Start with a known-good base EDID template
@@ -256,11 +256,14 @@ namespace virtual_display {
       edid[6] = 0xFF;
       edid[7] = 0x00;
 
-      // Manufacturer ID "VRT" encoded as 3 5-bit chars: V=22, R=18, T=20
-      // Byte 8: 0|10110|10010 -> high byte = (22 << 2) | (18 >> 3) = 88 | 2 = 0x5A
-      // Byte 9: 010|10100|00000000 -> (18 & 0x7) << 5 | 20 = 0x54
-      edid[8] = 0x5A;
-      edid[9] = 0x54;
+      // Manufacturer ID "PLR" (Polaris; unregistered in the PNP registry, so
+      // desktops show the raw code instead of mis-attributing the display —
+      // the old "VRT" decoded to Varjo Technologies).
+      // Encoding: 3 chars, 5 bits each (A=1..Z=26): P=16, L=12, R=18.
+      // Byte 8 = (16 << 2) | (12 >> 3) = 0x41
+      // Byte 9 = ((12 & 0x7) << 5) | 18 = 0x92
+      edid[8] = 0x41;
+      edid[9] = 0x92;
 
       // Product code (bytes 10-11)
       edid[10] = 0x01;
@@ -379,10 +382,18 @@ namespace virtual_display {
       edid[74] = 0x00;
       edid[75] = 0xFC;  // Monitor name tag
       edid[76] = 0x00;
-      const char *name = "Apollo Virtual";
+      // Per EDID spec: name (max 13 chars), then a single 0x0A terminator,
+      // then 0x20 space padding.
+      const char *name = "Polaris VDD";
       int name_len = std::min((int)strlen(name), 13);
       for (int i = 0; i < 13; i++) {
-        edid[77 + i] = (i < name_len) ? (unsigned char)name[i] : 0x0A;
+        if (i < name_len) {
+          edid[77 + i] = (unsigned char)name[i];
+        } else if (i == name_len) {
+          edid[77 + i] = 0x0A;
+        } else {
+          edid[77 + i] = 0x20;
+        }
       }
 
       // Descriptor block 3 (bytes 90-107): Monitor range limits
