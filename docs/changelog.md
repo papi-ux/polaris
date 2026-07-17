@@ -7,6 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.3.2 - 2026-07-17
+
+Reliability patch focused on stream lifecycle, Linux private-session isolation, reconnect recovery, and truthful host diagnostics.
+
+- Hardened RTSP follow-up control admission, live-session command ownership, session teardown, and serialized PulseAudio operations
+- Prevented private-stream controller input from also navigating host Steam Big Picture while preserving normal game input
+- Hardened private Steam teardown ownership and bounded interrupted process waits without broadly terminating desktop Steam
+- Preserved authenticated web sessions across host restarts and improved recovery from transient host outages
+- Tolerated near-target stream FPS so healthy sessions are not mislabeled as degraded
+- Exposed clearer Linux GPU probe topology diagnostics for capture-path troubleshooting
+- Hardened Dashboard smoke navigation so release checks do not issue duplicate route requests
+
 ## v1.3.1 - 2026-07-12
 
 Security and pairing-state patch focused on current cryptography dependencies, durable client authorization, and clearer paired-device history.
