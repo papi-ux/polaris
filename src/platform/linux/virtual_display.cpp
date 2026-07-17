@@ -695,7 +695,13 @@ namespace virtual_display {
       }
 
       if (!handle) {
-        BOOST_LOG(warning) << "Virtual display: failed to open EVDI device"sv;
+        // The most common cause: the evdi module is loaded without any
+        // pre-created device, and creating one at runtime requires root
+        // (a sysfs write), which Polaris does not have.
+        BOOST_LOG(warning) << "Virtual display: failed to open EVDI device. "sv
+                           << "Polaris cannot create EVDI devices without root; load the module with one pre-created: "sv
+                           << "[sudo modprobe evdi initial_device_count=1] "sv
+                           << "(persist via /etc/modprobe.d/evdi.conf: [options evdi initial_device_count=1])"sv;
         return std::nullopt;
       }
 
