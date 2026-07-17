@@ -23,6 +23,8 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
+#include <poll.h>
 #include <signal.h>
 #include <sstream>
 #include <thread>
@@ -428,6 +430,50 @@ namespace virtual_display {
     using fn_evdi_disconnect_t = void (*)(evdi_handle_t handle);
     using fn_evdi_close_t = void (*)(evdi_handle_t handle);
 
+    // ABI mirrors of the evdi_lib.h structs used by the frame-grab path.
+    // Layout matches evdi 1.6+ (unchanged through 1.14). Cursor/DDCCI handlers
+    // are never installed, so only the context layout (plain fn pointers)
+    // matters for those events.
+    struct evdi_rect_t {
+      int x1, y1, x2, y2;
+    };
+
+    struct evdi_mode_t {
+      int width;
+      int height;
+      int refresh_rate;
+      int bits_per_pixel;
+      unsigned int pixel_format;
+    };
+
+    struct evdi_buffer_desc_t {
+      int id;
+      void *buffer;
+      int width;
+      int height;
+      int stride;
+      evdi_rect_t *rects;
+      int rect_count;
+    };
+
+    struct evdi_event_context_t {
+      void (*dpms_handler)(int dpms_mode, void *user_data);
+      void (*mode_changed_handler)(evdi_mode_t mode, void *user_data);
+      void (*update_ready_handler)(int buffer_to_be_updated, void *user_data);
+      void (*crtc_state_handler)(int state, void *user_data);
+      void *cursor_set_handler;   // unused — never enabled
+      void *cursor_move_handler;  // unused — never enabled
+      void *ddcci_data_handler;   // unused
+      void *user_data;
+    };
+
+    using fn_evdi_get_event_ready_t = int (*)(evdi_handle_t handle);
+    using fn_evdi_handle_events_t = void (*)(evdi_handle_t handle, evdi_event_context_t *evtctx);
+    using fn_evdi_register_buffer_t = void (*)(evdi_handle_t handle, evdi_buffer_desc_t buffer);
+    using fn_evdi_unregister_buffer_t = void (*)(evdi_handle_t handle, int buffer_id);
+    using fn_evdi_request_update_t = bool (*)(evdi_handle_t handle, int buffer_id);
+    using fn_evdi_grab_pixels_t = int (*)(evdi_handle_t handle, evdi_rect_t *rects, int *num_rects);
+
     // Dynamically loaded function pointers
     static void *lib_handle = nullptr;
     static fn_evdi_open_t fn_open = nullptr;
@@ -435,6 +481,18 @@ namespace virtual_display {
     static fn_evdi_connect_t fn_connect = nullptr;
     static fn_evdi_disconnect_t fn_disconnect = nullptr;
     static fn_evdi_close_t fn_close = nullptr;
+    static fn_evdi_get_event_ready_t fn_get_event_ready = nullptr;
+    static fn_evdi_handle_events_t fn_handle_events = nullptr;
+    static fn_evdi_register_buffer_t fn_register_buffer = nullptr;
+    static fn_evdi_unregister_buffer_t fn_unregister_buffer = nullptr;
+    static fn_evdi_request_update_t fn_request_update = nullptr;
+    static fn_evdi_grab_pixels_t fn_grab_pixels = nullptr;
+
+    // Native frame-grab module (defined after create/destroy below).
+    namespace frame_grab {
+      static void publish(evdi_handle_t handle, const std::string &output_name, int width, int height);
+      static void unpublish(evdi_handle_t handle);
+    }  // namespace frame_grab
 
     /**
      * @brief Check if EVDI kernel module is loaded.
@@ -499,6 +557,14 @@ namespace virtual_display {
         {(dyn::apiproc *) &fn_connect, "evdi_connect"},
         {(dyn::apiproc *) &fn_disconnect, "evdi_disconnect"},
         {(dyn::apiproc *) &fn_close, "evdi_close"},
+        // Frame-grab path: the device opener is the intended consumer of EVDI
+        // frames (KMS reads of an EVDI card's scanout come back black).
+        {(dyn::apiproc *) &fn_get_event_ready, "evdi_get_event_ready"},
+        {(dyn::apiproc *) &fn_handle_events, "evdi_handle_events"},
+        {(dyn::apiproc *) &fn_register_buffer, "evdi_register_buffer"},
+        {(dyn::apiproc *) &fn_unregister_buffer, "evdi_unregister_buffer"},
+        {(dyn::apiproc *) &fn_request_update, "evdi_request_update"},
+        {(dyn::apiproc *) &fn_grab_pixels, "evdi_grab_pixels"},
       };
 
       if (dyn::load(lib_handle, funcs)) {
@@ -768,11 +834,135 @@ namespace virtual_display {
       display.backend = backend_e::EVDI;
       display.evdi_handle = handle;
 
+      // Publish for the native frame-grab capture path (see frame_grab above).
+      frame_grab::publish(handle, output_name, width, height);
+
       BOOST_LOG(info) << "Virtual display: EVDI display created ["sv
                       << output_name << "] at "sv << new_device_path;
 
       return display;
     }
+
+    // -----------------------------------------------------------------------
+    // Native frame grab — the device opener is EVDI's intended pixel consumer.
+    // The compositor renders and page-flips; frames are delivered to the
+    // process holding the evdi handle (us) via update events + grab_pixels,
+    // exactly like the DisplayLink daemon consumes them. All state is guarded
+    // by one mutex; libevdi calls happen only with it held, which also
+    // serializes capture against create()/destroy().
+    // -----------------------------------------------------------------------
+    namespace frame_grab {
+
+      constexpr int max_rects = 16;
+
+      static std::mutex mtx;
+      static evdi_handle_t active_handle = nullptr;
+      static std::string active_output_name;
+      static int mode_width = 0;
+      static int mode_height = 0;
+      static bool mode_dirty = false;
+      static bool buffer_registered = false;
+      static std::vector<std::uint8_t> framebuffer;
+      static std::array<evdi_rect_t, max_rects> rect_storage {};
+      static bool update_ready = false;
+
+      // Handlers run synchronously inside fn_handle_events (called with mtx
+      // held on the capture thread) — no extra locking needed.
+      static void on_mode_changed(evdi_mode_t mode, void *) {
+        BOOST_LOG(info) << "Virtual display: EVDI mode changed to "sv
+                        << mode.width << 'x' << mode.height << '@' << mode.refresh_rate
+                        << " bpp="sv << mode.bits_per_pixel;
+        if (mode.width > 0 && mode.height > 0) {
+          mode_width = mode.width;
+          mode_height = mode.height;
+          mode_dirty = true;
+        }
+      }
+
+      static void on_update_ready(int, void *) {
+        update_ready = true;
+      }
+
+      static void on_dpms(int, void *) {}
+
+      static void on_crtc_state(int, void *) {}
+
+      static evdi_event_context_t event_context {
+        on_dpms,
+        on_mode_changed,
+        on_update_ready,
+        on_crtc_state,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+      };
+
+      // Poll the evdi event fd; dispatch events when readable.
+      // Returns true if events were dispatched. Callers hold mtx.
+      static bool pump_events_locked(std::chrono::milliseconds timeout) {
+        struct pollfd pfd {};
+        pfd.fd = fn_get_event_ready(active_handle);
+        pfd.events = POLLIN;
+        int rc = ::poll(&pfd, 1, static_cast<int>(timeout.count()));
+        if (rc > 0 && (pfd.revents & POLLIN)) {
+          fn_handle_events(active_handle, &event_context);
+          return true;
+        }
+        return false;
+      }
+
+      // (Re)register the shared framebuffer for the current mode. Callers hold mtx.
+      static void ensure_buffer_locked() {
+        if (buffer_registered && !mode_dirty) {
+          return;
+        }
+        if (buffer_registered) {
+          fn_unregister_buffer(active_handle, 0);
+          buffer_registered = false;
+        }
+        framebuffer.assign(static_cast<std::size_t>(mode_width) * mode_height * 4, 0);
+        evdi_buffer_desc_t desc {};
+        desc.id = 0;
+        desc.buffer = framebuffer.data();
+        desc.width = mode_width;
+        desc.height = mode_height;
+        desc.stride = mode_width * 4;
+        desc.rects = rect_storage.data();
+        desc.rect_count = max_rects;
+        fn_register_buffer(active_handle, desc);
+        buffer_registered = true;
+        mode_dirty = false;
+        BOOST_LOG(info) << "Virtual display: EVDI frame buffer registered ("sv
+                        << mode_width << 'x' << mode_height << ")"sv;
+      }
+
+      static void publish(evdi_handle_t handle, const std::string &output_name, int width, int height) {
+        std::lock_guard lock(mtx);
+        active_handle = handle;
+        active_output_name = output_name;
+        mode_width = width;
+        mode_height = height;
+        mode_dirty = true;
+        buffer_registered = false;
+        update_ready = false;
+      }
+
+      // Tear down before disconnect/close. Safe to call with any handle state.
+      static void unpublish(evdi_handle_t handle) {
+        std::lock_guard lock(mtx);
+        if (active_handle != handle) {
+          return;
+        }
+        if (buffer_registered) {
+          fn_unregister_buffer(active_handle, 0);
+          buffer_registered = false;
+        }
+        active_handle = nullptr;
+        active_output_name.clear();
+      }
+
+    }  // namespace frame_grab
 
     /**
      * @brief Destroy an EVDI virtual display.
@@ -783,6 +973,8 @@ namespace virtual_display {
       }
 
       BOOST_LOG(info) << "Virtual display: disconnecting EVDI display ["sv << display.output_name << "]"sv;
+
+      frame_grab::unpublish((evdi_handle_t)display.evdi_handle);
 
       fn_disconnect((evdi_handle_t)display.evdi_handle);
 
@@ -1126,6 +1318,74 @@ namespace virtual_display {
     const auto backend = detect_backend();
     return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
   }
+
+  namespace evdi_capture {
+
+    bool available() {
+      std::lock_guard lock(evdi::frame_grab::mtx);
+      return evdi::frame_grab::active_handle != nullptr;
+    }
+
+    std::string output_name() {
+      std::lock_guard lock(evdi::frame_grab::mtx);
+      return evdi::frame_grab::active_output_name;
+    }
+
+    bool dimensions(int &width, int &height) {
+      std::lock_guard lock(evdi::frame_grab::mtx);
+      if (!evdi::frame_grab::active_handle) {
+        return false;
+      }
+      width = evdi::frame_grab::mode_width;
+      height = evdi::frame_grab::mode_height;
+      return true;
+    }
+
+    int grab_frame(frame_view_t &out, std::chrono::milliseconds timeout) {
+      using namespace evdi::frame_grab;
+      std::lock_guard lock(mtx);
+      if (!active_handle) {
+        return -1;
+      }
+
+      // Drain queued events first — the compositor's initial mode-set may
+      // still be pending from before capture started.
+      pump_events_locked(std::chrono::milliseconds(0));
+      ensure_buffer_locked();
+
+      update_ready = false;
+      if (!evdi::fn_request_update(active_handle, 0)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!update_ready) {
+          const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()
+          );
+          if (remaining.count() <= 0) {
+            return 0;  // no damage within the frame window — reuse last frame
+          }
+          pump_events_locked(remaining);
+          if (!active_handle) {
+            return -1;
+          }
+          if (mode_dirty) {
+            // Mode changed mid-wait; re-register and let the next request pick
+            // up the new geometry.
+            ensure_buffer_locked();
+          }
+        }
+      }
+
+      int num_rects = max_rects;
+      evdi::fn_grab_pixels(active_handle, rect_storage.data(), &num_rects);
+
+      out.data = framebuffer.data();
+      out.width = mode_width;
+      out.height = mode_height;
+      out.stride = mode_width * 4;
+      return 1;
+    }
+
+  }  // namespace evdi_capture
 
   bool cleanup_stale() {
     pid_t owner_pid = 0;

@@ -52,6 +52,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "vaapi.h"
+#include "virtual_display.h"
 
 #include <linux/rtnetlink.h>
 
@@ -1170,6 +1171,9 @@ std::string get_local_ip_for_gateway() {
   }
 #endif
 
+  // evdigrab.cpp — native EVDI frame consumption for EVDI-backed virtual displays
+  std::shared_ptr<display_t> evdi_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
 #ifdef POLARIS_BUILD_CUDA
     // display using NvFBC only supports mem_type_e::cuda
@@ -1210,6 +1214,21 @@ std::string get_local_ip_for_gateway() {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    // Native EVDI path: when the active virtual display is EVDI-backed, frames
+    // must be consumed via libevdi by the device opener (us). KMS reads of an
+    // EVDI card's scanout come back black, so this takes priority over the
+    // startup capture-source bitset.
+    if (virtual_display::evdi_capture::available()) {
+      const auto evdi_output = virtual_display::evdi_capture::output_name();
+      if (display_name.empty() || display_name == evdi_output) {
+        BOOST_LOG(info) << "Screencasting with native EVDI frame grab"sv;
+        auto evdi_disp = evdi_display(hwdevice_type, display_name, config);
+        if (evdi_disp) {
+          return evdi_disp;
+        }
+        BOOST_LOG(warning) << "Native EVDI frame grab unavailable for this device type; falling back"sv;
+      }
+    }
 #ifdef POLARIS_BUILD_CUDA
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;
