@@ -754,12 +754,32 @@ namespace cage_display_router {
         mangohud_prefix = mangohud_prefix_for_command(game_cmd, allow_mangohud, mh, mhc ? mhc : "");
       }
     }
+    // Optional splash backdrop: paint the output while the game cold-starts so
+    // the stream shows a deliberate backdrop instead of a black void. Uses
+    // swaybg when installed (no hard dependency); a user-supplied image at
+    // ~/.config/polaris/splash.png wins over the solid fallback color. swaybg
+    // is backgrounded inside the session and exits on its own when the
+    // compositor goes away, so no teardown is needed.
+    std::string splash_cmd;
+    if (!resolve_executable("swaybg").empty()) {
+      const std::string user_splash = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/.config/polaris/splash.png";
+      if (access(user_splash.c_str(), R_OK) == 0) {
+        splash_cmd = "swaybg -m fill -i " + shell_quote(user_splash) + " >/dev/null 2>&1 & ";
+        BOOST_LOG(info) << "labwc: splash backdrop enabled (image ["sv << user_splash << "])"sv;
+      } else {
+        splash_cmd = "swaybg -c '#101418' >/dev/null 2>&1 & ";
+        BOOST_LOG(info) << "labwc: splash backdrop enabled (solid color; drop an image at ~/.config/polaris/splash.png to customize)"sv;
+      }
+    } else {
+      BOOST_LOG(info) << "labwc: swaybg not found; startup shows a black backdrop until the game paints (install swaybg for a splash)"sv;
+    }
+
     if (!game_cmd.empty()) {
       auto mode_retry_cmd =
         "for i in $(seq 1 50); do "
         "wlr-randr --output " + output_name + " --custom-mode " + mode + " >/dev/null 2>&1 && break; "
         "sleep 0.1; "
-        "done; ";
+        "done; " + splash_cmd;
       if (headless) {
         // In headless mode: set resolution, ensure XWayland is ready, then launch game.
         // labwc with xwaylandPersistence=yes starts XWayland eagerly, but we still
@@ -775,7 +795,7 @@ namespace cage_display_router {
         "for i in $(seq 1 50); do "
         "wlr-randr --output " + output_name + " --custom-mode " + mode + " >/dev/null 2>&1 && break; "
         "sleep 0.1; "
-        "done; "
+        "done; " + splash_cmd +
         "exec sleep infinity";
     }
 
