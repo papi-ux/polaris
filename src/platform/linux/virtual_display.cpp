@@ -478,7 +478,16 @@ namespace virtual_display {
         return true;  // Already loaded
       }
 
-      lib_handle = dyn::handle({"libevdi.so.0", "libevdi.so"});
+      // Try bare sonames first (distros with libevdi on the default linker
+      // path), then known off-path locations: openSUSE ships libevdi.so.1
+      // under /usr/lib64/displaylink/, which ld.so does not search.
+      lib_handle = dyn::handle({
+        "libevdi.so.1",
+        "libevdi.so.0",
+        "libevdi.so",
+        "/usr/lib64/displaylink/libevdi.so.1",
+        "/usr/lib/displaylink/libevdi.so.1",
+      });
       if (!lib_handle) {
         BOOST_LOG(debug) << "Virtual display: libevdi not found on this system"sv;
         return false;
