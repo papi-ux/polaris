@@ -23,6 +23,7 @@
 #include "src/platform/common.h"
 #include "src/stream_stats.h"
 #include "src/video.h"
+#include "vaapi.h"
 #include "virtual_display.h"
 
 using namespace std::literals;
@@ -40,7 +41,8 @@ namespace platf {
 
     class evdi_display_t: public display_t {
     public:
-      int init(const ::video::config_t &config) {
+      int init(mem_type_e hwdevice_type, const ::video::config_t &config) {
+        mem_type = hwdevice_type;
         delay = std::chrono::nanoseconds {1s} / config.framerate;
 
         int w = 0, h = 0;
@@ -146,6 +148,15 @@ namespace platf {
         return capture_e::ok;
       }
 
+      std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) override {
+#ifdef POLARIS_BUILD_VAAPI
+        if (mem_type == mem_type_e::vaapi) {
+          return va::make_avcodec_encode_device(width, height, false);
+        }
+#endif
+        return std::make_unique<avcodec_encode_device_t>();
+      }
+
       std::shared_ptr<img_t> alloc_img() override {
         auto img = std::make_shared<evdi_img_t>();
         img->width = width;
@@ -164,6 +175,7 @@ namespace platf {
       }
 
     private:
+      mem_type_e mem_type = mem_type_e::unknown;
       std::chrono::nanoseconds delay {};
       bool capture_metadata_logged = false;
     };
@@ -177,7 +189,7 @@ namespace platf {
     }
 
     auto disp = std::make_shared<evdi_display_t>();
-    if (disp->init(config)) {
+    if (disp->init(hwdevice_type, config)) {
       return nullptr;
     }
     return disp;
