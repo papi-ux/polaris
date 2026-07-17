@@ -3802,19 +3802,19 @@ namespace proc {
 #ifdef __linux__
   // Linux virtual display state — holds the active virtual display instance, if any
   static std::optional<virtual_display::vdisplay_t> linux_vdisplay;
-  static bool linux_vdisplay_available_checked = false;
-  static bool linux_vdisplay_available = false;
 
   /**
-   * @brief Check and cache whether Linux virtual display support is available.
+   * @brief Check whether Linux virtual display support is available.
+   *
+   * Deliberately NOT latched per-process: availability changes at runtime
+   * (evdi module loaded/unloaded, libevdi installed, compositor restarted).
+   * A once-only latch here meant a Polaris started before the prerequisites
+   * were in place would report "no backend available" forever, even after
+   * detect_backend() itself succeeded. detect_backend() already maintains a
+   * short TTL cache, so calling it directly stays cheap.
    */
   bool isLinuxVDisplayAvailable() {
-    if (!linux_vdisplay_available_checked) {
-      const auto backend = virtual_display::detect_backend();
-      linux_vdisplay_available = (backend != virtual_display::backend_e::NONE);
-      linux_vdisplay_available_checked = true;
-    }
-    return linux_vdisplay_available;
+    return virtual_display::detect_backend() != virtual_display::backend_e::NONE;
   }
 
   namespace linux_display {
