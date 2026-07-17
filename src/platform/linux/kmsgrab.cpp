@@ -3,9 +3,11 @@
  * @brief Definitions for KMS screen capture.
  */
 // standard includes
+#include <algorithm>
 #include <errno.h>
 #include <fcntl.h>
 #include <filesystem>
+#include <iterator>
 #include <thread>
 #include <unistd.h>
 
@@ -149,6 +151,11 @@ namespace platf {
       // ID of the connector
       std::uint32_t connector_id;
 
+      // Kernel per-type connector instance (drmModeConnector::connector_type_id).
+      // Matches the /sys/class/drm card*-<TypeName>-<type_id> suffix, unlike
+      // `index`, which is a running counter across the enumeration.
+      std::uint32_t type_id;
+
       bool connected;
     };
 
@@ -226,6 +233,29 @@ namespace platf {
 
       BOOST_LOG(error) << "Unknown Monitor connector type ["sv << string << "]: Please report this to the GitHub issue tracker"sv;
       return DRM_MODE_CONNECTOR_Unknown;
+    }
+
+    // Build the kernel-style connector name (e.g. HDMI-A-1, DP-3, DVI-D-1) —
+    // the same naming used by /sys/class/drm, kscreen-doctor, and the EVDI
+    // virtual-display backend. This lets config::video.output_name address a
+    // connector deterministically instead of by plane enumeration order, which
+    // shifts whenever an output is hot-added (exactly what virtual-display
+    // creation does).
+    static std::string connector_name(const connector_t &connector) {
+      const char *type_name = drmModeGetConnectorTypeName(connector.type);
+      std::string name = type_name ? type_name : "Unknown";
+      name += '-';
+      name += std::to_string(connector.type_id);
+      return name;
+    }
+
+    // A display_name that contains any non-digit is a connector name; a purely
+    // numeric one keeps the legacy plane-enumeration-index behavior.
+    static bool is_connector_name(const std::string &display_name) {
+      return !display_name.empty() &&
+             std::any_of(std::begin(display_name), std::end(display_name), [](char ch) {
+               return ch < '0' || ch > '9';
+             });
     }
 
     class plane_it_t: public round_robin_util::it_wrap_t<plane_t::element_type, plane_it_t> {
@@ -460,6 +490,7 @@ namespace platf {
             crtc_id,
             index,
             conn->connector_id,
+            conn->connector_type_id,
             conn->connection == DRM_MODE_CONNECTED,
           });
         });
@@ -589,7 +620,8 @@ namespace platf {
       int init(const std::string &display_name, const ::video::config_t &config) {
         delay = std::chrono::nanoseconds {1s} / config.framerate;
 
-        int monitor_index = util::from_view(display_name);
+        const bool by_name = kms::is_connector_name(display_name);
+        int monitor_index = by_name ? -1 : util::from_view(display_name);
         int monitor = 0;
 
         fs::path card_dir {"/dev/dri"sv};
@@ -615,6 +647,25 @@ namespace platf {
             }
           }
 
+          // Named targeting: resolve the requested connector on this card up
+          // front and select the plane driving its CRTC, instead of counting
+          // active planes (whose order shifts when outputs are hot-added).
+          std::uint32_t wanted_crtc = 0;
+          if (by_name) {
+            kms::conn_type_count_t type_count;
+            for (auto &connector : card.monitors(type_count)) {
+              if (connector.crtc_id && kms::connector_name(connector) == display_name) {
+                wanted_crtc = connector.crtc_id;
+                break;
+              }
+            }
+
+            if (!wanted_crtc) {
+              // Requested connector is not active on this card
+              continue;
+            }
+          }
+
           auto end = std::end(card);
           for (auto plane = std::begin(card); plane != end; ++plane) {
             // Skip unused planes
@@ -626,7 +677,11 @@ namespace platf {
               continue;
             }
 
-            if (monitor != monitor_index) {
+            if (by_name) {
+              if (plane->crtc_id != wanted_crtc) {
+                continue;
+              }
+            } else if (monitor != monitor_index) {
               ++monitor;
               continue;
             }
@@ -741,7 +796,7 @@ namespace platf {
           }
         }
 
-        BOOST_LOG(error) << "Couldn't find monitor ["sv << monitor_index << ']';
+        BOOST_LOG(error) << "Couldn't find monitor ["sv << display_name << ']';
         return -1;
 
       // Neatly break from nested for loop
@@ -1592,6 +1647,10 @@ namespace platf {
 
     std::vector<kms::card_descriptor_t> cds;
     std::vector<std::string> display_names;
+    // Kernel-style connector names (HDMI-A-1, DVI-I-1, ...) of connected
+    // connectors. Appended AFTER all numeric entries so the legacy
+    // "name N sits at position N" invariant holds for the numeric names.
+    std::vector<std::string> connector_names;
 
     fs::path card_dir {"/dev/dri"sv};
     for (auto &entry : fs::directory_iterator {card_dir}) {
@@ -1618,7 +1677,17 @@ namespace platf {
         }
       }
 
-      auto crtc_to_monitor = kms::map_crtc_to_monitor(card.monitors(conn_type_count));
+      auto connectors = card.monitors(conn_type_count);
+      for (auto &connector : connectors) {
+        if (!connector.connected) {
+          continue;
+        }
+        auto name = kms::connector_name(connector);
+        if (std::find(std::begin(connector_names), std::end(connector_names), name) == std::end(connector_names)) {
+          connector_names.emplace_back(std::move(name));
+        }
+      }
+      auto crtc_to_monitor = kms::map_crtc_to_monitor(connectors);
 
       auto end = std::end(card);
       for (auto plane = std::begin(card); plane != end; ++plane) {
@@ -1702,6 +1771,14 @@ namespace platf {
     BOOST_LOG(debug) << "Desktop resolution: "sv << kms::env_width << 'x' << kms::env_height;
 
     kms::card_descriptors = std::move(cds);
+
+    // Expose kernel-style connector names alongside the numeric indexes so a
+    // configured output_name like [DVI-I-1] (e.g. a freshly created EVDI
+    // display, process.cpp sets it verbatim) survives display-list validation
+    // instead of being reset to display 0.
+    display_names.insert(std::end(display_names),
+                         std::make_move_iterator(std::begin(connector_names)),
+                         std::make_move_iterator(std::end(connector_names)));
 
     return display_names;
   }
