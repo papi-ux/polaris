@@ -45,6 +45,7 @@
 #endif
 
 // local includes
+#include "cage_display_router.h"
 #include "graphics.h"
 #include "misc.h"
 #include "src/config.h"
@@ -1175,6 +1176,13 @@ std::string get_local_ip_for_gateway() {
   std::shared_ptr<display_t> evdi_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
+#ifdef POLARIS_BUILD_WAYLAND
+    // Match display(): while the cage runtime is live, enumeration must come from
+    // the nested compositor, not whichever source the startup bitset selected.
+    if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+      return wl_display_names();
+    }
+#endif
 #ifdef POLARIS_BUILD_CUDA
     // display using NvFBC only supports mem_type_e::cuda
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
@@ -1214,6 +1222,17 @@ std::string get_local_ip_for_gateway() {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+#ifdef POLARIS_BUILD_WAYLAND
+    // A per-app isolated session (family mode) can start the cage runtime after the
+    // startup capture-source bitset was computed. When the cage is live, capture must
+    // target the nested compositor (wlgrab connects to its socket) — never the physical
+    // desktop via KMS/X11, which the startup bitset may otherwise select (e.g. KDE hosts
+    // where KMS is the desktop capture path). This takes priority over everything below.
+    if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+      BOOST_LOG(info) << "Screencasting with Wayland's protocol (cage runtime)"sv;
+      return wl_display(hwdevice_type, display_name, config);
+    }
+#endif
     // Native EVDI path: when the active virtual display is EVDI-backed, frames
     // must be consumed via libevdi by the device opener (us). KMS reads of an
     // EVDI card's scanout come back black, so this takes priority over the
