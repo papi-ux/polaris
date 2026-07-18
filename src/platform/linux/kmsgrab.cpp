@@ -1104,6 +1104,18 @@ namespace platf {
         plane_t plane = drmModeGetPlane(card.fd.el, plane_id);
         frame_timestamp = std::chrono::steady_clock::now();
 
+        // A display-topology change (e.g. a monitor powering off and the compositor
+        // moving the desktop to a dummy plug on another CRTC/GPU) retires the plane we
+        // pinned at init(). drmModeGetPlane() then returns NULL, and a plane that still
+        // exists but stopped scanning out reports fb_id == 0. Either way the captured
+        // CRTC is dead: ask the pipeline to re-resolve onto the now-active output instead
+        // of dereferencing a null plane (crash) or spinning on capture_e::timeout forever
+        // (freeze). Mirrors the HDR-metadata and resolution reinit paths in this function.
+        if (!plane || !plane->fb_id) {
+          BOOST_LOG(info) << "Reinitializing capture after the captured plane was retired (display topology change)"sv;
+          return capture_e::reinit;
+        }
+
         auto fb = card.fb(plane.get());
         if (!fb) {
           // This can happen if the display is being reconfigured while streaming
