@@ -3828,10 +3828,17 @@ namespace proc {
         return;
       }
 
-      // Enable streaming output but keep primary display as priority 1
-      // so KDE taskbar stays on the main display
       std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
-      if (!cfg.primary_output.empty()) {
+      if (cfg.headless_swap_primary && !cfg.primary_output.empty()) {
+        // Swap the desktop ONTO the headless display: make it the primary and disable the
+        // physical monitor, so the stream shows the real desktop while the physical screen
+        // stays dark. disable_streaming_display() restores it on teardown. This is the
+        // built-in replacement for manual kscreen-doctor prep-cmd swap scripts.
+        cmd += " output." + cfg.streaming_output + ".priority.1";
+        cmd += " output." + cfg.primary_output + ".disable";
+      } else if (!cfg.primary_output.empty()) {
+        // Legacy: enable the headless output as a SECONDARY, keep the physical primary
+        // (KDE taskbar stays on the main display).
         cmd += " output." + cfg.primary_output + ".priority.1";
         cmd += " output." + cfg.streaming_output + ".priority.2";
       }
@@ -3856,10 +3863,18 @@ namespace proc {
       }
 
       std::string cmd = "kscreen-doctor";
-      if (!cfg.primary_output.empty()) {
+      if (cfg.headless_swap_primary && !cfg.primary_output.empty()) {
+        // Undo the swap: bring the physical monitor back as primary and turn the headless
+        // display back off.
+        cmd += " output." + cfg.primary_output + ".enable";
         cmd += " output." + cfg.primary_output + ".priority.1";
+        cmd += " output." + cfg.streaming_output + ".disable";
+      } else {
+        if (!cfg.primary_output.empty()) {
+          cmd += " output." + cfg.primary_output + ".priority.1";
+        }
+        cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
       }
-      cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
 
       BOOST_LOG(info) << "Linux display management: disabling streaming display ["sv << cmd << "]"sv;
       int ret = std::system(cmd.c_str());

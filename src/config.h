@@ -165,6 +165,7 @@ namespace config {
       bool prefer_gpu_native_capture;  ///< Prefer a GPU-native DMA-BUF path even if that requires windowed labwc
       bool capture_profile;          ///< Emit periodic transport-tagged capture timing summaries
       std::string headless_source;   ///< Off-screen source override: "auto" | "virtual" | "evdi" | "physical"
+      bool headless_swap_primary;    ///< While streaming, make the headless display the PRIMARY (move the desktop onto it, disable the physical monitor) and swap back on teardown
     } linux_display;
 
     std::string fallback_mode;
