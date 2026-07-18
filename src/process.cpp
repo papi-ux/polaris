@@ -1017,6 +1017,10 @@ namespace proc {
 #ifdef POLARIS_TESTS
     thread_local pid_t forced_pidfd_open_failure_pid = -1;
     thread_local std::atomic<bool> *pidfd_wait_entered_for_tests = nullptr;
+    // When set, the pre-cage Steam teardown skips the real `steam -shutdown` shell-out and
+    // its graceful wait, so unit tests neither touch a developer's real Steam nor hang on
+    // stub processes; they exercise the pidfd fallback directly.
+    thread_local bool bypass_graceful_steam_shutdown_for_tests = false;
 #endif
 
     std::optional<pidfd_handle_t> open_process_pidfd(pid_t pid, int &open_error) {
@@ -1689,17 +1693,31 @@ namespace proc {
       // a fatal error on the next launch. Only fall back to the pidfd SIGTERM/SIGKILL
       // path if the graceful shutdown does not complete within the window (Steam closing
       // a running game can legitimately take several seconds).
-      const auto shutdown_cmd = canonical_steam_shutdown_command(steam_launch_reference_command(app));
-      BOOST_LOG(info) << "process: requesting graceful Steam shutdown ["sv << shutdown_cmd
-                      << "] before isolated cage stop"sv;
-      std::system((shutdown_cmd + " >/dev/null 2>&1").c_str());
-      if (wait_for_pidfds_exit(ownership.owned, 20s)) {
-        BOOST_LOG(info) << "process: session-owned Steam exited gracefully before isolated cage stop"sv;
-        return true;
+      // Skip the graceful wait when the daemon itself is shutting down: a ~10s abort
+      // watchdog is armed on SIGTERM/logout, so a longer wait here (which also holds the
+      // session lifecycle lock) would be truncated anyway — go straight to the fast,
+      // bounded pidfd path.
+      bool graceful_steam_shutdown = !daemon_shutdown_requested();
+#ifdef POLARIS_TESTS
+      if (bypass_graceful_steam_shutdown_for_tests) {
+        graceful_steam_shutdown = false;
+      }
+#endif
+      if (graceful_steam_shutdown) {
+        const auto shutdown_cmd = canonical_steam_shutdown_command(steam_launch_reference_command(app));
+        BOOST_LOG(info) << "process: requesting graceful Steam shutdown ["sv << shutdown_cmd
+                        << "] before isolated cage stop"sv;
+        // Always background the shell-out (trailing &) so std::system cannot block the
+        // teardown even when the launch command was not detached with setsid.
+        std::system((shutdown_cmd + " >/dev/null 2>&1 &").c_str());
+        if (wait_for_pidfds_exit(ownership.owned, 20s)) {
+          BOOST_LOG(info) << "process: session-owned Steam exited gracefully before isolated cage stop"sv;
+          return true;
+        }
+        BOOST_LOG(warning) << "process: Steam did not exit within the graceful-shutdown window; terminating "sv
+                           << ownership.owned.size() << " session-owned Steam process(es) through pidfd"sv;
       }
 
-      BOOST_LOG(warning) << "process: Steam did not exit within the graceful-shutdown window; terminating "sv
-                         << ownership.owned.size() << " session-owned Steam process(es) through pidfd"sv;
       if (terminate_pidfds(ownership.owned, 5s, 1s, "private Steam"sv)) {
         BOOST_LOG(info) << "process: session-owned Steam exited before isolated cage stop"sv;
         return true;
@@ -3640,6 +3658,9 @@ namespace proc {
     _app = app;
     _session_used_cage_compositor = session_owned_cage;
     _session_instance_id = session_instance_id;
+#ifdef POLARIS_TESTS
+    bypass_graceful_steam_shutdown_for_tests = true;
+#endif
     auto restore_state = util::fail_guard([
       this,
       previous_app,
@@ -3649,6 +3670,9 @@ namespace proc {
       _app = previous_app;
       _session_used_cage_compositor = previous_used_cage;
       _session_instance_id = previous_instance_id;
+#ifdef POLARIS_TESTS
+      bypass_graceful_steam_shutdown_for_tests = false;
+#endif
     });
     return terminate_session_owned_steam_before_cage_stop();
   }
