@@ -45,6 +45,7 @@
 #endif
 
 // local includes
+#include "cage_display_router.h"
 #include "graphics.h"
 #include "misc.h"
 #include "src/config.h"
@@ -1171,6 +1172,13 @@ std::string get_local_ip_for_gateway() {
 #endif
 
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
+#ifdef POLARIS_BUILD_WAYLAND
+    // Match display(): while the cage runtime is live, enumeration must come from
+    // the nested compositor, not whichever source the startup bitset selected.
+    if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+      return wl_display_names();
+    }
+#endif
 #ifdef POLARIS_BUILD_CUDA
     // display using NvFBC only supports mem_type_e::cuda
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
@@ -1210,6 +1218,17 @@ std::string get_local_ip_for_gateway() {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+#ifdef POLARIS_BUILD_WAYLAND
+    // The capture-source set is computed once at startup, but a per-app isolated
+    // session (family mode) can start the cage runtime afterwards. When the cage is
+    // live, capture must target the nested compositor (wlgrab connects to its
+    // socket) — never the physical desktop via KMS/X11, which the startup bitset
+    // may otherwise select (e.g. KDE hosts where KMS is the desktop capture path).
+    if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+      BOOST_LOG(info) << "Screencasting with Wayland's protocol (cage runtime)"sv;
+      return wl_display(hwdevice_type, display_name, config);
+    }
+#endif
 #ifdef POLARIS_BUILD_CUDA
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;
