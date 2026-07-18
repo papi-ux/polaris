@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -3819,6 +3820,68 @@ namespace proc {
 
   namespace linux_display {
     /**
+     * @brief Run a command and capture its stdout (trimmed). Empty on failure.
+     */
+    static std::string exec_capture(const std::string &cmd) {
+      FILE *pipe = popen(cmd.c_str(), "r");
+      if (!pipe) {
+        return {};
+      }
+      char buf[512];
+      std::string result;
+      while (fgets(buf, sizeof(buf), pipe)) {
+        result += buf;
+      }
+      pclose(pipe);
+      return result;
+    }
+
+    /**
+     * @brief Whether kscreen-doctor currently lists an output with exactly this name.
+     *
+     * kscreen-doctor omits disconnected connectors entirely, so mere presence on an
+     * "Output:" line means the connector is enumerated and addressable by kscreen-doctor
+     * (whether enabled or disabled). The name is matched as a whole token so "DP-2" does
+     * not spuriously match "DP-20" and "DVI-I-1" does not match "DVI-I-10".
+     */
+    static bool kscreen_output_present(const std::string &name) {
+      if (name.empty()) {
+        return false;
+      }
+      const std::string out = exec_capture("kscreen-doctor -o 2>/dev/null");
+      auto is_tok = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+      };
+      for (size_t pos = 0; (pos = out.find(name, pos)) != std::string::npos; pos += name.size()) {
+        const char before = pos > 0 ? out[pos - 1] : ' ';
+        const size_t after_idx = pos + name.size();
+        const char after = after_idx < out.size() ? out[after_idx] : ' ';
+        if (!is_tok(before) && !is_tok(after)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * @brief Poll for a kscreen output to appear, absorbing KWin's async hotplug lag.
+     *
+     * A freshly-connected EVDI (or any hotplugged connector) can take a beat to show up
+     * in KScreen's enumeration after the DRM connect. Retry briefly rather than assume
+     * absence — but bounded, so a genuinely-absent output aborts promotion safely instead
+     * of hanging the launch.
+     */
+    static bool wait_for_kscreen_output(const std::string &name, int attempts = 8, int delay_ms = 250) {
+      for (int i = 0; i < attempts; ++i) {
+        if (kscreen_output_present(name)) {
+          return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+      }
+      return false;
+    }
+
+    /**
      * @brief Enable the streaming display and set display priorities for a streaming session.
      * Uses kscreen-doctor to enable the streaming output and set it as priority 1.
      */
@@ -4817,7 +4880,81 @@ namespace proc {
         launch_session->virtual_display ||
         (!launch_session->user_locked_virtual_display && _app.virtual_display));
 
-    if (
+    // EVDI-as-primary (no physical dongle needed): create the virtual display even
+    // though auto-manage is on, then promote the desktop onto it. This is an
+    // INDEPENDENT gate — deliberately not tied to should_use_linux_virtual_display
+    // (which is false for the very no-dongle user this targets) — and it must never
+    // fall into the !auto_manage_displays creation branch below.
+    const bool evdi_promotion =
+      !display_policy.use_cage_runtime &&
+      config::video.linux_display.auto_manage_displays &&
+      config::video.linux_display.headless_swap_primary &&
+      config::video.linux_display.headless_source == "evdi";
+
+    if (evdi_promotion) {
+      // Neutralize the generic auto_manage swap below until we KNOW there is a live
+      // EVDI to promote onto: clear streaming_output so enable_streaming_display()
+      // no-ops, saving the user's value first so teardown restores it.
+      if (!this->initial_streaming_output_saved) {
+        this->initial_streaming_output = config::video.linux_display.streaming_output;
+        this->initial_streaming_output_saved = true;
+      }
+      config::video.linux_display.streaming_output.clear();
+
+      if (isLinuxVDisplayAvailable()) {
+        int target_fps = launch_session->fps ? launch_session->fps : 60000;
+        if (target_fps >= 1000) {
+          target_fps /= 1000;
+        }
+        if (config::video.double_refreshrate) {
+          target_fps *= 2;
+        }
+
+        auto vdisplay = virtual_display::create(render_width, render_height, target_fps);
+        if (vdisplay.has_value()) {
+          linux_vdisplay = std::move(vdisplay);
+          launch_session->virtual_display = true;
+          this->virtual_display = true;
+          this->display_name = linux_vdisplay->output_name;
+          const std::string evdi_name = linux_vdisplay->output_name;
+
+          BOOST_LOG(info) << "EVDI-as-primary: virtual display created ["sv << evdi_name
+                          << "] ("sv << render_width << "x"sv << render_height << "@"sv
+                          << target_fps << "Hz) via "sv
+                          << virtual_display::backend_name(linux_vdisplay->backend);
+
+          // Only promote once the EVDI is a live, addressable kscreen output. Otherwise
+          // the swap could fail to light it yet still disable the physical monitor,
+          // stranding the desktop on a dark screen. The presence check absorbs KWin's
+          // asynchronous hotplug-enumeration lag.
+          if (!evdi_name.empty() && linux_display::wait_for_kscreen_output(evdi_name)) {
+            this->evdi_promotion_active = true;
+            // Route capture to evdigrab: the misc.cpp dispatch matches
+            // config::video.output_name against the RAW connector name evdi_capture
+            // publishes, so set it directly (not via map_display_name, which can differ).
+            config::video.output_name = evdi_name;
+            // Point the auto_manage swap at the EVDI (enable_streaming_display reads
+            // streaming_output). primary_output stays the physical monitor to disable.
+            config::video.linux_display.streaming_output = evdi_name;
+            BOOST_LOG(info) << "EVDI-as-primary: promoting desktop onto ["sv << evdi_name
+                            << "]; physical monitor ["sv
+                            << config::video.linux_display.primary_output
+                            << "] will be disabled for the session"sv;
+          } else {
+            BOOST_LOG(warning) << "EVDI-as-primary: EVDI output ["sv << evdi_name
+                               << "] never appeared in kscreen-doctor; aborting promotion "sv
+                               << "and leaving all displays untouched (blank secondary stream)"sv;
+            // streaming_output stays cleared → no swap → physical monitor untouched.
+          }
+        } else {
+          BOOST_LOG(warning) << "EVDI-as-primary: virtual display creation failed on Linux"sv;
+          launch_session->virtual_display = false;
+        }
+      } else {
+        BOOST_LOG(warning) << "EVDI-as-primary requested but no virtual display backend available"sv;
+        launch_session->virtual_display = false;
+      }
+    } else if (
       !display_policy.use_cage_runtime &&
       !config::video.linux_display.auto_manage_displays && (
         should_use_linux_virtual_display
@@ -6189,8 +6326,13 @@ namespace proc {
     finish_isolated_session_generation_cleanup();
 
     // Disable streaming display after undo commands have run.
-    // Skip if a virtual display was created (it will be destroyed below).
-    if (!linux_vdisplay.has_value() || !linux_vdisplay->active) {
+    // Skip if a virtual display was created (it will be destroyed below) — EXCEPT for an
+    // EVDI-promotion session: it promoted the desktop onto the (active) vdisplay and MUST
+    // run the un-promote here to restore the physical monitor BEFORE that vdisplay is
+    // destroyed. The original !linux_vdisplay clause is preserved verbatim so the
+    // Increment-1 physical-dongle restore is untouched; the evdi_promotion_active || is
+    // additive.
+    if (this->evdi_promotion_active || !linux_vdisplay.has_value() || !linux_vdisplay->active) {
       linux_display::disable_streaming_display();
     }
 #endif
@@ -6233,6 +6375,12 @@ namespace proc {
     // Destroy Linux virtual display if one was created
     bool used_linux_vdisplay = linux_vdisplay.has_value() && linux_vdisplay->active;
     if (used_linux_vdisplay) {
+      // For an EVDI-promotion session the un-promote above re-enabled the physical
+      // monitor; give KDE a beat to bring it back online BEFORE destroying the EVDI,
+      // otherwise there is a window with zero enabled CRTCs → a momentary black desktop.
+      if (this->evdi_promotion_active) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+      }
       virtual_display::destroy(*linux_vdisplay);
       linux_vdisplay.reset();
       BOOST_LOG(info) << "Linux Virtual Display removed successfully"sv;
@@ -6284,6 +6432,7 @@ namespace proc {
     initial_max_bitrate = 0;
     initial_adaptive_max_bitrate = 0;
     initial_video_config_saved = false;
+    evdi_promotion_active = false;
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;

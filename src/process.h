@@ -502,6 +502,10 @@ namespace proc {
     // display for the session (restored independently of the isolated flags).
     std::string initial_streaming_output;
     bool initial_streaming_output_saved = false;
+    // True when the session promoted an EVDI virtual display to primary (headless
+    // streaming display with no physical dongle). Drives the teardown un-promote so
+    // the physical monitor is restored BEFORE the EVDI is destroyed.
+    bool evdi_promotion_active = false;
 
     /**
      * @brief Whether the currently running app opted into an isolated session.
