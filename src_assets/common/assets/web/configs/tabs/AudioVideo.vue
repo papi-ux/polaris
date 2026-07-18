@@ -471,7 +471,24 @@ const validateFallbackMode = (event) => {
                   <option value="auto">{{ $t('config.headless_source_auto') }}</option>
                   <option value="virtual">{{ $t('config.headless_source_virtual') }}</option>
                   <option value="evdi">{{ $t('config.headless_source_evdi') }}</option>
+                  <option value="physical">{{ $t('config.headless_source_physical') }}</option>
                 </select>
+              </div>
+
+              <div class="surface-muted p-4">
+                <div class="text-sm font-medium text-silver">{{ $t('config.headless_swap_primary') }}</div>
+                <div class="mt-1 text-sm text-storm">{{ $t('config.headless_swap_primary_desc') }}</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_swap_primary</div>
+                <label class="mt-4 flex items-center justify-between gap-4">
+                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Swap desktop onto headless display</span>
+                  <input
+                    type="checkbox"
+                    class="sr-only peer"
+                    :checked="config.headless_swap_primary === 'enabled'"
+                    @change="config.headless_swap_primary = $event.target.checked ? 'enabled' : 'disabled'"
+                  >
+                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                </label>
               </div>
             </div>
           </details>

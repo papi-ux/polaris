@@ -3827,6 +3827,13 @@ namespace proc {
       if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
         return;
       }
+      // A cage/isolated session (Family Mode, or the whole-host headless preset) owns its
+      // own off-screen compositor and must NOT touch the physical monitor — otherwise the
+      // global swap config would dim the host's screen during Family Mode. Skip here; the
+      // cage runtime handles its own display.
+      if (cfg.use_cage_compositor) {
+        return;
+      }
 
       std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
       if (cfg.headless_swap_primary && !cfg.primary_output.empty()) {
@@ -3860,6 +3867,9 @@ namespace proc {
       const auto &cfg = config::video.linux_display;
       if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
         return;
+      }
+      if (cfg.use_cage_compositor) {
+        return;  // mirror enable_streaming_display(): cage sessions never swapped
       }
 
       std::string cmd = "kscreen-doctor";
