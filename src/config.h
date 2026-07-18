@@ -164,6 +164,7 @@ namespace config {
       bool headless_mode;            ///< Run labwc with headless backend (no visible window on desktop)
       bool prefer_gpu_native_capture;  ///< Prefer a GPU-native DMA-BUF path even if that requires windowed labwc
       bool capture_profile;          ///< Emit periodic transport-tagged capture timing summaries
+      std::string headless_source;   ///< Off-screen source override: "auto" | "virtual" | "evdi" | "physical"
     } linux_display;
 
     std::string fallback_mode;

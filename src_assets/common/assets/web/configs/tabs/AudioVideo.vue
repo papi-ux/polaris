@@ -458,6 +458,21 @@ const validateFallbackMode = (event) => {
                   <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
                 </label>
               </div>
+
+              <div class="surface-muted p-4">
+                <div class="text-sm font-medium text-silver">{{ $t('config.headless_source') }}</div>
+                <div class="mt-1 text-sm text-storm">{{ $t('config.headless_source_desc') }}</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_source</div>
+                <select
+                  id="headless_source"
+                  v-model="config.headless_source"
+                  class="focus-ring mt-4 w-full rounded-lg border border-storm/40 bg-deep px-3 py-2 text-sm text-silver"
+                >
+                  <option value="auto">{{ $t('config.headless_source_auto') }}</option>
+                  <option value="virtual">{{ $t('config.headless_source_virtual') }}</option>
+                  <option value="evdi">{{ $t('config.headless_source_evdi') }}</option>
+                </select>
+              </div>
             </div>
           </details>
         </div>

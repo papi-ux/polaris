@@ -137,6 +137,7 @@ namespace confighttp::validation {
       "global_state_cmd"sv,
       "hdr_mode"sv,
       "headless_mode"sv,
+      "headless_source"sv,
       "hevc_mode"sv,
       "hide_tray_controls"sv,
       "high_resolution_scrolling"sv,
