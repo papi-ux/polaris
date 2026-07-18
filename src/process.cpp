@@ -1682,14 +1682,30 @@ namespace proc {
         return false;
       }
 
-      BOOST_LOG(info) << "process: terminating "sv << ownership.owned.size()
-                      << " session-owned Steam process(es) through pidfd before isolated cage stop"sv;
+      // Ask Steam to shut down GRACEFULLY first. `steam -shutdown` goes through Steam's
+      // own IPC: it closes the running game, flushes Steam Cloud, then exits cleanly. A
+      // broadcast SIGTERM across the dozen-odd Steam processes (the terminate_pidfds
+      // fallback below) does NOT do that — Steam gets signal-killed mid-game and reports
+      // a fatal error on the next launch. Only fall back to the pidfd SIGTERM/SIGKILL
+      // path if the graceful shutdown does not complete within the window (Steam closing
+      // a running game can legitimately take several seconds).
+      const auto shutdown_cmd = canonical_steam_shutdown_command(steam_launch_reference_command(app));
+      BOOST_LOG(info) << "process: requesting graceful Steam shutdown ["sv << shutdown_cmd
+                      << "] before isolated cage stop"sv;
+      std::system((shutdown_cmd + " >/dev/null 2>&1").c_str());
+      if (wait_for_pidfds_exit(ownership.owned, 20s)) {
+        BOOST_LOG(info) << "process: session-owned Steam exited gracefully before isolated cage stop"sv;
+        return true;
+      }
+
+      BOOST_LOG(warning) << "process: Steam did not exit within the graceful-shutdown window; terminating "sv
+                         << ownership.owned.size() << " session-owned Steam process(es) through pidfd"sv;
       if (terminate_pidfds(ownership.owned, 5s, 1s, "private Steam"sv)) {
         BOOST_LOG(info) << "process: session-owned Steam exited before isolated cage stop"sv;
         return true;
       }
 
-      BOOST_LOG(warning) << "process: session-owned Steam remained after bounded pidfd termination; continuing with isolated cage fallback cleanup"sv;
+      BOOST_LOG(warning) << "process: session-owned Steam remained after graceful shutdown and bounded pidfd termination; continuing with isolated cage fallback cleanup"sv;
       return false;
     }
 
