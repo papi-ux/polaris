@@ -473,6 +473,20 @@ const validateFallbackMode = (event) => {
                   <option value="evdi">{{ $t('config.headless_source_evdi') }}</option>
                   <option value="physical">{{ $t('config.headless_source_physical') }}</option>
                 </select>
+                <div
+                  v-if="config.headless_source === 'evdi'"
+                  class="mt-3 rounded-lg border border-storm/40 bg-deep/40 p-3 text-xs text-storm"
+                >
+                  <div class="text-sm text-silver">{{ $t('config.headless_source_evdi_setup') }}</div>
+                  <div class="mt-2 rounded bg-deep/60 px-2 py-1 font-mono">sudo modprobe evdi initial_device_count=1</div>
+                  <div class="mt-2">{{ $t('config.headless_source_evdi_setup_persist') }}</div>
+                </div>
+                <div
+                  v-else-if="config.headless_source === 'physical'"
+                  class="mt-3 rounded-lg border border-storm/40 bg-deep/40 p-3 text-xs text-storm"
+                >
+                  {{ $t('config.headless_source_physical_setup') }}
+                </div>
               </div>
 
               <div class="surface-muted p-4">
