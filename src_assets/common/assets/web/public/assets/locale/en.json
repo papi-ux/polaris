@@ -119,6 +119,8 @@
     "use_app_identity_desc": "Use the app's own identity while creating virtual displays instead of client's. This is useful when you want display configuration for each APP separately.",
     "virtual_display": "Always create Virtual Display",
     "virtual_display_desc": "Always create a virtual display when starting this app, overriding client request. Please make sure the SudoVDA driver is installed and enabled.",
+    "isolated_session": "Isolated session (Family Mode)",
+    "isolated_session_desc": "Run this app inside Polaris's hidden headless compositor so it streams alongside your live desktop. The streamed player controls only the game; your physical keyboard and mouse keep controlling the desktop, and game audio goes to a separate sink so it will not play on the host speakers. Linux only.",
     "virtual_display_primary": "Enforce Virtual Display Primary",
     "virtual_display_primary_desc": "Automatically set the virtual display as primary display when the app starts. Virtual display will always be set to primary when client requests to use virtual display. (Recommended to keep on) [Broken on Windows 11 24H2]",
     "wait_all": "Continue streaming until all app processes exit",

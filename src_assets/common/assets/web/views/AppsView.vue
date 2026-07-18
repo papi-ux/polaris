@@ -979,6 +979,7 @@
               <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" desc-as-hint v-model="editForm['wait-all']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" desc-as-hint v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" desc-as-hint v-model="editForm['virtual-display']" default="false"></Checkbox>
+              <Checkbox v-if="platform === 'linux'" class="app-editor-toggle-card" id="isolatedSession" label="apps.isolated_session" desc="apps.isolated_session_desc" desc-as-hint v-model="editForm['isolated-session']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" desc-as-hint v-model="editForm['use-app-identity']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" desc-as-hint v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
               <div class="app-editor-field">
@@ -1157,6 +1158,7 @@ const newAppTemplate = {
   "per-client-app-identity": false,
   "allow-client-commands": true,
   "virtual-display": false,
+  "isolated-session": false,
   "terminate-on-pause": false,
   "gamepad": "",
   "game-category": ""

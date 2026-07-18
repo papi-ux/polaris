@@ -5278,6 +5278,14 @@ namespace nvhttp {
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
+#ifdef __linux__
+    // A resumed isolated session (family mode) must keep stream-only audio: the
+    // client's localAudioPlayMode would otherwise re-enable host audio and leak
+    // the desktop's sound into the stream.
+    if (proc::proc.isolated_session_active()) {
+      host_audio = false;
+    }
+#endif
     auto launch_session = make_launch_session(host_audio, false, args, named_cert_p.get());
     const bool watch_only = launch_session->watch_only;
 

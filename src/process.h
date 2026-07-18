@@ -345,6 +345,7 @@ namespace proc {
     bool auto_detach;
     bool wait_all;
     bool virtual_display;
+    bool isolated_session;  // family mode: force headless+cage for THIS app only
     bool virtual_display_primary;
     bool use_app_identity;
     bool per_client_app_identity;
@@ -482,6 +483,28 @@ namespace proc {
     int initial_max_bitrate = 0;
     int initial_adaptive_max_bitrate = 0;
     bool initial_video_config_saved = false;
+    // Saved config for the per-app isolated-session override (family mode);
+    // populated only when the launched app opted in (initial_linux_display_saved
+    // is the guard).
+    bool initial_headless_mode = false;
+    bool initial_use_cage_compositor = false;
+    bool initial_prefer_gpu_native_capture = false;
+    std::string initial_audio_sink;
+    bool initial_linux_display_saved = false;
+
+    /**
+     * @brief Whether the currently running app opted into an isolated session.
+     * Used by the resume path to keep audio isolation across reconnects.
+     */
+    bool isolated_session_active() const {
+      return _app_id != -1 && _app.isolated_session;
+    }
+
+    /**
+     * @brief Restore the config globals forced by the isolated-session override.
+     * Idempotent; a no-op unless the override is active.
+     */
+    void restore_isolated_session_overrides();
 
     proc_t(
       boost::process::v1::environment &&env,

@@ -4168,6 +4168,41 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
+    // Session-scoped override for per-app isolated sessions (family mode).
+    // Forcing the globals makes every downstream read — the session snapshot
+    // below, display policy, cage lifecycle, gamepad isolation, encoder-probe
+    // deferral, audio capture — behave as a headless+cage session without
+    // touching those call sites. Saved ONLY when the app opts in, so mid-session
+    // config changes made during normal sessions are never clobbered.
+    // restore_isolated_session_overrides() undoes this from terminate() (which
+    // runs on both the success path and, via the fail_guard, the failure path).
+    if (_app.isolated_session && !(launch_session && launch_session->mirror_desktop)) {
+      initial_headless_mode = config::video.linux_display.headless_mode;
+      initial_use_cage_compositor = config::video.linux_display.use_cage_compositor;
+      initial_prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
+      initial_audio_sink = config::audio.sink;
+      initial_linux_display_saved = true;
+      config::video.linux_display.headless_mode = true;
+      config::video.linux_display.use_cage_compositor = true;
+      // Keep the compositor truly off-screen: a GPU-native windowed fallback
+      // would make the session visible on the host desktop, defeating isolation.
+      config::video.linux_display.prefer_gpu_native_capture = false;
+      // Audio isolation must hold in the CAPTURE pipeline too (rtsp copies
+      // host_audio into the session flags), so force it at the source — and
+      // clear any explicit sink so the virtual-sink env-tag routing path is
+      // taken instead of switching the desktop user's default sink.
+      launch_session->host_audio = false;
+      config::audio.sink.clear();
+      BOOST_LOG(info) << "process: app ["sv << _app.name
+                      << "] opted into isolated off-screen session; forcing headless+cage and stream-only audio for this session"sv;
+    }
+
+    // If a throw unwinds before the main fail_guard below is armed, still restore
+    // the forced globals; disabled once fg takes over (fg's terminate_impl restores).
+    auto isolated_override_guard = util::fail_guard([this]() {
+      restore_isolated_session_overrides();
+    });
+
     const bool use_cage_compositor_for_session =
       config::video.linux_display.use_cage_compositor &&
       !(launch_session && launch_session->mirror_desktop);
@@ -4575,6 +4610,9 @@ namespace proc {
       session_manager::restore_state(session_state);
 #endif
     });
+
+    // fg's terminate_impl now owns restoring the isolated-session override.
+    isolated_override_guard.disable();
 
     if (!app.gamepad.empty() && app_gamepad_override_is_supported(app.gamepad)) {
       _saved_input_config = std::make_shared<config::input_t>(config::input);
@@ -5887,6 +5925,20 @@ namespace proc {
 #endif
   }
 
+  void proc_t::restore_isolated_session_overrides() {
+#ifdef __linux__
+    if (!initial_linux_display_saved) {
+      return;
+    }
+    config::video.linux_display.headless_mode = initial_headless_mode;
+    config::video.linux_display.use_cage_compositor = initial_use_cage_compositor;
+    config::video.linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
+    config::audio.sink = initial_audio_sink;
+    initial_audio_sink.clear();
+    initial_linux_display_saved = false;
+#endif
+  }
+
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     if (!_session_lifecycle_gate->begin_stop()) {
       return;
@@ -6134,6 +6186,10 @@ namespace proc {
       config::video.max_bitrate = initial_max_bitrate;
       config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
     }
+
+    // Undo the per-app isolated-session override (family mode). Runs after any
+    // disable_streaming_display() above so display teardown sees session config.
+    restore_isolated_session_overrides();
 
     _app_id = -1;
     _app_name.clear();
@@ -7187,6 +7243,7 @@ namespace proc {
           ctx.wait_all = app_node.value("wait-all", true);
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           ctx.virtual_display = app_node.value("virtual-display", false);
+          ctx.isolated_session = app_node.value("isolated-session", false);
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
           ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);

@@ -384,6 +384,7 @@ namespace confighttp::validation {
       "elevated"sv,
       "exclude-global-prep-cmd"sv,
       "exclude-global-state-cmd"sv,
+      "isolated-session"sv,
       "launching"sv,
       "per-client-app-identity"sv,
       "terminate-on-pause"sv,
