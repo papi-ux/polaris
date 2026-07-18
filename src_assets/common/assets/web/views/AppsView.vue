@@ -978,9 +978,27 @@
               <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" desc-as-hint v-model="editForm['auto-detach']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" desc-as-hint v-model="editForm['wait-all']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" desc-as-hint v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" desc-as-hint v-model="editForm['virtual-display']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" desc-as-hint v-model="editForm['use-app-identity']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" desc-as-hint v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
+              <div class="app-editor-field">
+                <div class="settings-field-head">
+                  <label for="displaySource" class="settings-field-label">{{ $t('apps.display_source') }}</label>
+                  <InfoHint size="sm" :label="$t('apps.display_source')">{{ $t('apps.display_source_desc') }}</InfoHint>
+                </div>
+                <select id="displaySource" class="app-editor-input" v-model="editForm['display-source']">
+                  <option value="default">{{ $t('apps.display_source_default') }}</option>
+                  <option value="isolated">{{ $t('apps.display_source_isolated') }}</option>
+                  <option value="virtual">{{ $t('apps.display_source_virtual') }}</option>
+                  <option v-if="platform === 'linux'" value="output">{{ $t('apps.display_source_output') }}</option>
+                </select>
+              </div>
+              <div v-if="editForm['display-source'] === 'output'" class="app-editor-field">
+                <div class="settings-field-head">
+                  <label for="outputName" class="settings-field-label">{{ $t('apps.output_name') }}</label>
+                  <InfoHint size="sm" :label="$t('apps.output_name')">{{ $t('apps.output_name_desc') }}</InfoHint>
+                </div>
+                <input type="text" class="app-editor-input app-editor-input-mono" id="outputName" v-model="editForm['output-name']" placeholder="HDMI-A-1" />
+              </div>
               <div class="app-editor-field">
                 <div class="settings-field-head">
                   <label for="exitTimeout" class="settings-field-label">{{ $t('apps.exit_timeout') }}</label>
@@ -1157,9 +1175,12 @@ const newAppTemplate = {
   "per-client-app-identity": false,
   "allow-client-commands": true,
   "virtual-display": false,
+  "isolated-session": false,
   "terminate-on-pause": false,
   "gamepad": "",
-  "game-category": ""
+  "game-category": "",
+  "output-name": "",
+  "display-source": "default"
 }
 
 // Template ref
@@ -1554,8 +1575,19 @@ function closeApp(options = {}) {
   .finally(() => { actionDisabled.value = false; pendingStopAppUuid.value = ""; loadApps() })
 }
 
+// Derive the canonical Display Source from legacy per-app flags so apps
+// created before the unified selector open with the right choice.
+function migrateDisplaySource(form) {
+  if (form['display-source']) return
+  if (form['isolated-session']) form['display-source'] = 'isolated'
+  else if (form['virtual-display']) form['display-source'] = 'virtual'
+  else if (form['output-name']) form['display-source'] = 'output'
+  else form['display-source'] = 'default'
+}
+
 function editApp(app) {
   editForm.value = Object.assign({}, newAppTemplate, JSON.parse(JSON.stringify(app)))
+  migrateDisplaySource(editForm.value)
   // Populate env vars editor from the app's env object
   const envObj = app.env || {}
   editMangoHud.value = envObj['MANGOHUD'] === '1'
@@ -1691,6 +1723,12 @@ function save() {
     if (v.key.trim()) env[v.key.trim()] = v.value
   }
   editForm.value.env = Object.keys(env).length > 0 ? env : undefined
+  // Display Source is canonical; keep the legacy flags coherent with it so
+  // both older builds and external tools reading apps.json see one truth.
+  const src = editForm.value['display-source'] || 'default'
+  editForm.value['isolated-session'] = src === 'isolated'
+  editForm.value['virtual-display'] = src === 'virtual'
+  if (src !== 'output') delete editForm.value['output-name']
   delete editForm.value.id
   delete editForm.value.launching
   delete editForm.value.dragover

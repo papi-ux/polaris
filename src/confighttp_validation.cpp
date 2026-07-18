@@ -376,6 +376,8 @@ namespace confighttp::validation {
       "image-path"sv,
       "name"sv,
       "output"sv,
+      "display-source"sv,
+      "output-name"sv,
       "steam-appid"sv,
       "working-dir"sv,
     };
@@ -389,6 +391,7 @@ namespace confighttp::validation {
       "per-client-app-identity"sv,
       "terminate-on-pause"sv,
       "use-app-identity"sv,
+      "isolated-session"sv,
       "virtual-display"sv,
       "virtual-display-primary"sv,
       "wait-all"sv,
