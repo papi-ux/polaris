@@ -3835,15 +3835,25 @@ namespace proc {
         return;
       }
 
+      // A display cannot be swapped onto itself. Guard against streaming_output ==
+      // primary_output: without this the swap command would enable AND disable the same
+      // output in one call, leaving it (and possibly the only monitor) dark.
+      const bool distinct_outputs = cfg.streaming_output != cfg.primary_output;
+      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && !distinct_outputs) {
+        BOOST_LOG(warning) << "Linux display management: headless_swap_primary set but streaming_output and "
+                              "primary_output are the same output ["sv << cfg.streaming_output
+                           << "] — cannot swap a display onto itself; leaving it enabled without swapping"sv;
+      }
+
       std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
-      if (cfg.headless_swap_primary && !cfg.primary_output.empty()) {
+      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && distinct_outputs) {
         // Swap the desktop ONTO the headless display: make it the primary and disable the
         // physical monitor, so the stream shows the real desktop while the physical screen
         // stays dark. disable_streaming_display() restores it on teardown. This is the
         // built-in replacement for manual kscreen-doctor prep-cmd swap scripts.
         cmd += " output." + cfg.streaming_output + ".priority.1";
         cmd += " output." + cfg.primary_output + ".disable";
-      } else if (!cfg.primary_output.empty()) {
+      } else if (!cfg.primary_output.empty() && distinct_outputs) {
         // Legacy: enable the headless output as a SECONDARY, keep the physical primary
         // (KDE taskbar stays on the main display).
         cmd += " output." + cfg.primary_output + ".priority.1";
@@ -3872,15 +3882,23 @@ namespace proc {
         return;  // mirror enable_streaming_display(): cage sessions never swapped
       }
 
+      // Mirror the enable-side guard: when streaming_output == primary_output no swap was
+      // ever performed, so there is nothing to undo. Falling through would emit
+      // output.X.disable on the shared output and black out the only display.
+      const bool distinct_outputs = cfg.streaming_output != cfg.primary_output;
+      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && !distinct_outputs) {
+        return;
+      }
+
       std::string cmd = "kscreen-doctor";
-      if (cfg.headless_swap_primary && !cfg.primary_output.empty()) {
+      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && distinct_outputs) {
         // Undo the swap: bring the physical monitor back as primary and turn the headless
         // display back off.
         cmd += " output." + cfg.primary_output + ".enable";
         cmd += " output." + cfg.primary_output + ".priority.1";
         cmd += " output." + cfg.streaming_output + ".disable";
       } else {
-        if (!cfg.primary_output.empty()) {
+        if (!cfg.primary_output.empty() && distinct_outputs) {
           cmd += " output." + cfg.primary_output + ".priority.1";
         }
         cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
