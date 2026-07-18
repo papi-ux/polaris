@@ -3871,7 +3871,7 @@ namespace proc {
      * absence — but bounded, so a genuinely-absent output aborts promotion safely instead
      * of hanging the launch.
      */
-    static bool wait_for_kscreen_output(const std::string &name, int attempts = 8, int delay_ms = 250) {
+    static bool wait_for_kscreen_output(const std::string &name, int attempts = 20, int delay_ms = 250) {
       for (int i = 0; i < attempts; ++i) {
         if (kscreen_output_present(name)) {
           return true;
@@ -4885,23 +4885,63 @@ namespace proc {
     // INDEPENDENT gate — deliberately not tied to should_use_linux_virtual_display
     // (which is false for the very no-dongle user this targets) — and it must never
     // fall into the !auto_manage_displays creation branch below.
-    const bool evdi_promotion =
+    const bool evdi_promotion_requested =
       !display_policy.use_cage_runtime &&
       config::video.linux_display.auto_manage_displays &&
       config::video.linux_display.headless_swap_primary &&
       config::video.linux_display.headless_source == "evdi";
+    // Promotion needs a physical monitor to disable (enable_streaming_display() cannot
+    // swap without primary_output), and it must NOT clobber a more-specific per-app
+    // output pin (which already redirected streaming_output at ~4402).
+    const bool evdi_promotion =
+      evdi_promotion_requested &&
+      !config::video.linux_display.primary_output.empty() &&
+      _app.output_name.empty();
+
+    if (evdi_promotion_requested && !evdi_promotion) {
+      if (config::video.linux_display.primary_output.empty()) {
+        BOOST_LOG(warning) << "EVDI-as-primary requested but Primary Output is unset; set it to your "sv
+                           << "physical monitor to enable promotion. Streaming without promotion."sv;
+      } else if (!_app.output_name.empty()) {
+        BOOST_LOG(info) << "EVDI-as-primary: per-app Output pin ["sv << _app.output_name
+                        << "] takes precedence; not promoting the EVDI"sv;
+      }
+    }
 
     if (evdi_promotion) {
-      // Neutralize the generic auto_manage swap below until we KNOW there is a live
-      // EVDI to promote onto: clear streaming_output so enable_streaming_display()
-      // no-ops, saving the user's value first so teardown restores it.
+      // Neutralize the generic auto_manage swap below until we CONFIRM a live EVDI to
+      // promote onto: clear streaming_output so enable_streaming_display() no-ops on any
+      // abort path, saving the user's value first so teardown restores it.
       if (!this->initial_streaming_output_saved) {
         this->initial_streaming_output = config::video.linux_display.streaming_output;
         this->initial_streaming_output_saved = true;
       }
       config::video.linux_display.streaming_output.clear();
 
-      if (isLinuxVDisplayAvailable()) {
+      // Fully undo a partially-created EVDI so capture falls back to the physical
+      // desktop. Destroying the vdisplay unpublishes frame_grab, so
+      // evdi_capture::available() becomes false and misc.cpp routes capture to the real
+      // KMS/Wayland output instead of a blank, never-promoted EVDI (black stream).
+      auto abort_promotion = [&](const std::string &why) {
+        BOOST_LOG(warning) << "EVDI-as-primary: "sv << why
+                           << "; aborting promotion, leaving displays untouched and capturing "sv
+                           << "the physical desktop"sv;
+        if (linux_vdisplay.has_value()) {
+          virtual_display::destroy(*linux_vdisplay);
+          linux_vdisplay.reset();
+        }
+        this->virtual_display = false;
+        this->display_name.clear();
+        this->evdi_promotion_active = false;
+        launch_session->virtual_display = false;
+        // streaming_output stays cleared (restored at teardown); output_name untouched.
+      };
+
+      if (!isLinuxVDisplayAvailable()) {
+        BOOST_LOG(warning) << "EVDI-as-primary requested but no virtual display backend available; "sv
+                           << "capturing the physical desktop"sv;
+        launch_session->virtual_display = false;
+      } else {
         int target_fps = launch_session->fps ? launch_session->fps : 60000;
         if (target_fps >= 1000) {
           target_fps /= 1000;
@@ -4911,7 +4951,11 @@ namespace proc {
         }
 
         auto vdisplay = virtual_display::create(render_width, render_height, target_fps);
-        if (vdisplay.has_value()) {
+        if (!vdisplay.has_value()) {
+          BOOST_LOG(warning) << "EVDI-as-primary: virtual display creation failed on Linux; "sv
+                             << "capturing the physical desktop"sv;
+          launch_session->virtual_display = false;
+        } else {
           linux_vdisplay = std::move(vdisplay);
           launch_session->virtual_display = true;
           this->virtual_display = true;
@@ -4923,11 +4967,19 @@ namespace proc {
                           << target_fps << "Hz) via "sv
                           << virtual_display::backend_name(linux_vdisplay->backend);
 
-          // Only promote once the EVDI is a live, addressable kscreen output. Otherwise
-          // the swap could fail to light it yet still disable the physical monitor,
-          // stranding the desktop on a dark screen. The presence check absorbs KWin's
-          // asynchronous hotplug-enumeration lag.
-          if (!evdi_name.empty() && linux_display::wait_for_kscreen_output(evdi_name)) {
+          if (linux_vdisplay->backend != virtual_display::backend_e::EVDI) {
+            // headless_source=evdi but create() fell back to a non-EVDI backend (Wayland
+            // headless / kscreen-doctor). Native evdigrab does not apply — do not promote.
+            abort_promotion("virtual display backend is not EVDI (EVDI unavailable?)");
+          } else if (evdi_name.empty() || evdi_name == "VIRTUAL-1") {
+            // find_evdi_output() could not resolve the real connector (fell back to the
+            // synthetic "VIRTUAL-1"), which kscreen-doctor can never address for a swap.
+            abort_promotion("could not resolve the EVDI's real connector name");
+          } else if (!linux_display::wait_for_kscreen_output(evdi_name)) {
+            // The swap could fail to light the EVDI yet still disable the physical
+            // monitor, stranding the desktop. Presence check absorbs KWin hotplug lag.
+            abort_promotion("EVDI output [" + evdi_name + "] never appeared in kscreen-doctor");
+          } else {
             this->evdi_promotion_active = true;
             // Route capture to evdigrab: the misc.cpp dispatch matches
             // config::video.output_name against the RAW connector name evdi_capture
@@ -4940,19 +4992,8 @@ namespace proc {
                             << "]; physical monitor ["sv
                             << config::video.linux_display.primary_output
                             << "] will be disabled for the session"sv;
-          } else {
-            BOOST_LOG(warning) << "EVDI-as-primary: EVDI output ["sv << evdi_name
-                               << "] never appeared in kscreen-doctor; aborting promotion "sv
-                               << "and leaving all displays untouched (blank secondary stream)"sv;
-            // streaming_output stays cleared → no swap → physical monitor untouched.
           }
-        } else {
-          BOOST_LOG(warning) << "EVDI-as-primary: virtual display creation failed on Linux"sv;
-          launch_session->virtual_display = false;
         }
-      } else {
-        BOOST_LOG(warning) << "EVDI-as-primary requested but no virtual display backend available"sv;
-        launch_session->virtual_display = false;
       }
     } else if (
       !display_policy.use_cage_runtime &&
