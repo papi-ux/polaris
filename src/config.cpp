@@ -591,7 +591,7 @@ namespace config {
       false,  // linux_display.prefer_gpu_native_capture
       false,  // linux_display.capture_profile
       "auto",  // linux_display.headless_source
-      "mirror",  // linux_display.headless_swap_mode
+      "privacy",  // linux_display.headless_swap_mode
     },  // linux_display
 
     "1920x1080x60",  // fallback_mode

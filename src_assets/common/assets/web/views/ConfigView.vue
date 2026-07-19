@@ -388,7 +388,7 @@ const tabs = ref([
       "linux_prefer_gpu_native_capture": "disabled",
       "linux_capture_profile": "disabled",
       "headless_source": "auto",
-      "headless_swap_mode": "mirror",
+      "headless_swap_mode": "privacy",
       "double_refreshrate": "disabled",
       "max_bitrate": 0,
       "minimum_fps_target": 0,

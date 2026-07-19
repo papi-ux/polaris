@@ -165,7 +165,7 @@ namespace config {
       bool prefer_gpu_native_capture;  ///< Prefer a GPU-native DMA-BUF path even if that requires windowed labwc
       bool capture_profile;          ///< Emit periodic transport-tagged capture timing summaries
       std::string headless_source;   ///< Off-screen source override: "auto" | "virtual" | "evdi" | "physical"
-      std::string headless_swap_mode;  ///< Streaming display arrangement: "mirror" (default; no reconfiguration, capture the real primary screen) | "privacy" (headless primary, physical monitor disabled) | "off" (headless as a secondary; physical stays primary). Restored on teardown.
+      std::string headless_swap_mode;  ///< When the desktop is swapped onto a headless display (auto-manage + dummy plug/EVDI), what the physical monitor does: "privacy" (default; headless primary, physical monitor disabled) | "off" (headless as a secondary; physical stays primary). To stream the real screen unchanged, use the Mirror Desktop capture mode. Restored on teardown.
     } linux_display;
 
     std::string fallback_mode;

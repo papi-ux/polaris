@@ -72,7 +72,7 @@ const streamDisplayModes = [
     id: 'desktop_display',
     title: 'Mirror Desktop',
     badge: 'Advanced',
-    copy: 'Streams the visible KDE, GNOME, or wlroots desktop. Use only when you explicitly want the host monitor/session mirrored.',
+    copy: 'Streams your visible desktop exactly as-is — your monitor stays on and unchanged. Use when you want the stream to show your real screen (e.g. remote access) instead of a private session.',
     note: 'Advanced and not private: people near the PC may see the desktop or game window. Use for troubleshooting or already-running apps.',
   },
   {
@@ -518,7 +518,10 @@ const validateFallbackMode = (event) => {
                 </div>
               </div>
 
-              <div class="surface-muted p-4">
+              <div
+                v-if="config.linux_auto_manage_displays === 'enabled' && (config.headless_source === 'physical' || config.headless_source === 'evdi')"
+                class="surface-muted p-4"
+              >
                 <div class="text-sm font-medium text-silver">{{ $t('config.headless_swap_mode') }}</div>
                 <div class="mt-1 text-sm text-storm">{{ $t('config.headless_swap_mode_desc') }}</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_swap_mode</div>
@@ -527,7 +530,6 @@ const validateFallbackMode = (event) => {
                   v-model="config.headless_swap_mode"
                   class="focus-ring mt-4 w-full rounded-lg border border-storm/40 bg-deep px-3 py-2 text-sm text-silver"
                 >
-                  <option value="mirror">{{ $t('config.headless_swap_mode_mirror') }}</option>
                   <option value="privacy">{{ $t('config.headless_swap_mode_privacy') }}</option>
                   <option value="off">{{ $t('config.headless_swap_mode_off') }}</option>
                 </select>

@@ -2878,6 +2878,14 @@ namespace confighttp {
       output_tree["headless_swap_mode"] = legacy_on ? "privacy" : "off";
     }
     output_tree.erase("headless_swap_primary");
+    // Normalize a removed "mirror" value (from the brief mirror-default window) to a valid
+    // dropdown option so the UI select doesn't render blank. "Stream your real screen" is
+    // now the Mirror Desktop capture mode, so map it to "off" (monitor stays on).
+    if (output_tree.contains("headless_swap_mode") &&
+        output_tree["headless_swap_mode"].get<std::string>() != "privacy" &&
+        output_tree["headless_swap_mode"].get<std::string>() != "off") {
+      output_tree["headless_swap_mode"] = "off";
+    }
     output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
     output_tree["has_api_key"] = output_tree.value("has_api_key", false);
