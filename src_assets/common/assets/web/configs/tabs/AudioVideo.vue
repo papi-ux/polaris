@@ -490,19 +490,18 @@ const validateFallbackMode = (event) => {
               </div>
 
               <div class="surface-muted p-4">
-                <div class="text-sm font-medium text-silver">{{ $t('config.headless_swap_primary') }}</div>
-                <div class="mt-1 text-sm text-storm">{{ $t('config.headless_swap_primary_desc') }}</div>
-                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_swap_primary</div>
-                <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Swap desktop onto headless display</span>
-                  <input
-                    type="checkbox"
-                    class="sr-only peer"
-                    :checked="config.headless_swap_primary === 'enabled'"
-                    @change="config.headless_swap_primary = $event.target.checked ? 'enabled' : 'disabled'"
-                  >
-                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-                </label>
+                <div class="text-sm font-medium text-silver">{{ $t('config.headless_swap_mode') }}</div>
+                <div class="mt-1 text-sm text-storm">{{ $t('config.headless_swap_mode_desc') }}</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_swap_mode</div>
+                <select
+                  id="headless_swap_mode"
+                  v-model="config.headless_swap_mode"
+                  class="focus-ring mt-4 w-full rounded-lg border border-storm/40 bg-deep px-3 py-2 text-sm text-silver"
+                >
+                  <option value="off">{{ $t('config.headless_swap_mode_off') }}</option>
+                  <option value="privacy">{{ $t('config.headless_swap_mode_privacy') }}</option>
+                  <option value="keep_on">{{ $t('config.headless_swap_mode_keep_on') }}</option>
+                </select>
               </div>
             </div>
           </details>

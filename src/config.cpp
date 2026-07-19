@@ -591,7 +591,7 @@ namespace config {
       false,  // linux_display.prefer_gpu_native_capture
       false,  // linux_display.capture_profile
       "auto",  // linux_display.headless_source
-      false,  // linux_display.headless_swap_primary
+      "off",  // linux_display.headless_swap_mode
     },  // linux_display
 
     "1920x1080x60",  // fallback_mode
@@ -1342,7 +1342,16 @@ namespace config {
     bool_f(vars, "linux_prefer_gpu_native_capture", video.linux_display.prefer_gpu_native_capture);
     bool_f(vars, "linux_capture_profile", video.linux_display.capture_profile);
     string_f(vars, "headless_source", video.linux_display.headless_source);
-    bool_f(vars, "headless_swap_primary", video.linux_display.headless_swap_primary);
+    string_f(vars, "headless_swap_mode", video.linux_display.headless_swap_mode);
+    // Backward-compat: the old boolean headless_swap_primary=enabled maps to the
+    // "privacy" mode (headless primary, physical monitor disabled).
+    {
+      bool legacy_swap_primary = false;
+      bool_f(vars, "headless_swap_primary", legacy_swap_primary);
+      if (legacy_swap_primary && video.linux_display.headless_swap_mode == "off") {
+        video.linux_display.headless_swap_mode = "privacy";
+      }
+    }
 
     string_f(vars, "fallback_mode", video.fallback_mode);
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);

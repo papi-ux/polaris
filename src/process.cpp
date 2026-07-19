@@ -3921,6 +3921,19 @@ namespace proc {
       return false;
     }
 
+    // headless_swap_mode: how the headless display is arranged relative to the physical
+    // monitor while streaming.
+    //   "privacy" — headless becomes primary AND the physical monitor is disabled (dark)
+    //   "keep_on" — headless becomes primary but the physical monitor stays on (secondary)
+    //   "off"/other — headless is a secondary; the physical monitor stays primary
+    static bool swap_mode_makes_headless_primary(std::string_view mode) {
+      return mode == "privacy" || mode == "keep_on";
+    }
+
+    static bool swap_mode_disables_physical(std::string_view mode) {
+      return mode == "privacy";
+    }
+
     /**
      * @brief Enable the streaming display and set display priorities for a streaming session.
      * Uses kscreen-doctor to enable the streaming output and set it as priority 1.
@@ -3942,23 +3955,30 @@ namespace proc {
       // primary_output: without this the swap command would enable AND disable the same
       // output in one call, leaving it (and possibly the only monitor) dark.
       const bool distinct_outputs = cfg.streaming_output != cfg.primary_output;
-      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && !distinct_outputs) {
-        BOOST_LOG(warning) << "Linux display management: headless_swap_primary set but streaming_output and "
-                              "primary_output are the same output ["sv << cfg.streaming_output
+      const bool headless_primary = swap_mode_makes_headless_primary(cfg.headless_swap_mode);
+      const bool disable_physical = swap_mode_disables_physical(cfg.headless_swap_mode);
+      if (headless_primary && !cfg.primary_output.empty() && !distinct_outputs) {
+        BOOST_LOG(warning) << "Linux display management: headless_swap_mode ["sv << cfg.headless_swap_mode
+                           << "] makes the headless display primary, but streaming_output and primary_output "
+                              "are the same output ["sv << cfg.streaming_output
                            << "] — cannot swap a display onto itself; leaving it enabled without swapping"sv;
       }
 
       std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
-      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && distinct_outputs) {
-        // Swap the desktop ONTO the headless display: make it the primary and disable the
-        // physical monitor, so the stream shows the real desktop while the physical screen
-        // stays dark. disable_streaming_display() restores it on teardown. This is the
-        // built-in replacement for manual kscreen-doctor prep-cmd swap scripts.
+      if (headless_primary && !cfg.primary_output.empty() && distinct_outputs) {
+        // Make the headless display the PRIMARY so the desktop/game lands on it for capture.
+        // disable_streaming_display() restores the physical monitor on teardown.
         cmd += " output." + cfg.streaming_output + ".priority.1";
-        cmd += " output." + cfg.primary_output + ".disable";
+        if (disable_physical) {
+          // "privacy": black out the physical monitor for the session (screen goes dark).
+          cmd += " output." + cfg.primary_output + ".disable";
+        } else {
+          // "keep_on": leave the physical monitor on and usable as a secondary.
+          cmd += " output." + cfg.primary_output + ".priority.2";
+        }
       } else if (!cfg.primary_output.empty() && distinct_outputs) {
-        // Legacy: enable the headless output as a SECONDARY, keep the physical primary
-        // (KDE taskbar stays on the main display).
+        // "off"/extended: enable the headless output as a SECONDARY, keep the physical
+        // primary (KDE taskbar stays on the main display).
         cmd += " output." + cfg.primary_output + ".priority.1";
         cmd += " output." + cfg.streaming_output + ".priority.2";
       }
@@ -3989,14 +4009,16 @@ namespace proc {
       // ever performed, so there is nothing to undo. Falling through would emit
       // output.X.disable on the shared output and black out the only display.
       const bool distinct_outputs = cfg.streaming_output != cfg.primary_output;
-      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && !distinct_outputs) {
+      const bool headless_primary = swap_mode_makes_headless_primary(cfg.headless_swap_mode);
+      if (headless_primary && !cfg.primary_output.empty() && !distinct_outputs) {
         return;
       }
 
       std::string cmd = "kscreen-doctor";
-      if (cfg.headless_swap_primary && !cfg.primary_output.empty() && distinct_outputs) {
+      if (headless_primary && !cfg.primary_output.empty() && distinct_outputs) {
         // Undo the swap: bring the physical monitor back as primary and turn the headless
-        // display back off.
+        // display back off. Covers both "privacy" (physical was disabled) and "keep_on"
+        // (physical was a secondary) — .enable is idempotent when it was already on.
         cmd += " output." + cfg.primary_output + ".enable";
         cmd += " output." + cfg.primary_output + ".priority.1";
         cmd += " output." + cfg.streaming_output + ".disable";
@@ -4928,7 +4950,7 @@ namespace proc {
     const bool evdi_promotion_requested =
       !display_policy.use_cage_runtime &&
       config::video.linux_display.auto_manage_displays &&
-      config::video.linux_display.headless_swap_primary &&
+      linux_display::swap_mode_makes_headless_primary(config::video.linux_display.headless_swap_mode) &&
       config::video.linux_display.headless_source == "evdi";
     // Promotion needs a physical monitor to disable (enable_streaming_display() cannot
     // swap without primary_output), and it must NOT clobber a more-specific per-app

@@ -138,6 +138,7 @@ namespace confighttp::validation {
       "hdr_mode"sv,
       "headless_mode"sv,
       "headless_source"sv,
+      "headless_swap_mode"sv,
       "headless_swap_primary"sv,
       "hevc_mode"sv,
       "hide_tray_controls"sv,
