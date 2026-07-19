@@ -15,6 +15,7 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -433,6 +434,20 @@ namespace portal {
   // PipeWire frame capture
   // -----------------------------------------------------------------------
 
+#ifdef POLARIS_TESTS
+  static bool g_shutdown_probe_active = false;
+  static bool g_capture_running_when_loop_stopped = false;
+  static unsigned g_teardown_state_callback_count = 0;
+  static std::vector<std::string> g_shutdown_events;
+  static bool g_throw_state_callback_log = false;
+  static bool g_throw_process_callback = false;
+  static bool g_process_callback_probe_active = false;
+  static unsigned g_process_callback_requeue_count = 0;
+#endif
+
+  static void on_state_changed(void *userdata, enum pw_stream_state old,
+    enum pw_stream_state state, const char *errmsg) noexcept;
+
   struct pw_capture_t {
     struct pw_thread_loop *pw_loop = nullptr;
     struct pw_stream *pw_stream_handle = nullptr;
@@ -448,39 +463,89 @@ namespace portal {
 
     std::atomic<bool> running{false};
     std::atomic<bool> negotiated{false};
+    std::atomic<bool> shutting_down{false};
 
     ~pw_capture_t() {
+      shutting_down.store(true, std::memory_order_release);
+      running.store(false, std::memory_order_release);
+      frame_cv.notify_all();
+
+#ifdef POLARIS_TESTS
+      if (g_shutdown_probe_active) {
+        if (pw_loop) {
+          g_capture_running_when_loop_stopped = running.load();
+          g_shutdown_events.emplace_back("loop_stop");
+        }
+        if (pw_stream_handle) {
+          g_shutdown_events.emplace_back("stream_destroy");
+          on_state_changed(this, PW_STREAM_STATE_STREAMING, PW_STREAM_STATE_UNCONNECTED, nullptr);
+        }
+        if (pw_loop) {
+          g_shutdown_events.emplace_back("loop_destroy");
+        }
+        return;
+      }
+#endif
       if (pw_loop) pw_thread_loop_stop(pw_loop);
       if (pw_stream_handle) pw_stream_destroy(pw_stream_handle);
       if (pw_loop) pw_thread_loop_destroy(pw_loop);
     }
   };
 
-  static void on_process(void *userdata) {
-    auto *cap = static_cast<pw_capture_t *>(userdata);
-    struct pw_buffer *b = pw_stream_dequeue_buffer(cap->pw_stream_handle);
-    if (!b) return;
-
-    struct spa_buffer *buf = b->buffer;
-    if (!buf->datas[0].data || buf->datas[0].chunk->size == 0) {
-      pw_stream_queue_buffer(cap->pw_stream_handle, b);
+  static void queue_process_buffer(pw_capture_t *cap, struct pw_buffer *buffer) noexcept {
+#ifdef POLARIS_TESTS
+    if (g_process_callback_probe_active) {
+      ++g_process_callback_requeue_count;
       return;
     }
-
-    uint32_t size = buf->datas[0].chunk->size;
-    {
-      std::lock_guard lk(cap->frame_mtx);
-      cap->frame_data.resize(size);
-      std::memcpy(cap->frame_data.data(), buf->datas[0].data, size);
-      cap->frame_available = true;
-      cap->frame_cv.notify_one();
-    }
-
-    pw_stream_queue_buffer(cap->pw_stream_handle, b);
+#endif
+    pw_stream_queue_buffer(cap->pw_stream_handle, buffer);
   }
 
-  static void on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param) {
+  static void on_process(void *userdata) noexcept {
     auto *cap = static_cast<pw_capture_t *>(userdata);
+    if (!cap || cap->shutting_down.load(std::memory_order_acquire)) return;
+
+    struct pw_buffer *b = nullptr;
+    try {
+#ifdef POLARIS_TESTS
+      if (g_throw_process_callback) {
+        b = reinterpret_cast<pw_buffer *>(1);
+        throw std::runtime_error("injected process callback failure");
+      }
+#endif
+
+      b = pw_stream_dequeue_buffer(cap->pw_stream_handle);
+      if (!b) return;
+
+      struct spa_buffer *buf = b->buffer;
+      if (!buf->datas[0].data || buf->datas[0].chunk->size == 0) {
+        queue_process_buffer(cap, b);
+        b = nullptr;
+        return;
+      }
+
+      uint32_t size = buf->datas[0].chunk->size;
+      {
+        std::lock_guard lk(cap->frame_mtx);
+        cap->frame_data.resize(size);
+        std::memcpy(cap->frame_data.data(), buf->datas[0].data, size);
+        cap->frame_available = true;
+        cap->frame_cv.notify_one();
+      }
+
+      queue_process_buffer(cap, b);
+      b = nullptr;
+    } catch (...) {
+      if (b) {
+        queue_process_buffer(cap, b);
+      }
+    }
+  }
+
+  static void on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param) noexcept {
+    auto *cap = static_cast<pw_capture_t *>(userdata);
+    if (!cap || cap->shutting_down.load(std::memory_order_acquire)) return;
     if (!param || id != SPA_PARAM_Format) return;
 
     uint32_t media_type, media_subtype;
@@ -495,8 +560,12 @@ namespace portal {
     cap->frame_stride = cap->frame_width * 4;
     cap->negotiated = true;
 
-    BOOST_LOG(info) << "portal: PipeWire format negotiated: "sv
-                    << cap->frame_width << "x"sv << cap->frame_height;
+    try {
+      BOOST_LOG(info) << "portal: PipeWire format negotiated: "sv
+                      << cap->frame_width << "x"sv << cap->frame_height;
+    } catch (...) {
+      // PipeWire callbacks must not propagate logging failures across the C ABI.
+    }
 
     // Set buffer parameters
     uint8_t params_buffer[1024];
@@ -511,14 +580,64 @@ namespace portal {
   }
 
   static void on_state_changed(void *userdata, enum pw_stream_state old,
-    enum pw_stream_state state, const char *errmsg) {
-    BOOST_LOG(info) << "portal: PipeWire state: "sv
-                    << pw_stream_state_as_string(old) << " -> "sv
-                    << pw_stream_state_as_string(state);
-    if (state == PW_STREAM_STATE_ERROR && errmsg) {
-      BOOST_LOG(warning) << "portal: PipeWire error: "sv << errmsg;
+    enum pw_stream_state state, const char *errmsg) noexcept {
+    auto *cap = static_cast<pw_capture_t *>(userdata);
+    if (!cap || cap->shutting_down.load(std::memory_order_acquire)) return;
+
+#ifdef POLARIS_TESTS
+    if (g_shutdown_probe_active) {
+      ++g_teardown_state_callback_count;
+    }
+#endif
+    try {
+#ifdef POLARIS_TESTS
+      if (g_throw_state_callback_log) {
+        throw std::runtime_error("injected state callback log failure");
+      }
+#endif
+      BOOST_LOG(info) << "portal: PipeWire state: "sv
+                      << pw_stream_state_as_string(old) << " -> "sv
+                      << pw_stream_state_as_string(state);
+      if (state == PW_STREAM_STATE_ERROR && errmsg) {
+        BOOST_LOG(warning) << "portal: PipeWire error: "sv << errmsg;
+      }
+    } catch (...) {
+      // PipeWire callbacks must not propagate logging failures across the C ABI.
     }
   }
+
+#ifdef POLARIS_TESTS
+  void exercise_state_callback_log_failure_for_tests() {
+    pw_capture_t capture;
+    g_throw_state_callback_log = true;
+    try {
+      on_state_changed(&capture, PW_STREAM_STATE_STREAMING, PW_STREAM_STATE_UNCONNECTED, nullptr);
+    } catch (...) {
+      g_throw_state_callback_log = false;
+      throw;
+    }
+    g_throw_state_callback_log = false;
+  }
+
+  void exercise_process_callback_failure_for_tests() {
+    pw_capture_t capture;
+    g_process_callback_probe_active = true;
+    g_process_callback_requeue_count = 0;
+    g_throw_process_callback = true;
+    try {
+      on_process(&capture);
+    } catch (...) {
+      g_throw_process_callback = false;
+      g_process_callback_probe_active = false;
+      throw;
+    }
+    g_throw_process_callback = false;
+    g_process_callback_probe_active = false;
+    if (g_process_callback_requeue_count != 1) {
+      throw std::runtime_error("process callback did not requeue its dequeued buffer");
+    }
+  }
+#endif
 
   static const struct pw_stream_events pw_events = {
     .version = PW_VERSION_STREAM_EVENTS,
@@ -925,6 +1044,56 @@ namespace portal {
   static std::unique_ptr<portal_session_t> g_portal;
   static std::unique_ptr<pw_capture_t> g_capture;
   static uint32_t g_node_id = 0;
+
+  void shutdown() {
+    g_screencopy_stop = true;
+    g_capture.reset();
+    g_portal.reset();
+    g_node_id = 0;
+  }
+
+#ifdef POLARIS_TESTS
+  void install_shutdown_probe_for_tests() {
+    g_shutdown_probe_active = true;
+    g_capture_running_when_loop_stopped = false;
+    g_teardown_state_callback_count = 0;
+    g_shutdown_events.clear();
+
+    g_portal = std::make_unique<portal_session_t>();
+    g_capture = std::make_unique<pw_capture_t>();
+    g_capture->pw_loop = reinterpret_cast<pw_thread_loop *>(1);
+    g_capture->pw_stream_handle = reinterpret_cast<pw_stream *>(1);
+    g_capture->running = true;
+    g_node_id = 1;
+  }
+
+  void cleanup_shutdown_probe_for_tests() {
+    g_capture.reset();
+    g_portal.reset();
+    g_node_id = 0;
+    g_shutdown_probe_active = false;
+  }
+
+  bool global_capture_present_for_tests() {
+    return static_cast<bool>(g_capture);
+  }
+
+  bool global_session_present_for_tests() {
+    return static_cast<bool>(g_portal);
+  }
+
+  bool capture_running_when_loop_stopped_for_tests() {
+    return g_capture_running_when_loop_stopped;
+  }
+
+  unsigned teardown_state_callback_count_for_tests() {
+    return g_teardown_state_callback_count;
+  }
+
+  std::vector<std::string> shutdown_events_for_tests() {
+    return g_shutdown_events;
+  }
+#endif
 
   static bool ensure_global_session() {
     // Create the portal D-Bus session once (shows picker on first use)

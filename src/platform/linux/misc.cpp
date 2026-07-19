@@ -67,6 +67,12 @@ namespace bp = boost::process::v1;
 
 window_system_e window_system;
 
+#ifdef POLARIS_BUILD_PORTAL
+namespace portal {
+  void shutdown();
+}
+#endif
+
 namespace {
   std::atomic_bool thread_priority_permission_denied {false};
   std::atomic_bool thread_priority_permission_warning_logged {false};
@@ -1244,6 +1250,19 @@ std::string get_local_ip_for_gateway() {
     return nullptr;
   }
 
+  class linux_deinit_t final: public deinit_t {
+  public:
+    ~linux_deinit_t() override {
+#ifdef POLARIS_BUILD_PORTAL
+      ::portal::shutdown();
+#endif
+    }
+  };
+
+  static std::unique_ptr<deinit_t> make_linux_deinit_guard() {
+    return std::make_unique<linux_deinit_t>();
+  }
+
   std::unique_ptr<deinit_t> init() {
     // enable low latency mode for AMD
     // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039
@@ -1340,8 +1359,14 @@ std::string get_local_ip_for_gateway() {
       BOOST_LOG(warning) << "Couldn't load EGL library"sv;
     }
 
-    return std::make_unique<deinit_t>();
+    return make_linux_deinit_guard();
   }
+
+#ifdef POLARIS_TESTS
+  std::unique_ptr<deinit_t> linux_deinit_guard_for_tests() {
+    return make_linux_deinit_guard();
+  }
+#endif
 
   class linux_high_precision_timer: public high_precision_timer {
   public:
