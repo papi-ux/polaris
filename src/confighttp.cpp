@@ -2858,6 +2858,15 @@ namespace confighttp {
     if (!output_tree.contains("browser_streaming") && output_tree.contains("webrtc_browser_streaming")) {
       output_tree["browser_streaming"] = output_tree["webrtc_browser_streaming"];
     }
+    // Backward-compat: surface the legacy boolean headless_swap_primary as the new
+    // headless_swap_mode value so migrated configs show the correct mode in the UI, then
+    // drop the legacy key so it is not re-persisted on save (a re-persisted legacy key
+    // could otherwise override a deliberate "off"/Extended choice back to privacy).
+    if (!output_tree.contains("headless_swap_mode") && output_tree.contains("headless_swap_primary")) {
+      const bool legacy_on = output_tree["headless_swap_primary"].get<std::string>() == "enabled";
+      output_tree["headless_swap_mode"] = legacy_on ? "privacy" : "off";
+    }
+    output_tree.erase("headless_swap_primary");
     output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
     output_tree["has_api_key"] = output_tree.value("has_api_key", false);

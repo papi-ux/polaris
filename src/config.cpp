@@ -1342,13 +1342,17 @@ namespace config {
     bool_f(vars, "linux_prefer_gpu_native_capture", video.linux_display.prefer_gpu_native_capture);
     bool_f(vars, "linux_capture_profile", video.linux_display.capture_profile);
     string_f(vars, "headless_source", video.linux_display.headless_source);
+    // Capture presence BEFORE string_f consumes (erases) the key, so an explicit
+    // headless_swap_mode — including "off" — always wins over the legacy bool below.
+    const bool has_swap_mode = vars.count("headless_swap_mode") > 0;
     string_f(vars, "headless_swap_mode", video.linux_display.headless_swap_mode);
     // Backward-compat: the old boolean headless_swap_primary=enabled maps to the
-    // "privacy" mode (headless primary, physical monitor disabled).
+    // "privacy" mode, but ONLY when no explicit headless_swap_mode was provided (so a
+    // deliberate "off"/Extended choice is never silently overridden back to privacy).
     {
       bool legacy_swap_primary = false;
       bool_f(vars, "headless_swap_primary", legacy_swap_primary);
-      if (legacy_swap_primary && video.linux_display.headless_swap_mode == "off") {
+      if (legacy_swap_primary && !has_swap_mode) {
         video.linux_display.headless_swap_mode = "privacy";
       }
     }
