@@ -30,6 +30,20 @@ const sudovdaStatus = {
 const currentDriverStatus = computed(() => sudovdaStatus[props.vdisplay])
 const config = ref(props.config)
 const isLinux = computed(() => props.platform === 'linux')
+
+// Session readiness (Linux): host-computed status of the optional dependencies each
+// streaming feature needs, so users see silent-fallback situations instead of digging
+// through the log. Values are display-only (see CLIENT_SETTINGS_RESPONSE_ONLY_KEYS).
+const readinessItems = computed(() => {
+  const c = config.value || {}
+  const ok = (v) => v === true || v === 'true' || v === 'enabled'
+  return [
+    { label: 'labwc', ok: ok(c.readiness_labwc), need: 'Family Mode compositor', fix: 'sudo zypper install labwc' },
+    { label: 'swaybg', ok: ok(c.readiness_swaybg), need: 'Family Mode splash (optional)', fix: 'sudo zypper install swaybg' },
+    { label: 'kscreen-doctor', ok: ok(c.readiness_kscreen), need: 'Privacy / Extended display swap', fix: 'ships with KDE Plasma' },
+    { label: 'EVDI', ok: ok(c.readiness_evdi), need: 'Headless streaming with no dongle', fix: 'load the evdi kernel module' },
+  ]
+})
 const isWindows = computed(() => props.platform === 'windows')
 const showDisplayPlannerAdvanced = ref(false)
 const customDisplayScale = ref(1)
@@ -290,6 +304,21 @@ const validateFallbackMode = (event) => {
             <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-ice">
               {{ selectedStreamDisplayMode.title }}
             </span>
+          </div>
+
+          <div class="surface-muted p-4">
+            <div class="text-sm font-medium text-silver">Session readiness</div>
+            <div class="mt-1 text-sm text-storm">Whether the optional dependencies each streaming feature needs are present on this host. A missing item means that feature falls back silently — install it to enable the feature.</div>
+            <div class="mt-3 grid gap-2 sm:grid-cols-2">
+              <div v-for="item in readinessItems" :key="item.label" class="flex items-start gap-2 text-sm">
+                <span :class="item.ok ? 'text-green-400' : 'text-amber-300'" class="mt-px font-semibold">{{ item.ok ? '✓' : '✗' }}</span>
+                <div class="min-w-0">
+                  <span class="text-silver">{{ item.label }}</span>
+                  <span class="ml-1 text-xs text-storm">— {{ item.need }}</span>
+                  <div v-if="!item.ok" class="mt-0.5 font-mono text-[11px] text-amber-200">{{ item.fix }}</div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="grid gap-3 xl:grid-cols-2">

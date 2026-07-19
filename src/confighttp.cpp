@@ -31,6 +31,7 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/process/v1/search_path.hpp>
 #include <nlohmann/json.hpp>
 #include <Simple-Web-Server/crypto.hpp>
 #include <Simple-Web-Server/server_https.hpp>
@@ -2838,6 +2839,16 @@ namespace confighttp {
       output_tree["runtime_requested_headless"] = runtime_state.requested_headless;
       output_tree["runtime_effective_headless"] = runtime_state.effective_headless;
       output_tree["runtime_gpu_native_override_active"] = runtime_state.gpu_native_override_active;
+      // Session readiness: whether the optional Linux dependencies each streaming feature
+      // needs are actually installed/loaded, so the UI can flag silent-fallback situations
+      // (e.g. EVDI not loaded, no swaybg splash) instead of hiding them in the log.
+      auto have_bin = [](const char *name) {
+        return !boost::process::v1::search_path(name).empty();
+      };
+      output_tree["readiness_evdi"] = (vd_backend == virtual_display::backend_e::EVDI);
+      output_tree["readiness_labwc"] = have_bin("labwc");
+      output_tree["readiness_swaybg"] = have_bin("swaybg");
+      output_tree["readiness_kscreen"] = have_bin("kscreen-doctor");
     }
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
