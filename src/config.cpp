@@ -591,7 +591,7 @@ namespace config {
       false,  // linux_display.prefer_gpu_native_capture
       false,  // linux_display.capture_profile
       "auto",  // linux_display.headless_source
-      "off",  // linux_display.headless_swap_mode
+      "mirror",  // linux_display.headless_swap_mode
     },  // linux_display
 
     "1920x1080x60",  // fallback_mode
@@ -1343,17 +1343,18 @@ namespace config {
     bool_f(vars, "linux_capture_profile", video.linux_display.capture_profile);
     string_f(vars, "headless_source", video.linux_display.headless_source);
     // Capture presence BEFORE string_f consumes (erases) the key, so an explicit
-    // headless_swap_mode — including "off" — always wins over the legacy bool below.
+    // headless_swap_mode always wins over the legacy bool below.
     const bool has_swap_mode = vars.count("headless_swap_mode") > 0;
     string_f(vars, "headless_swap_mode", video.linux_display.headless_swap_mode);
-    // Backward-compat: the old boolean headless_swap_primary=enabled maps to the
-    // "privacy" mode, but ONLY when no explicit headless_swap_mode was provided (so a
-    // deliberate "off"/Extended choice is never silently overridden back to privacy).
+    // Backward-compat: the old boolean headless_swap_primary maps to "privacy" (enabled)
+    // or "off"/Extended (disabled), but ONLY when no explicit headless_swap_mode was
+    // provided — a deliberate new-key choice is never overridden.
     {
+      const bool has_legacy = vars.count("headless_swap_primary") > 0;
       bool legacy_swap_primary = false;
       bool_f(vars, "headless_swap_primary", legacy_swap_primary);
-      if (legacy_swap_primary && !has_swap_mode) {
-        video.linux_display.headless_swap_mode = "privacy";
+      if (has_legacy && !has_swap_mode) {
+        video.linux_display.headless_swap_mode = legacy_swap_primary ? "privacy" : "off";
       }
     }
 

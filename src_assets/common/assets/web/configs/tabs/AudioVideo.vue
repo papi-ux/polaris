@@ -498,9 +498,9 @@ const validateFallbackMode = (event) => {
                   v-model="config.headless_swap_mode"
                   class="focus-ring mt-4 w-full rounded-lg border border-storm/40 bg-deep px-3 py-2 text-sm text-silver"
                 >
-                  <option value="off">{{ $t('config.headless_swap_mode_off') }}</option>
+                  <option value="mirror">{{ $t('config.headless_swap_mode_mirror') }}</option>
                   <option value="privacy">{{ $t('config.headless_swap_mode_privacy') }}</option>
-                  <option value="keep_on">{{ $t('config.headless_swap_mode_keep_on') }}</option>
+                  <option value="off">{{ $t('config.headless_swap_mode_off') }}</option>
                 </select>
               </div>
             </div>

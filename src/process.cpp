@@ -3921,17 +3921,17 @@ namespace proc {
       return false;
     }
 
-    // headless_swap_mode: how the headless display is arranged relative to the physical
-    // monitor while streaming.
+    // headless_swap_mode: how the streaming display relates to the physical monitor.
     //   "privacy" — headless becomes primary AND the physical monitor is disabled (dark)
-    //   "keep_on" — headless becomes primary but the physical monitor stays on (secondary)
+    //   "mirror"  — NO reconfiguration; capture the real primary screen as-is and let
+    //               capture-follow hand off if the user later powers the monitor off
     //   "off"/other — headless is a secondary; the physical monitor stays primary
     static bool swap_mode_makes_headless_primary(std::string_view mode) {
-      return mode == "privacy" || mode == "keep_on";
+      return mode == "privacy";
     }
 
-    static bool swap_mode_disables_physical(std::string_view mode) {
-      return mode == "privacy";
+    static bool swap_mode_is_mirror(std::string_view mode) {
+      return mode == "mirror";
     }
 
     /**
@@ -3950,13 +3950,18 @@ namespace proc {
       if (cfg.use_cage_compositor) {
         return;
       }
+      // "mirror" mode performs NO display reconfiguration — the stream just captures the
+      // real primary screen as-is (capture target is set in the launch setup path). Never
+      // touch the monitor layout.
+      if (swap_mode_is_mirror(cfg.headless_swap_mode)) {
+        return;
+      }
 
       // A display cannot be swapped onto itself. Guard against streaming_output ==
       // primary_output: without this the swap command would enable AND disable the same
       // output in one call, leaving it (and possibly the only monitor) dark.
       const bool distinct_outputs = cfg.streaming_output != cfg.primary_output;
       const bool headless_primary = swap_mode_makes_headless_primary(cfg.headless_swap_mode);
-      const bool disable_physical = swap_mode_disables_physical(cfg.headless_swap_mode);
       if (headless_primary && !cfg.primary_output.empty() && !distinct_outputs) {
         BOOST_LOG(warning) << "Linux display management: headless_swap_mode ["sv << cfg.headless_swap_mode
                            << "] makes the headless display primary, but streaming_output and primary_output "
@@ -3966,16 +3971,11 @@ namespace proc {
 
       std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
       if (headless_primary && !cfg.primary_output.empty() && distinct_outputs) {
-        // Make the headless display the PRIMARY so the desktop/game lands on it for capture.
+        // "privacy": make the headless display the PRIMARY so the desktop/game lands on it
+        // for capture, and black out the physical monitor for the session.
         // disable_streaming_display() restores the physical monitor on teardown.
         cmd += " output." + cfg.streaming_output + ".priority.1";
-        if (disable_physical) {
-          // "privacy": black out the physical monitor for the session (screen goes dark).
-          cmd += " output." + cfg.primary_output + ".disable";
-        } else {
-          // "keep_on": leave the physical monitor on and usable as a secondary.
-          cmd += " output." + cfg.primary_output + ".priority.2";
-        }
+        cmd += " output." + cfg.primary_output + ".disable";
       } else if (!cfg.primary_output.empty() && distinct_outputs) {
         // "off"/extended: enable the headless output as a SECONDARY, keep the physical
         // primary (KDE taskbar stays on the main display).
@@ -4004,6 +4004,10 @@ namespace proc {
       if (cfg.use_cage_compositor) {
         return;  // mirror enable_streaming_display(): cage sessions never swapped
       }
+      // "mirror" mode never reconfigured anything on enable — nothing to undo.
+      if (swap_mode_is_mirror(cfg.headless_swap_mode)) {
+        return;
+      }
 
       // Mirror the enable-side guard: when streaming_output == primary_output no swap was
       // ever performed, so there is nothing to undo. Falling through would emit
@@ -4016,9 +4020,8 @@ namespace proc {
 
       std::string cmd = "kscreen-doctor";
       if (headless_primary && !cfg.primary_output.empty() && distinct_outputs) {
-        // Undo the swap: bring the physical monitor back as primary and turn the headless
-        // display back off. Covers both "privacy" (physical was disabled) and "keep_on"
-        // (physical was a secondary) — .enable is idempotent when it was already on.
+        // Undo the "privacy" swap: bring the physical monitor back as primary (it was
+        // disabled) and turn the headless display back off. .enable is idempotent.
         cmd += " output." + cfg.primary_output + ".enable";
         cmd += " output." + cfg.primary_output + ".priority.1";
         cmd += " output." + cfg.streaming_output + ".disable";
@@ -4936,8 +4939,24 @@ namespace proc {
     // name via config::video.output_name (see kmsgrab named targeting).
     const bool physical_headless_source =
       config::video.linux_display.headless_source == "physical";
+
+    // "mirror" arrangement: stream the real primary screen with NO display
+    // reconfiguration. Point capture at the ACTIVE primary (empty output_name → kmsgrab
+    // index 0), overriding any dongle/EVDI output the config may hold, so the stream
+    // shows exactly what is on the desktop. enable/disable_streaming_display() no-op for
+    // this mode, and the capture-follow logic hands off if the user later powers their
+    // monitor off. A per-app output pin still wins (it is a more specific choice).
+    const bool mirror_mode =
+      !display_policy.use_cage_runtime &&
+      linux_display::swap_mode_is_mirror(config::video.linux_display.headless_swap_mode);
+    if (mirror_mode && _app.output_name.empty()) {
+      config::video.output_name.clear();  // restored from initial_display on teardown
+      BOOST_LOG(info) << "Streaming display arrangement: mirror — capturing the active "
+                         "primary display as-is, no reconfiguration"sv;
+    }
+
     const bool should_use_linux_virtual_display =
-      !physical_headless_source && (
+      !physical_headless_source && !mirror_mode && (
         display_policy.use_host_virtual_display ||
         launch_session->virtual_display ||
         (!launch_session->user_locked_virtual_display && _app.virtual_display));
@@ -5099,7 +5118,7 @@ namespace proc {
         BOOST_LOG(warning) << "Virtual display requested but no backend available on Linux"sv;
         launch_session->virtual_display = false;
       }
-    } else if (physical_headless_source && !display_policy.use_cage_runtime) {
+    } else if (physical_headless_source && !mirror_mode && !display_policy.use_cage_runtime) {
       if (!config::video.output_name.empty()) {
         BOOST_LOG(info) << "Physical headless source: capturing connector ["sv
                         << config::video.output_name
