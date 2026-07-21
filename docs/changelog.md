@@ -5,9 +5,7 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
-## Unreleased
-
-## v1.3.2 - 2026-07-17
+## v1.3.2 - Unreleased
 
 Reliability patch focused on stream lifecycle, Linux private-session isolation, reconnect recovery, and truthful host diagnostics.
 
