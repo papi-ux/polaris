@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -1016,6 +1017,10 @@ namespace proc {
 #ifdef POLARIS_TESTS
     thread_local pid_t forced_pidfd_open_failure_pid = -1;
     thread_local std::atomic<bool> *pidfd_wait_entered_for_tests = nullptr;
+    // When set, the pre-cage Steam teardown skips the real `steam -shutdown` shell-out and
+    // its graceful wait, so unit tests neither touch a developer's real Steam nor hang on
+    // stub processes; they exercise the pidfd fallback directly.
+    thread_local bool bypass_graceful_steam_shutdown_for_tests = false;
 #endif
 
     std::optional<pidfd_handle_t> open_process_pidfd(pid_t pid, int &open_error) {
@@ -1681,14 +1686,44 @@ namespace proc {
         return false;
       }
 
-      BOOST_LOG(info) << "process: terminating "sv << ownership.owned.size()
-                      << " session-owned Steam process(es) through pidfd before isolated cage stop"sv;
+      // Ask Steam to shut down GRACEFULLY first. `steam -shutdown` goes through Steam's
+      // own IPC: it closes the running game, flushes Steam Cloud, then exits cleanly. A
+      // broadcast SIGTERM across the dozen-odd Steam processes (the terminate_pidfds
+      // fallback below) does NOT do that — Steam gets signal-killed mid-game and reports
+      // a fatal error on the next launch. Only fall back to the pidfd SIGTERM/SIGKILL
+      // path if the graceful shutdown does not complete within the window (Steam closing
+      // a running game can legitimately take several seconds).
+      // Skip the graceful wait when the daemon itself is shutting down: a ~10s abort
+      // watchdog is armed on SIGTERM/logout, so a longer wait here (which also holds the
+      // session lifecycle lock) would be truncated anyway — go straight to the fast,
+      // bounded pidfd path.
+      bool graceful_steam_shutdown = !daemon_shutdown_requested();
+#ifdef POLARIS_TESTS
+      if (bypass_graceful_steam_shutdown_for_tests) {
+        graceful_steam_shutdown = false;
+      }
+#endif
+      if (graceful_steam_shutdown) {
+        const auto shutdown_cmd = canonical_steam_shutdown_command(steam_launch_reference_command(app));
+        BOOST_LOG(info) << "process: requesting graceful Steam shutdown ["sv << shutdown_cmd
+                        << "] before isolated cage stop"sv;
+        // Always background the shell-out (trailing &) so std::system cannot block the
+        // teardown even when the launch command was not detached with setsid.
+        std::system((shutdown_cmd + " >/dev/null 2>&1 &").c_str());
+        if (wait_for_pidfds_exit(ownership.owned, 20s)) {
+          BOOST_LOG(info) << "process: session-owned Steam exited gracefully before isolated cage stop"sv;
+          return true;
+        }
+        BOOST_LOG(warning) << "process: Steam did not exit within the graceful-shutdown window; terminating "sv
+                           << ownership.owned.size() << " session-owned Steam process(es) through pidfd"sv;
+      }
+
       if (terminate_pidfds(ownership.owned, 5s, 1s, "private Steam"sv)) {
         BOOST_LOG(info) << "process: session-owned Steam exited before isolated cage stop"sv;
         return true;
       }
 
-      BOOST_LOG(warning) << "process: session-owned Steam remained after bounded pidfd termination; continuing with isolated cage fallback cleanup"sv;
+      BOOST_LOG(warning) << "process: session-owned Steam remained after graceful shutdown and bounded pidfd termination; continuing with isolated cage fallback cleanup"sv;
       return false;
     }
 
@@ -3623,6 +3658,9 @@ namespace proc {
     _app = app;
     _session_used_cage_compositor = session_owned_cage;
     _session_instance_id = session_instance_id;
+#ifdef POLARIS_TESTS
+    bypass_graceful_steam_shutdown_for_tests = true;
+#endif
     auto restore_state = util::fail_guard([
       this,
       previous_app,
@@ -3632,6 +3670,9 @@ namespace proc {
       _app = previous_app;
       _session_used_cage_compositor = previous_used_cage;
       _session_instance_id = previous_instance_id;
+#ifdef POLARIS_TESTS
+      bypass_graceful_steam_shutdown_for_tests = false;
+#endif
     });
     return terminate_session_owned_steam_before_cage_stop();
   }
@@ -3802,22 +3843,94 @@ namespace proc {
 #ifdef __linux__
   // Linux virtual display state — holds the active virtual display instance, if any
   static std::optional<virtual_display::vdisplay_t> linux_vdisplay;
-  static bool linux_vdisplay_available_checked = false;
-  static bool linux_vdisplay_available = false;
 
   /**
-   * @brief Check and cache whether Linux virtual display support is available.
+   * @brief Check whether Linux virtual display support is available.
+   *
+   * Deliberately NOT latched per-process: availability changes at runtime
+   * (evdi module loaded/unloaded, libevdi installed, compositor restarted).
+   * A once-only latch here meant a Polaris started before the prerequisites
+   * were in place would report "no backend available" forever, even after
+   * detect_backend() itself succeeded. detect_backend() already maintains a
+   * short TTL cache, so calling it directly stays cheap.
    */
   bool isLinuxVDisplayAvailable() {
-    if (!linux_vdisplay_available_checked) {
-      const auto backend = virtual_display::detect_backend();
-      linux_vdisplay_available = (backend != virtual_display::backend_e::NONE);
-      linux_vdisplay_available_checked = true;
-    }
-    return linux_vdisplay_available;
+    return virtual_display::detect_backend() != virtual_display::backend_e::NONE;
   }
 
   namespace linux_display {
+    /**
+     * @brief Run a command and capture its stdout (trimmed). Empty on failure.
+     */
+    static std::string exec_capture(const std::string &cmd) {
+      FILE *pipe = popen(cmd.c_str(), "r");
+      if (!pipe) {
+        return {};
+      }
+      char buf[512];
+      std::string result;
+      while (fgets(buf, sizeof(buf), pipe)) {
+        result += buf;
+      }
+      pclose(pipe);
+      return result;
+    }
+
+    /**
+     * @brief Whether kscreen-doctor currently lists an output with exactly this name.
+     *
+     * kscreen-doctor omits disconnected connectors entirely, so mere presence on an
+     * "Output:" line means the connector is enumerated and addressable by kscreen-doctor
+     * (whether enabled or disabled). The name is matched as a whole token so "DP-2" does
+     * not spuriously match "DP-20" and "DVI-I-1" does not match "DVI-I-10".
+     */
+    static bool kscreen_output_present(const std::string &name) {
+      if (name.empty()) {
+        return false;
+      }
+      const std::string out = exec_capture("kscreen-doctor -o 2>/dev/null");
+      auto is_tok = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+      };
+      for (size_t pos = 0; (pos = out.find(name, pos)) != std::string::npos; pos += name.size()) {
+        const char before = pos > 0 ? out[pos - 1] : ' ';
+        const size_t after_idx = pos + name.size();
+        const char after = after_idx < out.size() ? out[after_idx] : ' ';
+        if (!is_tok(before) && !is_tok(after)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * @brief Poll for a kscreen output to appear, absorbing KWin's async hotplug lag.
+     *
+     * A freshly-connected EVDI (or any hotplugged connector) can take a beat to show up
+     * in KScreen's enumeration after the DRM connect. Retry briefly rather than assume
+     * absence — but bounded, so a genuinely-absent output aborts promotion safely instead
+     * of hanging the launch.
+     */
+    static bool wait_for_kscreen_output(const std::string &name, int attempts = 20, int delay_ms = 250) {
+      for (int i = 0; i < attempts; ++i) {
+        if (kscreen_output_present(name)) {
+          return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+      }
+      return false;
+    }
+
+    // headless_swap_mode — how the physical monitor behaves when the desktop is swapped
+    // onto a headless display (dummy plug / EVDI) while streaming. Only meaningful when
+    // display auto-management is on. To stream the real screen with NO reconfiguration,
+    // use the "Mirror Desktop" capture mode instead.
+    //   "privacy" — headless becomes primary AND the physical monitor is disabled (dark)
+    //   "off"/other — headless is a secondary; the physical monitor stays primary
+    static bool swap_mode_makes_headless_primary(std::string_view mode) {
+      return mode == "privacy";
+    }
+
     /**
      * @brief Enable the streaming display and set display priorities for a streaming session.
      * Uses kscreen-doctor to enable the streaming output and set it as priority 1.
@@ -3827,11 +3940,36 @@ namespace proc {
       if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
         return;
       }
+      // A cage/isolated session (Family Mode, or the whole-host headless preset) owns its
+      // own off-screen compositor and must NOT touch the physical monitor — otherwise the
+      // global swap config would dim the host's screen during Family Mode. Skip here; the
+      // cage runtime handles its own display.
+      if (cfg.use_cage_compositor) {
+        return;
+      }
 
-      // Enable streaming output but keep primary display as priority 1
-      // so KDE taskbar stays on the main display
+      // A display cannot be swapped onto itself. Guard against streaming_output ==
+      // primary_output: without this the swap command would enable AND disable the same
+      // output in one call, leaving it (and possibly the only monitor) dark.
+      const bool distinct_outputs = cfg.streaming_output != cfg.primary_output;
+      const bool headless_primary = swap_mode_makes_headless_primary(cfg.headless_swap_mode);
+      if (headless_primary && !cfg.primary_output.empty() && !distinct_outputs) {
+        BOOST_LOG(warning) << "Linux display management: headless_swap_mode ["sv << cfg.headless_swap_mode
+                           << "] makes the headless display primary, but streaming_output and primary_output "
+                              "are the same output ["sv << cfg.streaming_output
+                           << "] — cannot swap a display onto itself; leaving it enabled without swapping"sv;
+      }
+
       std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
-      if (!cfg.primary_output.empty()) {
+      if (headless_primary && !cfg.primary_output.empty() && distinct_outputs) {
+        // "privacy": make the headless display the PRIMARY so the desktop/game lands on it
+        // for capture, and black out the physical monitor for the session.
+        // disable_streaming_display() restores the physical monitor on teardown.
+        cmd += " output." + cfg.streaming_output + ".priority.1";
+        cmd += " output." + cfg.primary_output + ".disable";
+      } else if (!cfg.primary_output.empty() && distinct_outputs) {
+        // "off"/extended: enable the headless output as a SECONDARY, keep the physical
+        // primary (KDE taskbar stays on the main display).
         cmd += " output." + cfg.primary_output + ".priority.1";
         cmd += " output." + cfg.streaming_output + ".priority.2";
       }
@@ -3854,12 +3992,32 @@ namespace proc {
       if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
         return;
       }
+      if (cfg.use_cage_compositor) {
+        return;  // mirror enable_streaming_display(): cage sessions never swapped
+      }
+
+      // Mirror the enable-side guard: when streaming_output == primary_output no swap was
+      // ever performed, so there is nothing to undo. Falling through would emit
+      // output.X.disable on the shared output and black out the only display.
+      const bool distinct_outputs = cfg.streaming_output != cfg.primary_output;
+      const bool headless_primary = swap_mode_makes_headless_primary(cfg.headless_swap_mode);
+      if (headless_primary && !cfg.primary_output.empty() && !distinct_outputs) {
+        return;
+      }
 
       std::string cmd = "kscreen-doctor";
-      if (!cfg.primary_output.empty()) {
+      if (headless_primary && !cfg.primary_output.empty() && distinct_outputs) {
+        // Undo the "privacy" swap: bring the physical monitor back as primary (it was
+        // disabled) and turn the headless display back off. .enable is idempotent.
+        cmd += " output." + cfg.primary_output + ".enable";
         cmd += " output." + cfg.primary_output + ".priority.1";
+        cmd += " output." + cfg.streaming_output + ".disable";
+      } else {
+        if (!cfg.primary_output.empty() && distinct_outputs) {
+          cmd += " output." + cfg.primary_output + ".priority.1";
+        }
+        cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
       }
-      cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
 
       BOOST_LOG(info) << "Linux display management: disabling streaming display ["sv << cmd << "]"sv;
       int ret = std::system(cmd.c_str());
@@ -4168,6 +4326,36 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
+    // Session-scoped overrides for per-app isolated sessions (family mode).
+    // Forcing the globals makes every downstream read — the session snapshot
+    // below, display policy, cage start, gamepad isolation, encoder-probe
+    // deferral, audio capture — behave as a headless+cage session without
+    // touching those call sites. Saved ONLY when the app opts in, so
+    // mid-session config changes made during normal sessions are never
+    // clobbered. restore_isolated_session_overrides() undoes this (hooked
+    // into teardown on both the success and failure paths).
+    if (_app.isolated_session && !(launch_session && launch_session->mirror_desktop)) {
+      initial_headless_mode = config::video.linux_display.headless_mode;
+      initial_use_cage_compositor = config::video.linux_display.use_cage_compositor;
+      initial_prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
+      initial_audio_sink = config::audio.sink;
+      initial_linux_display_saved = true;
+      config::video.linux_display.headless_mode = true;
+      config::video.linux_display.use_cage_compositor = true;
+      // Keep the compositor truly off-screen: a GPU-native windowed fallback
+      // would make the session visible on the host desktop, defeating the
+      // isolation.
+      config::video.linux_display.prefer_gpu_native_capture = false;
+      // Audio isolation must hold in the CAPTURE pipeline too (rtsp copies
+      // host_audio into the session flags), so force it at the source — and
+      // clear any explicit sink so the virtual-sink env-tag routing path is
+      // taken instead of switching the desktop user's default sink.
+      launch_session->host_audio = false;
+      config::audio.sink.clear();
+      BOOST_LOG(info) << "process: app ["sv << _app.name
+                      << "] opted into isolated off-screen session; forcing headless+cage and stream-only audio for this session"sv;
+    }
+
     const bool use_cage_compositor_for_session =
       config::video.linux_display.use_cage_compositor &&
       !(launch_session && launch_session->mirror_desktop);
@@ -4248,11 +4436,33 @@ namespace proc {
                       << *launch_session->paired_target_bitrate_kbps << " kbps";
     }
 
+    // Per-app output targeting: an app may pin capture to a specific output
+    // (a dummy-plug connector or EVDI screen, by kernel connector name). Wins
+    // over client-profile output preferences. config::video.output_name is
+    // already saved to initial_display above and restored on teardown, so no
+    // extra restore plumbing is needed for the capture target itself.
+    const bool app_output_override = !_app.output_name.empty();
+    if (app_output_override) {
+      BOOST_LOG(info) << "process: app ["sv << _app.name
+                      << "] pins capture output to ["sv << _app.output_name << ']';
+      config::video.output_name = _app.output_name;
+#ifdef __linux__
+      // Let auto-managed display power follow the session's target: the pinned
+      // output is enabled at session start and disabled at teardown. No-op
+      // unless linux_auto_manage_displays is on. Never auto-manage the primary.
+      if (_app.output_name != config::video.linux_display.primary_output) {
+        initial_streaming_output = config::video.linux_display.streaming_output;
+        initial_streaming_output_saved = true;
+        config::video.linux_display.streaming_output = _app.output_name;
+      }
+#endif
+    }
+
     auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
     if (client_profile) {
       BOOST_LOG(info) << "Applying client profile for \""sv << launch_session->device_name << '"';
 
-      if (!client_profile->output_name.empty()) {
+      if (!client_profile->output_name.empty() && !app_output_override) {
         BOOST_LOG(info) << "Client profile: overriding output_name to \""sv << client_profile->output_name << '"';
         config::video.output_name = client_profile->output_name;
       }
@@ -4710,12 +4920,135 @@ namespace proc {
     const bool using_headless_cage =
       display_policy.requested_headless &&
       display_policy.use_cage_runtime;
-    const bool should_use_linux_virtual_display =
-      display_policy.use_host_virtual_display ||
-      launch_session->virtual_display ||
-      (!launch_session->user_locked_virtual_display && _app.virtual_display);
+    // headless_source=physical: the stream captures a real connector (HDMI
+    // dongle) that the desktop compositor already drives — no virtual display
+    // is created. Capture targets it deterministically by kernel connector
+    // name via config::video.output_name (see kmsgrab named targeting).
+    const bool physical_headless_source =
+      config::video.linux_display.headless_source == "physical";
 
-    if (
+    const bool should_use_linux_virtual_display =
+      !physical_headless_source && (
+        display_policy.use_host_virtual_display ||
+        launch_session->virtual_display ||
+        (!launch_session->user_locked_virtual_display && _app.virtual_display));
+
+    // EVDI-as-primary (no physical dongle needed): create the virtual display even
+    // though auto-manage is on, then promote the desktop onto it. This is an
+    // INDEPENDENT gate — deliberately not tied to should_use_linux_virtual_display
+    // (which is false for the very no-dongle user this targets) — and it must never
+    // fall into the !auto_manage_displays creation branch below.
+    const bool evdi_promotion_requested =
+      !display_policy.use_cage_runtime &&
+      config::video.linux_display.auto_manage_displays &&
+      linux_display::swap_mode_makes_headless_primary(config::video.linux_display.headless_swap_mode) &&
+      config::video.linux_display.headless_source == "evdi";
+    // Promotion needs a physical monitor to disable (enable_streaming_display() cannot
+    // swap without primary_output), and it must NOT clobber a more-specific per-app
+    // output pin (which already redirected streaming_output at ~4402).
+    const bool evdi_promotion =
+      evdi_promotion_requested &&
+      !config::video.linux_display.primary_output.empty() &&
+      _app.output_name.empty();
+
+    if (evdi_promotion_requested && !evdi_promotion) {
+      if (config::video.linux_display.primary_output.empty()) {
+        BOOST_LOG(warning) << "EVDI-as-primary requested but Primary Output is unset; set it to your "sv
+                           << "physical monitor to enable promotion. Streaming without promotion."sv;
+      } else if (!_app.output_name.empty()) {
+        BOOST_LOG(info) << "EVDI-as-primary: per-app Output pin ["sv << _app.output_name
+                        << "] takes precedence; not promoting the EVDI"sv;
+      }
+    }
+
+    if (evdi_promotion) {
+      // Neutralize the generic auto_manage swap below until we CONFIRM a live EVDI to
+      // promote onto: clear streaming_output so enable_streaming_display() no-ops on any
+      // abort path, saving the user's value first so teardown restores it.
+      if (!this->initial_streaming_output_saved) {
+        this->initial_streaming_output = config::video.linux_display.streaming_output;
+        this->initial_streaming_output_saved = true;
+      }
+      config::video.linux_display.streaming_output.clear();
+
+      // Fully undo a partially-created EVDI so capture falls back to the physical
+      // desktop. Destroying the vdisplay unpublishes frame_grab, so
+      // evdi_capture::available() becomes false and misc.cpp routes capture to the real
+      // KMS/Wayland output instead of a blank, never-promoted EVDI (black stream).
+      auto abort_promotion = [&](const std::string &why) {
+        BOOST_LOG(warning) << "EVDI-as-primary: "sv << why
+                           << "; aborting promotion, leaving displays untouched and capturing "sv
+                           << "the physical desktop"sv;
+        if (linux_vdisplay.has_value()) {
+          virtual_display::destroy(*linux_vdisplay);
+          linux_vdisplay.reset();
+        }
+        this->virtual_display = false;
+        this->display_name.clear();
+        this->evdi_promotion_active = false;
+        launch_session->virtual_display = false;
+        // streaming_output stays cleared (restored at teardown); output_name untouched.
+      };
+
+      if (!isLinuxVDisplayAvailable()) {
+        BOOST_LOG(warning) << "EVDI-as-primary requested but no virtual display backend available; "sv
+                           << "capturing the physical desktop"sv;
+        launch_session->virtual_display = false;
+      } else {
+        int target_fps = launch_session->fps ? launch_session->fps : 60000;
+        if (target_fps >= 1000) {
+          target_fps /= 1000;
+        }
+        if (config::video.double_refreshrate) {
+          target_fps *= 2;
+        }
+
+        auto vdisplay = virtual_display::create(render_width, render_height, target_fps);
+        if (!vdisplay.has_value()) {
+          BOOST_LOG(warning) << "EVDI-as-primary: virtual display creation failed on Linux; "sv
+                             << "capturing the physical desktop"sv;
+          launch_session->virtual_display = false;
+        } else {
+          linux_vdisplay = std::move(vdisplay);
+          launch_session->virtual_display = true;
+          this->virtual_display = true;
+          this->display_name = linux_vdisplay->output_name;
+          const std::string evdi_name = linux_vdisplay->output_name;
+
+          BOOST_LOG(info) << "EVDI-as-primary: virtual display created ["sv << evdi_name
+                          << "] ("sv << render_width << "x"sv << render_height << "@"sv
+                          << target_fps << "Hz) via "sv
+                          << virtual_display::backend_name(linux_vdisplay->backend);
+
+          if (linux_vdisplay->backend != virtual_display::backend_e::EVDI) {
+            // headless_source=evdi but create() fell back to a non-EVDI backend (Wayland
+            // headless / kscreen-doctor). Native evdigrab does not apply — do not promote.
+            abort_promotion("virtual display backend is not EVDI (EVDI unavailable?)");
+          } else if (evdi_name.empty() || evdi_name == "VIRTUAL-1") {
+            // find_evdi_output() could not resolve the real connector (fell back to the
+            // synthetic "VIRTUAL-1"), which kscreen-doctor can never address for a swap.
+            abort_promotion("could not resolve the EVDI's real connector name");
+          } else if (!linux_display::wait_for_kscreen_output(evdi_name)) {
+            // The swap could fail to light the EVDI yet still disable the physical
+            // monitor, stranding the desktop. Presence check absorbs KWin hotplug lag.
+            abort_promotion("EVDI output [" + evdi_name + "] never appeared in kscreen-doctor");
+          } else {
+            this->evdi_promotion_active = true;
+            // Route capture to evdigrab: the misc.cpp dispatch matches
+            // config::video.output_name against the RAW connector name evdi_capture
+            // publishes, so set it directly (not via map_display_name, which can differ).
+            config::video.output_name = evdi_name;
+            // Point the auto_manage swap at the EVDI (enable_streaming_display reads
+            // streaming_output). primary_output stays the physical monitor to disable.
+            config::video.linux_display.streaming_output = evdi_name;
+            BOOST_LOG(info) << "EVDI-as-primary: promoting desktop onto ["sv << evdi_name
+                            << "]; physical monitor ["sv
+                            << config::video.linux_display.primary_output
+                            << "] will be disabled for the session"sv;
+          }
+        }
+      }
+    } else if (
       !display_policy.use_cage_runtime &&
       !config::video.linux_display.auto_manage_displays && (
         should_use_linux_virtual_display
@@ -4756,6 +5089,16 @@ namespace proc {
       } else {
         BOOST_LOG(warning) << "Virtual display requested but no backend available on Linux"sv;
         launch_session->virtual_display = false;
+      }
+    } else if (physical_headless_source && !display_policy.use_cage_runtime) {
+      if (!config::video.output_name.empty()) {
+        BOOST_LOG(info) << "Physical headless source: capturing connector ["sv
+                        << config::video.output_name
+                        << "] driven by the desktop compositor; no virtual display created"sv;
+      } else {
+        BOOST_LOG(warning) << "headless_source=physical but no Output Name is configured; "sv
+                           << "set Output Name to the dongle's connector name (e.g. DP-3 or HDMI-A-2, "sv
+                           << "see /sys/class/drm) so capture targets it deterministically"sv;
       }
     } else if (using_headless_cage) {
       BOOST_LOG(info) << "Linux virtual display: skipped because "sv
@@ -5887,6 +6230,28 @@ namespace proc {
 #endif
   }
 
+  void proc_t::restore_isolated_session_overrides() {
+    // Per-app output pin: restore the auto-managed streaming output. Kept
+    // independent of the isolated-session flags — an app can pin an output
+    // without opting into an isolated session.
+#ifdef __linux__
+    if (initial_streaming_output_saved) {
+      config::video.linux_display.streaming_output = initial_streaming_output;
+      initial_streaming_output.clear();
+      initial_streaming_output_saved = false;
+    }
+    if (!initial_linux_display_saved) {
+      return;
+    }
+    config::video.linux_display.headless_mode = initial_headless_mode;
+    config::video.linux_display.use_cage_compositor = initial_use_cage_compositor;
+    config::video.linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
+    config::audio.sink = initial_audio_sink;
+    initial_audio_sink.clear();
+    initial_linux_display_saved = false;
+#endif
+  }
+
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     if (!_session_lifecycle_gate->begin_stop()) {
       return;
@@ -6055,8 +6420,13 @@ namespace proc {
     finish_isolated_session_generation_cleanup();
 
     // Disable streaming display after undo commands have run.
-    // Skip if a virtual display was created (it will be destroyed below).
-    if (!linux_vdisplay.has_value() || !linux_vdisplay->active) {
+    // Skip if a virtual display was created (it will be destroyed below) — EXCEPT for an
+    // EVDI-promotion session: it promoted the desktop onto the (active) vdisplay and MUST
+    // run the un-promote here to restore the physical monitor BEFORE that vdisplay is
+    // destroyed. The original !linux_vdisplay clause is preserved verbatim so the
+    // Increment-1 physical-dongle restore is untouched; the evdi_promotion_active || is
+    // additive.
+    if (this->evdi_promotion_active || !linux_vdisplay.has_value() || !linux_vdisplay->active) {
       linux_display::disable_streaming_display();
     }
 #endif
@@ -6099,6 +6469,12 @@ namespace proc {
     // Destroy Linux virtual display if one was created
     bool used_linux_vdisplay = linux_vdisplay.has_value() && linux_vdisplay->active;
     if (used_linux_vdisplay) {
+      // For an EVDI-promotion session the un-promote above re-enabled the physical
+      // monitor; give KDE a beat to bring it back online BEFORE destroying the EVDI,
+      // otherwise there is a window with zero enabled CRTCs → a momentary black desktop.
+      if (this->evdi_promotion_active) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+      }
       virtual_display::destroy(*linux_vdisplay);
       linux_vdisplay.reset();
       BOOST_LOG(info) << "Linux Virtual Display removed successfully"sv;
@@ -6135,6 +6511,11 @@ namespace proc {
       config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
     }
 
+    // Undo the per-app display-source overrides (isolated session / output
+    // pin). Runs after disable_streaming_display() above, which must still see
+    // the session's pinned output to power it off.
+    restore_isolated_session_overrides();
+
     _app_id = -1;
     _app_name.clear();
     _app = {};
@@ -6145,6 +6526,7 @@ namespace proc {
     initial_max_bitrate = 0;
     initial_adaptive_max_bitrate = 0;
     initial_video_config_saved = false;
+    evdi_promotion_active = false;
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;
@@ -7187,6 +7569,34 @@ namespace proc {
           ctx.wait_all = app_node.value("wait-all", true);
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           ctx.virtual_display = app_node.value("virtual-display", false);
+          ctx.isolated_session = app_node.value("isolated-session", false);
+          ctx.output_name = app_node.value("output-name", "");
+
+          // Display Source — the canonical per-app selector for where this
+          // app's pixels come from: "" / "default" (primary display),
+          // "isolated" (hidden compositor), "virtual" (created virtual
+          // screen), "output" (a specific connector via output-name).
+          // Legacy flags migrate silently; an explicit display-source wins
+          // over legacy flags and normalizes them so every downstream read
+          // (isolated_session / virtual_display / output_name) stays valid.
+          ctx.display_source = app_node.value("display-source", "");
+          if (ctx.display_source.empty()) {
+            if (ctx.isolated_session) {
+              ctx.display_source = "isolated";
+            } else if (ctx.virtual_display) {
+              ctx.display_source = "virtual";
+            } else if (!ctx.output_name.empty()) {
+              ctx.display_source = "output";
+            } else {
+              ctx.display_source = "default";
+            }
+          }
+          ctx.isolated_session = (ctx.display_source == "isolated");
+          ctx.virtual_display = (ctx.display_source == "virtual");
+          if (ctx.display_source != "output") {
+            ctx.output_name.clear();
+          }
+
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
           ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);

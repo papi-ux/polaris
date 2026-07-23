@@ -31,6 +31,7 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/process/v1/search_path.hpp>
 #include <nlohmann/json.hpp>
 #include <Simple-Web-Server/crypto.hpp>
 #include <Simple-Web-Server/server_https.hpp>
@@ -2838,6 +2839,16 @@ namespace confighttp {
       output_tree["runtime_requested_headless"] = runtime_state.requested_headless;
       output_tree["runtime_effective_headless"] = runtime_state.effective_headless;
       output_tree["runtime_gpu_native_override_active"] = runtime_state.gpu_native_override_active;
+      // Session readiness: whether the optional Linux dependencies each streaming feature
+      // needs are actually installed/loaded, so the UI can flag silent-fallback situations
+      // (e.g. EVDI not loaded, no swaybg splash) instead of hiding them in the log.
+      auto have_bin = [](const char *name) {
+        return !boost::process::v1::search_path(name).empty();
+      };
+      output_tree["readiness_evdi"] = (vd_backend == virtual_display::backend_e::EVDI);
+      output_tree["readiness_labwc"] = have_bin("labwc");
+      output_tree["readiness_swaybg"] = have_bin("swaybg");
+      output_tree["readiness_kscreen"] = have_bin("kscreen-doctor");
     }
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
@@ -2857,6 +2868,23 @@ namespace confighttp {
     }
     if (!output_tree.contains("browser_streaming") && output_tree.contains("webrtc_browser_streaming")) {
       output_tree["browser_streaming"] = output_tree["webrtc_browser_streaming"];
+    }
+    // Backward-compat: surface the legacy boolean headless_swap_primary as the new
+    // headless_swap_mode value so migrated configs show the correct mode in the UI, then
+    // drop the legacy key so it is not re-persisted on save (a re-persisted legacy key
+    // could otherwise override a deliberate "off"/Extended choice back to privacy).
+    if (!output_tree.contains("headless_swap_mode") && output_tree.contains("headless_swap_primary")) {
+      const bool legacy_on = output_tree["headless_swap_primary"].get<std::string>() == "enabled";
+      output_tree["headless_swap_mode"] = legacy_on ? "privacy" : "off";
+    }
+    output_tree.erase("headless_swap_primary");
+    // Normalize a removed "mirror" value (from the brief mirror-default window) to a valid
+    // dropdown option so the UI select doesn't render blank. "Stream your real screen" is
+    // now the Mirror Desktop capture mode, so map it to "off" (monitor stays on).
+    if (output_tree.contains("headless_swap_mode") &&
+        output_tree["headless_swap_mode"].get<std::string>() != "privacy" &&
+        output_tree["headless_swap_mode"].get<std::string>() != "off") {
+      output_tree["headless_swap_mode"] = "off";
     }
     output_tree["has_ai_api_key"] = output_tree.value("has_ai_api_key", false);
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);

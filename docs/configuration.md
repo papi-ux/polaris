@@ -37,6 +37,9 @@ desktop shell or app is launched inside that runtime.
 Use Desktop Display mode when you want to stream the visible host desktop session. Use Headless
 Stream when you want a stream-only runtime that leaves the host desktop layout alone.
 
+To stream an isolated game session per-app — so someone can play on another device while you keep
+using your PC — see [Family Mode](family-mode.md).
+
 ## Common options
 
 | Key | Typical value | What it controls |

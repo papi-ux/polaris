@@ -23,6 +23,8 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
+#include <poll.h>
 #include <signal.h>
 #include <sstream>
 #include <thread>
@@ -48,6 +50,7 @@ namespace virtual_display {
   namespace {
     constexpr auto backend_detection_cache_ttl = 30s;
     std::optional<backend_e> cached_backend;
+    std::string cached_backend_source;
     std::chrono::steady_clock::time_point cached_backend_time {};
     backend_detection_log_cache_t backend_detection_log_cache;
 
@@ -238,7 +241,7 @@ namespace virtual_display {
      * This creates a valid EDID 1.4 block with:
      *   - Manufacturer ID "VRT" (Virtual)
      *   - A detailed timing descriptor for the requested mode
-     *   - Monitor name "Apollo Virtual"
+     *   - Monitor name "Polaris VDD"
      */
     static std::vector<unsigned char> generate_edid(int width, int height, int fps) {
       // Start with a known-good base EDID template
@@ -254,11 +257,14 @@ namespace virtual_display {
       edid[6] = 0xFF;
       edid[7] = 0x00;
 
-      // Manufacturer ID "VRT" encoded as 3 5-bit chars: V=22, R=18, T=20
-      // Byte 8: 0|10110|10010 -> high byte = (22 << 2) | (18 >> 3) = 88 | 2 = 0x5A
-      // Byte 9: 010|10100|00000000 -> (18 & 0x7) << 5 | 20 = 0x54
-      edid[8] = 0x5A;
-      edid[9] = 0x54;
+      // Manufacturer ID "PLR" (Polaris; unregistered in the PNP registry, so
+      // desktops show the raw code instead of mis-attributing the display —
+      // the old "VRT" decoded to Varjo Technologies).
+      // Encoding: 3 chars, 5 bits each (A=1..Z=26): P=16, L=12, R=18.
+      // Byte 8 = (16 << 2) | (12 >> 3) = 0x41
+      // Byte 9 = ((12 & 0x7) << 5) | 18 = 0x92
+      edid[8] = 0x41;
+      edid[9] = 0x92;
 
       // Product code (bytes 10-11)
       edid[10] = 0x01;
@@ -377,10 +383,18 @@ namespace virtual_display {
       edid[74] = 0x00;
       edid[75] = 0xFC;  // Monitor name tag
       edid[76] = 0x00;
-      const char *name = "Apollo Virtual";
+      // Per EDID spec: name (max 13 chars), then a single 0x0A terminator,
+      // then 0x20 space padding.
+      const char *name = "Polaris VDD";
       int name_len = std::min((int)strlen(name), 13);
       for (int i = 0; i < 13; i++) {
-        edid[77 + i] = (i < name_len) ? (unsigned char)name[i] : 0x0A;
+        if (i < name_len) {
+          edid[77 + i] = (unsigned char)name[i];
+        } else if (i == name_len) {
+          edid[77 + i] = 0x0A;
+        } else {
+          edid[77 + i] = 0x20;
+        }
       }
 
       // Descriptor block 3 (bytes 90-107): Monitor range limits
@@ -428,6 +442,50 @@ namespace virtual_display {
     using fn_evdi_disconnect_t = void (*)(evdi_handle_t handle);
     using fn_evdi_close_t = void (*)(evdi_handle_t handle);
 
+    // ABI mirrors of the evdi_lib.h structs used by the frame-grab path.
+    // Layout matches evdi 1.6+ (unchanged through 1.14). Cursor/DDCCI handlers
+    // are never installed, so only the context layout (plain fn pointers)
+    // matters for those events.
+    struct evdi_rect_t {
+      int x1, y1, x2, y2;
+    };
+
+    struct evdi_mode_t {
+      int width;
+      int height;
+      int refresh_rate;
+      int bits_per_pixel;
+      unsigned int pixel_format;
+    };
+
+    struct evdi_buffer_desc_t {
+      int id;
+      void *buffer;
+      int width;
+      int height;
+      int stride;
+      evdi_rect_t *rects;
+      int rect_count;
+    };
+
+    struct evdi_event_context_t {
+      void (*dpms_handler)(int dpms_mode, void *user_data);
+      void (*mode_changed_handler)(evdi_mode_t mode, void *user_data);
+      void (*update_ready_handler)(int buffer_to_be_updated, void *user_data);
+      void (*crtc_state_handler)(int state, void *user_data);
+      void *cursor_set_handler;   // unused — never enabled
+      void *cursor_move_handler;  // unused — never enabled
+      void *ddcci_data_handler;   // unused
+      void *user_data;
+    };
+
+    using fn_evdi_get_event_ready_t = int (*)(evdi_handle_t handle);
+    using fn_evdi_handle_events_t = void (*)(evdi_handle_t handle, evdi_event_context_t *evtctx);
+    using fn_evdi_register_buffer_t = void (*)(evdi_handle_t handle, evdi_buffer_desc_t buffer);
+    using fn_evdi_unregister_buffer_t = void (*)(evdi_handle_t handle, int buffer_id);
+    using fn_evdi_request_update_t = bool (*)(evdi_handle_t handle, int buffer_id);
+    using fn_evdi_grab_pixels_t = int (*)(evdi_handle_t handle, evdi_rect_t *rects, int *num_rects);
+
     // Dynamically loaded function pointers
     static void *lib_handle = nullptr;
     static fn_evdi_open_t fn_open = nullptr;
@@ -435,6 +493,18 @@ namespace virtual_display {
     static fn_evdi_connect_t fn_connect = nullptr;
     static fn_evdi_disconnect_t fn_disconnect = nullptr;
     static fn_evdi_close_t fn_close = nullptr;
+    static fn_evdi_get_event_ready_t fn_get_event_ready = nullptr;
+    static fn_evdi_handle_events_t fn_handle_events = nullptr;
+    static fn_evdi_register_buffer_t fn_register_buffer = nullptr;
+    static fn_evdi_unregister_buffer_t fn_unregister_buffer = nullptr;
+    static fn_evdi_request_update_t fn_request_update = nullptr;
+    static fn_evdi_grab_pixels_t fn_grab_pixels = nullptr;
+
+    // Native frame-grab module (defined after create/destroy below).
+    namespace frame_grab {
+      static void publish(evdi_handle_t handle, const std::string &output_name, int width, int height);
+      static void unpublish(evdi_handle_t handle);
+    }  // namespace frame_grab
 
     /**
      * @brief Check if EVDI kernel module is loaded.
@@ -478,7 +548,16 @@ namespace virtual_display {
         return true;  // Already loaded
       }
 
-      lib_handle = dyn::handle({"libevdi.so.0", "libevdi.so"});
+      // Try bare sonames first (distros with libevdi on the default linker
+      // path), then known off-path locations: openSUSE ships libevdi.so.1
+      // under /usr/lib64/displaylink/, which ld.so does not search.
+      lib_handle = dyn::handle({
+        "libevdi.so.1",
+        "libevdi.so.0",
+        "libevdi.so",
+        "/usr/lib64/displaylink/libevdi.so.1",
+        "/usr/lib/displaylink/libevdi.so.1",
+      });
       if (!lib_handle) {
         BOOST_LOG(debug) << "Virtual display: libevdi not found on this system"sv;
         return false;
@@ -490,6 +569,14 @@ namespace virtual_display {
         {(dyn::apiproc *) &fn_connect, "evdi_connect"},
         {(dyn::apiproc *) &fn_disconnect, "evdi_disconnect"},
         {(dyn::apiproc *) &fn_close, "evdi_close"},
+        // Frame-grab path: the device opener is the intended consumer of EVDI
+        // frames (KMS reads of an EVDI card's scanout come back black).
+        {(dyn::apiproc *) &fn_get_event_ready, "evdi_get_event_ready"},
+        {(dyn::apiproc *) &fn_handle_events, "evdi_handle_events"},
+        {(dyn::apiproc *) &fn_register_buffer, "evdi_register_buffer"},
+        {(dyn::apiproc *) &fn_unregister_buffer, "evdi_unregister_buffer"},
+        {(dyn::apiproc *) &fn_request_update, "evdi_request_update"},
+        {(dyn::apiproc *) &fn_grab_pixels, "evdi_grab_pixels"},
       };
 
       if (dyn::load(lib_handle, funcs)) {
@@ -686,7 +773,13 @@ namespace virtual_display {
       }
 
       if (!handle) {
-        BOOST_LOG(warning) << "Virtual display: failed to open EVDI device"sv;
+        // The most common cause: the evdi module is loaded without any
+        // pre-created device, and creating one at runtime requires root
+        // (a sysfs write), which Polaris does not have.
+        BOOST_LOG(warning) << "Virtual display: failed to open EVDI device. "sv
+                           << "Polaris cannot create EVDI devices without root; load the module with one pre-created: "sv
+                           << "[sudo modprobe evdi initial_device_count=1] "sv
+                           << "(persist via /etc/modprobe.d/evdi.conf: [options evdi initial_device_count=1])"sv;
         return std::nullopt;
       }
 
@@ -753,11 +846,135 @@ namespace virtual_display {
       display.backend = backend_e::EVDI;
       display.evdi_handle = handle;
 
+      // Publish for the native frame-grab capture path (see frame_grab above).
+      frame_grab::publish(handle, output_name, width, height);
+
       BOOST_LOG(info) << "Virtual display: EVDI display created ["sv
                       << output_name << "] at "sv << new_device_path;
 
       return display;
     }
+
+    // -----------------------------------------------------------------------
+    // Native frame grab — the device opener is EVDI's intended pixel consumer.
+    // The compositor renders and page-flips; frames are delivered to the
+    // process holding the evdi handle (us) via update events + grab_pixels,
+    // exactly like the DisplayLink daemon consumes them. All state is guarded
+    // by one mutex; libevdi calls happen only with it held, which also
+    // serializes capture against create()/destroy().
+    // -----------------------------------------------------------------------
+    namespace frame_grab {
+
+      constexpr int max_rects = 16;
+
+      static std::mutex mtx;
+      static evdi_handle_t active_handle = nullptr;
+      static std::string active_output_name;
+      static int mode_width = 0;
+      static int mode_height = 0;
+      static bool mode_dirty = false;
+      static bool buffer_registered = false;
+      static std::vector<std::uint8_t> framebuffer;
+      static std::array<evdi_rect_t, max_rects> rect_storage {};
+      static bool update_ready = false;
+
+      // Handlers run synchronously inside fn_handle_events (called with mtx
+      // held on the capture thread) — no extra locking needed.
+      static void on_mode_changed(evdi_mode_t mode, void *) {
+        BOOST_LOG(info) << "Virtual display: EVDI mode changed to "sv
+                        << mode.width << 'x' << mode.height << '@' << mode.refresh_rate
+                        << " bpp="sv << mode.bits_per_pixel;
+        if (mode.width > 0 && mode.height > 0) {
+          mode_width = mode.width;
+          mode_height = mode.height;
+          mode_dirty = true;
+        }
+      }
+
+      static void on_update_ready(int, void *) {
+        update_ready = true;
+      }
+
+      static void on_dpms(int, void *) {}
+
+      static void on_crtc_state(int, void *) {}
+
+      static evdi_event_context_t event_context {
+        on_dpms,
+        on_mode_changed,
+        on_update_ready,
+        on_crtc_state,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+      };
+
+      // Poll the evdi event fd; dispatch events when readable.
+      // Returns true if events were dispatched. Callers hold mtx.
+      static bool pump_events_locked(std::chrono::milliseconds timeout) {
+        struct pollfd pfd {};
+        pfd.fd = fn_get_event_ready(active_handle);
+        pfd.events = POLLIN;
+        int rc = ::poll(&pfd, 1, static_cast<int>(timeout.count()));
+        if (rc > 0 && (pfd.revents & POLLIN)) {
+          fn_handle_events(active_handle, &event_context);
+          return true;
+        }
+        return false;
+      }
+
+      // (Re)register the shared framebuffer for the current mode. Callers hold mtx.
+      static void ensure_buffer_locked() {
+        if (buffer_registered && !mode_dirty) {
+          return;
+        }
+        if (buffer_registered) {
+          fn_unregister_buffer(active_handle, 0);
+          buffer_registered = false;
+        }
+        framebuffer.assign(static_cast<std::size_t>(mode_width) * mode_height * 4, 0);
+        evdi_buffer_desc_t desc {};
+        desc.id = 0;
+        desc.buffer = framebuffer.data();
+        desc.width = mode_width;
+        desc.height = mode_height;
+        desc.stride = mode_width * 4;
+        desc.rects = rect_storage.data();
+        desc.rect_count = max_rects;
+        fn_register_buffer(active_handle, desc);
+        buffer_registered = true;
+        mode_dirty = false;
+        BOOST_LOG(info) << "Virtual display: EVDI frame buffer registered ("sv
+                        << mode_width << 'x' << mode_height << ")"sv;
+      }
+
+      static void publish(evdi_handle_t handle, const std::string &output_name, int width, int height) {
+        std::lock_guard lock(mtx);
+        active_handle = handle;
+        active_output_name = output_name;
+        mode_width = width;
+        mode_height = height;
+        mode_dirty = true;
+        buffer_registered = false;
+        update_ready = false;
+      }
+
+      // Tear down before disconnect/close. Safe to call with any handle state.
+      static void unpublish(evdi_handle_t handle) {
+        std::lock_guard lock(mtx);
+        if (active_handle != handle) {
+          return;
+        }
+        if (buffer_registered) {
+          fn_unregister_buffer(active_handle, 0);
+          buffer_registered = false;
+        }
+        active_handle = nullptr;
+        active_output_name.clear();
+      }
+
+    }  // namespace frame_grab
 
     /**
      * @brief Destroy an EVDI virtual display.
@@ -768,6 +985,8 @@ namespace virtual_display {
       }
 
       BOOST_LOG(info) << "Virtual display: disconnecting EVDI display ["sv << display.output_name << "]"sv;
+
+      frame_grab::unpublish((evdi_handle_t)display.evdi_handle);
 
       fn_disconnect((evdi_handle_t)display.evdi_handle);
 
@@ -1064,31 +1283,62 @@ namespace virtual_display {
   }
 
   backend_e detect_backend() {
+    // Explicit user override (headless_source) takes precedence over auto-detect.
+    // The result — forced or auto — is cached under the TTL together with the source
+    // value that produced it, so probes (which spawn modprobe / shell out) run at most
+    // once per TTL, and a config change invalidates the cache immediately.
+    const auto &source = config::video.linux_display.headless_source;
     const auto now = std::chrono::steady_clock::now();
-    if (cached_backend.has_value() && (now - cached_backend_time) <= backend_detection_cache_ttl) {
+    if (cached_backend.has_value() && cached_backend_source == source &&
+        (now - cached_backend_time) <= backend_detection_cache_ttl) {
       return *cached_backend;
     }
 
     backend_e backend = backend_e::NONE;
+    bool forced = false;
 
-    // Priority 1: EVDI — creates true virtual connectors
-    if (evdi::is_module_loaded() || evdi::load_module()) {
-      if (evdi::load_library()) {
+    if (source == "evdi") {
+      if (evdi::is_available()) {
         backend = backend_e::EVDI;
+        forced = true;
+      } else {
+        BOOST_LOG(warning) << "Virtual display: headless_source=evdi requested but EVDI is unavailable; falling back to auto-detect"sv;
+      }
+    } else if (source == "virtual") {
+      if (wayland_wlr::is_available()) {
+        backend = backend_e::WAYLAND_WLR;
+        forced = true;
+      } else {
+        BOOST_LOG(warning) << "Virtual display: headless_source=virtual requested but no wlroots headless output is available; falling back to auto-detect"sv;
+      }
+    } else if (source == "physical") {
+      // Physical source means "capture a real connector the desktop compositor
+      // already drives" — the launch path skips virtual-display creation
+      // entirely (see process.cpp), so no backend is needed here. This branch
+      // is only reached if something still asks for a virtual display; honor
+      // that request via auto-detect rather than failing it.
+      BOOST_LOG(debug) << "Virtual display: headless_source=physical targets an existing connector; using auto-detect for this virtual-display request"sv;
+    }
+
+    if (!forced) {
+      // Priority 1: EVDI — creates true virtual connectors
+      if (evdi::is_available()) {
+        backend = backend_e::EVDI;
+      }
+
+      // Priority 2: Wayland compositor headless outputs
+      if (backend == backend_e::NONE && wayland_wlr::is_available()) {
+        backend = backend_e::WAYLAND_WLR;
+      }
+
+      // Priority 3: kscreen-doctor (KDE Plasma)
+      if (backend == backend_e::NONE && kscreen::is_available()) {
+        backend = backend_e::KSCREEN_DOCTOR;
       }
     }
 
-    // Priority 2: Wayland compositor headless outputs
-    if (backend == backend_e::NONE && wayland_wlr::is_available()) {
-      backend = backend_e::WAYLAND_WLR;
-    }
-
-    // Priority 3: kscreen-doctor (KDE Plasma)
-    if (backend == backend_e::NONE && kscreen::is_available()) {
-      backend = backend_e::KSCREEN_DOCTOR;
-    }
-
     cached_backend = backend;
+    cached_backend_source = source;
     cached_backend_time = now;
     log_detected_backend(backend);
     return backend;
@@ -1111,6 +1361,74 @@ namespace virtual_display {
     const auto backend = detect_backend();
     return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
   }
+
+  namespace evdi_capture {
+
+    bool available() {
+      std::lock_guard lock(evdi::frame_grab::mtx);
+      return evdi::frame_grab::active_handle != nullptr;
+    }
+
+    std::string output_name() {
+      std::lock_guard lock(evdi::frame_grab::mtx);
+      return evdi::frame_grab::active_output_name;
+    }
+
+    bool dimensions(int &width, int &height) {
+      std::lock_guard lock(evdi::frame_grab::mtx);
+      if (!evdi::frame_grab::active_handle) {
+        return false;
+      }
+      width = evdi::frame_grab::mode_width;
+      height = evdi::frame_grab::mode_height;
+      return true;
+    }
+
+    int grab_frame(frame_view_t &out, std::chrono::milliseconds timeout) {
+      using namespace evdi::frame_grab;
+      std::lock_guard lock(mtx);
+      if (!active_handle) {
+        return -1;
+      }
+
+      // Drain queued events first — the compositor's initial mode-set may
+      // still be pending from before capture started.
+      pump_events_locked(std::chrono::milliseconds(0));
+      ensure_buffer_locked();
+
+      update_ready = false;
+      if (!evdi::fn_request_update(active_handle, 0)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!update_ready) {
+          const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()
+          );
+          if (remaining.count() <= 0) {
+            return 0;  // no damage within the frame window — reuse last frame
+          }
+          pump_events_locked(remaining);
+          if (!active_handle) {
+            return -1;
+          }
+          if (mode_dirty) {
+            // Mode changed mid-wait; re-register and let the next request pick
+            // up the new geometry.
+            ensure_buffer_locked();
+          }
+        }
+      }
+
+      int num_rects = max_rects;
+      evdi::fn_grab_pixels(active_handle, rect_storage.data(), &num_rects);
+
+      out.data = framebuffer.data();
+      out.width = mode_width;
+      out.height = mode_height;
+      out.stride = mode_width * 4;
+      return 1;
+    }
+
+  }  // namespace evdi_capture
 
   bool cleanup_stale() {
     pid_t owner_pid = 0;

@@ -11,6 +11,8 @@
 #pragma once
 
 // standard includes
+#include <chrono>
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -124,5 +126,42 @@ namespace virtual_display {
    * @return A string like "EVDI", "Wayland (wlr)", or "kscreen-doctor".
    */
   const char *backend_name(backend_e backend);
+
+  /**
+   * @brief Native EVDI frame consumption — the intended EVDI pixel path.
+   *
+   * EVDI delivers rendered frames to the process that opened the device
+   * (via update events + grab_pixels), the same way the DisplayLink daemon
+   * consumes them. Reading the EVDI card's scanout through KMS returns
+   * black, so capture must pull frames through this API whenever the active
+   * virtual display is EVDI-backed.
+   */
+  namespace evdi_capture {
+
+    struct frame_view_t {
+      const std::uint8_t *data = nullptr;
+      int width = 0;
+      int height = 0;
+      int stride = 0;  ///< bytes per row (width * 4, BGRA)
+    };
+
+    /// True while an EVDI-backed virtual display session is active.
+    bool available();
+
+    /// Connector name of the active EVDI display (e.g. "DVI-I-1").
+    std::string output_name();
+
+    /// Current mode of the active display. False when no session is active.
+    bool dimensions(int &width, int &height);
+
+    /**
+     * @brief Pump EVDI events and grab the next frame.
+     * @return 1 frame ready (out is valid until the next call),
+     *         0 timeout (no new damage — reuse the previous frame),
+     *        -1 no active EVDI session.
+     */
+    int grab_frame(frame_view_t &out, std::chrono::milliseconds timeout);
+
+  }  // namespace evdi_capture
 
 }  // namespace virtual_display

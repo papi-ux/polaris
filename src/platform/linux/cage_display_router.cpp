@@ -7,9 +7,9 @@
  * switching, no HDMI-A-1, no kscreen-doctor, no KWin routing scripts.
  *
  * Key environment variables set for cage:
- *   WLR_BACKENDS=wayland    — run as a Wayland client window (not DRM)
- *   WLR_RENDERER=vulkan     — best NVIDIA support
- *   WAYLAND_DISPLAY=<sock>  — cage's own socket name for its children
+ *   WLR_BACKENDS=wayland|headless — windowed on desktop, or off-screen (family mode)
+ *   WLR_RENDERER=vulkan|gles2     — per-GPU: Vulkan on AMD/Intel, GLES2 on NVIDIA
+ *   WAYLAND_DISPLAY=<sock>        — cage's own socket name for its children
  *
  * Resolution is set via wlr-randr after cage starts (--custom-mode).
  */
@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <dirent.h>
+#include <filesystem>
 #include <functional>
 #include <fstream>
 #include <cstdlib>
@@ -138,6 +139,42 @@ namespace cage_display_router {
     return prefix;
   }
 
+  /**
+   * @brief Pick the wlroots renderer for a headless labwc compositor.
+   *
+   * The headless GLES2 renderer leaves GPU-accelerated clients — Steam's CEF UI
+   * and Proton games — as a black frame off-screen (the "Family Mode black
+   * screen"). The Vulkan renderer GPU-accelerates the compositor and paints
+   * those clients correctly while still running fully off-screen. On AMD/Intel
+   * we therefore use Vulkan for headless. NVIDIA is the exception: headless +
+   * Vulkan is unstable on the nvidia driver / wlroots 0.19, so NVIDIA keeps
+   * GLES2 (and relies on the windowed GPU-native fallback). The choice is made
+   * by inspecting the DRM driver — no user configuration required. Cached
+   * because the GPU set does not change within a process lifetime.
+   */
+  static const std::string &headless_wlr_renderer() {
+    static const std::string cached = [] {
+      namespace fs = std::filesystem;
+      std::error_code ec;
+      for (const auto &entry : fs::directory_iterator("/sys/class/drm", ec)) {
+        const auto card = entry.path().filename().string();
+        // Match render-capable primary nodes (card0, card1, ...), not the
+        // per-connector entries (card0-HDMI-A-1) which have no device/driver.
+        if (card.rfind("card", 0) != 0 || card.find('-') != std::string::npos) {
+          continue;
+        }
+        const auto driver = fs::read_symlink(entry.path() / "device" / "driver", ec);
+        if (!ec && driver.filename().string() == "nvidia") {
+          BOOST_LOG(info) << "cage: NVIDIA DRM driver detected — using GLES2 renderer for headless labwc (Vulkan headless is unstable on NVIDIA)"sv;
+          return std::string {"gles2"};
+        }
+      }
+      BOOST_LOG(info) << "cage: using Vulkan renderer for headless labwc (GPU-accelerated off-screen; required for Steam CEF / Proton to paint)"sv;
+      return std::string {"vulkan"};
+    }();
+    return cached;
+  }
+
   static std::string labwc_process_environment_value(bool headless, std::string_view key) {
     if (key == "WLR_NO_HARDWARE_CURSORS") {
       // Polaris captures the private labwc compositor, not the host desktop. On
@@ -151,7 +188,7 @@ namespace cage_display_router {
     }
 
     if (key == "WLR_RENDERER") {
-      return headless ? "gles2" : "vulkan";
+      return headless ? headless_wlr_renderer() : "vulkan";
     }
 
     if (headless && key == "WLR_HEADLESS_OUTPUTS") {
@@ -717,12 +754,32 @@ namespace cage_display_router {
         mangohud_prefix = mangohud_prefix_for_command(game_cmd, allow_mangohud, mh, mhc ? mhc : "");
       }
     }
+    // Optional splash backdrop: paint the output while the game cold-starts so
+    // the stream shows a deliberate backdrop instead of a black void. Uses
+    // swaybg when installed (no hard dependency); a user-supplied image at
+    // ~/.config/polaris/splash.png wins over the solid fallback color. swaybg
+    // is backgrounded inside the session and exits on its own when the
+    // compositor goes away, so no teardown is needed.
+    std::string splash_cmd;
+    if (!resolve_executable("swaybg").empty()) {
+      const std::string user_splash = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/.config/polaris/splash.png";
+      if (access(user_splash.c_str(), R_OK) == 0) {
+        splash_cmd = "swaybg -m fill -i " + shell_quote(user_splash) + " >/dev/null 2>&1 & ";
+        BOOST_LOG(info) << "labwc: splash backdrop enabled (image ["sv << user_splash << "])"sv;
+      } else {
+        splash_cmd = "swaybg -c '#101418' >/dev/null 2>&1 & ";
+        BOOST_LOG(info) << "labwc: splash backdrop enabled (solid color; drop an image at ~/.config/polaris/splash.png to customize)"sv;
+      }
+    } else {
+      BOOST_LOG(info) << "labwc: swaybg not found; startup shows a black backdrop until the game paints (install swaybg for a splash)"sv;
+    }
+
     if (!game_cmd.empty()) {
       auto mode_retry_cmd =
         "for i in $(seq 1 50); do "
         "wlr-randr --output " + output_name + " --custom-mode " + mode + " >/dev/null 2>&1 && break; "
         "sleep 0.1; "
-        "done; ";
+        "done; " + splash_cmd;
       if (headless) {
         // In headless mode: set resolution, ensure XWayland is ready, then launch game.
         // labwc with xwaylandPersistence=yes starts XWayland eagerly, but we still
@@ -738,7 +795,7 @@ namespace cage_display_router {
         "for i in $(seq 1 50); do "
         "wlr-randr --output " + output_name + " --custom-mode " + mode + " >/dev/null 2>&1 && break; "
         "sleep 0.1; "
-        "done; "
+        "done; " + splash_cmd +
         "exec sleep infinity";
     }
 
@@ -773,14 +830,14 @@ namespace cage_display_router {
         // Headless mode: no visible window on desktop, no parent display needed.
         // labwc creates virtual outputs that still support wlr-screencopy.
         //
-        // Known limitations on NVIDIA + wlroots 0.19:
-        // - Vulkan renderer crashes (vulkan_instance_destroy SEGV)
-        // - GLES2/pixman renderers work but screencopy returns SHM/ARGB frames
-        //   which CUDA/NVENC can't consume directly (needs NV12)
-        // - Requires SHM→NV12 conversion in the capture pipeline (future work)
+        // Renderer is chosen per-GPU in headless_wlr_renderer():
+        // - AMD/Intel: Vulkan renderer, so GPU-accelerated clients (Steam's CEF,
+        //   Proton games) actually paint off-screen instead of rendering black.
+        // - NVIDIA + wlroots 0.19: Vulkan headless crashes
+        //   (vulkan_instance_destroy SEGV), so NVIDIA keeps the GLES2/pixman path;
+        //   screencopy returns SHM/ARGB there and wlgrab converts via software
+        //   scaler (slower but functional). Windowed GPU-native is the fallback.
         //
-        // For now: use headless with GLES2, the SHM capture path in wlgrab
-        // handles the conversion via software scaler (slower but functional).
         // Clear inherited display vars so children ONLY talk to labwc.
         // labwc will set its own WAYLAND_DISPLAY and start XWayland (new DISPLAY).
         // Without this, Steam connects to KDE's :0 instead of labwc's XWayland.

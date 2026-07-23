@@ -18,6 +18,11 @@ export const CLIENT_SETTINGS_RESPONSE_ONLY_KEYS = [
   'client_settings_live_fields',
   'client_settings_restart_fields',
   'ai_auto_quality_enabled',
+  // Linux session-readiness status (display-only; computed by the host, never persisted).
+  'readiness_evdi',
+  'readiness_labwc',
+  'readiness_swaybg',
+  'readiness_kscreen',
 ]
 
 export function isTruthySetting(value) {

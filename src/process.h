@@ -345,6 +345,7 @@ namespace proc {
     bool auto_detach;
     bool wait_all;
     bool virtual_display;
+    bool isolated_session;  // family mode: force headless+cage for THIS app only
     bool virtual_display_primary;
     bool use_app_identity;
     bool per_client_app_identity;
@@ -352,6 +353,13 @@ namespace proc {
     bool terminate_on_pause;
     int  scale_factor;
     std::chrono::seconds exit_timeout;
+    // Pin capture to a specific output (kernel connector name, e.g. HDMI-A-1)
+    // for this app only; empty = use the global/default output (primary).
+    std::string output_name;
+    // Canonical display-source selector: "default" | "isolated" | "virtual" |
+    // "output". Parsed/migrated in parse(); the legacy bools above are
+    // normalized from it, so downstream code may read either.
+    std::string display_source;
   };
 
   enum class session_stop_outcome_t {
@@ -482,6 +490,36 @@ namespace proc {
     int initial_max_bitrate = 0;
     int initial_adaptive_max_bitrate = 0;
     bool initial_video_config_saved = false;
+    // Saved config for the per-app isolated-session override (family mode);
+    // populated only when the launched app opted in (initial_linux_display_saved
+    // is the guard).
+    bool initial_headless_mode = false;
+    bool initial_use_cage_compositor = false;
+    bool initial_prefer_gpu_native_capture = false;
+    std::string initial_audio_sink;
+    bool initial_linux_display_saved = false;
+    // Saved when a per-app output pin redirects the auto-managed streaming
+    // display for the session (restored independently of the isolated flags).
+    std::string initial_streaming_output;
+    bool initial_streaming_output_saved = false;
+    // True when the session promoted an EVDI virtual display to primary (headless
+    // streaming display with no physical dongle). Drives the teardown un-promote so
+    // the physical monitor is restored BEFORE the EVDI is destroyed.
+    bool evdi_promotion_active = false;
+
+    /**
+     * @brief Whether the currently running app opted into an isolated session.
+     * Used by the resume path to keep audio isolation across reconnects.
+     */
+    bool isolated_session_active() const {
+      return _app_id != -1 && _app.isolated_session;
+    }
+
+    /**
+     * @brief Restore the config globals forced by the per-app display-source
+     * overrides (isolated session / output pin). Idempotent.
+     */
+    void restore_isolated_session_overrides();
 
     proc_t(
       boost::process::v1::environment &&env,

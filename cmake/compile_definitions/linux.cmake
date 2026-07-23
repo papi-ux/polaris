@@ -357,6 +357,7 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/virtual_display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/virtual_display.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/evdigrab.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.h"

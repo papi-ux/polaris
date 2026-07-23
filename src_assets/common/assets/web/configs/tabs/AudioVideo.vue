@@ -30,6 +30,20 @@ const sudovdaStatus = {
 const currentDriverStatus = computed(() => sudovdaStatus[props.vdisplay])
 const config = ref(props.config)
 const isLinux = computed(() => props.platform === 'linux')
+
+// Session readiness (Linux): host-computed status of the optional dependencies each
+// streaming feature needs, so users see silent-fallback situations instead of digging
+// through the log. Values are display-only (see CLIENT_SETTINGS_RESPONSE_ONLY_KEYS).
+const readinessItems = computed(() => {
+  const c = config.value || {}
+  const ok = (v) => v === true || v === 'true' || v === 'enabled'
+  return [
+    { label: 'labwc', ok: ok(c.readiness_labwc), need: 'Family Mode compositor', fix: 'sudo zypper install labwc' },
+    { label: 'swaybg', ok: ok(c.readiness_swaybg), need: 'Family Mode splash (optional)', fix: 'sudo zypper install swaybg' },
+    { label: 'kscreen-doctor', ok: ok(c.readiness_kscreen), need: 'Privacy / Extended display swap', fix: 'ships with KDE Plasma' },
+    { label: 'EVDI', ok: ok(c.readiness_evdi), need: 'Headless streaming with no dongle', fix: 'load the evdi kernel module' },
+  ]
+})
 const isWindows = computed(() => props.platform === 'windows')
 const showDisplayPlannerAdvanced = ref(false)
 const customDisplayScale = ref(1)
@@ -58,7 +72,7 @@ const streamDisplayModes = [
     id: 'desktop_display',
     title: 'Mirror Desktop',
     badge: 'Advanced',
-    copy: 'Streams the visible KDE, GNOME, or wlroots desktop. Use only when you explicitly want the host monitor/session mirrored.',
+    copy: 'Streams your visible desktop exactly as-is — your monitor stays on and unchanged. Use when you want the stream to show your real screen (e.g. remote access) instead of a private session.',
     note: 'Advanced and not private: people near the PC may see the desktop or game window. Use for troubleshooting or already-running apps.',
   },
   {
@@ -292,6 +306,21 @@ const validateFallbackMode = (event) => {
             </span>
           </div>
 
+          <div class="surface-muted p-4">
+            <div class="text-sm font-medium text-silver">Session readiness</div>
+            <div class="mt-1 text-sm text-storm">Whether the optional dependencies each streaming feature needs are present on this host. A missing item means that feature falls back silently — install it to enable the feature.</div>
+            <div class="mt-3 grid gap-2 sm:grid-cols-2">
+              <div v-for="item in readinessItems" :key="item.label" class="flex items-start gap-2 text-sm">
+                <span :class="item.ok ? 'text-green-400' : 'text-amber-300'" class="mt-px font-semibold">{{ item.ok ? '✓' : '✗' }}</span>
+                <div class="min-w-0">
+                  <span class="text-silver">{{ item.label }}</span>
+                  <span class="ml-1 text-xs text-storm">— {{ item.need }}</span>
+                  <div v-if="!item.ok" class="mt-0.5 font-mono text-[11px] text-amber-200">{{ item.fix }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="grid gap-3 xl:grid-cols-2">
             <button
               v-for="mode in streamDisplayModes"
@@ -457,6 +486,53 @@ const validateFallbackMode = (event) => {
                   >
                   <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
                 </label>
+              </div>
+
+              <div class="surface-muted p-4">
+                <div class="text-sm font-medium text-silver">{{ $t('config.headless_source') }}</div>
+                <div class="mt-1 text-sm text-storm">{{ $t('config.headless_source_desc') }}</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_source</div>
+                <select
+                  id="headless_source"
+                  v-model="config.headless_source"
+                  class="focus-ring mt-4 w-full rounded-lg border border-storm/40 bg-deep px-3 py-2 text-sm text-silver"
+                >
+                  <option value="auto">{{ $t('config.headless_source_auto') }}</option>
+                  <option value="virtual">{{ $t('config.headless_source_virtual') }}</option>
+                  <option value="evdi">{{ $t('config.headless_source_evdi') }}</option>
+                  <option value="physical">{{ $t('config.headless_source_physical') }}</option>
+                </select>
+                <div
+                  v-if="config.headless_source === 'evdi'"
+                  class="mt-3 rounded-lg border border-storm/40 bg-deep/40 p-3 text-xs text-storm"
+                >
+                  <div class="text-sm text-silver">{{ $t('config.headless_source_evdi_setup') }}</div>
+                  <div class="mt-2 rounded bg-deep/60 px-2 py-1 font-mono">sudo modprobe evdi initial_device_count=1</div>
+                  <div class="mt-2">{{ $t('config.headless_source_evdi_setup_persist') }}</div>
+                </div>
+                <div
+                  v-else-if="config.headless_source === 'physical'"
+                  class="mt-3 rounded-lg border border-storm/40 bg-deep/40 p-3 text-xs text-storm"
+                >
+                  {{ $t('config.headless_source_physical_setup') }}
+                </div>
+              </div>
+
+              <div
+                v-if="config.linux_auto_manage_displays === 'enabled' && (config.headless_source === 'physical' || config.headless_source === 'evdi')"
+                class="surface-muted p-4"
+              >
+                <div class="text-sm font-medium text-silver">{{ $t('config.headless_swap_mode') }}</div>
+                <div class="mt-1 text-sm text-storm">{{ $t('config.headless_swap_mode_desc') }}</div>
+                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_swap_mode</div>
+                <select
+                  id="headless_swap_mode"
+                  v-model="config.headless_swap_mode"
+                  class="focus-ring mt-4 w-full rounded-lg border border-storm/40 bg-deep px-3 py-2 text-sm text-silver"
+                >
+                  <option value="privacy">{{ $t('config.headless_swap_mode_privacy') }}</option>
+                  <option value="off">{{ $t('config.headless_swap_mode_off') }}</option>
+                </select>
               </div>
             </div>
           </details>
