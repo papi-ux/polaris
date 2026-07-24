@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/screenshots/Polaris_fulllogo_2.svg" width="72" alt="Polaris" />
+<img src="docs/screenshots/Polaris_fulllogo_2.svg" width="250" />
 
-# Polaris
+#
 **Linux-only, self-hosted game streaming. Free, open source, and community-driven.**
 
 Stream PC games to Nova and Moonlight clients without letting the stream take
