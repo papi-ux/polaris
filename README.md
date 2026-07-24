@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/screenshots/logo-polaris.svg" width="72" alt="Polaris" />
+<img src="docs/screenshots/Polaris_fulllogo_2.svg" width="72" alt="Polaris" />
 
 # Polaris
 **Linux-only, self-hosted game streaming. Free, open source, and community-driven.**
