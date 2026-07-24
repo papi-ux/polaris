@@ -20,8 +20,10 @@
 
 #ifdef __linux__
   #include <csignal>
+  #include <fcntl.h>
   #include <pthread.h>
   #include <sys/prctl.h>
+  #include <sys/stat.h>
   #include <sys/wait.h>
   #include <unistd.h>
 #endif
@@ -1184,6 +1186,42 @@ TEST(ProcessRuntimeConfigTests, SteamShutdownOwnershipRejectsUnmarkedActiveClien
   EXPECT_FALSE(proc::steam_shutdown_process_is_unowned_active_for_tests(
     "steam", "/opt/steam/ubuntu12_32/steam", "/opt/steam/ubuntu12_32/steam", zombie_status, "", token
   ));
+}
+
+TEST(ProcessRuntimeConfigTests, SteamInstancePipeDetectsSingletonListener) {
+  namespace fs = std::filesystem;
+  const fs::path pipe_path = fs::temp_directory_path() /
+    ("polaris-steam-pipe-test-" + std::to_string(::getpid()));
+  ASSERT_EQ(mkfifo(pipe_path.c_str(), 0600), 0);
+
+  // No reader: opening for write fails with ENXIO, so no listener.
+  EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(pipe_path.string()));
+
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const auto child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    const int fd = open(pipe_path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) _exit(2);
+    const char ready = '1';
+    (void) write(ready_pipe[1], &ready, 1);
+    for (;;) pause();
+  }
+  close(ready_pipe[1]);
+  linux_child_guard_t guard(child);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+
+  EXPECT_TRUE(proc::steam_instance_pipe_listener_active_for_tests(pipe_path.string()));
+  guard.terminate_and_reap();
+  EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(pipe_path.string()));
+  EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(
+    (fs::temp_directory_path() / "polaris-steam-pipe-missing").string()));
+  std::error_code ec;
+  fs::remove(pipe_path, ec);
 }
 
 TEST(ProcessRuntimeConfigTests, PidfdSteamTerminationSignalsOnlyCapturedChild) {

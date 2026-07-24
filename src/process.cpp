@@ -1709,6 +1709,34 @@ namespace proc {
     thread_local pid_t forced_desktop_steam_scan_only_pid = -1;
 #endif
 
+    // Steam's client singleton is a FIFO at ~/.steam/steam.pipe: every
+    // `steam ...` invocation (including `steam steam://rungameid/...`)
+    // forwards its arguments to whatever instance is reading from that
+    // pipe and then exits. The last Steam process can vanish from /proc
+    // while teardown still holds the pipe, so process scanning alone
+    // cannot tell when a new instance may safely own the singleton; a
+    // launch URI forwarded in that window is swallowed by the dying
+    // instance and the game never starts.
+    bool steam_instance_pipe_listener_active(const std::string &pipe_path) {
+      const int fd = open(pipe_path.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+      if (fd < 0) {
+        // ENXIO: FIFO exists but has no reader. ENOENT: no pipe at all.
+        // Both mean no live instance owns the singleton. Fail closed
+        // on any other error.
+        return errno != ENXIO && errno != ENOENT;
+      }
+      close(fd);
+      return true;
+    }
+
+    bool steam_instance_singleton_released() {
+      const char *home = getenv("HOME");
+      if (home == nullptr || *home == '\0') {
+        return true;
+      }
+      return !steam_instance_pipe_listener_active(std::string(home) + "/.steam/steam.pipe");
+    }
+
     bool desktop_steam_client_active_impl() {
       DIR *dir = nullptr;
 #ifdef POLARIS_TESTS
@@ -3312,12 +3340,27 @@ namespace proc {
     child.detach();
     for (int i = 0; i < 50; ++i) {
       if (!desktop_steam_client_active_impl()) {
+        break;
+      }
+      std::this_thread::sleep_for(100ms);
+    }
+    if (desktop_steam_client_active_impl()) {
+      BOOST_LOG(warning) << "process: desktop Steam still active after explicit shutdown wait";
+      return false;
+    }
+    // The client processes are gone, but Steam's instance singleton can still
+    // be held by teardown. Launching `steam steam://rungameid/...` in that
+    // window forwards the URI to the dying instance, which swallows it, so
+    // the game never starts. Wait for the singleton to be released before
+    // reporting the shutdown as complete.
+    for (int i = 0; i < 50; ++i) {
+      if (steam_instance_singleton_released()) {
         return true;
       }
       std::this_thread::sleep_for(100ms);
     }
-    BOOST_LOG(warning) << "process: desktop Steam still active after explicit shutdown wait";
-    return !desktop_steam_client_active_impl();
+    BOOST_LOG(warning) << "process: desktop Steam instance singleton still held after shutdown wait";
+    return steam_instance_singleton_released();
   }
 #endif
 
@@ -3345,6 +3388,10 @@ namespace proc {
                                                std::string_view cmdline,
                                                std::string_view status) {
     return is_active_desktop_steam_client_process(comm, argv0_path, cmdline, status);
+  }
+
+  bool steam_instance_pipe_listener_active_for_tests(const std::string &pipe_path) {
+    return steam_instance_pipe_listener_active(pipe_path);
   }
 
   bool desktop_steam_proc_open_error_fails_closed_for_tests() {
