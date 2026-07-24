@@ -167,6 +167,15 @@ namespace cage_display_router {
   );
 
   /**
+   * @brief Returns whether a live frame conversion failure should disable the
+   *        windowed GPU-native override and retry capture through SHM.
+   */
+  bool should_disable_windowed_gpu_native_after_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    const platf::frame_metadata_t &source_metadata
+  );
+
+  /**
    * @brief Returns the cached result of the windowed GPU-native probe for the
    *        current Polaris process, if one exists.
    */

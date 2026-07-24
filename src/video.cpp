@@ -432,12 +432,24 @@ namespace video {
       }
     }
 
-    bool handle_headless_extcopy_conversion_failure(const frame_t &frame) {
+    bool handle_linux_gpu_native_conversion_failure(const frame_t &frame) {
       if (!::config::video.linux_display.use_cage_compositor || !cage_display_router::is_running()) {
         return false;
       }
 
       const auto runtime_state = cage_display_router::runtime_state();
+      if (cage_display_router::should_disable_windowed_gpu_native_after_conversion_failure(
+            runtime_state,
+            frame.source_metadata
+          )) {
+        cage_display_router::update_windowed_gpu_native_probe_result(false);
+        stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "frame_conversion", "live_gpu_frame_conversion_failed");
+        stream_stats::update_gpu_native_probe_selection("windowed_shm", "windowed_shm");
+        BOOST_LOG(warning)
+          << "Windowed GPU-native DMA-BUF frame conversion failed; disabling the GPU-native override and reinitializing with SHM/system-memory fallback"sv;
+        return true;
+      }
+
       if (!cage_display_router::should_disable_headless_extcopy_after_conversion_failure(
             runtime_state,
             frame.source_metadata
@@ -3164,7 +3176,7 @@ namespace video {
           if (session->convert(frame)) {
             BOOST_LOG(error) << "Could not convert image"sv;
 #ifdef __linux__
-            if (handle_headless_extcopy_conversion_failure(frame)) {
+            if (handle_linux_gpu_native_conversion_failure(frame)) {
               reinit_request_event.raise(true);
             }
 #endif
@@ -3538,7 +3550,7 @@ namespace video {
           if (frame_captured && frame.valid() && pos->session->convert(frame)) {
             BOOST_LOG(error) << "Could not convert image"sv;
 #ifdef __linux__
-            if (handle_headless_extcopy_conversion_failure(frame)) {
+            if (handle_linux_gpu_native_conversion_failure(frame)) {
               ec = platf::capture_e::reinit;
               return false;
             }

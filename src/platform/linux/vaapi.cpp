@@ -29,6 +29,7 @@ extern "C" {
 // local includes
 #include "graphics.h"
 #include "misc.h"
+#include "vaapi.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -412,28 +413,71 @@ namespace va {
   public:
     int convert(platf::img_t &img) override {
       auto &descriptor = (egl::img_descriptor_t &) img;
-
-      if (descriptor.sequence == 0) {
-        // For dummy images, use a blank RGB texture instead of importing a DMA-BUF
-        rgb = egl::create_blank(img);
-      } else if (descriptor.sequence > sequence) {
-        sequence = descriptor.sequence;
-
-        rgb = egl::rgb_t {};
-
-        auto rgb_opt = egl::import_source(display.get(), descriptor.sd);
-
-        if (!rgb_opt) {
-          return -1;
-        }
-
-        rgb = std::move(*rgb_opt);
+      std::array<bool, dmabuf_surface_cache_policy_t::capacity> valid_slots {};
+      for (std::size_t slot = 0; slot < rgb_cache.size(); ++slot) {
+        valid_slots[slot] = rgb_cache[slot]->tex.size() > 0 &&
+                            rgb_cache[slot]->tex[0] != 0 &&
+                            rgb_cache[slot].el.xrgb8 != EGL_NO_IMAGE;
       }
 
-      sws.load_vram(descriptor, offset_x, offset_y, rgb->tex[0]);
+      auto decision = cache_policy.plan(
+        descriptor.sequence,
+        descriptor.dmabuf_buffer_key,
+        valid_slots
+      );
+      egl::rgb_t *active_rgb = nullptr;
 
-      sws.convert(nv12->buf);
-      return 0;
+      switch (decision.action) {
+        case dmabuf_surface_action_e::blank:
+          if (blank_rgb->tex.size() == 0 || blank_rgb->tex[0] == 0) {
+            blank_rgb = egl::create_blank(img);
+          }
+          cache_policy.commit_blank();
+          active_rgb = &blank_rgb;
+          break;
+
+        case dmabuf_surface_action_e::reuse:
+          active_rgb = &rgb_cache[*decision.slot];
+          cache_policy.commit_live(
+            descriptor.sequence,
+            descriptor.dmabuf_buffer_key,
+            *decision.slot
+          );
+          descriptor.reset();
+          break;
+
+        case dmabuf_surface_action_e::import: {
+          auto rgb_opt = egl::import_source(display.get(), descriptor.sd);
+          if (!rgb_opt) {
+            return -1;
+          }
+
+          auto &slot = rgb_cache[*decision.slot];
+          slot = std::move(*rgb_opt);
+          active_rgb = &slot;
+          cache_policy.commit_live(
+            descriptor.sequence,
+            descriptor.dmabuf_buffer_key,
+            *decision.slot
+          );
+          descriptor.reset();
+          break;
+        }
+
+        case dmabuf_surface_action_e::unavailable:
+          BOOST_LOG(error)
+            << "VAAPI DMA-BUF conversion has no valid active RGB surface for frame sequence "sv
+            << descriptor.sequence;
+          return -1;
+      }
+
+      if (!active_rgb || (*active_rgb)->tex.size() == 0 || (*active_rgb)->tex[0] == 0) {
+        BOOST_LOG(error) << "VAAPI DMA-BUF conversion selected an invalid RGB texture"sv;
+        return -1;
+      }
+
+      sws.load_vram(descriptor, offset_x, offset_y, (*active_rgb)->tex[0]);
+      return sws.convert(nv12->buf);
     }
 
     int init(int in_width, int in_height, file_t &&render_device, int offset_x, int offset_y) {
@@ -441,16 +485,15 @@ namespace va {
         return -1;
       }
 
-      sequence = 0;
-
       this->offset_x = offset_x;
       this->offset_y = offset_y;
 
       return 0;
     }
 
-    std::uint64_t sequence;
-    egl::rgb_t rgb;
+    dmabuf_surface_cache_policy_t cache_policy;
+    egl::rgb_t blank_rgb;
+    std::array<egl::rgb_t, dmabuf_surface_cache_policy_t::capacity> rgb_cache;
 
     int offset_x, offset_y;
   };
