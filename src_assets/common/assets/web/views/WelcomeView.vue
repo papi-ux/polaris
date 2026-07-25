@@ -5,7 +5,7 @@
       <div class="grid w-full max-w-5xl gap-6 xl:grid-cols-[minmax(0,1.15fr)_340px]">
         <section class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
           <div class="flex items-center gap-3">
-            <img src="/images/logo-polaris-45.png" class="h-11" alt="Polaris">
+            <img :src="polarisWordmarkSrc" class="h-11 w-auto" alt="Polaris">
             <div>
               <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/85">First-Time Setup</div>
               <h1 class="mt-1 text-3xl font-bold text-silver">{{ $t('welcome.greeting') }}</h1>
@@ -212,6 +212,8 @@
 </template>
 
 <script setup>
+
+
 import { ref, reactive } from 'vue'
 import ResourceCard from '../ResourceCard.vue'
 
@@ -296,4 +298,6 @@ async function save() {
     loading.value = false
   }
 }
+
+const polarisWordmarkSrc = "/images/polaris-wordmark.svg?v=20260726"
 </script>

@@ -7,7 +7,9 @@
       :aria-busy="checking"
       class="glass relative w-full max-w-lg rounded-[28px] border border-storm/30 p-8 text-center shadow-2xl"
     >
-      <img :src="'/images/logo-polaris.svg'" class="mx-auto h-12" alt="Polaris">
+      <div class="flex items-center justify-center gap-3">
+        <img :src="polarisWordmarkSrc" class="h-12 w-auto" alt="Polaris">
+      </div>
       <div class="mt-5 text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/85">Host connection</div>
       <h1 class="mt-3 text-3xl font-bold text-silver">Host reconnecting…</h1>
       <p class="mt-4 text-sm leading-relaxed text-storm">
@@ -30,6 +32,8 @@
 </template>
 
 <script setup>
+
+
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -154,4 +158,6 @@ onUnmounted(() => {
   beginWebUiAuthProbeGeneration()
   clearRetryTimer()
 })
+
+const polarisWordmarkSrc = "/images/polaris-wordmark.svg?v=20260726"
 </script>

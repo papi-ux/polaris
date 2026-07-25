@@ -3,7 +3,9 @@
     <div class="flex w-full max-w-5xl flex-col gap-6 lg:flex-row">
       <div class="glass rounded-2xl p-8 w-full shadow-2xl animate-[scale-in_0.3s_ease-out]">
         <header class="flex items-center gap-3 mb-6">
-          <img src="/images/logo-polaris.svg" class="h-10" alt="Polaris">
+          <div class="flex items-center gap-3">
+            <img :src="polarisWordmarkSrc" class="h-10 w-auto" alt="Polaris">
+          </div>
           <div>
             <h1 class="text-2xl font-bold text-silver">{{ $t('recovery.title') }}</h1>
             <p class="text-storm text-sm">{{ $t('recovery.subtitle') }}</p>
@@ -76,6 +78,8 @@
 </template>
 
 <script setup>
+
+
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ResourceCard from '../ResourceCard.vue'
@@ -117,4 +121,6 @@ async function copyCommand(id, command) {
     console.error('Failed to copy recovery command', e)
   }
 }
+
+const polarisWordmarkSrc = "/images/polaris-wordmark.svg?v=20260726"
 </script>
