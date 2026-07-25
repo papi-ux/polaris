@@ -5,12 +5,8 @@
     <div class="relative mx-auto flex min-h-screen max-w-5xl items-center justify-center p-4 sm:p-6">
       <div class="grid w-full max-w-4xl gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <main id="polaris-login-main" tabindex="-1" class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
-          <div class="flex items-center gap-3">
-            <img src="/images/logo-polaris.svg" class="h-12" alt="Polaris">
-            <div>
-              <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/85">Host Console</div>
-              <h1 class="mt-1 text-3xl font-bold text-silver">{{ $t('welcome.greeting') }}</h1>
-            </div>
+          <div class="flex items-center gap-2">
+            <img :src="polarisWordmarkSrc" class="h-7 w-auto" alt="Polaris">
           </div>
 
           <div class="mt-6 max-w-2xl">
@@ -104,6 +100,8 @@
 </template>
 
 <script setup>
+
+
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { isDynamicImportError } from '../router-helpers.js'
@@ -215,4 +213,6 @@ async function login() {
     loading.value = false
   }
 }
+
+const polarisWordmarkSrc = "/images/polaris-wordmark.svg?v=20260726"
 </script>

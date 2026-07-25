@@ -16,12 +16,9 @@
       ]"
     >
       <div class="border-b border-storm/20 px-4 py-4">
-        <h1 class="flex items-center gap-2 text-xl font-bold text-ice" :class="{ 'justify-center': sidebarCollapsed }">
-          <img src="/images/logo-polaris.svg" class="h-8" alt="Polaris">
-          <div v-if="!sidebarCollapsed" class="min-w-0">
-            <div>Polaris</div>
-            <div class="mt-0.5 text-[10px] font-medium uppercase tracking-[0.2em] text-storm/80">Host Console</div>
-          </div>
+        <h1 class="flex items-center gap-2 text-xl font-bold text-ice leading-none mt-1" :class="{ 'justify-center': sidebarCollapsed }">
+          <img src="/images/polaris-wordmark.svg?v=20260726" class="h-7 w-auto shrink-0 align-middle" alt="Polaris">
+          <div v-if="!sidebarCollapsed" class="sr-only">Polaris</div>
         </h1>
       </div>
       <nav class="flex-1 overflow-y-auto p-3 scrollbar-hidden">
@@ -145,9 +142,8 @@
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
         <div class="min-w-0">
-          <h1 class="text-lg font-bold text-ice flex items-center gap-2">
-            <img src="/images/logo-polaris.svg" class="h-6" alt="Polaris">
-            Polaris
+          <h1 class="text-lg font-bold text-ice flex items-center gap-2 leading-none">
+            <img src="/images/polaris-wordmark.svg?v=20260726" class="h-6 w-auto shrink-0 align-middle" alt="Polaris">
           </h1>
           <div class="text-xs text-storm truncate">{{ currentPageLabel }}</div>
         </div>
