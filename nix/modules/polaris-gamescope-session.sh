@@ -20,6 +20,15 @@ gs_refresh="${POLARIS_HDR_REFRESH:-120}"
 
 session_id_file="$rt/polaris-gamescope-session-id"
 
+publish_nested_claim() (
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp
+  exec 9>>"$rt/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
+  tmp="$rt/.polaris-gamescope-wsi-nested.$$"
+  printf 'nested\n' >"$tmp" || return 1
+  mv -f -- "$tmp" "$rt/polaris-gamescope-wsi-nested"
+)
+
 load_session_instance_id() {
   local persisted
   if [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ]; then
@@ -350,7 +359,7 @@ case "${1:-}" in
       echo "polaris-gamescope-session: nested geometry ${gs_width}x${gs_height}@${gs_refresh}" >&2
       # Claim ownership before launch so marker-capture failure remains
       # recoverable without an unsafe numeric PGID fallback.
-      printf 'nested\n' >"$rt/polaris-gamescope-wsi-nested"
+      publish_nested_claim
       setsid env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
         "${child_env[@]}" "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
         --backend headless \
@@ -423,7 +432,7 @@ case "${1:-}" in
         polaris_stop_marked_gamescope "$marker" nested "$rt" || true
         exit 1
       fi
-      printf 'nested\n' >"$rt/polaris-gamescope-wsi-nested"
+      publish_nested_claim
       # Portal + polaris-gamescope.env assume gamescope-0. Bail if we lost the race.
       if rg -q "wayland display 'gamescope-1'" "$steam_log" 2>/dev/null; then
         echo "polaris-gamescope-session: nested bound gamescope-1 (portal captures gamescope-0) — see $steam_log" >&2

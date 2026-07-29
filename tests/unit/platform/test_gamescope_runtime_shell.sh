@@ -451,6 +451,12 @@ grep -q 'POLARIS_GAMESCOPE_SESSION_BIN' "$repo_root/scripts/install/lib/polaris-
   || fail "non-Nix readiness helper does not use credentialed session recovery"
 grep -q 'polaris-gamescope-session-id' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" \
   || fail "non-Nix readiness helper does not require durable session identity"
+grep -q 'publish_nested_claim' "$repo_root/nix/modules/polaris-gamescope-session.sh" \
+  || fail "nested claim publication is not ownership-lock serialized"
+grep -q 'polaris_validate_marker "$marker" idle' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" \
+  || fail "non-Nix readiness helper does not require idle marker role"
+grep -q 'POLARIS_FLOCK_BIN' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" \
+  || fail "non-Nix recovery does not hold the ownership transition lock"
 grep -q 'polaris_reclaim_orphan_gamescope_sockets' \
   "$repo_root/scripts/install/lib/polaris-gamescope-idle.sh" ||
   fail "idle unit does not reclaim orphan gamescope sockets"

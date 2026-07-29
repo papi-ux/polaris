@@ -1234,6 +1234,46 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedUnreadableLiveProcessFailsClose
   EXPECT_EQ(kill(child, 0), 0);
 }
 
+TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsStrippedExactGenerationDescendant) {
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  setenv("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0", 1);
+  setenv("STEAM_COMPAT_APP_ID", "4242", 1);
+  setenv("POLARIS_SESSION_INSTANCE_ID", "gamescope-attached-test", 1);
+  const pid_t root = fork();
+  ASSERT_GE(root, 0);
+  if (root == 0) {
+    close(ready_pipe[0]);
+    const std::string fd = std::to_string(ready_pipe[1]);
+    const std::string command =
+      "trap '' TERM; env -u GAMESCOPE_WAYLAND_DISPLAY -u STEAM_COMPAT_APP_ID "
+      "-u POLARIS_SESSION_INSTANCE_ID /bin/sh -c 'trap \"\" TERM; while :; do sleep 1; done' & "
+      "printf '%s\\n' \"$!\" >&" + fd + "; while :; do sleep 1; done";
+    execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  unsetenv("GAMESCOPE_WAYLAND_DISPLAY");
+  unsetenv("STEAM_COMPAT_APP_ID");
+  unsetenv("POLARIS_SESSION_INSTANCE_ID");
+  close(ready_pipe[1]);
+  char descendant_text[32] {};
+  const auto count = read(ready_pipe[0], descendant_text, sizeof(descendant_text) - 1);
+  ASSERT_GT(count, 0);
+  close(ready_pipe[0]);
+  const pid_t descendant = static_cast<pid_t>(std::strtol(descendant_text, nullptr, 10));
+  ASSERT_GT(descendant, 1);
+  const bool terminated = proc::terminate_gamescope_attached_clients_for_tests("4242");
+  if (!terminated) {
+    (void) kill(root, SIGKILL);
+    (void) kill(descendant, SIGKILL);
+  }
+  EXPECT_TRUE(terminated);
+  EXPECT_EQ(waitpid(root, nullptr, 0), root);
+  errno = 0;
+  EXPECT_EQ(kill(descendant, 0), -1);
+  EXPECT_EQ(errno, ESRCH);
+}
+
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupRejectsUnownedSameAppProcess) {
   int ready_pipe[2] {-1, -1};
   ASSERT_EQ(pipe(ready_pipe), 0);

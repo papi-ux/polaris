@@ -91,6 +91,12 @@ namespace {
         << unix_rows;
     }
 
+    void replace_unix_socket(std::uint64_t inode, const fs::path &path) {
+      unix_rows.clear();
+      add_unix_socket(inode, path);
+      flush_unix_sockets();
+    }
+
     fs::path root;
     fs::path proc;
     fs::path runtime;
@@ -202,6 +208,9 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
   };
   EXPECT_TRUE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
   EXPECT_EQ(gp::discover_owned_x11_display(marker, paths_for(tree)), std::optional<std::string>(":4"));
+  auto rebound_paths = paths_for(tree);
+  rebound_paths.before_x11_return_for_tests = [&]() { tree.replace_unix_socket(605, owned_x4); };
+  EXPECT_FALSE(gp::discover_owned_x11_display(marker, rebound_paths));
   EXPECT_TRUE(fs::exists(host_x0));
 }
 

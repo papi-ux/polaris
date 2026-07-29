@@ -116,14 +116,20 @@ namespace stream_runtime {
       int term_steps = 30,
       int kill_steps = 20
     ) {
-      if (!is_private_group_leader(pgid) || !authority_still_current()) {
+      if (!authority_still_current()) {
         return false;
+      }
+      auto state = private_group_state(pgid);
+      if (state == private_group_state_e::unknown) {
+        return false;
+      }
+      if (state == private_group_state_e::drained) {
+        return true;
       }
       if (kill(-pgid, SIGTERM) != 0 && errno != ESRCH) {
         return false;
       }
       int status = 0;
-      auto state = private_group_state(pgid);
       for (int i = 0; i < term_steps && state == private_group_state_e::alive; ++i) {
         (void) waitpid(pgid, &status, WNOHANG);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -141,6 +147,28 @@ namespace stream_runtime {
       }
       (void) waitpid(pgid, &status, WNOHANG);
       return state == private_group_state_e::drained;
+    }
+
+    bool rollback_spawned_private_group(pid_t child, bool child_reaped) {
+      const auto group_state = private_group_state(child);
+      if (group_state == private_group_state_e::unknown) {
+        return false;
+      }
+      if (group_state == private_group_state_e::alive) {
+        return drain_private_process_group(child, []() { return true; });
+      }
+      if (child_reaped) {
+        return true;
+      }
+      int status = 0;
+      const auto child_state = waitpid(child, &status, WNOHANG);
+      if (child_state == child) {
+        return true;
+      }
+      if (child_state != 0 || kill(child, SIGTERM) != 0) {
+        return false;
+      }
+      return waitpid(child, nullptr, 0) == child;
     }
 
     /// Wait until socket exists for two consecutive polls (avoids attach races).
@@ -325,32 +353,11 @@ namespace stream_runtime {
         }
         if (!marker_written) {
           BOOST_LOG(error) << "gamescope_runtime: could not record exact owned gamescope generation"sv;
-          // An unreaped child PID cannot be reused. Re-check that relationship
-          // immediately before signaling; if the loop already reaped it (or it
-          // is no longer our child), the numeric PID is no longer authority.
-          if (!child_reaped) {
-            int status = 0;
-            const auto child_state = waitpid(child, &status, WNOHANG);
-            if (child_state == 0) {
-              if (is_private_group_leader(child)) {
-                (void) kill(-child, SIGTERM);
-                for (int i = 0; i < 20 && private_group_state(child) == private_group_state_e::alive; ++i) {
-                  (void) waitpid(child, &status, WNOHANG);
-                  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-                const auto final_group_state = private_group_state(child);
-                if (final_group_state == private_group_state_e::alive) {
-                  (void) kill(-child, SIGKILL);
-                }
-                else if (final_group_state == private_group_state_e::unknown) {
-                  (void) kill(child, SIGKILL);
-                }
-              }
-              else {
-                (void) kill(child, SIGTERM);
-              }
-              (void) waitpid(child, nullptr, 0);
-            }
+
+          const bool rollback_drained = rollback_spawned_private_group(child, child_reaped);
+          if (!rollback_drained) {
+            BOOST_LOG(error) << "gamescope_runtime: launch rollback could not prove private group drained; preserving state"sv;
+            return false;
           }
           pid_ = 0;
           owned_ = false;
@@ -370,7 +377,18 @@ namespace stream_runtime {
           int status = 0;
           if (waitpid(pid_, &status, WNOHANG) == pid_) {
             BOOST_LOG(error) << "gamescope_runtime: gamescope exited before socket appeared"sv;
-            remove_owned_files_if_current();
+            const auto marker_matches = [this]() {
+              const auto marker_on_disk = gp::read_marker(marker_path());
+              return marker_ && marker_on_disk && *marker_on_disk == *marker_;
+            };
+            if (!drain_private_process_group(pid_, marker_matches)) {
+              BOOST_LOG(error) << "gamescope_runtime: exited leader left an unverified private group; preserving ownership"sv;
+              return false;
+            }
+            if (!remove_owned_files_if_current()) {
+              BOOST_LOG(error) << "gamescope_runtime: failed to remove drained generation marker; preserving ownership"sv;
+              return false;
+            }
             pid_ = 0;
             owned_ = false;
             marker_.reset();
@@ -517,25 +535,30 @@ namespace stream_runtime {
         return current && *current == *marker_;
       }
 
-      void remove_owned_files_if_current() const {
+      bool remove_owned_files_if_current() const {
         owner_transition_lock_t owner_lock;
         if (!owner_lock) {
-          return;
+          return false;
         }
-        remove_owned_files_if_current_unlocked();
+        return remove_owned_files_if_current_unlocked();
       }
 
-      void remove_owned_files_if_current_unlocked() const {
+      bool remove_owned_files_if_current_unlocked() const {
         if (!marker_) {
-          return;
+          return false;
         }
         const auto current = gp::read_marker(marker_path());
         if (!current || *current != *marker_) {
-          return;
+          return false;
         }
         std::error_code ec;
-        fs::remove(marker_path(), ec);
-        fs::remove(fs::path(xdg_runtime_dir()) / "polaris-gamescope.env", ec);
+        const auto env_path = fs::path(xdg_runtime_dir()) / "polaris-gamescope.env";
+        const bool env_exists = fs::exists(env_path, ec);
+        if (ec || (env_exists && (!fs::remove(env_path, ec) || ec))) {
+          return false;
+        }
+        ec.clear();
+        return fs::remove(marker_path(), ec) && !ec;
       }
 
       void stop_unlocked() {
@@ -560,7 +583,10 @@ namespace stream_runtime {
             return;
           }
           BOOST_LOG(info) << "gamescope_runtime: drained owned gamescope group="sv << marker_->pid;
-          remove_owned_files_if_current_unlocked();
+          if (!remove_owned_files_if_current_unlocked()) {
+            BOOST_LOG(error) << "gamescope_runtime: failed to clear drained ownership files; preserving state"sv;
+            return;
+          }
         }
         else if (!owned_ && marker_) {
           BOOST_LOG(info) << "gamescope_runtime: detached from validated "sv << socket_name_
@@ -760,6 +786,10 @@ namespace stream_runtime {
 
   bool drain_gamescope_private_group_for_tests(pid_t pgid) {
     return drain_private_process_group(pgid, []() { return true; }, 3, 20);
+  }
+
+  bool rollback_gamescope_spawn_for_tests(pid_t pgid, bool leader_reaped) {
+    return rollback_spawned_private_group(pgid, leader_reaped);
   }
 
   stream_runtime_t *gamescope_runtime_instance() {

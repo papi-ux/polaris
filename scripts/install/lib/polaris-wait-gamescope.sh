@@ -12,10 +12,26 @@ fi
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 marker="$rt/polaris-gamescope.pid"
 
-# Crash residue: a gamescope-0 path without a live holder looks "ready" to -S
-# but cannot accept clients. Reclaim orphans before treating the socket as up.
+clear_invalid_marker() (
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
+  exec 9>>"$rt/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
+  polaris_validate_marker "$marker" && return 0
+  [ ! -e "$marker" ] || rm -f -- "$marker"
+)
+
+idle_ownership_is_current() {
+  [ ! -e "$rt/polaris-gamescope-wsi-nested" ] \
+    && polaris_validate_marker "$marker" idle \
+    && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" 2>/dev/null
+}
+
+# Serialize invalid-marker removal with every cooperating ownership publisher,
+# then revalidate: never unlink a marker based on a lockless stale observation.
 if ! polaris_validate_marker "$marker"; then
-  rm -f "$marker"
+  clear_invalid_marker || exit 1
+fi
+if ! polaris_validate_marker "$marker"; then
   if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
     echo "polaris: live unowned gamescope sockets block startup" >&2
     exit 1
@@ -57,19 +73,28 @@ while [ ! -S "$rt/gamescope-0" ]; do
   sleep 0.2
 done
 
-if ! polaris_validate_marker "$marker" \
-    || ! polaris_marker_owns_socket "$marker" "$rt/gamescope-0" 2>/dev/null; then
+# Hold the same ownership-transition lock used by marker writers and nested
+# claim publication through idle validation and portal rebinding.
+exec 8>>"$rt/polaris-gamescope.lock" || exit 1
+"${POLARIS_FLOCK_BIN:-flock}" -x 8 || exit 1
+
+if ! idle_ownership_is_current; then
   echo "polaris: gamescope-0 appeared without exact idle ownership" >&2
   exit 1
 fi
 
 bus_path="$rt/polaris-portal/bus"
 if [ ! -e "$bus_path" ]; then
+  idle_ownership_is_current || exit 1
   echo "polaris: gamescope-0 ready (no private portal bus — host portal or gamescopegrab OK)" >&2
   exit 0
 fi
 
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"
+idle_ownership_is_current || {
+  echo "polaris: idle ownership changed before private portal restart" >&2
+  exit 1
+}
 systemctl --user restart polaris-portal-gamescope.service >/dev/null 2>&1 || {
   echo "polaris: failed to restart private gamescope portal" >&2
   exit 1
@@ -84,6 +109,10 @@ while true; do
       | awk '{print $2}' || true)"
   fi
   if [ -n "${modes:-}" ] && [ "${modes}" != "0" ]; then
+    idle_ownership_is_current || {
+      echo "polaris: nested generation replaced idle ownership during portal recovery" >&2
+      exit 1
+    }
     echo "polaris: private ScreenCast ready (gamescope-0 + portal, cursor_modes=$modes)" >&2
     exit 0
   fi

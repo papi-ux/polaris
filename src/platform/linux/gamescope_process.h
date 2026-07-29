@@ -27,6 +27,7 @@ namespace stream_runtime::gamescope_process {
     std::filesystem::path proc_net_unix = "/proc/net/unix";
     std::filesystem::path x11_socket_dir = "/tmp/.X11-unix";
     std::function<void()> before_socket_unlink_for_tests;
+    std::function<void()> before_x11_return_for_tests;
   };
 
   std::optional<marker_t> read_marker(const std::filesystem::path &path);

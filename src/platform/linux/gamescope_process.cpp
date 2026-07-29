@@ -670,6 +670,9 @@ namespace stream_runtime::gamescope_process {
     if (!best) {
       return std::nullopt;
     }
+    if (paths.before_x11_return_for_tests) {
+      paths.before_x11_return_for_tests();
+    }
     // Rebuild the process snapshot and prove both generations and fd ownership
     // again immediately before returning a routing decision.
     if (!validate_process(marker, paths)) {
@@ -689,6 +692,12 @@ namespace stream_runtime::gamescope_process {
         !executable_named(found->second, "Xwayland") ||
         !related_to_root(best->pid, marker.pid, final_processes) ||
         !process_holds_inode(paths, best->pid, best->inode)) {
+      return std::nullopt;
+    }
+    const auto final_x11_inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    const auto socket_path = paths.x11_socket_dir / ("X" + std::to_string(best->display));
+    const auto final_inode = final_x11_inodes ? inode_for_path(*final_x11_inodes, socket_path) : std::nullopt;
+    if (!final_inode || *final_inode != best->inode) {
       return std::nullopt;
     }
     return ":" + std::to_string(best->display);
