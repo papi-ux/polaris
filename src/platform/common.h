@@ -362,7 +362,8 @@ namespace platf {
     bool requested_headless = false;
     bool effective_headless = false;
     bool gpu_native_override_active = false;
-    std::string backend_name;
+    std::string backend_name;  ///< labwc | gamescope | portal | host | virtual_display | …
+    std::string path_id;  ///< stream path selection id (headless_stream, desktop_display, …)
   };
 
   // Dimensions for touchscreen input
@@ -518,11 +519,15 @@ namespace platf {
     }
 
     video::sunshine_colorspace_t colorspace;
+
+    // Portal SHM CUDA upload is NV12-only; request 8-bit encode when set.
+    bool prefer_8bit_encode = false;
     std::optional<SS_HDR_METADATA> hdr_metadata;
   };
 
   struct avcodec_encode_device_t: encode_device_t {
     void *data {};
+    std::optional<int> hardware_device_index;
     AVFrame *frame {};
 
     int convert(platf::img_t &img) override {

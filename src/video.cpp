@@ -42,7 +42,7 @@ extern "C" {
 #include "video.h"
 
 #ifdef __linux__
-  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_runtime.h"
   #include "platform/linux/cuda.h"
   #include "platform/linux/graphics.h"
   #include "platform/linux/vaapi.h"
@@ -60,6 +60,33 @@ using namespace std::literals;
 namespace video {
 
   namespace {
+
+#ifdef __linux__
+    /**
+     * @brief Local labwc snapshot for encode/capture override sites (one façade read).
+     */
+    struct labwc_snapshot_t {
+      bool running = false;
+      platf::runtime_state_t state {};
+    };
+
+    labwc_snapshot_t snapshot_labwc() {
+      labwc_snapshot_t snap;
+      snap.running = stream_runtime::labwc::is_running();
+      if (snap.running) {
+        snap.state = stream_runtime::labwc::runtime_state();
+      }
+      return snap;
+    }
+
+    bool labwc_gpu_native_override_active() {
+      if (!::config::video.linux_display.use_cage_compositor) {
+        return false;
+      }
+      const auto labwc = snapshot_labwc();
+      return labwc.running && labwc.state.gpu_native_override_active;
+    }
+#endif
 
     frame_t make_frame(std::shared_ptr<platf::img_t> image) {
       return frame_t {std::move(image)};
@@ -433,19 +460,22 @@ namespace video {
     }
 
     bool handle_headless_extcopy_conversion_failure(const frame_t &frame) {
-      if (!::config::video.linux_display.use_cage_compositor || !cage_display_router::is_running()) {
+      if (!::config::video.linux_display.use_cage_compositor) {
+        return false;
+      }
+      const auto labwc = snapshot_labwc();
+      if (!labwc.running) {
         return false;
       }
 
-      const auto runtime_state = cage_display_router::runtime_state();
-      if (!cage_display_router::should_disable_headless_extcopy_after_conversion_failure(
-            runtime_state,
+      if (!stream_runtime::labwc::should_disable_headless_extcopy_after_conversion_failure(
+            labwc.state,
             frame.source_metadata
           )) {
         return false;
       }
 
-      cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+      stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
       stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "frame_conversion", "live_gpu_frame_conversion_failed");
       stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
       BOOST_LOG(warning)
@@ -1974,6 +2004,12 @@ namespace video {
   };
 
   static encoder_t *chosen_encoder;
+  static thread_local bool encoder_probe_in_progress = false;
+
+  bool encoder_probe_active() {
+    return encoder_probe_in_progress;
+  }
+
   int active_hevc_mode;
   int active_av1_mode;
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
@@ -3025,9 +3061,7 @@ namespace video {
           av_session->conversion_request.target_residency == platf::frame_residency_e::gpu &&
           (av_session->conversion_request.target_device == platf::mem_type_e::cuda ||
            av_session->conversion_request.target_device == platf::mem_type_e::vaapi) &&
-          ::config::video.linux_display.use_cage_compositor &&
-          cage_display_router::is_running() &&
-          cage_display_router::runtime_state().gpu_native_override_active) {
+          labwc_gpu_native_override_active()) {
         dummy_img = make_gpu_dummy_img(config.width, config.height);
       } else
 #endif
@@ -3152,9 +3186,7 @@ namespace video {
               av_session &&
               av_session->conversion_request.target_residency == platf::frame_residency_e::gpu &&
               frame.source_metadata.transport != platf::frame_transport_e::dmabuf &&
-              ::config::video.linux_display.use_cage_compositor &&
-              cage_display_router::is_running() &&
-              cage_display_router::runtime_state().gpu_native_override_active) {
+              labwc_gpu_native_override_active()) {
             BOOST_LOG(warning)
               << "GPU-native encode session received non-DMA-BUF frame; rebuilding encoder session to match the active capture path"sv;
             break;
@@ -3346,6 +3378,42 @@ namespace video {
 
     if (dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get())) {
       result = disp.make_avcodec_encode_device(*pix_fmt);
+      // Portal SHM CUDA is NV12-only: prefer GPU 8-bit over software 10-bit.
+      // 8-bit NV12 when: SHM path cannot do 10-bit GPU frames, OR stream is non-HDR
+      // (client 10-bit SDR still sets dynamicRange=1 → portal DmaBuf was encoding p010 ~8ms).
+      // If the capture path is 8-bit-only but colorspace is still HDR PQ, demote to
+      // full SDR — bit_depth=8 alone still attaches Rec.2020+PQ metadata and the
+      // client shows dark/red "HDR garbage" over SDR pixels.
+      if (result && result->prefer_8bit_encode && colorspace_is_hdr(colorspace)) {
+        BOOST_LOG(warning)
+          << "Forcing SDR colorspace: capture path cannot produce 10-bit HDR frames "
+             "(host portal SHM/MemFd is 8-bit BGRx). Use gamescope_stream for real HDR."sv;
+        colorspace = colorspace_from_client_config(config, /*hdr_metadata_available=*/false);
+        colorspace.bit_depth = 8;
+        if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
+          result = disp.make_avcodec_encode_device(*pix8);
+          if (result) {
+            result->prefer_8bit_encode = true;
+          }
+        }
+        BOOST_LOG(info) << "Color coding (after 8-bit capture demote): " << color_coding_label(colorspace);
+        BOOST_LOG(info) << "HDR decision (after 8-bit capture demote): stream_hdr_enabled=false";
+      }
+      else if (result && colorspace.bit_depth == 10 &&
+               (result->prefer_8bit_encode || !colorspace_is_hdr(colorspace))) {
+        if (result->prefer_8bit_encode) {
+          BOOST_LOG(info) << "Using 8-bit NV12 CUDA upload for capture path that cannot do 10-bit GPU frames"sv;
+        } else {
+          BOOST_LOG(info) << "Using 8-bit NV12 encode for non-HDR stream (avoid p010 cost for 10-bit SDR)"sv;
+        }
+        colorspace.bit_depth = 8;
+        if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
+          result = disp.make_avcodec_encode_device(*pix8);
+          if (result) {
+            result->prefer_8bit_encode = true;
+          }
+        }
+      }
     } else if (dynamic_cast<const encoder_platform_formats_nvenc *>(encoder.platform_formats.get())) {
       result = disp.make_nvenc_encode_device(*pix_fmt);
     }
@@ -3354,16 +3422,12 @@ namespace video {
     if (auto *avcodec_device = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
         avcodec_device &&
         !avcodec_device->data &&
-        ::config::video.linux_display.use_cage_compositor &&
-        cage_display_router::is_running()) {
-      const auto runtime_state = cage_display_router::runtime_state();
-      if (runtime_state.gpu_native_override_active) {
-        auto direct_device = make_direct_linux_gpu_native_encode_device(encoder, config);
-        if (direct_device && direct_device->data) {
-          BOOST_LOG(info)
-            << "Using direct GPU-native avcodec encode device for active windowed cage runtime"sv;
-          result = std::move(direct_device);
-        }
+        labwc_gpu_native_override_active()) {
+      auto direct_device = make_direct_linux_gpu_native_encode_device(encoder, config);
+      if (direct_device && direct_device->data) {
+        BOOST_LOG(info)
+          << "Using direct GPU-native avcodec encode device for active windowed cage runtime"sv;
+        result = std::move(direct_device);
       }
     }
 #endif
@@ -3809,6 +3873,12 @@ namespace video {
   }
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure) {
+    const auto previous_probe_state = encoder_probe_in_progress;
+    encoder_probe_in_progress = true;
+    auto probe_state_guard = util::fail_guard([previous_probe_state]() {
+      encoder_probe_in_progress = previous_probe_state;
+    });
+
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
 
@@ -4422,7 +4492,18 @@ namespace video {
   util::Either<avcodec_buffer_t, int> cuda_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *encode_device) {
     avcodec_buffer_t hw_device_buf;
 
-    auto status = av_hwdevice_ctx_create(&hw_device_buf, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 1 /* AV_CUDA_USE_PRIMARY_CONTEXT */);
+    std::string cuda_device;
+    if (encode_device && encode_device->hardware_device_index &&
+        *encode_device->hardware_device_index >= 0) {
+      cuda_device = std::to_string(*encode_device->hardware_device_index);
+    }
+
+    auto status = av_hwdevice_ctx_create(
+      &hw_device_buf,
+      AV_HWDEVICE_TYPE_CUDA,
+      cuda_device.empty() ? nullptr : cuda_device.c_str(),
+      nullptr,
+      1 /* AV_CUDA_USE_PRIMARY_CONTEXT */);
     if (status < 0) {
       char string[AV_ERROR_MAX_STRING_SIZE];
       BOOST_LOG(error) << "Failed to create a CUDA device: "sv << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status);

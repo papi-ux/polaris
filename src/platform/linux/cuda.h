@@ -6,6 +6,7 @@
 
 #if defined(POLARIS_BUILD_CUDA)
   // standard includes
+  #include <cstddef>
   #include <cstdint>
   #include <memory>
   #include <optional>
@@ -37,6 +38,8 @@ namespace cuda {
    * @return FFmpeg encoding device context.
    */
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_gl_encode_device(int width, int height, int offset_x, int offset_y);
+
+  std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_dmabuf_encode_device(int width, int height);
 
   int init();
 }  // namespace cuda
@@ -94,6 +97,9 @@ namespace cuda {
     } texture;
   };
 
+  std::optional<cudaTextureObject_t> make_pitch2d_texture(void *dev_ptr, int width, int height, std::size_t pitch_bytes, bool linear_filter, bool xbgr2101010 = false);
+  void destroy_texture(cudaTextureObject_t tex);
+
   class sws_t {
   public:
     sws_t() = default;
@@ -107,9 +113,12 @@ namespace cuda {
      */
     static std::optional<sws_t> make(int in_width, int in_height, int out_width, int out_height, int pitch);
 
-    // Converts loaded image into a CUDevicePtr
-    int convert(std::uint8_t *Y, std::uint8_t *UV, std::uint32_t pitchY, std::uint32_t pitchUV, cudaTextureObject_t texture, stream_t::pointer stream);
-    int convert(std::uint8_t *Y, std::uint8_t *UV, std::uint32_t pitchY, std::uint32_t pitchUV, cudaTextureObject_t texture, stream_t::pointer stream, const viewport_t &viewport);
+    // Converts loaded image into a CUDevicePtr.
+    // src_xb30: DRM XBGR2101010 packed 10-bit.
+    // src_rgb8: true for DRM XBGR8888/ABGR8888 (SPA RGBx LE R,G,B,X);
+    //           false for DRM XRGB8888/ARGB8888 (SPA BGRx LE B,G,R,X / bgra_to_rgb).
+    int convert(std::uint8_t *Y, std::uint8_t *UV, std::uint32_t pitchY, std::uint32_t pitchUV, cudaTextureObject_t texture, stream_t::pointer stream, bool dst_p010 = false, bool src_xb30 = false, bool src_rgb8 = false);
+    int convert(std::uint8_t *Y, std::uint8_t *UV, std::uint32_t pitchY, std::uint32_t pitchUV, cudaTextureObject_t texture, stream_t::pointer stream, const viewport_t &viewport, bool dst_p010 = false, bool src_xb30 = false, bool src_rgb8 = false);
 
     void apply_colorspace(const video::sunshine_colorspace_t &colorspace);
 
@@ -120,6 +129,10 @@ namespace cuda {
     int threadsPerBlock;
 
     viewport_t viewport;
+
+    // Full destination frame size (letterbox/pillarbox padding is outside viewport).
+    int frame_width = 0;
+    int frame_height = 0;
 
     float scale;
   };

@@ -164,6 +164,21 @@ namespace config {
       bool headless_mode;            ///< Run labwc with headless backend (no visible window on desktop)
       bool prefer_gpu_native_capture;  ///< Prefer a GPU-native DMA-BUF path even if that requires windowed labwc
       bool capture_profile;          ///< Emit periodic transport-tagged capture timing summaries
+      /**
+       * @brief First-class stream mode id (headless_stream, windowed_stream, …).
+       * Empty means derive from legacy booleans on load.
+       */
+      std::string stream_mode;
+      /**
+       * @brief Private nested compositor backend for Private Stream modes.
+       * "labwc" (default) or "gamescope" (reserved; not available yet).
+       */
+      std::string private_runtime;
+      /**
+       * @brief When auto-managing a dongle/EVDI streaming output: "privacy" makes it
+       * primary and disables primary_output; "off" keeps physical primary (extended).
+       */
+      std::string headless_swap_mode;
     } linux_display;
 
     std::string fallback_mode;

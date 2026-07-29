@@ -51,6 +51,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "rtsp.h"
 #include "session_event_queue.h"
 #include "stream_recorder.h"
 #include "stream_stats.h"
@@ -72,6 +73,8 @@
   #include "platform/windows/utils.h"
   #include <Windows.h>
 #elif __linux__
+  #include "platform/linux/session_media.h"
+  #include <sys/stat.h>
   #include <unistd.h>
 #elif __APPLE__
   #include <mach-o/dyld.h>
@@ -80,8 +83,9 @@
 #ifdef __linux__
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
-  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/display_topology.h"
   #include "platform/linux/wayland.h"
 #endif
 
@@ -193,6 +197,32 @@ namespace confighttp {
   constexpr int MAX_LOGIN_ATTEMPTS = 5;
   constexpr auto LOGIN_BLOCK_DURATION = std::chrono::seconds(60);
   static size_t append_string_curl_write_cb(void *contents, size_t size, size_t nmemb, std::string *out);
+
+#ifdef __linux__
+  /**
+   * @brief One labwc façade snapshot for confighttp handlers (running + state + socket).
+   * Avoids triplicated is_running/runtime_state/wayland_socket call clusters.
+   */
+  struct labwc_snapshot_t {
+    bool running = false;
+    platf::runtime_state_t state {};
+    std::string socket;
+    pid_t pid = 0;
+    bool healthy = false;
+  };
+
+  labwc_snapshot_t snapshot_labwc() {
+    labwc_snapshot_t snap;
+    snap.running = stream_runtime::labwc::is_running();
+    snap.state = stream_runtime::labwc::runtime_state();
+    if (snap.running) {
+      snap.socket = stream_runtime::labwc::wayland_socket();
+      snap.pid = stream_runtime::labwc::pid();
+      snap.healthy = stream_runtime::labwc::is_healthy();
+    }
+    return snap;
+  }
+#endif
 
   namespace {
     constexpr auto SESSION_IDLE_TIMEOUT = 12h;
@@ -309,6 +339,9 @@ namespace confighttp {
 
 #ifdef __linux__
     constexpr auto PREVIEW_FAILURE_LOG_BACKOFF = std::chrono::seconds(60);
+    // Minimum PNG size that is unlikely to be an empty/stub write (IHDR + tiny body).
+    constexpr std::uintmax_t PREVIEW_MIN_BYTES = 256;
+    constexpr auto PREVIEW_CACHE_MAX_AGE = std::chrono::minutes(30);
 
     struct preview_failure_log_state_t {
       std::chrono::steady_clock::time_point last_log {};
@@ -325,6 +358,65 @@ namespace confighttp {
       return "/run/user/1000";
     }
 
+    std::string preview_last_frame_cache_path() {
+      return preview_xdg_runtime_dir() + "/polaris-last-preview.png";
+    }
+
+    bool preview_file_usable(const std::string &path) {
+      std::error_code ec;
+      const auto size = std::filesystem::file_size(path, ec);
+      return !ec && size >= PREVIEW_MIN_BYTES;
+    }
+
+    void store_preview_last_frame(const std::string &src) {
+      if (!preview_file_usable(src)) {
+        return;
+      }
+      std::error_code ec;
+      std::filesystem::copy_file(
+        src,
+        preview_last_frame_cache_path(),
+        std::filesystem::copy_options::overwrite_existing,
+        ec
+      );
+      if (ec) {
+        BOOST_LOG(debug) << "display_preview: failed to update last-frame cache: "sv << ec.message();
+      }
+    }
+
+    bool try_preview_last_frame_cache(const std::string &outfile) {
+      const auto cache = preview_last_frame_cache_path();
+      std::error_code ec;
+      if (!preview_file_usable(cache)) {
+        return false;
+      }
+      // Prefer cache while a session is live (preview during/just after stream).
+      // Otherwise only serve if the file is still "fresh" by wall-clock mtime.
+      const auto state = get_session_state();
+      const bool stream_active =
+        state == "streaming" || state == "paused" || state == "game_launching" ||
+        state == "cage_starting" || state == "initializing" || state == "tearing_down" ||
+        proc::proc.running() > 0;
+      if (!stream_active) {
+        // Age via status_last_write_time is awkward across clocks; use st_mtime via stat.
+        struct stat st {};
+        if (stat(cache.c_str(), &st) != 0) {
+          return false;
+        }
+        const auto age = std::chrono::system_clock::now() - std::chrono::system_clock::from_time_t(st.st_mtime);
+        if (age > PREVIEW_CACHE_MAX_AGE) {
+          return false;
+        }
+      }
+      std::filesystem::copy_file(
+        cache,
+        outfile,
+        std::filesystem::copy_options::overwrite_existing,
+        ec
+      );
+      return !ec && preview_file_usable(outfile);
+    }
+
     bool preview_output_is_safe(const std::string &value) {
       return !value.empty() &&
              std::all_of(value.begin(), value.end(), [](unsigned char ch) {
@@ -337,10 +429,10 @@ namespace confighttp {
         return requested_output;
       }
 
-      if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
-        const auto runtime_state = cage_display_router::runtime_state();
-        if (runtime_state.backend_name == "labwc") {
-          return runtime_state.effective_headless ? "HEADLESS-1" : "WL-1";
+      if (config::video.linux_display.use_cage_compositor) {
+        const auto labwc = snapshot_labwc();
+        if (labwc.running && labwc.state.backend_name == "labwc") {
+          return labwc.state.effective_headless ? "HEADLESS-1" : "WL-1";
         }
       }
 
@@ -359,6 +451,205 @@ namespace confighttp {
       }
       cmd << shell_escape(outfile) << " 2>/dev/null";
       return cmd.str();
+    }
+
+    /**
+     * @brief Try preview capture for the active stream path (labwc / gamescope / host).
+     * @return true on success. Prefer gamescopectl on gamescope (grim unsupported);
+     *         fall back to last successful stream frame cache.
+     */
+    bool try_stream_path_preview_capture(const std::string &requested_output,
+                                         const std::string &outfile,
+                                         std::string &used_backend) {
+      const auto xdg = preview_xdg_runtime_dir();
+      auto try_grim_socket = [&](const std::string &socket_name, const std::string &output_name) {
+        if (socket_name.empty()) {
+          return false;
+        }
+        const auto sock_path = xdg + "/" + socket_name;
+        if (access(sock_path.c_str(), F_OK) != 0) {
+          return false;
+        }
+        std::remove(outfile.c_str());
+        const auto cmd = build_cage_preview_capture_command(socket_name, output_name, outfile);
+        if (std::system(cmd.c_str()) != 0) {
+          return false;
+        }
+        return preview_file_usable(outfile);
+      };
+
+      // 1) Owned labwc private runtime
+      if (config::video.linux_display.use_cage_compositor) {
+        const auto labwc = snapshot_labwc();
+        if (labwc.running) {
+          const auto output = active_preview_output_name(requested_output);
+          if (try_grim_socket(labwc.socket, output)) {
+            used_backend = "labwc";
+            store_preview_last_frame(outfile);
+            return true;
+          }
+        }
+      }
+
+      // 2) Gamescope (owned or idle attach) — grim/wlr-screencopy is NOT
+      // supported on gamescope ("compositor doesn't support the screen capture
+      // protocol"). Prefer gamescopectl screenshot (async write to path).
+      auto try_gamescope_screenshot = [&](const std::string &socket_name) {
+        if (socket_name.empty()) {
+          return false;
+        }
+        const auto sock_path = xdg + "/" + socket_name;
+        if (access(sock_path.c_str(), F_OK) != 0) {
+          return false;
+        }
+        // Remove stale target so we can detect a new write.
+        std::remove(outfile.c_str());
+        const std::string env =
+          "GAMESCOPE_WAYLAND_DISPLAY=" + shell_escape(socket_name) +
+          " WAYLAND_DISPLAY=" + shell_escape(socket_name) +
+          " XDG_RUNTIME_DIR=" + shell_escape(xdg) + " ";
+        // Nudge a frame then screenshot (async write inside gamescope).
+        std::system((env + "gamescopectl debug_force_repaint >/dev/null 2>&1").c_str());
+        std::ostringstream cmd;
+        cmd << env << "gamescopectl screenshot " << shell_escape(outfile)
+            << " >/dev/null 2>&1";
+        if (std::system(cmd.str().c_str()) != 0) {
+          return false;
+        }
+        // Screenshot thread is async — wait briefly for a non-empty write.
+        for (int i = 0; i < 40; ++i) {
+          if (preview_file_usable(outfile)) {
+            return true;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return preview_file_usable(outfile);
+      };
+
+      for (const char *gs : {"gamescope-0", "gamescope-1"}) {
+        if (try_gamescope_screenshot(gs)) {
+          used_backend = std::string("gamescopectl:") + gs;
+          store_preview_last_frame(outfile);
+          return true;
+        }
+        // grim may still work on some nested/wlroots-compatible forks — try last.
+        if (try_grim_socket(gs, "")) {
+          used_backend = gs;
+          store_preview_last_frame(outfile);
+          return true;
+        }
+      }
+      if (const char *gs_env = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs_env && *gs_env) {
+        if (try_gamescope_screenshot(gs_env)) {
+          used_backend = std::string("gamescopectl:") + gs_env;
+          store_preview_last_frame(outfile);
+          return true;
+        }
+        if (try_grim_socket(gs_env, "")) {
+          used_backend = gs_env;
+          store_preview_last_frame(outfile);
+          return true;
+        }
+      }
+
+      // 2b) Gamescope X11 nested surface (from polaris-gamescope.env / DISPLAY) via ImageMagick.
+      // gamescopectl can fail idle (empty vulkan screenshot texture); X11 grab may still work mid-stream.
+      {
+        std::string x11_display;
+        const auto env_file = xdg + "/polaris-gamescope.env";
+        if (std::ifstream env_in(env_file); env_in) {
+          std::string line;
+          while (std::getline(env_in, line)) {
+            if (line.rfind("DISPLAY=", 0) == 0) {
+              x11_display = line.substr(8);
+              break;
+            }
+          }
+        }
+        if (x11_display.empty()) {
+          if (const char *d = std::getenv("DISPLAY"); d && *d) {
+            x11_display = d;
+          }
+        }
+        if (!x11_display.empty() && preview_output_is_safe(x11_display)) {
+          std::remove(outfile.c_str());
+          // Prefer magick import (IM7), fall back to import.
+          const std::string magick_cmd =
+            "DISPLAY=" + shell_escape(x11_display) +
+            " magick import -window root " + shell_escape(outfile) + " 2>/dev/null";
+          const std::string import_cmd =
+            "DISPLAY=" + shell_escape(x11_display) +
+            " import -window root " + shell_escape(outfile) + " 2>/dev/null";
+          if (std::system(magick_cmd.c_str()) == 0 && preview_file_usable(outfile)) {
+            used_backend = std::string("x11:") + x11_display;
+            store_preview_last_frame(outfile);
+            return true;
+          }
+          if (std::system(import_cmd.c_str()) == 0 && preview_file_usable(outfile)) {
+            used_backend = std::string("x11:") + x11_display;
+            store_preview_last_frame(outfile);
+            return true;
+          }
+        }
+      }
+
+      // 3) Host Wayland (Mirror Desktop / dongle desktop) — skip gamescope sockets
+      // already handled above (grim unsupported there).
+      if (const char *wl = std::getenv("WAYLAND_DISPLAY"); wl && *wl) {
+        const std::string wl_s {wl};
+        const bool is_gamescope =
+          wl_s == "gamescope-0" || wl_s == "gamescope-1" ||
+          wl_s.rfind("gamescope-", 0) == 0;
+        if (!is_gamescope) {
+          std::string out_name = requested_output;
+          if (out_name.empty() && !config::video.linux_display.streaming_output.empty() &&
+              config::video.linux_display.stream_mode == "headless_dongle") {
+            out_name = config::video.linux_display.streaming_output;
+          }
+          if (try_grim_socket(wl_s, out_name)) {
+            used_backend = std::string("host:") + wl_s;
+            store_preview_last_frame(outfile);
+            return true;
+          }
+          // grim without -o
+          if (try_grim_socket(wl_s, "")) {
+            used_backend = std::string("host:") + wl_s;
+            store_preview_last_frame(outfile);
+            return true;
+          }
+        }
+      }
+
+      // 4) Host X11 / spectacle last resort
+      {
+        std::remove(outfile.c_str());
+        const std::string cmd = "spectacle -b -n -o " + shell_escape(outfile) + " 2>/dev/null";
+        if (std::system(cmd.c_str()) == 0 && preview_file_usable(outfile)) {
+          used_backend = "spectacle";
+          store_preview_last_frame(outfile);
+          return true;
+        }
+      }
+
+      // 5) grim on default session without explicit socket (some hosts)
+      {
+        std::remove(outfile.c_str());
+        const std::string cmd = "grim " + shell_escape(outfile) + " 2>/dev/null";
+        if (std::system(cmd.c_str()) == 0 && preview_file_usable(outfile)) {
+          used_backend = "grim";
+          store_preview_last_frame(outfile);
+          return true;
+        }
+      }
+
+      // 6) Last successful stream/preview frame (SB-1: gamescopectl idle often fails)
+      if (try_preview_last_frame_cache(outfile)) {
+        used_backend = "last_frame_cache";
+        return true;
+      }
+
+      used_backend = "none";
+      return false;
     }
 
     std::string preview_failure_log_key(const std::string &capture_kind,
@@ -2755,6 +3046,42 @@ namespace confighttp {
     output_tree["platform"] = POLARIS_PLATFORM;
     output_tree["version"] = PROJECT_VERSION;
 
+#ifdef __linux__
+    const auto stream_display_mode_label = [](const std::string &selection) {
+      const auto label = stream_display_policy::label_for_selection(selection);
+      return label.empty() ? "Mirror Desktop"s : std::string {label};
+    };
+    const auto stats = stream_stats::get_current();
+    // Shared resolve snapshot: one vdisplay probe, one labwc state, configured + effective.
+    const auto labwc = snapshot_labwc();
+    const auto vd_backend = virtual_display::detect_backend();
+    const bool vd_available = vd_backend != virtual_display::backend_e::NONE;
+    const auto configured_policy = stream_display_policy::resolve(stream_display_policy::input_t {
+      vd_available,
+      false,
+      false,
+    });
+    const auto effective_policy = stream_display_policy::resolve_effective(
+      stream_display_policy::input_t {
+        vd_available,
+        false,
+        stats.runtime_gpu_native_override_active,
+      },
+      stats.streaming,
+      proc::proc.session_uses_virtual_display(),
+      stats.runtime_effective_headless
+    );
+    // Path/runtime display: reuse configured unless live override needs a second resolve.
+    const auto policy = labwc.state.gpu_native_override_active ?
+      stream_display_policy::resolve(stream_display_policy::input_t {
+        vd_available,
+        false,
+        true,
+      }) :
+      configured_policy;
+    const auto &configured_mode = configured_policy.selection;
+    const auto &effective_mode = effective_policy.selection;
+#else
     const auto stream_display_mode_label = [](const std::string &selection) {
       if (selection == "headless_stream") {
         return "Private Stream"s;
@@ -2765,37 +3092,15 @@ namespace confighttp {
       if (selection == "windowed_stream") {
         return "Private Stream (GPU-native)"s;
       }
+      if (selection == "gamescope_stream") {
+        return "Gamescope Stream"s;
+      }
       return "Mirror Desktop"s;
     };
-    const auto configured_stream_display_mode = []() {
-      const auto &linux_display = config::video.linux_display;
-      if (!linux_display.headless_mode) {
-        return "desktop_display"s;
-      }
-      if (!linux_display.use_cage_compositor) {
-        return "host_virtual_display"s;
-      }
-      if (linux_display.prefer_gpu_native_capture) {
-        return "windowed_stream"s;
-      }
-      return "headless_stream"s;
-    };
     const auto stats = stream_stats::get_current();
-    const auto configured_mode = configured_stream_display_mode();
-    auto effective_mode = configured_mode;
-    if (stats.streaming) {
-      if (stats.runtime_gpu_native_override_active) {
-        effective_mode = "windowed_stream";
-      } else if (proc::proc.session_uses_virtual_display()) {
-        effective_mode = "host_virtual_display";
-      } else if (configured_mode == "windowed_stream" && stats.runtime_effective_headless) {
-        effective_mode = "windowed_stream";
-      } else if (stats.runtime_effective_headless) {
-        effective_mode = "headless_stream";
-      } else {
-        effective_mode = "desktop_display";
-      }
-    }
+    const auto configured_mode = "desktop_display"s;
+    const auto effective_mode = configured_mode;
+#endif
     const bool client_settings_relaunch_required =
       stats.streaming && configured_mode != effective_mode;
     const auto host_header = request->header.find("host");
@@ -2830,14 +3135,20 @@ namespace confighttp {
 #endif
 #ifdef __linux__
     {
-      auto vd_backend = virtual_display::detect_backend();
-      output_tree["vdisplayAvailable"] = (vd_backend != virtual_display::backend_e::NONE);
+      output_tree["vdisplayAvailable"] = vd_available;
       output_tree["vdisplayBackend"] = virtual_display::backend_name(vd_backend);
-      auto runtime_state = cage_display_router::runtime_state();
-      output_tree["runtime_backend"] = runtime_state.backend_name;
-      output_tree["runtime_requested_headless"] = runtime_state.requested_headless;
-      output_tree["runtime_effective_headless"] = runtime_state.effective_headless;
-      output_tree["runtime_gpu_native_override_active"] = runtime_state.gpu_native_override_active;
+      // Prefer live cage state when private labwc is running; otherwise policy backend
+      // (portal / gamescope / host) so the UI never shows "Unknown".
+      output_tree["runtime_backend"] = labwc.running && !labwc.state.backend_name.empty() ?
+        labwc.state.backend_name :
+        (policy.backend_name.empty() ? "none" : policy.backend_name);
+      output_tree["runtime_requested_headless"] = policy.requested_headless;
+      output_tree["runtime_effective_headless"] = labwc.running ?
+        labwc.state.effective_headless :
+        policy.effective_headless;
+      output_tree["runtime_gpu_native_override_active"] = labwc.state.gpu_native_override_active;
+      output_tree["stream_path_id"] = policy.selection;
+      output_tree["stream_path_label"] = policy.label;
     }
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
@@ -3789,8 +4100,77 @@ namespace confighttp {
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string uuid = input_tree.value("uuid", "");
-      output_tree["status"] = nvhttp::find_and_stop_session(uuid, true);
+
+      // Host-operator path: WebUI disconnect fully ends the stream. Answer HTTPS
+      // first, then session_media worker runs media teardown + nested kill.
+      output_tree["status"] = true;
+      output_tree["force"] = true;
+      BOOST_LOG(info) << "WebUI disconnect: responding before capture/nested teardown"sv;
       send_response(response, output_tree);
+
+#ifdef __linux__
+      session_media::schedule([uuid = std::move(uuid)]() {
+        try {
+          BOOST_LOG(info) << "WebUI disconnect: async prepare capture/portal teardown"sv;
+          session_media::prepare_for_stop();
+
+          if (!uuid.empty()) {
+            const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
+            const bool stopped = shutdown.stopped ||
+                                 shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                                 shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+            if (!stopped) {
+              BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
+                              << static_cast<int>(shutdown.snapshot.outcome);
+              rtsp_stream::terminate_sessions();
+              proc::proc.terminate();
+            }
+            nvhttp::find_and_stop_session(uuid, true);
+          }
+          else {
+            bool stopped = false;
+            const auto owner = proc::proc.get_session_owner_unique_id();
+            if (!owner.empty()) {
+              const auto shutdown = proc::proc.request_session_shutdown(owner, {}, true, false);
+              stopped = shutdown.stopped ||
+                        shutdown.snapshot.outcome == proc::session_stop_outcome_t::allowed ||
+                        shutdown.snapshot.outcome == proc::session_stop_outcome_t::no_active_session;
+            }
+            if (!stopped) {
+              BOOST_LOG(info) << "WebUI disconnect: force-stop active session(s)"sv;
+              rtsp_stream::terminate_sessions();
+              if (proc::proc.running() > 0) {
+                proc::proc.terminate();
+              }
+            }
+          }
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "WebUI disconnect: nested force-stop failed: "sv << e.what();
+        }
+      });
+#else
+      // Non-Linux: keep previous force-stop path on a detached thread.
+      std::thread {[uuid = std::move(uuid)]() {
+        try {
+          if (!uuid.empty()) {
+            const auto shutdown = proc::proc.request_session_shutdown(uuid, {}, true, false);
+            if (!shutdown.stopped) {
+              rtsp_stream::terminate_sessions();
+              proc::proc.terminate();
+            }
+            nvhttp::find_and_stop_session(uuid, true);
+          }
+          else {
+            rtsp_stream::terminate_sessions();
+            if (proc::proc.running() > 0) {
+              proc::proc.terminate();
+            }
+          }
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "WebUI disconnect: nested force-stop failed: "sv << e.what();
+        }
+      }}.detach();
+#endif
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Disconnect: "sv << e.what();
       bad_request(response, request, e.what());
@@ -4023,36 +4403,17 @@ namespace confighttp {
       requested_output = it->second;
     }
 
-    // Prefer grim on labwc's socket (works in both headless and windowed mode)
-    bool captured = false;
-    bool cage_capture_required = false;
-    if (config::video.linux_display.use_cage_compositor) {
-      auto cage_socket = cage_display_router::get_wayland_socket();
-      if (!cage_socket.empty() && cage_display_router::is_running()) {
-        const auto preview_output = active_preview_output_name(requested_output);
-        const auto cmd = build_cage_preview_capture_command(cage_socket, preview_output, tmpfile);
-        cage_capture_required = true;
-        if (std::system(cmd.c_str()) == 0) {
-          captured = true;
-          clear_cage_preview_capture_failure("screenshot", cage_socket, preview_output);
-        } else {
-          log_cage_preview_capture_failure("screenshot", cage_socket, preview_output);
-        }
-      }
-    }
-
-    // Fallback: spectacle on desktop (for non-cage setups)
-    if (!captured && !cage_capture_required) {
-      std::string cmd = "spectacle -b -n -o " + tmpfile + " 2>/dev/null";
-      captured = (std::system(cmd.c_str()) == 0);
+    std::string preview_backend;
+    const bool captured = try_stream_path_preview_capture(requested_output, tmpfile, preview_backend);
+    if (captured) {
+      BOOST_LOG(debug) << "display_preview: captured via "sv << preview_backend;
     }
 
     if (!captured) {
       nlohmann::json err;
       err["status"] = false;
-      err["error"] = cage_capture_required ?
-        "Preview capture failed; the active stream may still be healthy" :
-        "Screenshot capture failed";
+      err["error"] = "Screenshot capture failed for the active stream path (tried gamescopectl, labwc grim, host Wayland, last-frame cache, spectacle)";
+      err["preview_backend"] = preview_backend;
       send_response(response, err);
       return;
     }
@@ -4125,35 +4486,8 @@ namespace confighttp {
       while (!shutdown_event->peek()) {
         auto start = std::chrono::steady_clock::now();
 
-        // Capture frame
-        bool captured = false;
-        bool cage_capture_required = false;
-        if (config::video.linux_display.use_cage_compositor) {
-          auto cage_socket = cage_display_router::get_wayland_socket();
-          if (!cage_socket.empty() && cage_display_router::is_running()) {
-            const auto preview_output = active_preview_output_name(requested_output);
-            const auto cmd = build_cage_preview_capture_command(cage_socket, preview_output, tmpfile);
-            cage_capture_required = true;
-            if (std::system(cmd.c_str()) == 0) {
-              captured = true;
-              clear_cage_preview_capture_failure("MJPEG frame", cage_socket, preview_output);
-            } else {
-              log_cage_preview_capture_failure("MJPEG frame", cage_socket, preview_output);
-              break;
-            }
-          }
-        }
-
-        if (!captured && !cage_capture_required) {
-          std::string cmd = "spectacle -b -n -o " + tmpfile + " 2>/dev/null";
-          if (std::system(cmd.c_str()) == 0) {
-            captured = true;
-          } else {
-            cmd = "grim " + shell_escape(tmpfile) + " 2>/dev/null";
-            captured = (std::system(cmd.c_str()) == 0);
-          }
-        }
-
+        std::string preview_backend;
+        const bool captured = try_stream_path_preview_capture(requested_output, tmpfile, preview_backend);
         if (!captured) {
           break;
         }
@@ -4212,11 +4546,11 @@ namespace confighttp {
 
     bool available = cached_backend != virtual_display::backend_e::NONE;
     output_tree["available"] = available;
-    const auto runtime_state = cage_display_router::runtime_state();
+    const auto labwc = snapshot_labwc();
     const auto display_policy = stream_display_policy::resolve(stream_display_policy::input_t {
       available,
       video::active_encoder_requires_gpu_native_capture(),
-      runtime_state.gpu_native_override_active,
+      labwc.state.gpu_native_override_active,
     });
     output_tree["backend"] = virtual_display::backend_name(cached_backend);
     output_tree["backend_id"] = static_cast<int>(cached_backend);
@@ -4224,8 +4558,8 @@ namespace confighttp {
     output_tree["policy_mode"] = display_policy.selection;
     output_tree["policy_label"] = display_policy.label;
     output_tree["policy_reason"] = display_policy.reason;
-    output_tree["runtime_backend"] = runtime_state.backend_name;
-    output_tree["runtime_effective_headless"] = runtime_state.effective_headless;
+    output_tree["runtime_backend"] = labwc.state.backend_name;
+    output_tree["runtime_effective_headless"] = labwc.state.effective_headless;
 
     send_response(response, output_tree);
   }
@@ -4299,10 +4633,54 @@ namespace confighttp {
       BOOST_LOG(warning) << "BrowserStreamStop: "sv << e.what();
     }
 
+    // Answer HTTPS before portal/PW work. Token stop without media; schedule
+    // media teardown on the session_media worker after the response flushes.
+    browser_stream::stop_session_result_t result;
+    if (!token.empty()) {
+      result = browser_stream::stop_session(
+        token,
+        /*terminate_owned_app=*/false,
+        /*release_media=*/false
+      );
+    }
+
     nlohmann::json output;
+    // Operator force-stop always acknowledges so the gate/WebUI get a body
+    // even if residual media teardown is still draining PipeWire.
     output["status"] = true;
-    output["stopped"] = !token.empty() && browser_stream::stop_session(token);
+    output["stopped"] = true;
+    output["token_matched"] = result.stopped;
+    output["media_draining"] = true;
+    BOOST_LOG(info) << "BrowserStreamStop: responding before teardown token_ok="sv
+                    << result.stopped << " owns_app="sv << result.owns_app;
     send_response(response, output);
+
+    const bool owns_app = result.owns_app;
+#ifdef __linux__
+    session_media::schedule([owns_app]() {
+      try {
+        BOOST_LOG(info) << "BrowserStreamStop: async prepare capture/portal teardown"sv;
+        session_media::prepare_for_stop();
+        if (owns_app) {
+          BOOST_LOG(info) << "BrowserStreamStop: async terminate owned app"sv;
+          proc::proc.terminate(false, false);
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "BrowserStreamStop: async teardown failed: "sv << e.what();
+      }
+    });
+#else
+    std::thread {[owns_app]() {
+      try {
+        browser_stream::prepare_for_session_teardown();
+        if (owns_app) {
+          proc::proc.terminate(false, false);
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "BrowserStreamStop: async teardown failed: "sv << e.what();
+      }
+    }}.detach();
+#endif
   }
 
   /**
@@ -4794,11 +5172,11 @@ namespace confighttp {
     output["display_session"]["wayland_available"] = has_wayland_display;
     output["display_session"]["x11_available"] = has_x11_display;
     {
-      auto runtime_state = cage_display_router::runtime_state();
-      output["runtime"]["backend"] = runtime_state.backend_name;
-      output["runtime"]["requested_headless"] = runtime_state.requested_headless;
-      output["runtime"]["effective_headless"] = runtime_state.effective_headless;
-      output["runtime"]["gpu_native_override_active"] = runtime_state.gpu_native_override_active;
+      const auto labwc = snapshot_labwc();
+      output["runtime"]["backend"] = labwc.state.backend_name;
+      output["runtime"]["requested_headless"] = labwc.state.requested_headless;
+      output["runtime"]["effective_headless"] = labwc.state.effective_headless;
+      output["runtime"]["gpu_native_override_active"] = labwc.state.gpu_native_override_active;
     }
 #endif
 
@@ -4844,12 +5222,10 @@ namespace confighttp {
 
       auto live_stats = stream_stats::get_current();
       std::vector<std::unique_ptr<wl::monitor_t>> wayland_monitors;
-      if (live_stats.streaming &&
-          config::video.linux_display.use_cage_compositor &&
-          cage_display_router::is_running()) {
-        auto cage_socket = cage_display_router::get_wayland_socket();
-        if (!cage_socket.empty()) {
-          wayland_monitors = wl::monitors(cage_socket.c_str());
+      if (live_stats.streaming && config::video.linux_display.use_cage_compositor) {
+        const auto labwc = snapshot_labwc();
+        if (labwc.running && !labwc.socket.empty()) {
+          wayland_monitors = wl::monitors(labwc.socket.c_str());
         }
       }
 
@@ -5195,8 +5571,11 @@ namespace confighttp {
           // Build current session state
           nlohmann::json state;
 #ifdef __linux__
-          state["cage_running"] = cage_display_router::is_running();
-          state["cage_socket"] = cage_display_router::get_wayland_socket();
+          {
+            const auto labwc = snapshot_labwc();
+            state["cage_running"] = labwc.running;
+            state["cage_socket"] = labwc.socket;
+          }
           state["screen_locked"] = session_manager::is_screen_locked();
 #endif
           state["seq"] = current_seq;
@@ -5239,10 +5618,13 @@ namespace confighttp {
       nlohmann::json output;
 
 #ifdef __linux__
-      output["cage_running"] = cage_display_router::is_running();
-      output["cage_pid"] = cage_display_router::get_pid();
-      output["cage_socket"] = cage_display_router::get_wayland_socket();
-      output["cage_healthy"] = cage_display_router::is_healthy();
+      {
+        const auto labwc = snapshot_labwc();
+        output["cage_running"] = labwc.running;
+        output["cage_pid"] = labwc.pid;
+        output["cage_socket"] = labwc.socket;
+        output["cage_healthy"] = labwc.healthy;
+      }
       output["screen_locked"] = session_manager::is_screen_locked();
 #else
       output["cage_running"] = false;
@@ -5375,6 +5757,45 @@ namespace confighttp {
     server.resource["^/api/webrtc/status$"]["GET"] = getBrowserStreamStatus;
     server.resource["^/api/display/screenshot$"]["GET"] = getDisplayScreenshot;
     server.resource["^/api/display/stream$"]["GET"] = getDisplayStream;
+#ifdef __linux__
+    server.resource["^/api/linux/display-outputs$"]["GET"] = [](resp_https_t response, req_https_t request) {
+      if (!authenticate(response, request)) {
+        return;
+      }
+      print_req(request);
+      nlohmann::json output;
+      output["status"] = true;
+      nlohmann::json arr = nlohmann::json::array();
+      for (const auto &o : display_topology::list_outputs()) {
+        arr.push_back({
+          {"name", o.name},
+          {"drm_path", o.drm_path},
+          {"connected", o.connected},
+          {"enabled", o.enabled},
+          {"likely_dongle", o.likely_dongle},
+          {"suggested_primary", o.suggested_primary},
+          {"suggested_streaming", o.suggested_streaming},
+        });
+      }
+      output["outputs"] = std::move(arr);
+      output["streaming_output"] = config::video.linux_display.streaming_output;
+      output["primary_output"] = config::video.linux_display.primary_output;
+      // Suggestions when config empty
+      std::string sug_stream;
+      std::string sug_primary;
+      for (const auto &o : display_topology::list_outputs()) {
+        if (o.suggested_streaming) {
+          sug_stream = o.name;
+        }
+        if (o.suggested_primary) {
+          sug_primary = o.name;
+        }
+      }
+      output["suggested_streaming_output"] = sug_stream;
+      output["suggested_primary_output"] = sug_primary;
+      send_response(response, output);
+    };
+#endif
     server.resource["^/api/vdisplay/status$"]["GET"] = getVDisplayStatus;
     server.resource["^/api/vdisplay/backends$"]["GET"] = getVDisplayBackends;
     server.resource["^/api/vdisplay/create$"]["POST"] = withCsrf(createVDisplay);

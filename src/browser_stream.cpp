@@ -53,7 +53,11 @@ extern "C" {
   #include <boost/process/v1/handles.hpp>
   #include <boost/process/v1/io.hpp>
   #include <boost/process/v1/start_dir.hpp>
-  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/stream_display_policy.h"
+  #ifdef POLARIS_BUILD_PORTAL
+    #include "platform/linux/portal_session.h"
+  #endif
   #include <dirent.h>
   #include <sys/stat.h>
   #include <unistd.h>
@@ -444,9 +448,124 @@ namespace browser_stream {
       return launch_session;
     }
 
+    // Private runtime via stream_runtime facade (labwc adapter + gamescope).
+    bool gamescope_socket_ready() {
+      auto runtime = stream_runtime::acquire(stream_path::runtime_kind_e::GAMESCOPE);
+      if (runtime && runtime->is_running()) {
+        return true;
+      }
+      // Attach path: idle unit may own the socket without our owned process.
+      const char *rt = std::getenv("XDG_RUNTIME_DIR");
+      if (!rt || !*rt) {
+        return false;
+      }
+      for (const char *sock : {"gamescope-0", "gamescope-1"}) {
+        std::string path = std::string(rt) + "/" + sock;
+        if (access(path.c_str(), F_OK) == 0) {
+          return true;
+        }
+      }
+      if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
+        std::string path = std::string(rt) + "/" + gs;
+        if (access(path.c_str(), F_OK) == 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    bool private_runtime_configured() {
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        return true;
+      }
+      const auto &mode = config::video.linux_display.stream_mode;
+      if (mode == "gamescope_stream" || mode == "headless_stream" || mode == "windowed_stream") {
+        return true;
+      }
+      if (config::video.linux_display.use_cage_compositor) {
+        return true;
+      }
+      // Portal + live gamescope socket still counts as a private paint surface.
+      return gamescope_socket_ready();
+    }
+
+    bool private_runtime_active() {
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        if (runtime->is_running()) {
+          return true;
+        }
+      }
+      // Labwc adapter may not be the resolved policy if config drifted — probe both.
+      if (auto labwc = stream_runtime::acquire(stream_path::runtime_kind_e::LABWC)) {
+        if (labwc->is_running()) {
+          return true;
+        }
+      }
+      return gamescope_socket_ready();
+    }
+
+    std::string private_runtime_backend() {
+      if (auto labwc = stream_runtime::acquire(stream_path::runtime_kind_e::LABWC)) {
+        if (labwc->is_running()) {
+          return std::string {labwc->backend_id()};
+        }
+      }
+      if (gamescope_socket_ready()) {
+        return "gamescope";
+      }
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        return std::string {runtime->backend_id()};
+      }
+      if (config::video.linux_display.use_cage_compositor) {
+        return "labwc";
+      }
+      if (config::video.linux_display.stream_mode == "gamescope_stream" ||
+          config::video.capture == "portal") {
+        return "gamescope";
+      }
+      return "";
+    }
+
+    nlohmann::json fill_isolation_json(bool include_available_active) {
+      std::string wl_sock;
+      bool headless = false;
+      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+        wl_sock = runtime->wayland_socket();
+        headless = runtime->runtime_state().effective_headless;
+      }
+      if (wl_sock.empty()) {
+        if (auto labwc = stream_runtime::acquire(stream_path::runtime_kind_e::LABWC)) {
+          if (labwc->is_running()) {
+            wl_sock = labwc->wayland_socket();
+            headless = labwc->runtime_state().effective_headless;
+          }
+        }
+      }
+      if (wl_sock.empty() && gamescope_socket_ready()) {
+        if (const char *gs = std::getenv("GAMESCOPE_WAYLAND_DISPLAY"); gs && *gs) {
+          wl_sock = gs;
+        }
+        else {
+          wl_sock = "gamescope-0";
+        }
+        headless = true;
+      }
+      const auto backend = private_runtime_backend();
+      nlohmann::json isolation = {
+        {"backend", backend.empty() ? "labwc" : backend},
+        {"headless", headless},
+        {"wayland_socket", wl_sock},
+      };
+      if (include_available_active) {
+        isolation["available"] = private_runtime_configured();
+        isolation["active"] = private_runtime_active();
+      }
+      return isolation;
+    }
+
     bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {
-      if (!config::video.linux_display.use_cage_compositor) {
-        error_out = "Browser Stream app isolation requires the Linux private compositor runtime to be enabled.";
+      if (!private_runtime_configured()) {
+        error_out = "Browser Stream app isolation requires a Linux private runtime (labwc cage or gamescope).";
         return false;
       }
 
@@ -459,7 +578,8 @@ namespace browser_stream {
         }
       }
 
-      BOOST_LOG(info) << "Launching Browser Stream app session ["sv << app.name << ']';
+      BOOST_LOG(info) << "Launching Browser Stream app session ["sv << app.name
+                      << "] runtime=" << private_runtime_backend();
       auto launch_session = browser_launch_session();
       const auto err = proc::proc.execute(app, launch_session);
       if (err) {
@@ -469,7 +589,15 @@ namespace browser_stream {
         return false;
       }
 
-      if (!cage_display_router::is_running()) {
+      // Allow a short settle: nested gamescope / cage may take a moment.
+      for (int i = 0; i < 25; ++i) {
+        if (private_runtime_active()) {
+          return true;
+        }
+        std::this_thread::sleep_for(100ms);
+      }
+
+      if (!private_runtime_active()) {
         error_out = "Browser Stream started the application, but the isolated compositor did not remain active.";
         proc::proc.terminate(false, false);
         return false;
@@ -705,8 +833,10 @@ namespace browser_stream {
       const auto session_token = message->value("session_token", "");
 
       if (message_type == "transport_closed") {
-        const auto stopped = stop_session(session_token);
-        BOOST_LOG(info) << "Browser Stream transport closed; backend stop requested="sv << stopped;
+        // IPC path: terminate owned app here (no HTTP response to protect).
+        const auto result = stop_session(session_token, true);
+        BOOST_LOG(info) << "Browser Stream transport closed; backend stop requested="sv
+                        << result.stopped << " owns_app="sv << result.owns_app;
         write_input_ipc_response(socket, true, "");
         return;
       }
@@ -1291,7 +1421,7 @@ namespace browser_stream {
       return state;
     }
 
-    void finish_video_capture_stop(std::unique_ptr<capture_state_t> state) {
+    void finish_video_capture_stop_join(std::unique_ptr<capture_state_t> state) {
       if (!state) {
         return;
       }
@@ -1318,8 +1448,47 @@ namespace browser_stream {
       }
     }
 
+    // Join capture threads, but never block the HTTP/lifecycle thread past
+    // `timeout` (SB-2: unbounded join hung :47990 → 10s force-shutdown SIGTRAP).
+    // On timeout, hand ownership to a detached joiner so state lifetime is safe.
+    void finish_video_capture_stop(
+      std::unique_ptr<capture_state_t> state,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds {0}
+    ) {
+      if (!state) {
+        return;
+      }
+      if (timeout.count() <= 0) {
+        finish_video_capture_stop_join(std::move(state));
+        return;
+      }
+
+      auto done = std::make_shared<std::atomic<bool>>(false);
+      std::thread joiner {[state = std::move(state), done]() mutable {
+        finish_video_capture_stop_join(std::move(state));
+        done->store(true, std::memory_order_release);
+      }};
+      const auto deadline = std::chrono::steady_clock::now() + timeout;
+      while (!done->load(std::memory_order_acquire) &&
+             std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      if (done->load(std::memory_order_acquire)) {
+        if (joiner.joinable()) {
+          joiner.join();
+        }
+      }
+      else {
+        BOOST_LOG(warning) << "Browser Stream capture join exceeded "
+                           << timeout.count()
+                           << "ms; continuing teardown without blocking HTTPS"sv;
+        joiner.detach();
+      }
+    }
+
     void stop_video_capture() {
-      finish_video_capture_stop(take_capture_state_for_stop());
+      // Synchronous path used from prepare; bound so stop handlers return.
+      finish_video_capture_stop(take_capture_state_for_stop(), 3s);
     }
 
     void stop_video_capture_async() {
@@ -1328,7 +1497,7 @@ namespace browser_stream {
         return;
       }
       std::thread {[state = std::move(state)]() mutable {
-        finish_video_capture_stop(std::move(state));
+        finish_video_capture_stop_join(std::move(state));
       }}.detach();
     }
 
@@ -1487,15 +1656,39 @@ namespace browser_stream {
     return valid;
   }
 
-  bool stop_session(std::string_view token) {
+  void prepare_for_session_teardown() {
+#ifdef __linux__
+    // Single ordered media teardown (prefer session_media::prepare_for_stop as
+    // the external entry). History: join-before-release hung HTTPS; release
+    // hangs in pw_thread_loop_stop — bound join + portal budget, then settle.
+    // See docs/research/stream-path-rewrite-followups.md (SB-2).
+    const bool had_media = video_capture_active() || audio_capture_active();
+    BOOST_LOG(info) << "session_media: step1 signal capture shutdown (had_media="sv
+                    << had_media << ")"sv;
+    auto state = take_capture_state_for_stop();
+#ifdef POLARIS_BUILD_PORTAL
+    BOOST_LOG(info) << "session_media: step2 release portal/PipeWire"sv;
+    portal::release_global_capture();
+#endif
+    BOOST_LOG(info) << "session_media: step3 bounded capture join (3s)"sv;
+    finish_video_capture_stop(std::move(state), 3s);
+    if (had_media) {
+      std::this_thread::sleep_for(100ms);
+      BOOST_LOG(info) << "session_media: media ready for nested compositor kill"sv;
+    }
+#endif
+  }
+
+  stop_session_result_t stop_session(std::string_view token, bool terminate_owned_app, bool release_media) {
     auto record = take_session_token(token);
-    bool stopped = record.has_value();
+    stop_session_result_t result;
+    result.stopped = record.has_value();
 #ifdef __linux__
     bool should_stop_capture = false;
-    bool should_stop_app = record && record->owns_app;
+    result.owns_app = record && record->owns_app;
     {
       std::lock_guard lock(helper_mutex);
-      if (stopped && helper_running_locked()) {
+      if (result.stopped && helper_running_locked()) {
         std::string error;
         nlohmann::json message {
           {"ipc_token", helper_state.ipc_token},
@@ -1507,14 +1700,18 @@ namespace browser_stream {
         stop_helper_locked();
       }
     }
-    if (should_stop_capture) {
-      stop_video_capture_async();
+    // Drop capture when this token owned media (unless caller defers prepare
+    // until after the HTTPS response — HTTP stop handlers set release_media=false).
+    if (release_media &&
+        (should_stop_capture || result.owns_app || video_capture_active() || audio_capture_active())) {
+      prepare_for_session_teardown();
     }
-    if (should_stop_app) {
+    if (result.owns_app && terminate_owned_app) {
+      BOOST_LOG(info) << "Browser Stream stop_session: terminating owned app"sv;
       proc::proc.terminate(false, false);
     }
 #endif
-    return stopped;
+    return result;
   }
 
   nlohmann::json status_json() {
@@ -1569,21 +1766,15 @@ namespace browser_stream {
       {"app_name", proc::proc.get_last_run_app_name()},
       {"app_uuid", proc::proc.get_running_app_uuid()},
 #ifdef __linux__
-      {"isolated", cage_display_router::is_running()},
-      {"runtime", cage_display_router::is_running() ? "labwc" : ""},
+      {"isolated", private_runtime_active()},
+      {"runtime", private_runtime_backend()},
 #else
       {"isolated", false},
       {"runtime", ""},
 #endif
     };
 #ifdef __linux__
-    output["isolation"] = {
-      {"backend", "labwc"},
-      {"available", config::video.linux_display.use_cage_compositor},
-      {"active", cage_display_router::is_running()},
-      {"headless", cage_display_router::runtime_state().effective_headless},
-      {"wayland_socket", cage_display_router::get_wayland_socket()},
-    };
+    output["isolation"] = fill_isolation_json(true);
 #endif
     output["codecs"] = codec_json();
     output["profiles"] = stream_profiles_json();
@@ -1805,15 +1996,16 @@ namespace browser_stream {
       {"app_id", proc::proc.running()},
       {"app_name", proc::proc.get_last_run_app_name()},
       {"app_uuid", proc::proc.get_running_app_uuid()},
+#ifdef __linux__
+      {"isolated", private_runtime_active()},
+      {"runtime", private_runtime_backend()},
+#else
       {"isolated", true},
       {"runtime", "labwc"},
+#endif
     };
 #ifdef __linux__
-    output["isolation"] = {
-      {"backend", "labwc"},
-      {"headless", cage_display_router::runtime_state().effective_headless},
-      {"wayland_socket", cage_display_router::get_wayland_socket()},
-    };
+    output["isolation"] = fill_isolation_json(false);
 #endif
     output["deferred"] = {"browser_gamepad", "wan_traversal", "hdr", "hevc", "av1"};
     return output;

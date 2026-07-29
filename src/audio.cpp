@@ -246,9 +246,11 @@ namespace audio {
     auto next_audio_route_check = std::chrono::steady_clock::now();
 
     while (!shutdown_event->peek()) {
+      // Re-pin session streams that left the capture sink (EE reclaim); 3s poll,
+      // platform side enforces 10s cooldown per sink-input (no 1Hz crackle thrash).
       if (route_without_default && std::chrono::steady_clock::now() >= next_audio_route_check) {
         control->route_process_audio_to_sink(sink);
-        next_audio_route_check = std::chrono::steady_clock::now() + 1s;
+        next_audio_route_check = std::chrono::steady_clock::now() + 3s;
       }
 
       std::vector<float> sample_buffer;
@@ -286,27 +288,91 @@ namespace audio {
     return control_shared.ref();
   }
 
+  bool host_sink_is_processing(const std::string &sink_name) {
+    if (sink_name.empty()) {
+      return false;
+    }
+    // Match node names used by common PipeWire filter graphs. These sinks
+    // advertise themselves as the default and set target.object on clients;
+    // pa_context_move_sink_input cannot keep FMOD/Wine off them.
+    auto contains = [&](const char *needle) {
+      return sink_name.find(needle) != std::string::npos;
+    };
+    return contains("easyeffects") || contains("EasyEffects") ||
+           contains("jamesdsp") || contains("JamesDSP") ||
+           contains("pulseeffects") || contains("PulseEffects");
+  }
+
+  // Host default that must never be the stream capture target (filter/null
+  // placeholders). Observed: null-sink-for-xlrdock-source "do not use".
+  bool host_sink_is_unusable_for_stream(const std::string &sink_name) {
+    if (sink_name.empty()) {
+      return true;
+    }
+    auto contains = [&](const char *needle) {
+      return sink_name.find(needle) != std::string::npos;
+    };
+    return contains("do not use") || contains("do-not-use") ||
+           contains("null-sink-for-xlrdock") ||
+           contains("Null Sink For XLRDock");
+  }
+
+  std::string select_virtual_sink_for_channels(const audio_ctx_t &ctx, int channels) {
+    if (!ctx.sink.null) {
+      return {};
+    }
+    const auto &null = *ctx.sink.null;
+    switch (channels) {
+      case 6:
+        return null.surround51;
+      case 8:
+        return null.surround71;
+      case 2:
+      default:
+        return null.stereo;
+    }
+  }
+
   std::string select_sink_name(const audio_ctx_t &ctx, int channels, bool host_audio) {
     // Order of priority:
-    // 1. Virtual sink, when host playback is disabled or no host sink exists
-    // 2. Explicit audio sink
-    // 3. Host/default sink
-    std::string sink = config::audio.sink.empty() ? ctx.sink.host : config::audio.sink;
+    // 1. Explicit audio_sink from web UI / conf — always enforced when set
+    // 2. Host processing sink (EasyEffects etc.) when host_audio is off — games
+    //    rebind there after menu reinit; virtual isolation + re-pin loses
+    // 3. Virtual sink by channel count when host_audio is off, OR host default
+    //    is an unusable placeholder (XLRDock null, "do not use")
+    // 4. Host/default sink (only if usable)
+    if (!config::audio.sink.empty()) {
+      BOOST_LOG(info) << "Linux audio: using configured audio_sink ["sv << config::audio.sink << "]"sv;
+      return config::audio.sink;
+    }
 
-    if (ctx.sink.null && (!host_audio || sink.empty())) {
-      const auto &null = *ctx.sink.null;
-      switch (channels) {
-        case 6:
-          return null.surround51;
-        case 8:
-          return null.surround71;
-        case 2:
-        default:
-          return null.stereo;
+    if (!host_audio && host_sink_is_processing(ctx.sink.host)) {
+      BOOST_LOG(info) << "Linux audio: host default ["sv << ctx.sink.host
+                      << "] is a processing sink; capturing it instead of virtual isolation "
+                         "(FMOD/EasyEffects target.object cannot be overridden by re-pin)"sv;
+      return ctx.sink.host;
+    }
+
+    const bool prefer_virtual =
+      ctx.sink.null &&
+      (!host_audio || host_sink_is_unusable_for_stream(ctx.sink.host));
+    if (prefer_virtual) {
+      auto virtual_sink = select_virtual_sink_for_channels(ctx, channels);
+      if (!virtual_sink.empty()) {
+        if (host_audio && host_sink_is_unusable_for_stream(ctx.sink.host)) {
+          BOOST_LOG(info) << "Linux audio: host default ["sv << ctx.sink.host
+                          << "] is unusable for stream capture; using virtual sink ["sv
+                          << virtual_sink << "]"sv;
+        }
+        return virtual_sink;
       }
     }
 
-    return sink;
+    if (host_sink_is_unusable_for_stream(ctx.sink.host)) {
+      BOOST_LOG(warning) << "Linux audio: host default ["sv << ctx.sink.host
+                         << "] is unusable and no virtual sink is available"sv;
+    }
+    return ctx.sink.host;
   }
 
   bool sink_is_virtual(const audio_ctx_t &ctx, const std::string &sink) {
@@ -318,7 +384,19 @@ namespace audio {
 
   bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio) {
 #ifdef __linux__
-    return !host_audio && config::audio.sink.empty() && sink_is_virtual(ctx, sink);
+    if (sink.empty()) {
+      return false;
+    }
+    // Never thrash re-pin against EasyEffects — capture host instead (select_sink_name).
+    if (host_sink_is_processing(ctx.sink.host) || host_sink_is_processing(sink)) {
+      return false;
+    }
+    // Pin session apps to the capture sink when isolating (host_audio off) or when
+    // we were forced onto a virtual sink because the host default is unusable.
+    if (!host_audio) {
+      return true;
+    }
+    return sink_is_virtual(ctx, sink) && host_sink_is_unusable_for_stream(ctx.sink.host);
 #else
     return false;
 #endif

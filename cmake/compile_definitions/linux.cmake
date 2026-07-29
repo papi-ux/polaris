@@ -113,7 +113,9 @@ if(${POLARIS_ENABLE_CUDA})
     endif()
 endif()
 if(CUDA_FOUND)
+    find_package(Vulkan REQUIRED)
     include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nvfbc")
+    list(APPEND PLATFORM_LIBRARIES Vulkan::Vulkan)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda.cu"
@@ -123,8 +125,8 @@ if(CUDA_FOUND)
     add_compile_definitions(POLARIS_BUILD_CUDA)
 endif()
 
-# libdrm is required for both DRM (KMS) and Wayland
-if(${POLARIS_ENABLE_DRM} OR ${POLARIS_ENABLE_WAYLAND})
+# libdrm is required for DRM (KMS), Wayland, and Portal capture
+if(${POLARIS_ENABLE_DRM} OR ${POLARIS_ENABLE_WAYLAND} OR ${POLARIS_ENABLE_PORTAL})
     find_package(LIBDRM REQUIRED)
 else()
     set(LIBDRM_FOUND OFF)
@@ -182,24 +184,34 @@ if(${POLARIS_ENABLE_PORTAL})
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(GIO gio-2.0)
+        pkg_check_modules(GIO_UNIX gio-unix-2.0)
     endif()
 else()
     set(GIO_FOUND OFF)
+    set(GIO_UNIX_FOUND OFF)
 endif()
-if(GIO_FOUND)
+if(GIO_FOUND AND GIO_UNIX_FOUND)
     add_compile_definitions(POLARIS_BUILD_GIO)
-    include_directories(SYSTEM ${GIO_INCLUDE_DIRS})
-    list(APPEND PLATFORM_LIBRARIES ${GIO_LIBRARIES})
+    include_directories(SYSTEM ${GIO_INCLUDE_DIRS} ${GIO_UNIX_INCLUDE_DIRS})
+    list(APPEND PLATFORM_LIBRARIES ${GIO_LIBRARIES} ${GIO_UNIX_LIBRARIES})
 endif()
-if(GIO_FOUND AND PIPEWIRE_FOUND)
+if(GIO_FOUND AND GIO_UNIX_FOUND AND PIPEWIRE_FOUND)
     add_compile_definitions(POLARIS_BUILD_PORTAL)
     list(APPEND PLATFORM_TARGET_FILES
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire_capture.cpp"
+            # Cage/labwc wlr-screencopy SHM path (extracted from portal_grab; needs Wayland protocols)
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.cpp"
+            # KWin direct screencast (host desktop/dongle); needs Wayland + PipeWire
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.cpp")
     message(STATUS "XDG Desktop Portal capture support enabled")
-elseif(GIO_FOUND)
+elseif(GIO_FOUND AND GIO_UNIX_FOUND)
     message(STATUS "XDG Desktop Portal capture not available (libpipewire-0.3 not found)")
 else()
-    message(STATUS "XDG Desktop Portal capture not available (gio-2.0 not found)")
+    message(STATUS "XDG Desktop Portal capture not available (gio-2.0 or gio-unix-2.0 not found)")
 endif()
 
 # vaapi
@@ -241,6 +253,8 @@ if(WAYLAND_FOUND)
     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-screencopy-unstable-v1)
     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-virtual-pointer-unstable-v1)
     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/src/platform/linux" "protocols" virtual-keyboard-unstable-v1)
+    # KWin host capture (kwingrab) — private KDE protocols, not for third-party apps generally
+    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/src/platform/linux" "protocols" zkde-screencast-unstable-v1)
 
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
@@ -361,8 +375,20 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_path.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_path.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_display_policy.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_display_policy.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_labwc.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_gamescope.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"
         "${CMAKE_SOURCE_DIR}/third-party/glad/src/egl.c"
         "${CMAKE_SOURCE_DIR}/third-party/glad/src/gl.c"
         "${CMAKE_SOURCE_DIR}/third-party/glad/include/EGL/eglplatform.h"

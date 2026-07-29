@@ -6,7 +6,7 @@
 #include <thread>
 
 // local includes
-#include "cage_display_router.h"
+#include "stream_runtime.h"
 #include "cuda.h"
 #include "src/config.h"
 #include "src/logging.h"
@@ -77,9 +77,9 @@ namespace wl {
       // for direct wlr-screencopy capture (no portal, no picker).
       const char *wayland_target = nullptr;
 #ifdef __linux__
-      if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+      if (config::video.linux_display.use_cage_compositor && stream_runtime::labwc::is_running()) {
         static std::string cached_socket;
-        cached_socket = cage_display_router::get_wayland_socket();
+        cached_socket = stream_runtime::labwc::wayland_socket();
         if (!cached_socket.empty()) {
           wayland_target = cached_socket.c_str();
           BOOST_LOG(info) << "wlr: Targeting cage compositor on "sv << cached_socket;
@@ -193,26 +193,18 @@ namespace wl {
       return platf::capture_e::ok;
     }
 
-    platf::mem_type_e mem_type;
-    bool capture_transport_logged = false;
-    bool prefer_shm_screencopy = false;
-    std::string reported_wayland_main_device;
-    std::chrono::microseconds last_dispatch_time {};
-
-    std::chrono::nanoseconds delay;
-
-    wl::display_t display;
-    interface_t interface;
-    dmabuf_t dmabuf;
-
-    wl_output *output;
-  };
-
-  class wlr_ram_t: public wlr_t {
-  public:
-    platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+    /**
+     * @brief Shared capture pacing loop for RAM / VRAM / extcopy backends.
+     * @param snapshot_fn Called each tick: (pull_cb, img_out, cursor) → capture_e
+     */
+    template <class SnapshotFn>
+    platf::capture_e capture_loop(
+      const push_captured_image_cb_t &push_captured_image_cb,
+      const pull_free_image_cb_t &pull_free_image_cb,
+      bool *cursor,
+      SnapshotFn &&snapshot_fn
+    ) {
       auto next_frame = std::chrono::steady_clock::now();
-
       sleep_overshoot_logger.reset();
 
       while (true) {
@@ -230,7 +222,7 @@ namespace wl {
         }
 
         std::shared_ptr<platf::img_t> img_out;
-        auto status = snapshot(pull_free_image_cb, img_out, 1000ms, *cursor);
+        auto status = snapshot_fn(pull_free_image_cb, img_out, cursor);
         switch (status) {
           case platf::capture_e::reinit:
           case platf::capture_e::error:
@@ -253,6 +245,30 @@ namespace wl {
       }
 
       return platf::capture_e::ok;
+    }
+
+    platf::mem_type_e mem_type;
+    bool capture_transport_logged = false;
+    bool prefer_shm_screencopy = false;
+    std::string reported_wayland_main_device;
+    std::chrono::microseconds last_dispatch_time {};
+
+    std::chrono::nanoseconds delay;
+
+    wl::display_t display;
+    interface_t interface;
+    dmabuf_t dmabuf;
+
+    wl_output *output;
+  };
+
+  class wlr_ram_t: public wlr_t {
+  public:
+    platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+      return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
+        [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
+          return snapshot(pull, img, 1000ms, c && *c);
+        });
     }
 
     platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor) {
@@ -429,48 +445,10 @@ namespace wl {
   class wlr_vram_t: public wlr_t {
   public:
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
-      auto next_frame = std::chrono::steady_clock::now();
-
-      sleep_overshoot_logger.reset();
-
-      while (true) {
-        auto now = std::chrono::steady_clock::now();
-
-        if (next_frame > now) {
-          std::this_thread::sleep_for(next_frame - now);
-          sleep_overshoot_logger.first_point(next_frame);
-          sleep_overshoot_logger.second_point_now_and_log();
-        }
-
-        next_frame += delay;
-        if (next_frame < now) {  // some major slowdown happened; we couldn't keep up
-          next_frame = now + delay;
-        }
-
-        std::shared_ptr<platf::img_t> img_out;
-        auto status = snapshot(pull_free_image_cb, img_out, 1000ms, *cursor);
-        switch (status) {
-          case platf::capture_e::reinit:
-          case platf::capture_e::error:
-          case platf::capture_e::interrupted:
-            return status;
-          case platf::capture_e::timeout:
-            if (!push_captured_image_cb(std::move(img_out), false)) {
-              return platf::capture_e::ok;
-            }
-            break;
-          case platf::capture_e::ok:
-            if (!push_captured_image_cb(std::move(img_out), true)) {
-              return platf::capture_e::ok;
-            }
-            break;
-          default:
-            BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
-            return status;
-        }
-      }
-
-      return platf::capture_e::ok;
+      return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
+        [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
+          return snapshot(pull, img, 1000ms, c && *c);
+        });
     }
 
     platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor) {
@@ -564,48 +542,10 @@ namespace wl {
   class wlr_extcopy_vram_t: public wlr_t {
   public:
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
-      auto next_frame = std::chrono::steady_clock::now();
-
-      sleep_overshoot_logger.reset();
-
-      while (true) {
-        auto now = std::chrono::steady_clock::now();
-
-        if (next_frame > now) {
-          std::this_thread::sleep_for(next_frame - now);
-          sleep_overshoot_logger.first_point(next_frame);
-          sleep_overshoot_logger.second_point_now_and_log();
-        }
-
-        next_frame += delay;
-        if (next_frame < now) {
-          next_frame = now + delay;
-        }
-
-        std::shared_ptr<platf::img_t> img_out;
-        auto status = snapshot(pull_free_image_cb, img_out, cursor);
-        switch (status) {
-          case platf::capture_e::reinit:
-          case platf::capture_e::error:
-          case platf::capture_e::interrupted:
-            return status;
-          case platf::capture_e::timeout:
-            if (!push_captured_image_cb(std::move(img_out), false)) {
-              return platf::capture_e::ok;
-            }
-            break;
-          case platf::capture_e::ok:
-            if (!push_captured_image_cb(std::move(img_out), true)) {
-              return platf::capture_e::ok;
-            }
-            break;
-          default:
-            BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
-            return status;
-        }
-      }
-
-      return platf::capture_e::ok;
+      return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
+        [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
+          return snapshot(pull, img, c);
+        });
     }
 
     platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, bool *cursor) {
@@ -743,9 +683,9 @@ namespace platf {
 #ifdef __linux__
     if (!prefer_ram_capture &&
         config::video.linux_display.use_cage_compositor &&
-        cage_display_router::is_running()) {
-      auto runtime_state = cage_display_router::runtime_state();
-      if (cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state)) {
+        stream_runtime::labwc::is_running()) {
+      auto runtime_state = stream_runtime::labwc::runtime_state();
+      if (stream_runtime::labwc::should_attempt_gpu_native_cage_capture(runtime_state)) {
         static bool logged_windowed_gpu_native_attempt = false;
         if (!logged_windowed_gpu_native_attempt) {
           BOOST_LOG(info)
@@ -753,15 +693,15 @@ namespace platf {
           logged_windowed_gpu_native_attempt = true;
         }
         prefer_linear_dmabuf = true;
-      } else if (cage_display_router::should_report_headless_ram_capture_fallback(runtime_state)) {
+      } else if (stream_runtime::labwc::should_report_headless_ram_capture_fallback(runtime_state)) {
         prefer_ram_capture = true;
         using_headless_ram_capture = true;
         try_headless_extcopy_dmabuf =
-          cage_display_router::should_attempt_headless_extcopy_dmabuf(runtime_state, hwdevice_type);
+          stream_runtime::labwc::should_attempt_headless_extcopy_dmabuf(runtime_state, hwdevice_type);
         if (!try_headless_extcopy_dmabuf && hwdevice_type == platf::mem_type_e::vaapi) {
           stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "policy", "vaapi_headless_dmabuf_disabled_for_stability");
           stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
-          if (cage_display_router::should_log_headless_ram_capture_warning()) {
+          if (stream_runtime::labwc::should_log_headless_ram_capture_warning()) {
             BOOST_LOG(info)
               << "wlr: Using RAM capture path for headless labwc because true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"sv;
           }
@@ -769,8 +709,8 @@ namespace platf {
       } else {
         prefer_ram_capture = true;
 
-        if (cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state) &&
-            cage_display_router::should_log_windowed_ram_capture_warning()) {
+        if (stream_runtime::labwc::should_report_windowed_ram_capture_fallback(runtime_state) &&
+            stream_runtime::labwc::should_log_windowed_ram_capture_warning()) {
           BOOST_LOG(warning)
             << "wlr: Using RAM capture path for windowed labwc because nested DMA-BUF screencopy is not reliable on this stack"sv;
         }
@@ -813,7 +753,7 @@ namespace platf {
             << config::video.adapter_name
             << "]; using SHM/system-memory fallback to avoid unsafe cross-GPU import"sv;
 #ifdef __linux__
-          cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+          stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
           stream_stats::update_gpu_native_probe_attempt(
             "headless_extcopy",
@@ -823,7 +763,7 @@ namespace platf {
           );
         } else {
 #ifdef __linux__
-          cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+          stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(true);
 #endif
           stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "succeeded");
           stream_stats::update_gpu_native_probe_selection("headless_extcopy_dmabuf");
@@ -833,7 +773,7 @@ namespace platf {
       }
 
 #ifdef __linux__
-      cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+      stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
       if (!device_pairing_failed) {
         stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "capture_init", "dmabuf_capture_not_initialized");
@@ -844,7 +784,7 @@ namespace platf {
 
     auto wlr = std::make_shared<wl::wlr_ram_t>();
     wlr->prefer_shm_screencopy = prefer_ram_capture;
-    if (using_headless_ram_capture && cage_display_router::should_log_headless_ram_capture_warning()) {
+    if (using_headless_ram_capture && stream_runtime::labwc::should_log_headless_ram_capture_warning()) {
       BOOST_LOG(info)
         << "wlr: Using RAM capture path for headless labwc because GPU-native override is not active"sv;
     }
@@ -861,9 +801,9 @@ namespace platf {
     // If cage is running, enumerate from cage. Otherwise use default display.
     const char *wayland_target = nullptr;
 #ifdef __linux__
-    if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
+    if (config::video.linux_display.use_cage_compositor && stream_runtime::labwc::is_running()) {
       static std::string cached_socket;
-      cached_socket = cage_display_router::get_wayland_socket();
+      cached_socket = stream_runtime::labwc::wayland_socket();
       if (!cached_socket.empty()) {
         wayland_target = cached_socket.c_str();
         BOOST_LOG(info) << "wlr: Enumerating displays from cage on "sv << cached_socket;

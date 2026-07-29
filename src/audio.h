@@ -102,6 +102,10 @@ namespace audio {
 
   bool sink_is_virtual(const audio_ctx_t &ctx, const std::string &sink);
 
+  // EasyEffects / JamesDSP style sinks pin streams via WirePlumber target.object;
+  // virtual-sink re-pin never sticks (silent stream after game audio reinit).
+  bool host_sink_is_processing(const std::string &sink_name);
+
   bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio);
 
   /**
