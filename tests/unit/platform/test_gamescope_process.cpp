@@ -81,6 +81,10 @@ namespace {
                    std::to_string(inode) + " " + path.string() + "\n";
     }
 
+    void set_cgroup(int pid, const std::string &cgroup) const {
+      std::ofstream(proc / std::to_string(pid) / "cgroup") << cgroup << '\n';
+    }
+
     void flush_unix_sockets() const {
       std::ofstream(proc / "net" / "unix")
         << "Num RefCount Protocol Flags Type St Inode Path\n"
@@ -171,11 +175,13 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
   const auto host_x0 = tree.x11 / "X0";
+  const auto stale_x2 = tree.x11 / "X2";
   const auto spoofed_x3 = tree.x11 / "X3";
   const auto owned_x4 = tree.x11 / "X4";
 
   tree.add_unix_socket(500, gamescope_socket);
   tree.add_unix_socket(600, host_x0);
+  tree.add_unix_socket(602, stale_x2);
   tree.add_unix_socket(603, spoofed_x3);
   tree.add_unix_socket(604, owned_x4);
   tree.flush_unix_sockets();
@@ -183,6 +189,9 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
   tree.add_process(410, 1, 9001,
                    {"/usr/bin/gamescope", "--backend", "headless", "--xwayland-count", "2"}, {500});
   tree.add_process(411, 410, 9002, {"/usr/bin/Xwayland", ":4"}, {604});
+  tree.add_process(413, 1, 8000, {"/usr/bin/Xwayland", ":2"}, {602});
+  tree.set_cgroup(410, "0::/user.slice/polaris.service");
+  tree.set_cgroup(413, "0::/user.slice/polaris.service");
   tree.add_process(412, 410, 9003, {"/usr/bin/Xwayland", ":3"}, {603});
   fs::remove(tree.proc / "412" / "exe");
   fs::create_symlink("/usr/bin/sleep", tree.proc / "412" / "exe");

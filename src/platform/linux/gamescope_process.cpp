@@ -306,40 +306,12 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
 
-    std::optional<std::string> read_cgroup(const lookup_paths_t &paths, int pid) {
-      std::ifstream input(paths.proc_root / std::to_string(pid) / "cgroup");
-      std::string line;
-      std::string last;
-      while (std::getline(input, line)) {
-        if (!line.empty()) {
-          last = line;
-        }
-      }
-      if (last.empty()) {
-        return std::nullopt;
-      }
-      return last;
-    }
-
-    bool same_cgroup(const lookup_paths_t &paths, int a, int b) {
-      const auto ca = read_cgroup(paths, a);
-      const auto cb = read_cgroup(paths, b);
-      return ca && cb && *ca == *cb;
-    }
-
     bool related_to_root(
       int pid,
       int root,
-      const std::map<int, process_t> &processes,
-      const lookup_paths_t &paths
+      const std::map<int, process_t> &processes
     ) {
-      if (pid == root) {
-        return true;
-      }
-      if (is_descendant_of(pid, root, processes)) {
-        return true;
-      }
-      return same_cgroup(paths, pid, root);
+      return pid != root && is_descendant_of(pid, root, processes);
     }
 
     std::optional<std::uint64_t> inode_for_path(
@@ -584,7 +556,14 @@ namespace stream_runtime::gamescope_process {
       return std::nullopt;
     }
     const auto processes = read_processes(paths.proc_root);
-    std::optional<int> best;
+    struct candidate_t {
+      int display;
+      int pid;
+      std::uint64_t start_time;
+      fs::path executable;
+      std::uint64_t inode;
+    };
+    std::optional<candidate_t> best;
 
     std::error_code ec;
     for (const auto &entry : fs::directory_iterator(paths.x11_socket_dir, ec)) {
@@ -604,12 +583,18 @@ namespace stream_runtime::gamescope_process {
       for (const auto inode : all_inodes_for_path(paths.proc_net_unix, entry.path())) {
         for (const auto &[pid, process] : processes) {
           if (pid == marker.pid || !executable_named(process, "Xwayland") ||
-              !related_to_root(pid, marker.pid, processes, paths) ||
+              !related_to_root(pid, marker.pid, processes) ||
               !process_holds_inode(paths, pid, inode)) {
             continue;
           }
-          if (!best || *display < *best) {
-            best = *display;
+          if (!best || *display < best->display) {
+            best = candidate_t {
+              .display = *display,
+              .pid = pid,
+              .start_time = process.start_time,
+              .executable = process.executable,
+              .inode = inode,
+            };
           }
         }
       }
@@ -617,7 +602,22 @@ namespace stream_runtime::gamescope_process {
     if (!best) {
       return std::nullopt;
     }
-    return ":" + std::to_string(*best);
+    // Rebuild the process snapshot and prove both generations and fd ownership
+    // again immediately before returning a routing decision.
+    if (!validate_process(marker, paths)) {
+      return std::nullopt;
+    }
+    const auto final_processes = read_processes(paths.proc_root);
+    const auto found = final_processes.find(best->pid);
+    if (found == final_processes.end() ||
+        found->second.start_time != best->start_time ||
+        found->second.executable != best->executable ||
+        !executable_named(found->second, "Xwayland") ||
+        !related_to_root(best->pid, marker.pid, final_processes) ||
+        !process_holds_inode(paths, best->pid, best->inode)) {
+      return std::nullopt;
+    }
+    return ":" + std::to_string(best->display);
   }
 
 }  // namespace stream_runtime::gamescope_process
