@@ -100,7 +100,9 @@ in
       Service = {
         Type = "simple";
         ExecStart = session.portalFrontendExec;
-        Restart = "on-failure";
+        # always: frontend can be cleanly stopped while polaris stays up; stream
+        # needs org.freedesktop.portal.Desktop on the private bus.
+        Restart = "always";
         RestartSec = "1s";
         Environment = session.envToList session.portalEnvironment;
       };
@@ -118,17 +120,15 @@ in
           "polaris-portal-gamescope.service"
           "polaris-portal.service"
         ];
+        # Soft deps: nested↔idle restarts portal-gamescope; Requires would kill polaris.
+        # Hard dep: private bus only. ExecStartPre still waits for ScreenCast readiness.
         Wants = [
           "polaris-gamescope-idle.service"
           "polaris-portal-dbus.service"
           "polaris-portal-gamescope.service"
           "polaris-portal.service"
         ];
-        Requires = [
-          "polaris-portal-dbus.service"
-          "polaris-portal-gamescope.service"
-          "polaris-portal.service"
-        ];
+        Requires = [ "polaris-portal-dbus.service" ];
         PartOf = [ cfg.desktopUserTarget ];
       };
       Service = {

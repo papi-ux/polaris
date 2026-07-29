@@ -230,6 +230,11 @@ namespace proc {
     std::optional<std::uint64_t> before,
     std::optional<std::uint64_t> after
   );
+  bool terminate_gamescope_attached_clients_for_tests(
+    const std::string &steam_appid,
+    pid_t forced_reused_pid = -1,
+    pid_t forced_unreadable_pid = -1
+  );
   bool terminate_pid_with_pidfd_for_tests(
     pid_t pid,
     std::chrono::milliseconds graceful_timeout,
@@ -645,6 +650,7 @@ namespace proc {
     std::shared_ptr<steam_big_picture_guard_runtime_t> _steam_big_picture_guard;
     std::string _session_instance_id;
     bool _session_used_cage_compositor = false;
+    bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;

@@ -3385,9 +3385,20 @@ namespace video {
       // full SDR — bit_depth=8 alone still attaches Rec.2020+PQ metadata and the
       // client shows dark/red "HDR garbage" over SDR pixels.
       if (result && result->prefer_8bit_encode && colorspace_is_hdr(colorspace)) {
-        BOOST_LOG(warning)
-          << "Forcing SDR colorspace: capture path cannot produce 10-bit HDR frames "
-             "(host portal SHM/MemFd is 8-bit BGRx). Use gamescope_stream for real HDR."sv;
+        // Probe / host-portal SHM paths demote often; gamescope_stream still gets real
+        // 10-bit later via dmabuf — keep that path at info to avoid session spam.
+        const bool gamescope_stream =
+          config::video.linux_display.stream_mode == "gamescope_stream";
+        if (gamescope_stream) {
+          BOOST_LOG(info)
+            << "Forcing SDR colorspace for this encode device: capture path reported "
+               "8-bit-only frames (common during portal probe); gamescope_stream HDR "
+               "may still negotiate 10-bit on the live capture path."sv;
+        } else {
+          BOOST_LOG(warning)
+            << "Forcing SDR colorspace: capture path cannot produce 10-bit HDR frames "
+               "(host portal SHM/MemFd is 8-bit BGRx). Use gamescope_stream for real HDR."sv;
+        }
         colorspace = colorspace_from_client_config(config, /*hdr_metadata_available=*/false);
         colorspace.bit_depth = 8;
         if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {

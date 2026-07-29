@@ -6,15 +6,24 @@
 #include <src/nvhttp.h>
 #include <src/process.h>
 #include <src/rtsp.h>
+#include <src/platform/linux/stream_runtime.h>
 
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <fcntl.h>
+#include <poll.h>
 #include <sstream>
 #include <thread>
+#include <signal.h>
+#include <sys/file.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
   using proc::session_stop_outcome_t;
@@ -220,7 +229,7 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 1200);
+  const auto body = source.substr(start, 5000);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto steam = body.find("terminate_session_owned_steam_before_cage_stop(");
   const auto gen = body.find("terminate_isolated_session_generation(");
@@ -231,6 +240,340 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   EXPECT_LT(prepare, gen);
   // Double portal release is forbidden — only session_media may release.
   EXPECT_EQ(body.find("portal::release_global_capture("), std::string::npos);
+}
+
+TEST(SessionStopContractTests, UnclassifiedNestedLaunchHasNoNumericGroupKillFallback) {
+  const auto source = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
+  ASSERT_FALSE(source.empty());
+  EXPECT_EQ(source.find("kill -TERM \"-$nested_launch_pid\""), std::string::npos);
+  const auto claim = source.find("      publish_nested_claim", source.find("start)"));
+  const auto launch = source.find("setsid env -u WAYLAND_DISPLAY");
+  ASSERT_NE(claim, std::string::npos);
+  ASSERT_NE(launch, std::string::npos);
+  EXPECT_LT(claim, launch);
+  const auto recover = source.find("\"$0\" stop");
+  ASSERT_NE(recover, std::string::npos);
+}
+
+TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebind) {
+  const auto recovery = read_source_for_contract("nix/modules/session-lib.nix");
+  const auto session = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
+  ASSERT_FALSE(recovery.empty());
+  ASSERT_FALSE(session.empty());
+  EXPECT_NE(recovery.find("${lib.getExe sessionBin} stop"), std::string::npos);
+  EXPECT_NE(recovery.find("polaris-gamescope-session-id"), std::string::npos);
+  EXPECT_NE(recovery.find("polaris-gamescope-session-state"), std::string::npos);
+  EXPECT_NE(recovery.find("POLARIS_GAMESCOPE_LOCK_HELD=1"), std::string::npos);
+  EXPECT_NE(recovery.find("claim_state=absent"), std::string::npos);
+  EXPECT_NE(session.find("restart polaris-portal-gamescope.service"), std::string::npos);
+  EXPECT_NE(session.find("publish_nested_claim transition absent"), std::string::npos);
+  EXPECT_NE(session.find("polaris-gamescope-session-mode"), std::string::npos);
+  EXPECT_NE(session.find("polaris-gamescope-session-state"), std::string::npos);
+  EXPECT_NE(session.find("printf '%s %s\\n' \"$POLARIS_SESSION_INSTANCE_ID\" \"$mode\""), std::string::npos);
+  EXPECT_NE(session.find("mv -f -- \"$tmp\" \"$session_state_file\""), std::string::npos);
+  EXPECT_NE(session.find("attach recovery could not terminate exact-session Steam"), std::string::npos);
+  const auto idle = read_source_for_contract("scripts/install/lib/polaris-gamescope-idle.sh");
+  ASSERT_FALSE(idle.empty());
+  EXPECT_NE(idle.find("polaris-gamescope.lock"), std::string::npos);
+  EXPECT_NE(idle.find("transition|nested|1"), std::string::npos);
+  const auto non_nix = read_source_for_contract("scripts/install/lib/polaris-wait-gamescope.sh");
+  ASSERT_FALSE(non_nix.empty());
+  EXPECT_NE(non_nix.find("POLARIS_GAMESCOPE_SESSION_BIN"), std::string::npos);
+  EXPECT_NE(non_nix.find("polaris-gamescope-session-id"), std::string::npos);
+  EXPECT_NE(non_nix.find("polaris-gamescope-session-state"), std::string::npos);
+}
+
+TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState) {
+  const auto source = read_source_for_contract("src/platform/linux/stream_runtime_gamescope.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto ownership_source = read_source_for_contract("src/platform/linux/gamescope_process.cpp");
+  ASSERT_FALSE(ownership_source.empty());
+  EXPECT_NE(ownership_source.find("O_PATH | O_CLOEXEC | O_NOFOLLOW"), std::string::npos);
+  EXPECT_NE(ownership_source.find("socket_pin.still_names_node(socket_path)"), std::string::npos);
+  EXPECT_NE(source.find("private_group_state"), std::string::npos);
+  EXPECT_NE(source.find("private group did not drain"), std::string::npos);
+  EXPECT_NE(source.find("SIGKILL"), std::string::npos);
+  EXPECT_NE(source.find("SYS_pidfd_open"), std::string::npos);
+  EXPECT_NE(source.find("pidfd_targets_pid(leader_pidfd, pgid)"), std::string::npos);
+  EXPECT_NE(source.find("retained owned generation did not drain; refusing replacement launch"), std::string::npos);
+  const auto pair_validation = source.find("revalidate_publication_pair()");
+  ASSERT_NE(pair_validation, std::string::npos);
+  EXPECT_NE(source.find("revalidate_publication_pair()", pair_validation + 1), std::string::npos);
+  EXPECT_NE(source.find("Keep the leader unreaped until every negative-PGID operation finishes"), std::string::npos);
+  const auto stop_start = source.find("void stop_unlocked()");
+  const auto refresh_start = source.find("void refresh_runtime_state(", stop_start);
+  ASSERT_NE(stop_start, std::string::npos);
+  ASSERT_NE(refresh_start, std::string::npos);
+  const auto stop_body = source.substr(stop_start, refresh_start - stop_start);
+  EXPECT_NE(stop_body.find("gp::read_marker(marker_path())"), std::string::npos);
+  EXPECT_EQ(stop_body.find("validated_marker_for_socket"), std::string::npos);
+  const auto runtime_start = source.find("bool start(const start_params_t &params) override");
+  const auto runtime_stop = source.find("void stop() override", runtime_start);
+  ASSERT_NE(runtime_start, std::string::npos);
+  ASSERT_NE(runtime_stop, std::string::npos);
+  const auto start_body = source.substr(runtime_start, runtime_stop - runtime_start);
+  const auto acquisition = start_body.find("owner_transition_lock_t acquisition_lock");
+  const auto reclaim = start_body.find("reclaim_orphan_gamescope_sockets()");
+  const auto spawn = start_body.find("const pid_t child = fork()");
+  const auto marker_write = start_body.find("gp::write_marker(marker_path(), *marker_)");
+  ASSERT_NE(acquisition, std::string::npos);
+  ASSERT_NE(reclaim, std::string::npos);
+  ASSERT_NE(spawn, std::string::npos);
+  ASSERT_NE(marker_write, std::string::npos);
+  EXPECT_LT(acquisition, reclaim);
+  EXPECT_LT(reclaim, spawn);
+  EXPECT_LT(spawn, marker_write);
+  EXPECT_NE(start_body.find("runtime_acquisition_allowed_locked()"), std::string::npos);
+  EXPECT_NE(source.find("try_attach_gamescope0(params, true)"), std::string::npos);
+  const auto drain_start = source.find("bool drain_private_process_group(");
+  const auto rollback_start = source.find("bool rollback_spawned_private_group(", drain_start);
+  ASSERT_NE(drain_start, std::string::npos);
+  ASSERT_NE(rollback_start, std::string::npos);
+  const auto drain = source.substr(drain_start, rollback_start - drain_start);
+  EXPECT_EQ(drain.find("waitpid(pgid", drain.find("for (int i = 0")), drain.rfind("waitpid(pgid"));
+}
+
+TEST(SessionStopContractTests, RuntimeAcquisitionRejectsNestedOrIncompleteDurableClaims) {
+#ifdef __linux__
+  namespace fs = std::filesystem;
+  const auto dir = fs::temp_directory_path() /
+    ("polaris-runtime-claim-test-" + std::to_string(getpid()));
+  fs::remove_all(dir);
+  ASSERT_TRUE(fs::create_directories(dir));
+  const char *old_runtime = std::getenv("XDG_RUNTIME_DIR");
+  const std::string saved_runtime = old_runtime ? old_runtime : "";
+  ASSERT_EQ(setenv("XDG_RUNTIME_DIR", dir.c_str(), 1), 0);
+
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  const int lock_fd = open((dir / "polaris-gamescope.lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  ASSERT_GE(lock_fd, 0);
+  ASSERT_EQ(flock(lock_fd, LOCK_EX), 0);
+  auto blocked_acquisition = std::async(std::launch::async, []() {
+    return stream_runtime::gamescope_runtime_acquisition_allowed_for_tests();
+  });
+  EXPECT_EQ(blocked_acquisition.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state");
+    state << "session-A nested\n";
+  }
+  ASSERT_EQ(flock(lock_fd, LOCK_UN), 0);
+  close(lock_fd);
+  EXPECT_FALSE(blocked_acquisition.get());
+  fs::remove(dir / "polaris-gamescope-session-state");
+
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state");
+    state << "session-A nested\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A attach\n";
+  }
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream claim(dir / "polaris-gamescope-wsi-nested");
+    claim << "transition\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  fs::remove(dir / "polaris-gamescope-wsi-nested");
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  fs::remove(dir / "polaris-gamescope-session-state");
+  {
+    std::ofstream id(dir / "polaris-gamescope-session-id");
+    id << "session-A\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream mode(dir / "polaris-gamescope-session-mode");
+    mode << "attach\n";
+  }
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream mode(dir / "polaris-gamescope-session-mode", std::ios::trunc);
+    mode << "nested\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+
+  if (old_runtime) {
+    ASSERT_EQ(setenv("XDG_RUNTIME_DIR", saved_runtime.c_str(), 1), 0);
+  }
+  else {
+    ASSERT_EQ(unsetenv("XDG_RUNTIME_DIR"), 0);
+  }
+  fs::remove_all(dir);
+#endif
+}
+
+TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
+#ifdef __linux__
+  int ready[2] {-1, -1};
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t leader = fork();
+  ASSERT_GE(leader, 0);
+  if (leader == 0) {
+    close(ready[0]);
+    if (setsid() < 0) _exit(125);
+    signal(SIGTERM, SIG_IGN);
+    const pid_t sibling = fork();
+    if (sibling < 0) _exit(126);
+    if (sibling == 0) {
+      signal(SIGTERM, SIG_IGN);
+      for (;;) pause();
+    }
+    (void) write(ready[1], &sibling, sizeof(sibling));
+    close(ready[1]);
+    for (;;) pause();
+  }
+  close(ready[1]);
+  pid_t sibling = -1;
+  ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
+  close(ready[0]);
+  const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
+  if (!drained) (void) kill(-leader, SIGKILL);
+  EXPECT_TRUE(drained);
+  errno = 0;
+  EXPECT_EQ(kill(sibling, 0), -1);
+  EXPECT_EQ(errno, ESRCH);
+#endif
+}
+
+TEST(SessionStopContractTests, OwnedRuntimeEscalatesAfterLeaderExitsOnTerm) {
+#ifdef __linux__
+  int ready[2] {-1, -1};
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t leader = fork();
+  ASSERT_GE(leader, 0);
+  if (leader == 0) {
+    close(ready[0]);
+    if (setsid() < 0) _exit(125);
+    const pid_t sibling = fork();
+    if (sibling < 0) _exit(126);
+    if (sibling == 0) {
+      signal(SIGTERM, SIG_IGN);
+      for (;;) pause();
+    }
+    (void) write(ready[1], &sibling, sizeof(sibling));
+    close(ready[1]);
+    for (;;) pause();
+  }
+  close(ready[1]);
+  pid_t sibling = -1;
+  ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
+  close(ready[0]);
+  const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
+  if (!drained) (void) kill(-leader, SIGKILL);
+  EXPECT_TRUE(drained);
+  errno = 0;
+  EXPECT_EQ(kill(sibling, 0), -1);
+  EXPECT_EQ(errno, ESRCH);
+#endif
+}
+
+TEST(SessionStopContractTests, OwnedRuntimeDoesNotClearSameSessionEscapedGroup) {
+#ifdef __linux__
+  int ready[2] {-1, -1};
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t leader = fork();
+  ASSERT_GE(leader, 0);
+  if (leader == 0) {
+    close(ready[0]);
+    if (setsid() < 0) _exit(125);
+    signal(SIGTERM, SIG_IGN);
+    const pid_t escaped = fork();
+    if (escaped < 0) _exit(126);
+    if (escaped == 0) {
+      if (setpgid(0, 0) < 0) _exit(127);
+      signal(SIGTERM, SIG_IGN);
+      const pid_t escaped_pid = getpid();
+      (void) write(ready[1], &escaped_pid, sizeof(escaped_pid));
+      close(ready[1]);
+      for (;;) pause();
+    }
+    close(ready[1]);
+    for (;;) pause();
+  }
+  close(ready[1]);
+  pid_t escaped = -1;
+  ASSERT_EQ(read(ready[0], &escaped, sizeof(escaped)), sizeof(escaped));
+  close(ready[0]);
+  const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
+  EXPECT_FALSE(drained);
+  EXPECT_EQ(kill(escaped, 0), 0);
+  (void) kill(escaped, SIGKILL);
+  (void) kill(-leader, SIGKILL);
+  (void) waitpid(leader, nullptr, 0);
+#endif
+}
+
+TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
+#ifdef __linux__
+  int ready[2] {-1, -1};
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t leader = fork();
+  ASSERT_GE(leader, 0);
+  if (leader == 0) {
+    close(ready[0]);
+    if (setsid() < 0) _exit(125);
+    const pid_t sibling = fork();
+    if (sibling < 0) _exit(126);
+    if (sibling == 0) {
+      signal(SIGTERM, SIG_IGN);
+      for (;;) pause();
+    }
+    (void) write(ready[1], &sibling, sizeof(sibling));
+    close(ready[1]);
+    _exit(0);
+  }
+  close(ready[1]);
+  pid_t sibling = -1;
+  ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
+  close(ready[0]);
+  const int leader_pidfd = static_cast<int>(syscall(SYS_pidfd_open, leader, 0));
+  ASSERT_GE(leader_pidfd, 0);
+  pollfd leader_exit {.fd = leader_pidfd, .events = POLLIN, .revents = 0};
+  ASSERT_EQ(poll(&leader_exit, 1, 5000), 1);
+  const bool drained = stream_runtime::rollback_gamescope_spawn_for_tests(leader, leader_pidfd);
+  close(leader_pidfd);
+  if (!drained) (void) kill(-leader, SIGKILL);
+  EXPECT_TRUE(drained);
+  errno = 0;
+  EXPECT_EQ(kill(sibling, 0), -1);
+  EXPECT_EQ(errno, ESRCH);
+#endif
+}
+
+TEST(SessionStopContractTests, SpawnRollbackRejectsPidfdForDifferentLeader) {
+#ifdef __linux__
+  const pid_t first = fork();
+  ASSERT_GE(first, 0);
+  if (first == 0) {
+    if (setsid() < 0) _exit(125);
+    signal(SIGTERM, SIG_IGN);
+    for (;;) pause();
+  }
+  const pid_t second = fork();
+  ASSERT_GE(second, 0);
+  if (second == 0) {
+    if (setsid() < 0) _exit(126);
+    signal(SIGTERM, SIG_IGN);
+    for (;;) pause();
+  }
+  const int second_pidfd = static_cast<int>(syscall(SYS_pidfd_open, second, 0));
+  ASSERT_GE(second_pidfd, 0);
+  EXPECT_FALSE(stream_runtime::rollback_gamescope_spawn_for_tests(first, second_pidfd));
+  close(second_pidfd);
+  EXPECT_EQ(kill(first, 0), 0);
+  EXPECT_EQ(kill(second, 0), 0);
+  (void) kill(-first, SIGKILL);
+  (void) kill(-second, SIGKILL);
+  EXPECT_EQ(waitpid(first, nullptr, 0), first);
+  EXPECT_EQ(waitpid(second, nullptr, 0), second);
+#endif
 }
 
 TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {
@@ -304,7 +647,7 @@ TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKil
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 1600);
+  const auto body = source.substr(start, 3500);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto kill = body.find("terminate_isolated_session_generation(");
   ASSERT_NE(prepare, std::string::npos);
@@ -402,7 +745,8 @@ TEST(SessionStopContractTests, CompositorTerminationRetainsRootMediaFenceUntilCl
   const auto terminate = process.find("void proc_t::terminate_impl(");
   ASSERT_NE(terminate, std::string::npos);
   const auto terminate_body = process.substr(terminate, 4200);
-  const auto fence = terminate_body.find("media_stop_fence = session_media::prepare_for_stop()");
+  // Function-scoped holder so the fence outlives early #ifdef blocks through undo.
+  const auto fence = terminate_body.find("media_stop.fence = session_media::prepare_for_stop()");
   const auto compositor_stop = terminate_body.find("terminate_isolated_session_generation()");
   ASSERT_NE(fence, std::string::npos);
   ASSERT_NE(compositor_stop, std::string::npos);

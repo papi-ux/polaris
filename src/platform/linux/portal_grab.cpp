@@ -257,10 +257,27 @@ namespace portal {
   static bool ensure_session_unlocked() {
     if (!g_media.portal || !g_media.portal->ready || g_media.portal->pw_node_id == 0) {
       g_media.portal.reset();
-      g_media.portal = create_portal_session(capture_type_for_stream_display(
-        config::video.linux_display.headless_mode,
-        config::video.linux_display.use_cage_compositor,
-        config::video.linux_display.stream_mode));
+      auto try_create = []() {
+        return create_portal_session(capture_type_for_stream_display(
+          config::video.linux_display.headless_mode,
+          config::video.linux_display.use_cage_compositor,
+          config::video.linux_display.stream_mode));
+      };
+      g_media.portal = try_create();
+      // Nested↔idle gamescope handoff: portal-gamescope may briefly fail Start with
+      // "failed to connect to wayland socket" until the new generation owns
+      // gamescope-0. Retry a few times rather than fail the whole stream.
+      for (int attempt = 1;
+           attempt <= 4 &&
+           (!g_media.portal || g_media.portal->failed || !g_media.portal->ready ||
+            g_media.portal->pw_node_id == 0);
+           ++attempt) {
+        BOOST_LOG(warning) << "portal: create session attempt "sv << attempt
+                           << " failed; waiting for gamescope-0 before retry"sv;
+        g_media.portal.reset();
+        std::this_thread::sleep_for(std::chrono::milliseconds(400 * attempt));
+        g_media.portal = try_create();
+      }
       if (!g_media.portal || g_media.portal->failed || !g_media.portal->ready ||
           g_media.portal->pw_node_id == 0) {
         BOOST_LOG(warning) << "portal: Failed to create global session"sv;

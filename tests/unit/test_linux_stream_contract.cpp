@@ -66,13 +66,14 @@ TEST(LinuxStreamContractTests, GamescopeOwnershipTransitionsUseOneCrossProcessLo
 
   const auto marker_failure = runtime.find("if (!marker_written)");
   ASSERT_NE(marker_failure, std::string::npos);
-  const auto failure_body = runtime.substr(marker_failure, 1200);
-  const auto child_check = failure_body.find("waitpid(child, &status, WNOHANG)");
-  const auto signal = failure_body.find("kill(child, SIGTERM)");
-  ASSERT_NE(child_check, std::string::npos);
-  ASSERT_NE(signal, std::string::npos);
-  EXPECT_LT(child_check, signal);
-  EXPECT_NE(failure_body.find("if (!child_reaped)"), std::string::npos);
+  const auto failure_body = runtime.substr(marker_failure, 5000);
+  const auto rollback = failure_body.find("rollback_spawned_private_group(child, leader_pidfd_)");
+  const auto clear_state = failure_body.find("pid_ = 0");
+  ASSERT_NE(rollback, std::string::npos);
+  ASSERT_NE(clear_state, std::string::npos);
+  EXPECT_LT(rollback, clear_state);
+  EXPECT_NE(runtime.find("drain_private_process_group(child"), std::string::npos);
+  EXPECT_NE(failure_body.find("preserving state"), std::string::npos);
 }
 
 TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {
@@ -104,7 +105,8 @@ TEST(LinuxStreamContractTests, RootMediaFenceSurvivesThroughCompositorTerminatio
   const auto terminate = process.find("void proc_t::terminate_impl(");
   ASSERT_NE(terminate, std::string::npos);
   const auto body = process.substr(terminate, 4200);
-  const auto fence = body.find("media_stop_fence = session_media::prepare_for_stop()");
+  // Function-scoped holder so the fence outlives early #ifdef blocks through undo.
+  const auto fence = body.find("media_stop.fence = session_media::prepare_for_stop()");
   const auto compositor = body.find("terminate_isolated_session_generation()");
   ASSERT_NE(fence, std::string::npos);
   ASSERT_NE(compositor, std::string::npos);

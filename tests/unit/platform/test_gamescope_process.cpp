@@ -13,6 +13,10 @@
   #include <string>
   #include <vector>
 
+  #include <fcntl.h>
+  #include <sys/file.h>
+  #include <unistd.h>
+
 namespace {
   namespace fs = std::filesystem;
   namespace gp = stream_runtime::gamescope_process;
@@ -77,10 +81,20 @@ namespace {
                    std::to_string(inode) + " " + path.string() + "\n";
     }
 
+    void set_cgroup(int pid, const std::string &cgroup) const {
+      std::ofstream(proc / std::to_string(pid) / "cgroup") << cgroup << '\n';
+    }
+
     void flush_unix_sockets() const {
       std::ofstream(proc / "net" / "unix")
         << "Num RefCount Protocol Flags Type St Inode Path\n"
         << unix_rows;
+    }
+
+    void replace_unix_socket(std::uint64_t inode, const fs::path &path) {
+      unix_rows.clear();
+      add_unix_socket(inode, path);
+      flush_unix_sockets();
     }
 
     fs::path root;
@@ -167,11 +181,13 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
   const auto host_x0 = tree.x11 / "X0";
+  const auto stale_x2 = tree.x11 / "X2";
   const auto spoofed_x3 = tree.x11 / "X3";
   const auto owned_x4 = tree.x11 / "X4";
 
   tree.add_unix_socket(500, gamescope_socket);
   tree.add_unix_socket(600, host_x0);
+  tree.add_unix_socket(602, stale_x2);
   tree.add_unix_socket(603, spoofed_x3);
   tree.add_unix_socket(604, owned_x4);
   tree.flush_unix_sockets();
@@ -179,6 +195,9 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
   tree.add_process(410, 1, 9001,
                    {"/usr/bin/gamescope", "--backend", "headless", "--xwayland-count", "2"}, {500});
   tree.add_process(411, 410, 9002, {"/usr/bin/Xwayland", ":4"}, {604});
+  tree.add_process(413, 1, 8000, {"/usr/bin/Xwayland", ":2"}, {602});
+  tree.set_cgroup(410, "0::/user.slice/polaris.service");
+  tree.set_cgroup(413, "0::/user.slice/polaris.service");
   tree.add_process(412, 410, 9003, {"/usr/bin/Xwayland", ":3"}, {603});
   fs::remove(tree.proc / "412" / "exe");
   fs::create_symlink("/usr/bin/sleep", tree.proc / "412" / "exe");
@@ -188,7 +207,18 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
     .pid = 410, .start_time = 9001, .role = "idle", .executable = "/usr/bin/gamescope"
   };
   EXPECT_TRUE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
+  const auto original_unix_rows = tree.unix_rows;
+  auto rebound_wayland_paths = paths_for(tree);
+  rebound_wayland_paths.before_socket_ownership_return_for_tests = [&]() {
+    tree.replace_unix_socket(501, gamescope_socket);
+  };
+  EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, rebound_wayland_paths));
+  tree.unix_rows = original_unix_rows;
+  tree.flush_unix_sockets();
   EXPECT_EQ(gp::discover_owned_x11_display(marker, paths_for(tree)), std::optional<std::string>(":4"));
+  auto rebound_paths = paths_for(tree);
+  rebound_paths.before_x11_return_for_tests = [&]() { tree.replace_unix_socket(605, owned_x4); };
+  EXPECT_FALSE(gp::discover_owned_x11_display(marker, rebound_paths));
   EXPECT_TRUE(fs::exists(host_x0));
 }
 
@@ -213,6 +243,7 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedWhenOnlyUnrelatedXwaylandExists)
 TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
   const auto x4 = tree.x11 / "X4";
 
   // /proc/net/unix may retain an unlinked old listener while a successor has
@@ -228,7 +259,169 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   const gp::marker_t marker {
     .pid = 410, .start_time = 9001, .role = "runtime", .executable = "/usr/bin/gamescope"
   };
+  // Pathname is ambiguous → cannot claim exclusive ownership of gamescope-0.
   EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
-  EXPECT_FALSE(gp::discover_owned_x11_display(marker, paths_for(tree)).has_value());
+  // Duplicate X11 pathname rows are ambiguous after unlink/rebind; routing must
+  // fail closed even when one stale inode is held by a related Xwayland.
+  EXPECT_EQ(gp::discover_owned_x11_display(marker, paths_for(tree)), std::nullopt);
+  // Ambiguous pathnames are not safe to reclaim.
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, ReclaimsFilesystemResidueWithoutListener) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(lock_path).put('\n');
+  tree.flush_unix_sockets();  // header only — no listener row
+
+  EXPECT_FALSE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(fs::exists(gamescope_socket));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenWaylandLockIsMissing) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  tree.flush_unix_sockets();
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+  EXPECT_FALSE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesReplacementLockWhileDeletedLockIsHeld) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(lock_path).put('\n');
+  tree.flush_unix_sockets();
+  const auto fd_dir = tree.proc / "990" / "fd";
+  fs::create_directories(fd_dir);
+  fs::create_symlink(lock_path.string() + " (deleted)", fd_dir / "8");
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesLockReplacementBetweenValidationAndUnlink) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(lock_path).put('\n');
+  tree.flush_unix_sockets();
+  auto paths = paths_for(tree);
+  paths.before_socket_unlink_for_tests = [&]() {
+    fs::remove(lock_path);
+    std::ofstream(lock_path).put('\n');
+  };
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesSocketReplacementBeforeUnlink) {
+  fake_proc_tree_t tree;
+  const auto socket = tree.runtime / "gamescope-0";
+  std::ofstream(socket).put('\n');
+  std::ofstream(socket.string() + ".lock").put('\n');
+  tree.flush_unix_sockets();
+  auto paths = paths_for(tree);
+  paths.before_socket_unlink_for_tests = [&]() {
+    fs::remove(socket);
+    std::ofstream(socket).put('x');
+  };
+  EXPECT_FALSE(gp::remove_orphan_socket(socket, paths));
+  EXPECT_TRUE(fs::exists(socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, MissingSocketDoesNotUnlinkPotentiallyHeldLock) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(lock_path).put('\n');
+
+  EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, HeldWaylandSocketLockBlocksReclaim) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  tree.flush_unix_sockets();
+
+  const int lock_fd = open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  ASSERT_GE(lock_fd, 0);
+  ASSERT_EQ(flock(lock_fd, LOCK_EX | LOCK_NB), 0);
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+
+  EXPECT_EQ(flock(lock_fd, LOCK_UN), 0);
+  EXPECT_EQ(close(lock_fd), 0);
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesKernelSocketRowWithoutVisibleHolder) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
+  tree.add_unix_socket(700, gamescope_socket);
+  tree.flush_unix_sockets();
+  // Procfs permissions can hide the holder. A kernel row is still unsafe.
+
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenProcEnumerationIsUnavailable) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
+  tree.flush_unix_sockets();
+  auto paths = paths_for(tree);
+  paths.proc_root = tree.root / "missing-proc";
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenProcSocketMetadataIsUnavailable) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
+  auto paths = paths_for(tree);
+  paths.proc_net_unix = tree.proc / "net" / "missing-unix";
+
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
+  tree.add_unix_socket(701, gamescope_socket);
+  tree.flush_unix_sockets();
+  tree.add_process(440, 1, 9400, {"/usr/bin/gamescope", "--backend=headless"}, {701});
+
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
 }
 #endif

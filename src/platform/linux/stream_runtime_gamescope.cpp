@@ -18,16 +18,21 @@
   #include <cstdio>
   #include <cstdlib>
   #include <cstring>
+  #include <dirent.h>
   #include <filesystem>
   #include <fstream>
+  #include <functional>
   #include <fcntl.h>
   #include <mutex>
   #include <optional>
+  #include <poll.h>
   #include <signal.h>
+  #include <sstream>
   #include <string>
   #include <string_view>
   #include <sys/file.h>
   #include <sys/stat.h>
+  #include <sys/syscall.h>
   #include <sys/types.h>
   #include <sys/wait.h>
   #include <thread>
@@ -46,7 +51,10 @@ namespace stream_runtime {
 
     class owner_transition_lock_t {
     public:
-      owner_transition_lock_t() {
+      explicit owner_transition_lock_t(bool acquire = true) {
+        if (!acquire) {
+          return;
+        }
         const auto path = fs::path(xdg_runtime_dir()) / "polaris-gamescope.lock";
         fd_ = open(path.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, 0600);
         if (fd_ >= 0 && flock(fd_, LOCK_EX) != 0) {
@@ -67,6 +75,14 @@ namespace stream_runtime {
 
       explicit operator bool() const { return fd_ >= 0; }
 
+      void unlock() {
+        if (fd_ >= 0) {
+          flock(fd_, LOCK_UN);
+          close(fd_);
+          fd_ = -1;
+        }
+      }
+
     private:
       int fd_ = -1;
     };
@@ -78,8 +94,215 @@ namespace stream_runtime {
       return "/run/user/" + std::to_string(getuid());
     }
 
+    bool runtime_acquisition_allowed_locked() {
+      const auto rt = fs::path(xdg_runtime_dir());
+      const auto path_is_absent = [](const fs::path &path) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        if (ec == std::errc::no_such_file_or_directory) {
+          return true;
+        }
+        return !ec && status.type() == fs::file_type::not_found;
+      };
+      if (!path_is_absent(rt / "polaris-gamescope-wsi-nested")) {
+        return false;
+      }
+
+      const auto state_path = rt / "polaris-gamescope-session-state";
+      if (!path_is_absent(state_path)) {
+        std::ifstream state(state_path);
+        std::string session_id;
+        std::string mode;
+        std::string extra;
+        if (!(state >> session_id >> mode) || (state >> extra) || session_id.empty()) {
+          return false;
+        }
+        return mode == "attach";
+      }
+
+      const auto legacy_id = rt / "polaris-gamescope-session-id";
+      const auto legacy_mode = rt / "polaris-gamescope-session-mode";
+      const bool id_absent = path_is_absent(legacy_id);
+      const bool mode_absent = path_is_absent(legacy_mode);
+      if (id_absent && mode_absent) {
+        return true;
+      }
+      if (id_absent || mode_absent) {
+        return false;
+      }
+      std::ifstream mode_file(legacy_mode);
+      std::string mode;
+      std::string extra;
+      if (!(mode_file >> mode) || (mode_file >> extra)) {
+        return false;
+      }
+      return mode == "attach";
+    }
+
     bool socket_exists(const std::string &name) {
       return fs::exists(xdg_runtime_dir() + "/" + name);
+    }
+
+    enum class private_group_state_e {
+      alive,
+      drained,
+      unknown,
+    };
+
+    private_group_state_e private_group_state(pid_t pgid) {
+      DIR *proc = opendir("/proc");
+      if (!proc) {
+        return private_group_state_e::unknown;
+      }
+      bool alive = false;
+      bool complete = true;
+      while (true) {
+        errno = 0;
+        auto *entry = readdir(proc);
+        if (!entry) {
+          if (errno != 0) {
+            complete = false;
+          }
+          break;
+        }
+        char *end = nullptr;
+        const long parsed = std::strtol(entry->d_name, &end, 10);
+        if (parsed <= 1 || !end || *end != '\0') {
+          continue;
+        }
+        const pid_t pid = static_cast<pid_t>(parsed);
+        std::ifstream stat_file("/proc/" + std::to_string(pid) + "/stat");
+        std::string stat_line;
+        if (!std::getline(stat_file, stat_line)) {
+          if (kill(pid, 0) == 0 || errno == EPERM) {
+            complete = false;
+          }
+          continue;
+        }
+        const auto close = stat_line.rfind(')');
+        if (close == std::string::npos || close + 2 >= stat_line.size()) {
+          complete = false;
+          continue;
+        }
+        std::istringstream fields(stat_line.substr(close + 2));
+        char state = '\0';
+        pid_t ppid = 0;
+        pid_t process_group = 0;
+        pid_t session = 0;
+        if (!(fields >> state >> ppid >> process_group >> session)) {
+          complete = false;
+          continue;
+        }
+        if (session == pgid) {
+          // The SID is the private ownership domain. Descendants may move to a
+          // separate process group while remaining in this exact session; they
+          // must keep teardown live so marker/environment authority is retained.
+          if (state != 'Z' && state != 'X') {
+            alive = true;
+          }
+        }
+        else if (process_group == pgid) {
+          // The numeric PGID is now associated with another session. Authority
+          // is ambiguous and negative-PGID signaling must fail closed.
+          complete = false;
+        }
+      }
+      closedir(proc);
+      if (!complete) {
+        return private_group_state_e::unknown;
+      }
+      return alive ? private_group_state_e::alive : private_group_state_e::drained;
+    }
+
+    bool is_private_group_leader(pid_t pid) {
+      errno = 0;
+      const auto pgid = getpgid(pid);
+      if (pgid < 0) {
+        return false;
+      }
+      const auto sid = getsid(pid);
+      return sid >= 0 && pgid == pid && sid == pid;
+    }
+
+    bool pidfd_has_exited(int pidfd) {
+      pollfd descriptor {.fd = pidfd, .events = POLLIN, .revents = 0};
+      const int result = poll(&descriptor, 1, 0);
+      return result == 1 && (descriptor.revents & (POLLIN | POLLHUP)) != 0;
+    }
+
+    bool pidfd_targets_pid(int pidfd, pid_t expected_pid) {
+      if (pidfd < 0 || expected_pid <= 1) {
+        return false;
+      }
+      std::ifstream info("/proc/self/fdinfo/" + std::to_string(pidfd));
+      std::string key;
+      pid_t pid = -1;
+      while (info >> key) {
+        if (key == "Pid:") {
+          return (info >> pid) && pid == expected_pid;
+        }
+        std::string ignored;
+        std::getline(info, ignored);
+      }
+      return false;
+    }
+
+    bool drain_private_process_group(
+      pid_t pgid,
+      int leader_pidfd,
+      const std::function<bool()> &authority_still_current,
+      int term_steps = 30,
+      int kill_steps = 20
+    ) {
+      if (!pidfd_targets_pid(leader_pidfd, pgid) || !authority_still_current()) {
+        return false;
+      }
+      auto state = private_group_state(pgid);
+      if (state == private_group_state_e::unknown) {
+        return false;
+      }
+      if (state == private_group_state_e::drained) {
+        return true;
+      }
+      if (kill(-pgid, SIGTERM) != 0 && errno != ESRCH) {
+        return false;
+      }
+      int status = 0;
+      for (int i = 0; i < term_steps && state == private_group_state_e::alive; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        state = private_group_state(pgid);
+      }
+      if (state == private_group_state_e::alive) {
+        if (!pidfd_targets_pid(leader_pidfd, pgid) || !authority_still_current() ||
+            (kill(-pgid, SIGKILL) != 0 && errno != ESRCH)) {
+          return false;
+        }
+        for (int i = 0; i < kill_steps && state == private_group_state_e::alive; ++i) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          state = private_group_state(pgid);
+        }
+      }
+      (void) waitpid(pgid, &status, WNOHANG);
+      return state == private_group_state_e::drained;
+    }
+
+    bool rollback_spawned_private_group(pid_t child, int leader_pidfd) {
+      const auto group_state = private_group_state(child);
+      if (group_state == private_group_state_e::unknown) {
+        return false;
+      }
+      if (group_state == private_group_state_e::alive) {
+        return drain_private_process_group(child, leader_pidfd, []() { return true; });
+      }
+      int status = 0;
+      const auto child_state = waitpid(child, &status, WNOHANG);
+      if (child_state == child) {
+        return true;
+      }
+      if (child_state != 0 || kill(child, SIGTERM) != 0) {
+        return false;
+      }
+      return waitpid(child, nullptr, 0) == child;
     }
 
     /// Wait until socket exists for two consecutive polls (avoids attach races).
@@ -125,24 +348,59 @@ namespace stream_runtime {
 
       bool start(const start_params_t &params) override {
         std::lock_guard lock(mu_);
-        if (is_running_unlocked()) {
-          refresh_runtime_state(params);
-          if (!write_env_file()) {
+        const bool retained_state =
+          owned_ || pid_ > 0 || leader_pidfd_ >= 0 || marker_ ||
+          !socket_name_.empty() || !x11_display_.empty();
+        if (retained_state) {
+          owner_transition_lock_t retained_lock;
+          if (!retained_lock || !runtime_acquisition_allowed_locked()) {
+            BOOST_LOG(warning) << "gamescope_runtime: nested ownership claim blocks retained runtime reuse"sv;
             return false;
           }
-          BOOST_LOG(info) << "gamescope_runtime: already "sv
-                          << (owned_ ? "owned"sv : "attached"sv)
-                          << " "sv << (socket_name_.empty() ? "gamescope-0" : socket_name_)
-                          << "; reusing"sv;
-          return true;
+          if (is_running_unlocked() && revalidate_running_unlocked(params, true)) {
+            BOOST_LOG(info) << "gamescope_runtime: already "sv
+                            << (owned_ ? "owned"sv : "attached"sv)
+                            << " "sv << (socket_name_.empty() ? "gamescope-0" : socket_name_)
+                            << "; reusing"sv;
+            return true;
+          }
+          retained_lock.unlock();
+          if (owned_) {
+            if (!marker_) {
+              BOOST_LOG(error) << "gamescope_runtime: retained owned state lacks immutable marker authority; refusing restart"sv;
+              return false;
+            }
+            BOOST_LOG(warning) << "gamescope_runtime: draining retained owned generation before restart"sv;
+            stop_unlocked();
+            if (owned_ || pid_ > 0 || leader_pidfd_ >= 0 || marker_) {
+              BOOST_LOG(error) << "gamescope_runtime: retained owned generation did not drain; refusing replacement launch"sv;
+              return false;
+            }
+          }
+          else {
+            BOOST_LOG(warning) << "gamescope_runtime: dropping stale attached gamescope state"sv;
+            clear_runtime_state_unlocked();
+          }
         }
 
-        // 1) Prefer attach to idle gamescope-0 (portal + polaris-gamescope.env contract).
-        if (try_attach_gamescope0(params)) {
-          return true;
+        ensure_portal_stack();
+
+        // 1) Prefer attach to idle gamescope-0, but participate in the same
+        // locked durable-claim protocol as nested shell recovery.
+        {
+          owner_transition_lock_t acquisition_lock;
+          if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+            BOOST_LOG(warning) << "gamescope_runtime: nested ownership claim blocks runtime acquisition"sv;
+            return false;
+          }
+          if (try_attach_gamescope0(params, true)) {
+            return true;
+          }
         }
 
-        // 2) Ask the host idle unit to start (if present) before we spawn our own.
+        // 2) Ask the host idle unit to start. This helper releases the ownership
+        // lock around systemd activation, then reacquires and rechecks the claim
+        // before attaching.
         if (try_start_idle_unit_and_attach(params)) {
           return true;
         }
@@ -152,10 +410,22 @@ namespace stream_runtime {
           return false;
         }
 
-        // 3) Spawn owned headless gamescope — only if gamescope-0 is still free.
+        // 3) Spawn owned headless gamescope only inside the same ownership lock
+        // and after proving no durable nested transition/recovery claim exists.
+        owner_transition_lock_t acquisition_lock;
+        if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+          BOOST_LOG(warning) << "gamescope_runtime: nested claim appeared before owned spawn"sv;
+          return false;
+        }
         // Never attach/spawn onto gamescope-1 (portal is hard-wired to gamescope-0).
+        // Crash residue with no live holder is reclaimed under this transaction.
+        reclaim_orphan_gamescope_sockets();
         if (socket_exists("gamescope-0") && wait_for_stable_socket("gamescope-0", 1500)) {
-          return try_attach_gamescope0(params);
+          if (try_attach_gamescope0(params, true)) {
+            return true;
+          }
+          BOOST_LOG(error) << "gamescope_runtime: gamescope-0 exists but is not a validated owner; refusing destructive cleanup"sv;
+          return false;
         }
         if (socket_exists("gamescope-1") && !socket_exists("gamescope-0")) {
           BOOST_LOG(error) << "gamescope_runtime: gamescope-1 exists without a validated gamescope-0 owner; refusing destructive cleanup"sv;
@@ -209,7 +479,9 @@ namespace stream_runtime {
           return false;
         }
         if (child == 0) {
-          setsid();
+          if (setsid() < 0) {
+            _exit(126);
+          }
           unsetenv("WAYLAND_DISPLAY");
           unsetenv("ENABLE_GAMESCOPE_WSI");
           unsetenv("ENABLE_HDR_WSI");
@@ -219,47 +491,53 @@ namespace stream_runtime {
           _exit(127);
         }
 
+        leader_pidfd_ = static_cast<int>(syscall(SYS_pidfd_open, child, 0));
+        if (leader_pidfd_ < 0) {
+          (void) kill(child, SIGKILL);
+          (void) waitpid(child, nullptr, 0);
+          BOOST_LOG(error) << "gamescope_runtime: pidfd_open failed for owned leader"sv;
+          return false;
+        }
         pid_ = child;
         owned_ = true;
         socket_name_ = "gamescope-0";
 
         // Capture the exact PID generation only after exec has exposed the
         // expected gamescope --backend headless argv.
-        bool child_reaped = false;
+        // Keep the leader unreaped until every negative-PGID operation finishes;
+        // its live/zombie PID allocation prevents the numeric PGID from being reused.
         for (int i = 0; i < 100 && !marker_; ++i) {
           marker_ = gp::marker_for_pid(child, "runtime");
           if (!marker_) {
-            int status = 0;
-            if (waitpid(child, &status, WNOHANG) == child) {
-              child_reaped = true;
+            if (pidfd_has_exited(leader_pidfd_)) {
               break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
           }
         }
+        if (marker_ && !is_private_group_leader(child)) {
+          marker_.reset();
+        }
         bool marker_written = false;
-        if (marker_) {
-          owner_transition_lock_t owner_lock;
-          if (owner_lock) {
-            const auto current_owner = gp::validated_marker(marker_path());
-            const bool authority_free = !current_owner ||
-              *current_owner == *marker_;
-            marker_written = authority_free && gp::write_marker(marker_path(), *marker_);
-          }
+        if (marker_ && runtime_acquisition_allowed_locked()) {
+          const auto current_owner = gp::validated_marker(marker_path());
+          const bool authority_free = !current_owner || *current_owner == *marker_;
+          marker_written = authority_free && gp::write_marker(marker_path(), *marker_);
+        }
+        if (marker_written) {
+          // The exact runtime generation is now durable. Release the acquisition
+          // transaction so nested recovery can observe and stop this marker.
+          acquisition_lock.unlock();
         }
         if (!marker_written) {
           BOOST_LOG(error) << "gamescope_runtime: could not record exact owned gamescope generation"sv;
-          // An unreaped child PID cannot be reused. Re-check that relationship
-          // immediately before signaling; if the loop already reaped it (or it
-          // is no longer our child), the numeric PID is no longer authority.
-          if (!child_reaped) {
-            int status = 0;
-            const auto child_state = waitpid(child, &status, WNOHANG);
-            if (child_state == 0) {
-              kill(child, SIGTERM);
-              waitpid(child, nullptr, 0);
-            }
+
+          const bool rollback_drained = rollback_spawned_private_group(child, leader_pidfd_);
+          if (!rollback_drained) {
+            BOOST_LOG(error) << "gamescope_runtime: launch rollback could not prove private group drained; preserving state"sv;
+            return false;
           }
+          close_leader_pidfd();
           pid_ = 0;
           owned_ = false;
           marker_.reset();
@@ -275,10 +553,21 @@ namespace stream_runtime {
             stop_unlocked();
             return false;
           }
-          int status = 0;
-          if (waitpid(pid_, &status, WNOHANG) == pid_) {
+          if (pidfd_has_exited(leader_pidfd_)) {
             BOOST_LOG(error) << "gamescope_runtime: gamescope exited before socket appeared"sv;
-            remove_owned_files_if_current();
+            const auto marker_matches = [this]() {
+              const auto marker_on_disk = gp::read_marker(marker_path());
+              return marker_ && marker_on_disk && *marker_on_disk == *marker_;
+            };
+            if (!drain_private_process_group(pid_, leader_pidfd_, marker_matches)) {
+              BOOST_LOG(error) << "gamescope_runtime: exited leader left an unverified private group; preserving ownership"sv;
+              return false;
+            }
+            if (!remove_owned_files_if_current()) {
+              BOOST_LOG(error) << "gamescope_runtime: failed to remove drained generation marker; preserving ownership"sv;
+              return false;
+            }
+            close_leader_pidfd();
             pid_ = 0;
             owned_ = false;
             marker_.reset();
@@ -325,6 +614,7 @@ namespace stream_runtime {
           int status = 0;
           waitpid(pid_, &status, WNOHANG);
         }
+        close_leader_pidfd();
         pid_ = 0;
         owned_ = false;
         marker_.reset();
@@ -375,6 +665,7 @@ namespace stream_runtime {
     private:
       mutable std::mutex mu_;
       pid_t pid_ = 0;
+      int leader_pidfd_ = -1;
       bool owned_ = false;
       std::optional<gp::marker_t> marker_;
       std::string socket_name_;
@@ -386,6 +677,13 @@ namespace stream_runtime {
         .backend_name = "gamescope",
         .path_id = "gamescope_stream",
       };
+
+      void close_leader_pidfd() {
+        if (leader_pidfd_ >= 0) {
+          close(leader_pidfd_);
+          leader_pidfd_ = -1;
+        }
+      }
 
       fs::path marker_path() const {
         return fs::path(xdg_runtime_dir()) / "polaris-gamescope.pid";
@@ -425,25 +723,30 @@ namespace stream_runtime {
         return current && *current == *marker_;
       }
 
-      void remove_owned_files_if_current() const {
+      bool remove_owned_files_if_current() const {
         owner_transition_lock_t owner_lock;
         if (!owner_lock) {
-          return;
+          return false;
         }
-        remove_owned_files_if_current_unlocked();
+        return remove_owned_files_if_current_unlocked();
       }
 
-      void remove_owned_files_if_current_unlocked() const {
+      bool remove_owned_files_if_current_unlocked() const {
         if (!marker_) {
-          return;
+          return false;
         }
         const auto current = gp::read_marker(marker_path());
         if (!current || *current != *marker_) {
-          return;
+          return false;
         }
         std::error_code ec;
-        fs::remove(marker_path(), ec);
-        fs::remove(fs::path(xdg_runtime_dir()) / "polaris-gamescope.env", ec);
+        const auto env_path = fs::path(xdg_runtime_dir()) / "polaris-gamescope.env";
+        const bool env_exists = fs::exists(env_path, ec);
+        if (ec || (env_exists && (!fs::remove(env_path, ec) || ec))) {
+          return false;
+        }
+        ec.clear();
+        return fs::remove(marker_path(), ec) && !ec;
       }
 
       void stop_unlocked() {
@@ -454,34 +757,34 @@ namespace stream_runtime {
             return;
           }
           const auto current = gp::validated_marker(marker_path(), "runtime");
-          if (current && *current == *marker_) {
-            // The marker validates this exact PID generation immediately before
-            // signalling its setsid-owned process group.
-            kill(-marker_->pid, SIGTERM);
-            for (int i = 0; i < 30; ++i) {
-              int status = 0;
-              const auto result = waitpid(marker_->pid, &status, WNOHANG);
-              if (result == marker_->pid || (result < 0 && errno == ECHILD)) {
-                break;
-              }
-              std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            if (gp::is_valid_headless_gamescope(*marker_)) {
-              kill(-marker_->pid, SIGKILL);
-              waitpid(marker_->pid, nullptr, 0);
-            }
-            BOOST_LOG(info) << "gamescope_runtime: stopped owned gamescope pid="sv << marker_->pid;
-          }
-          else {
-            BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale/reused owned pid="sv
+          if (!current || *current != *marker_ || !is_private_group_leader(marker_->pid)) {
+            BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale or unverified group="sv
                                << marker_->pid;
+            return;
           }
-          remove_owned_files_if_current_unlocked();
+          // The pidfd keeps the unreaped leader allocation as the PGID barrier.
+          // After TERM the leader may be a zombie, so this callback deliberately
+          // fences only the immutable marker record instead of requiring live
+          // cmdline/exe/socket validation before SIGKILL escalation.
+          const auto authority_still_current = [this]() {
+            const auto marker_on_disk = gp::read_marker(marker_path());
+            return marker_on_disk && *marker_on_disk == *marker_;
+          };
+          if (!drain_private_process_group(marker_->pid, leader_pidfd_, authority_still_current)) {
+            BOOST_LOG(error) << "gamescope_runtime: private group did not drain; preserving ownership state"sv;
+            return;
+          }
+          BOOST_LOG(info) << "gamescope_runtime: drained owned gamescope group="sv << marker_->pid;
+          if (!remove_owned_files_if_current_unlocked()) {
+            BOOST_LOG(error) << "gamescope_runtime: failed to clear drained ownership files; preserving state"sv;
+            return;
+          }
         }
         else if (!owned_ && marker_) {
           BOOST_LOG(info) << "gamescope_runtime: detached from validated "sv << socket_name_
                           << " owner pid="sv << marker_->pid << " (left running)"sv;
         }
+        close_leader_pidfd();
         pid_ = 0;
         owned_ = false;
         marker_.reset();
@@ -499,7 +802,57 @@ namespace stream_runtime {
         (void) params;
       }
 
-      bool try_attach_gamescope0(const start_params_t &params) {
+      void clear_runtime_state_unlocked() {
+        close_leader_pidfd();
+        marker_.reset();
+        owned_ = false;
+        pid_ = 0;
+        socket_name_.clear();
+        x11_display_.clear();
+        state_ = {};
+      }
+
+      bool revalidate_running_unlocked(const start_params_t &params, bool ownership_lock_held = false) {
+        if (!marker_ || socket_name_.empty() || x11_display_.empty()) {
+          return false;
+        }
+        const auto current = validated_marker_for_socket(socket_name_, marker_->role);
+        if (!current || *current != *marker_) {
+          return false;
+        }
+        const auto display = gp::discover_owned_x11_display(*marker_);
+        if (!display || *display != x11_display_) {
+          return false;
+        }
+        refresh_runtime_state(params);
+        return write_env_file(ownership_lock_held);
+      }
+
+      static void ensure_portal_stack() {
+        // Best-effort: private portal frontend can be TERM'd while polaris stays up.
+        // Idle recovery alone is not enough — CreateSession needs org.freedesktop.portal.Desktop.
+        (void) std::system(
+          "systemctl --user start polaris-portal-dbus.service "
+          "polaris-portal-gamescope.service polaris-portal.service 2>/dev/null"
+        );
+      }
+
+      // Best-effort: drop crash residue only. Live holders are left for attach / fail-closed.
+      static void reclaim_orphan_gamescope_sockets() {
+        const auto rt = fs::path(xdg_runtime_dir());
+        for (const char *name : {"gamescope-0", "gamescope-1", "gamescope-0-ei", "gamescope-1-ei"}) {
+          const auto path = rt / name;
+          std::error_code ec;
+          if (!fs::exists(path, ec) || ec) {
+            continue;
+          }
+          if (gp::remove_orphan_socket(path)) {
+            BOOST_LOG(info) << "gamescope_runtime: reclaimed orphan socket "sv << path.string();
+          }
+        }
+      }
+
+      bool try_attach_gamescope0(const start_params_t &params, bool ownership_lock_held = false) {
         if (!wait_for_stable_socket("gamescope-0", 2000)) {
           return false;
         }
@@ -513,13 +866,14 @@ namespace stream_runtime {
           BOOST_LOG(warning) << "gamescope_runtime: marked gamescope-0 has no owned Xwayland socket"sv;
           return false;
         }
+        close_leader_pidfd();
         marker_ = marker;
         owned_ = false;
         pid_ = marker->pid;
         socket_name_ = "gamescope-0";
         x11_display_ = display;
         refresh_runtime_state(params);
-        if (!write_env_file()) {
+        if (!write_env_file(ownership_lock_held)) {
           marker_.reset();
           pid_ = 0;
           socket_name_.clear();
@@ -546,6 +900,7 @@ namespace stream_runtime {
       }
 
       static bool restart_or_start_idle_unit() {
+        ensure_portal_stack();
         const int rc = std::system(
           "systemctl --user restart polaris-gamescope-idle.service 2>/dev/null || "
           "systemctl --user start polaris-gamescope-idle.service 2>/dev/null");
@@ -553,7 +908,8 @@ namespace stream_runtime {
       }
 
       bool try_start_idle_unit_and_attach(const start_params_t &params) {
-        // Best-effort: host may ship polaris-gamescope-idle.service that owns gamescope-0.
+        // Best-effort: host may ship polaris-gamescope-idle.service. Its own
+        // startup transaction reclaims residue under the shared ownership lock.
         const bool active =
           std::system("systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null") == 0;
         const bool activating =
@@ -561,34 +917,47 @@ namespace stream_runtime {
             "test \"$(systemctl --user show -p ActiveState --value polaris-gamescope-idle.service 2>/dev/null)\" = activating") == 0;
         if ((active || activating) && idle_hdr_flags_match_force()) {
           if (wait_for_stable_socket("gamescope-0", 8000)) {
-            return try_attach_gamescope0(params);
+            owner_transition_lock_t acquisition_lock;
+            if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+              return false;
+            }
+            return try_attach_gamescope0(params, true);
           }
         }
         if (active && !idle_hdr_flags_match_force()) {
           BOOST_LOG(info) << "gamescope_runtime: restarting polaris-gamescope-idle to match polaris-gamescope-force"sv;
         }
         if (restart_or_start_idle_unit()) {
-          if (wait_for_stable_socket("gamescope-0", 12000) && try_attach_gamescope0(params)) {
-            BOOST_LOG(info) << "gamescope_runtime: polaris-gamescope-idle ready (HDR flags synced); attached to gamescope-0"sv;
-            return true;
+          if (wait_for_stable_socket("gamescope-0", 12000)) {
+            owner_transition_lock_t acquisition_lock;
+            if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+              return false;
+            }
+            if (try_attach_gamescope0(params, true)) {
+              BOOST_LOG(info) << "gamescope_runtime: polaris-gamescope-idle ready (HDR flags synced); attached to gamescope-0"sv;
+              return true;
+            }
           }
           BOOST_LOG(warning) << "gamescope_runtime: polaris-gamescope-idle started but gamescope-0 not ready; will try owned spawn"sv;
         }
         return false;
       }
 
-      bool write_env_file() const {
+      bool write_env_file(bool ownership_lock_held = false) const {
         if (!marker_ || x11_display_.empty() || socket_name_.empty()) {
           return false;
         }
-        owner_transition_lock_t owner_lock;
-        if (!owner_lock) {
+        owner_transition_lock_t owner_lock(!ownership_lock_held);
+        if ((!ownership_lock_held && !owner_lock) || !runtime_acquisition_allowed_locked()) {
           return false;
         }
-        const auto current = validated_marker_for_socket(socket_name_, marker_->role);
-        const auto current_display = gp::discover_owned_x11_display(*marker_);
-        if (!current || *current != *marker_ ||
-            !current_display || *current_display != x11_display_) {
+        const auto revalidate_publication_pair = [this]() {
+          const auto current = validated_marker_for_socket(socket_name_, marker_->role);
+          const auto current_display = gp::discover_owned_x11_display(*marker_);
+          return current && *current == *marker_ &&
+                 current_display && *current_display == x11_display_;
+        };
+        if (!revalidate_publication_pair()) {
           return false;
         }
 
@@ -608,6 +977,10 @@ namespace stream_runtime {
           out << "POLARIS_GAMESCOPE_EXECUTABLE=" << marker_->executable.string() << "\n";
         }
         std::error_code ec;
+        if (!revalidate_publication_pair()) {
+          fs::remove(temporary, ec);
+          return false;
+        }
         fs::rename(temporary, path, ec);
         if (ec) {
           fs::remove(temporary, ec);
@@ -621,6 +994,25 @@ namespace stream_runtime {
     gamescope_runtime_t g_gamescope_runtime;
 
   }  // namespace
+
+  bool drain_gamescope_private_group_for_tests(pid_t pgid) {
+    const int pidfd = static_cast<int>(syscall(SYS_pidfd_open, pgid, 0));
+    if (pidfd < 0) {
+      return false;
+    }
+    const bool drained = drain_private_process_group(pgid, pidfd, []() { return true; }, 3, 20);
+    close(pidfd);
+    return drained;
+  }
+
+  bool rollback_gamescope_spawn_for_tests(pid_t pgid, int leader_pidfd) {
+    return rollback_spawned_private_group(pgid, leader_pidfd);
+  }
+
+  bool gamescope_runtime_acquisition_allowed_for_tests() {
+    owner_transition_lock_t owner_lock;
+    return owner_lock && runtime_acquisition_allowed_locked();
+  }
 
   stream_runtime_t *gamescope_runtime_instance() {
     return &g_gamescope_runtime;

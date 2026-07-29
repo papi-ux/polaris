@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <fstream>
 #include <map>
 #include <set>
@@ -15,6 +16,11 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace stream_runtime::gamescope_process {
   namespace {
@@ -27,6 +33,118 @@ namespace stream_runtime::gamescope_process {
       fs::path executable;
       std::vector<std::string> argv;
     };
+
+    class locked_fd_t {
+    public:
+      explicit locked_fd_t(int fd):
+          fd_(fd) {}
+
+      locked_fd_t(const locked_fd_t &) = delete;
+      locked_fd_t &operator=(const locked_fd_t &) = delete;
+      locked_fd_t(locked_fd_t &&other) noexcept:
+          fd_(std::exchange(other.fd_, -1)) {}
+
+      ~locked_fd_t() {
+        if (fd_ >= 0) {
+          close(fd_);
+        }
+      }
+
+      bool still_names(const fs::path &path) const {
+        struct stat fd_stat {};
+        struct stat path_stat {};
+        return fd_ >= 0 && fstat(fd_, &fd_stat) == 0 && lstat(path.c_str(), &path_stat) == 0 &&
+               S_ISREG(fd_stat.st_mode) && S_ISREG(path_stat.st_mode) &&
+               fd_stat.st_dev == path_stat.st_dev && fd_stat.st_ino == path_stat.st_ino;
+      }
+
+      bool still_names_node(const fs::path &path) const {
+        struct stat fd_stat {};
+        struct stat path_stat {};
+        return fd_ >= 0 && fstat(fd_, &fd_stat) == 0 && lstat(path.c_str(), &path_stat) == 0 &&
+               !S_ISLNK(path_stat.st_mode) &&
+               fd_stat.st_dev == path_stat.st_dev && fd_stat.st_ino == path_stat.st_ino &&
+               fd_stat.st_mode == path_stat.st_mode;
+      }
+
+    private:
+      int fd_;
+    };
+
+    bool process_holds_deleted_path(const fs::path &proc_root, const fs::path &path, uid_t owner) {
+      const auto expected = path.string() + " (deleted)";
+      std::error_code ec;
+      for (const auto &process : fs::directory_iterator(proc_root, ec)) {
+        if (ec) {
+          return true;
+        }
+        const auto name = process.path().filename().string();
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
+          continue;
+        }
+        struct stat process_stat {};
+        if (lstat(process.path().c_str(), &process_stat) != 0) {
+          return true;
+        }
+        if (process_stat.st_uid != owner) {
+          continue;
+        }
+        std::error_code fd_ec;
+        for (const auto &entry : fs::directory_iterator(process.path() / "fd", fd_ec)) {
+          if (fd_ec) {
+            return true;
+          }
+          std::error_code link_ec;
+          const auto target = fs::read_symlink(entry.path(), link_ec);
+          if (link_ec) {
+            if (link_ec == std::errc::no_such_file_or_directory) {
+              continue;
+            }
+            return true;
+          }
+          if (target == expected) {
+            return true;
+          }
+        }
+        if (fd_ec) {
+          return true;
+        }
+      }
+      if (ec) {
+        return true;
+      }
+      return false;
+    }
+
+    bool deleted_lock_state_unsafe(const fs::path &proc_root, const fs::path &lock_path) {
+      struct stat lock_stat {};
+      if (lstat(lock_path.c_str(), &lock_stat) != 0 || !S_ISREG(lock_stat.st_mode)) {
+        return true;
+      }
+      return process_holds_deleted_path(proc_root, lock_path, lock_stat.st_uid);
+    }
+
+    std::optional<locked_fd_t> lock_wayland_socket_path(
+      const fs::path &socket_path,
+      const lookup_paths_t &paths
+    ) {
+      const fs::path lock_path {socket_path.string() + ".lock"};
+      if (deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+        return std::nullopt;
+      }
+      const int fd = open(lock_path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+      if (fd < 0) {
+        return std::nullopt;
+      }
+      locked_fd_t locked {fd};
+      if (!locked.still_names(lock_path) || flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        return std::nullopt;
+      }
+      if (!locked.still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+        return std::nullopt;
+      }
+      return locked;
+    }
 
     template<typename T>
     std::optional<T> parse_integer(std::string_view value) {
@@ -209,11 +327,14 @@ namespace stream_runtime::gamescope_process {
 
     using socket_inode_map_t = std::unordered_map<std::string, std::optional<std::uint64_t>>;
 
-    socket_inode_map_t read_unix_socket_inodes(
+    std::optional<socket_inode_map_t> read_unix_socket_inodes(
       const fs::path &proc_net_unix
     ) {
-      socket_inode_map_t inodes;
       std::ifstream input(proc_net_unix);
+      if (!input) {
+        return std::nullopt;
+      }
+      socket_inode_map_t inodes;
       std::string line;
       std::getline(input, line);  // header
       while (std::getline(input, line)) {
@@ -266,6 +387,14 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
 
+    bool related_to_root(
+      int pid,
+      int root,
+      const std::map<int, process_t> &processes
+    ) {
+      return pid != root && is_descendant_of(pid, root, processes);
+    }
+
     std::optional<std::uint64_t> inode_for_path(
       const socket_inode_map_t &inodes,
       const fs::path &path
@@ -276,6 +405,7 @@ namespace stream_runtime::gamescope_process {
       }
       return *found->second;
     }
+
   }  // namespace
 
   std::optional<marker_t> read_marker(const fs::path &path) {
@@ -394,18 +524,118 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
     const auto inodes = read_unix_socket_inodes(paths.proc_net_unix);
-    const auto inode = inode_for_path(inodes, socket_path);
+    if (!inodes) {
+      return false;
+    }
+    const auto inode = inode_for_path(*inodes, socket_path);
     if (!inode) {
       return false;
     }
     const auto processes = read_processes(paths.proc_root);
+    std::optional<pid_t> holder_pid;
     for (const auto &[pid, process] : processes) {
       (void) process;
       if (is_descendant_of(pid, marker.pid, processes) && process_holds_inode(paths, pid, *inode)) {
-        return true;
+        holder_pid = pid;
+        break;
       }
     }
-    return false;
+    if (!holder_pid) {
+      return false;
+    }
+    if (paths.before_socket_ownership_return_for_tests) {
+      paths.before_socket_ownership_return_for_tests();
+    }
+    if (!validate_process(marker, paths)) {
+      return false;
+    }
+    const auto final_inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    const auto final_inode = final_inodes ? inode_for_path(*final_inodes, socket_path) : std::nullopt;
+    if (!final_inode || *final_inode != *inode) {
+      return false;
+    }
+    const auto final_processes = read_processes(paths.proc_root);
+    return is_descendant_of(*holder_pid, marker.pid, final_processes) &&
+           process_holds_inode(paths, *holder_pid, *inode);
+  }
+
+  bool socket_has_live_holder(
+    const fs::path &socket_path,
+    const lookup_paths_t &paths
+  ) {
+    std::error_code ec;
+    const bool socket_exists = fs::exists(socket_path, ec);
+    if (ec) {
+      return true;
+    }
+    if (!socket_exists) {
+      return false;
+    }
+    const auto inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    if (!inodes) {
+      return true;
+    }
+    const auto found = inodes->find(socket_path.string());
+    // No /proc/net/unix row → filesystem residue only.
+    if (found == inodes->end()) {
+      return false;
+    }
+    // Any kernel socket-table row means the socket is still referenced. The
+    // owning fd may be hidden by procfs permissions, so never use a failed fd
+    // scan as permission to unlink the pathname.
+    return true;
+  }
+
+  bool remove_orphan_socket(
+    const fs::path &socket_path,
+    const lookup_paths_t &paths
+  ) {
+    std::error_code ec;
+    if (!fs::exists(socket_path, ec) || ec) {
+      return !ec;
+    }
+    // Libwayland holds this advisory lock from bind through display teardown.
+    // Taking it non-blocking closes the check/unlink race with a compositor
+    // that has locked the name but has not created its socket yet.
+    const fs::path lock_path {socket_path.string() + ".lock"};
+    auto socket_lock = lock_wayland_socket_path(socket_path, paths);
+    if (!socket_lock) {
+      return false;
+    }
+    if (!fs::exists(socket_path, ec) || ec) {
+      return !ec;
+    }
+    const int socket_pin_fd = open(socket_path.c_str(), O_PATH | O_CLOEXEC | O_NOFOLLOW);
+    if (socket_pin_fd < 0) {
+      return false;
+    }
+    locked_fd_t socket_pin {socket_pin_fd};
+    if (!socket_pin.still_names_node(socket_path)) {
+      return false;
+    }
+    if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+      return false;
+    }
+    if (socket_has_live_holder(socket_path, paths)) {
+      return false;
+    }
+    if (paths.before_socket_unlink_for_tests) {
+      paths.before_socket_unlink_for_tests();
+    }
+    if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+      return false;
+    }
+    // Keep an O_PATH descriptor for the original node until unlink completes.
+    // A replacement path therefore cannot reuse the original inode allocation.
+    if (!socket_pin.still_names_node(socket_path)) {
+      return false;
+    }
+    if (!fs::remove(socket_path, ec) || ec) {
+      return false;
+    }
+    // Leave the unlocked lock file in place. Unlinking a held lock creates a
+    // second inode that another binder can acquire concurrently.
+    return true;
   }
 
   std::optional<std::string> discover_owned_x11_display(
@@ -415,41 +645,91 @@ namespace stream_runtime::gamescope_process {
     if (!validate_process(marker, paths)) {
       return std::nullopt;
     }
-    const auto inodes = read_unix_socket_inodes(paths.proc_net_unix);
     const auto processes = read_processes(paths.proc_root);
-    std::vector<std::pair<int, std::uint64_t>> candidates;
-    for (const auto &[path, inode] : inodes) {
-      if (!inode) {
-        continue;
+    const auto x11_inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    if (!x11_inodes) {
+      return std::nullopt;
+    }
+    struct candidate_t {
+      int display;
+      int pid;
+      std::uint64_t start_time;
+      fs::path executable;
+      std::uint64_t inode;
+    };
+    std::optional<candidate_t> best;
+
+    std::error_code ec;
+    for (const auto &entry : fs::directory_iterator(paths.x11_socket_dir, ec)) {
+      if (ec) {
+        break;
       }
-      const fs::path socket_path(path);
-      if (socket_path.parent_path() != paths.x11_socket_dir) {
-        continue;
-      }
-      const auto name = socket_path.filename().string();
+      const auto name = entry.path().filename().string();
       if (name.size() < 2 || name.front() != 'X') {
         continue;
       }
       const auto display = parse_integer<int>(std::string_view {name}.substr(1));
-      std::error_code ec;
-      if (display && *display >= 0 && fs::exists(socket_path, ec) && !ec) {
-        candidates.emplace_back(*display, *inode);
+      if (!display || *display < 0 || !entry.exists(ec)) {
+        continue;
       }
-    }
-    std::sort(candidates.begin(), candidates.end());
-
-    for (const auto &[display, inode] : candidates) {
+      // Routing by pathname is authoritative only when the kernel exposes one
+      // unambiguous inode for that X socket. Duplicate rows can represent an
+      // unlinked predecessor plus a successor rebind.
+      const auto inode = inode_for_path(*x11_inodes, entry.path());
+      if (!inode) {
+        continue;
+      }
       for (const auto &[pid, process] : processes) {
-        if (pid == marker.pid || !is_descendant_of(pid, marker.pid, processes) ||
-            !executable_named(process, "Xwayland")) {
+        if (pid == marker.pid || !executable_named(process, "Xwayland") ||
+            !related_to_root(pid, marker.pid, processes) ||
+            !process_holds_inode(paths, pid, *inode)) {
           continue;
         }
-        if (process_holds_inode(paths, pid, inode)) {
-          return ":" + std::to_string(display);
+        if (!best || *display < best->display) {
+          best = candidate_t {
+            .display = *display,
+            .pid = pid,
+            .start_time = process.start_time,
+            .executable = process.executable,
+            .inode = *inode,
+          };
         }
       }
     }
-    return std::nullopt;
+    if (!best) {
+      return std::nullopt;
+    }
+    if (paths.before_x11_return_for_tests) {
+      paths.before_x11_return_for_tests();
+    }
+    // Rebuild the process snapshot and prove both generations and fd ownership
+    // again immediately before returning a routing decision.
+    if (!validate_process(marker, paths)) {
+      return std::nullopt;
+    }
+    const auto final_processes = read_processes(paths.proc_root);
+    const auto root = final_processes.find(marker.pid);
+    if (root == final_processes.end() ||
+        root->second.start_time != marker.start_time ||
+        root->second.executable != marker.executable) {
+      return std::nullopt;
+    }
+    const auto found = final_processes.find(best->pid);
+    if (found == final_processes.end() ||
+        found->second.start_time != best->start_time ||
+        found->second.executable != best->executable ||
+        !executable_named(found->second, "Xwayland") ||
+        !related_to_root(best->pid, marker.pid, final_processes) ||
+        !process_holds_inode(paths, best->pid, best->inode)) {
+      return std::nullopt;
+    }
+    const auto final_x11_inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    const auto socket_path = paths.x11_socket_dir / ("X" + std::to_string(best->display));
+    const auto final_inode = final_x11_inodes ? inode_for_path(*final_x11_inodes, socket_path) : std::nullopt;
+    if (!final_inode || *final_inode != best->inode) {
+      return std::nullopt;
+    }
+    return ":" + std::to_string(best->display);
   }
 
 }  // namespace stream_runtime::gamescope_process

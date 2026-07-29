@@ -18,6 +18,25 @@ marker="$rt/polaris-gamescope.pid"
 child=""
 child_start=""
 
+exec 8>>"$rt/polaris-gamescope.lock" || exit 1
+"${POLARIS_FLOCK_BIN:-flock}" -x 8 || exit 1
+export POLARIS_GAMESCOPE_LOCK_HELD=1
+nested_claim="$rt/polaris-gamescope-wsi-nested"
+if [ -f "$nested_claim" ]; then
+  claim_state="$(tr -d '[:space:]' <"$nested_claim")"
+  case "$claim_state" in
+    restore-idle) ;;
+    transition|nested|1)
+      echo "polaris-gamescope-idle: yielding to active ownership transition ($claim_state)" >&2
+      exit 0
+      ;;
+    *)
+      echo "polaris-gamescope-idle: refusing unknown ownership claim ($claim_state)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 command -v "$gs" >/dev/null 2>&1 || {
   echo "polaris-gamescope-idle: gamescope not found (set POLARIS_GAMESCOPE_BIN)" >&2
   exit 1
@@ -35,26 +54,43 @@ trap cleanup EXIT
 trap 'exit 143' TERM INT
 
 if polaris_validate_marker "$marker"; then
-  if [ "$POLARIS_MARKER_ROLE" = idle ]; then
-    polaris_stop_marked_gamescope "$marker" idle "$rt" || {
-      echo "polaris-gamescope-idle: existing idle owner did not stop" >&2
+  case "$POLARIS_MARKER_ROLE" in
+    idle)
+      polaris_stop_marked_gamescope "$marker" idle "$rt" || {
+        echo "polaris-gamescope-idle: existing idle owner did not stop" >&2
+        exit 1
+      }
+      ;;
+    nested|runtime)
+      # Nested WSI / owned spawn holds gamescope-0. Exit 0 so Restart=on-failure
+      # does not fight polaris-gamescope-session (mask can race with restart).
+      echo "polaris-gamescope-idle: yielding to active $POLARIS_MARKER_ROLE owner pid=$POLARIS_MARKER_PID" >&2
+      exit 0
+      ;;
+    *)
+      echo "polaris-gamescope-idle: refusing to replace active $POLARIS_MARKER_ROLE owner pid=$POLARIS_MARKER_PID" >&2
       exit 1
-    }
-  else
-    echo "polaris-gamescope-idle: refusing to replace active $POLARIS_MARKER_ROLE owner pid=$POLARIS_MARKER_PID" >&2
-    exit 1
-  fi
+      ;;
+  esac
 else
-  # Invalid marker metadata is safe to discard; unknown sockets are not.
+  # No valid marker. If gamescope-0 is still live (nested race, or marker write
+  # lag), yield cleanly — do NOT delete someone else's state or restart-loop.
+  if [ -e "$rt/gamescope-0" ] || [ -S "$rt/gamescope-0" ]; then
+    if ! polaris_socket_is_orphan "$rt/gamescope-0"; then
+      echo "polaris-gamescope-idle: yielding to live gamescope-0 holder (not idle-owned)" >&2
+      exit 0
+    fi
+  fi
+  # Invalid marker + orphan sockets only: safe to discard and reclaim residue.
   rm -f "$marker"
+  rm -f "$rt/polaris-gamescope.env"
 fi
 
-for socket in gamescope-0 gamescope-1; do
-  if [ -e "$rt/$socket" ]; then
-    echo "polaris-gamescope-idle: refusing destructive cleanup of unowned $rt/$socket" >&2
-    exit 1
-  fi
-done
+if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+  # Live holder appeared between checks (nested start race): yield, don't loop.
+  echo "polaris-gamescope-idle: yielding; live gamescope sockets remain" >&2
+  exit 0
+fi
 
 prefer_vk=()
 if [ -n "${POLARIS_GAMESCOPE_PREFER_VK:-}" ]; then
@@ -119,6 +155,11 @@ if [ "$ready" != 1 ]; then
   echo "polaris-gamescope-idle: owned gamescope-0/Xwayland did not become ready" >&2
   exit 1
 fi
+
+trap '' HUP INT TERM
+"${POLARIS_FLOCK_BIN:-flock}" -u 8
+export POLARIS_GAMESCOPE_LOCK_HELD=0
+trap cleanup EXIT HUP INT TERM
 
 echo "polaris-gamescope-idle: ready pid=$child generation=$child_start" >&2
 wait "$child"

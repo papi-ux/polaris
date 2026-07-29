@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,6 +26,9 @@ namespace stream_runtime::gamescope_process {
     std::filesystem::path proc_root = "/proc";
     std::filesystem::path proc_net_unix = "/proc/net/unix";
     std::filesystem::path x11_socket_dir = "/tmp/.X11-unix";
+    std::function<void()> before_socket_unlink_for_tests;
+    std::function<void()> before_x11_return_for_tests;
+    std::function<void()> before_socket_ownership_return_for_tests;
   };
 
   std::optional<marker_t> read_marker(const std::filesystem::path &path);
@@ -60,6 +64,26 @@ namespace stream_runtime::gamescope_process {
   /** True only when marker is still valid and its process tree holds socket_path. */
   bool process_tree_owns_socket(
     const marker_t &marker,
+    const std::filesystem::path &socket_path,
+    const lookup_paths_t &paths = {}
+  );
+
+  /**
+   * True when any process holds the unique /proc/net/unix inode for socket_path.
+   * False when missing, filesystem-only residue, or no live holder.
+   * Ambiguous duplicate pathname rows fail closed as "live" (not safe to unlink).
+   */
+  bool socket_has_live_holder(
+    const std::filesystem::path &socket_path,
+    const lookup_paths_t &paths = {}
+  );
+
+  /**
+   * Unlink a crash-orphaned Wayland socket while preserving its existing lock.
+   * Returns true when the path is gone afterward; false if a live holder (or
+   * ambiguous pathname) still owns it.
+   */
+  bool remove_orphan_socket(
     const std::filesystem::path &socket_path,
     const lookup_paths_t &paths = {}
   );
