@@ -1182,6 +1182,7 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedClientPidReuseFailsClosedBefore
       "env",
       "GAMESCOPE_WAYLAND_DISPLAY=gamescope-0",
       "STEAM_COMPAT_APP_ID=4242",
+      "POLARIS_SESSION_INSTANCE_ID=gamescope-attached-test",
       "/bin/sh",
       "-c",
       "printf x >&3; exec /usr/bin/tail -f /dev/null",
@@ -1216,6 +1217,7 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedUnreadableLiveProcessFailsClose
     close(ready_pipe[0]);
     setenv("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0", 1);
     setenv("STEAM_COMPAT_APP_ID", "4242", 1);
+    setenv("POLARIS_SESSION_INSTANCE_ID", "gamescope-attached-test", 1);
     if (prctl(PR_SET_NAME, "game-client", 0, 0, 0) != 0) _exit(125);
     if (prctl(PR_SET_DUMPABLE, 0) != 0) _exit(126);
     const char ready = 'x';
@@ -1239,6 +1241,9 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupRejectsUnownedSameAppPro
   ASSERT_GE(child, 0);
   if (child == 0) {
     close(ready_pipe[0]);
+    setenv("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0", 1);
+    setenv("STEAM_COMPAT_APP_ID", "4242", 1);
+    setenv("POLARIS_SESSION_INSTANCE_ID", "other-generation", 1);
     const char ready = 'x';
     (void) write(ready_pipe[1], &ready, 1);
     close(ready_pipe[1]);
@@ -1264,8 +1269,8 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupRejectsUnownedSameAppPro
     usleep(10000);
   }
   ASSERT_TRUE(observed);
-  EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
-  EXPECT_EQ(kill(child, 0), 0) << "same-app process without gamescope attachment was signalled";
+  EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
+  EXPECT_EQ(kill(child, 0), 0) << "other-generation gamescope client was signalled";
 }
 
 TEST(ProcessRuntimeConfigTests, SteamShutdownOwnershipRejectsUnmarkedActiveClients) {
@@ -2312,6 +2317,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
 
   const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
   const auto terminate_private_steam = terminate.find("terminate_session_owned_steam_before_cage_stop(");
+  const auto terminate_attached = terminate.find("terminate_gamescope_attached_session_clients(");
   const auto terminate_generation = terminate.find("terminate_isolated_session_generation();");
   const auto terminate_main = terminate.find("terminate_process_group(");
   const auto legacy_group_gate = terminate.find(
@@ -2326,6 +2332,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   const auto immutable_undo_guard = terminate.find("_session_used_cage_compositor", clear_legacy_child);
   const auto finish_generation = terminate.find("finish_isolated_session_generation_cleanup();");
   ASSERT_NE(terminate_private_steam, std::string::npos);
+  ASSERT_NE(terminate_attached, std::string::npos);
   ASSERT_NE(terminate_generation, std::string::npos);
   ASSERT_NE(terminate_main, std::string::npos);
   ASSERT_NE(legacy_group_gate, std::string::npos);
@@ -2335,7 +2342,8 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   ASSERT_NE(clear_legacy_child, std::string::npos);
   ASSERT_NE(immutable_undo_guard, std::string::npos);
   ASSERT_NE(finish_generation, std::string::npos);
-  EXPECT_LT(terminate_private_steam, terminate_generation);
+  EXPECT_LT(terminate_private_steam, terminate_attached);
+  EXPECT_LT(terminate_attached, terminate_generation);
   EXPECT_LT(terminate_generation, terminate_main);
   EXPECT_LT(terminate_generation, legacy_group_gate);
   EXPECT_LT(legacy_group_gate, legacy_detach_gate);

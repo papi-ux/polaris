@@ -2020,11 +2020,33 @@ namespace proc {
      * idle compositor causes gamescope xwm "X11 I/O error" ABRT and takes down
      * the portal capture target.
      */
-    bool terminate_gamescope_attached_session_clients(const std::string &steam_appid) {
+    bool terminate_gamescope_attached_session_clients(
+      const std::string &steam_appid,
+      std::string_view session_instance_id
+    ) {
       struct snapshot_t {
         std::vector<pidfd_handle_t> targets;
         bool capture_complete = true;
       } snapshot;
+      auto authority = isolated_session_process_snapshot(session_instance_id);
+      if (!authority.capture_complete || authority.owned.empty()) {
+        return false;
+      }
+      const auto has_exact_generation_ancestry = [&authority](pid_t pid) -> std::optional<bool> {
+        for (const auto &root : authority.owned) {
+          if (pid == root.pid) {
+            return true;
+          }
+          const auto descends = proc_pid_descends_from(pid, root.pid);
+          if (!descends) {
+            return std::nullopt;
+          }
+          if (*descends) {
+            return true;
+          }
+        }
+        return false;
+      };
       DIR *dir = opendir("/proc");
       if (!dir) {
         return false;
@@ -2083,6 +2105,14 @@ namespace proc {
           continue;
         }
         if (proc_dir_stat.st_uid != geteuid()) {
+          continue;
+        }
+        const auto exact_generation_ancestry = has_exact_generation_ancestry(pid);
+        if (!exact_generation_ancestry) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+        if (!*exact_generation_ancestry) {
           continue;
         }
 
@@ -2145,7 +2175,9 @@ namespace proc {
           ++*identity_after;
         }
 #endif
+        const auto ancestry_after = has_exact_generation_ancestry(pid);
         const bool capture_matches =
+          ancestry_after && *ancestry_after &&
           steam_pidfd_capture_identity_matches(identity_before, identity_after) &&
           comm_after.ok() && cmdline_after.ok() && environ_after.ok() &&
           is_candidate(comm_after.bytes, cmdline_after.bytes, environ_after.bytes);
@@ -2161,6 +2193,11 @@ namespace proc {
       }
       if (errno != 0) {
         snapshot.capture_complete = false;
+      }
+      for (const auto &root : authority.owned) {
+        if (pidfd_has_exited(root)) {
+          snapshot.capture_complete = false;
+        }
       }
       if (!snapshot.capture_complete) {
         BOOST_LOG(error) << "process: gamescope-attached client capture incomplete; refusing partial termination"sv;
@@ -4197,7 +4234,7 @@ namespace proc {
     });
     forced_reused_gamescope_attached_pid = forced_reused_pid;
     forced_unreadable_gamescope_attached_pid = forced_unreadable_pid;
-    return terminate_gamescope_attached_session_clients(steam_appid);
+    return terminate_gamescope_attached_session_clients(steam_appid, "gamescope-attached-test");
   }
 
   bool terminate_pid_with_pidfd_for_tests(
@@ -6845,11 +6882,6 @@ namespace proc {
       terminate_session_owned_steam_before_cage_stop();
     }
 
-    // The immutable launch generation, not mutable config, owns this cleanup.
-    // Capture and terminate every exact-generation process through pidfds before
-    // any legacy child/group handle can signal or be destroyed.
-    terminate_isolated_session_generation();
-
     // Gamescope Steam/pressure-vessel often strips POLARIS_SESSION_INSTANCE_ID, so
     // exact-generation + session-owned Steam paths find nothing and webui close
     // leaves the game running. Sweep attach-env Steam/game clients only (not bare
@@ -6860,11 +6892,19 @@ namespace proc {
         config::video.linux_display.private_runtime == "gamescope";
       if (gamescope_session) {
         const bool attached_cleanup_complete =
-          terminate_gamescope_attached_session_clients(steam_appid_for_context(_app));
+          terminate_gamescope_attached_session_clients(
+            steam_appid_for_context(_app),
+            _session_instance_id
+          );
         _exact_generation_cleanup_complete =
           _exact_generation_cleanup_complete && attached_cleanup_complete;
       }
     }
+
+    // The immutable launch generation, not mutable config, owns this cleanup.
+    // Keep exact-generation ancestors alive while proving pressure-vessel client
+    // ancestry above, then terminate every exact-generation process via pidfds.
+    terminate_isolated_session_generation();
 
     if (isolated_session_uses_legacy_group_termination(
           _session_used_cage_compositor,

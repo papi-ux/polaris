@@ -377,7 +377,7 @@ TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKil
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 1600);
+  const auto body = source.substr(start, 3500);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto kill = body.find("terminate_isolated_session_generation(");
   ASSERT_NE(prepare, std::string::npos);
