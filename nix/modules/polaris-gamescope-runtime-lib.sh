@@ -317,6 +317,37 @@ polaris_write_runtime_env() (
   mv -f "$tmp" "$runtime_dir/polaris-gamescope.env"
 )
 
+# Hjem / NixOS install polaris units under ~/.config/systemd/user, which has
+# higher search priority than $XDG_RUNTIME_DIR/systemd/user. Plain
+# `systemctl --user mask --runtime` therefore does NOT mask those units, and
+# polaris-portal-gamescope Wants= / polaris Wants= keep restarting idle under
+# nested WSI (yield loop). Mask via user.control (first path) instead.
+polaris_idle_unit_control_dir() {
+  printf '%s\n' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user.control"
+}
+
+polaris_mask_idle_unit_runtime() {
+  local unit="${1:-polaris-gamescope-idle.service}"
+  local control
+  control="$(polaris_idle_unit_control_dir)"
+  mkdir -p "$control"
+  ln -sfn /dev/null "$control/$unit"
+  # Drop legacy ineffective mask --runtime symlink if present.
+  rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user/$unit"
+  systemctl --user daemon-reload 2>/dev/null || true
+  systemctl --user stop "$unit" 2>/dev/null || true
+}
+
+polaris_unmask_idle_unit_runtime() {
+  local unit="${1:-polaris-gamescope-idle.service}"
+  local control
+  control="$(polaris_idle_unit_control_dir)"
+  rm -f "$control/$unit"
+  rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user/$unit"
+  systemctl --user daemon-reload 2>/dev/null || true
+  systemctl --user unmask --runtime "$unit" 2>/dev/null || true
+}
+
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"

@@ -192,10 +192,10 @@ case "${1:-}" in
     if [ "$want_wsi" = 1 ]; then
       # --- Nested WSI path (games as gamescope child) ---
       echo "polaris-gamescope-session: WSI nested mode — Steam is ${POLARIS_GAMESCOPE_BIN:-gamescope} primary child" >&2
-      # Runtime-mask so polaris Wants= / on-failure cannot respawn idle
-      # while nested needs exclusive gamescope-0 (portal is hard-wired).
-      systemctl --user mask --runtime polaris-gamescope-idle.service 2>/dev/null || true
-      systemctl --user stop polaris-gamescope-idle.service 2>/dev/null || true
+      # Runtime-mask so polaris Wants= / portal-gamescope Wants= cannot respawn
+      # idle while nested needs exclusive gamescope-0 (portal is hard-wired).
+      # Use user.control — plain mask --runtime loses to Hjem ~/.config units.
+      polaris_mask_idle_unit_runtime
       # Stop only the exact marked owner of gamescope-0. Unknown sockets fail
       # closed instead of risking another user's compositor.
       if polaris_validate_marker "$marker"; then
@@ -378,7 +378,7 @@ case "${1:-}" in
           exit 1
         fi
         rm -f "$rt/polaris-gamescope-wsi-nested"
-        systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+        polaris_unmask_idle_unit_runtime
         systemctl --user start polaris-gamescope-idle.service || true
       elif ! systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null; then
         systemctl --user start polaris-gamescope-idle.service || true
@@ -508,7 +508,7 @@ case "${1:-}" in
       # Ordered handoff: idle must own gamescope-0 before portal capture can
       # reconnect. Otherwise portal-gamescope hits "failed to connect to wayland
       # socket" (Response code 2) during the gap.
-      systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+      polaris_unmask_idle_unit_runtime
       systemctl --user reset-failed polaris-gamescope-idle.service 2>/dev/null || true
       systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
       idle_ready=0

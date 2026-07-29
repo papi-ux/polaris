@@ -254,5 +254,16 @@ if grep -Eq 'rm .*polaris-gamescope\.pid|rm -f .*polaris-gamescope\.pid' \
     "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh"; then
   fail "non-Nix readiness helper still removes ownership markers unconditionally"
 fi
+# Nested mask must use user.control (Hjem ~/.config units beat mask --runtime).
+grep -q 'polaris_mask_idle_unit_runtime' \
+  "$repo_root/nix/modules/polaris-gamescope-session.sh" ||
+  fail "nested session does not mask idle via polaris_mask_idle_unit_runtime"
+grep -q 'user.control' \
+  "$repo_root/nix/modules/polaris-gamescope-runtime-lib.sh" ||
+  fail "runtime lib mask helpers do not target user.control"
+if grep -E 'systemctl --user mask --runtime polaris-gamescope-idle' \
+    "$repo_root/nix/modules/polaris-gamescope-session.sh"; then
+  fail "session still uses ineffective mask --runtime for idle"
+fi
 
 printf 'PASS: gamescope shell ownership and display routing\n'

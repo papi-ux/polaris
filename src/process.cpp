@@ -1112,7 +1112,13 @@ namespace proc {
         "systemctl --user start polaris-portal-dbus.service "
         "polaris-portal-gamescope.service polaris-portal.service 2>/dev/null"
       );
+      // Hjem units live under ~/.config/systemd/user (higher priority than
+      // mask --runtime). Clear user.control mask so start can succeed.
       (void) std::system(
+        "rt=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; "
+        "rm -f \"$rt/systemd/user.control/polaris-gamescope-idle.service\" "
+        "\"$rt/systemd/user/polaris-gamescope-idle.service\"; "
+        "systemctl --user daemon-reload 2>/dev/null; "
         "systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null; "
         "systemctl --user reset-failed polaris-gamescope-idle.service 2>/dev/null; "
         "systemctl --user restart polaris-gamescope-idle.service 2>/dev/null || "

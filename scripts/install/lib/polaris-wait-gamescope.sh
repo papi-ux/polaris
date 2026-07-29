@@ -41,7 +41,7 @@ if [ -f "$rt/polaris-gamescope-wsi-nested" ] || [ ! -S "$rt/gamescope-0" ]; then
   fi
   rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
     "$rt/polaris-gamescope-audio-sink" || true
-  systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+  polaris_unmask_idle_unit_runtime
   if [ ! -S "$rt/gamescope-0" ] && [ "$marker_role" != runtime ]; then
     systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
       || systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true

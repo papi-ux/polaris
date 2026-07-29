@@ -162,7 +162,7 @@ let
       fi
       rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
         "$rt/polaris-gamescope-audio-sink" || true
-      ${pkgs.systemd}/bin/systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+      polaris_unmask_idle_unit_runtime
       if [ ! -S "$rt/gamescope-0" ]; then
         ${pkgs.systemd}/bin/systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
           || ${pkgs.systemd}/bin/systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
@@ -250,7 +250,8 @@ let
         ExecStart=${lib.getExe idleApp}
         # on-failure: gamescope ABRT ends the wrapper with exit 134; on-abnormal
         # ignores that and leaves idle permanently failed (orphan sockets stick).
-        # Nested WSI uses runtime mask so stop/mask still will not respawn idle.
+        # Nested WSI masks via user.control (not plain mask --runtime) so
+        # portal-gamescope Wants= cannot respawn idle under ~/.config units.
         Restart=on-failure
         RestartSec=5s
         TimeoutStopSec=10s
