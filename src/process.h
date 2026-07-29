@@ -232,7 +232,8 @@ namespace proc {
   );
   bool terminate_gamescope_attached_clients_for_tests(
     const std::string &steam_appid,
-    pid_t forced_reused_pid = -1
+    pid_t forced_reused_pid = -1,
+    pid_t forced_unreadable_pid = -1
   );
   bool terminate_pid_with_pidfd_for_tests(
     pid_t pid,

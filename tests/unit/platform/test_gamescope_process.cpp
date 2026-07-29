@@ -244,9 +244,9 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   };
   // Pathname is ambiguous → cannot claim exclusive ownership of gamescope-0.
   EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
-  // X11 discovery still finds related Xwayland across multi-row residue (the
-  // process holds a concrete inode; display routing must not go blind).
-  EXPECT_EQ(gp::discover_owned_x11_display(marker, paths_for(tree)), std::optional<std::string> {":4"});
+  // Duplicate X11 pathname rows are ambiguous after unlink/rebind; routing must
+  // fail closed even when one stale inode is held by a related Xwayland.
+  EXPECT_EQ(gp::discover_owned_x11_display(marker, paths_for(tree)), std::nullopt);
   // Ambiguous pathnames are not safe to reclaim.
   EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
   EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));

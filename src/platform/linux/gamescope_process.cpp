@@ -388,38 +388,6 @@ namespace stream_runtime::gamescope_process {
       return *found->second;
     }
 
-    // All inode numbers listed for pathname (including ambiguous multi-row sets).
-    std::vector<std::uint64_t> all_inodes_for_path(
-      const fs::path &proc_net_unix,
-      const fs::path &path
-    ) {
-      std::vector<std::uint64_t> out;
-      std::ifstream input(proc_net_unix);
-      std::string line;
-      std::getline(input, line);  // header
-      while (std::getline(input, line)) {
-        std::istringstream row(line);
-        std::string num;
-        std::string ref_count;
-        std::string protocol;
-        std::string flags;
-        std::string type;
-        std::string state;
-        std::string inode_text;
-        if (!(row >> num >> ref_count >> protocol >> flags >> type >> state >> inode_text)) {
-          continue;
-        }
-        std::string sock_path;
-        std::getline(row >> std::ws, sock_path);
-        if (sock_path != path.string()) {
-          continue;
-        }
-        if (const auto inode = parse_integer<std::uint64_t>(inode_text)) {
-          out.push_back(*inode);
-        }
-      }
-      return out;
-    }
   }  // namespace
 
   std::optional<marker_t> read_marker(const fs::path &path) {
@@ -626,6 +594,10 @@ namespace stream_runtime::gamescope_process {
       return std::nullopt;
     }
     const auto processes = read_processes(paths.proc_root);
+    const auto x11_inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    if (!x11_inodes) {
+      return std::nullopt;
+    }
     struct candidate_t {
       int display;
       int pid;
@@ -648,24 +620,27 @@ namespace stream_runtime::gamescope_process {
       if (!display || *display < 0 || !entry.exists(ec)) {
         continue;
       }
-      // Include every inode row for this path so unlink/rebind residue does not
-      // hide a live Xwayland still related to the marker generation.
-      for (const auto inode : all_inodes_for_path(paths.proc_net_unix, entry.path())) {
-        for (const auto &[pid, process] : processes) {
-          if (pid == marker.pid || !executable_named(process, "Xwayland") ||
-              !related_to_root(pid, marker.pid, processes) ||
-              !process_holds_inode(paths, pid, inode)) {
-            continue;
-          }
-          if (!best || *display < best->display) {
-            best = candidate_t {
-              .display = *display,
-              .pid = pid,
-              .start_time = process.start_time,
-              .executable = process.executable,
-              .inode = inode,
-            };
-          }
+      // Routing by pathname is authoritative only when the kernel exposes one
+      // unambiguous inode for that X socket. Duplicate rows can represent an
+      // unlinked predecessor plus a successor rebind.
+      const auto inode = inode_for_path(*x11_inodes, entry.path());
+      if (!inode) {
+        continue;
+      }
+      for (const auto &[pid, process] : processes) {
+        if (pid == marker.pid || !executable_named(process, "Xwayland") ||
+            !related_to_root(pid, marker.pid, processes) ||
+            !process_holds_inode(paths, pid, *inode)) {
+          continue;
+        }
+        if (!best || *display < best->display) {
+          best = candidate_t {
+            .display = *display,
+            .pid = pid,
+            .start_time = process.start_time,
+            .executable = process.executable,
+            .inode = *inode,
+          };
         }
       }
     }
@@ -678,6 +653,12 @@ namespace stream_runtime::gamescope_process {
       return std::nullopt;
     }
     const auto final_processes = read_processes(paths.proc_root);
+    const auto root = final_processes.find(marker.pid);
+    if (root == final_processes.end() ||
+        root->second.start_time != marker.start_time ||
+        root->second.executable != marker.executable) {
+      return std::nullopt;
+    }
     const auto found = final_processes.find(best->pid);
     if (found == final_processes.end() ||
         found->second.start_time != best->start_time ||

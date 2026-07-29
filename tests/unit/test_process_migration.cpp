@@ -1198,10 +1198,49 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedClientPidReuseFailsClosedBefore
   EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242", child));
   EXPECT_EQ(kill(child, 0), 0) << "PID-reuse simulation signalled the captured process";
 
+  EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242", -1, child));
+  EXPECT_EQ(kill(child, 0), 0) << "unreadable live candidate allowed partial pidfd signaling";
+
   EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
   int status = 0;
   ASSERT_EQ(child_guard.wait(&status, 0), child);
   EXPECT_TRUE(WIFSIGNALED(status));
+}
+
+TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupRejectsUnownedSameAppProcess) {
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    const char ready = 'x';
+    (void) write(ready_pipe[1], &ready, 1);
+    close(ready_pipe[1]);
+    execl("/bin/bash", "bash", "-c", "exec -a AppId=4242 /usr/bin/tail -f /dev/null", static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+
+  bool observed = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    std::ifstream cmdline("/proc/" + std::to_string(child) + "/cmdline", std::ios::binary);
+    const std::string bytes {
+      std::istreambuf_iterator<char> {cmdline}, std::istreambuf_iterator<char> {}
+    };
+    if (bytes.find("AppId=4242") != std::string::npos) {
+      observed = true;
+      break;
+    }
+    usleep(10000);
+  }
+  ASSERT_TRUE(observed);
+  EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
+  EXPECT_EQ(kill(child, 0), 0) << "same-app process without gamescope attachment was signalled";
 }
 
 TEST(ProcessRuntimeConfigTests, SteamShutdownOwnershipRejectsUnmarkedActiveClients) {

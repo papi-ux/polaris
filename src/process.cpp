@@ -1524,6 +1524,7 @@ namespace proc {
     thread_local pid_t forced_proc_directory_error_after_capture_pid = -1;
     thread_local pid_t forced_reused_exact_generation_pid = -1;
     thread_local pid_t forced_reused_gamescope_attached_pid = -1;
+    thread_local pid_t forced_unreadable_gamescope_attached_pid = -1;
     thread_local pid_t forced_steam_ownership_capture_failure_pid = -1;
 #endif
 
@@ -2049,12 +2050,7 @@ namespace proc {
         }
         const bool gamescope_attached = proc_environ_is_gamescope_stream_attached(environ);
         const bool game_client = is_steam_or_game_client_process(comm, cmdline, environ, steam_appid);
-        const bool steam_launch_for_app =
-          !steam_appid.empty() &&
-          (cmdline.find("AppId=" + steam_appid) != std::string::npos ||
-           cmdline.find("steam://rungameid/" + steam_appid) != std::string::npos ||
-           cmdline.find("rungameid/" + steam_appid) != std::string::npos);
-        return (gamescope_attached && game_client) || steam_launch_for_app;
+        return gamescope_attached && game_client;
       };
 
       for (;;) {
@@ -2070,13 +2066,54 @@ namespace proc {
         if (pid <= 1 || pid == this_pid) {
           continue;
         }
+        struct stat proc_dir_stat {};
+        const auto proc_dir_path = "/proc/" + std::to_string(pid);
+        if (lstat(proc_dir_path.c_str(), &proc_dir_stat) != 0) {
+          if (errno != ENOENT && errno != ESRCH) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+        if (proc_dir_stat.st_uid != geteuid()) {
+          continue;
+        }
 
         const auto identity_before = proc_start_time_ticks(pid);
-        const auto comm_before = read_proc_status_file_result(pid, "comm");
-        const auto cmdline_before = read_proc_status_file_result(pid, "cmdline");
-        const auto environ_before = read_proc_status_file_result(pid, "environ");
-        if (!identity_before || !comm_before.ok() || !cmdline_before.ok() || !environ_before.ok() ||
-            !is_candidate(comm_before.bytes, cmdline_before.bytes, environ_before.bytes)) {
+        auto comm_before = read_proc_status_file_result(pid, "comm");
+        auto cmdline_before = read_proc_status_file_result(pid, "cmdline");
+        auto environ_before = read_proc_status_file_result(pid, "environ");
+#ifdef POLARIS_TESTS
+        const bool forced_unreadable = pid == forced_unreadable_gamescope_attached_pid;
+        if (forced_unreadable) {
+          environ_before = {{}, EACCES};
+        }
+#else
+        constexpr bool forced_unreadable = false;
+#endif
+        if (!identity_before || !comm_before.ok() || !cmdline_before.ok()) {
+          errno = 0;
+          if (kill(pid, 0) != 0 && errno == ESRCH) {
+            continue;
+          }
+          if (forced_unreadable ||
+              (comm_before.ok() && cmdline_before.ok() &&
+               is_steam_or_game_client_process(comm_before.bytes, cmdline_before.bytes, "", steam_appid))) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+        if (!environ_before.ok()) {
+          errno = 0;
+          if (kill(pid, 0) != 0 && errno == ESRCH) {
+            continue;
+          }
+          if (forced_unreadable ||
+              is_steam_or_game_client_process(comm_before.bytes, cmdline_before.bytes, "", steam_appid)) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+        if (!is_candidate(comm_before.bytes, cmdline_before.bytes, environ_before.bytes)) {
           continue;
         }
 
@@ -4139,13 +4176,17 @@ namespace proc {
 
   bool terminate_gamescope_attached_clients_for_tests(
     const std::string &steam_appid,
-    pid_t forced_reused_pid
+    pid_t forced_reused_pid,
+    pid_t forced_unreadable_pid
   ) {
-    const auto previous = forced_reused_gamescope_attached_pid;
-    auto restore = util::fail_guard([previous]() {
-      forced_reused_gamescope_attached_pid = previous;
+    const auto previous_reused = forced_reused_gamescope_attached_pid;
+    const auto previous_unreadable = forced_unreadable_gamescope_attached_pid;
+    auto restore = util::fail_guard([previous_reused, previous_unreadable]() {
+      forced_reused_gamescope_attached_pid = previous_reused;
+      forced_unreadable_gamescope_attached_pid = previous_unreadable;
     });
     forced_reused_gamescope_attached_pid = forced_reused_pid;
+    forced_unreadable_gamescope_attached_pid = forced_unreadable_pid;
     return terminate_gamescope_attached_session_clients(steam_appid);
   }
 
