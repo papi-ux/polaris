@@ -317,6 +317,10 @@ if (BUILD_FULL_TESTS)
         ${TEST_CONFIG_SOURCES}
     )
 
+    configure_polaris_full_test_target(test_polaris_steam_shutdown
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_steam_shutdown_state_machine.cpp
+    )
+
     configure_polaris_full_test_target(test_polaris_pairing
         ${TEST_PAIRING_SOURCES}
     )
@@ -349,6 +353,7 @@ if (BUILD_FULL_TESTS)
             test_polaris_platform
             test_polaris_input
             test_polaris_config
+            test_polaris_steam_shutdown
             test_polaris_pairing
             test_polaris_http
             test_polaris_network

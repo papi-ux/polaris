@@ -5135,7 +5135,7 @@ namespace nvhttp {
         }
 
 #ifdef __linux__
-        const auto launch_policy = resolve_streaming_launch_safety_policy(
+        auto launch_policy = resolve_streaming_launch_safety_policy(
           args,
           *app_iter,
           current_appid > 0 && current_appid != proc::input_only_app_id
@@ -5150,15 +5150,11 @@ namespace nvhttp {
             tree.put("root.gamesession", 0);
             return;
           }
-          const auto refreshed_launch_policy = proc::resolve_desktop_launch_safety_policy(
-            true,
-            false,
-            false,
+          launch_policy = proc::resolve_desktop_launch_safety_policy_after_shutdown(
             *app_iter,
-            false,
             proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
           );
-          put_desktop_launch_policy(tree, refreshed_launch_policy);
+          put_desktop_launch_policy(tree, launch_policy);
         }
         if (launch_policy.recommendedAction == "refuse_private_stream") {
           tree.put("root.resume", 0);
@@ -6541,7 +6537,7 @@ namespace nvhttp {
 
 #ifdef __linux__
         const auto &app = apps.at(static_cast<size_t>(app_id - 1));
-        const auto launch_policy = resolve_streaming_launch_safety_policy(
+        auto launch_policy = resolve_streaming_launch_safety_policy(
           body,
           app,
           proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
@@ -6558,14 +6554,11 @@ namespace nvhttp {
             response->write(SimpleWeb::StatusCode::client_error_conflict, err.dump(), headers);
             return;
           }
-          launch_policy_json = proc::desktop_launch_safety_policy_to_json(proc::resolve_desktop_launch_safety_policy(
-            true,
-            false,
-            false,
+          launch_policy = proc::resolve_desktop_launch_safety_policy_after_shutdown(
             app,
-            false,
             proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
-          ));
+          );
+          launch_policy_json = proc::desktop_launch_safety_policy_to_json(launch_policy);
         }
         if (launch_policy.recommendedAction == "refuse_private_stream") {
           nlohmann::json err;

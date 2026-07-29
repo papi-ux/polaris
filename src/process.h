@@ -14,6 +14,7 @@
 
 // standard includes
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -21,9 +22,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <unordered_map>
+#include <vector>
 
 // lib includes
 #include <boost/process/v1/child.hpp>
@@ -98,6 +101,10 @@ namespace proc {
     bool desktop_steam_active,
     bool active_desktop_game
   );
+  desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_after_shutdown(
+    const struct ctx_t &app,
+    bool active_desktop_game
+  );
 
   nlohmann::json desktop_launch_safety_policy_to_json(const desktop_launch_safety_policy_t &policy);
   bool desktop_steam_client_active();
@@ -162,6 +169,24 @@ namespace proc {
     bool force_private_after_desktop_steam_shutdown = false
   );
 
+  struct steam_shutdown_quiescence_test_result_t {
+    bool quiescent = false;
+    std::size_t process_checks = 0;
+    std::size_t fifo_checks = 0;
+    std::chrono::milliseconds elapsed {0};
+  };
+
+  steam_shutdown_quiescence_test_result_t run_steam_shutdown_quiescence_scenario_for_tests(
+    const std::vector<bool> &process_active_observations,
+    const std::vector<bool> &fifo_listener_observations,
+    std::chrono::milliseconds timeout,
+    std::chrono::milliseconds poll_interval
+  );
+  std::optional<std::string> steam_instance_pipe_path_for_tests(
+    const std::optional<std::string> &home_env,
+    const std::optional<std::string> &account_home
+  );
+
   bool desktop_steam_client_process_for_tests(std::string_view comm,
                                                std::string_view argv0_path,
                                                std::string_view cmdline,
@@ -169,6 +194,7 @@ namespace proc {
   bool desktop_steam_proc_open_error_fails_closed_for_tests();
   bool desktop_steam_proc_enumeration_error_fails_closed_for_tests();
   bool desktop_steam_proc_read_error_fails_closed_for_tests(pid_t forced_pid);
+  bool steam_instance_pipe_listener_active_for_tests(const std::string &pipe_path);
 
   bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
                                                    bool use_cage_compositor,
