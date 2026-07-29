@@ -158,6 +158,9 @@ TEST(SteamShutdownStateMachineTests, FifoProbeTracksReaderLifetime) {
   close_reader.disable();
   close(reader);
   EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(pipe_path.string()));
+  EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(
+    (test_dir / "missing-steam.pipe").string()
+  ));
 }
 
 TEST(SteamShutdownStateMachineTests, ProductionShutdownUsesSingleMonotonicQuiescenceLoop) {
