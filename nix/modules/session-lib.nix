@@ -11,6 +11,16 @@ let
   polarisPkg = cfg.package;
   target = cfg.desktopUserTarget;
   ready = if cfg.desktopUserReadyTarget != null then cfg.desktopUserReadyTarget else target;
+  privatePortalAddress = "unix:path=%t/polaris-portal/bus";
+  portalEnvironment = {
+    DBUS_SESSION_BUS_ADDRESS = privatePortalAddress;
+    WAYLAND_DISPLAY = "gamescope-0";
+    XDG_CURRENT_DESKTOP = "gamescope";
+    XDG_DESKTOP_PORTAL_DIR = "${portal}/share/xdg-desktop-portal/portals";
+  };
+  portalBusExec = "${pkgs.dbus}/bin/dbus-daemon --session --nofork --nopidfile --address=${privatePortalAddress}";
+  portalBackendExec = "${portal}/libexec/xdg-desktop-portal-gamescope";
+  portalFrontendExec = "${pkgs.xdg-desktop-portal}/libexec/xdg-desktop-portal -r";
 
   # Unit Environment= lines from options (preferVk + free-form attrs).
   baseEnvironment = {
@@ -29,7 +39,6 @@ let
     GAMESCOPE_WAYLAND_DISPLAY = "gamescope-0";
     XDG_CURRENT_DESKTOP = "gamescope";
     DISPLAY = ":0";
-    POLARIS_PORTAL_DBUS_ADDRESS = "unix:path=%t/polaris-portal/bus";
   };
 
   envToUnitLines =
@@ -168,6 +177,22 @@ let
       cp ${polarisConfSeed} "$confdir/polaris.conf"
       chmod 600 "$confdir/polaris.conf"
     fi
+
+    # Prefer the managed private portal only after both portal names own the
+    # private bus. If it is absent or failed, leave the variable unset so
+    # Polaris can use the host session portal instead.
+    rt="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    bus_path="$rt/polaris-portal/bus"
+    private_address="unix:path=$bus_path"
+    if [ -z "''${POLARIS_PORTAL_DBUS_ADDRESS:-}" ] \
+      && [ -S "$bus_path" ] \
+      && ${pkgs.systemd}/bin/busctl --address="$private_address" --no-pager \
+        status org.freedesktop.portal.Desktop >/dev/null 2>&1 \
+      && ${pkgs.systemd}/bin/busctl --address="$private_address" --no-pager \
+        status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
+      export POLARIS_PORTAL_DBUS_ADDRESS="$private_address"
+    fi
+
     exec ${lib.getExe polarisPkg}
   '';
 
@@ -180,21 +205,14 @@ let
       echo "polaris: recover idle gamescope-0 (nested leftover or missing socket)" >&2
       rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
         "$rt/polaris-gamescope-audio-sink" "$rt/polaris-gamescope.pid" || true
-      systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+      ${pkgs.systemd}/bin/systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
       if [ ! -S "$rt/gamescope-0" ]; then
-        systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
-          || systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
+        ${pkgs.systemd}/bin/systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
+          || ${pkgs.systemd}/bin/systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
       fi
     fi
 
     bus_path="$rt/polaris-portal/bus"
-    # Labwc / non-portal: private bus absent → skip.
-    if [ ! -e "$bus_path" ] && [ ! -S "$rt/gamescope-0" ]; then
-      if [ ! -S "$rt/gamescope-0" ]; then
-        echo "polaris: recover idle gamescope-0 (missing socket)" >&2
-        systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
-      fi
-    fi
 
     deadline=$((SECONDS + 60))
     while [ ! -S "$rt/gamescope-0" ]; do
@@ -205,18 +223,19 @@ let
       sleep 0.2
     done
 
-    if [ ! -e "$bus_path" ]; then
+    if [ ! -S "$bus_path" ]; then
       echo "polaris: gamescope-0 ready (no private portal bus)" >&2
       exit 0
     fi
 
-    export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"
+    private_address="unix:path=$bus_path"
     deadline=$((SECONDS + 45))
     while true; do
-      modes="$(busctl --user get-property org.freedesktop.impl.portal.desktop.gamescope \
+      modes="$(${pkgs.systemd}/bin/busctl --address="$private_address" get-property \
+        org.freedesktop.impl.portal.desktop.gamescope \
         /org/freedesktop/portal/desktop \
         org.freedesktop.impl.portal.ScreenCast AvailableCursorModes 2>/dev/null \
-        | awk '{print $2}' || true)"
+        | ${pkgs.gawk}/bin/awk '{print $2}' || true)"
       if [ -n "''${modes:-}" ] && [ "''${modes}" != "0" ]; then
         echo "polaris: private ScreenCast ready (gamescope-0 + portal, cursor_modes=$modes)" >&2
         exit 0
@@ -274,6 +293,51 @@ let
         TimeoutStopSec=10s
         ${envToUnitLines baseEnvironment}
         PassEnvironment=XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+        UnsetEnvironment=WAYLAND_DISPLAY
+      '';
+    };
+    "polaris-portal-dbus.service" = mkUnit {
+      description = "Private D-Bus session bus for Polaris ScreenCast portal";
+      after = [ target ];
+      serviceConfig = ''
+        Type=simple
+        RuntimeDirectory=polaris-portal
+        RuntimeDirectoryMode=0700
+        ExecStart=${portalBusExec}
+        Restart=on-failure
+        RestartSec=1s
+      '';
+    };
+    "polaris-portal-gamescope.service" = mkUnit {
+      description = "Gamescope ScreenCast backend for Polaris private portal";
+      after = [
+        "polaris-gamescope-idle.service"
+        "polaris-portal-dbus.service"
+      ];
+      wants = [ "polaris-gamescope-idle.service" ];
+      requires = [ "polaris-portal-dbus.service" ];
+      serviceConfig = ''
+        Type=simple
+        ExecStart=${portalBackendExec}
+        Restart=on-failure
+        RestartSec=1s
+        ${envToUnitLines portalEnvironment}
+      '';
+    };
+    "polaris-portal.service" = mkUnit {
+      description = "Private XDG desktop portal for Polaris";
+      after = [
+        "polaris-portal-dbus.service"
+        "polaris-portal-gamescope.service"
+      ];
+      wants = [ "polaris-portal-gamescope.service" ];
+      requires = [ "polaris-portal-dbus.service" ];
+      serviceConfig = ''
+        Type=simple
+        ExecStart=${portalFrontendExec}
+        Restart=on-failure
+        RestartSec=1s
+        ${envToUnitLines portalEnvironment}
       '';
     };
     "polaris.service" = mkUnit {
@@ -311,6 +375,7 @@ let
         }:%h/.local/bin:/run/current-system/sw/bin
         # Do not PassEnvironment WAYLAND_DISPLAY — host KWin would override gamescope path.
         PassEnvironment=DISPLAY XDG_SESSION_TYPE XDG_SESSION_ID XAUTHORITY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+        UnsetEnvironment=WAYLAND_DISPLAY
       '';
     };
   };
@@ -350,6 +415,11 @@ in
     polarisPkg
     target
     ready
+    privatePortalAddress
+    portalEnvironment
+    portalBusExec
+    portalBackendExec
+    portalFrontendExec
     userUnitTexts
     unitPaths
     userUnitFiles
@@ -359,6 +429,8 @@ in
     polarisPkg
     gamescope
     portal
+    pkgs.dbus
+    pkgs.xdg-desktop-portal
     idleApp
     sessionBin
     pkgs.steam

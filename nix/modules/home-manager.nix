@@ -36,6 +36,73 @@ in
         Restart = "on-failure";
         RestartSec = "2s";
         Environment = session.envToList session.baseEnvironment;
+        UnsetEnvironment = [ "WAYLAND_DISPLAY" ];
+      };
+      Install.WantedBy = [ cfg.desktopUserTarget ];
+    };
+
+    systemd.user.services.polaris-portal-dbus = {
+      Unit = {
+        Description = "Private D-Bus session bus for Polaris ScreenCast portal";
+        After = [
+          cfg.desktopUserTarget
+          ready
+        ];
+        PartOf = [ cfg.desktopUserTarget ];
+      };
+      Service = {
+        Type = "simple";
+        RuntimeDirectory = "polaris-portal";
+        RuntimeDirectoryMode = "0700";
+        ExecStart = session.portalBusExec;
+        Restart = "on-failure";
+        RestartSec = "1s";
+      };
+      Install.WantedBy = [ cfg.desktopUserTarget ];
+    };
+
+    systemd.user.services.polaris-portal-gamescope = {
+      Unit = {
+        Description = "Gamescope ScreenCast backend for Polaris private portal";
+        After = [
+          cfg.desktopUserTarget
+          ready
+          "polaris-gamescope-idle.service"
+          "polaris-portal-dbus.service"
+        ];
+        Wants = [ "polaris-gamescope-idle.service" ];
+        Requires = [ "polaris-portal-dbus.service" ];
+        PartOf = [ cfg.desktopUserTarget ];
+      };
+      Service = {
+        Type = "simple";
+        ExecStart = session.portalBackendExec;
+        Restart = "on-failure";
+        RestartSec = "1s";
+        Environment = session.envToList session.portalEnvironment;
+      };
+      Install.WantedBy = [ cfg.desktopUserTarget ];
+    };
+
+    systemd.user.services.polaris-portal = {
+      Unit = {
+        Description = "Private XDG desktop portal for Polaris";
+        After = [
+          cfg.desktopUserTarget
+          ready
+          "polaris-portal-dbus.service"
+          "polaris-portal-gamescope.service"
+        ];
+        Wants = [ "polaris-portal-gamescope.service" ];
+        Requires = [ "polaris-portal-dbus.service" ];
+        PartOf = [ cfg.desktopUserTarget ];
+      };
+      Service = {
+        Type = "simple";
+        ExecStart = session.portalFrontendExec;
+        Restart = "on-failure";
+        RestartSec = "1s";
+        Environment = session.envToList session.portalEnvironment;
       };
       Install.WantedBy = [ cfg.desktopUserTarget ];
     };
@@ -60,6 +127,7 @@ in
         LimitRTPRIO = 95;
         LimitNICE = -10;
         Environment = session.envToList session.polarisServiceEnvironment;
+        UnsetEnvironment = [ "WAYLAND_DISPLAY" ];
       };
       Install.WantedBy = [ cfg.desktopUserTarget ];
     };

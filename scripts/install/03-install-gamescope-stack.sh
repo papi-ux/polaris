@@ -47,9 +47,12 @@ fi
 command -v gamescope >/dev/null 2>&1 || warn "gamescope not on PATH — install it before starting services"
 command -v steam >/dev/null 2>&1 || warn "steam not on PATH — library launches need Steam"
 
-mkdir -p "$LIBEXEC_DIR" "$BIN_DIR" "$SYSTEMD_USER_DIR" "$CONFIG_DIR"
-# LIBEXEC may need root if PREFIX is system-wide
-if ! is_user_prefix; then
+mkdir -p "$SYSTEMD_USER_DIR" "$CONFIG_DIR"
+# Prefix directories may need root when installing system-wide. Never attempt a
+# plain mkdir under /usr/local before privilege selection.
+if is_user_prefix; then
+  mkdir -p "$LIBEXEC_DIR" "$BIN_DIR"
+else
   maybe_sudo mkdir -p "$LIBEXEC_DIR" "$BIN_DIR"
 fi
 

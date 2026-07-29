@@ -47,6 +47,8 @@ case "$DISTRO" in
       avahi-devel numactl-devel \
       systemd-devel pkgconf-pkg-config
     if [ "$WITH_CUDA" = 1 ]; then
+      # CUDA capture uses find_package(Vulkan REQUIRED) for external-memory import.
+      maybe_sudo dnf install -y vulkan-loader-devel
       maybe_sudo dnf install -y cuda-nvcc cuda-cudart-devel 2>/dev/null \
         || warn "CUDA packages not found via dnf; install NVIDIA CUDA toolkit manually"
     fi
@@ -63,6 +65,7 @@ case "$DISTRO" in
       gamescope steam bubblewrap util-linux wireplumber \
       avahi numactl systemd pkgconf
     if [ "$WITH_CUDA" = 1 ]; then
+      maybe_sudo pacman -S --needed --noconfirm vulkan-headers vulkan-icd-loader
       maybe_sudo pacman -S --needed --noconfirm cuda 2>/dev/null \
         || warn "install 'cuda' from official/extra or use the NVIDIA runfile"
     fi
@@ -85,6 +88,7 @@ case "$DISTRO" in
       libavahi-client-dev libnuma-dev \
       pkg-config
     if [ "$WITH_CUDA" = 1 ]; then
+      maybe_sudo apt-get install -y libvulkan-dev
       warn "On Ubuntu/Debian install CUDA from NVIDIA; apt package names vary by release"
     fi
     ;;
@@ -103,6 +107,7 @@ case "$DISTRO" in
       gamescope bubblewrap util-linux wireplumber \
       pkgconf-pkg-config
     if [ "$WITH_CUDA" = 1 ]; then
+      maybe_sudo zypper install -y vulkan-devel
       warn "Install CUDA toolkit from NVIDIA for openSUSE"
     fi
     ;;

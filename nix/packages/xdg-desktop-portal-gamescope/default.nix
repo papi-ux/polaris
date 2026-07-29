@@ -12,6 +12,7 @@
   rustPlatform,
   systemd,
   dbus,
+  pipewire,
   makeWrapper,
 }:
 
@@ -56,7 +57,8 @@ stdenv.mkDerivation (finalAttrs: {
   # Bind the portal process to the idle gamescope Wayland socket name.
   postInstall = ''
     wrapProgram $out/libexec/xdg-desktop-portal-gamescope \
-      --set-default WAYLAND_DISPLAY gamescope-0
+      --set-default WAYLAND_DISPLAY gamescope-0 \
+      --prefix PATH : ${lib.makeBinPath [ pipewire ]}
 
     mkdir -p $out/share/xdg-desktop-portal/portals
     cat > $out/share/xdg-desktop-portal/portals/gamescope.portal <<EOF

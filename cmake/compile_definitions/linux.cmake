@@ -200,13 +200,7 @@ if(GIO_FOUND AND GIO_UNIX_FOUND AND PIPEWIRE_FOUND)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.cpp"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire_capture.cpp"
-            # Cage/labwc wlr-screencopy SHM path (extracted from portal_grab; needs Wayland protocols)
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.cpp"
-            # KWin direct screencast (host desktop/dongle); needs Wayland + PipeWire
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire_capture.cpp")
     message(STATUS "XDG Desktop Portal capture support enabled")
 elseif(GIO_FOUND AND GIO_UNIX_FOUND)
     message(STATUS "XDG Desktop Portal capture not available (libpipewire-0.3 not found)")
@@ -280,6 +274,17 @@ if(WAYLAND_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wlgrab.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wayland.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wayland.cpp")
+
+    # Portal remains available without native Wayland. These helpers, however,
+    # include generated Wayland protocol headers and must only compile when both
+    # the portal/PipeWire stack and Wayland are available.
+    if(GIO_FOUND AND GIO_UNIX_FOUND AND PIPEWIRE_FOUND)
+        list(APPEND PLATFORM_TARGET_FILES
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.h"
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.cpp"
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.h"
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.cpp")
+    endif()
 endif()
 
 # x11
@@ -302,8 +307,8 @@ if(NOT CUDA_FOUND
         AND NOT X11_FOUND
         AND NOT (LIBDRM_FOUND AND LIBCAP_FOUND)
         AND NOT LIBVA_FOUND
-        AND NOT (GIO_FOUND AND PIPEWIRE_FOUND))
-    message(FATAL_ERROR "Couldn't find either cuda, wayland, x11, (libdrm and libcap), libva, or gio-2.0 (portal)")
+        AND NOT (GIO_FOUND AND GIO_UNIX_FOUND AND PIPEWIRE_FOUND))
+    message(FATAL_ERROR "Couldn't find either cuda, wayland, x11, (libdrm and libcap), libva, or Portal/PipeWire capture support")
 endif()
 
 # tray icon

@@ -33,8 +33,10 @@
 #include "src/stream_stats.h"
 
 #include "src/platform/linux/stream_runtime.h"
-#include "src/platform/linux/cage_screencopy.h"
-#include "src/platform/linux/kwingrab.h"
+#ifdef POLARIS_BUILD_WAYLAND
+  #include "src/platform/linux/cage_screencopy.h"
+  #include "src/platform/linux/kwingrab.h"
+#endif
 #include "src/platform/linux/pipewire_capture.h"
 #include "src/platform/linux/portal_session.h"
 
@@ -71,8 +73,9 @@ namespace portal {
 
   struct media_cache_t {
     std::unique_ptr<portal_session_t> portal;
-    /// KWin zkde screencast session (keeps Wayland stream alive for local PW node).
-    std::unique_ptr<kwingrab::session_t> kwin;
+    // Opaque lifetime guard for a Wayland-only kwingrab session. Keeping the
+    // cache type independent lets portal/PipeWire builds omit Wayland helpers.
+    std::shared_ptr<void> kwin;
     std::shared_ptr<pipewire_capture::capture_t> capture;
     int requested_width = 0;
     int requested_height = 0;
@@ -152,7 +155,7 @@ namespace portal {
   void release_global_capture() {
     std::shared_ptr<pipewire_capture::capture_t> capture;
     std::unique_ptr<portal_session_t> portal;
-    std::unique_ptr<kwingrab::session_t> kwin;
+    std::shared_ptr<void> kwin;
     {
       std::lock_guard lock(g_media_mu);
       if (g_media.empty()) {
@@ -300,6 +303,7 @@ namespace portal {
         }
       }
 
+#ifdef POLARIS_BUILD_WAYLAND
       // W4/P1 kwingrab: host KDE desktop_display / headless_dongle — try KWin
       // zkde screencast before portal picker. Fail cleanly when not on KWin.
       // capture=portal/auto/empty only; explicit wlr/kms unchanged.
@@ -326,7 +330,7 @@ namespace portal {
             BOOST_LOG(info) << "portal: kwingrab local PW node="sv << src.node_id
                             << " output="sv << src.output_name
                             << " (no xdg-desktop-portal picker)"sv;
-            g_media.kwin = std::move(kwin_session);
+            g_media.kwin = std::shared_ptr<kwingrab::session_t>(std::move(kwin_session));
             g_media.portal.reset();
             g_media.capture = std::move(local);
             g_media.requested_width = width;
@@ -344,6 +348,7 @@ namespace portal {
           BOOST_LOG(info) << "portal: kwingrab unavailable; falling back to portal ScreenCast"sv;
         }
       }
+#endif
 
       // gamescopegrab / kwingrab already filled capture — skip portal session.
       if (capture && capture->running()) {
@@ -487,8 +492,10 @@ namespace portal {
   class portal_display_t: public platf::display_t {
   public:
     ~portal_display_t() override {
+#ifdef POLARIS_BUILD_WAYLAND
       // Wake cage_screencopy::capture if it is the active path (no-op otherwise).
       cage_screencopy::request_stop();
+#endif
     }
 
     int requested_width = 0;
@@ -517,7 +524,10 @@ namespace portal {
         // If cage/labwc compositor is configured (windowed or headless), skip portal entirely.
         // Direct wlr-screencopy will be used in capture() instead.
         // Check config, not runtime state — cage may not be running yet at init time.
-        bool cage_configured = config::video.linux_display.use_cage_compositor;
+        bool cage_configured = false;
+#ifdef POLARIS_BUILD_WAYLAND
+        cage_configured = config::video.linux_display.use_cage_compositor;
+#endif
         if (!cage_configured) {
           if (!ensure_global_session()) {
             return -1;
@@ -632,7 +642,7 @@ namespace portal {
       BOOST_LOG(info) << "portal: capture() called"sv;
 
       // If cage/labwc is configured, use direct wlr-screencopy (no portal, no picker)
-#ifdef __linux__
+#ifdef POLARIS_BUILD_WAYLAND
       if (config::video.linux_display.use_cage_compositor) {
         // Wait for labwc to be running (it may still be starting up)
         for (int wait = 0; wait < 50 && !stream_runtime::labwc::is_running(); ++wait) {
