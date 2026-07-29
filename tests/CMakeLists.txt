@@ -292,6 +292,12 @@ if (UNIX)
         NAME polaris_gamescope_runtime_shell
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_runtime_shell.sh
     )
+    add_test(
+        NAME polaris_gamescope_session_stop_shell
+        COMMAND ${CMAKE_COMMAND} -E env
+                POLARIS_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+                bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_stop_shell.sh
+    )
 endif()
 
 if (BUILD_FULL_TESTS)

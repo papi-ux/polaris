@@ -154,19 +154,46 @@ let
     export POLARIS_FLOCK_BIN=${lib.getExe' pkgs.util-linux "flock"}
     ${builtins.readFile ./polaris-gamescope-runtime-lib.sh}
 
-    # Nested stop can leave runtime-masked idle / no gamescope-0.
-    if [ -f "$rt/polaris-gamescope-wsi-nested" ] || [ ! -S "$rt/gamescope-0" ]; then
-      echo "polaris: recover idle gamescope-0 (nested leftover or missing socket)" >&2
-      if polaris_validate_marker "$rt/polaris-gamescope.pid" nested; then
-        polaris_stop_marked_gamescope "$rt/polaris-gamescope.pid" nested "$rt" || true
-      fi
-      rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
-        "$rt/polaris-gamescope-audio-sink" || true
+    # Nested stop can leave runtime-masked idle / no gamescope-0. Preserve a
+    # durable recovery claim until exact nested teardown and idle handoff finish.
+    nested_claim="$rt/polaris-gamescope-wsi-nested"
+    if [ -f "$nested_claim" ]; then
+      claim_state="$(tr -d '[:space:]' <"$nested_claim")"
+      case "$claim_state" in
+        1|nested)
+          echo "polaris: recover exact nested gamescope generation" >&2
+          if polaris_validate_marker "$rt/polaris-gamescope.pid" nested; then
+            polaris_stop_marked_gamescope "$rt/polaris-gamescope.pid" nested "$rt" || {
+              echo "polaris: nested recovery could not prove terminal state" >&2
+              exit 1
+            }
+          elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+            echo "polaris: live or unknown sockets block nested recovery" >&2
+            exit 1
+          fi
+          claim_tmp="$nested_claim.tmp.$$"
+          printf 'restore-idle\n' >"$claim_tmp"
+          mv -f "$claim_tmp" "$nested_claim"
+          ;;
+        restore-idle) ;;
+        *)
+          echo "polaris: invalid nested recovery state '$claim_state'" >&2
+          exit 1
+          ;;
+      esac
+      rm -f "$rt/polaris-gamescope-appid" "$rt/polaris-gamescope-audio-sink" || true
       polaris_unmask_idle_unit_runtime
       if [ ! -S "$rt/gamescope-0" ]; then
         ${pkgs.systemd}/bin/systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
-          || ${pkgs.systemd}/bin/systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
+          || ${pkgs.systemd}/bin/systemctl --user start polaris-gamescope-idle.service 2>/dev/null \
+          || exit 1
       fi
+    elif [ ! -S "$rt/gamescope-0" ]; then
+      echo "polaris: gamescope-0 missing; starting idle owner" >&2
+      polaris_unmask_idle_unit_runtime
+      ${pkgs.systemd}/bin/systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
+        || ${pkgs.systemd}/bin/systemctl --user start polaris-gamescope-idle.service 2>/dev/null \
+        || exit 1
     fi
 
     bus_path="$rt/polaris-portal/bus"
@@ -198,6 +225,17 @@ let
         org.freedesktop.impl.portal.ScreenCast AvailableCursorModes 2>/dev/null \
         | ${pkgs.gawk}/bin/awk '{print $2}' || true)"
       if [ -n "''${modes:-}" ] && [ "''${modes}" != "0" ]; then
+        if ! polaris_validate_marker "$rt/polaris-gamescope.pid" idle \
+            || ! polaris_marker_owns_socket "$rt/polaris-gamescope.pid" "$rt/gamescope-0" idle \
+            || ! polaris_write_runtime_env "$rt/polaris-gamescope.pid" gamescope-0 idle "$rt"; then
+          echo "polaris: portal is up but exact idle gamescope ownership is not ready" >&2
+          sleep 0.1
+          continue
+        fi
+        if [ -f "''${nested_claim:-}" ] \
+            && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ]; then
+          rm -f "$nested_claim"
+        fi
         echo "polaris: private ScreenCast ready (gamescope-0 + portal, cursor_modes=$modes)" >&2
         exit 0
       fi

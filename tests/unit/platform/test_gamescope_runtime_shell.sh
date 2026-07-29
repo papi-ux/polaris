@@ -26,17 +26,27 @@ chmod +x "$work/bin/flock"
 export POLARIS_FLOCK_BIN="$work/bin/flock"
 printf 'lock-sentinel\n' >"$work/run/polaris-gamescope.lock"
 
-write_process() {
-  local pid="$1" ppid="$2" start_time="$3" exe="$4"
-  shift 4
+write_process_with_group() {
+  local pid="$1" ppid="$2" pgrp="$3" sid="$4" start_time="$5" exe="$6"
+  shift 6
   local dir="$POLARIS_PROC_ROOT/$pid"
   rm -rf "$dir"
   mkdir -p "$dir/fd"
   ln -s "$exe" "$dir/exe"
-  # state(field 3), ppid(field 4), fields 5..21, starttime(field 22)
-  printf '%s (%s) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' \
-    "$pid" "${exe##*/}" "$ppid" "$start_time" >"$dir/stat"
+  # state(field 3), ppid(field 4), pgrp(field 5), session(field 6),
+  # fields 7..21, starttime(field 22)
+  {
+    printf '%s (%s) S %s %s %s' "$pid" "${exe##*/}" "$ppid" "$pgrp" "$sid"
+    for _ in $(seq 1 15); do printf ' 0'; done
+    printf ' %s\n' "$start_time"
+  } >"$dir/stat"
   printf '%s\0' "$exe" "$@" >"$dir/cmdline"
+}
+
+write_process() {
+  local pid="$1" ppid="$2" start_time="$3" exe="$4"
+  shift 4
+  write_process_with_group "$pid" "$ppid" "$pid" "$pid" "$start_time" "$exe" "$@"
 }
 
 write_unix_header() {
@@ -71,6 +81,48 @@ fi
 [ -e "$work/run/polaris-gamescope.env" ] || fail "stale generation removed runtime env"
 [ "$(<"$work/run/polaris-gamescope.lock")" = "lock-sentinel" ] || fail "owner lock open truncated existing data"
 
+# The exact compositor may be a child of the setsid launcher. Signal the
+# validated private process group, never assume compositor PID equals PGID.
+write_process_with_group 410 1 400 400 9001 /usr/bin/gamescope --backend headless
+: >"$work/run/gamescope-0"
+write_unix_header
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 501 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+ln -s 'socket:[501]' "$POLARIS_PROC_ROOT/410/fd/3"
+printf '410 9001 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+printf 'POLARIS_GAMESCOPE_PID=410\nPOLARIS_GAMESCOPE_START_TIME=9001\nPOLARIS_GAMESCOPE_EXECUTABLE=/usr/bin/gamescope\n' \
+  >"$work/run/polaris-gamescope.env"
+: >"$work/kills"
+cp "$work/bin/kill" "$work/bin/kill.default"
+cat >"$work/bin/kill" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -TERM ] && [ "\${2:-}" = -400 ]; then
+  rm -rf "$POLARIS_PROC_ROOT/410"
+  rm -f "$work/run/gamescope-0"
+fi
+EOF
+chmod +x "$work/bin/kill"
+polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
+  fail "private child compositor group did not stop"
+grep -qx -- '-TERM -400' "$work/kills" || fail "validated PGID was not signalled"
+if grep -q -- '-410' "$work/kills"; then
+  fail "compositor PID was used as a process group"
+fi
+mv "$work/bin/kill.default" "$work/bin/kill"
+chmod +x "$work/bin/kill"
+
+# A non-private or moved compositor group is not authorized for negative
+# signaling even when PID/start/executable still match the marker.
+write_process_with_group 410 1 400 401 9050 /usr/bin/gamescope --backend headless
+printf '410 9050 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+: >"$work/kills"
+if polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "mismatched process-group/session identity was accepted"
+fi
+[ ! -s "$work/kills" ] || fail "non-private process group was signalled"
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "failed group proof removed marker authority"
+
 # Nix wrapProgram executes .gamescope-wrapped while preserving argv[0] as
 # gamescope. Capture and validate that exact executable instead of rejecting it.
 write_process 420 1 9200 /nix/store/fake-gamescope/bin/.gamescope-wrapped --backend headless
@@ -82,19 +134,25 @@ polaris_validate_marker "$work/run/polaris-gamescope.pid" idle || fail "Nix-wrap
 write_process 410 1 9001 /usr/bin/gamescope --backend headless --hdr-enabled
 write_process 411 410 9002 /usr/bin/Xwayland :4
 write_process 412 410 9003 /usr/bin/Xwayland :3
+write_process 413 1 8000 /usr/bin/Xwayland :2
 rm -f "$POLARIS_PROC_ROOT/412/exe"
 ln -s /usr/bin/sleep "$POLARIS_PROC_ROOT/412/exe"
+printf '0::/user.slice/polaris.service\n' >"$POLARIS_PROC_ROOT/410/cgroup"
+printf '0::/user.slice/polaris.service\n' >"$POLARIS_PROC_ROOT/413/cgroup"
 write_process 99 1 100 /usr/bin/Xorg :0
 : >"$POLARIS_X11_SOCKET_DIR/X0"
+: >"$POLARIS_X11_SOCKET_DIR/X2"
 : >"$POLARIS_X11_SOCKET_DIR/X3"
 : >"$POLARIS_X11_SOCKET_DIR/X4"
 ln -s 'socket:[500]' "$POLARIS_PROC_ROOT/410/fd/3"
+ln -s 'socket:[602]' "$POLARIS_PROC_ROOT/413/fd/3"
 ln -s 'socket:[603]' "$POLARIS_PROC_ROOT/412/fd/3"
 ln -s 'socket:[604]' "$POLARIS_PROC_ROOT/411/fd/3"
 ln -s 'socket:[600]' "$POLARIS_PROC_ROOT/99/fd/3"
 write_unix_header
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 500 %s\n' "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 600 %s\n' "$POLARIS_X11_SOCKET_DIR/X0" >>"$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 602 %s\n' "$POLARIS_X11_SOCKET_DIR/X2" >>"$POLARIS_PROC_NET_UNIX"
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 603 %s\n' "$POLARIS_X11_SOCKET_DIR/X3" >>"$POLARIS_PROC_NET_UNIX"
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 604 %s\n' "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
 printf '410 9001 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"

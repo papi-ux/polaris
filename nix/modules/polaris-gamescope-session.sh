@@ -19,44 +19,61 @@ gs_height="${POLARIS_HDR_HEIGHT:-2160}"
 gs_refresh="${POLARIS_HDR_REFRESH:-120}"
 
 session_steam_pids() {
-  local p h
+  local p envf session_id="${POLARIS_SESSION_INSTANCE_ID:-}" proc_root
+  [ -n "$session_id" ] || return 1
+  proc_root="$(polaris_proc_root)"
   for p in $(pgrep -x steam 2>/dev/null || true); do
-    h="$(tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | sed -n 's/^HOME=//p' | head -n1 || true)"
-    if [ "$h" = "${HOME}" ]; then
-      printf '%s\n' "$p"
-    fi
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    envf="$proc_root/$p/environ"
+    tr '\0' '\n' <"$envf" 2>/dev/null |
+      grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" || continue
+    printf '%s\n' "$p"
   done
 }
 session_steam_alive() { [ -n "$(session_steam_pids)" ]; }
 
 kill_session_steam() {
-  if session_steam_alive; then
-    steam -shutdown 2>/dev/null || true
-    sleep 1
-    pkill -TERM -x steam 2>/dev/null || true
-    for _ in $(seq 1 40); do
-      session_steam_alive || break
-      sleep 0.25
-    done
-  fi
+  local pid start_time kill_bin="${POLARIS_KILL_BIN:-kill}" session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
+  [ -n "$session_id" ] || return 0
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    polaris_process_fields "$pid" || return 1
+    start_time="$POLARIS_PROCESS_START_TIME"
+    # Bind the numeric PID and environment classification immediately before
+    # signaling. Desktop Steam lacks this exact session credential and survives.
+    polaris_process_fields "$pid" \
+      && [ "$POLARIS_PROCESS_START_TIME" = "$start_time" ] \
+      && tr '\0' '\n' <"$(polaris_proc_root)/$pid/environ" 2>/dev/null |
+           grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" \
+      || return 1
+    "$kill_bin" -TERM "$pid" 2>/dev/null || return 1
+  done < <(session_steam_pids)
+  for _ in $(seq 1 40); do
+    session_steam_alive || return 0
+    sleep 0.25
+  done
+  ! session_steam_alive
 }
 
 # True while a real game process for $1 (Steam appid) is running.
 # Steam client / webhelper also inherit SteamAppId — exclude those so
 # Big Picture alone does not count as "game still up".
 steam_app_game_alive() {
-  local appid="$1" pid cmd envf
-  [ -n "$appid" ] || return 1
-  for envf in /proc/[0-9]*/environ; do
-    pid="${envf#/proc/}"
+  local appid="$1" pid cmd envf env_lines proc_root session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
+  [ -n "$appid" ] && [ -n "$session_id" ] || return 1
+  proc_root="$(polaris_proc_root)"
+  for envf in "$proc_root"/[0-9]*/environ; do
+    pid="${envf#"$proc_root"/}"
     pid="${pid%/environ}"
     case "$pid" in
       *[!0-9]*) continue ;;
     esac
-    if ! tr '\0' '\n' <"$envf" 2>/dev/null | grep -qx "SteamAppId=${appid}"; then
+    env_lines="$(tr '\0' '\n' <"$envf" 2>/dev/null)" || continue
+    if ! grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" <<<"$env_lines" \
+        || ! grep -qx "SteamAppId=${appid}" <<<"$env_lines"; then
       continue
     fi
-    cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+    cmd="$(tr '\0' ' ' <"$proc_root/$pid/cmdline" 2>/dev/null || true)"
     # Skip empty / Steam client helpers (not the game binary).
     if [ -z "$cmd" ]; then
       continue
@@ -187,8 +204,6 @@ case "${1:-}" in
       echo "polaris-gamescope-session: true SDR (force=0, no --hdr-enabled; not hybrid PQ+SDR)" >&2
     fi
 
-    kill_session_steam
-
     if [ "$want_wsi" = 1 ]; then
       # --- Nested WSI path (games as gamescope child) ---
       echo "polaris-gamescope-session: WSI nested mode — Steam is ${POLARIS_GAMESCOPE_BIN:-gamescope} primary child" >&2
@@ -215,7 +230,7 @@ case "${1:-}" in
         echo "polaris-gamescope-session: refusing unowned gamescope socket cleanup" >&2
         exit 1
       fi
-      for _ in $(seq 1 100); do
+      for _ in $(seq 1 "${POLARIS_IDLE_WAIT_STEPS:-100}"); do
         [ ! -S "$rt/gamescope-0" ] && [ ! -S "$rt/gamescope-1" ] && break
         sleep 0.1
       done
@@ -281,10 +296,11 @@ case "${1:-}" in
         -w "$gs_width" -h "$gs_height" \
         -- "${steam_launch[@]}" \
         >"$steam_log" 2>&1 &
-      nested_pid=$!
+      nested_launch_pid=$!
 
       # Resolve the real headless gamescope PID. setsid/env/wrapProgram may leave
-      # $! as a short-lived parent; marker must pin the compositor generation.
+      # $! as a launcher; preserve that PID as the private PGID/SID and pin the
+      # separately discovered compositor generation in the marker.
       resolve_nested_gamescope_pid() {
         local root="$1" p
         if polaris_headless_gamescope_pid "$root" 2>/dev/null; then
@@ -301,20 +317,29 @@ case "${1:-}" in
       }
 
       nested_marked=0
+      nested_gamescope_pid=""
       for _ in $(seq 1 150); do
-        gs_pid="$(resolve_nested_gamescope_pid "$nested_pid" 2>/dev/null || true)"
-        if [ -n "${gs_pid:-}" ] && polaris_write_marker_for_pid "$marker" "$gs_pid" nested; then
+        gs_pid="$(resolve_nested_gamescope_pid "$nested_launch_pid" 2>/dev/null || true)"
+        if [ -n "${gs_pid:-}" ] \
+            && polaris_write_marker_for_pid "$marker" "$gs_pid" nested \
+            && polaris_validate_marker "$marker" nested \
+            && [ "$POLARIS_PROCESS_PGID" = "$nested_launch_pid" ] \
+            && [ "$POLARIS_PROCESS_SESSION_ID" = "$nested_launch_pid" ]; then
           nested_marked=1
-          nested_pid="$gs_pid"
+          nested_gamescope_pid="$gs_pid"
           break
         fi
-        kill -0 "$nested_pid" 2>/dev/null || break
+        kill -0 "$nested_launch_pid" 2>/dev/null || break
         sleep 0.02
       done
       if [ "$nested_marked" != 1 ]; then
-        echo "polaris-gamescope-session: failed to record exact nested gamescope generation" >&2
-        kill "$nested_pid" 2>/dev/null || true
-        wait "$nested_pid" 2>/dev/null || true
+        echo "polaris-gamescope-session: failed to record an exact nested gamescope generation in its private setsid group" >&2
+        if [ -f "$marker" ] && polaris_validate_marker "$marker" nested; then
+          polaris_stop_marked_gamescope "$marker" nested "$rt" || true
+        else
+          kill -TERM "-$nested_launch_pid" 2>/dev/null || true
+        fi
+        wait "$nested_launch_pid" 2>/dev/null || true
         exit 1
       fi
 
@@ -324,7 +349,7 @@ case "${1:-}" in
           ready=1
           break
         fi
-        kill -0 "$nested_pid" 2>/dev/null || break
+        kill -0 "$nested_gamescope_pid" 2>/dev/null || break
         sleep 0.1
       done
       if [ "$ready" != 1 ]; then
@@ -332,7 +357,7 @@ case "${1:-}" in
         polaris_stop_marked_gamescope "$marker" nested "$rt" || true
         exit 1
       fi
-      printf '1\n' >"$rt/polaris-gamescope-wsi-nested"
+      printf 'nested\n' >"$rt/polaris-gamescope-wsi-nested"
       # Portal + polaris-gamescope.env assume gamescope-0. Bail if we lost the race.
       if rg -q "wayland display 'gamescope-1'" "$steam_log" 2>/dev/null; then
         echo "polaris-gamescope-session: nested bound gamescope-1 (portal captures gamescope-0) — see $steam_log" >&2
@@ -490,53 +515,89 @@ case "${1:-}" in
     fi
     ;;
   stop)
-    kill_session_steam
     rm -f "$rt/polaris-gamescope-appid" "$rt/polaris-gamescope-audio-sink" "$rt/polaris-gamescope-audio-skip-pin"
     # Keep null sinks loaded (permanent capture targets).
     rm -f "$rt/polaris-gamescope-sink-module"
     # Legacy flags from builds that killed EasyEffects / hijacked default.
     rm -f "$rt/polaris-gamescope-prev-default-sink" "$rt/polaris-gamescope-easyeffects-units"
-    if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
-      echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
-      if polaris_validate_marker "$marker" nested; then
-        polaris_stop_marked_gamescope "$marker" nested "$rt" ||
-          echo "polaris-gamescope-session: nested owner did not reach terminal state" >&2
-      elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-        echo "polaris-gamescope-session: leaving live unowned gamescope sockets untouched" >&2
-      fi
-      rm -f "$rt/polaris-gamescope-wsi-nested"
+    nested_claim="$rt/polaris-gamescope-wsi-nested"
+    if [ -f "$nested_claim" ]; then
+      claim_state="$(tr -d '[:space:]' <"$nested_claim")"
+      case "$claim_state" in
+        1|nested)
+          echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
+          if polaris_validate_marker "$marker" nested; then
+            if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
+              echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
+              exit 1
+            fi
+          elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+            echo "polaris-gamescope-session: live or unknown gamescope sockets block teardown; retaining recovery claim" >&2
+            exit 1
+          fi
+          if ! kill_session_steam || session_steam_alive; then
+            echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
+            exit 1
+          fi
+          claim_tmp="$nested_claim.tmp.$$"
+          printf 'restore-idle\n' >"$claim_tmp"
+          mv -f "$claim_tmp" "$nested_claim"
+          ;;
+        restore-idle)
+          ;;
+        *)
+          echo "polaris-gamescope-session: invalid nested recovery state '$claim_state'" >&2
+          exit 1
+          ;;
+      esac
+
+      # Ordered handoff: idle must own gamescope-0 and publish an exact runtime
+      # environment before the portal may rebind. The restore-idle claim stays
+      # durable across every failure so a retry never repeats nested signaling.
       printf '0\n' >"$rt/polaris-gamescope-force"
-      # Ordered handoff: idle must own gamescope-0 before portal capture can
-      # reconnect. Otherwise portal-gamescope hits "failed to connect to wayland
-      # socket" (Response code 2) during the gap.
       polaris_unmask_idle_unit_runtime
       systemctl --user reset-failed polaris-gamescope-idle.service 2>/dev/null || true
-      systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
+      if ! systemctl --user start polaris-gamescope-idle.service 2>/dev/null; then
+        echo "polaris-gamescope-session: failed to start idle gamescope; retaining restore-idle claim" >&2
+        exit 1
+      fi
       idle_ready=0
-      for _ in $(seq 1 100); do
-        if polaris_validate_marker "$marker" idle &&
-           polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle; then
-          polaris_write_runtime_env "$marker" gamescope-0 idle "$rt" 2>/dev/null || true
+      for _ in $(seq 1 "${POLARIS_IDLE_WAIT_STEPS:-100}"); do
+        if polaris_validate_marker "$marker" idle \
+            && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle \
+            && polaris_write_runtime_env "$marker" gamescope-0 idle "$rt" 2>/dev/null; then
           idle_ready=1
           break
         fi
         sleep 0.1
       done
       if [ "$idle_ready" != 1 ]; then
-        echo "polaris-gamescope-session: idle gamescope-0 not ready after nested stop" >&2
-      else
-        echo "polaris-gamescope-session: idle gamescope restored after nested stop" >&2
+        echo "polaris-gamescope-session: idle gamescope-0 not ready; retaining restore-idle claim" >&2
+        exit 1
       fi
-      # Rebind backend to idle generation. polaris must Wants= (not Requires=)
-      # this unit so the restart does not cascade-stop the stream host.
-      systemctl --user restart polaris-portal-gamescope.service 2>/dev/null || true
+      echo "polaris-gamescope-session: idle gamescope restored after nested stop" >&2
+
+      if ! systemctl --user restart polaris-portal-gamescope.service 2>/dev/null; then
+        echo "polaris-gamescope-session: portal restart failed; retaining restore-idle claim" >&2
+        exit 1
+      fi
       portal_bus="unix:path=$rt/polaris-portal/bus"
-      for _ in $(seq 1 50); do
-        busctl --address="$portal_bus" --no-pager \
-          status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1 && break
+      portal_ready=0
+      for _ in $(seq 1 "${POLARIS_PORTAL_WAIT_STEPS:-50}"); do
+        if busctl --address="$portal_bus" --no-pager \
+            status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
+          portal_ready=1
+          break
+        fi
         sleep 0.1
       done
+      if [ "$portal_ready" != 1 ]; then
+        echo "polaris-gamescope-session: portal did not bind idle generation; retaining restore-idle claim" >&2
+        exit 1
+      fi
+      rm -f "$nested_claim"
     elif [ -f "$rt/polaris-gamescope-force" ] && [ "$(tr -d '[:space:]' <"$rt/polaris-gamescope-force")" = "1" ]; then
+      kill_session_steam || exit 1
       printf '0\n' >"$rt/polaris-gamescope-force"
       systemctl --user restart polaris-gamescope-idle.service || true
     fi

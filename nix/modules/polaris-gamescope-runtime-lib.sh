@@ -19,11 +19,15 @@ polaris_process_fields() {
   local fields=( $rest )
   [ "${#fields[@]}" -ge 20 ] || return 1
   POLARIS_PROCESS_PPID="${fields[1]}"
+  POLARIS_PROCESS_PGID="${fields[2]}"
+  POLARIS_PROCESS_SESSION_ID="${fields[3]}"
   POLARIS_PROCESS_START_TIME="${fields[19]}"
-  case "$POLARIS_PROCESS_PPID:$POLARIS_PROCESS_START_TIME" in
+  case "$POLARIS_PROCESS_PPID:$POLARIS_PROCESS_PGID:$POLARIS_PROCESS_SESSION_ID:$POLARIS_PROCESS_START_TIME" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
-  [ "$POLARIS_PROCESS_START_TIME" != 0 ]
+  [ "$POLARIS_PROCESS_PGID" -gt 1 ] 2>/dev/null \
+    && [ "$POLARIS_PROCESS_SESSION_ID" -gt 1 ] 2>/dev/null \
+    && [ "$POLARIS_PROCESS_START_TIME" != 0 ]
 }
 
 polaris_read_marker() {
@@ -239,26 +243,20 @@ polaris_xwayland_pid() {
   [ "${executable##*/}" = Xwayland ]
 }
 
-# gamescope may reparent Xwayland under the user manager while keeping the
-# service cgroup; treat same-cgroup as related when ancestry is gone.
-polaris_pid_same_cgroup() {
-  local a="$1" b="$2" ca cb
-  ca="$(cat "$(polaris_proc_root)/$a/cgroup" 2>/dev/null)" || return 1
-  cb="$(cat "$(polaris_proc_root)/$b/cgroup" 2>/dev/null)" || return 1
-  [ -n "$ca" ] && [ "$ca" = "$cb" ]
-}
-
+# Xwayland ownership is exact-generation ancestry only. Service cgroups are
+# scheduling containers shared by old and new compositor generations and are
+# never authorization for DISPLAY routing.
 polaris_pid_related_to_root() {
   local pid="$1" root="$2"
-  [ "$pid" = "$root" ] && return 0
-  polaris_pid_is_descendant "$pid" "$root" && return 0
-  polaris_pid_same_cgroup "$pid" "$root"
+  [ "$pid" != "$root" ] && polaris_pid_is_descendant "$pid" "$root"
 }
 
 polaris_discover_xwayland_display() {
-  local marker="$1" expected_role="${2:-}" xdir socket name display inode path process pid best=
+  local marker="$1" expected_role="${2:-}" xdir socket name display inode path process pid
+  local best= best_pid= best_start= best_inode= marker_line
   polaris_validate_marker "$marker" "$expected_role" || return 1
-  local root_pid="$POLARIS_MARKER_PID"
+  local root_pid="$POLARIS_MARKER_PID" root_start="$POLARIS_MARKER_START_TIME" root_executable="$POLARIS_MARKER_EXECUTABLE"
+  marker_line="$(<"$marker")"
   xdir="$(polaris_x11_socket_dir)"
   for socket in "$xdir"/X*; do
     [ -e "$socket" ] || continue
@@ -276,15 +274,27 @@ polaris_discover_xwayland_display() {
         case "$pid" in ''|*[!0-9]*) continue ;; esac
         [ "$pid" != "$root_pid" ] || continue
         if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
-            && polaris_pid_holds_inode "$pid" "$inode"; then
+            && polaris_pid_holds_inode "$pid" "$inode" \
+            && polaris_process_fields "$pid"; then
           if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
             best="$display"
+            best_pid="$pid"
+            best_start="$POLARIS_PROCESS_START_TIME"
+            best_inode="$inode"
           fi
         fi
       done
     done <"$(polaris_proc_net_unix)" 2>/dev/null
   done
   [ -n "$best" ] || return 1
+  # Revalidate both process generations and the exact socket ownership after
+  # the scan. Numeric PIDs and procfs metadata are not stable authorizations.
+  polaris_validate_process_generation "$root_pid" "$root_start" "$root_executable" || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  polaris_process_fields "$best_pid" && [ "$POLARIS_PROCESS_START_TIME" = "$best_start" ] || return 1
+  polaris_xwayland_pid "$best_pid" \
+    && polaris_pid_related_to_root "$best_pid" "$root_pid" \
+    && polaris_pid_holds_inode "$best_pid" "$best_inode" || return 1
   printf ':%s\n' "$best"
 }
 
@@ -331,7 +341,7 @@ polaris_unmask_idle_unit_runtime() {
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
-  local marker_line pid start_time executable_path socket inode entry current_inode
+  local marker_line pid start_time executable_path pgid session_id socket inode entry current_inode
   local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
   umask 077
   exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
@@ -351,21 +361,35 @@ polaris_stop_marked_gamescope() (
   done
 
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
+  pgid="$POLARIS_PROCESS_PGID"
+  session_id="$POLARIS_PROCESS_SESSION_ID"
+  [ "$pgid" -gt 1 ] 2>/dev/null && [ "$session_id" = "$pgid" ] || return 1
   [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-  "$kill_bin" -TERM "-$pid" 2>/dev/null || "$kill_bin" -TERM "$pid" 2>/dev/null || return 1
+  polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
+  [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  "$kill_bin" -TERM "-$pgid" 2>/dev/null || return 1
   for _ in $(seq 1 "$term_steps"); do
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
     if ! polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
       break
     fi
+    [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
     sleep 0.1
   done
   if polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
+    [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-    "$kill_bin" -KILL "-$pid" 2>/dev/null || "$kill_bin" -KILL "$pid" 2>/dev/null || return 1
+    "$kill_bin" -KILL "-$pgid" 2>/dev/null || return 1
     for _ in $(seq 1 "$kill_steps"); do
       [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-      polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || break
+      if ! polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
+        break
+      fi
+      [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
       sleep 0.1
     done
   fi
@@ -388,7 +412,7 @@ polaris_stop_marked_gamescope() (
     current_inode="$(polaris_socket_inode "$socket" 2>/dev/null || true)"
     if [ -n "$current_inode" ] && [ "$current_inode" = "$inode" ]; then
       [ "$(<"$marker")" = "$marker_line" ] || return 1
-      rm -f "$socket" "$socket.lock"
+      polaris_remove_orphan_socket "$socket" || return 1
     fi
   done
   [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
