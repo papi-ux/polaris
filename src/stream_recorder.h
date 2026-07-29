@@ -57,8 +57,16 @@ namespace stream_recorder {
    * @param is_video True if this is a video packet, false for audio.
    * @param is_keyframe True if this is an IDR/keyframe.
    * @param pts Presentation timestamp (frame index).
+   * @param video_format Optional: 0=H.264, 1=HEVC, 2=AV1 (from active session).
+   *        When set, filenames match the real encode codec (not conf mode flags).
    */
-  void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts);
+  void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts, int video_format = -1);
+
+  /**
+   * @brief Remember the active stream videoFormat for recording filenames.
+   * @param video_format 0=H.264, 1=HEVC, 2=AV1.
+   */
+  void set_active_video_format(int video_format);
 
   /**
    * @brief Get the current recording mode from config.

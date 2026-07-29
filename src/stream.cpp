@@ -1467,13 +1467,15 @@ namespace stream {
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
 
-      // Feed raw encoded frame to the stream recorder (before any header modifications)
+      // Feed raw encoded frame to the stream recorder (before any header modifications).
+      // Path-agnostic (labwc / gamescope / portal): same post-encode tap.
       if (stream_recorder::is_recording() || stream_recorder::current_mode() == stream_recorder::mode_t::replay_buffer) {
         stream_recorder::push_packet(
           packet->data(), packet->data_size(),
           true,  // is_video
           packet->is_idr(),
-          packet->frame_index()
+          packet->frame_index(),
+          session->config.monitor.videoFormat
         );
       }
 
@@ -2316,6 +2318,7 @@ namespace stream {
 
       auto codec_name = session.config.monitor.videoFormat == 2 ? "av1" :
                          session.config.monitor.videoFormat == 1 ? "hevc" : "h264";
+      stream_recorder::set_active_video_format(session.config.monitor.videoFormat);
 
       // Track this client in multi-client stats
       stream_stats::add_client(addr_string, session.device_name);

@@ -7,7 +7,8 @@ describe('config defaults', () => {
 
     expect(source).toContain('Private Stream')
     expect(source).toContain('Private Stream (GPU-native)')
-    expect(source).toContain('GPU-native appears in session health as the capture path')
+    expect(source).toContain('GPU-native is a labwc capture preference')
+    expect(source).toContain('session health shows SHM/system-memory fallback')
     expect(source).toContain('Mirror Desktop')
     expect(source).not.toContain('GPU-Native Test')
     expect(source).not.toContain('Experimental')

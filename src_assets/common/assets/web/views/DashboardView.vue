@@ -1067,14 +1067,45 @@ function modeLabelFromBool(value) {
   return value ? 'Private Stream' : 'Private Stream (windowed)'
 }
 
+function humanizeStreamPathId(id) {
+  const map = {
+    headless_stream: 'Private Stream',
+    windowed_stream: 'Private Stream (GPU-native)',
+    host_virtual_display: 'Host Virtual Display',
+    desktop_display: 'Mirror Desktop',
+    gamescope_stream: 'Gamescope Stream',
+    family_isolated: 'Family Mode (isolated)',
+    headless_evdi: 'Headless EVDI',
+    headless_dongle: 'Headless Dongle',
+  }
+  return map[id] || titleizeToken(id || '')
+}
+
 function streamDisplayModeLabel(statsPayload) {
-  const explicitMode = statsPayload?.stream_display_mode
-  if (explicitMode) return explicitMode
+  // Prefer human label from the host; fall back to path id mapping.
+  const label = statsPayload?.stream_display_mode
+  if (label && !String(label).includes('_')) return label
+  const pathId = statsPayload?.stream_display_mode_id || statsPayload?.stream_path_id || label
+  if (pathId) return humanizeStreamPathId(pathId) || modeLabelFromBool(Boolean(statsPayload?.runtime_effective_headless))
   return modeLabelFromBool(Boolean(statsPayload?.runtime_effective_headless))
 }
 
 const runtimeBackendLabel = computed(() => {
-  return titleizeToken(stats.value?.runtime_backend || 'unknown')
+  const backend = String(stats.value?.runtime_backend || '').trim()
+  if (!backend || backend === 'none' || backend === 'unknown') {
+    // Last-resort while idle: derive from configured path id if present.
+    const pathId = stats.value?.stream_path_id || stats.value?.stream_display_mode_id
+    if (pathId === 'headless_stream' || pathId === 'windowed_stream' || pathId === 'family_isolated') return 'Labwc'
+    if (pathId === 'gamescope_stream') return 'Gamescope'
+    if (pathId === 'host_virtual_display' || pathId === 'headless_evdi') return 'Virtual display'
+    if (pathId === 'desktop_display') return 'Portal / host'
+    return 'Host'
+  }
+  if (backend === 'labwc') return 'Labwc'
+  if (backend === 'gamescope') return 'Gamescope'
+  if (backend === 'portal') return 'Portal'
+  if (backend === 'virtual_display') return 'Virtual display'
+  return titleizeToken(backend)
 })
 
 const runtimeRequestedMode = computed(() => {
@@ -1083,7 +1114,11 @@ const runtimeRequestedMode = computed(() => {
 })
 
 const runtimeEffectiveMode = computed(() => {
-  if (!stats.value?.streaming) return '--'
+  if (!stats.value?.streaming) {
+    // Idle: still show configured path when stats expose it.
+    const idleLabel = streamDisplayModeLabel(stats.value)
+    return idleLabel && idleLabel !== 'Private Stream (windowed)' ? idleLabel : '--'
+  }
   return streamDisplayModeLabel(stats.value)
 })
 

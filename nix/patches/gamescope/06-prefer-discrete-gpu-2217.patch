@@ -1,0 +1,45 @@
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index fd63f25..7497d81 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -343,6 +343,14 @@ bool CVulkanDevice::selectPhysDev(VkSurfaceKHR surface)
+ 		bTryComputeOnly = false;
+ 	}
+ 
++	// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2217
++	// Headless has no VkSurface, so selectPhysDev often picks the first device
++	// (frequently the iGPU on hybrid NVIDIA+AMD). Prefer discrete unless the user
++	// pinned --prefer-vk-device. First discrete wins if multiple dGPUs (corner case).
++	// Drop this block + selection predicate changes when #2217 merges.
++	const bool bHavePreferredDevice = ( g_preferVendorID != 0 || g_preferDeviceID != 0 );
++	bool bSelectedIsDiscrete = false;
++
+ 	for (auto cphysDev : physDevs)
+ 	{
+ 		VkPhysicalDeviceProperties deviceProperties;
+@@ -368,9 +376,14 @@ bool CVulkanDevice::selectPhysDev(VkSurfaceKHR surface)
+ 
+ 		if (generalIndex != ~0u || computeOnlyIndex != ~0u)
+ 		{
+-			// Select the device if it's the first one or the preferred one
+-			if (!m_physDev ||
+-			    (g_preferVendorID == deviceProperties.vendorID && g_preferDeviceID == deviceProperties.deviceID))
++			// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2217 (selection predicate)
++			const bool bIsPreferred = bHavePreferredDevice &&
++			    g_preferVendorID == deviceProperties.vendorID &&
++			    g_preferDeviceID == deviceProperties.deviceID;
++			const bool bIsDiscrete = deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
++			const bool bDiscreteUpgrade = !bHavePreferredDevice && m_physDev && !bSelectedIsDiscrete && bIsDiscrete;
++
++			if (!m_physDev || bIsPreferred || bDiscreteUpgrade)
+ 			{
+ 				// if we have a surface, check that the queue family can actually present on it
+ 				if (surface) {
+@@ -395,6 +408,7 @@ bool CVulkanDevice::selectPhysDev(VkSurfaceKHR surface)
+ 				m_queueFamily = computeOnlyIndex == ~0u ? generalIndex : computeOnlyIndex;
+ 				m_generalQueueFamily = generalIndex;
+ 				m_physDev = cphysDev;
++				bSelectedIsDiscrete = bIsDiscrete; // POLARIS-UPSTREAM-REMOVE: #2217
+ 
+ 				/* When Intel uses compute-only queue for Gamescope composition, some games
+ 				 * experience performance loss. Using the general queue alleviates the issue

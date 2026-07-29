@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, inject } from 'vue'
+import { ref, computed, inject, watch, onMounted } from 'vue'
 import { $tp } from '../../platform-i18n'
 import PlatformLayout from '../../PlatformLayout.vue'
 import AdapterNameSelector from './audiovideo/AdapterNameSelector.vue'
@@ -7,7 +7,13 @@ import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
-import { resolveClientSettingsSync, resolveStreamDisplayRuntimeNotice } from '../../client-settings-sync'
+import {
+  applyStreamDisplayModeToConfig,
+  resolveClientSettingsSync,
+  resolveStreamDisplayMode,
+  resolveStreamDisplayRuntimeNotice,
+  streamDisplayModeAvailable,
+} from '../../client-settings-sync'
 import { buildResolutionPlanner } from '../../display-resolution-planner'
 
 const $t = inject('i18n').t;
@@ -39,47 +45,85 @@ const displayPlanner = computed(() => buildResolutionPlanner({
   showAdvanced: showDisplayPlannerAdvanced.value,
 }))
 
+// Path cards mirror the stream_path registry (runtime × capture × topology).
+// Reserved paths (gamescope ownership, Family Mode, EVDI/dongle) stay visible but disabled
+// so new modes plug into the same UI without reshaping the selector.
 const streamDisplayModes = [
   {
     id: 'headless_stream',
     title: 'Private Stream',
-    badge: 'Recommended',
-    copy: 'Recommended. Starts apps inside a private hidden compositor without taking over the physical desktop. Polaris still reports the live capture path honestly.',
-    note: 'Best handheld path. GPU-native appears in session health as the capture path when Polaris can keep frames on DMA-BUF/GPU; otherwise it reports SHM/system-memory fallback.',
-  },
-  {
-    id: 'host_virtual_display',
-    title: 'Host Virtual Display',
-    badge: 'Compatibility',
-    copy: 'Compatibility mode. Creates a display the operating system can see. Your desktop may rearrange or remember it.',
-    note: 'Use this when the hidden compositor path is not available or the desktop needs to own the virtual output.',
-  },
-  {
-    id: 'desktop_display',
-    title: 'Mirror Desktop',
-    badge: 'Advanced',
-    copy: 'Streams the visible KDE, GNOME, or wlroots desktop. Use only when you explicitly want the host monitor/session mirrored.',
-    note: 'Advanced and not private: people near the PC may see the desktop or game window. Use for troubleshooting or already-running apps.',
+    badge: 'labwc',
+    available: true,
+    group: 'private',
+    copy: 'Private labwc compositor — apps stay off your physical desktop. Preferred handheld path.',
+    note: 'Runtime: labwc · Capture: wlroots · Topology: leave host alone',
   },
   {
     id: 'windowed_stream',
     title: 'Private Stream (GPU-native)',
-    badge: 'Advanced capture',
-    copy: 'Advanced Private Stream preference: request GPU-native capture and allow Polaris to use a windowed private compositor if hidden headless cannot stay GPU-resident.',
-    note: 'Use when diagnostics say Private Stream fell back to SHM/system-memory. GPU-native appears in session health as the capture path, not as a separate user-facing play mode.',
+    badge: 'labwc + GPU',
+    available: true,
+    group: 'private',
+    copy: 'Same labwc private session, but prefer GPU-native capture (may run windowed under the host compositor).',
+    note: 'Runtime: labwc · Capture: wlroots · Prefer DMA-BUF',
+  },
+  {
+    id: 'gamescope_stream',
+    title: 'Gamescope Stream',
+    badge: 'gamescope',
+    available: true,
+    group: 'private',
+    copy: 'Attach to idle gamescope-0 or spawn an owned headless Gamescope. Portal/PipeWire captures the session.',
+    note: 'Runtime: gamescope · Capture: portal · Needs gamescope on PATH. Prefer idle unit attach on lea.',
+  },
+  {
+    id: 'family_isolated',
+    title: 'Family Mode (isolated)',
+    badge: 'Reserved',
+    available: false,
+    group: 'experimental',
+    copy: 'Per-app isolated labwc so the host desktop stays usable (community Family Mode / PR #226).',
+    note: 'Runtime: labwc (nested) · Capture: wlroots · Topology: leave host alone',
+  },
+  {
+    id: 'host_virtual_display',
+    title: 'Host Virtual Display',
+    badge: 'Host',
+    available: true,
+    group: 'host',
+    copy: 'Host-visible virtual output (EVDI / wlr / kscreen). Desktop may rearrange.',
+    note: 'Runtime: none · Topology: host virtual',
+  },
+  {
+    id: 'headless_evdi',
+    title: 'Headless EVDI',
+    badge: 'Reserved',
+    available: false,
+    group: 'experimental',
+    copy: 'Promote desktop onto EVDI and capture it (community headless display / PR #226).',
+    note: 'Runtime: none · Capture: EVDI · Topology: swap primary',
+  },
+  {
+    id: 'headless_dongle',
+    title: 'Headless Dongle',
+    badge: 'Physical dummy',
+    available: true,
+    group: 'host',
+    copy: 'Swap the desktop onto a physical dummy-plug (HDMI/DP dongle), blank the real panel (privacy), capture via host portal ScreenCast.',
+    note: 'Runtime: none · Capture: portal (default; KMS optional) · Needs streaming + primary outputs + auto_manage',
+  },
+  {
+    id: 'desktop_display',
+    title: 'Mirror Desktop',
+    badge: 'Host / portal',
+    available: true,
+    group: 'host',
+    copy: 'Stream the host desktop via portal. Prefer Private Stream (labwc) or Gamescope Stream for isolated apps.',
+    note: 'Runtime: none · Capture: portal · Host desktop only',
   },
 ]
 
-const streamDisplayMode = computed(() => {
-  const headless = config.value.headless_mode === 'enabled'
-  const cage = config.value.linux_use_cage_compositor === 'enabled'
-  const gpuNative = config.value.linux_prefer_gpu_native_capture === 'enabled'
-
-  if (headless && cage && gpuNative) return 'windowed_stream'
-  if (headless && cage) return 'headless_stream'
-  if (headless) return 'host_virtual_display'
-  return 'desktop_display'
-})
+const streamDisplayMode = computed(() => resolveStreamDisplayMode(config.value))
 
 const selectedStreamDisplayMode = computed(() => (
   streamDisplayModes.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes[0]
@@ -176,50 +220,70 @@ const autoQualityRows = computed(() => [
     note: clientSettingsSync.value.relaunchRequired ? 'Relaunch to sync' : 'Push/pull ready',
   },
 ])
+const isLabwcPath = computed(() => (
+  streamDisplayMode.value === 'headless_stream' || streamDisplayMode.value === 'windowed_stream'
+))
+const isGamescopePath = computed(() => streamDisplayMode.value === 'gamescope_stream')
+const isDonglePath = computed(() => streamDisplayMode.value === 'headless_dongle')
+
 const nvidiaTrueHeadlessGpuNativeGuard = computed(() => (
+  isLabwcPath.value &&
   String(config.value.encoder || '').toLowerCase() === 'nvenc' &&
   config.value.headless_mode === 'enabled' &&
   config.value.linux_use_cage_compositor === 'enabled' &&
   config.value.linux_prefer_gpu_native_capture !== 'enabled'
 ))
-const linuxStreamingSetupChecklist = computed(() => [
-  {
-    id: 'pairing',
-    title: 'Pair encoder and display',
-    status: config.value.adapter_name || config.value.output_name ? 'Selected' : 'Discover first',
-    copy: config.value.adapter_name || config.value.output_name
-      ? 'Polaris has a GPU adapter or output hint saved for this host.'
-      : 'Start by selecting the GPU adapter/output Polaris should capture so encoder and display discovery line up.',
-  },
-  {
-    id: 'runtime',
-    title: 'Choose the Linux runtime path',
-    status: selectedStreamDisplayMode.value.title,
-    copy: 'Private Stream is the safe default. GPU-native is a capture capability/status, not a separate normal play mode; Polaris reports fallback honestly when frames cannot stay GPU-resident.',
-  },
-  {
-    id: 'quality',
-    title: 'Decide Auto Quality',
-    status: autoQualityBadge.value,
-    copy: autoQualityEnabled.value
-      ? 'Auto Quality will handle bitrate/profile recovery for this headless path.'
-      : 'Enable Auto Quality when you want Polaris to balance bitrate, profile choice, and recovery instead of hand-tuning every stream.',
-  },
-  {
-    id: 'wayland-vaapi',
-    title: 'Check Wayland / VAAPI capture truth',
-    status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
-    copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
-      ? 'Polaris may use windowed labwc to avoid SHM/system-memory fallback and preserve GPU-resident DMA-BUF capture when the runtime proves it can. Session health will show GPU-native as the capture path.'
-      : 'VAAPI / Mesa is the AMD Linux baseline. Leave forced GPU-native off for normal Private Stream; turn it on only when telemetry shows SHM/system-memory fallback and you are collecting support evidence. KMS/DRM is advanced.',
-  },
-  ...(nvidiaTrueHeadlessGpuNativeGuard.value ? [{
-    id: 'nvidia-headless-gpu-native-guard',
-    title: 'NVIDIA true-headless guard',
-    status: 'Needs GPU-native preference',
-    copy: 'NVENC true-headless labwc hosts can hit cold-cache 503 encoder-init failures when linux_prefer_gpu_native_capture is disabled. Set linux_prefer_gpu_native_capture = enabled / Private Stream (GPU-native), restart Polaris, then retry before chasing CUDA or driver issues.',
-  }] : []),
-])
+const linuxStreamingSetupChecklist = computed(() => {
+  const items = [
+    {
+      id: 'path',
+      title: 'Pick a stream path',
+      status: selectedStreamDisplayMode.value.title,
+      copy: isGamescopePath.value
+        ? 'Gamescope Stream: attach idle gamescope-0 or spawn owned headless; portal captures it. Encoder/bitrate/HDR below still apply.'
+        : isDonglePath.value
+          ? 'Dongle: set streaming + primary outputs, privacy swap, portal capture after topology prepare.'
+          : isLabwcPath.value
+            ? 'Private Stream (labwc) is the solid default — apps stay off the desk, wlroots capture.'
+            : 'Mirror Desktop captures the host session via portal. Prefer Private Stream or Gamescope for isolated apps.',
+    },
+    {
+      id: 'encoder',
+      title: 'Encoder and quality',
+      status: autoQualityBadge.value,
+      copy: autoQualityEnabled.value
+        ? 'Auto Quality balances bitrate and profile recovery for this path.'
+        : 'Set encoder (NVENC/VAAPI), bitrate, and optional Auto Quality — these apply to labwc and gamescope.',
+    },
+  ]
+  if (isLabwcPath.value) {
+    items.push({
+      id: 'wayland-vaapi',
+      title: 'labwc GPU-native capture',
+      status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
+      copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
+        ? 'Windowed labwc may be used to keep DMA-BUF capture GPU-resident when proven.'
+        : 'Leave GPU-native off unless session health shows SHM/system-memory fallback. This flag does not apply to Gamescope Stream.',
+    })
+  }
+  if (isGamescopePath.value) {
+    items.push({
+      id: 'gamescope-host',
+      title: 'Host gamescope stack',
+      status: 'Portal + gamescope-0',
+      copy: 'Needs gamescope on PATH and (on lea) private portal units. WebUI labwc flags (cage, GPU-native preference) are ignored for this path.',
+    })
+  }
+  if (nvidiaTrueHeadlessGpuNativeGuard.value) {
+    items.push({
+      id: 'nvidia-headless-gpu-native-guard',
+      title: 'NVIDIA true-headless guard',
+      status: 'Needs GPU-native preference',
+      copy: 'NVENC true-headless labwc hosts can hit cold-cache 503 when GPU-native capture is disabled. Switch to Private Stream (GPU-native) or enable the preference, restart, retry.',
+    })
+  }
+  return items
+})
 
 function setEnabledConfig(key, enabled) {
   config.value[key] = enabled ? 'enabled' : 'disabled'
@@ -230,30 +294,75 @@ function setAutoQuality(enabled) {
   setEnabledConfig('ai_enabled', enabled)
 }
 
-function setStreamDisplayMode(mode) {
-  switch (mode) {
-    case 'headless_stream':
-      setEnabledConfig('headless_mode', true)
-      setEnabledConfig('linux_use_cage_compositor', true)
-      setEnabledConfig('linux_prefer_gpu_native_capture', false)
-      break
-    case 'host_virtual_display':
-      setEnabledConfig('headless_mode', true)
-      setEnabledConfig('linux_use_cage_compositor', false)
-      setEnabledConfig('linux_prefer_gpu_native_capture', false)
-      break
-    case 'desktop_display':
-      setEnabledConfig('headless_mode', false)
-      setEnabledConfig('linux_use_cage_compositor', false)
-      setEnabledConfig('linux_prefer_gpu_native_capture', false)
-      break
-    case 'windowed_stream':
-      setEnabledConfig('headless_mode', true)
-      setEnabledConfig('linux_use_cage_compositor', true)
-      setEnabledConfig('linux_prefer_gpu_native_capture', true)
-      break
+const dongleOutputs = ref([])
+const dongleDetectStatus = ref('')
+let dongleRequestGeneration = 0
+
+async function refreshDongleOutputs() {
+  const requestGeneration = ++dongleRequestGeneration
+  dongleDetectStatus.value = 'Detecting…'
+  try {
+    const res = await fetch('/api/linux/display-outputs', { credentials: 'include' })
+    const data = await res.json()
+    if (requestGeneration !== dongleRequestGeneration || streamDisplayMode.value !== 'headless_dongle') {
+      return
+    }
+    if (!data?.status) {
+      dongleDetectStatus.value = 'Detection failed'
+      return
+    }
+    dongleOutputs.value = data.outputs || []
+    // Auto-fill empty fields from host discovery (sysfs DRM).
+    if (!config.value.linux_streaming_output && data.suggested_streaming_output) {
+      config.value.linux_streaming_output = data.suggested_streaming_output
+    }
+    if (!config.value.linux_primary_output && data.suggested_primary_output) {
+      config.value.linux_primary_output = data.suggested_primary_output
+    }
+    if (!config.value.headless_swap_mode) {
+      config.value.headless_swap_mode = 'privacy'
+    }
+    config.value.linux_auto_manage_displays = 'enabled'
+    const n = dongleOutputs.value.filter((o) => o.connected).length
+    dongleDetectStatus.value = n
+      ? `Found ${n} connected connector(s); suggestions applied if fields were empty`
+      : 'No connected connectors reported (plug dongle / check DRM)'
+  } catch (e) {
+    if (requestGeneration === dongleRequestGeneration && streamDisplayMode.value === 'headless_dongle') {
+      dongleDetectStatus.value = 'Detection request failed'
+    }
   }
 }
+
+function setStreamDisplayMode(mode) {
+  if (!streamDisplayModeAvailable(mode)) {
+    return
+  }
+  if (mode !== 'headless_dongle') {
+    ++dongleRequestGeneration
+  }
+  const next = applyStreamDisplayModeToConfig(config.value, mode)
+  config.value.headless_mode = next.headless_mode
+  config.value.linux_use_cage_compositor = next.linux_use_cage_compositor
+  config.value.linux_prefer_gpu_native_capture = next.linux_prefer_gpu_native_capture
+  config.value.linux_stream_mode = next.linux_stream_mode
+  config.value.linux_private_runtime = next.linux_private_runtime
+  config.value.linux_auto_manage_displays = next.linux_auto_manage_displays
+  config.value.headless_swap_mode = next.headless_swap_mode
+  config.value.capture = next.capture
+}
+
+watch(streamDisplayMode, (mode) => {
+  if (mode === 'headless_dongle' && dongleOutputs.value.length === 0) {
+    refreshDongleOutputs()
+  }
+})
+
+onMounted(() => {
+  if (streamDisplayMode.value === 'headless_dongle') {
+    refreshDongleOutputs()
+  }
+})
 
 function applyDisplayPlan(choice) {
   if (!choice?.safe) return
@@ -298,7 +407,13 @@ const validateFallbackMode = (event) => {
               :key="mode.id"
               type="button"
               class="focus-ring min-h-[112px] rounded-lg border p-4 text-left transition"
-              :class="streamDisplayMode === mode.id ? 'border-ice/60 bg-ice/10' : 'border-storm/40 bg-deep/40 hover:border-storm/70'"
+              :disabled="mode.available === false"
+              :class="[
+                streamDisplayMode === mode.id ? 'border-ice/60 bg-ice/10' : 'border-storm/40 bg-deep/40',
+                mode.available === false
+                  ? 'cursor-not-allowed opacity-60'
+                  : 'hover:border-storm/70',
+              ]"
               @click="setStreamDisplayMode(mode.id)"
             >
               <div class="flex items-start justify-between gap-3">
@@ -309,7 +424,9 @@ const validateFallbackMode = (event) => {
                     ? 'border-green-400/30 bg-green-400/10 text-green-300'
                     : mode.id === 'windowed_stream'
                       ? 'border-amber-300/40 bg-amber-300/10 text-amber-200'
-                      : 'border-storm/40 bg-storm/10 text-storm'"
+                      : mode.id === 'gamescope_stream'
+                        ? 'border-ice/30 bg-ice/10 text-ice'
+                        : 'border-storm/40 bg-storm/10 text-storm'"
                 >
                   {{ mode.badge }}
                 </span>
@@ -329,13 +446,102 @@ const validateFallbackMode = (event) => {
             {{ streamDisplayRuntimeNotice.copy }}
           </div>
 
+          <div
+            v-if="streamDisplayMode === 'headless_dongle'"
+            class="settings-subtle-surface space-y-3"
+            data-dongle-outputs
+          >
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="section-kicker">Dongle outputs</div>
+              <button
+                type="button"
+                class="focus-ring rounded-lg border border-storm/40 px-2 py-1 text-xs text-silver hover:border-ice"
+                @click="refreshDongleOutputs"
+              >
+                Detect connectors
+              </button>
+            </div>
+            <p class="text-sm text-storm">
+              Auto-detect uses DRM sysfs (fast). Pick the dummy plug as streaming and the real panel as primary, then save.
+            </p>
+            <p v-if="dongleDetectStatus" class="text-xs text-ice">{{ dongleDetectStatus }}</p>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <label class="block text-sm text-storm">
+                Streaming output (dongle)
+                <select
+                  v-model="config.linux_streaming_output"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                >
+                  <option value="">— select —</option>
+                  <option
+                    v-for="o in dongleOutputs"
+                    :key="'s-' + o.name"
+                    :value="o.name"
+                  >
+                    {{ o.name }}{{ o.connected ? ' (connected)' : '' }}{{ o.likely_dongle ? ' · dongle?' : '' }}{{ o.suggested_streaming ? ' · suggested' : '' }}
+                  </option>
+                </select>
+                <input
+                  v-model="config.linux_streaming_output"
+                  type="text"
+                  class="mt-2 w-full rounded-lg border border-storm/40 bg-void/40 px-3 py-1.5 font-mono text-xs text-silver"
+                  placeholder="or type e.g. HDMI-A-2"
+                />
+              </label>
+              <label class="block text-sm text-storm">
+                Primary output (real panel)
+                <select
+                  v-model="config.linux_primary_output"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                >
+                  <option value="">— select —</option>
+                  <option
+                    v-for="o in dongleOutputs"
+                    :key="'p-' + o.name"
+                    :value="o.name"
+                  >
+                    {{ o.name }}{{ o.connected ? ' (connected)' : '' }}{{ o.enabled ? ' · enabled' : '' }}{{ o.suggested_primary ? ' · suggested' : '' }}
+                  </option>
+                </select>
+                <input
+                  v-model="config.linux_primary_output"
+                  type="text"
+                  class="mt-2 w-full rounded-lg border border-storm/40 bg-void/40 px-3 py-1.5 font-mono text-xs text-silver"
+                  placeholder="or type e.g. DP-3"
+                />
+              </label>
+              <label class="block text-sm text-storm sm:col-span-2">
+                Swap mode
+                <select
+                  v-model="config.headless_swap_mode"
+                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                >
+                  <option value="privacy">privacy — dongle primary, blank panel</option>
+                  <option value="off">off — extended, panel stays primary</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div
+            v-if="isGamescopePath"
+            class="rounded-lg border border-ice/20 bg-ice/5 px-3 py-2 text-sm text-storm"
+          >
+            <strong class="text-silver">Gamescope Stream</strong> attaches to
+            <code class="text-ice">gamescope-0</code> (idle unit) or spawns owned headless Gamescope.
+            Capture is portal/PipeWire. Settings that matter: path card, encoder, bitrate/HDR, apps.
+            labwc-only flags (cage compositor, GPU-native preference) are ignored on this path.
+            Save and restart Polaris after switching.
+          </div>
+
           <div class="settings-subtle-surface" data-linux-streaming-setup>
             <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <div class="section-kicker">Linux Streaming Setup</div>
-                <h4 class="mt-2 text-sm font-semibold text-silver">Guided checklist for desktop Linux hosts</h4>
+                <h4 class="mt-2 text-sm font-semibold text-silver">Minimal checklist for this path</h4>
                 <div class="mt-1 text-sm leading-relaxed text-storm">
-                  Use this before the first Moonlight run: discover the display pair, keep Private Stream as the default, decide Auto Quality, then only force GPU-native capture when telemetry shows SHM/system-memory fallback.
+                  Default is <strong class="text-silver">Private Stream (labwc)</strong>. Gamescope works when the host stack is ready.
+                  Only the steps for the selected path are shown.
                 </div>
               </div>
               <span class="meta-pill shrink-0">{{ selectedStreamDisplayMode.title }}</span>
@@ -372,11 +578,21 @@ const validateFallbackMode = (event) => {
           <div class="grid gap-3 xl:grid-cols-3">
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-accent">Isolation</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">Private Stream keeps apps off your real desktop and is the default stability target.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">
+                {{ isGamescopePath
+                  ? 'Gamescope Stream isolates paint in gamescope-0 (portal capture).'
+                  : 'Private Stream (labwc) keeps apps off your real desktop — the default stability target.' }}
+              </div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">GPU-native is reported as capture truth in session health. Force it only when diagnostics show CPU/SHM fallback.</div>
+              <div class="mt-2 text-sm leading-relaxed text-storm">
+                {{ isLabwcPath
+                  ? 'GPU-native is a labwc capture preference. Force it only when diagnostics show CPU/SHM fallback.'
+                  : isGamescopePath
+                    ? 'Gamescope uses portal/PipeWire capture; labwc GPU-native flags do not apply.'
+                    : 'Capture backend follows the path (portal for mirror/dongle; KMS only if you set capture=kms).' }}
+              </div>
             </div>
             <div class="surface-muted p-3">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>
@@ -384,12 +600,12 @@ const validateFallbackMode = (event) => {
             </div>
           </div>
 
-          <details class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
+          <details v-if="isLabwcPath" class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
             <summary class="settings-disclosure-summary p-4">
               <div>
                 <div class="section-kicker">Advanced</div>
-                <h4 class="mt-2 text-sm font-semibold text-silver">Advanced Linux runtime flags</h4>
-                <div class="mt-1 text-sm text-storm">Direct access to the existing config keys used by the mode selector.</div>
+                <h4 class="mt-2 text-sm font-semibold text-silver">labwc runtime flags</h4>
+                <div class="mt-1 text-sm text-storm">These keys only affect Private Stream / labwc paths. Hidden when Gamescope or host paths are selected.</div>
               </div>
               <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
             </summary>

@@ -1,0 +1,118 @@
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 5c2dd11..fd63f25 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -3644,6 +3644,10 @@ static gamescope::Rc<CVulkanTexture> acquire_pooled_texture( auto& pool, uint32_
+ 			textureFlags.bMappable = true;
+ 			textureFlags.bTransferDst = true;
+ 			textureFlags.bStorage = true;
++			// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2271 (was #2094)
++// RGB-to-NV12 paint_pipewire samples this texture; without bSampled the view is
++// never created → black PipeWire frames (Intel + NVIDIA).
++textureFlags.bSampled = true;
+ 			if (exportable || drmFormat == DRM_FORMAT_NV12) {
+ 				textureFlags.bExportable = true;
+ 				textureFlags.bLinear = true; // TODO: support multi-planar DMA-BUF export via PipeWire
+@@ -3683,6 +3687,28 @@ gamescope::Rc<CVulkanTexture> vulkan_acquire_capture_texture(uint32_t width, uin
+ 	return texture;
+ }
+ 
++// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2271 (supersedes #2094)
++// XRGB2101010 linear storage+sampled is optional. NVIDIA proprietary often lacks
++// it; imageStore then lands in XBGR order and PipeWire NV12 / clients (e.g. iPhone)
++// show red/blue swapped. Prefer feature query over driver-id matching (#2094).
++// Drop this helper + all call sites when #2271 merges.
++uint32_t vulkan_get_rgb10_capture_format( void )
++{
++	static uint32_t s_uFormat = []()
++	{
++		// Pooled capture textures are mappable, hence linear-tiled.
++		VkFormatProperties props;
++		g_device.vk.GetPhysicalDeviceFormatProperties( g_device.physDev(), VK_FORMAT_A2R10G10B10_UNORM_PACK32, &props );
++		constexpr VkFormatFeatureFlags uNeeded = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
++		if ( ( props.linearTilingFeatures & uNeeded ) == uNeeded )
++			return DRM_FORMAT_XRGB2101010;
++
++		vk_log.infof( "XRGB2101010 lacks linear storage/sampled support, capturing as XBGR2101010" );
++		return DRM_FORMAT_XBGR2101010;
++	}();
++	return s_uFormat;
++}
++
+ // Internal display's native brightness.
+ float g_flInternalDisplayBrightnessNits = 500.0f;
+ 
+diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
+index b6749d4..7e58b07 100644
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -414,6 +414,8 @@ void vulkan_wait( uint64_t ulSeqNo, bool bReset );
+ gamescope::Rc<CVulkanTexture> vulkan_get_last_output_image( bool partial, bool defer );
+ gamescope::Rc<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace = k_EStreamColorspace_Unknown);
+ gamescope::Rc<CVulkanTexture> vulkan_acquire_capture_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace = k_EStreamColorspace_Unknown);
++// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2271
++uint32_t vulkan_get_rgb10_capture_format( void );
+ 
+ void vulkan_present_to_window( void );
+ 
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 19b1cf7..a1f7a25 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -2421,8 +2421,11 @@ static void paint_pipewire()
+ 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 )  );
+ 	}
+ 
++	// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2271 — was DRM_FORMAT_XRGB2101010.
++	// Intermediate RGB for RGB→NV12 must match what the driver can storage-write
++	// (NVIDIA often needs XBGR2101010 or R/B end up swapped on Moonlight/iPhone).
+ 	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
+-		? vulkan_acquire_capture_texture( uWidth, uHeight, false, DRM_FORMAT_XRGB2101010 )
++		? vulkan_acquire_capture_texture( uWidth, uHeight, false, vulkan_get_rgb10_capture_format() )
+ 		: gamescope::Rc<CVulkanTexture>{ s_pPipewireBuffer->texture };
+ 
+ 	gamescope::Rc<CVulkanTexture> pYUVTexture = s_pPipewireBuffer->texture->isYcbcr() ? s_pPipewireBuffer->texture : nullptr;
+@@ -2861,8 +2864,9 @@ paint_all( global_focus_t *pFocus, bool async )
+ 
+ 		uint32_t drmCaptureFormat = DRM_FORMAT_INVALID;
+ 
++		// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2271
+ 		if ( path.extension() == ".avif" )
+-			drmCaptureFormat = DRM_FORMAT_XRGB2101010;
++			drmCaptureFormat = vulkan_get_rgb10_capture_format();
+ 		else if ( path.extension() == ".png" )
+ 			drmCaptureFormat = DRM_FORMAT_XRGB8888;
+ 		else if ( path.extension() == ".bin" && path.stem().extension() == ".nv12" )
+@@ -3028,12 +3032,18 @@ paint_all( global_focus_t *pFocus, bool async )
+ 
+ 				bool bScreenshotSuccess = false;
+ 
+-				if ( pScreenshotTexture->format() == VK_FORMAT_A2R10G10B10_UNORM_PACK32 )
++				// POLARIS-UPSTREAM-REMOVE: ValveSoftware/gamescope#2271 — unpack R/B by actual format.
++				if ( pScreenshotTexture->format() == VK_FORMAT_A2R10G10B10_UNORM_PACK32 ||
++				     pScreenshotTexture->format() == VK_FORMAT_A2B10G10R10_UNORM_PACK32 )
+ 				{
+ 					// Make our own copy of the image to remove the alpha channel.
+ 					constexpr uint32_t kCompCnt = 3;
+ 					auto imageData = std::vector<uint16_t>( width * height * kCompCnt );
+ 
++					// R sits at bits 20-29 for XRGB, 0-9 for XBGR. B mirrors it.
++					const uint32_t uRedShift = pScreenshotTexture->format() == VK_FORMAT_A2R10G10B10_UNORM_PACK32 ? 20 : 0;
++					const uint32_t uBlueShift = 20 - uRedShift;
++
+ 					for (uint32_t y = 0; y < height; y++)
+ 					{
+ 						for (uint32_t x = 0; x < width; x++)
+@@ -3041,9 +3051,9 @@ paint_all( global_focus_t *pFocus, bool async )
+ 							uint32_t *pInPixel = (uint32_t *)&mappedData[(y * pScreenshotTexture->rowPitch()) + x * (32 / 8)];
+ 							uint32_t uInPixel = *pInPixel;
+ 
+-							imageData[y * width * kCompCnt + x * kCompCnt + 0] = (uInPixel & (0b1111111111 << 20)) >> 20;
+-							imageData[y * width * kCompCnt + x * kCompCnt + 1] = (uInPixel & (0b1111111111 << 10)) >> 10;
+-							imageData[y * width * kCompCnt + x * kCompCnt + 2] = (uInPixel & (0b1111111111 << 0))  >> 0;
++							imageData[y * width * kCompCnt + x * kCompCnt + 0] = (uInPixel >> uRedShift)  & 0b1111111111;
++							imageData[y * width * kCompCnt + x * kCompCnt + 1] = (uInPixel >> 10) & 0b1111111111;
++							imageData[y * width * kCompCnt + x * kCompCnt + 2] = (uInPixel >> uBlueShift) & 0b1111111111;
+ 						}
+ 					}
+ 

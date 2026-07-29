@@ -5,13 +5,20 @@
 // standard includes
 #include <array>
 #include <bitset>
+#include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <limits>
+#include <iomanip>
+#include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 
 // lib includes
+#include <drm_fourcc.h>
 #include <ffnvcodec/dynlink_loader.h>
 #include <NvFBC.h>
+#include <vulkan/vulkan.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -24,6 +31,7 @@ extern "C" {
 #include "graphics.h"
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/stream_stats.h"
 #include "src/utility.h"
 #include "src/video.h"
 #include "wayland.h"
@@ -45,6 +53,7 @@ using namespace std::literals;
 namespace cuda {
   constexpr auto cudaDevAttrMaxThreadsPerBlock = (CUdevice_attribute) 1;
   constexpr auto cudaDevAttrMaxThreadsPerMultiProcessor = (CUdevice_attribute) 39;
+  constexpr unsigned cudaExternalMemoryDedicated = 1;
 
   void pass_error(const std::string_view &sv, const char *name, const char *description) {
     BOOST_LOG(error) << sv << name << ':' << description;
@@ -110,6 +119,7 @@ namespace cuda {
       }
 
       data = (void *) 0x1;
+      hardware_device_index = 0;
 
       width = in_width;
       height = in_height;
@@ -275,6 +285,50 @@ namespace cuda {
     return -1;
   }
 
+  std::optional<int> cuda_device_index_for_render_node(const fs::path &render_node) {
+    if (render_node.parent_path() != "/dev/dri" ||
+        !render_node.filename().string().starts_with("renderD")) {
+      return std::nullopt;
+    }
+
+    std::error_code ec;
+    const auto render_pci_device = fs::canonical(
+      fs::path {"/sys/class/drm"} / render_node.filename() / "device", ec);
+    if (ec) {
+      BOOST_LOG(error) << "Unable to resolve DRM render node ["sv << render_node.string()
+                       << "] to a PCI device: "sv << ec.message();
+      return std::nullopt;
+    }
+
+    int device_count = 0;
+    if (cdf->cuDeviceGetCount(&device_count) != CUDA_SUCCESS) {
+      return std::nullopt;
+    }
+    for (int i = 0; i < device_count; ++i) {
+      CUdevice device;
+      if (cdf->cuDeviceGet(&device, i) != CUDA_SUCCESS) {
+        continue;
+      }
+
+      std::array<char, 13> pci_bus_id {};
+      if (cdf->cuDeviceGetPCIBusId(pci_bus_id.data(), pci_bus_id.size(), device) != CUDA_SUCCESS) {
+        continue;
+      }
+      std::transform(pci_bus_id.begin(), pci_bus_id.end(), pci_bus_id.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+
+      ec.clear();
+      const auto cuda_pci_device = fs::canonical(
+        fs::path {"/sys/bus/pci/devices"} / pci_bus_id.data(), ec);
+      if (!ec && cuda_pci_device == render_pci_device) {
+        return i;
+      }
+    }
+
+    return std::nullopt;
+  }
+
   class gl_cuda_vram_t: public platf::avcodec_encode_device_t {
   public:
     struct rgb_cache_entry_t {
@@ -291,28 +345,50 @@ namespace cuda {
      * @return 0 on success or -1 on failure.
      */
     int init(int in_width, int in_height, int offset_x, int offset_y) {
-      // This must be non-zero to tell the video core that it's a hardware encoding device.
-      data = (void *) 0x1;
-
-      // Select CUDA device by adapter_name config or default to first device
+      // Select the CUDA device by exact render-node PCI identity when a DRM
+      // adapter path is configured. Never silently fall back to CUDA device 0
+      // for an explicit render node: that would violate same-GPU DMA-BUF use.
       int cuda_device_index = 0;
       if (!::config::video.adapter_name.empty()) {
-        int device_count = 0;
-        cdf->cuDeviceGetCount(&device_count);
-        for (int i = 0; i < device_count; i++) {
-          CUdevice dev;
-          if (cdf->cuDeviceGet(&dev, i) == CUDA_SUCCESS) {
-            char name[256];
-            if (cdf->cuDeviceGetName(name, sizeof(name), dev) == CUDA_SUCCESS) {
-              if (::config::video.adapter_name == name) {
+        if (::config::video.adapter_name.starts_with("/dev/dri/renderD")) {
+          const auto selected = cuda_device_index_for_render_node(::config::video.adapter_name);
+          if (!selected) {
+            BOOST_LOG(error) << "Configured render node ["sv << ::config::video.adapter_name
+                             << "] does not map to a CUDA device"sv;
+            return -1;
+          }
+          cuda_device_index = *selected;
+          BOOST_LOG(info) << "Selected CUDA device "sv << cuda_device_index
+                          << " from render node ["sv << ::config::video.adapter_name << ']';
+        } else {
+          bool found = false;
+          int device_count = 0;
+          cdf->cuDeviceGetCount(&device_count);
+          for (int i = 0; i < device_count; i++) {
+            CUdevice dev;
+            if (cdf->cuDeviceGet(&dev, i) == CUDA_SUCCESS) {
+              char name[256];
+              if (cdf->cuDeviceGetName(name, sizeof(name), dev) == CUDA_SUCCESS &&
+                  ::config::video.adapter_name == name) {
                 cuda_device_index = i;
+                found = true;
                 BOOST_LOG(info) << "Selected CUDA device " << i << ": " << name;
                 break;
               }
             }
           }
+          if (!found) {
+            BOOST_LOG(error) << "Configured CUDA adapter ["sv << ::config::video.adapter_name
+                             << "] was not found"sv;
+            return -1;
+          }
         }
       }
+
+      // Keep the historical non-null hardware marker and pass the selected
+      // ordinal explicitly to FFmpeg CUDA context creation.
+      data = (void *) 0x1;
+      hardware_device_index = cuda_device_index;
       file = std::move(open_drm_fd_for_cuda_device(cuda_device_index));
       if (file.el < 0) {
         char string[1024];
@@ -526,6 +602,896 @@ namespace cuda {
     int offset_x, offset_y;
   };
 
+  class cuda_dmabuf_t: public cuda_t {
+  public:
+    struct source_import_t {
+      std::uint64_t buffer_key {0};
+      VkBuffer buffer {VK_NULL_HANDLE};
+      VkDeviceMemory memory {VK_NULL_HANDLE};
+      VkDeviceSize allocation_size {0};
+      VkDeviceSize copy_offset {0};
+      VkDeviceSize copy_size {0};
+      std::uint32_t pitch {0};
+    };
+
+    ~cuda_dmabuf_t() override {
+      if (!cu_ctx) {
+        release_vulkan();
+        return;
+      }
+      CUcontext popped = nullptr;
+      if (cdf->cuCtxPushCurrent(cu_ctx) != CUDA_SUCCESS) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: couldn't activate CUDA context for ordered cleanup; retaining shared resources"sv;
+        return;
+      }
+      release_cuda_destination();
+      staging_tex.reset();
+      sws.color_matrix.reset();
+      stream.reset();
+      release_vulkan();
+      cdf->cuCtxPopCurrent(&popped);
+    }
+
+    int init(int in_width, int in_height) {
+      if (!cdf) {
+        return -1;
+      }
+
+      int cuda_device_index = 0;
+      if (!::config::video.adapter_name.empty()) {
+        if (::config::video.adapter_name.starts_with("/dev/dri/renderD")) {
+          const auto selected = cuda_device_index_for_render_node(::config::video.adapter_name);
+          if (!selected) {
+            BOOST_LOG(error) << "Configured render node ["sv << ::config::video.adapter_name
+                             << "] does not map to a CUDA device"sv;
+            return -1;
+          }
+          cuda_device_index = *selected;
+        } else {
+          bool found = false;
+          int device_count = 0;
+          cdf->cuDeviceGetCount(&device_count);
+          for (int i = 0; i < device_count; ++i) {
+            CUdevice dev;
+            char name[256];
+            if (cdf->cuDeviceGet(&dev, i) == CUDA_SUCCESS &&
+                cdf->cuDeviceGetName(name, sizeof(name), dev) == CUDA_SUCCESS &&
+                ::config::video.adapter_name == name) {
+              cuda_device_index = i;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            BOOST_LOG(error) << "Configured CUDA adapter ["sv << ::config::video.adapter_name
+                             << "] was not found"sv;
+            return -1;
+          }
+        }
+      }
+
+      data = (void *) 0x1;
+      hardware_device_index = cuda_device_index;
+      width = in_width;
+      height = in_height;
+      return 0;
+    }
+
+    int set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx_buf) override {
+      // Accept NV12 (SDR) and P010 (HDR 10-bit). Base cuda_t only allows NV12.
+      // CUDA hw frames use frame->format=AV_PIX_FMT_CUDA; real layout is sw_format.
+      this->hwframe.reset(frame);
+      this->frame = frame;
+
+      auto *hwframe_ctx = (AVHWFramesContext *) hw_frames_ctx_buf->data;
+      if (hwframe_ctx->sw_format != AV_PIX_FMT_NV12 && hwframe_ctx->sw_format != AV_PIX_FMT_P010) {
+        BOOST_LOG(error) << "CUDA DMABUF: unsupported sw_format (need NV12 or P010), got "sv
+                         << hwframe_ctx->sw_format;
+        return -1;
+      }
+      encode_sw_format = hwframe_ctx->sw_format;
+
+      if (!frame->buf[0]) {
+        if (av_hwframe_get_buffer(hw_frames_ctx_buf, frame, 0)) {
+          BOOST_LOG(error) << "CUDA DMABUF: Couldn't get hwframe for NVENC"sv;
+          return -1;
+        }
+      }
+
+      auto *device_ctx = (AVCUDADeviceContext *) hwframe_ctx->device_ctx->hwctx;
+      cu_ctx = device_ctx->cuda_ctx;
+
+      stream = make_stream();
+      if (!stream) {
+        return -1;
+      }
+      device_ctx->stream = stream.get();
+
+      auto sws_opt = sws_t::make(width, height, frame->width, frame->height, width * 4);
+      if (!sws_opt) {
+        return -1;
+      }
+      sws = std::move(*sws_opt);
+      linear_interpolation = width != frame->width || height != frame->height;
+
+      staging_tex = tex_t::make(height, width * 4);
+      if (!staging_tex) {
+        return -1;
+      }
+
+      CUcontext popped = nullptr;
+      if (!cu_ctx || cdf->cuCtxPushCurrent(cu_ctx) != CUDA_SUCCESS) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: selected CUDA context unavailable"sv;
+        return -1;
+      }
+      if (!init_vulkan()) {
+        activate_fallback("Vulkan initialization or capability validation failed"sv);
+      }
+      cdf->cuCtxPopCurrent(&popped);
+      return 0;
+    }
+
+    int convert(platf::img_t &img) override {
+      CUcontext popped = nullptr;
+      if (!cu_ctx || cdf->cuCtxPushCurrent(cu_ctx) != CUDA_SUCCESS) {
+        return -1;
+      }
+      const int result = convert_inner(static_cast<egl::img_descriptor_t &>(img));
+      cdf->cuCtxPopCurrent(&popped);
+      return result;
+    }
+
+  private:
+    struct layout_t {
+      VkDeviceSize required_size;
+      VkDeviceSize offset;
+      VkDeviceSize copy_size;
+      std::uint32_t pitch;
+    };
+
+    bool vk_call(VkResult result, std::string_view action) {
+      if (result == VK_SUCCESS) {
+        return true;
+      }
+      BOOST_LOG(error) << "CUDA DMABUF Vulkan: "sv << action << " failed VkResult="sv << result;
+      return false;
+    }
+
+    void activate_fallback(std::string_view reason) {
+      if (!force_mmap) {
+        release_cuda_destination();
+        release_vulkan();
+      }
+      force_mmap = true;
+      active_frame = false;
+      if (!fallback_logged) {
+        BOOST_LOG(error)
+          << "CUDA DMABUF: Vulkan bridge failed — STICKY FALLBACK convert_path=mmap_cuda reason="sv
+          << reason << ". DmaBuf capture remains active, but encode conversion crosses CPU memory; not gpu_native."sv;
+        fallback_logged = true;
+      }
+      stream_stats::update_encode_path_metadata(
+        "mmap_cuda",
+        platf::frame_residency_e::cpu,
+        platf::frame_format_e::bgra8
+      );
+    }
+
+    std::optional<layout_t> layout(const egl::surface_descriptor_t &sd) const {
+      // 8-bit BGRx/BGRA and 10-bit XBGR2101010 are all single-plane 32bpp LINEAR.
+      if (sd.fds[0] < 0 || sd.fds[1] >= 0 || sd.fds[2] >= 0 || sd.fds[3] >= 0 ||
+          (sd.fourcc != DRM_FORMAT_XRGB8888 && sd.fourcc != DRM_FORMAT_ARGB8888 &&
+           sd.fourcc != DRM_FORMAT_XBGR2101010) ||
+          sd.width <= 0 || sd.height <= 0 || sd.width != width || sd.height != height ||
+          sd.modifier != DRM_FORMAT_MOD_LINEAR || (sd.offsets[0] & 3) || (sd.pitches[0] & 3)) {
+        return std::nullopt;
+      }
+      const auto min_pitch = static_cast<VkDeviceSize>(sd.width) * 4;
+      const auto pitch = static_cast<VkDeviceSize>(sd.pitches[0]);
+      const auto frame_height = static_cast<VkDeviceSize>(sd.height);
+      if (pitch < min_pitch || pitch > std::numeric_limits<VkDeviceSize>::max() / frame_height) {
+        return std::nullopt;
+      }
+      const auto copy_size = pitch * frame_height;
+      const auto offset = static_cast<VkDeviceSize>(sd.offsets[0]);
+      if (offset > std::numeric_limits<VkDeviceSize>::max() - copy_size) {
+        return std::nullopt;
+      }
+      return layout_t {offset + copy_size, offset, copy_size, sd.pitches[0]};
+    }
+
+    std::optional<VkDeviceSize> dmabuf_allocation_size(int fd, VkDeviceSize required_size, std::string_view action) const {
+      errno = 0;
+      const auto end = lseek(fd, 0, SEEK_END);
+      if (end < 0) {
+        BOOST_LOG(error) << "CUDA DMABUF: "sv << action << " couldn't query allocation size with lseek: fd="sv
+                         << fd << " error="sv << strerror(errno);
+        return std::nullopt;
+      }
+      const auto allocation_size = static_cast<VkDeviceSize>(end);
+      if (allocation_size < required_size) {
+        BOOST_LOG(error) << "CUDA DMABUF: "sv << action << " allocation too small: allocation_size="sv
+                         << allocation_size << " required_offset_pitch_height="sv << required_size;
+        return std::nullopt;
+      }
+      return allocation_size;
+    }
+
+    int convert_inner(egl::img_descriptor_t &descriptor) {
+      if (descriptor.sequence == 0) {
+        return convert_blank();
+      }
+      if (descriptor.sequence > sequence) {
+        sequence = descriptor.sequence;
+        int result = force_mmap ? convert_mmap(descriptor) : vulkan_and_convert(descriptor);
+        if (result < 0 && !force_mmap) {
+          activate_fallback("frame import/copy failed"sv);
+          result = convert_mmap(descriptor);
+        }
+        descriptor.reset();
+        active_frame = result == 0;
+        return result;
+      }
+      if (!active_frame) {
+        return convert_blank();
+      }
+      const auto texture = force_mmap ? tex_obj(*staging_tex) : destination_texture;
+      const bool src_xb30 = source_fourcc == DRM_FORMAT_XBGR2101010;
+      // SPA BGRx → DRM XRGB8888 LE is B,G,R,X (classic bgra_to_rgb).
+      // SPA RGBx → DRM XBGR8888 LE is R,G,B,X (no swizzle). Never treat XRGB as RGB8 —
+      // that R/B-swaps every client (iPhone looked "fixed", Bedroom/Mac/TV broken).
+      const bool src_rgb8 = !src_xb30 &&
+        (source_fourcc == DRM_FORMAT_XBGR8888 || source_fourcc == DRM_FORMAT_ABGR8888);
+      return sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], texture, stream.get(),
+        encode_sw_format == AV_PIX_FMT_P010, src_xb30, src_rgb8);
+    }
+
+    int convert_blank() {
+      if (!staging_tex || check(cdf->cuStreamSynchronize(stream.get()), "Couldn't synchronize CUDA stream before blank upload: "sv)) {
+        return -1;
+      }
+      platf::img_t blank;
+      blank.width = width;
+      blank.height = height;
+      blank.pixel_pitch = 4;
+      blank.row_pitch = width * 4;
+      std::vector<std::uint8_t> zeros(static_cast<std::size_t>(blank.row_pitch) * blank.height, 0);
+      blank.data = zeros.data();
+      return sws.load_ram(blank, staging_tex->array) ||
+        sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex_obj(*staging_tex), stream.get(),
+          encode_sw_format == AV_PIX_FMT_P010, false);
+    }
+
+    int convert_mmap(egl::img_descriptor_t &descriptor) {
+      const auto frame_layout = layout(descriptor.sd);
+      if (!frame_layout || !staging_tex) {
+        BOOST_LOG(error) << "CUDA DMABUF: mmap fallback rejected non-LINEAR one-plane packed-4 descriptor"sv;
+        return -1;
+      }
+      const auto allocation_size = dmabuf_allocation_size(
+        descriptor.sd.fds[0], frame_layout->required_size, "mmap fallback"sv);
+      if (!allocation_size || *allocation_size > std::numeric_limits<std::size_t>::max()) {
+        if (allocation_size) {
+          BOOST_LOG(error) << "CUDA DMABUF: mmap allocation exceeds addressable size: allocation_size="sv << *allocation_size;
+        }
+        return -1;
+      }
+      stream_stats::update_encode_path_metadata(
+        "mmap_cuda",
+        platf::frame_residency_e::cpu,
+        platf::frame_format_e::bgra8
+      );
+      if (check(cdf->cuStreamSynchronize(stream.get()), "Couldn't synchronize CUDA stream before mmap upload: "sv)) {
+        return -1;
+      }
+      void *map = mmap(nullptr, static_cast<std::size_t>(*allocation_size), PROT_READ, MAP_SHARED, descriptor.sd.fds[0], 0);
+      if (map == MAP_FAILED) {
+        BOOST_LOG(error) << "CUDA DMABUF: mmap failed: allocation_size="sv << *allocation_size
+                         << " error="sv << strerror(errno);
+        return -1;
+      }
+      platf::img_t host;
+      host.width = width;
+      host.height = height;
+      host.pixel_pitch = 4;
+      host.row_pitch = static_cast<std::int32_t>(frame_layout->pitch);
+      host.data = static_cast<std::uint8_t *>(map) + frame_layout->offset;
+      const int load_result = sws.load_ram(host, staging_tex->array);
+      munmap(map, static_cast<std::size_t>(*allocation_size));
+      if (load_result) {
+        return -1;
+      }
+      // mmap staging is uchar4; XB30 bytes will be wrong here — only SDR/fallback path.
+      // Match vulkan_and_convert: XBGR/ABGR = RGB bytes; XRGB/ARGB = BGR bytes.
+      const bool src_rgb8 = descriptor.sd.fourcc == DRM_FORMAT_XBGR8888 ||
+        descriptor.sd.fourcc == DRM_FORMAT_ABGR8888;
+      return sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex_obj(*staging_tex), stream.get(),
+        encode_sw_format == AV_PIX_FMT_P010, false, src_rgb8);
+    }
+
+    bool has_device_extension(const std::vector<VkExtensionProperties> &extensions, const char *name) const {
+      return std::any_of(extensions.begin(), extensions.end(), [&](const auto &extension) {
+        return std::strcmp(extension.extensionName, name) == 0;
+      });
+    }
+
+    bool external_buffer_supported(VkExternalMemoryHandleTypeFlagBits handle_type, VkBufferUsageFlags usage, VkExternalMemoryFeatureFlags feature) {
+      VkPhysicalDeviceExternalBufferInfo info {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO,
+        .flags = 0,
+        .usage = usage,
+        .handleType = handle_type,
+      };
+      VkExternalBufferProperties properties {VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES};
+      vkGetPhysicalDeviceExternalBufferProperties(physical_device, &info, &properties);
+      const auto &external = properties.externalMemoryProperties;
+      return (external.externalMemoryFeatures & feature) == feature &&
+             (external.compatibleHandleTypes & handle_type) != 0;
+    }
+
+    bool init_vulkan() {
+      if (!cdf->cuImportExternalMemory || !cdf->cuExternalMemoryGetMappedBuffer ||
+          !cdf->cuDestroyExternalMemory || (!cdf->cuDeviceGetUuid_v2 && !cdf->cuDeviceGetUuid)) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: required CUDA external-memory or UUID symbols unavailable"sv;
+        return false;
+      }
+
+      CUdevice cuda_device;
+      CUuuid cuda_uuid {};
+      if (cdf->cuCtxGetDevice(&cuda_device) != CUDA_SUCCESS ||
+          ((cdf->cuDeviceGetUuid_v2 && cdf->cuDeviceGetUuid_v2(&cuda_uuid, cuda_device) != CUDA_SUCCESS) ||
+           (!cdf->cuDeviceGetUuid_v2 && cdf->cuDeviceGetUuid(&cuda_uuid, cuda_device) != CUDA_SUCCESS))) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: couldn't query selected CUDA context UUID"sv;
+        return false;
+      }
+
+      auto enumerate_instance_version = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+        vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+      std::uint32_t api_version = VK_API_VERSION_1_0;
+      if (!enumerate_instance_version || enumerate_instance_version(&api_version) != VK_SUCCESS || api_version < VK_API_VERSION_1_1) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: Vulkan 1.1 loader required"sv;
+        return false;
+      }
+      VkApplicationInfo app_info {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pApplicationName = "polaris-cuda-dmabuf",
+        .apiVersion = VK_API_VERSION_1_1,
+      };
+      VkInstanceCreateInfo instance_info {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pApplicationInfo = &app_info,
+      };
+      if (!vk_call(vkCreateInstance(&instance_info, nullptr, &instance), "vkCreateInstance"sv)) {
+        return false;
+      }
+
+      std::uint32_t physical_count = 0;
+      if (!vk_call(vkEnumeratePhysicalDevices(instance, &physical_count, nullptr), "vkEnumeratePhysicalDevices(count)"sv) || !physical_count) {
+        return false;
+      }
+      std::vector<VkPhysicalDevice> physical_devices(physical_count);
+      if (!vk_call(vkEnumeratePhysicalDevices(instance, &physical_count, physical_devices.data()), "vkEnumeratePhysicalDevices"sv)) {
+        return false;
+      }
+      for (const auto candidate : physical_devices) {
+        VkPhysicalDeviceIDProperties id {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 properties {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &id};
+        vkGetPhysicalDeviceProperties2(candidate, &properties);
+        if (std::memcmp(id.deviceUUID, cuda_uuid.bytes, VK_UUID_SIZE) != 0) {
+          continue;
+        }
+        if (properties.properties.apiVersion < VK_API_VERSION_1_1) {
+          BOOST_LOG(error) << "CUDA DMABUF Vulkan: CUDA-matched physical device supports only Vulkan "sv
+                           << VK_API_VERSION_MAJOR(properties.properties.apiVersion) << '.'
+                           << VK_API_VERSION_MINOR(properties.properties.apiVersion) << "; Vulkan 1.1 required"sv;
+          return false;
+        }
+        physical_device = candidate;
+        break;
+      }
+      if (!physical_device) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: no Vulkan physical device matches selected CUDA UUID"sv;
+        return false;
+      }
+
+      std::uint32_t extension_count = 0;
+      if (!vk_call(vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, nullptr), "vkEnumerateDeviceExtensionProperties(count)"sv)) {
+        return false;
+      }
+      std::vector<VkExtensionProperties> extensions(extension_count);
+      if (!vk_call(vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, extensions.data()), "vkEnumerateDeviceExtensionProperties"sv)) {
+        return false;
+      }
+      constexpr std::array required_extensions {
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+      };
+      for (const auto *extension : required_extensions) {
+        if (!has_device_extension(extensions, extension)) {
+          BOOST_LOG(error) << "CUDA DMABUF Vulkan: missing device extension "sv << extension;
+          return false;
+        }
+      }
+
+      if (!external_buffer_supported(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) ||
+          !external_buffer_supported(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT)) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: required external-buffer import/export capability unavailable"sv;
+        return false;
+      }
+
+      std::uint32_t queue_count = 0;
+      vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_count, nullptr);
+      std::vector<VkQueueFamilyProperties> queue_properties(queue_count);
+      vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_count, queue_properties.data());
+      for (std::uint32_t i = 0; i < queue_count; ++i) {
+        if (queue_properties[i].queueCount && (queue_properties[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
+          queue_family = i;
+          break;
+        }
+      }
+      if (queue_family == VK_QUEUE_FAMILY_IGNORED) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: no transfer-capable queue family"sv;
+        return false;
+      }
+
+      float priority = 1.0f;
+      VkDeviceQueueCreateInfo queue_info {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = queue_family,
+        .queueCount = 1,
+        .pQueuePriorities = &priority,
+      };
+      VkDeviceCreateInfo device_info {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &queue_info,
+        .enabledExtensionCount = static_cast<std::uint32_t>(required_extensions.size()),
+        .ppEnabledExtensionNames = required_extensions.data(),
+      };
+      if (!vk_call(vkCreateDevice(physical_device, &device_info, nullptr, &device), "vkCreateDevice"sv)) {
+        return false;
+      }
+      vkGetDeviceQueue(device, queue_family, 0, &queue);
+      get_memory_fd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR"));
+      get_memory_fd_properties = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryFdPropertiesKHR"));
+      if (!get_memory_fd || !get_memory_fd_properties) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: external-memory-fd entry points unavailable"sv;
+        return false;
+      }
+
+      vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+      VkCommandPoolCreateInfo pool_info {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = queue_family,
+      };
+      if (!vk_call(vkCreateCommandPool(device, &pool_info, nullptr, &command_pool), "vkCreateCommandPool"sv)) {
+        return false;
+      }
+      VkCommandBufferAllocateInfo command_info {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+      };
+      if (!vk_call(vkAllocateCommandBuffers(device, &command_info, &command_buffer), "vkAllocateCommandBuffers"sv)) {
+        return false;
+      }
+      VkFenceCreateInfo fence_info {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+      return vk_call(vkCreateFence(device, &fence_info, nullptr, &fence), "vkCreateFence"sv);
+    }
+
+    std::optional<std::uint32_t> memory_type(std::uint32_t bits, VkMemoryPropertyFlags preferred = 0) const {
+      for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+        if ((bits & (1u << i)) && (memory_properties.memoryTypes[i].propertyFlags & preferred) == preferred) {
+          return i;
+        }
+      }
+      if (preferred) {
+        return memory_type(bits);
+      }
+      return std::nullopt;
+    }
+
+    bool ensure_destination(const layout_t &frame_layout) {
+      if (destination_buffer) {
+        return destination_copy_size == frame_layout.copy_size && destination_pitch == frame_layout.pitch;
+      }
+      VkExternalMemoryBufferCreateInfo external_info {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+      };
+      VkBufferCreateInfo buffer_info {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = &external_info,
+        .size = frame_layout.copy_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      };
+      if (!vk_call(vkCreateBuffer(device, &buffer_info, nullptr, &destination_buffer), "vkCreateBuffer(destination)"sv)) {
+        return false;
+      }
+      VkMemoryRequirements requirements;
+      vkGetBufferMemoryRequirements(device, destination_buffer, &requirements);
+      const auto type = memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      if (!type) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: no destination memory type"sv;
+        return false;
+      }
+      VkExportMemoryAllocateInfo export_info {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+      };
+      VkMemoryDedicatedAllocateInfo dedicated_info {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .pNext = &export_info,
+        .buffer = destination_buffer,
+      };
+      VkMemoryAllocateInfo allocation_info {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &dedicated_info,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = *type,
+      };
+      if (!vk_call(vkAllocateMemory(device, &allocation_info, nullptr, &destination_memory), "vkAllocateMemory(destination)"sv) ||
+          !vk_call(vkBindBufferMemory(device, destination_buffer, destination_memory, 0), "vkBindBufferMemory(destination)"sv)) {
+        return false;
+      }
+      destination_allocation_size = requirements.size;
+      destination_copy_size = frame_layout.copy_size;
+      destination_pitch = frame_layout.pitch;
+
+      VkMemoryGetFdInfoKHR fd_info {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+        .memory = destination_memory,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+      };
+      int export_fd = -1;
+      if (!vk_call(get_memory_fd(device, &fd_info, &export_fd), "vkGetMemoryFdKHR"sv)) {
+        return false;
+      }
+      CUDA_EXTERNAL_MEMORY_HANDLE_DESC cuda_handle {};
+      cuda_handle.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD;
+      cuda_handle.handle.fd = export_fd;
+      cuda_handle.size = destination_allocation_size;
+      cuda_handle.flags = cudaExternalMemoryDedicated;
+      CUresult cuda_result = cdf->cuImportExternalMemory(&destination_external_memory, &cuda_handle);
+      if (cuda_result == CUDA_SUCCESS) {
+        export_fd = -1;
+      }
+      if (export_fd >= 0) {
+        close(export_fd);
+      }
+      if (check(cuda_result, "Couldn't import Vulkan destination into CUDA: "sv)) {
+        return false;
+      }
+      CUDA_EXTERNAL_MEMORY_BUFFER_DESC map_info {};
+      map_info.size = destination_allocation_size;
+      if (check(cdf->cuExternalMemoryGetMappedBuffer(&destination_device_ptr, destination_external_memory, &map_info),
+            "Couldn't map Vulkan destination in CUDA: "sv)) {
+        return false;
+      }
+      auto texture = make_pitch2d_texture(
+        reinterpret_cast<void *>(static_cast<std::uintptr_t>(destination_device_ptr)),
+        width,
+        height,
+        destination_pitch,
+        linear_interpolation,
+        source_fourcc == DRM_FORMAT_XBGR2101010
+      );
+      if (!texture) {
+        return false;
+      }
+      destination_texture = *texture;
+      return true;
+    }
+
+    void release_source(source_import_t &source) {
+      if (source.buffer) {
+        vkDestroyBuffer(device, source.buffer, nullptr);
+      }
+      if (source.memory) {
+        vkFreeMemory(device, source.memory, nullptr);
+      }
+      source = {};
+    }
+
+    source_import_t *source_for(egl::img_descriptor_t &descriptor, const layout_t &frame_layout) {
+      const auto allocation_size = dmabuf_allocation_size(
+        descriptor.sd.fds[0], frame_layout.required_size, "Vulkan source import"sv);
+      if (!allocation_size) {
+        return nullptr;
+      }
+      for (auto &source : sources) {
+        if (source.buffer && source.buffer_key == descriptor.dmabuf_buffer_key) {
+          if (source.allocation_size == *allocation_size && source.copy_offset == frame_layout.offset &&
+              source.copy_size == frame_layout.copy_size && source.pitch == frame_layout.pitch) {
+            return &source;
+          }
+          release_source(source);
+          break;
+        }
+      }
+
+      auto &source = sources[source_slot];
+      source_slot = (source_slot + 1) % sources.size();
+      release_source(source);
+      VkExternalMemoryBufferCreateInfo external_info {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+      };
+      VkBufferCreateInfo buffer_info {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = &external_info,
+        .size = *allocation_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      };
+      if (!vk_call(vkCreateBuffer(device, &buffer_info, nullptr, &source.buffer), "vkCreateBuffer(source)"sv)) {
+        return nullptr;
+      }
+      VkMemoryRequirements requirements;
+      vkGetBufferMemoryRequirements(device, source.buffer, &requirements);
+      if (*allocation_size < requirements.size) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: source allocation doesn't cover Vulkan memory requirement: allocation_size="sv
+                         << *allocation_size << " layout_required="sv << frame_layout.required_size
+                         << " vk_memory_requirement="sv << requirements.size;
+        release_source(source);
+        return nullptr;
+      }
+      int import_fd = fcntl(descriptor.sd.fds[0], F_DUPFD_CLOEXEC, 0);
+      if (import_fd < 0) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: DMA-BUF fd duplication failed: allocation_size="sv
+                         << *allocation_size << " error="sv << strerror(errno);
+        release_source(source);
+        return nullptr;
+      }
+      VkMemoryFdPropertiesKHR fd_properties {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+      if (!vk_call(get_memory_fd_properties(device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, import_fd, &fd_properties),
+            "vkGetMemoryFdPropertiesKHR"sv)) {
+        close(import_fd);
+        release_source(source);
+        return nullptr;
+      }
+      const auto type = memory_type(requirements.memoryTypeBits & fd_properties.memoryTypeBits);
+      if (!type) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: imported DMA-BUF has no compatible memory type: allocation_size="sv
+                         << *allocation_size << " vk_memory_requirement="sv << requirements.size;
+        close(import_fd);
+        release_source(source);
+        return nullptr;
+      }
+      VkImportMemoryFdInfoKHR import_info {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+        .fd = import_fd,
+      };
+      VkMemoryDedicatedAllocateInfo dedicated_info {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .pNext = &import_info,
+        .buffer = source.buffer,
+      };
+      VkMemoryAllocateInfo allocation_info {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &dedicated_info,
+        .allocationSize = *allocation_size,
+        .memoryTypeIndex = *type,
+      };
+      const VkResult allocation_result = vkAllocateMemory(device, &allocation_info, nullptr, &source.memory);
+      if (allocation_result == VK_SUCCESS) {
+        import_fd = -1;
+      }
+      if (import_fd >= 0) {
+        close(import_fd);
+      }
+      if (!vk_call(allocation_result, "vkAllocateMemory(source import)"sv)) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: source import allocation failed: allocation_size="sv
+                         << *allocation_size << " vk_memory_requirement="sv << requirements.size;
+        release_source(source);
+        return nullptr;
+      }
+      if (!vk_call(vkBindBufferMemory(device, source.buffer, source.memory, 0), "vkBindBufferMemory(source)"sv)) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: source bind failed: allocation_size="sv << *allocation_size
+                         << " vk_memory_requirement="sv << requirements.size;
+        release_source(source);
+        return nullptr;
+      }
+      source.buffer_key = descriptor.dmabuf_buffer_key;
+      source.allocation_size = *allocation_size;
+      source.copy_offset = frame_layout.offset;
+      source.copy_size = frame_layout.copy_size;
+      source.pitch = frame_layout.pitch;
+      return &source;
+    }
+
+    int vulkan_and_convert(egl::img_descriptor_t &descriptor) {
+      const auto frame_layout = layout(descriptor.sd);
+      if (!frame_layout) {
+        return -1;
+      }
+      // Recreate destination texture when packed format changes (8-bit vs 10-bit).
+      if (source_fourcc && source_fourcc != descriptor.sd.fourcc) {
+        release_cuda_destination();
+      }
+      source_fourcc = descriptor.sd.fourcc;
+      if (!device || !ensure_destination(*frame_layout)) {
+        return -1;
+      }
+      auto *source = source_for(descriptor, *frame_layout);
+      if (!source || check(cdf->cuStreamSynchronize(stream.get()), "Couldn't synchronize CUDA stream before Vulkan overwrite: "sv)) {
+        return -1;
+      }
+      if (!vk_call(vkResetFences(device, 1, &fence), "vkResetFences"sv) ||
+          !vk_call(vkResetCommandBuffer(command_buffer, 0), "vkResetCommandBuffer"sv)) {
+        return -1;
+      }
+      VkCommandBufferBeginInfo begin_info {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+      };
+      if (!vk_call(vkBeginCommandBuffer(command_buffer, &begin_info), "vkBeginCommandBuffer"sv)) {
+        return -1;
+      }
+      VkBufferCopy copy {
+        .srcOffset = source->copy_offset,
+        .dstOffset = 0,
+        .size = source->copy_size,
+      };
+      vkCmdCopyBuffer(command_buffer, source->buffer, destination_buffer, 1, &copy);
+      VkBufferMemoryBarrier barrier {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = destination_buffer,
+        .offset = 0,
+        .size = destination_copy_size,
+      };
+      vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 0, nullptr, 1, &barrier, 0, nullptr);
+      if (!vk_call(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer"sv)) {
+        return -1;
+      }
+      VkSubmitInfo submit_info {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &command_buffer,
+      };
+      if (!vk_call(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit"sv) ||
+          !vk_call(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences"sv)) {
+        return -1;
+      }
+      // frame->format is AV_PIX_FMT_CUDA for NVENC; use stored sw_format for layout.
+      const bool dst_p010 = encode_sw_format == AV_PIX_FMT_P010;
+      const bool src_xb30 = descriptor.sd.fourcc == DRM_FORMAT_XBGR2101010;
+      // XRGB/AR24 (SPA BGRx): B,G,R,X → bgra_to_rgb. XBGR/AB24 (SPA RGBx): R,G,B,X.
+      const bool src_rgb8 = !src_xb30 &&
+        (descriptor.sd.fourcc == DRM_FORMAT_XBGR8888 || descriptor.sd.fourcc == DRM_FORMAT_ABGR8888);
+      const int result = sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1],
+        destination_texture, stream.get(), dst_p010, src_xb30, src_rgb8);
+      if (result) {
+        return result;
+      }
+      // Ensure fill+convert kernels finish before NVENC samples the CUDA frame.
+      if (check(cdf->cuStreamSynchronize(stream.get()), "Couldn't synchronize CUDA stream after convert: "sv)) {
+        return -1;
+      }
+      const auto fmt = dst_p010 ? platf::frame_format_e::p010 : platf::frame_format_e::bgra8;
+      stream_stats::update_encode_path_metadata(
+        "vulkan_cuda",
+        platf::frame_residency_e::gpu,
+        fmt
+      );
+      if (!vulkan_logged) {
+        BOOST_LOG(info) << "CUDA DMABUF: convert_path=vulkan_cuda "sv << width << 'x' << height
+                        << " pitch="sv << destination_pitch
+                        << " fourcc=0x"sv << std::hex << descriptor.sd.fourcc << std::dec
+                        << " src_xb30="sv << src_xb30 << " src_rgb8="sv << src_rgb8
+                        << " dst_p010="sv << dst_p010
+                        << " source imports cached; destination mapping persistent"sv;
+        vulkan_logged = true;
+      }
+      return 0;
+    }
+
+    void release_cuda_destination() {
+      if (stream) {
+        CU_CHECK_IGNORE(cdf->cuStreamSynchronize(stream.get()), "Couldn't synchronize CUDA stream during Vulkan bridge cleanup");
+      }
+      if (destination_texture) {
+        destroy_texture(destination_texture);
+        destination_texture = 0;
+      }
+      if (destination_device_ptr) {
+        CU_CHECK_IGNORE(cdf->cuMemFree(destination_device_ptr), "Couldn't free CUDA external-memory mapping");
+        destination_device_ptr = 0;
+      }
+      if (destination_external_memory) {
+        CU_CHECK_IGNORE(cdf->cuDestroyExternalMemory(destination_external_memory), "Couldn't destroy CUDA external memory");
+        destination_external_memory = nullptr;
+      }
+    }
+
+    void release_vulkan() {
+      if (device) {
+        vkDeviceWaitIdle(device);
+        for (auto &source : sources) {
+          release_source(source);
+        }
+        if (destination_buffer) {
+          vkDestroyBuffer(device, destination_buffer, nullptr);
+        }
+        if (destination_memory) {
+          vkFreeMemory(device, destination_memory, nullptr);
+        }
+        if (fence) {
+          vkDestroyFence(device, fence, nullptr);
+        }
+        if (command_pool) {
+          vkDestroyCommandPool(device, command_pool, nullptr);
+        }
+        vkDestroyDevice(device, nullptr);
+      }
+      if (instance) {
+        vkDestroyInstance(instance, nullptr);
+      }
+      sources = {};
+      source_slot = 0;
+      instance = VK_NULL_HANDLE;
+      physical_device = VK_NULL_HANDLE;
+      memory_properties = {};
+      device = VK_NULL_HANDLE;
+      queue_family = VK_QUEUE_FAMILY_IGNORED;
+      queue = VK_NULL_HANDLE;
+      command_pool = VK_NULL_HANDLE;
+      command_buffer = VK_NULL_HANDLE;
+      fence = VK_NULL_HANDLE;
+      get_memory_fd = nullptr;
+      get_memory_fd_properties = nullptr;
+      destination_buffer = VK_NULL_HANDLE;
+      destination_memory = VK_NULL_HANDLE;
+      destination_allocation_size = 0;
+      destination_copy_size = 0;
+      destination_pitch = 0;
+    }
+
+    std::array<source_import_t, 4> sources {};
+    std::size_t source_slot {0};
+    std::uint64_t sequence {0};
+    CUcontext cu_ctx {nullptr};
+    bool force_mmap {false};
+    bool fallback_logged {false};
+    bool vulkan_logged {false};
+    bool active_frame {false};
+    std::optional<tex_t> staging_tex;
+
+    VkInstance instance {VK_NULL_HANDLE};
+    VkPhysicalDevice physical_device {VK_NULL_HANDLE};
+    VkPhysicalDeviceMemoryProperties memory_properties {};
+    VkDevice device {VK_NULL_HANDLE};
+    std::uint32_t queue_family {VK_QUEUE_FAMILY_IGNORED};
+    VkQueue queue {VK_NULL_HANDLE};
+    VkCommandPool command_pool {VK_NULL_HANDLE};
+    VkCommandBuffer command_buffer {VK_NULL_HANDLE};
+    VkFence fence {VK_NULL_HANDLE};
+    PFN_vkGetMemoryFdKHR get_memory_fd {nullptr};
+    PFN_vkGetMemoryFdPropertiesKHR get_memory_fd_properties {nullptr};
+
+    VkBuffer destination_buffer {VK_NULL_HANDLE};
+    VkDeviceMemory destination_memory {VK_NULL_HANDLE};
+    VkDeviceSize destination_allocation_size {0};
+    VkDeviceSize destination_copy_size {0};
+    std::uint32_t destination_pitch {0};
+    CUexternalMemory destination_external_memory {nullptr};
+    CUdeviceptr destination_device_ptr {0};
+    cudaTextureObject_t destination_texture {0};
+    std::uint32_t source_fourcc {0};
+    AVPixelFormat encode_sw_format {AV_PIX_FMT_NONE};
+  };
+
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(int width, int height, bool vram) {
     if (init()) {
       return nullptr;
@@ -566,6 +1532,22 @@ namespace cuda {
     }
 
     return cuda;
+  }
+
+  std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_dmabuf_encode_device(int width, int height) {
+    if (init()) {
+      return nullptr;
+    }
+
+    auto device = std::make_unique<cuda_dmabuf_t>();
+    if (device->init(width, height)) {
+      return nullptr;
+    }
+    // Prefer true 10-bit GPU frames when capture is xBGR_210LE + HDR client.
+    // Patch 04 still forces NV12 for non-HDR streams (even if client asks 10-bit SDR).
+    // convert() writes P010 when frame is AV_PIX_FMT_P010*, else NV12 from BGRx.
+    device->prefer_8bit_encode = false;
+    return device;
   }
 
   namespace nvfbc {

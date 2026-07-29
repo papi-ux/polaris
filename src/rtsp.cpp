@@ -13,9 +13,11 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <format>
 #include <optional>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -759,6 +761,9 @@ namespace rtsp_stream {
         cleanup_unlocked_probe_for_tests();
       }
 #endif
+      // SB-2: send control terminate to every live session *before* joining so
+      // clients see an orderly end instead of a mid-flight connection reset.
+      // Probe path still short-circuits join for unit tests.
       for (auto &slot : sessions_to_join) {
 #ifdef POLARIS_TESTS
         if (cleanup_session_probe_for_tests) {
@@ -766,7 +771,18 @@ namespace rtsp_stream {
           continue;
         }
 #endif
-        stream::session::stop(*slot);
+        stream::session::graceful_stop(*slot);
+      }
+      if (!sessions_to_join.empty()) {
+        // Give ENet a beat to flush the terminate packet before socket teardown.
+        std::this_thread::sleep_for(50ms);
+      }
+      for (auto &slot : sessions_to_join) {
+#ifdef POLARIS_TESTS
+        if (cleanup_session_probe_for_tests) {
+          continue;
+        }
+#endif
         stream::session::join(*slot);
       }
     }
@@ -1557,35 +1573,17 @@ namespace rtsp_stream {
       config.monitor.bitrate = configuredBitrateKbps;
     }
 
+    // IMPORTANT: do NOT call video::active_encoder_runtime_supports_config() here.
+    // That path opens a full capture display + validate_config on the RTSP thread
+    // (reset_display → portal ScreenCast). Under gamescope_stream that blocks
+    // ANNOUNCE for tens of seconds, Moonlight times out with "no handshake",
+    // and UDP video/control never bind. Codec mode gates below are enough for
+    // reject; live capture will fail closed later if the runtime cannot encode.
     if (config.monitor.videoFormat != 0) {
-      const auto codec_name_for_format = [](int video_format) -> std::string_view {
-        switch (video_format) {
-          case 1:
-            return "hevc"sv;
-          case 2:
-            return "av1"sv;
-          default:
-            return "h264"sv;
-        }
-      };
-
-      if (!video::active_encoder_runtime_supports_config(config.monitor)) {
-        auto fallback_config = config.monitor;
-        fallback_config.videoFormat = 0;
-
-        if (video::active_encoder_runtime_supports_config(fallback_config)) {
-          BOOST_LOG(warning)
-            << "Session codec fallback: requested "sv << codec_name_for_format(config.monitor.videoFormat)
-            << " is not operational on encoder ["sv << video::active_encoder_name()
-            << "] for the current runtime; falling back to h264"sv;
-          config.monitor.videoFormat = 0;
-        } else {
-          BOOST_LOG(warning)
-            << "Session codec fallback: requested "sv << codec_name_for_format(config.monitor.videoFormat)
-            << " is not operational on encoder ["sv << video::active_encoder_name()
-            << "], but h264 validation also failed; keeping requested codec"sv;
-        }
-      }
+      BOOST_LOG(debug)
+        << "RTSP ANNOUNCE: accepting client codec format="sv << config.monitor.videoFormat
+        << " without runtime display reprob (encoder="sv << video::active_encoder_name()
+        << ")"sv;
     }
 
     if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {

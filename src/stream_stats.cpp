@@ -22,7 +22,7 @@
 #include "logging.h"
 #include "stream_stats.h"
 #ifdef __linux__
-  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
 #endif
 
@@ -83,27 +83,15 @@ namespace stream_stats {
       }
     }
 
-    const char *stream_display_mode_label() {
+    stream_display_policy::resolved_t current_stream_policy() {
 #ifdef __linux__
-      static thread_local std::string label;
-      label = stream_display_policy::resolve(stream_display_policy::input_t {
+      // One resolve snapshot: override flag comes from live labwc state only.
+      return stream_display_policy::resolve_current(
         false,
-        false,
-        cage_display_router::runtime_state().gpu_native_override_active,
-      }).label;
-      return label.c_str();
+        stream_runtime::labwc::runtime_state().gpu_native_override_active
+      );
 #else
-      const auto &linux_display = config::video.linux_display;
-      if (!linux_display.headless_mode) {
-        return "Mirror Desktop";
-      }
-      if (!linux_display.use_cage_compositor) {
-        return "Host Virtual Display";
-      }
-      if (linux_display.prefer_gpu_native_capture) {
-        return "Private Stream (GPU-native)";
-      }
-      return "Private Stream";
+      return {};
 #endif
     }
 
@@ -124,11 +112,22 @@ namespace stream_stats {
     j["streaming"] = streaming;
     j["client_name"] = client_name;
     j["client_ip"] = client_ip;
-    j["runtime_backend"] = runtime_backend;
+#ifdef __linux__
+    {
+      const auto policy = current_stream_policy();
+      const auto backend = !runtime_backend.empty() ? runtime_backend : policy.backend_name;
+      j["runtime_backend"] = backend.empty() ? "none" : backend;
+      // path id is SoT; UI falls back stream_display_mode_id → stream_path_id
+      j["stream_path_id"] = policy.selection;
+      j["stream_display_mode"] = policy.label.empty() ? "Mirror Desktop" : policy.label;
+    }
+#else
+    j["runtime_backend"] = runtime_backend.empty() ? "none" : runtime_backend;
+    j["stream_display_mode"] = "Mirror Desktop";
+#endif
     j["runtime_requested_headless"] = runtime_requested_headless;
     j["runtime_effective_headless"] = runtime_effective_headless;
     j["runtime_gpu_native_override_active"] = runtime_gpu_native_override_active;
-    j["stream_display_mode"] = stream_display_mode_label();
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
@@ -140,33 +139,18 @@ namespace stream_stats {
     const auto capture_reason_message = capture_path_reason_message(capture_reason);
     const bool capture_cpu_copy = capture_path_uses_cpu_copy(*this);
     const bool capture_gpu_native = capture_path_is_gpu_native(*this);
+    // Flat capture_* fields only (UI + diagnostics); nested capture_decision was a pure duplicate.
     j["capture_path"] = capture_path;
     j["capture_path_reason"] = capture_reason;
     j["capture_path_reason_message"] = capture_reason_message;
     j["capture_cpu_copy"] = capture_cpu_copy;
     j["capture_gpu_native"] = capture_gpu_native;
-    j["capture_decision"] = {
-      {"path", capture_path},
-      {"reason", capture_reason},
-      {"reason_message", capture_reason_message},
-      {"transport", platf::from_frame_transport(capture_transport)},
-      {"residency", platf::from_frame_residency(capture_residency)},
-      {"format", platf::from_frame_format(capture_format)},
-      {"capture_device", capture_device},
-      {"wayland_main_device", wayland_main_device},
-      {"encoder_adapter", config::video.adapter_name},
-      {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(*this)},
-      {"cpu_copy", capture_cpu_copy},
-      {"gpu_native", capture_gpu_native},
-      {"runtime_backend", runtime_backend},
-      {"requested_headless", runtime_requested_headless},
-      {"effective_headless", runtime_effective_headless},
-      {"gpu_native_override_active", runtime_gpu_native_override_active}
-    };
+    j["capture_cross_gpu_dmabuf_risk"] = capture_path_has_cross_gpu_dmabuf_risk(*this);
     j["linux_gpu_profile"] = linux_gpu_profile_json(*this);
     j["encode_target_device"] = encode_target_device;
     j["encode_target_residency"] = platf::from_frame_residency(encode_target_residency);
     j["encode_target_format"] = platf::from_frame_format(encode_target_format);
+    j["convert_path"] = encode_target_device.empty() ? "unknown" : encode_target_device;
     j["dynamic_range"] = dynamic_range;
     j["display_hdr"] = display_hdr;
     j["hdr_metadata_available"] = hdr_metadata_available;
@@ -745,21 +729,7 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "frame_pacing", "Frame pacing", stats.frame_jitter_ms, "ms jitter", pacing_watch ? "watch" : "pass", "stream_stats", "Frame jitter, duplicate/drop ratios, and target FPS gap classify pacing risk.");
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "frame_jitter_ms"});
-    advanced["capture_decision"] = {
-      {"path", capture_path},
-      {"reason", capture_reason},
-      {"reason_message", capture_path_reason_message(capture_reason)},
-      {"transport", platf::from_frame_transport(stats.capture_transport)},
-      {"residency", platf::from_frame_residency(stats.capture_residency)},
-      {"format", platf::from_frame_format(stats.capture_format)},
-      {"capture_device", stats.capture_device},
-      {"wayland_main_device", stats.wayland_main_device},
-      {"encoder_adapter", config::video.adapter_name},
-      {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
-      {"cpu_copy", capture_cpu_copy},
-      {"gpu_native", capture_gpu_native}
-    };
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "frame_jitter_ms"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["health"] = health;
@@ -973,7 +943,9 @@ namespace stream_stats {
 
   void update_runtime_state(const platf::runtime_state_t &state) {
     std::lock_guard<std::mutex> lock(stats_mutex);
-    current_stats.runtime_backend = state.backend_name;
+    if (!state.backend_name.empty()) {
+      current_stats.runtime_backend = state.backend_name;
+    }
     current_stats.runtime_requested_headless = state.requested_headless;
     current_stats.runtime_effective_headless = state.effective_headless;
     current_stats.runtime_gpu_native_override_active = state.gpu_native_override_active;

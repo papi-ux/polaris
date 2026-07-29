@@ -70,7 +70,7 @@
 #include "stream_stats.h"
 #include "video.h"
 #ifdef __linux__
-  #include "platform/linux/cage_display_router.h"
+  #include "platform/linux/stream_runtime.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/virtual_display.h"
@@ -524,7 +524,9 @@ namespace nvhttp {
 
     bool host_prefers_headless() {
 #ifdef __linux__
-      return stream_display_policy::resolve(stream_display_policy::input_t {}).mode == stream_display_policy::mode_e::HEADLESS;
+      // One resolve_current snapshot for the two flags (no hand-built input_t thrash).
+      const auto resolved = stream_display_policy::resolve_current();
+      return resolved.uses_labwc() && resolved.requested_headless;
 #else
       return false;
 #endif
@@ -541,12 +543,18 @@ namespace nvhttp {
       std::string mode_reason;
 
       auto allowed_modes = nlohmann::json::array();
+#ifdef __linux__
+      for (const auto &mode : stream_display_policy::allowed_launch_modes(virtual_display_available, false)) {
+        allowed_modes.push_back(mode);
+      }
+#else
       allowed_modes.push_back("headless_stream");
       allowed_modes.push_back("desktop_display");
       allowed_modes.push_back("windowed_stream");
       if (virtual_display_available) {
         allowed_modes.push_back("host_virtual_display");
       }
+#endif
 
       const bool steam_big_picture = boost::iequals(boost::trim_copy(std::string {app_name}), "Steam Big Picture");
 
@@ -880,40 +888,33 @@ namespace nvhttp {
     }
 
     std::string configured_stream_display_mode_selection() {
-      const auto &linux_display = config::video.linux_display;
-      if (!linux_display.headless_mode) {
-        return "desktop_display";
-      }
-      if (!linux_display.use_cage_compositor) {
-        return "host_virtual_display";
-      }
-      if (linux_display.prefer_gpu_native_capture) {
-        return "windowed_stream";
-      }
-      return "headless_stream";
+#ifdef __linux__
+      return stream_display_policy::resolve_current().selection;
+#else
+      return "desktop_display";
+#endif
     }
 
     std::string effective_stream_display_mode_selection(
       const stream_stats::stats_t &stats,
       bool session_uses_virtual_display
     ) {
-      if (!stats.streaming) {
-        return configured_stream_display_mode_selection();
-      }
-      const auto configured_mode = configured_stream_display_mode_selection();
-      if (stats.runtime_gpu_native_override_active) {
-        return "windowed_stream";
-      }
-      if (session_uses_virtual_display) {
-        return "host_virtual_display";
-      }
-      if (configured_mode == "windowed_stream" && stats.runtime_effective_headless) {
-        return "windowed_stream";
-      }
-      if (stats.runtime_effective_headless) {
-        return "headless_stream";
-      }
-      return "desktop_display";
+#ifdef __linux__
+      return stream_display_policy::resolve_effective(
+        stream_display_policy::input_t {
+          host_virtual_display_available(),
+          false,
+          stats.runtime_gpu_native_override_active,
+        },
+        stats.streaming,
+        session_uses_virtual_display,
+        stats.runtime_effective_headless
+      ).selection;
+#else
+      (void) stats;
+      (void) session_uses_virtual_display;
+      return configured_stream_display_mode_selection();
+#endif
     }
 
     std::string effective_stream_display_mode_selection(const stream_stats::stats_t &stats) {
@@ -921,6 +922,10 @@ namespace nvhttp {
     }
 
     std::string stream_display_mode_label_for_selection(const std::string &selection) {
+#ifdef __linux__
+      const auto label = stream_display_policy::label_for_selection(selection);
+      return label.empty() ? "Mirror Desktop" : label;
+#else
       if (selection == "headless_stream") {
         return "Private Stream";
       }
@@ -930,64 +935,97 @@ namespace nvhttp {
       if (selection == "windowed_stream") {
         return "Private Stream (GPU-native)";
       }
+      if (selection == "gamescope_stream") {
+        return "Gamescope Stream";
+      }
       return "Mirror Desktop";
+#endif
     }
 
     std::string stream_display_mode_reason_for_selection(const std::string &selection) {
-      if (selection == "headless_stream") {
-        return "Polaris streams from a private headless compositor; GPU-native appears in session health when capture stays on DMA-BUF/GPU.";
-      }
-      if (selection == "host_virtual_display") {
-        return host_virtual_display_available() ?
-          "Polaris will create or use a host virtual display for this stream." :
-          "Polaris requested a host virtual display, but no backend is currently available.";
-      }
-      if (selection == "windowed_stream") {
-        return "Polaris can force a windowed private compositor when hidden Private Stream capture cannot stay GPU-native.";
-      }
+#ifdef __linux__
+      return stream_display_policy::reason_for_selection(selection, host_virtual_display_available());
+#else
+      (void) selection;
       return "Polaris will mirror the current desktop session.";
+#endif
     }
 
     bool apply_stream_display_mode_selection(const std::string &selection,
                                              std::string &error) {
-      bool headless = false;
-      bool cage = false;
-      bool gpu_native = false;
-
-      if (selection == "headless_stream") {
-        headless = true;
-        cage = true;
-      } else if (selection == "host_virtual_display") {
-        headless = true;
-      } else if (selection == "desktop_display") {
-        // Defaults already describe Mirror Desktop.
-      } else if (selection == "windowed_stream") {
-        headless = true;
-        cage = true;
-        gpu_native = true;
-      } else {
-        error = "stream_display_mode must be headless_stream, desktop_display, host_virtual_display, or windowed_stream";
+#ifdef __linux__
+      if (!stream_display_policy::apply_selection(selection, error)) {
         return false;
       }
 
-      config::video.linux_display.headless_mode = headless;
-      config::video.linux_display.use_cage_compositor = cage;
-      config::video.linux_display.prefer_gpu_native_capture = gpu_native;
-
-      if (!persist_config_values({
-            {"headless_mode", bool_config_value(headless)},
-            {"linux_use_cage_compositor", bool_config_value(cage)},
-            {"linux_prefer_gpu_native_capture", bool_config_value(gpu_native)}
-          })) {
+      const auto &linux_display = config::video.linux_display;
+      std::unordered_map<std::string, std::string> values {
+        {"linux_stream_mode", linux_display.stream_mode},
+        {"linux_private_runtime", linux_display.private_runtime.empty() ? "labwc" : linux_display.private_runtime},
+        {"headless_mode", bool_config_value(linux_display.headless_mode)},
+        {"linux_use_cage_compositor", bool_config_value(linux_display.use_cage_compositor)},
+        {"linux_prefer_gpu_native_capture", bool_config_value(linux_display.prefer_gpu_native_capture)},
+      };
+      if (selection == "headless_dongle") {
+        values["linux_auto_manage_displays"] = bool_config_value(linux_display.auto_manage_displays);
+        values["headless_swap_mode"] = linux_display.headless_swap_mode.empty() ? "privacy" : linux_display.headless_swap_mode;
+        if (!linux_display.streaming_output.empty()) {
+          values["linux_streaming_output"] = linux_display.streaming_output;
+        }
+        if (!linux_display.primary_output.empty()) {
+          values["linux_primary_output"] = linux_display.primary_output;
+        }
+        if (!config::video.capture.empty()) {
+          values["capture"] = config::video.capture;
+        }
+        if (!config::video.output_name.empty()) {
+          values["output_name"] = config::video.output_name;
+        }
+      }
+      if (selection == "gamescope_stream") {
+        if (!config::video.capture.empty()) {
+          values["capture"] = config::video.capture;
+        }
+        else {
+          values["capture"] = "portal";
+        }
+      }
+      if (!persist_config_values(values)) {
         error = "failed to persist stream display mode";
         return false;
       }
 
       return true;
+#else
+      error = "stream display mode selection is only supported on Linux";
+      return false;
+#endif
     }
 
     nlohmann::json stream_display_mode_options_json() {
       nlohmann::json modes = nlohmann::json::array();
+#ifdef __linux__
+      for (const auto &option : stream_display_policy::mode_options(host_virtual_display_available())) {
+        bool available = option.available;
+        if (option.value == "host_virtual_display") {
+          available = available && host_virtual_display_available();
+        }
+        modes.push_back({
+          {"value", option.value},
+          {"label", option.label},
+          {"available", available},
+          {"unavailable_reason", available ? "" : (option.unavailable_reason.empty() ?
+            "Host virtual display is not available on this host." :
+            option.unavailable_reason)},
+          {"restart_required", true},
+          {"reason", option.reason},
+          {"group", option.group},
+          {"runtime", option.runtime},
+          {"capture", option.capture},
+          {"topology", option.topology},
+        });
+      }
+#else
       for (const auto &selection : {
              "headless_stream"s,
              "desktop_display"s,
@@ -998,10 +1036,12 @@ namespace nvhttp {
           {"value", selection},
           {"label", stream_display_mode_label_for_selection(selection)},
           {"available", selection != "host_virtual_display" || host_virtual_display_available()},
+          {"unavailable_reason", ""},
           {"restart_required", true},
           {"reason", stream_display_mode_reason_for_selection(selection)}
         });
       }
+#endif
       return modes;
     }
 
@@ -1682,6 +1722,7 @@ namespace nvhttp {
       policy["hdr_downgrade_reason"] = hdr_downgrade_reason;
       policy["hdr_downgrade_message"] = hdr_downgrade_message;
       const auto capture_reason_message = stream_stats::capture_path_reason_message(capture_reason);
+      // Flat capture_* only — nested capture_decision duplicated these for no UI reader.
       policy["capture_path"] = capture_path;
       policy["capture_path_reason"] = capture_reason;
       policy["capture_path_reason_message"] = capture_reason_message;
@@ -1696,24 +1737,6 @@ namespace nvhttp {
       policy["capture_cross_gpu_dmabuf_risk"] = stream_stats::capture_path_has_cross_gpu_dmabuf_risk(stats);
       policy["linux_gpu_profile"] = stream_stats::linux_gpu_profile_json(stats);
       policy["gpu_native_probe"] = stream_stats::gpu_native_probe_json(stats);
-      policy["capture_decision"] = {
-        {"path", capture_path},
-        {"reason", capture_reason},
-        {"reason_message", capture_reason_message},
-        {"transport", policy["capture_transport"]},
-        {"residency", policy["capture_residency"]},
-        {"format", policy["capture_format"]},
-        {"capture_device", policy["capture_device"]},
-        {"wayland_main_device", policy["capture_wayland_main_device"]},
-        {"encoder_adapter", policy["capture_encoder_adapter"]},
-        {"cross_gpu_dmabuf_risk", policy["capture_cross_gpu_dmabuf_risk"]},
-        {"cpu_copy", capture_cpu_copy},
-        {"gpu_native", capture_gpu_native},
-        {"runtime_backend", stats.runtime_backend},
-        {"requested_headless", stats.runtime_requested_headless},
-        {"effective_headless", stats.runtime_effective_headless},
-        {"gpu_native_override_active", stats.runtime_gpu_native_override_active}
-      };
       policy["presentation_policy"] = build_client_presentation_policy_json(policy_fps);
       policy["warnings"] = std::move(warnings);
       policy["has_warnings"] = !policy["warnings"].empty();
@@ -2363,10 +2386,6 @@ namespace nvhttp {
       }
     }
 
-    bool should_defer_encoder_probe_until_cage() {
-      return config::video.linux_display.use_cage_compositor;
-    }
-
     bool prime_deferred_headless_codec_capabilities() {
       if (!config::video.linux_display.use_cage_compositor ||
           !config::video.linux_display.headless_mode ||
@@ -2374,7 +2393,7 @@ namespace nvhttp {
         return true;
       }
 
-      if (rtsp_stream::session_count() != 0 || cage_display_router::is_running()) {
+      if (rtsp_stream::session_count() != 0 || stream_runtime::labwc::is_running()) {
         return false;
       }
 
@@ -2383,22 +2402,22 @@ namespace nvhttp {
         return true;
       }
 
-      if (rtsp_stream::session_count() != 0 || cage_display_router::is_running()) {
+      if (rtsp_stream::session_count() != 0 || stream_runtime::labwc::is_running()) {
         return false;
       }
 
       BOOST_LOG(info) << "nvhttp: Priming deferred headless encoder capabilities using a temporary cage runtime"sv;
-      if (!cage_display_router::start()) {
+      if (!stream_runtime::labwc::start()) {
         BOOST_LOG(warning) << "nvhttp: Temporary cage runtime failed to start for deferred capability probe"sv;
         return false;
       }
 
       auto stop_guard = util::fail_guard([]() {
-        cage_display_router::stop();
+        stream_runtime::labwc::stop();
         video::reset_encoder_probe_state();
       });
 
-      const auto cage_socket = cage_display_router::get_wayland_socket();
+      const auto cage_socket = stream_runtime::labwc::wayland_socket();
       if (cage_socket.empty()) {
         BOOST_LOG(warning) << "nvhttp: Temporary cage runtime did not expose a WAYLAND_DISPLAY for deferred capability probe"sv;
         return false;
@@ -5038,7 +5057,7 @@ namespace nvhttp {
       // But we're ignoring if it's successful or not
       if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
 #ifdef __linux__
-        if (should_defer_encoder_probe_until_cage()) {
+        if (config::video.linux_display.use_cage_compositor) {
           BOOST_LOG(info) << "nvhttp: Deferring input-only encoder probe until the cage runtime is available"sv;
         } else
 #endif
@@ -5084,7 +5103,7 @@ namespace nvhttp {
         if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
           display_device::configure_display(config::video, *launch_session);
 #ifdef __linux__
-          if (should_defer_encoder_probe_until_cage()) {
+          if (config::video.linux_display.use_cage_compositor) {
             BOOST_LOG(info) << "nvhttp: Deferring resume-time encoder probe until the cage runtime is available"sv;
           } else
 #endif
@@ -5333,7 +5352,7 @@ namespace nvhttp {
       // due to hotplugging, driver crash, primary monitor change,
       // or any number of other factors).
 #ifdef __linux__
-      if (should_defer_encoder_probe_until_cage()) {
+      if (config::video.linux_display.use_cage_compositor) {
         BOOST_LOG(info) << "nvhttp: Deferring launch-time encoder probe until the cage runtime is available"sv;
       } else
 #endif
@@ -5386,7 +5405,12 @@ namespace nvhttp {
     print_req<PolarisHTTPS>(request);
 
     pt::ptree tree;
+    bool response_written = false;
     auto g = util::fail_guard([&]() {
+      // SB-2: when we already answered Moonlight before nested teardown, skip.
+      if (response_written) {
+        return;
+      }
       std::ostringstream data;
 
       pt::write_xml(data, tree);
@@ -5414,13 +5438,30 @@ namespace nvhttp {
     }
 
     const auto session_token = get_arg(args, "sessiontoken", "");
-    const auto shutdown = proc::proc.request_session_shutdown(
-      named_cert_p->uuid,
-      session_token,
-      true,
-      !session_token.empty()
-    );
-    switch (shutdown.snapshot.outcome) {
+    // Paired cert UUID is the owner identity. Never require sessiontoken for the
+    // owner — Artemis/Moonlight often send a stale token and map any cancel
+    // failure to "started by another device".
+    const bool is_owner = proc::proc.is_session_owner(named_cert_p->uuid);
+
+    // Preflight without teardown so we can answer the client before nested
+    // gamescope undo (which can SEGV polaris mid-cancel and leave Moonlight
+    // thinking quit failed as "another device").
+    auto preflight = proc::proc.get_session_stop_snapshot(named_cert_p->uuid, true);
+    auto outcome = preflight.outcome;
+    if (is_owner &&
+        (outcome == proc::session_stop_outcome_t::other_owner ||
+         outcome == proc::session_stop_outcome_t::token_mismatch ||
+         outcome == proc::session_stop_outcome_t::uncontrolled_stream)) {
+      // Owner cert always wins over stale token / role race after disconnect.
+      if (preflight.had_running_app || preflight.active_sessions > 0) {
+        outcome = proc::session_stop_outcome_t::allowed;
+      }
+      else {
+        outcome = proc::session_stop_outcome_t::no_active_session;
+      }
+    }
+
+    switch (outcome) {
       case proc::session_stop_outcome_t::allowed:
       case proc::session_stop_outcome_t::no_active_session:
         tree.put("root.cancel", 1);
@@ -5451,6 +5492,30 @@ namespace nvhttp {
         break;
     }
 
+    BOOST_LOG(info) << "cancel: client=["sv << named_cert_p->name
+                    << "] owner="sv << (is_owner ? "yes" : "no")
+                    << " preflight_outcome="sv << static_cast<int>(outcome)
+                    << " token_sent="sv << !session_token.empty()
+                    << " had_app="sv << preflight.had_running_app;
+
+    // Answer Moonlight first — nested WSI undo can SEGV the host process.
+    {
+      std::ostringstream data;
+      pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+      response_written = true;
+    }
+
+    if (outcome == proc::session_stop_outcome_t::allowed) {
+      // Require no token for owner; empty token for non-owner still fails if not owned.
+      static_cast<void>(proc::proc.request_session_shutdown(
+        named_cert_p->uuid,
+        session_token,
+        true,
+        !session_token.empty() && !is_owner
+      ));
+    }
   }
 
   void appasset(resp_https_t response, req_https_t request) {
@@ -5741,7 +5806,7 @@ namespace nvhttp {
       // Capture info
       auto &capture = output["capture"];
 #ifdef __linux__
-      capture["backend"] = cage_display_router::is_running() ? "cage-screencopy" : "portal";
+      capture["backend"] = stream_runtime::labwc::is_running() ? "cage-screencopy" : "portal";
       capture["compositor"] = "cage";
 #else
       capture["backend"] = "platform";
@@ -5789,7 +5854,7 @@ namespace nvhttp {
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
 #ifdef __linux__
-      output["cage_pid"] = cage_display_router::get_pid();
+      output["cage_pid"] = stream_runtime::labwc::pid();
       output["screen_locked"] = session_manager::is_screen_locked();
 #endif
       output["owned_by_client"] = owned_by_client;
@@ -5904,23 +5969,9 @@ namespace nvhttp {
       capture_info["reason_message"] = stream_stats::capture_path_reason_message(capture_reason);
       capture_info["cpu_copy"] = stream_stats::capture_path_uses_cpu_copy(stats);
       capture_info["gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
-      capture_info["decision"] = {
-        {"path", capture_info["path"]},
-        {"reason", capture_info["reason"]},
-        {"reason_message", capture_info["reason_message"]},
-        {"transport", capture_info["transport"]},
-        {"residency", capture_info["residency"]},
-        {"format", capture_info["format"]},
-        {"capture_device", capture_info["device"]},
-        {"encoder_adapter", capture_info["encoder_adapter"]},
-        {"cross_gpu_dmabuf_risk", capture_info["cross_gpu_dmabuf_risk"]},
-        {"cpu_copy", capture_info["cpu_copy"]},
-        {"gpu_native", capture_info["gpu_native"]},
-        {"runtime_backend", stats.runtime_backend.empty() ? "screencopy" : stats.runtime_backend},
-        {"requested_headless", stats.runtime_requested_headless},
-        {"effective_headless", stats.runtime_effective_headless},
-        {"gpu_native_override_active", stats.runtime_gpu_native_override_active}
-      };
+      capture_info["requested_headless"] = stats.runtime_requested_headless;
+      capture_info["effective_headless"] = stats.runtime_effective_headless;
+      capture_info["gpu_native_override_active"] = stats.runtime_gpu_native_override_active;
 
       // Encoder info
       auto &encoder = output["encoder"];
@@ -6465,16 +6516,6 @@ namespace nvhttp {
         if (client_width > 0 && client_height > 0) {
           BOOST_LOG(info) << "Smart Launch: client display " << client_width << "x" << client_height
                           << " @ " << (client_fps > 0 ? client_fps : 60) << " fps";
-
-#ifdef __linux__
-          // Pre-configure labwc resolution to match client device
-          if (config::video.linux_display.use_cage_compositor && cage_display_router::is_running()) {
-            BOOST_LOG(info) << "Smart Launch: adjusting labwc resolution to " << client_width << "x" << client_height;
-            // Note: labwc will be restarted with the correct resolution when the game launches
-            // via the cage_display_router::start() call in process.cpp.
-            // Store the preferred resolution for the session.
-          }
-#endif
         }
 
         // Find the app by UUID

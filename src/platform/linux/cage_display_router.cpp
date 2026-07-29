@@ -50,13 +50,39 @@ namespace cage_display_router {
   static std::string cage_x11_display;  // e.g., ":1"
   static std::atomic_bool headless_ram_capture_warning_logged {false};
   static std::atomic_bool windowed_ram_capture_warning_logged {false};
-  static std::atomic<int> windowed_gpu_native_probe_result {0};
-  static std::atomic<int> headless_extcopy_dmabuf_probe_result {0};
+
+  // 0 = unknown, 1 = false, 2 = true (shared by windowed + headless probe caches).
+  struct probe_cache_t {
+    std::atomic<int> value {0};
+
+    std::optional<bool> get() const {
+      switch (value.load()) {
+        case 1:
+          return false;
+        case 2:
+          return true;
+        default:
+          return std::nullopt;
+      }
+    }
+
+    void set(bool supported) {
+      value.store(supported ? 2 : 1);
+    }
+
+    void reset() {
+      value.store(0);
+    }
+  };
+
+  static probe_cache_t windowed_gpu_native_probe;
+  static probe_cache_t headless_extcopy_dmabuf_probe;
   static platf::runtime_state_t cage_runtime_state {
     .requested_headless = false,
     .effective_headless = false,
     .gpu_native_override_active = false,
     .backend_name = "labwc",
+    .path_id = "headless_stream",
   };
 
   // -----------------------------------------------------------------------
@@ -498,20 +524,6 @@ namespace cage_display_router {
     return mode;
   }
 
-  bool should_attempt_windowed_gpu_native_probe(
-    bool requested_headless,
-    bool prefer_gpu_native_capture,
-    bool encoder_requires_gpu_native_capture
-  ) {
-    return requested_headless &&
-           prefer_gpu_native_capture &&
-           encoder_requires_gpu_native_capture;
-  }
-
-  bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state) {
-    return runtime_state.gpu_native_override_active;
-  }
-
   bool should_attempt_headless_extcopy_dmabuf(
     const platf::runtime_state_t &runtime_state,
     platf::mem_type_e hwdevice_type
@@ -520,7 +532,7 @@ namespace cage_display_router {
       return false;
     }
 
-    if (auto cached_result = cached_headless_extcopy_dmabuf_probe_result();
+    if (auto cached_result = headless_extcopy_dmabuf_probe.get();
         cached_result && !*cached_result) {
       return false;
     }
@@ -539,49 +551,24 @@ namespace cage_display_router {
   }
 
   std::optional<bool> cached_windowed_gpu_native_probe_result() {
-    switch (windowed_gpu_native_probe_result.load()) {
-      case 1:
-        return false;
-      case 2:
-        return true;
-      default:
-        return std::nullopt;
-    }
+    return windowed_gpu_native_probe.get();
   }
 
   std::optional<bool> cached_headless_extcopy_dmabuf_probe_result() {
-    switch (headless_extcopy_dmabuf_probe_result.load()) {
-      case 1:
-        return false;
-      case 2:
-        return true;
-      default:
-        return std::nullopt;
-    }
+    return headless_extcopy_dmabuf_probe.get();
   }
 
   void update_windowed_gpu_native_probe_result(bool supported) {
-    windowed_gpu_native_probe_result.store(supported ? 2 : 1);
+    windowed_gpu_native_probe.set(supported);
   }
 
   void update_headless_extcopy_dmabuf_probe_result(bool supported) {
-    headless_extcopy_dmabuf_probe_result.store(supported ? 2 : 1);
-  }
-
-  bool headless_extcopy_dmabuf_probe_succeeded(
-    bool capture_initialized,
-    bool live_gpu_frame_converted
-  ) {
-    return capture_initialized && live_gpu_frame_converted;
+    headless_extcopy_dmabuf_probe.set(supported);
   }
 
   bool should_report_headless_ram_capture_fallback(const platf::runtime_state_t &runtime_state) {
     return runtime_state.effective_headless ||
            (runtime_state.requested_headless && !runtime_state.gpu_native_override_active);
-  }
-
-  bool should_report_windowed_ram_capture_fallback(const platf::runtime_state_t &runtime_state) {
-    return !should_report_headless_ram_capture_fallback(runtime_state);
   }
 
   bool should_log_headless_ram_capture_warning() {
@@ -596,8 +583,8 @@ namespace cage_display_router {
   void reset_windowed_ram_capture_warning_for_tests() {
     headless_ram_capture_warning_logged.store(false);
     windowed_ram_capture_warning_logged.store(false);
-    windowed_gpu_native_probe_result.store(0);
-    headless_extcopy_dmabuf_probe_result.store(0);
+    windowed_gpu_native_probe.reset();
+    headless_extcopy_dmabuf_probe.reset();
   }
 
   bool output_reports_current_mode_for_tests(

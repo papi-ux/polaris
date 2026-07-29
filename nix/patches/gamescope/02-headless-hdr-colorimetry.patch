@@ -1,0 +1,126 @@
+--- a/src/Backends/HeadlessBackend.cpp
++++ b/src/Backends/HeadlessBackend.cpp
+@@ -1,10 +1,15 @@
+ #include "backend.h"
+ #include "rendervulkan.hpp"
++#include "edid.h"
++#include "main.hpp"
+ #include "wlserver.hpp"
+ #include "refresh_rate.h"
+ 
+ extern int g_nPreferredOutputWidth;
+ extern int g_nPreferredOutputHeight;
++extern gamescope::ConVar<bool> cv_hdr_enabled;
++
++void update_connector_display_info_wl(struct drm_t *drm);
+ 
+ namespace gamescope
+ {
+@@ -18,9 +23,31 @@
+         {
+         }
+ 
++		// bEnabled=false: true SDR (no HDR expose / EDID patch).
++		// Older revision always set bExposeHDRSupport=true -> washed SDR streams.
++		void SetHDR( bool bEnabled )
++		{
++			m_HDRInfo = {};
++			m_HDRInfo.bExposeHDRSupport = bEnabled;
++			m_HDRInfo.bAlwaysPatchEdid = bEnabled;
++			m_FakeEdid = GenerateSimpleEdid( g_nOutputWidth, g_nOutputHeight );
++
++			if ( bEnabled )
++			{
++				m_HDRInfo.eOutputEncodingEOTF = EOTF_PQ;
++				m_HDRInfo.uMaxContentLightLevel = 1000;
++				m_HDRInfo.uMaxFrameAverageLuminance = 400;
++			}
++			else
++			{
++				m_HDRInfo.eOutputEncodingEOTF = EOTF_Gamma22;
++			}
++		}
++
++
+         virtual gamescope::GamescopeScreenType GetScreenType() const override
+         {
+-            return GAMESCOPE_SCREEN_TYPE_INTERNAL;
++            return GAMESCOPE_SCREEN_TYPE_EXTERNAL;
+         }
+         virtual GamescopePanelOrientation GetCurrentOrientation() const override
+         {
+@@ -28,11 +55,11 @@
+         }
+         virtual bool SupportsHDR() const override
+         {
+-            return false;
++			return m_HDRInfo.bExposeHDRSupport;
+         }
+         virtual bool IsHDRActive() const override
+         {
+-            return false;
++			return cv_hdr_enabled.Get();
+         }
+         virtual const BackendConnectorHDRInfo &GetHDRInfo() const override
+         {
+@@ -54,7 +81,7 @@
+ 
+         virtual std::span<const uint8_t> GetRawEDID() const override
+         {
+-            return std::span<const uint8_t>{};
++			return std::span<const uint8_t>{ m_FakeEdid.begin(), m_FakeEdid.end() };
+         }
+         virtual std::span<const uint32_t> GetValidDynamicRefreshRates() const override
+         {
+@@ -66,10 +93,20 @@
+             displaycolorimetry_t *displayColorimetry, EOTF *displayEOTF,
+             displaycolorimetry_t *outputEncodingColorimetry, EOTF *outputEncodingEOTF ) const override
+         {
+-			*displayColorimetry = displaycolorimetry_709;
+-			*displayEOTF = EOTF_Gamma22;
+-			*outputEncodingColorimetry = displaycolorimetry_709;
+-			*outputEncodingEOTF = EOTF_Gamma22;
++			if (bHDR10)
++			{
++				*displayColorimetry = displaycolorimetry_2020;
++				*displayEOTF = EOTF_PQ;
++				*outputEncodingColorimetry = displaycolorimetry_2020;
++				*outputEncodingEOTF = EOTF_PQ;
++			}
++			else
++			{
++				*displayColorimetry = displaycolorimetry_709;
++				*displayEOTF = EOTF_Gamma22;
++				*outputEncodingColorimetry = displaycolorimetry_709;
++				*outputEncodingEOTF = EOTF_Gamma22;
++			}
+         }
+ 
+         virtual const char *GetName() const override
+@@ -92,6 +129,7 @@
+ 
+     private:
+         BackendConnectorHDRInfo m_HDRInfo{};
++        std::vector<uint8_t> m_FakeEdid;
+     };
+ 
+ 	class CHeadlessBackend final : public CBaseBackend
+@@ -137,10 +175,18 @@
+ 			}
+ 
+ 			return true;
++
+ 		}
+ 
+ 		virtual bool PostInit() override
+ 		{
++			const bool hdr = cv_hdr_enabled.Get();
++			m_Connector.SetHDR( hdr );
++			if ( hdr )
++			{
++				WritePatchedEdid( m_Connector.GetRawEDID(), m_Connector.GetHDRInfo(), false );
++				update_connector_display_info_wl( NULL );
++			}
+ 			return true;
+ 		}
+ 

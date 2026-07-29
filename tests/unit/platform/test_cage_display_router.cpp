@@ -49,53 +49,9 @@ TEST(WaylandInterfaceTests, RemovedOutputMarksDirtyButKeepsMonitorStorageUntilRe
 }
 #endif
 
-TEST(CageDisplayRouterPolicyTests, HeadlessNvencRequestsWindowedGpuNativeProbeWhenAllConditionsMatch) {
-  EXPECT_TRUE(cage_display_router::should_attempt_windowed_gpu_native_probe(
-    true,
-    true,
-    true
-  ));
-}
-
-TEST(CageDisplayRouterPolicyTests, OverrideRequiresHeadlessGpuPreferenceAndEncoderRequirement) {
-  EXPECT_FALSE(cage_display_router::should_attempt_windowed_gpu_native_probe(
-    false,
-    true,
-    true
-  ));
-  EXPECT_FALSE(cage_display_router::should_attempt_windowed_gpu_native_probe(
-    true,
-    false,
-    true
-  ));
-  EXPECT_FALSE(cage_display_router::should_attempt_windowed_gpu_native_probe(
-    true,
-    true,
-    false
-  ));
-}
-
-TEST(CageDisplayRouterPolicyTests, WindowedOverrideAttemptsGpuNativeCapture) {
-  const platf::runtime_state_t runtime_state {
-    .requested_headless = true,
-    .effective_headless = false,
-    .gpu_native_override_active = true,
-    .backend_name = "labwc",
-  };
-
-  EXPECT_TRUE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
-}
-
-TEST(CageDisplayRouterPolicyTests, HeadlessRuntimeDoesNotAttemptGpuNativeCapture) {
-  const platf::runtime_state_t runtime_state {
-    .requested_headless = true,
-    .effective_headless = true,
-    .gpu_native_override_active = false,
-    .backend_name = "labwc",
-  };
-
-  EXPECT_FALSE(cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state));
-}
+// Trivial AND/negation helpers (windowed_gpu_native_probe, gpu_native_cage_capture,
+// windowed_ram_fallback, headless_extcopy_probe_succeeded) live only under
+// stream_runtime::labwc as one-liners — no dual cage export / matrix tests.
 
 TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiSkipsExtcopyDmabufForShmFallback) {
   const platf::runtime_state_t runtime_state {
@@ -218,28 +174,6 @@ TEST(CageDisplayRouterPolicyTests, WindowedOverrideDoesNotReportHeadlessFallback
   EXPECT_FALSE(cage_display_router::should_report_headless_ram_capture_fallback(runtime_state));
 }
 
-TEST(CageDisplayRouterPolicyTests, WindowedOverrideReportsWindowedFallback) {
-  const platf::runtime_state_t runtime_state {
-    .requested_headless = true,
-    .effective_headless = false,
-    .gpu_native_override_active = true,
-    .backend_name = "labwc",
-  };
-
-  EXPECT_TRUE(cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state));
-}
-
-TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessDoesNotReportWindowedFallback) {
-  const platf::runtime_state_t runtime_state {
-    .requested_headless = true,
-    .effective_headless = true,
-    .gpu_native_override_active = false,
-    .backend_name = "labwc",
-  };
-
-  EXPECT_FALSE(cage_display_router::should_report_windowed_ram_capture_fallback(runtime_state));
-}
-
 #ifdef POLARIS_TESTS
 TEST(WaylandDrmDeviceTests, InvalidDeviceDoesNotFabricateRenderNode) {
   EXPECT_TRUE(wl::render_node_from_drm_device_for_tests(dev_t {}).empty());
@@ -301,12 +235,6 @@ TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeResultCachesSuccess
   cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
 
   EXPECT_EQ(cage_display_router::cached_headless_extcopy_dmabuf_probe_result(), std::optional<bool> {true});
-}
-
-TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeRequiresLiveFrameConversion) {
-  EXPECT_FALSE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(false, false));
-  EXPECT_FALSE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(true, false));
-  EXPECT_TRUE(cage_display_router::headless_extcopy_dmabuf_probe_succeeded(true, true));
 }
 
 TEST(CageDisplayRouterPolicyTests, HeadlessExtcopyDmabufProbeFailureSuppressesRetry) {

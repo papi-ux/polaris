@@ -232,6 +232,10 @@ namespace dyn {
   }
 }  // namespace dyn
 
+#ifdef POLARIS_BUILD_PORTAL
+  #include "portal_session.h"
+#endif
+
 namespace platf {
   using ifaddr_t = util::safe_ptr<ifaddrs, freeifaddrs>;
 
@@ -614,7 +618,12 @@ std::string get_local_ip_for_gateway() {
   }
 
   void streaming_will_stop() {
-    // Nothing to do
+#ifdef POLARIS_BUILD_PORTAL
+    // SB-2: drop PipeWire + ScreenCast session while the compositor is still
+    // alive. Video threads have already joined; releasing here keeps gamescope
+    // kill (owned path) from racing a live portal source.
+    ::portal::release_global_capture();
+#endif
   }
 
   void restart_on_exit() {

@@ -9,14 +9,32 @@ Use this page when you want the technical model behind the README, runtime dashb
 Headless Stream is controlled by these settings:
 
 ```ini
+# Preferred first-class mode (Private Stream family uses labwc today)
+linux_stream_mode = headless_stream
+linux_private_runtime = labwc
+linux_prefer_gpu_native_capture = enabled
+
+# Legacy booleans (still accepted; written together when the UI/API changes mode)
 headless_mode = enabled
 linux_use_cage_compositor = enabled
-linux_prefer_gpu_native_capture = enabled
 ```
 
-- `headless_mode` requests a stream-only session instead of the visible desktop.
-- `linux_use_cage_compositor` routes launched apps into Polaris' private Wayland compositor.
+| `linux_stream_mode` | Meaning |
+|---|---|
+| `headless_stream` | Private Stream — private labwc compositor, prefer true headless |
+| `windowed_stream` | Private Stream (GPU-native preference) — may window labwc to keep DMA-BUF |
+| `host_virtual_display` | Host-side virtual output (EVDI / wlr / kscreen) |
+| `desktop_display` | Mirror the current desktop session |
+| `gamescope_stream` | Gamescope Stream — attach idle `gamescope-0` or spawn owned headless; portal/PipeWire capture (available when `gamescope` is on PATH) |
+| `headless_dongle` | Swap desktop onto a dummy-plug connector for KMS capture (needs streaming + primary outputs) |
+| `family_isolated` / `headless_evdi` | Reserved slots for community Family Mode + EVDI-as-primary |
+
+- `linux_stream_mode` is the source of truth when set; otherwise Polaris derives the mode from the legacy booleans.
+- `linux_private_runtime` selects the nested compositor for private modes (`labwc` or `gamescope`).
 - `linux_prefer_gpu_native_capture = enabled` asks Polaris to prefer DMA-BUF/GPU-resident capture on capable NVIDIA and AMD/Mesa stacks. If a compositor or driver cannot provide it, Polaris should report the real SHM/system-memory fallback instead of pretending the stream is GPU-native.
+- Capture (wlroots screencopy, portal, KMS) stays orthogonal to which private runtime owns the session.
+
+See [Stream paths (plugin contract)](stream-paths.md) for how to add a new mode (runtime × capture × topology) without more boolean soup.
 
 The private runtime is intentionally isolated. Steam, Wine, XWayland clients, and game launches should stay inside the stream compositor instead of bouncing back to the host desktop.
 

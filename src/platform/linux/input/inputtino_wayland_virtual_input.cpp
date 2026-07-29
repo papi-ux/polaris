@@ -28,7 +28,7 @@
 
 // local includes
 #include "src/logging.h"
-#include "src/platform/linux/cage_display_router.h"
+#include "src/platform/linux/stream_runtime.h"
 
 using namespace std::literals;
 
@@ -318,11 +318,11 @@ namespace platf {
     };
 
     bool cage_runtime_active() const {
-      if (!cage_display_router::is_healthy()) {
+      if (!stream_runtime::labwc::is_healthy()) {
         return false;
       }
 
-      const auto runtime = cage_display_router::runtime_state();
+      const auto runtime = stream_runtime::labwc::runtime_state();
       return runtime.backend_name == "labwc"sv && runtime.effective_headless;
     }
 
@@ -393,12 +393,12 @@ namespace platf {
         return false;
       }
 
-      const auto socket = cage_display_router::get_wayland_socket();
+      const auto socket = stream_runtime::labwc::wayland_socket();
       if (socket.empty()) {
         return false;
       }
 
-      const auto current_pid = cage_display_router::get_pid();
+      const auto current_pid = stream_runtime::labwc::pid();
       if (current_pid <= 0) {
         return false;
       }

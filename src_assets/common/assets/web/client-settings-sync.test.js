@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyStreamDisplayModeToConfig,
   labelForStreamDisplayMode,
   resolveClientSettingsSync,
   resolveStreamDisplayMode,
   resolveStreamDisplayRuntimeNotice,
+  streamDisplayModeAvailable,
   stripClientSettingsResponseOnly,
 } from './client-settings-sync'
 
@@ -25,6 +27,76 @@ describe('client settings sync helpers', () => {
       linux_use_cage_compositor: 'enabled',
       linux_prefer_gpu_native_capture: 'enabled',
     })).toBe('windowed_stream')
+  })
+
+  it('prefers explicit linux_stream_mode over legacy booleans', () => {
+    expect(resolveStreamDisplayMode({
+      linux_stream_mode: 'desktop_display',
+      headless_mode: 'enabled',
+      linux_use_cage_compositor: 'enabled',
+    })).toBe('desktop_display')
+  })
+
+  it('registers gamescope_stream as selectable and maps private runtimes on apply', () => {
+    // Client-side allow-list: gamescope is selectable (host still probes PATH).
+    // Family/EVDI remain reserved until those paths ship.
+    expect(streamDisplayModeAvailable('gamescope_stream')).toBe(true)
+    expect(streamDisplayModeAvailable('family_isolated')).toBe(false)
+    expect(streamDisplayModeAvailable('headless_evdi')).toBe(false)
+    expect(labelForStreamDisplayMode('gamescope_stream')).toBe('Gamescope Stream')
+
+    const labwc = applyStreamDisplayModeToConfig({}, 'headless_stream')
+    expect(labwc.linux_stream_mode).toBe('headless_stream')
+    expect(labwc.linux_private_runtime).toBe('labwc')
+    expect(labwc.headless_mode).toBe('enabled')
+    expect(labwc.linux_use_cage_compositor).toBe('enabled')
+
+    const gamescope = applyStreamDisplayModeToConfig({}, 'gamescope_stream')
+    expect(gamescope.linux_stream_mode).toBe('gamescope_stream')
+    expect(gamescope.linux_private_runtime).toBe('gamescope')
+    expect(gamescope.linux_use_cage_compositor).toBe('disabled')
+    expect(gamescope.capture).toBe('portal')
+
+    const dongle = applyStreamDisplayModeToConfig({}, 'headless_dongle')
+    expect(dongle.linux_stream_mode).toBe('headless_dongle')
+    expect(dongle.capture).toBe('portal')
+    expect(dongle.linux_auto_manage_displays).toBe('enabled')
+    // Explicit kms is preserved for CAP_SYS_ADMIN hosts.
+    const dongleKms = applyStreamDisplayModeToConfig({ capture: 'kms' }, 'headless_dongle')
+    expect(dongleKms.capture).toBe('kms')
+  })
+
+  it('normalizes stale capture and topology fields when switching stream paths', () => {
+    const gamescope = applyStreamDisplayModeToConfig({
+      capture: 'kms',
+      linux_auto_manage_displays: 'enabled',
+      headless_swap_mode: 'privacy',
+    }, 'gamescope_stream')
+    expect(gamescope.capture).toBe('portal')
+    expect(gamescope.linux_private_runtime).toBe('gamescope')
+    expect(gamescope.linux_auto_manage_displays).toBe('disabled')
+    expect(gamescope.headless_swap_mode).toBe('')
+
+    const labwc = applyStreamDisplayModeToConfig({
+      capture: 'portal',
+      linux_auto_manage_displays: 'enabled',
+      headless_swap_mode: 'privacy',
+    }, 'headless_stream')
+    expect(labwc.capture).toBe('wlr')
+    expect(labwc.linux_private_runtime).toBe('labwc')
+    expect(labwc.linux_auto_manage_displays).toBe('disabled')
+    expect(labwc.headless_swap_mode).toBe('')
+
+    const desktop = applyStreamDisplayModeToConfig({
+      capture: 'kms',
+      linux_private_runtime: 'gamescope',
+      linux_auto_manage_displays: 'enabled',
+      headless_swap_mode: 'privacy',
+    }, 'desktop_display')
+    expect(desktop.capture).toBe('portal')
+    expect(desktop.linux_private_runtime).toBe('')
+    expect(desktop.linux_auto_manage_displays).toBe('disabled')
+    expect(desktop.headless_swap_mode).toBe('')
   })
 
   it('labels GPU-native as a Private Stream capture capability', () => {

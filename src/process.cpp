@@ -67,8 +67,10 @@
 #elif __linux__
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
-  #include "platform/linux/cage_display_router.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/session_launch_linux.h"
+  #include "platform/linux/display_topology.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <fcntl.h>
@@ -77,12 +79,17 @@
   #include <sys/stat.h>
   #include <sys/syscall.h>
   #include <unistd.h>
+  #include "platform/linux/session_media.h"
+  #ifdef POLARIS_BUILD_PORTAL
+    #include "platform/linux/portal_session.h"
+  #endif
 #elif __APPLE__
   #include <mach-o/dyld.h>
 #endif
 
 #include "device_db.h"
 #include "ai_optimizer.h"
+#include "browser_stream.h"
 #include "stream_stats.h"
 #include "game_classifier.h"
 
@@ -120,7 +127,12 @@ namespace proc {
     if (requester_role == rtsp_stream::session_role_e::viewer) {
       return session_stop_outcome_t::viewer_forbidden;
     }
-    if (has_running_app && !owned_by_client) {
+    // Live RTSP controller may stop even if launch-owner uuid drifted (e.g.
+    // browser-stream handoff, residual app after client reconnect). Prefer
+    // controller role over strict launch-owner match so quit is not 470 while
+    // the stream still ends from process death.
+    if (has_running_app && !owned_by_client &&
+        requester_role != rtsp_stream::session_role_e::controller) {
       return session_stop_outcome_t::other_owner;
     }
     if (!has_running_app && requester_role != rtsp_stream::session_role_e::controller) {
@@ -750,7 +762,21 @@ namespace proc {
         return extract_digits(pos + std::string("-applaunch").size());
       }
 
+      // polaris-gamescope-session prep: ".../polaris-gamescope-session start <appid>"
+      // Used to unwrap mode-hardwired lea apps.json entries (SB-5).
+      if (boost::icontains(lower, "polaris-gamescope-session")) {
+        if (auto pos = lower.rfind(" start "); pos != std::string::npos) {
+          if (auto id = extract_digits(pos + std::string(" start ").size()); id) {
+            return id;
+          }
+        }
+      }
+
       return std::nullopt;
+    }
+
+    bool command_uses_polaris_gamescope_session(const std::string &cmd) {
+      return boost::icontains(cmd, "polaris-gamescope-session");
     }
 
     std::string canonical_steam_library_big_picture_followup_command(const std::string &reference_cmd, const std::string &appid) {
@@ -789,43 +815,6 @@ namespace proc {
     }
 
 #ifdef __linux__
-    std::string strip_leading_setsid_for_cage(std::string cmd) {
-      auto trimmed = boost::trim_left_copy(cmd);
-      if (!boost::istarts_with(trimmed, "setsid")) {
-        return cmd;
-      }
-
-      if (trimmed.size() > 6 && !std::isspace(static_cast<unsigned char>(trimmed[6]))) {
-        return cmd;
-      }
-
-      auto rest = trimmed.substr(std::min<size_t>(trimmed.size(), 6));
-      boost::trim_left(rest);
-
-      if (boost::istarts_with(rest, "-f")) {
-        if (rest.size() == 2 || std::isspace(static_cast<unsigned char>(rest[2]))) {
-          rest = rest.substr(std::min<size_t>(rest.size(), 2));
-          boost::trim_left(rest);
-        }
-      } else if (boost::istarts_with(rest, "--fork")) {
-        if (rest.size() == 6 || std::isspace(static_cast<unsigned char>(rest[6]))) {
-          rest = rest.substr(std::min<size_t>(rest.size(), 6));
-          boost::trim_left(rest);
-        }
-      }
-
-      return rest.empty() ? cmd : rest;
-    }
-
-    std::string cage_runtime_command(const std::string &cmd) {
-      auto sanitized = strip_leading_setsid_for_cage(cmd);
-      if (sanitized != cmd) {
-        BOOST_LOG(info) << "process: stripped leading setsid for cage runtime command ["
-                        << cmd << "] -> [" << sanitized << ']';
-      }
-      return sanitized;
-    }
-
     bool proc_environ_contains_exact_entry(
       std::string_view environ,
       std::string_view key,
@@ -974,12 +963,58 @@ namespace proc {
       bool unowned_steam_client_active,
       bool ownership_capture_complete
     ) {
+      // unowned_steam_client_active is informational only: we still terminate the
+      // owned set (session/gamescope-attached). Desktop Steam is left alone.
+      (void) unowned_steam_client_active;
       return session_owned_cage &&
              session_generation_available &&
              context_uses_steam(ctx) &&
              session_owned_steam_client_active &&
-             !unowned_steam_client_active &&
              ownership_capture_complete;
+    }
+
+    bool proc_environ_is_gamescope_stream_attached(std::string_view environ) {
+      // Gamescope attach env from session_launch_linux / polaris-gamescope.env.
+      // Pressure-vessel rewrites the value to …/gamescope-socket but keeps the key.
+      std::size_t start = 0;
+      while (start < environ.size()) {
+        const auto end = environ.find('\0', start);
+        if (end == std::string_view::npos) {
+          break;
+        }
+        const auto entry = environ.substr(start, end - start);
+        if (entry.starts_with("GAMESCOPE_WAYLAND_DISPLAY="sv) &&
+            entry.find("gamescope") != std::string_view::npos) {
+          return true;
+        }
+        if (entry == "WAYLAND_DISPLAY=gamescope-0"sv) {
+          return true;
+        }
+        start = end + 1;
+      }
+      return false;
+    }
+
+    bool is_gamescope_infrastructure_process(std::string_view comm, std::string_view cmdline) {
+      if (comm == "gamescope" || comm == "gamescope-wl" || comm == "gamescopereaper" ||
+          comm == "Xwayland" || comm == "Xwayland.bin") {
+        return true;
+      }
+      if (comm.find("portal-gamescope") != std::string_view::npos) {
+        return true;
+      }
+      if (cmdline.find("xdg-desktop-portal-gamescope") != std::string_view::npos) {
+        return true;
+      }
+      if (cmdline.find("gamescope --backend") != std::string_view::npos ||
+          cmdline.find("gamescope --") != std::string_view::npos) {
+        // Parent gamescope compositor itself (comm may be .gamescope-wrappe).
+        if (cmdline.find("steam://") == std::string_view::npos &&
+            cmdline.find("SteamLaunch") == std::string_view::npos) {
+          return true;
+        }
+      }
+      return false;
     }
 
     struct pidfd_handle_t {
@@ -1746,7 +1781,10 @@ namespace proc {
           }
           continue;
         }
-        if (proc_environ_matches_isolated_session(environ.bytes, session_instance_id)) {
+        // Session instance id is the gold standard; gamescope attach env is the
+        // fallback when pressure-vessel strips POLARIS_SESSION_* (common for Steam).
+        if (proc_environ_matches_isolated_session(environ.bytes, session_instance_id) ||
+            proc_environ_is_gamescope_stream_attached(environ.bytes)) {
           switch (steam_client_process_role(comm, argv0)) {
             case steam_client_process_role_e::native_root:
               snapshot.roots.emplace_back(std::move(*handle));
@@ -1810,6 +1848,11 @@ namespace proc {
         return false;
       }
 
+      if (!ownership.unowned.empty()) {
+        BOOST_LOG(info) << "process: leaving "sv << ownership.unowned.size()
+                        << " non-session Steam client process(es) running"sv;
+      }
+
       BOOST_LOG(info) << "process: terminating the session-owned Steam client root through pidfd before "sv
                       << ownership.helpers.size() << " helper process(es)"sv;
       if (!terminate_pidfds(ownership.roots, 5s, 1s, "private Steam client root"sv)) {
@@ -1854,6 +1897,90 @@ namespace proc {
       BOOST_LOG(warning) << "process: session-owned Steam survivors remained after bounded pidfd termination; "sv
                          << "continuing with isolated cage fallback cleanup"sv;
       return false;
+    }
+
+    /**
+     * Kill gamescope-attached clients (games reaper, game binary, leftover Steam)
+     * that pressure-vessel stripped of POLARIS_SESSION_INSTANCE_ID. Does not touch
+     * the gamescope compositor or desktop processes without gamescope attach env.
+     */
+    bool terminate_gamescope_attached_session_clients(const std::string &steam_appid) {
+      std::vector<pidfd_handle_t> targets;
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        return false;
+      }
+      auto close_dir = util::fail_guard([dir]() {
+        closedir(dir);
+      });
+
+      const auto this_pid = getpid();
+      const std::string appid_marker = steam_appid.empty() ? std::string {} : ("AppId=" + steam_appid);
+
+      for (;;) {
+        auto *entry = read_next_proc_entry(dir);
+        if (entry == nullptr) {
+          break;
+        }
+        const std::string name = entry->d_name;
+        if (!proc_pid_dir_name(name)) {
+          continue;
+        }
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == this_pid) {
+          continue;
+        }
+
+        const auto comm_r = read_proc_status_file_result(pid, "comm");
+        const auto cmdline_r = read_proc_status_file_result(pid, "cmdline");
+        const auto environ_r = read_proc_status_file_result(pid, "environ");
+        if (!comm_r.ok() || !cmdline_r.ok() || !environ_r.ok()) {
+          continue;
+        }
+        auto comm = boost::to_lower_copy(comm_r.bytes);
+        boost::trim(comm);
+        const auto &cmdline = cmdline_r.bytes;
+        if (comm == "polaris" || comm.find("polaris") != std::string::npos) {
+          continue;
+        }
+        // Host helpers that inherit gamescope env from the polaris unit — not game clients.
+        if (comm == "sleep" || comm == "dbus-daemon" || comm == "systemd" ||
+            cmdline.find("systemd-inhibit") != std::string::npos ||
+            cmdline.find("srt-logger") != std::string::npos) {
+          continue;
+        }
+        if (is_gamescope_infrastructure_process(comm, cmdline)) {
+          continue;
+        }
+
+        const bool gamescope_attached = proc_environ_is_gamescope_stream_attached(environ_r.bytes);
+        const bool steam_launch_for_app =
+          !appid_marker.empty() && cmdline.find(appid_marker) != std::string::npos &&
+          (cmdline.find("SteamLaunch") != std::string::npos ||
+           cmdline.find("steam://rungameid/") != std::string::npos ||
+           cmdline.find("rungameid/") != std::string::npos);
+
+        // Gamescope-attached Steam/game, or reaper for this appid (may lose attach env).
+        if (!gamescope_attached && !steam_launch_for_app) {
+          continue;
+        }
+
+        int open_error = 0;
+        auto handle = open_process_pidfd(pid, open_error);
+        if (!handle) {
+          continue;
+        }
+        targets.emplace_back(std::move(*handle));
+      }
+
+      if (targets.empty()) {
+        BOOST_LOG(info) << "process: no gamescope-attached session clients to terminate"sv;
+        return true;
+      }
+
+      BOOST_LOG(info) << "process: terminating "sv << targets.size()
+                      << " gamescope-attached session client(s) (game/reaper/steam)"sv;
+      return terminate_pidfds(targets, 3s, 2s, "gamescope session client"sv);
     }
 
     bool is_active_desktop_steam_client_process(
@@ -2064,24 +2191,46 @@ namespace proc {
     }
 
     void normalize_steam_library_app(proc::ctx_t &ctx) {
-      if (!is_steam_library_app(ctx)) {
+      if (is_steam_big_picture_app(ctx)) {
         return;
       }
 
+      // SB-5: recover appid from polaris-gamescope-session hardwire (prep "start <id>")
+      // so library games stay mode-neutral even before inject/migration rewrites apps.json.
       std::string appid = ctx.steam_appid;
+      const bool session_wired =
+        boost::iequals(ctx.source, "polaris-gamescope-session") ||
+        command_uses_polaris_gamescope_session(ctx.cmd) ||
+        std::any_of(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), [](const proc::cmd_t &cmd) {
+          return command_uses_polaris_gamescope_session(cmd.do_cmd) ||
+                 command_uses_polaris_gamescope_session(cmd.undo_cmd);
+        });
+
       if (appid.empty()) {
         if (const auto detected = extract_steam_appid_from_command(ctx.cmd); detected) {
           appid = *detected;
-        } else {
-          for (const auto &cmd : ctx.detached) {
-            if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
-              appid = *detected;
-              break;
-            }
+        }
+      }
+      if (appid.empty()) {
+        for (const auto &cmd : ctx.detached) {
+          if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
+            appid = *detected;
+            break;
+          }
+        }
+      }
+      if (appid.empty()) {
+        for (const auto &cmd : ctx.prep_cmds) {
+          if (const auto detected = extract_steam_appid_from_command(cmd.do_cmd); detected) {
+            appid = *detected;
+            break;
           }
         }
       }
 
+      if (appid.empty() && !is_steam_library_app(ctx) && !session_wired) {
+        return;
+      }
       if (appid.empty()) {
         return;
       }
@@ -2090,13 +2239,28 @@ namespace proc {
       ctx.source = "steam";
       ctx.steam_launch_mode = proc::normalize_steam_launch_mode(ctx.steam_launch_mode);
 
+      if (session_wired) {
+        // Drop per-app polaris-gamescope-session shell; path runtime wraps env by mode.
+        BOOST_LOG(info) << "process: unwrapping polaris-gamescope-session hardwire for Steam library appid="
+                        << appid << " (mode-neutral launch)"sv;
+        ctx.cmd.clear();
+        ctx.prep_cmds.erase(
+          std::remove_if(ctx.prep_cmds.begin(), ctx.prep_cmds.end(), [](const proc::cmd_t &cmd) {
+            return command_uses_polaris_gamescope_session(cmd.do_cmd) ||
+                   command_uses_polaris_gamescope_session(cmd.undo_cmd);
+          }),
+          ctx.prep_cmds.end()
+        );
+        ctx.auto_detach = true;
+      }
+
       std::string reference_cmd = ctx.cmd;
       std::vector<nlohmann::json> preserved_detached;
       preserved_detached.reserve(ctx.detached.size());
 
       for (const auto &cmd : ctx.detached) {
-        if (command_is_steam_library_launch_component(cmd)) {
-          if (reference_cmd.empty()) {
+        if (command_is_steam_library_launch_component(cmd) || command_uses_polaris_gamescope_session(cmd)) {
+          if (reference_cmd.empty() && !command_uses_polaris_gamescope_session(cmd)) {
             reference_cmd = cmd;
           }
           continue;
@@ -2104,7 +2268,8 @@ namespace proc {
         preserved_detached.emplace_back(cmd);
       }
 
-      if (!ctx.cmd.empty() && command_is_steam_library_launch_component(ctx.cmd)) {
+      if (!ctx.cmd.empty() &&
+          (command_is_steam_library_launch_component(ctx.cmd) || command_uses_polaris_gamescope_session(ctx.cmd))) {
         BOOST_LOG(info) << "process: converted Steam library primary command into detached launch components"sv;
         ctx.cmd.clear();
       }
@@ -3990,54 +4155,13 @@ namespace proc {
   }
 
   namespace linux_display {
-    /**
-     * @brief Enable the streaming display and set display priorities for a streaming session.
-     * Uses kscreen-doctor to enable the streaming output and set it as priority 1.
-     */
+    // Thin wrappers — topology lives in display_topology for path plugins.
     void enable_streaming_display() {
-      const auto &cfg = config::video.linux_display;
-      if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
-        return;
-      }
-
-      // Enable streaming output but keep primary display as priority 1
-      // so KDE taskbar stays on the main display
-      std::string cmd = "kscreen-doctor output." + cfg.streaming_output + ".enable";
-      if (!cfg.primary_output.empty()) {
-        cmd += " output." + cfg.primary_output + ".priority.1";
-        cmd += " output." + cfg.streaming_output + ".priority.2";
-      }
-
-      BOOST_LOG(info) << "Linux display management: enabling streaming display ["sv << cmd << "]"sv;
-      int ret = std::system(cmd.c_str());
-      if (ret != 0) {
-        BOOST_LOG(error) << "Linux display management: enable command failed with code ["sv << ret << "]"sv;
-      }
-      // Wait for display to come online before capture starts
-      std::this_thread::sleep_for(std::chrono::seconds(2));
+      display_topology::prepare_for_stream();
     }
 
-    /**
-     * @brief Disable the streaming display and restore the primary display after a streaming session ends.
-     * Uses kscreen-doctor to restore priority and disable the streaming output.
-     */
     void disable_streaming_display() {
-      const auto &cfg = config::video.linux_display;
-      if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
-        return;
-      }
-
-      std::string cmd = "kscreen-doctor";
-      if (!cfg.primary_output.empty()) {
-        cmd += " output." + cfg.primary_output + ".priority.1";
-      }
-      cmd += " output." + cfg.streaming_output + ".priority.2 output." + cfg.streaming_output + ".disable";
-
-      BOOST_LOG(info) << "Linux display management: disabling streaming display ["sv << cmd << "]"sv;
-      int ret = std::system(cmd.c_str());
-      if (ret != 0) {
-        BOOST_LOG(error) << "Linux display management: disable command failed with code ["sv << ret << "]"sv;
-      }
+      display_topology::restore_after_stream();
     }
   }  // namespace linux_display
 #endif
@@ -4262,16 +4386,8 @@ namespace proc {
     auto runtime = std::make_shared<steam_big_picture_guard_runtime_t>();
     const steam_big_picture_action_dispatch_t dispatch_action = [reference_command, launch_env](std::string_view action) {
       auto action_env = launch_env;
-      if (cage_display_router::is_running()) {
-        const auto cage_socket = cage_display_router::get_wayland_socket();
-        if (!cage_socket.empty()) {
-          action_env["WAYLAND_DISPLAY"] = cage_socket;
-          action_env["AT_SPI_BUS_ADDRESS"] = "";
-        }
-        const auto cage_display = cage_display_router::get_x11_display();
-        if (!cage_display.empty()) {
-          action_env["DISPLAY"] = cage_display;
-        }
+      if (stream_runtime::labwc::is_running()) {
+        session_launch_linux::apply_labwc_child_env(action_env, nullptr);
       }
       return dispatch_steam_big_picture_action(reference_command, action, action_env);
     };
@@ -4340,12 +4456,19 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
+    const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
+    const bool gamescope_stream_session =
+      config::video.linux_display.stream_mode == "gamescope_stream" ||
+      config::video.linux_display.private_runtime == "gamescope";
+    // Set true after enable_hdr when rewiring to polaris-gamescope-session nested WSI.
+    bool nested_wsi_hdr_session = false;
+    // Private nested runtime: labwc cage and/or owned/attach gamescope.
     const bool use_cage_compositor_for_session =
-      config::video.linux_display.use_cage_compositor &&
-      !(launch_session && launch_session->mirror_desktop);
+      !mirror_desktop_session &&
+      (config::video.linux_display.use_cage_compositor || gamescope_stream_session);
     const bool requested_headless_for_session =
-      config::video.linux_display.headless_mode &&
-      !(launch_session && launch_session->mirror_desktop);
+      !mirror_desktop_session &&
+      (config::video.linux_display.headless_mode || gamescope_stream_session);
     const auto steam_guard_snapshot = snapshot_steam_big_picture_input_guard(
       use_cage_compositor_for_session,
       launch_session && launch_session->mirror_desktop
@@ -4585,9 +4708,95 @@ namespace proc {
       config::video.color_range = *resolved_optimization.color_range;
     }
 
-    if (resolved_optimization.hdr.has_value()) {
+    // device_db sets hdr from hdr_capable (capability), not a session request.
+    // Only client_profile (optimization_locks.hdr) may force enable_hdr.
+    if (resolved_optimization.hdr.has_value() && optimization_locks.hdr) {
       launch_session->enable_hdr = *resolved_optimization.hdr;
+    } else if (resolved_optimization.hdr.has_value() &&
+               *resolved_optimization.hdr != launch_session->enable_hdr) {
+      BOOST_LOG(info) << "Ignoring non-profile HDR optimization (device_db/ai capability) "
+                      << (*resolved_optimization.hdr ? "enabled"sv : "disabled"sv)
+                      << "; keeping client enable_hdr="sv
+                      << (launch_session->enable_hdr ? "true"sv : "false"sv);
     }
+
+#ifdef __linux__
+    // Portal is_hdr reads this file. Write from final enable_hdr only.
+    // Never restart gamescope or rewrite from encoder probe. Session owns restart.
+    {
+      const char *rt = std::getenv("XDG_RUNTIME_DIR");
+      if (rt && *rt) {
+        const auto force_path = std::filesystem::path(rt) / "polaris-gamescope-force";
+        std::ofstream out(force_path, std::ios::trunc);
+        out << (launch_session->enable_hdr ? "1" : "0") << '\n';
+        BOOST_LOG(info) << "portal HDR force -> "sv
+                        << (launch_session->enable_hdr ? "1"sv : "0"sv)
+                        << " from enable_hdr="sv
+                        << (launch_session->enable_hdr ? "true"sv : "false"sv);
+      }
+    }
+
+    // Nested WSI is the proven game-HDR present path (FROG layer + DXVK HDR10
+    // swapchain). SB-5 unwrapped polaris-gamescope-session into attach+X11, which
+    // cannot register Gamescope surfaces — BG3 etc. stay SDR despite stream PQ.
+    // For gamescope_stream + client HDR + Steam appid, rewire to nested session.
+    if (gamescope_stream_session && launch_session->enable_hdr) {
+      std::string appid = _app.steam_appid;
+      if (appid.empty()) {
+        if (const auto detected = extract_steam_appid_from_command(_app.cmd); detected) {
+          appid = *detected;
+        }
+      }
+      if (appid.empty()) {
+        for (const auto &cmd : _app.detached) {
+          if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
+            appid = *detected;
+            break;
+          }
+        }
+      }
+      boost::filesystem::path session_bin;
+      try {
+        session_bin = boost::process::v1::search_path("polaris-gamescope-session");
+      }
+      catch (...) {
+        session_bin.clear();
+      }
+      if (!appid.empty() && !session_bin.empty()) {
+        nested_wsi_hdr_session = true;
+        _app.steam_appid = appid;
+        const auto start_cmd = session_bin.string() + " start " + appid;
+        const auto wait_cmd = session_bin.string() + " wait";
+        const auto stop_cmd = session_bin.string() + " stop";
+        // Drop attach-era steam launches; nested session owns Steam as gamescope child.
+        _app.detached.clear();
+        _app.cmd = wait_cmd;
+        _app.auto_detach = false;
+        _app.wait_all = true;
+        // Keep non-session prep (e.g. steam -shutdown undo); replace session entries.
+        std::vector<proc::cmd_t> kept_prep;
+        kept_prep.reserve(_app.prep_cmds.size() + 1);
+        for (auto &cmd : _app.prep_cmds) {
+          if (command_uses_polaris_gamescope_session(cmd.do_cmd) ||
+              command_uses_polaris_gamescope_session(cmd.undo_cmd)) {
+            continue;
+          }
+          kept_prep.push_back(std::move(cmd));
+        }
+        kept_prep.insert(
+          kept_prep.begin(),
+          proc::cmd_t {std::string {start_cmd}, std::string {stop_cmd}, false}
+        );
+        _app.prep_cmds = std::move(kept_prep);
+        BOOST_LOG(info) << "session_manager: nested WSI HDR path — polaris-gamescope-session start "
+                        << appid << " (Steam primary child; not attach/X11)"sv;
+      }
+      else if (launch_session->enable_hdr) {
+        BOOST_LOG(warning) << "session_manager: HDR client but cannot nest WSI "
+                              "(need steam-appid + polaris-gamescope-session on PATH); using attach"sv;
+      }
+    }
+#endif
 
     if (resolved_optimization.virtual_display.has_value()) {
       launch_session->virtual_display = *resolved_optimization.virtual_display;
@@ -4743,7 +4952,7 @@ namespace proc {
       confighttp::set_session_state(confighttp::session_state_e::tearing_down);
       confighttp::emit_session_event("session_ending", "Cleaning up");
       // terminate_impl() owns exact-generation cage cleanup. Do not follow it
-      // with raw PID/group signaling from cage_display_router::stop().
+      // with raw PID/group signaling from stream_runtime::labwc::stop().
       session_manager::restore_state(session_state);
 #endif
     });
@@ -4879,16 +5088,17 @@ namespace proc {
     const auto display_policy = stream_display_policy::resolve_current(
       video::active_encoder_requires_gpu_native_capture()
     );
+    // S4: labwc private runtime is derived (use_private_runtime && LABWC).
     const bool using_headless_cage =
       display_policy.requested_headless &&
-      display_policy.use_cage_runtime;
+      display_policy.uses_labwc();
     const bool should_use_linux_virtual_display =
       display_policy.use_host_virtual_display ||
       launch_session->virtual_display ||
       (!launch_session->user_locked_virtual_display && _app.virtual_display);
 
     if (
-      !display_policy.use_cage_runtime &&
+      !display_policy.uses_labwc() &&
       !config::video.linux_display.auto_manage_displays && (
         should_use_linux_virtual_display
       )
@@ -5239,7 +5449,7 @@ namespace proc {
         return true;
       }
 
-      const auto cage_socket = cage_display_router::get_wayland_socket();
+      const auto cage_socket = stream_runtime::labwc::wayland_socket();
       if (cage_socket.empty()) {
         BOOST_LOG(error) << "session_manager: Cage compositor started without an active WAYLAND_DISPLAY socket for encoder reprobe"sv;
         if (config::video.ignore_encoder_probe_failure) {
@@ -5282,7 +5492,8 @@ namespace proc {
       prefer_gpu_native_capture || encoder_requires_gpu_native_capture;
     const bool should_probe_windowed_cage_for_gpu_native =
       use_cage_compositor_for_session &&
-      cage_display_router::should_attempt_windowed_gpu_native_probe(
+      !gamescope_stream_session &&
+      stream_runtime::labwc::should_attempt_windowed_gpu_native_probe(
         requested_headless,
         prefer_gpu_native_capture,
         should_try_gpu_native_cage_probe
@@ -5290,11 +5501,11 @@ namespace proc {
     stream_stats::reset_gpu_native_probe(should_probe_windowed_cage_for_gpu_native, no_active_sessions_at_launch);
     const auto cached_windowed_gpu_native_probe_result =
       should_probe_windowed_cage_for_gpu_native ?
-        cage_display_router::cached_windowed_gpu_native_probe_result() :
+        stream_runtime::labwc::cached_windowed_gpu_native_probe_result() :
         std::optional<bool> {};
     const auto cached_headless_extcopy_dmabuf_probe_result =
       should_probe_windowed_cage_for_gpu_native ?
-        cage_display_router::cached_headless_extcopy_dmabuf_probe_result() :
+        stream_runtime::labwc::cached_headless_extcopy_dmabuf_probe_result() :
         std::optional<bool> {};
     bool force_windowed_cage_for_gpu_native = false;
     bool headless_extcopy_dmabuf_selected = false;
@@ -5317,41 +5528,86 @@ namespace proc {
       false,
     };
 
-    auto log_runtime_state = []() {
-      auto runtime_state = cage_display_router::runtime_state();
+    // Stream path policy (labwc / portal / host / gamescope).
+    const auto path_policy = stream_display_policy::resolve_current(
+      encoder_requires_gpu_native_capture,
+      false
+    );
+    // Nested WSI owns gamescope-0 (Steam as primary child). Do not attach/spawn a
+    // second idle compositor — that was the SB-5 path that lost FROG HDR present.
+    const bool need_private_runtime =
+      use_cage_compositor_for_session && !nested_wsi_hdr_session;
+    const bool prefer_gamescope =
+      path_policy.runtime == stream_path::runtime_kind_e::GAMESCOPE ||
+      gamescope_stream_session;
+    auto *private_runtime = need_private_runtime ?
+      stream_runtime::acquire(
+        prefer_gamescope ? stream_path::runtime_kind_e::GAMESCOPE : stream_path::runtime_kind_e::LABWC
+      ) :
+      nullptr;
+    if (need_private_runtime && !private_runtime) {
+      BOOST_LOG(error) << "session_manager: Private stream runtime is not available for path ["sv
+                       << path_policy.selection << "] backend=["sv << path_policy.backend_name << ']';
+      return 503;
+    }
+
+    auto log_runtime_state = [&]() {
+      platf::runtime_state_t runtime_state;
+      if (private_runtime) {
+        runtime_state = private_runtime->runtime_state();
+      }
+      else {
+        runtime_state.backend_name = path_policy.backend_name.empty() ? "host" : path_policy.backend_name;
+        runtime_state.path_id = path_policy.selection;
+        runtime_state.requested_headless = path_policy.requested_headless;
+        runtime_state.effective_headless = path_policy.effective_headless;
+        runtime_state.gpu_native_override_active = false;
+      }
+      if (runtime_state.path_id.empty()) {
+        runtime_state.path_id = path_policy.selection;
+      }
       stream_stats::update_runtime_state(runtime_state);
-      BOOST_LOG(info) << "session_runtime: backend="sv << runtime_state.backend_name
+      BOOST_LOG(info) << "session_runtime: path="sv << runtime_state.path_id
+                      << " backend="sv << runtime_state.backend_name
                       << " requested_headless="sv << runtime_state.requested_headless
                       << " effective_headless="sv << runtime_state.effective_headless
                       << " gpu_native_override_active="sv << runtime_state.gpu_native_override_active;
     };
+    // Always publish an honest backend for non-labwc (portal/gamescope/host) sessions.
+    if (!use_cage_compositor_for_session) {
+      log_runtime_state();
+    }
 
     auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed, bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
-      if (cage_display_router::is_running()) {
-        cage_display_router::stop();
+      if (!private_runtime) {
+        return false;
+      }
+      if (private_runtime->is_running()) {
+        private_runtime->stop();
       }
 
-      if (!cage_display_router::start(
-            render_width,
-            render_height,
-            cage_refresh_hz,
-            startup_cmd,
-            force_windowed,
-            allow_cage_mangohud,
-            _session_instance_id
-          )) {
+      const stream_runtime::start_params_t start_params {
+        .width = static_cast<int>(render_width),
+        .height = static_cast<int>(render_height),
+        .refresh_hz = cage_refresh_hz,
+        .game_cmd = startup_cmd,
+        .force_windowed = force_windowed,
+        .allow_mangohud = allow_cage_mangohud,
+        .session_instance_id = _session_instance_id,
+      };
+      if (!private_runtime->start(start_params)) {
         return false;
       }
 
       if (!reprobe_encoders_for_cage(strict_configured_encoder, save_successful_cache)) {
-        cage_display_router::stop();
+        private_runtime->stop();
         return false;
       }
 
       log_runtime_state();
-      const auto runtime_state = cage_display_router::runtime_state();
+      const auto runtime_state = private_runtime->runtime_state();
       if (!runtime_state.effective_headless) {
-        // KDE edit mode only matters when labwc is a visible nested window on the desktop.
+        // KDE edit mode only matters when the private compositor is a visible nested window.
         session_manager::start_edit_mode_watchdog();
       }
       return true;
@@ -5369,40 +5625,40 @@ namespace proc {
                       << encoder_label << ']';
 
       auto stop_probe_cage = util::fail_guard([&]() {
-        if (cage_display_router::is_running()) {
-          cage_display_router::stop();
+        if (stream_runtime::labwc::is_running()) {
+          stream_runtime::labwc::stop();
         }
       });
 
       if (!start_cage_session("", false, true, false)) {
-        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "compositor_encoder_init", "compositor_or_encoder_init_failed");
         BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe could not initialize the compositor/encoder path"sv;
         return false;
       }
 
-      const auto runtime_state = cage_display_router::runtime_state();
+      const auto runtime_state = stream_runtime::labwc::runtime_state();
       if (!runtime_state.effective_headless) {
-        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "runtime_validation", "not_effective_headless");
         BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not start an effective headless runtime"sv;
         return false;
       }
 
       if (!video::active_encoder_runtime_supports_config(gpu_native_probe_config)) {
-        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+        stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "encoder_validation", "encoder_config_not_supported");
         BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not validate the active encoder configuration"sv;
         return false;
       }
 
       const bool extcopy_initialized =
-        cage_display_router::cached_headless_extcopy_dmabuf_probe_result() == std::optional<bool> {true};
+        stream_runtime::labwc::cached_headless_extcopy_dmabuf_probe_result() == std::optional<bool> {true};
       const bool live_gpu_frame_converted =
         extcopy_initialized && video::active_encoder_runtime_supports_live_gpu_capture(gpu_native_probe_config);
 
-      if (!cage_display_router::headless_extcopy_dmabuf_probe_succeeded(extcopy_initialized, live_gpu_frame_converted)) {
-        cage_display_router::update_headless_extcopy_dmabuf_probe_result(false);
+      if (!stream_runtime::labwc::headless_extcopy_dmabuf_probe_succeeded(extcopy_initialized, live_gpu_frame_converted)) {
+        stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
         if (!extcopy_initialized) {
           const auto gpu_profile = stream_stats::linux_gpu_profile_json(stream_stats::get_current());
           if (encoder_label.find("vaapi") != std::string::npos) {
@@ -5420,7 +5676,7 @@ namespace proc {
         return false;
       }
 
-      cage_display_router::update_headless_extcopy_dmabuf_probe_result(true);
+      stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(true);
       stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "succeeded");
       BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe succeeded with encoder ["
                       << video::active_encoder_name() << ']';
@@ -5439,26 +5695,26 @@ namespace proc {
                       << encoder_label << ']';
 
       auto stop_probe_cage = util::fail_guard([&]() {
-        if (cage_display_router::is_running()) {
-          cage_display_router::stop();
+        if (stream_runtime::labwc::is_running()) {
+          stream_runtime::labwc::stop();
         }
       });
 
       if (!start_cage_session("", true, true, false)) {
-        cage_display_router::update_windowed_gpu_native_probe_result(false);
+        stream_runtime::labwc::update_windowed_gpu_native_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "compositor_encoder_init", "compositor_or_encoder_init_failed");
         BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe could not initialize the compositor/encoder path; staying headless"sv;
         return false;
       }
 
       if (!video::active_encoder_runtime_supports_live_gpu_capture(gpu_native_probe_config)) {
-        cage_display_router::update_windowed_gpu_native_probe_result(false);
+        stream_runtime::labwc::update_windowed_gpu_native_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "first_frame", "no_live_dmabuf_frame");
         BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe did not deliver a live DMA-BUF frame; staying headless"sv;
         return false;
       }
 
-      cage_display_router::update_windowed_gpu_native_probe_result(true);
+      stream_runtime::labwc::update_windowed_gpu_native_probe_result(true);
       stream_stats::update_gpu_native_probe_attempt("windowed", "succeeded");
       BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe succeeded with encoder ["
                       << video::active_encoder_name() << ']';
@@ -5581,7 +5837,7 @@ namespace proc {
       }
 
       if (force_windowed_cage_for_gpu_native) {
-        cage_display_router::update_windowed_gpu_native_probe_result(false);
+        stream_runtime::labwc::update_windowed_gpu_native_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "session_start", "windowed_override_start_failed");
         stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
         BOOST_LOG(warning) << "session_manager: windowed_dmabuf_override start failed; falling back to headless_shm_fallback if headless DMA-BUF remains unavailable"sv;
@@ -5600,58 +5856,95 @@ namespace proc {
       input::preallocate_gamepad();
     }
 
-    // Start cage with the first detached command as its primary client.
-    // Cage is a kiosk compositor — it only displays its main process fullscreen.
+    // Start private runtime, then launch detached app commands into it.
+    // Labwc: first detached is the kiosk primary client.
+    // Gamescope (SB-5): attach/owned start ignores primary game_cmd when idle
+    // gamescope-0 is already present — launch all detached via sanitize + process env
+    // (no shell wrap_cmd dual path; mode-neutral steam-appid imports).
+    const bool gamescope_private_runtime =
+      private_runtime &&
+      private_runtime->backend_id() == stream_display_policy::k_runtime_gamescope;
+
+    auto spawn_detached_into_runtime = [&](const std::string &raw_cmd) {
+      const auto cmd = session_launch_linux::sanitize_cage_command(raw_cmd);
+      auto cmd_env = _env;
+      if (!allow_cage_mangohud) {
+        strip_mangohud_env(cmd_env);
+      }
+      apply_gamepad_sdl_env(cmd_env);
+      if (gamescope_private_runtime) {
+        session_launch_linux::apply_gamescope_attach_env(
+          cmd_env,
+          private_runtime,
+          launch_session->enable_hdr
+        );
+      }
+      else {
+        session_launch_linux::apply_labwc_child_env(cmd_env, private_runtime);
+      }
+      const auto launch_cmd = command_with_gamepad_isolation(cmd);
+      boost::filesystem::path working_dir = _app.working_dir.empty() ?
+                                              find_working_directory(raw_cmd, cmd_env) :
+                                              boost::filesystem::path(_app.working_dir);
+      BOOST_LOG(info) << (gamescope_private_runtime ? "gamescope_runtime: spawning detached ["sv : "Spawning ["sv)
+                      << launch_cmd << "] in ["sv << working_dir << ']';
+      auto child = platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
+      if (ec) {
+        BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
+      }
+      else {
+        child.detach();
+      }
+    };
+
     if (use_cage_compositor_for_session && !_app.detached.empty()) {
-      std::string game_cmd = cage_runtime_command(_app.detached[0]);
-      if (!start_cage_with_runtime_fallback(game_cmd)) {
-        BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
-        confighttp::emit_session_event("error", "Failed to start cage compositor");
-        return 503;
-      } else {
+      if (gamescope_private_runtime) {
+        // Attach/start gamescope without a primary child; launch all detached into it.
+        if (!start_cage_with_runtime_fallback("")) {
+          BOOST_LOG(error) << "session_manager: Failed to start gamescope runtime for detached app"sv;
+          confighttp::emit_session_event("error", "Failed to start gamescope runtime");
+          return 503;
+        }
         _session_used_cage_compositor = true;
         cage_started_with_detached_client = true;
         confighttp::set_session_state(confighttp::session_state_e::game_launching);
         confighttp::emit_session_event("game_launching", "Launching " + _app.name);
+
+        for (const auto &raw_cmd : _app.detached) {
+          spawn_detached_into_runtime(raw_cmd);
+        }
       }
-      // Launch remaining detached commands (if any) with cage's WAYLAND_DISPLAY
-      for (size_t i = 1; i < _app.detached.size(); ++i) {
-        auto cmd = cage_runtime_command(_app.detached[i]);
-        auto cmd_env = _env;
-        if (!allow_cage_mangohud) {
-          strip_mangohud_env(cmd_env);
-        }
-        apply_gamepad_sdl_env(cmd_env);
-        auto cage_socket = cage_display_router::get_wayland_socket();
-        if (!cage_socket.empty()) {
-          cmd_env["WAYLAND_DISPLAY"] = cage_socket;
-          cmd_env["AT_SPI_BUS_ADDRESS"] = "";
-          auto cage_display = cage_display_router::get_x11_display();
-          if (!cage_display.empty()) {
-            cmd_env["DISPLAY"] = cage_display;
-          } else {
-            cmd_env.erase("DISPLAY");
-          }
-        }
-        const auto launch_cmd = command_with_gamepad_isolation(cmd);
-        boost::filesystem::path working_dir = _app.working_dir.empty() ?
-                                                find_working_directory(cmd, cmd_env) :
-                                                boost::filesystem::path(_app.working_dir);
-        BOOST_LOG(info) << "Spawning ["sv << launch_cmd << "] in ["sv << working_dir << ']';
-        auto child = platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
-        if (ec) {
-          BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
+      else {
+        const std::string game_cmd = session_launch_linux::sanitize_cage_command(_app.detached[0]);
+        if (!start_cage_with_runtime_fallback(game_cmd)) {
+          BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
+          confighttp::emit_session_event("error", "Failed to start cage compositor");
+          return 503;
         } else {
-          child.detach();
+          _session_used_cage_compositor = true;
+          cage_started_with_detached_client = true;
+          confighttp::set_session_state(confighttp::session_state_e::game_launching);
+          confighttp::emit_session_event("game_launching", "Launching " + _app.name);
+        }
+        // Launch remaining detached commands (if any) with cage's WAYLAND_DISPLAY
+        for (size_t i = 1; i < _app.detached.size(); ++i) {
+          spawn_detached_into_runtime(_app.detached[i]);
         }
       }
-    } else if (use_cage_compositor_for_session) {
+    } else if (use_cage_compositor_for_session && !nested_wsi_hdr_session) {
       // No detached commands — start cage empty, game will use _app.cmd
       if (!start_cage_with_runtime_fallback("")) {
         BOOST_LOG(error) << "session_manager: Failed to start cage compositor"sv;
         return 503;
       }
       _session_used_cage_compositor = true;
+    } else if (nested_wsi_hdr_session) {
+      // polaris-gamescope-session start already owns nested gamescope + Steam (prep-cmd).
+      // _app.cmd is "wait"; do not attach idle or spawn a second compositor.
+      _session_used_cage_compositor = false;
+      confighttp::set_session_state(confighttp::session_state_e::game_launching);
+      confighttp::emit_session_event("game_launching", "Launching " + _app.name + " (nested WSI)");
+      BOOST_LOG(info) << "session_manager: nested WSI session ready (gamescope owned by polaris-gamescope-session)"sv;
     } else
 #endif
     {
@@ -5671,33 +5964,28 @@ namespace proc {
     }
 
 #ifdef __linux__
-    // Set cage environment for the app command (if cage is running and app has a cmd)
+    // Set private-runtime environment for the app command (session_launch_linux).
     std::string effective_cmd = _app.cmd;
     std::string working_dir_cmd = effective_cmd;
     auto launch_env = _env;
     bool app_command_uses_cage_runtime = false;
-    if (use_cage_compositor_for_session && cage_display_router::is_running() && !_app.cmd.empty()) {
-      effective_cmd = cage_runtime_command(_app.cmd);
+    if (use_cage_compositor_for_session && private_runtime && private_runtime->is_running() && !_app.cmd.empty()) {
+      effective_cmd = session_launch_linux::sanitize_cage_command(_app.cmd);
       working_dir_cmd = effective_cmd;
       app_command_uses_cage_runtime = true;
       if (!allow_cage_mangohud) {
         strip_mangohud_env(launch_env);
       }
       apply_gamepad_sdl_env(launch_env);
-      auto cage_socket = cage_display_router::get_wayland_socket();
-      if (!cage_socket.empty()) {
-        launch_env["WAYLAND_DISPLAY"] = cage_socket;
-        launch_env["AT_SPI_BUS_ADDRESS"] = "";
-        auto cage_display = cage_display_router::get_x11_display();
-        if (!cage_display.empty()) {
-          launch_env["DISPLAY"] = cage_display;
-          BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket
-                          << " DISPLAY="sv << cage_display
-                          << " for app command"sv;
-        } else {
-          launch_env.erase("DISPLAY");
-          BOOST_LOG(info) << "cage: Set WAYLAND_DISPLAY="sv << cage_socket << " and cleared DISPLAY for app command"sv;
-        }
+      if (gamescope_private_runtime) {
+        session_launch_linux::apply_gamescope_attach_env(
+          launch_env,
+          private_runtime,
+          launch_session->enable_hdr
+        );
+      }
+      else {
+        session_launch_linux::apply_labwc_child_env(launch_env, private_runtime);
       }
     }
     if (app_command_uses_cage_runtime) {
@@ -6103,7 +6391,7 @@ namespace proc {
           !_session_instance_id.empty(),
           _exact_generation_cleanup_complete
         )) {
-      cage_display_router::reset_after_external_stop();
+      stream_runtime::labwc::reset_after_external_stop();
     } else {
       BOOST_LOG(error) << "process: retaining immutable cage generation because exact-generation cleanup was incomplete"sv;
     }
@@ -6129,6 +6417,9 @@ namespace proc {
     placebo = false;
 
 #ifdef __linux__
+    // Single media owner: signal → portal release → bounded front-end wait →
+    // terminal ownership fence. Nested kill only after every owned cleanup exits.
+    [[maybe_unused]] auto media_stop_fence = session_media::prepare_for_stop();
     stop_steam_big_picture_input_guard();
     if (!immediate) {
       terminate_session_owned_steam_before_cage_stop();
@@ -6138,6 +6429,18 @@ namespace proc {
     // Capture and terminate every exact-generation process through pidfds before
     // any legacy child/group handle can signal or be destroyed.
     terminate_isolated_session_generation();
+
+    // Gamescope Steam/pressure-vessel often strips POLARIS_SESSION_INSTANCE_ID, so
+    // exact-generation + session-owned Steam paths find nothing and webui close
+    // leaves the game running. Always sweep gamescope-attached clients by attach env.
+    if (_session_used_cage_compositor && !immediate) {
+      const bool gamescope_session =
+        config::video.linux_display.stream_mode == "gamescope_stream" ||
+        config::video.linux_display.private_runtime == "gamescope";
+      if (gamescope_session) {
+        terminate_gamescope_attached_session_clients(steam_appid_for_context(_app));
+      }
+    }
 #endif
 
 #ifdef __linux__
@@ -6424,7 +6727,10 @@ namespace proc {
   bool proc_t::is_session_owner(const std::string &unique_id) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
-    return !_launch_session || _launch_session->unique_id.empty() || _launch_session->unique_id == unique_id;
+    // Case-insensitive: cert UUID formatting can differ across client stacks.
+    return !_launch_session ||
+           _launch_session->unique_id.empty() ||
+           boost::iequals(_launch_session->unique_id, unique_id);
   }
 
   bool proc_t::session_uses_virtual_display() {
@@ -6549,14 +6855,18 @@ namespace proc {
       _launch_session &&
       !unique_id.empty() &&
       !_launch_session->unique_id.empty() &&
-      _launch_session->unique_id == unique_id;
+      boost::iequals(_launch_session->unique_id, unique_id);
     snapshot.game = _app_name;
-    const bool token_matches = session_stop_token_matches(
-      require_exact_token,
-      expected_token,
-      snapshot.session_token,
-      rtsp_snapshot.requester_session_tokens
-    );
+    // Owner cert identity is enough; do not require sessiontoken for stop/cancel.
+    // (Clients often send a stale token after disconnect and get a false 470.)
+    const bool token_matches =
+      snapshot.owned_by_client ||
+      session_stop_token_matches(
+        require_exact_token,
+        expected_token,
+        snapshot.session_token,
+        rtsp_snapshot.requester_session_tokens
+      );
     snapshot.outcome = evaluate_session_stop_request(
       can_launch,
       snapshot.had_running_app,
@@ -7215,8 +7525,145 @@ namespace proc {
     fileTree["version"] = this_version;
   }
 
+  void migration_v5(nlohmann::json &fileTree) {
+    // SB-5: persist mode-neutral Steam library apps. Nested gamescope WSI is
+    // path policy (stream_runtime wrap), not per-app polaris-gamescope-session shell.
+    // Optional "Steam Big Picture" entry may keep the session helper.
+    static const int this_version = 9;
+    int file_version = json_int_member_or(fileTree, "version", 0);
+    if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
+      BOOST_LOG(info) << "Cannot parse apps.json version while unwrapping polaris-gamescope-session apps, treating as v0.";
+    }
+
+    if (file_version >= this_version) {
+      return;
+    }
+
+    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+      fileTree["version"] = this_version;
+      return;
+    }
+
+    int unwrapped = 0;
+    for (auto &app : fileTree["apps"]) {
+      if (!app.is_object()) {
+        continue;
+      }
+
+      const auto app_name = json_string_member_or(app, "name");
+      if (is_steam_big_picture_name(app_name)) {
+        continue;
+      }
+
+      const auto source = json_string_member_or(app, "source");
+      const auto cmd = json_string_member_or(app, "cmd");
+      bool session_wired = boost::iequals(source, "polaris-gamescope-session") ||
+                           command_uses_polaris_gamescope_session(cmd);
+
+      std::string appid = json_string_member_or(app, "steam-appid");
+      if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
+        for (const auto &prep : app["prep-cmd"]) {
+          if (!prep.is_object()) {
+            continue;
+          }
+          const auto do_cmd = json_string_member_or(prep, "do");
+          const auto undo_cmd = json_string_member_or(prep, "undo");
+          if (command_uses_polaris_gamescope_session(do_cmd) || command_uses_polaris_gamescope_session(undo_cmd)) {
+            session_wired = true;
+          }
+          if (appid.empty()) {
+            if (const auto detected = extract_steam_appid_from_command(do_cmd); detected) {
+              appid = *detected;
+            }
+          }
+        }
+      }
+      if (appid.empty() && app.contains("detached") && app["detached"].is_array()) {
+        for (const auto &detached_val : app["detached"]) {
+          if (!detached_val.is_string()) {
+            continue;
+          }
+          const auto detached_cmd = detached_val.get<std::string>();
+          if (command_uses_polaris_gamescope_session(detached_cmd)) {
+            session_wired = true;
+          }
+          if (appid.empty()) {
+            if (const auto detected = extract_steam_appid_from_command(detached_cmd); detected) {
+              appid = *detected;
+            }
+          }
+        }
+      }
+      if (appid.empty()) {
+        if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
+          appid = *detected;
+        }
+      }
+
+      if (!session_wired || appid.empty()) {
+        continue;
+      }
+
+      app["source"] = "steam";
+      app["steam-appid"] = appid;
+      app["steam-launch-mode"] = std::string {proc::STEAM_LAUNCH_MODE_DIRECT};
+      app["cmd"] = "";
+      app["auto-detach"] = true;
+      app["wait-all"] = true;
+      if (!app.contains("exit-timeout")) {
+        app["exit-timeout"] = 5;
+      }
+
+      const auto canonical = canonical_steam_library_launch_commands(
+        "steam",
+        appid,
+        std::string {proc::STEAM_LAUNCH_MODE_DIRECT}
+      );
+      nlohmann::json detached = nlohmann::json::array();
+      for (const auto &launch_cmd : canonical) {
+        detached.push_back(launch_cmd);
+      }
+      app["detached"] = std::move(detached);
+
+      nlohmann::json prep = nlohmann::json::array();
+      if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
+        for (const auto &entry : app["prep-cmd"]) {
+          if (!entry.is_object()) {
+            continue;
+          }
+          const auto do_cmd = json_string_member_or(entry, "do");
+          const auto undo_cmd = json_string_member_or(entry, "undo");
+          if (command_uses_polaris_gamescope_session(do_cmd) || command_uses_polaris_gamescope_session(undo_cmd)) {
+            continue;
+          }
+          prep.push_back(entry);
+        }
+      }
+      bool has_shutdown = false;
+      for (const auto &entry : prep) {
+        if (entry.is_object() && command_requests_steam_shutdown(json_string_member_or(entry, "undo"))) {
+          has_shutdown = true;
+          break;
+        }
+      }
+      if (!has_shutdown) {
+        prep.push_back({{"undo", "setsid steam -shutdown"}});
+      }
+      app["prep-cmd"] = std::move(prep);
+
+      BOOST_LOG(info) << "Migrated polaris-gamescope-session hardwire for [" << json_app_label(app)
+                      << "] to mode-neutral steam-appid=" << appid;
+      ++unwrapped;
+    }
+
+    fileTree["version"] = this_version;
+    if (unwrapped > 0) {
+      BOOST_LOG(info) << "Migrated " << unwrapped << " Steam library apps to mode-neutral launch (SB-5 v9).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 8;
+    int last_version = 9;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -7227,6 +7674,7 @@ namespace proc {
       migration_v2(fileTree);
       migration_v3(fileTree);
       migration_v4(fileTree);
+      migration_v5(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }

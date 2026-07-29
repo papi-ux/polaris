@@ -1096,7 +1096,8 @@ TEST(ProcessRuntimeConfigTests, PreCageSteamTerminationRequiresImmutableCageAndE
   EXPECT_TRUE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
     steam_app, true, true, true, false, true
   ));
-  EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
+  // Unowned desktop Steam must not block terminating session-owned Steam.
+  EXPECT_TRUE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
     steam_app, true, true, true, true, true
   ));
   EXPECT_FALSE(proc::should_terminate_session_owned_steam_before_cage_stop_for_tests(
@@ -2632,7 +2633,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 8);
+  EXPECT_EQ(migrated_tree["version"], 9);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -2848,7 +2849,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 8);
+  EXPECT_EQ(migrated_tree["version"], 9);
 
   std::filesystem::remove(file_path);
 }
@@ -2899,7 +2900,7 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(parsed_tree["version"], 8);
+  EXPECT_EQ(parsed_tree["version"], 9);
 
   std::filesystem::remove(file_path);
 }
@@ -3112,7 +3113,7 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 8);
+  EXPECT_EQ(migrated_tree["version"], 9);
   ASSERT_TRUE(migrated_tree.contains("apps"));
 
   const auto &migrated_apps = migrated_tree["apps"];
@@ -3135,6 +3136,85 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_NE(parsed_lutris, parsed_apps.end());
   ASSERT_EQ(parsed_lutris->detached.size(), 1);
   EXPECT_EQ(parsed_lutris->detached[0], "setsid lutris");
+
+  std::filesystem::remove(file_path);
+}
+
+// SB-5: polaris-gamescope-session hardwire unwraps to mode-neutral steam-appid launches.
+// Big Picture may keep the session helper; library games must not.
+TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
+  const auto file_path = test_paths::root() / "sb5_unwrap_hdr_session.json";
+
+  const nlohmann::json apps = {
+    {"version", 8},
+    {"apps", {
+      {
+        {"name", "ARMORED CORE VI"},
+        {"uuid", "5D6418F1-9D9A-DC0B-FE8A-8A70B7DA88CB"},
+        {"cmd", "/nix/store/fake-polaris-gamescope-session/bin/polaris-gamescope-session wait"},
+        {"auto-detach", false},
+        {"wait-all", true},
+        {"source", "polaris-gamescope-session"},
+        {"prep-cmd", {{
+          {"do", "/nix/store/fake-polaris-gamescope-session/bin/polaris-gamescope-session start 1888160"},
+          {"undo", "/nix/store/fake-polaris-gamescope-session/bin/polaris-gamescope-session stop"}
+        }}}
+      },
+      {
+        {"name", "Steam Big Picture"},
+        {"uuid", "282A8EBA-DA08-6226-D08E-AEB756AEEF04"},
+        {"cmd", "/nix/store/fake-polaris-gamescope-session/bin/polaris-gamescope-session wait"},
+        {"auto-detach", false},
+        {"prep-cmd", {{
+          {"do", "/nix/store/fake-polaris-gamescope-session/bin/polaris-gamescope-session start"},
+          {"undo", "/nix/store/fake-polaris-gamescope-session/bin/polaris-gamescope-session stop"}
+        }}}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  EXPECT_EQ(migrated_tree["version"], 9);
+
+  const auto &migrated_apps = migrated_tree["apps"];
+  const auto lib_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {
+    return app.value("name", "") == "ARMORED CORE VI";
+  });
+  ASSERT_NE(lib_app, migrated_apps.end());
+  EXPECT_EQ((*lib_app)["source"], "steam");
+  EXPECT_EQ((*lib_app)["steam-appid"], "1888160");
+  ASSERT_TRUE((*lib_app).contains("detached"));
+  ASSERT_EQ((*lib_app)["detached"].size(), 1);
+  EXPECT_EQ((*lib_app)["detached"][0], "setsid steam steam://rungameid/1888160");
+  EXPECT_TRUE((*lib_app).value("cmd", "").empty() || (*lib_app)["cmd"] == "");
+
+  const auto bp_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {
+    return app.value("name", "") == "Steam Big Picture";
+  });
+  ASSERT_NE(bp_app, migrated_apps.end());
+  // Optional BP entry may keep polaris-gamescope-session shell.
+  EXPECT_NE(bp_app->value("cmd", "").find("polaris-gamescope-session"), std::string::npos);
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto lib_ctx = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "ARMORED CORE VI";
+  });
+  ASSERT_NE(lib_ctx, parsed_apps.end());
+  EXPECT_EQ(lib_ctx->steam_appid, "1888160");
+  EXPECT_EQ(lib_ctx->source, "steam");
+  ASSERT_EQ(lib_ctx->detached.size(), 1);
+  EXPECT_EQ(lib_ctx->detached.front(), "setsid steam steam://rungameid/1888160");
+  EXPECT_TRUE(lib_ctx->cmd.empty());
+  // No polaris-gamescope-session left in prep for library game.
+  EXPECT_TRUE(std::none_of(lib_ctx->prep_cmds.begin(), lib_ctx->prep_cmds.end(), [](const auto &cmd) {
+    return cmd.do_cmd.find("polaris-gamescope-session") != std::string::npos ||
+           cmd.undo_cmd.find("polaris-gamescope-session") != std::string::npos;
+  }));
 
   std::filesystem::remove(file_path);
 }

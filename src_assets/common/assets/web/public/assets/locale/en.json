@@ -201,7 +201,7 @@
     "amd_vbaq_desc": "The human visual system is typically less sensitive to artifacts in highly textured areas. In VBAQ mode, pixel variance is used to indicate the complexity of spatial textures, allowing the encoder to allocate more bits to smoother areas. Enabling this feature leads to improvements in subjective visual quality with some content.",
     "apply_note": "Click 'Apply' to restart Polaris and apply changes. This will terminate any running sessions.",
     "audio_sink": "Audio Sink",
-    "audio_sink_desc_linux": "The name of the audio sink used for Audio Loopback. If you do not specify this variable, pulseaudio will select the default monitor device. You can find the name of the audio sink using either command:",
+    "audio_sink_desc_linux": "PipeWire/Pulse sink Polaris captures and forces session apps onto (PULSE_SINK + re-pin). Leave empty to auto-pick a virtual sink by client channel count (stereo / 5.1 / 7.1). Set explicitly (e.g. sink-sunshine-surround51) to enforce that device. List sinks with:",
     "audio_sink_desc_macos": "The name of the audio sink used for Audio Loopback. Polaris can only access microphones on macOS due to system limitations. To stream system audio using Soundflower or BlackHole.",
     "audio_sink_desc_windows": "The audio device to be used when audio output is allowed on host by the client.\nIf unset, the device is chosen automatically.\nYou can get the Device ID using the following command:",
     "audio_sink_placeholder_macos": "BlackHole 2ch",

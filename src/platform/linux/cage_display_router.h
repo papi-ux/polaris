@@ -1,26 +1,7 @@
 /**
  * @file src/platform/linux/cage_display_router.h
- * @brief Cage lifecycle manager — runs cage as a windowed Wayland compositor on DP-3.
- *
- * The Polaris architecture runs cage as a regular Wayland window on the user's
- * primary display (DP-3). Games render inside cage at the client's requested
- * resolution. PipeWire window capture grabs the cage window for streaming.
- *
- * This eliminates all display switching (kscreen-doctor, HDMI-A-1 hotplug,
- * KWin layout chaos, KMS output index shifting). Cage is just a window.
- *
- * Lifecycle:
- *   start()          — spawn cage as a Wayland window, configure resolution
- *   wrap_cmd()       — produce a command that runs inside cage's Wayland session
- *   stop()           — SIGTERM cage (kills the game inside too)
- *   is_healthy()     — check cage process and wayland socket
- *
- * The caller (process.cpp) should:
- *   1. Call start() with the client's requested resolution
- *   2. Use wrap_cmd(original_cmd) for the app command
- *   3. For an owned streaming session, terminate exact-generation processes
- *      through pidfds and call reset_after_external_stop(); stop() remains for
- *      pre-session probes and startup failures before ownership is committed.
+ * @brief labwc private compositor lifecycle (implementation detail of stream_runtime::labwc).
+ *        External call sites must use stream_runtime / stream_runtime::labwc — not this header.
  */
 #pragma once
 
@@ -129,22 +110,6 @@ namespace cage_display_router {
   platf::runtime_state_t runtime_state();
 
   /**
-   * @brief Returns whether a session should attempt a windowed labwc probe
-   *        to validate GPU-native capture.
-   */
-  bool should_attempt_windowed_gpu_native_probe(
-    bool requested_headless,
-    bool prefer_gpu_native_capture,
-    bool encoder_requires_gpu_native_capture
-  );
-
-  /**
-   * @brief Returns whether the current cage runtime should attempt GPU-native
-   *        capture instead of forcing SHM fallback.
-   */
-  bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state);
-
-  /**
    * @brief Returns whether a headless labwc runtime should try the
    *        ext-image-copy-capture DMA-BUF path before falling back to SHM.
    *
@@ -191,25 +156,10 @@ namespace cage_display_router {
   void update_headless_extcopy_dmabuf_probe_result(bool supported);
 
   /**
-   * @brief Returns whether the headless extcopy DMA-BUF probe has validated
-   *        enough of the path to be selected for a real stream.
-   */
-  bool headless_extcopy_dmabuf_probe_succeeded(
-    bool capture_initialized,
-    bool live_gpu_frame_converted
-  );
-
-  /**
    * @brief Returns whether RAM-capture fallback logging should describe the
    *        current labwc runtime as headless.
    */
   bool should_report_headless_ram_capture_fallback(const platf::runtime_state_t &runtime_state);
-
-  /**
-   * @brief Returns whether RAM-capture fallback logging should describe the
-   *        current labwc runtime as windowed.
-   */
-  bool should_report_windowed_ram_capture_fallback(const platf::runtime_state_t &runtime_state);
 
   /**
    * @brief Returns whether the headless labwc RAM-capture fallback warning

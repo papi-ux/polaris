@@ -12,7 +12,9 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // lib includes
@@ -712,35 +714,69 @@ namespace platf {
       alarm->ring(status ? 0 : 1);
     }
 
-    bool process_env_has_session_audio_sink(pid_t pid, const std::string &sink) {
-      if (pid <= 1 || sink.empty()) {
-        return false;
-      }
-
-      std::ifstream env_file("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
-      if (!env_file) {
-        return false;
-      }
-
-      std::string env {
-        std::istreambuf_iterator<char> {env_file},
-        std::istreambuf_iterator<char> {}
-      };
+    bool environ_has_session_audio_markers(const std::string &env, const std::string &sink) {
       const std::string audio_sink_marker = "POLARIS_SESSION_AUDIO_SINK=" + sink;
       const std::string pulse_sink_marker = "PULSE_SINK=" + sink;
+      // Any polaris session instance counts — pressure-vessel often drops PULSE_SINK
+      // but keeps POLARIS_SESSION_* from the launch wrapper.
+      constexpr std::string_view session_id_prefix = "POLARIS_SESSION_INSTANCE_ID=";
 
       std::size_t pos = 0;
       while (pos < env.size()) {
         const auto end = env.find('\0', pos);
         const auto len = end == std::string::npos ? std::string::npos : end - pos;
         const auto entry = std::string_view {env.data() + pos, len == std::string::npos ? env.size() - pos : len};
-        if (entry == std::string_view {audio_sink_marker} || entry == std::string_view {pulse_sink_marker}) {
+        if (entry == std::string_view {audio_sink_marker} || entry == std::string_view {pulse_sink_marker} ||
+            entry.starts_with(session_id_prefix)) {
           return true;
         }
         if (end == std::string::npos) {
           break;
         }
         pos = end + 1;
+      }
+      return false;
+    }
+
+    bool process_env_has_session_audio_sink(pid_t pid, const std::string &sink) {
+      if (pid <= 1 || sink.empty()) {
+        return false;
+      }
+
+      // Walk the process tree: Steam pressure-vessel children often lose PULSE_SINK
+      // in their own environ while the polaris-launched parent still has markers.
+      for (int depth = 0; depth < 12 && pid > 1; ++depth) {
+        std::ifstream env_file("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+        if (env_file) {
+          std::string env {
+            std::istreambuf_iterator<char> {env_file},
+            std::istreambuf_iterator<char> {}
+          };
+          if (environ_has_session_audio_markers(env, sink)) {
+            return true;
+          }
+        }
+
+        std::ifstream status_file("/proc/" + std::to_string(pid) + "/status");
+        if (!status_file) {
+          break;
+        }
+        std::string line;
+        pid_t ppid = 0;
+        while (std::getline(status_file, line)) {
+          if (line.rfind("PPid:", 0) == 0) {
+            try {
+              ppid = static_cast<pid_t>(std::stoi(line.substr(5)));
+            } catch (...) {
+              ppid = 0;
+            }
+            break;
+          }
+        }
+        if (ppid <= 1 || ppid == pid) {
+          break;
+        }
+        pid = ppid;
       }
 
       return false;
@@ -751,6 +787,10 @@ namespace platf {
       loop_t loop;
       ctx_t ctx;
       std::string requested_sink;
+      // Last time we moved a given sink-input (avoid 1Hz thrash with EasyEffects).
+      std::unordered_map<std::uint32_t, std::chrono::steady_clock::time_point> routed_sink_inputs;
+      // Local hear-through: capture virtual sink.monitor → host default (EE/speakers).
+      std::uint32_t local_loopback_module = PA_INVALID_INDEX;
 
       struct {
         std::uint32_t stereo = PA_INVALID_INDEX;
@@ -886,6 +926,67 @@ namespace platf {
           return -1;
         }
         return *alarm->status();
+      }
+
+      // Games play into sink-sunshine-* for stream capture; system default stays
+      // Easy Effects. Without loopback the host is silent after the game leaves UI.
+      void ensure_local_loopback(const std::string &capture_sink) {
+        if (local_loopback_module != PA_INVALID_INDEX || capture_sink.empty()) {
+          return;
+        }
+        if (capture_sink.rfind("sink-sunshine-", 0) != 0) {
+          return;
+        }
+
+        const auto host = get_default_sink_name();
+        if (host.empty() || host == capture_sink || host.rfind("sink-sunshine-", 0) == 0) {
+          BOOST_LOG(info) << "Linux audio isolation: skip local loopback (host default=["sv
+                          << host << "])"sv;
+          return;
+        }
+
+        const auto args =
+          "source=" + capture_sink + ".monitor sink=" + host +
+          " latency_msec=30 sink_dont_move=true source_dont_move=true";
+
+        auto alarm = safe::make_alarm<int>();
+        mainloop_lock_t lock {loop.get()};
+        op_t op {
+          pa_context_load_module(
+            ctx.get(),
+            "module-loopback",
+            args.c_str(),
+            cb_i,
+            alarm.get()
+          ),
+        };
+        if (!op) {
+          BOOST_LOG(warning) << "Linux audio isolation: couldn't create loopback load op: "sv
+                             << pa_strerror(pa_context_errno(ctx.get()));
+          return;
+        }
+        if (!wait_for_operation(op) || !alarm->status()) {
+          BOOST_LOG(warning) << "Linux audio isolation: loopback load cancelled"sv;
+          return;
+        }
+        const auto idx = *alarm->status();
+        if (idx < 0) {
+          BOOST_LOG(warning) << "Linux audio isolation: loopback load failed: "sv
+                             << pa_strerror(pa_context_errno(ctx.get()));
+          return;
+        }
+        local_loopback_module = static_cast<std::uint32_t>(idx);
+        BOOST_LOG(info) << "Linux audio isolation: local monitor loopback "
+                        << capture_sink << ".monitor -> "sv << host
+                        << " (module="sv << local_loopback_module << ")"sv;
+      }
+
+      void unload_local_loopback() {
+        if (local_loopback_module == PA_INVALID_INDEX) {
+          return;
+        }
+        unload_null(local_loopback_module);
+        local_loopback_module = PA_INVALID_INDEX;
       }
 
       int unload_null(std::uint32_t i) {
@@ -1164,8 +1265,16 @@ namespace platf {
             return;
           }
 
+          // Already on capture sink — leave alone.
           if (input_info->sink == *target_sink) {
             return;
+          }
+          // Cooldown: EE reclaim was thrashing at 1Hz (crackle). Re-pin at most every 10s.
+          const auto now = std::chrono::steady_clock::now();
+          if (const auto it = routed_sink_inputs.find(input_info->index); it != routed_sink_inputs.end()) {
+            if (now - it->second < std::chrono::seconds {10}) {
+              return;
+            }
           }
 
           const char *pid_text = pa_proplist_gets(input_info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
@@ -1209,11 +1318,13 @@ namespace platf {
         }
 
         for (const auto &route : routes) {
+          routed_sink_inputs[route.index] = std::chrono::steady_clock::now();
+
           BOOST_LOG(info) << "Linux audio isolation: moving session audio stream ["sv
                           << route.app_name << "] pid="sv << route.pid
                           << " sink_input="sv << route.index
                           << " from sink #"sv << route.current_sink
-                          << " to ["sv << sink << ']';
+                          << " to ["sv << sink << "] (10s re-pin cooldown)"sv;
 
           auto move_alarm = safe::make_alarm<int>();
           mainloop_lock_t lock {loop.get()};
@@ -1263,6 +1374,10 @@ namespace platf {
         }
 
         auto monitor_name = get_monitor_name(sink_name);
+
+        // Stream capture sink is a null sink — without loopback the host is silent
+        // after the game leaves Steam UI / Easy Effects.
+        ensure_local_loopback(sink_name);
 
 #ifdef POLARIS_BUILD_PIPEWIRE
         // If PipeWire is available, try native capture first
@@ -1321,6 +1436,7 @@ namespace platf {
 
       ~server_t() override {
         if (mainloop_started) {
+          unload_local_loopback();
           unload_null(index.stereo);
           unload_null(index.surround51);
           unload_null(index.surround71);

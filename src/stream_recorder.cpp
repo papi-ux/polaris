@@ -52,6 +52,10 @@ namespace stream_recorder {
   static std::string recording_file;
   static std::ofstream recording_stream;
 
+  // Active stream codec (0=H.264, 1=HEVC, 2=AV1). Prefer over conf hevc/av1_mode
+  // flags, which only mean "allowed", not "what this session encodes".
+  static std::atomic<int> active_video_format {-1};
+
   // Replay buffer state
   static std::deque<buffered_packet_t> replay_buffer;
 
@@ -90,25 +94,35 @@ namespace stream_recorder {
 
   /**
    * @brief Determine the file extension for the current video codec.
-   *
-   * The video format is determined from the stream config. For now, we default
-   * to .hevc since we cannot easily query the active codec from here. If the
-   * caller knows the codec, it can be extended.
-   *
-   * @return File extension string including the dot.
+   * Prefer the active session's videoFormat; fall back to conf allow-lists.
    */
   static std::string codec_extension() {
-    // We use a simple heuristic: check what the config says about codec modes.
-    // hevc_mode > 0 and av1_mode == 0 -> HEVC
-    // av1_mode > 0 -> AV1
-    // otherwise -> H.264
-    if (config::video.av1_mode > 0) {
+    const int fmt = active_video_format.load(std::memory_order_relaxed);
+    if (fmt == 2) {
       return ".av1";
     }
-    if (config::video.hevc_mode > 0) {
+    if (fmt == 1) {
+      return ".hevc";
+    }
+    if (fmt == 0) {
+      return ".h264";
+    }
+    // No active stream yet: conf modes only mean "allowed", not "in use".
+    // Prefer H.264 when multiple are enabled so we do not mislabel.
+    if (config::video.av1_mode > 0 && config::video.hevc_mode <= 0) {
+      return ".av1";
+    }
+    if (config::video.hevc_mode > 0 && config::video.av1_mode <= 0) {
       return ".hevc";
     }
     return ".h264";
+  }
+
+  void set_active_video_format(int video_format) {
+    if (video_format < 0 || video_format > 2) {
+      return;
+    }
+    active_video_format.store(video_format, std::memory_order_relaxed);
   }
 
   /**
@@ -240,7 +254,7 @@ namespace stream_recorder {
     return filename;
   }
 
-  void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts) {
+  void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts, int video_format) {
     // Fast path: nothing to do if disabled and not recording
     if (cfg.mode == mode_t::disabled && !recording.load()) {
       return;
@@ -249,6 +263,10 @@ namespace stream_recorder {
     // Only record video packets (audio is not written to raw bitstream files)
     if (!is_video) {
       return;
+    }
+
+    if (video_format >= 0 && video_format <= 2) {
+      active_video_format.store(video_format, std::memory_order_relaxed);
     }
 
     std::lock_guard lock(mutex);

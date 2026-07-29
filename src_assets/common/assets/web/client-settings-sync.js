@@ -25,6 +25,13 @@ export function isTruthySetting(value) {
 }
 
 export function resolveStreamDisplayMode(config = {}) {
+  // Prefer first-class mode when present (new hosts / saved linux_stream_mode).
+  const explicit = String(config.linux_stream_mode || config.stream_display_mode || '').trim()
+  if (explicit) {
+    return explicit
+  }
+
+  // Legacy boolean combinations for older configs and hosts.
   const headless = isTruthySetting(config.headless_mode)
   const cage = isTruthySetting(config.linux_use_cage_compositor)
   const gpuNative = isTruthySetting(config.linux_prefer_gpu_native_capture)
@@ -33,6 +40,70 @@ export function resolveStreamDisplayMode(config = {}) {
   if (headless && cage) return 'headless_stream'
   if (headless) return 'host_virtual_display'
   return 'desktop_display'
+}
+
+export function streamDisplayModeAvailable(mode) {
+  // Family/EVDI software paths still reserved; gamescope is selectable (attach or own).
+  if (mode === 'family_isolated' || mode === 'headless_evdi') return false
+  return true
+}
+
+export function applyStreamDisplayModeToConfig(config = {}, mode) {
+  const next = {
+    ...config,
+    linux_stream_mode: mode,
+    linux_private_runtime: '',
+    capture: '',
+    linux_auto_manage_displays: 'disabled',
+    headless_swap_mode: '',
+  }
+
+  switch (mode) {
+    case 'headless_stream':
+      next.headless_mode = 'enabled'
+      next.linux_use_cage_compositor = 'enabled'
+      next.linux_prefer_gpu_native_capture = 'disabled'
+      next.linux_private_runtime = 'labwc'
+      next.capture = 'wlr'
+      break
+    case 'windowed_stream':
+      next.headless_mode = 'enabled'
+      next.linux_use_cage_compositor = 'enabled'
+      next.linux_prefer_gpu_native_capture = 'enabled'
+      next.linux_private_runtime = 'labwc'
+      next.capture = 'wlr'
+      break
+    case 'host_virtual_display':
+      next.headless_mode = 'enabled'
+      next.linux_use_cage_compositor = 'disabled'
+      next.linux_prefer_gpu_native_capture = 'disabled'
+      break
+    case 'gamescope_stream':
+      next.headless_mode = 'enabled'
+      next.linux_use_cage_compositor = 'disabled'
+      next.linux_prefer_gpu_native_capture = 'disabled'
+      next.linux_private_runtime = 'gamescope'
+      next.capture = 'portal'
+      break
+    case 'headless_dongle':
+      next.headless_mode = 'enabled'
+      next.linux_use_cage_compositor = 'disabled'
+      next.linux_prefer_gpu_native_capture = 'disabled'
+      next.linux_auto_manage_displays = 'enabled'
+      next.headless_swap_mode = config.headless_swap_mode || 'privacy'
+      // Portal after topology swap is the working default (KMS needs CAP_SYS_ADMIN).
+      next.capture = config.capture === 'kms' ? 'kms' : 'portal'
+      break
+    case 'desktop_display':
+    default:
+      next.headless_mode = 'disabled'
+      next.linux_use_cage_compositor = 'disabled'
+      next.linux_prefer_gpu_native_capture = 'disabled'
+      next.capture = 'portal'
+      break
+  }
+
+  return next
 }
 
 export function resolveClientSettingsSync(config = {}) {
@@ -67,6 +138,7 @@ export function labelForStreamDisplayMode(mode) {
   if (mode === 'host_virtual_display') return 'Host Virtual Display'
   if (mode === 'windowed_stream') return 'Private Stream (GPU-native)'
   if (mode === 'desktop_display') return 'Mirror Desktop'
+  if (mode === 'gamescope_stream') return 'Gamescope Stream'
   return ''
 }
 
