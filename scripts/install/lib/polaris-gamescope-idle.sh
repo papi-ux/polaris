@@ -156,8 +156,10 @@ if [ "$ready" != 1 ]; then
   exit 1
 fi
 
+trap '' HUP INT TERM
 "${POLARIS_FLOCK_BIN:-flock}" -u 8
 export POLARIS_GAMESCOPE_LOCK_HELD=0
+trap cleanup EXIT HUP INT TERM
 
 echo "polaris-gamescope-idle: ready pid=$child generation=$child_start" >&2
 wait "$child"
