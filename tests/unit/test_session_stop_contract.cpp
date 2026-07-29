@@ -330,6 +330,42 @@ TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
 #endif
 }
 
+TEST(SessionStopContractTests, OwnedRuntimeDoesNotClearSameSessionEscapedGroup) {
+#ifdef __linux__
+  int ready[2] {-1, -1};
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t leader = fork();
+  ASSERT_GE(leader, 0);
+  if (leader == 0) {
+    close(ready[0]);
+    if (setsid() < 0) _exit(125);
+    signal(SIGTERM, SIG_IGN);
+    const pid_t escaped = fork();
+    if (escaped < 0) _exit(126);
+    if (escaped == 0) {
+      if (setpgid(0, 0) < 0) _exit(127);
+      signal(SIGTERM, SIG_IGN);
+      const pid_t escaped_pid = getpid();
+      (void) write(ready[1], &escaped_pid, sizeof(escaped_pid));
+      close(ready[1]);
+      for (;;) pause();
+    }
+    close(ready[1]);
+    for (;;) pause();
+  }
+  close(ready[1]);
+  pid_t escaped = -1;
+  ASSERT_EQ(read(ready[0], &escaped, sizeof(escaped)), sizeof(escaped));
+  close(ready[0]);
+  const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
+  EXPECT_FALSE(drained);
+  EXPECT_EQ(kill(escaped, 0), 0);
+  (void) kill(escaped, SIGKILL);
+  (void) kill(-leader, SIGKILL);
+  (void) waitpid(leader, nullptr, 0);
+#endif
+}
+
 TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
 #ifdef __linux__
   int ready[2] {-1, -1};

@@ -137,14 +137,18 @@ namespace stream_runtime {
           complete = false;
           continue;
         }
-        if (process_group == pgid) {
-          if (session != pgid) {
-            complete = false;
-            continue;
-          }
+        if (session == pgid) {
+          // The SID is the private ownership domain. Descendants may move to a
+          // separate process group while remaining in this exact session; they
+          // must keep teardown live so marker/environment authority is retained.
           if (state != 'Z' && state != 'X') {
             alive = true;
           }
+        }
+        else if (process_group == pgid) {
+          // The numeric PGID is now associated with another session. Authority
+          // is ambiguous and negative-PGID signaling must fail closed.
+          complete = false;
         }
       }
       closedir(proc);
