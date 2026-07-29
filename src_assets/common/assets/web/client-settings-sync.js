@@ -49,8 +49,14 @@ export function streamDisplayModeAvailable(mode) {
 }
 
 export function applyStreamDisplayModeToConfig(config = {}, mode) {
-  const next = { ...config }
-  next.linux_stream_mode = mode
+  const next = {
+    ...config,
+    linux_stream_mode: mode,
+    linux_private_runtime: '',
+    capture: '',
+    linux_auto_manage_displays: 'disabled',
+    headless_swap_mode: '',
+  }
 
   switch (mode) {
     case 'headless_stream':
@@ -58,12 +64,14 @@ export function applyStreamDisplayModeToConfig(config = {}, mode) {
       next.linux_use_cage_compositor = 'enabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
       next.linux_private_runtime = 'labwc'
+      next.capture = 'wlr'
       break
     case 'windowed_stream':
       next.headless_mode = 'enabled'
       next.linux_use_cage_compositor = 'enabled'
       next.linux_prefer_gpu_native_capture = 'enabled'
       next.linux_private_runtime = 'labwc'
+      next.capture = 'wlr'
       break
     case 'host_virtual_display':
       next.headless_mode = 'enabled'
@@ -75,22 +83,23 @@ export function applyStreamDisplayModeToConfig(config = {}, mode) {
       next.linux_use_cage_compositor = 'disabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
       next.linux_private_runtime = 'gamescope'
-      next.capture = next.capture || 'portal'
+      next.capture = 'portal'
       break
     case 'headless_dongle':
       next.headless_mode = 'enabled'
       next.linux_use_cage_compositor = 'disabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
       next.linux_auto_manage_displays = 'enabled'
-      next.headless_swap_mode = next.headless_swap_mode || 'privacy'
+      next.headless_swap_mode = config.headless_swap_mode || 'privacy'
       // Portal after topology swap is the working default (KMS needs CAP_SYS_ADMIN).
-      next.capture = next.capture === 'kms' ? 'kms' : 'portal'
+      next.capture = config.capture === 'kms' ? 'kms' : 'portal'
       break
     case 'desktop_display':
     default:
       next.headless_mode = 'disabled'
       next.linux_use_cage_compositor = 'disabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
+      next.capture = 'portal'
       break
   }
 

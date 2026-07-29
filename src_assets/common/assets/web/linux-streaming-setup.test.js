@@ -1,6 +1,6 @@
 import { shallowMount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
-import { ref } from 'vue'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { nextTick, ref } from 'vue'
 
 import AudioVideo from './configs/tabs/AudioVideo.vue'
 
@@ -50,19 +50,20 @@ function mountAudioVideo(config = linuxConfig()) {
 }
 
 describe('Linux Streaming Setup checklist', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('guides desktop Linux operators through display pairing, Auto Quality, and AMD/VAAPI capture checks', () => {
     const wrapper = mountAudioVideo()
     const checklist = wrapper.find('[data-linux-streaming-setup]')
 
     expect(checklist.exists()).toBe(true)
     expect(checklist.text()).toContain('Linux Streaming Setup')
-    expect(checklist.text()).toContain('Pair encoder and display')
-    expect(checklist.text()).toContain('Discover first')
-    expect(checklist.text()).toContain('Decide Auto Quality')
+    expect(checklist.text()).toContain('Pick a stream path')
+    expect(checklist.text()).toContain('Encoder and quality')
     expect(checklist.text()).toContain('Manual')
-    expect(checklist.text()).toContain('Check Wayland / VAAPI capture truth')
-    expect(checklist.text()).toContain('VAAPI / Mesa')
-    expect(checklist.text()).toContain('KMS/DRM is advanced')
+    expect(checklist.text()).toContain('labwc GPU-native capture')
     expect(checklist.text()).toContain('Safe default')
   })
 
@@ -76,10 +77,10 @@ describe('Linux Streaming Setup checklist', () => {
     }))
     const text = wrapper.find('[data-linux-streaming-setup]').text()
 
-    expect(text).toContain('Selected')
+    expect(text).toContain('Private Stream (GPU-native)')
     expect(text).toContain('GPU-native requested')
     expect(text).toContain('Enabled')
-    expect(text).toContain('SHM/system-memory')
+    expect(text).toContain('DMA-BUF capture GPU-resident')
     expect(text).not.toContain('CUDA')
     expect(text).not.toContain('NVIDIA')
   })
@@ -94,8 +95,76 @@ describe('Linux Streaming Setup checklist', () => {
     const text = wrapper.find('[data-linux-streaming-setup]').text()
 
     expect(text).toContain('NVIDIA true-headless guard')
-    expect(text).toContain('linux_prefer_gpu_native_capture = enabled')
-    expect(text).toContain('503 encoder-init failures')
+    expect(text).toContain('Needs GPU-native preference')
+    expect(text).toContain('cold-cache 503')
+    expect(text).toContain('enable the preference')
     expect(text).toContain('Private Stream (GPU-native)')
+  })
+
+  it('applies normalized empty fields when leaving the dongle preset', async () => {
+    const config = linuxConfig({
+      linux_stream_mode: 'headless_dongle',
+      linux_private_runtime: 'gamescope',
+      capture: 'kms',
+      linux_auto_manage_displays: 'enabled',
+      headless_swap_mode: 'privacy',
+    })
+    const wrapper = mountAudioVideo(config)
+    const privateStream = wrapper.findAll('button').find((button) => {
+      const text = button.text()
+      return text.includes('Private Stream') && !text.includes('GPU-native')
+    })
+
+    expect(privateStream).toBeDefined()
+    await privateStream.trigger('click')
+
+    expect(config.linux_stream_mode).toBe('headless_stream')
+    expect(config.linux_private_runtime).toBe('labwc')
+    expect(config.capture).toBe('wlr')
+    expect(config.linux_auto_manage_displays).toBe('disabled')
+    expect(config.headless_swap_mode).toBe('')
+  })
+
+  it('ignores a stale dongle discovery response after another preset is selected', async () => {
+    let resolveFetch
+    const response = new Promise((resolve) => {
+      resolveFetch = resolve
+    })
+    vi.stubGlobal('fetch', vi.fn(() => response))
+
+    const config = linuxConfig({
+      linux_stream_mode: 'desktop_display',
+      linux_private_runtime: '',
+      capture: 'portal',
+      linux_auto_manage_displays: 'disabled',
+      headless_swap_mode: '',
+    })
+    const wrapper = mountAudioVideo(config)
+    const buttons = wrapper.findAll('button')
+    const dongle = buttons.find((button) => button.text().includes('Headless Dongle'))
+    const desktop = buttons.find((button) => button.text().includes('Mirror Desktop'))
+
+    expect(dongle).toBeDefined()
+    expect(desktop).toBeDefined()
+    await dongle.trigger('click')
+    await desktop.trigger('click')
+
+    resolveFetch({
+      json: async () => ({
+        status: true,
+        outputs: [{ name: 'HDMI-A-1', connected: true }],
+        suggested_streaming_output: 'HDMI-A-1',
+        suggested_primary_output: 'DP-1',
+      }),
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    await nextTick()
+
+    expect(config.linux_stream_mode).toBe('desktop_display')
+    expect(config.linux_auto_manage_displays).toBe('disabled')
+    expect(config.headless_swap_mode).toBe('')
+    expect(config.linux_streaming_output).toBeUndefined()
+    expect(config.linux_primary_output).toBeUndefined()
   })
 })

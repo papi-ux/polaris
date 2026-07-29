@@ -66,6 +66,39 @@ describe('client settings sync helpers', () => {
     expect(dongleKms.capture).toBe('kms')
   })
 
+  it('normalizes stale capture and topology fields when switching stream paths', () => {
+    const gamescope = applyStreamDisplayModeToConfig({
+      capture: 'kms',
+      linux_auto_manage_displays: 'enabled',
+      headless_swap_mode: 'privacy',
+    }, 'gamescope_stream')
+    expect(gamescope.capture).toBe('portal')
+    expect(gamescope.linux_private_runtime).toBe('gamescope')
+    expect(gamescope.linux_auto_manage_displays).toBe('disabled')
+    expect(gamescope.headless_swap_mode).toBe('')
+
+    const labwc = applyStreamDisplayModeToConfig({
+      capture: 'portal',
+      linux_auto_manage_displays: 'enabled',
+      headless_swap_mode: 'privacy',
+    }, 'headless_stream')
+    expect(labwc.capture).toBe('wlr')
+    expect(labwc.linux_private_runtime).toBe('labwc')
+    expect(labwc.linux_auto_manage_displays).toBe('disabled')
+    expect(labwc.headless_swap_mode).toBe('')
+
+    const desktop = applyStreamDisplayModeToConfig({
+      capture: 'kms',
+      linux_private_runtime: 'gamescope',
+      linux_auto_manage_displays: 'enabled',
+      headless_swap_mode: 'privacy',
+    }, 'desktop_display')
+    expect(desktop.capture).toBe('portal')
+    expect(desktop.linux_private_runtime).toBe('')
+    expect(desktop.linux_auto_manage_displays).toBe('disabled')
+    expect(desktop.headless_swap_mode).toBe('')
+  })
+
   it('labels GPU-native as a Private Stream capture capability', () => {
     const sync = resolveClientSettingsSync({
       client_settings_available: true,

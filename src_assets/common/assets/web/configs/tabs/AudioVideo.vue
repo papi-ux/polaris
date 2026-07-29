@@ -296,12 +296,17 @@ function setAutoQuality(enabled) {
 
 const dongleOutputs = ref([])
 const dongleDetectStatus = ref('')
+let dongleRequestGeneration = 0
 
 async function refreshDongleOutputs() {
+  const requestGeneration = ++dongleRequestGeneration
   dongleDetectStatus.value = 'Detecting…'
   try {
     const res = await fetch('/api/linux/display-outputs', { credentials: 'include' })
     const data = await res.json()
+    if (requestGeneration !== dongleRequestGeneration || streamDisplayMode.value !== 'headless_dongle') {
+      return
+    }
     if (!data?.status) {
       dongleDetectStatus.value = 'Detection failed'
       return
@@ -323,7 +328,9 @@ async function refreshDongleOutputs() {
       ? `Found ${n} connected connector(s); suggestions applied if fields were empty`
       : 'No connected connectors reported (plug dongle / check DRM)'
   } catch (e) {
-    dongleDetectStatus.value = 'Detection request failed'
+    if (requestGeneration === dongleRequestGeneration && streamDisplayMode.value === 'headless_dongle') {
+      dongleDetectStatus.value = 'Detection request failed'
+    }
   }
 }
 
@@ -331,23 +338,18 @@ function setStreamDisplayMode(mode) {
   if (!streamDisplayModeAvailable(mode)) {
     return
   }
+  if (mode !== 'headless_dongle') {
+    ++dongleRequestGeneration
+  }
   const next = applyStreamDisplayModeToConfig(config.value, mode)
   config.value.headless_mode = next.headless_mode
   config.value.linux_use_cage_compositor = next.linux_use_cage_compositor
   config.value.linux_prefer_gpu_native_capture = next.linux_prefer_gpu_native_capture
   config.value.linux_stream_mode = next.linux_stream_mode
-  if (next.linux_private_runtime) {
-    config.value.linux_private_runtime = next.linux_private_runtime
-  }
-  if (next.linux_auto_manage_displays) {
-    config.value.linux_auto_manage_displays = next.linux_auto_manage_displays
-  }
-  if (next.headless_swap_mode) {
-    config.value.headless_swap_mode = next.headless_swap_mode
-  }
-  if (next.capture) {
-    config.value.capture = next.capture
-  }
+  config.value.linux_private_runtime = next.linux_private_runtime
+  config.value.linux_auto_manage_displays = next.linux_auto_manage_displays
+  config.value.headless_swap_mode = next.headless_swap_mode
+  config.value.capture = next.capture
   if (mode === 'headless_dongle') {
     refreshDongleOutputs()
   }
