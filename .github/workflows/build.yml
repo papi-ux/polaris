@@ -23,12 +23,12 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -64,12 +64,12 @@ jobs:
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -121,7 +121,7 @@ jobs:
       - name: Bootstrap Arch container
         run: pacman -Syu --noconfirm --needed archlinux-keyring git
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
@@ -141,7 +141,7 @@ jobs:
           exit 1
 
       - name: Cache C++ compiler outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /github/home/.cache/ccache
           key: polaris-arch-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
@@ -149,7 +149,7 @@ jobs:
             polaris-arch-ccache-
 
       - name: Cache npm downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /github/home/.npm
           key: polaris-arch-npm-${{ hashFiles('package-lock.json') }}
@@ -407,7 +407,7 @@ jobs:
       CCACHE_COMPILERCHECK: content
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
@@ -426,13 +426,13 @@ jobs:
           exit 1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
 
       - name: Cache C++ compiler outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ccache
           key: polaris-ubuntu-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
@@ -600,7 +600,7 @@ jobs:
           done
           exit 1
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
@@ -619,7 +619,7 @@ jobs:
           exit 1
 
       - name: Cache C++ compiler outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /github/home/.cache/ccache
           key: polaris-fedora-${{ matrix.fedora }}-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
@@ -627,7 +627,7 @@ jobs:
             polaris-fedora-${{ matrix.fedora }}-ccache-
 
       - name: Cache npm downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /github/home/.npm
           key: polaris-fedora-${{ matrix.fedora }}-npm-${{ hashFiles('package-lock.json') }}

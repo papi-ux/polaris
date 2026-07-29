@@ -17,7 +17,7 @@ jobs:
           zypper --non-interactive install nodejs24 git tar gzip
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -93,7 +93,7 @@ jobs:
           find build -name '*.rpm' -exec cp {} dist/ \; || true
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: polaris-opensuse-tumbleweed
           path: dist/
