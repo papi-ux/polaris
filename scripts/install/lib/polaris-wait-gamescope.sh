@@ -12,6 +12,19 @@ fi
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 marker="$rt/polaris-gamescope.pid"
 
+# Crash residue: a gamescope-0 path without a live holder looks "ready" to -S
+# but cannot accept clients. Reclaim orphans before treating the socket as up.
+if ! polaris_validate_marker "$marker"; then
+  rm -f "$marker"
+  if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+    echo "polaris: live unowned gamescope sockets block startup" >&2
+    exit 1
+  fi
+elif ! polaris_marker_owns_socket "$marker" "$rt/gamescope-0" 2>/dev/null; then
+  # Valid marker but not holding gamescope-0 — still drop dead residue only.
+  polaris_reclaim_orphan_gamescope_sockets "$rt" || true
+fi
+
 # Nested stop can leave runtime-masked idle / no gamescope-0.
 if [ -f "$rt/polaris-gamescope-wsi-nested" ] || [ ! -S "$rt/gamescope-0" ]; then
   echo "polaris: recover idle gamescope-0 (nested leftover or missing socket)" >&2

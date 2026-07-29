@@ -64,6 +64,26 @@ namespace stream_runtime::gamescope_process {
     const lookup_paths_t &paths = {}
   );
 
+  /**
+   * True when any process holds the unique /proc/net/unix inode for socket_path.
+   * False when missing, filesystem-only residue, or no live holder.
+   * Ambiguous duplicate pathname rows fail closed as "live" (not safe to unlink).
+   */
+  bool socket_has_live_holder(
+    const std::filesystem::path &socket_path,
+    const lookup_paths_t &paths = {}
+  );
+
+  /**
+   * Unlink a crash-orphaned Wayland socket (and .lock) when no live holder exists.
+   * Returns true when the path is gone afterward; false if a live holder (or
+   * ambiguous pathname) still owns it.
+   */
+  bool remove_orphan_socket(
+    const std::filesystem::path &socket_path,
+    const lookup_paths_t &paths = {}
+  );
+
   /** Lowest numbered X socket held by an Xwayland descendant of marker.pid. */
   std::optional<std::string> discover_owned_x11_display(
     const marker_t &marker,

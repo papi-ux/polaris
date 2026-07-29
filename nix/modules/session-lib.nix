@@ -77,8 +77,13 @@ let
 
   idleApp = pkgs.writeShellApplication {
     name = "polaris-gamescope-idle";
-    runtimeInputs = with pkgs; [
-      bash coreutils gnugrep gnused util-linux gamescope
+    runtimeInputs = [
+      pkgs.bash
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.gnused
+      pkgs.util-linux
+      gamescope # cfg.packageGamescope (gamescope-polaris), not stock pkgs.gamescope
     ];
     text = ''
       export POLARIS_HDR_WIDTH="''${POLARIS_HDR_WIDTH:-${toString cfg.width}}"
@@ -93,16 +98,16 @@ let
 
   sessionBin = pkgs.writeShellApplication {
     name = "polaris-gamescope-session";
-    runtimeInputs = with pkgs; [
-      coreutils
-      gamescope
-      gnugrep
-      gnused
-      procps
-      pulseaudio
-      systemd
-      util-linux
-      wireplumber
+    runtimeInputs = [
+      pkgs.coreutils
+      gamescope # cfg.packageGamescope
+      pkgs.gnugrep
+      pkgs.gnused
+      pkgs.procps
+      pkgs.pulseaudio
+      pkgs.systemd
+      pkgs.util-linux
+      pkgs.wireplumber
     ];
     text = ''
       export POLARIS_GAMESCOPE_BIN=${lib.getExe gamescope}
@@ -243,8 +248,10 @@ let
       serviceConfig = ''
         Type=simple
         ExecStart=${lib.getExe idleApp}
-        # on-abnormal: stop/mask for nested WSI must not look like a crash restart.
-        Restart=on-abnormal
+        # on-failure: gamescope ABRT ends the wrapper with exit 134; on-abnormal
+        # ignores that and leaves idle permanently failed (orphan sockets stick).
+        # Nested WSI uses runtime mask so stop/mask still will not respawn idle.
+        Restart=on-failure
         RestartSec=5s
         TimeoutStopSec=10s
         ${envToUnitLines baseEnvironment}
@@ -291,7 +298,9 @@ let
       serviceConfig = ''
         Type=simple
         ExecStart=${portalFrontendExec}
-        Restart=on-failure
+        # always: frontend can be cleanly stopped while polaris stays up; stream
+        # needs org.freedesktop.portal.Desktop on the private bus.
+        Restart=always
         RestartSec=1s
         ${envToUnitLines portalEnvironment}
       '';

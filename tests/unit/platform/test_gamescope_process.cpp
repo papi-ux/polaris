@@ -230,5 +230,44 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   };
   EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
   EXPECT_FALSE(gp::discover_owned_x11_display(marker, paths_for(tree)).has_value());
+  // Ambiguous pathnames are not safe to reclaim.
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, ReclaimsFilesystemResidueWithoutListener) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket).put('\n');
+  tree.flush_unix_sockets();  // header only — no listener row
+
+  EXPECT_FALSE(gp::socket_has_live_holder(gamecope_socket, paths_for(tree)));
+  EXPECT_TRUE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
+  EXPECT_FALSE(fs::exists(gamecope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, ReclaimsDeadListenerWithoutHolder) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  tree.add_unix_socket(700, gamescope_socket);
+  tree.flush_unix_sockets();
+  // No process holds inode 700.
+
+  EXPECT_FALSE(gp::socket_has_live_holder(gamecope_socket, paths_for(tree)));
+  EXPECT_TRUE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
+  EXPECT_FALSE(fs::exists(gamecope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  tree.add_unix_socket(701, gamescope_socket);
+  tree.flush_unix_sockets();
+  tree.add_process(440, 1, 9400, {"/usr/bin/gamescope", "--backend=headless"}, {701});
+
+  EXPECT_TRUE(gp::socket_has_live_holder(gamecope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamecope_socket));
 }
 #endif

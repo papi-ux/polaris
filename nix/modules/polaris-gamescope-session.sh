@@ -211,7 +211,7 @@ case "${1:-}" in
             exit 1
             ;;
         esac
-      elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
+      elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
         echo "polaris-gamescope-session: refusing unowned gamescope socket cleanup" >&2
         exit 1
       fi
@@ -334,7 +334,7 @@ case "${1:-}" in
             echo "polaris-gamescope-session: nested owner did not stop" >&2
             exit 1
           }
-        elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
+        elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
           echo "polaris-gamescope-session: refusing to clean unowned nested sockets" >&2
           exit 1
         fi
@@ -461,8 +461,8 @@ case "${1:-}" in
       if polaris_validate_marker "$marker" nested; then
         polaris_stop_marked_gamescope "$marker" nested "$rt" ||
           echo "polaris-gamescope-session: nested owner did not reach terminal state" >&2
-      elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
-        echo "polaris-gamescope-session: leaving unowned gamescope sockets untouched" >&2
+      elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+        echo "polaris-gamescope-session: leaving live unowned gamescope sockets untouched" >&2
       fi
       rm -f "$rt/polaris-gamescope-wsi-nested"
       printf '0\n' >"$rt/polaris-gamescope-force"

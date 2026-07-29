@@ -100,7 +100,9 @@ in
       Service = {
         Type = "simple";
         ExecStart = session.portalFrontendExec;
-        Restart = "on-failure";
+        # always: frontend can be cleanly stopped while polaris stays up; stream
+        # needs org.freedesktop.portal.Desktop on the private bus.
+        Restart = "always";
         RestartSec = "1s";
         Environment = session.envToList session.portalEnvironment;
       };

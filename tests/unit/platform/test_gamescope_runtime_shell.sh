@@ -185,6 +185,51 @@ fi
 [ -e "$work/run/polaris-gamescope.env" ] || fail "missing marker allowed runtime env cleanup"
 [ -e "$work/run/gamescope-0" ] || fail "missing marker allowed socket cleanup"
 
+# Crash residue: filesystem socket with no /proc/net/unix listener is reclaimable.
+: >"$work/run/gamescope-0"
+: >"$work/run/gamescope-0.lock"
+: >"$work/run/gamescope-0-ei"
+write_unix_header
+polaris_socket_is_orphan "$work/run/gamescope-0" || fail "filesystem residue not treated as orphan"
+polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "orphan reclaim failed"
+[ ! -e "$work/run/gamescope-0" ] || fail "orphan gamescope-0 survived reclaim"
+[ ! -e "$work/run/gamescope-0-ei" ] || fail "orphan gamescope-0-ei survived reclaim"
+[ ! -e "$work/run/gamescope-0.lock" ] || fail "orphan lock survived reclaim"
+
+# Dead listener inode with no process holder is reclaimable.
+: >"$work/run/gamescope-0"
+write_unix_header
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 901 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+polaris_socket_is_orphan "$work/run/gamescope-0" || fail "dead listener not treated as orphan"
+polaris_remove_orphan_socket "$work/run/gamescope-0" || fail "dead listener not removed"
+[ ! -e "$work/run/gamescope-0" ] || fail "dead listener socket survived"
+
+# Live unowned holder must fail closed (do not unlink).
+write_process 430 1 9300 /usr/bin/gamescope --backend headless
+: >"$work/run/gamescope-0"
+ln -s 'socket:[902]' "$POLARIS_PROC_ROOT/430/fd/3"
+write_unix_header
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 902 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+if polaris_socket_is_orphan "$work/run/gamescope-0"; then
+  fail "live unowned holder treated as orphan"
+fi
+if polaris_reclaim_orphan_gamescope_sockets "$work/run"; then
+  fail "live unowned reclaim was allowed"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "live unowned socket was removed"
+
+# Ambiguous duplicate pathname rows fail closed.
+write_unix_header
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 903 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+printf '0000000000000001: 00000002 00000000 00010000 0001 01 904 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+if polaris_socket_is_orphan "$work/run/gamescope-0"; then
+  fail "ambiguous socket pathname treated as orphan"
+fi
+
 # Production call sites must use exact markers, never process-name-wide pkill/pgrep.
 for source in \
   "$repo_root/src/platform/linux/stream_runtime_gamescope.cpp" \
@@ -202,6 +247,9 @@ grep -q 'polaris_stop_marked_gamescope' "$repo_root/nix/modules/polaris-gamescop
   fail "session lifecycle does not stop the marked generation"
 grep -q 'polaris_stop_marked_gamescope' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" ||
   fail "non-Nix readiness helper does not stop nested ownership exactly"
+grep -q 'polaris_reclaim_orphan_gamescope_sockets' \
+  "$repo_root/scripts/install/lib/polaris-gamescope-idle.sh" ||
+  fail "idle unit does not reclaim orphan gamescope sockets"
 if grep -Eq 'rm .*polaris-gamescope\.pid|rm -f .*polaris-gamescope\.pid' \
     "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh"; then
   fail "non-Nix readiness helper still removes ownership markers unconditionally"

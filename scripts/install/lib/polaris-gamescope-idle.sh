@@ -45,16 +45,16 @@ if polaris_validate_marker "$marker"; then
     exit 1
   fi
 else
-  # Invalid marker metadata is safe to discard; unknown sockets are not.
+  # Invalid marker is safe to discard. Crash residue sockets are reclaimed only
+  # when no live process holds them; live unowned holders still fail closed.
   rm -f "$marker"
+  rm -f "$rt/polaris-gamescope.env"
 fi
 
-for socket in gamescope-0 gamescope-1; do
-  if [ -e "$rt/$socket" ]; then
-    echo "polaris-gamescope-idle: refusing destructive cleanup of unowned $rt/$socket" >&2
-    exit 1
-  fi
-done
+if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+  echo "polaris-gamescope-idle: cannot start while live unowned gamescope sockets remain" >&2
+  exit 1
+fi
 
 prefer_vk=()
 if [ -n "${POLARIS_GAMESCOPE_PREFER_VK:-}" ]; then

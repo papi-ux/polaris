@@ -28,7 +28,10 @@ polaris_process_fields() {
 
 polaris_read_marker() {
   local marker="$1" extra executable_name
-  read -r POLARIS_MARKER_PID POLARIS_MARKER_START_TIME POLARIS_MARKER_ROLE POLARIS_MARKER_EXECUTABLE extra <"$marker" 2>/dev/null || return 1
+  # Check readability first — bash still prints "No such file" for <"$missing"
+  # even when the whole command redirects stderr.
+  [ -r "$marker" ] || return 1
+  read -r POLARIS_MARKER_PID POLARIS_MARKER_START_TIME POLARIS_MARKER_ROLE POLARIS_MARKER_EXECUTABLE extra <"$marker" || return 1
   [ -z "${extra:-}" ] || return 1
   case "$POLARIS_MARKER_PID:$POLARIS_MARKER_START_TIME" in
     *[!0-9:]*|0:*|:*|*:) return 1 ;;
@@ -48,7 +51,7 @@ polaris_read_marker() {
 }
 
 polaris_headless_gamescope_pid() {
-  local pid="$1" arg first=1 executable= backend=0 previous=
+  local pid="$1" arg first=1 executable="" backend=0 previous=""
   local exe_path exe_name
   exe_path="$(readlink "$(polaris_proc_root)/$pid/exe" 2>/dev/null)" || return 1
   exe_name="${exe_path##*/}"
@@ -94,11 +97,11 @@ polaris_process_has_argument() {
 }
 
 polaris_write_marker_for_pid() (
-  local marker="$1" pid="$2" role="$3" attempt tmp lock_bin="${POLARIS_FLOCK_BIN:-flock}"
+  local marker="$1" pid="$2" role="$3" tmp lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   umask 077
   exec 9>>"${marker%/*}/polaris-gamescope.lock" || return 1
   "$lock_bin" -x 9 || return 1
-  for attempt in $(seq 1 100); do
+  for _ in $(seq 1 100); do
     if polaris_process_fields "$pid" && polaris_headless_gamescope_pid "$pid"; then
       local start_time="$POLARIS_PROCESS_START_TIME" executable_path="$POLARIS_GAMESCOPE_EXECUTABLE"
       if polaris_validate_marker "$marker"; then
@@ -130,8 +133,9 @@ polaris_pid_is_descendant() {
 }
 
 polaris_socket_inode() {
-  local wanted="$1" num ref protocol flags type state inode path rest found=""
-  while read -r num ref protocol flags type state inode path rest; do
+  local wanted="$1" inode path found=""
+  # /proc/net/unix columns: num ref protocol flags type state inode path …
+  while read -r _ _ _ _ _ _ inode path _; do
     [ "$path" = "$wanted" ] || continue
     case "$inode" in ''|*[!0-9]*) return 1 ;; esac
     # Duplicate pathname rows are ambiguous: an unlinked old listener may
@@ -172,6 +176,70 @@ polaris_marker_owns_socket() {
   polaris_process_tree_holds_inode "$POLARIS_MARKER_PID" "$inode"
 }
 
+polaris_any_process_holds_inode() {
+  local inode="$1" process pid
+  for process in "$(polaris_proc_root)"/[0-9]*; do
+    [ -d "$process" ] || continue
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if polaris_pid_holds_inode "$pid" "$inode"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# True (0) when $1 is missing or has no live holder — safe to unlink.
+# False (1) when a live process holds the socket or the pathname is ambiguous.
+polaris_socket_is_orphan() {
+  local socket="$1" inode path found="" count=0
+  [ -e "$socket" ] || return 0
+  while read -r _ _ _ _ _ _ inode path _; do
+    [ "$path" = "$socket" ] || continue
+    case "$inode" in ''|*[!0-9]*) continue ;; esac
+    count=$((count + 1))
+    found="$inode"
+  done <"$(polaris_proc_net_unix)" 2>/dev/null
+  # Duplicate pathname rows are ambiguous (unlink/rebind); refuse reclaim.
+  [ "$count" -le 1 ] || return 1
+  # Filesystem residue with no /proc/net/unix listener is safe to remove.
+  [ "$count" -eq 1 ] || return 0
+  if polaris_any_process_holds_inode "$found"; then
+    return 1
+  fi
+  return 0
+}
+
+# Remove one socket path if orphaned. 0 = missing/removed, 1 = live holder.
+polaris_remove_orphan_socket() {
+  local socket="$1"
+  if [ ! -e "$socket" ]; then
+    rm -f "$socket.lock" 2>/dev/null || true
+    return 0
+  fi
+  polaris_socket_is_orphan "$socket" || return 1
+  echo "polaris: reclaiming orphan socket $socket" >&2
+  rm -f "$socket" "$socket.lock" 2>/dev/null || true
+  return 0
+}
+
+# Reclaim dead gamescope-* residue after crash. Fails closed on live holders.
+polaris_reclaim_orphan_gamescope_sockets() {
+  local runtime_dir="$1" name socket
+  for name in gamescope-0 gamescope-1 gamescope-0-ei gamescope-1-ei; do
+    socket="$runtime_dir/$name"
+    if [ -e "$socket" ] || [ -S "$socket" ]; then
+      if ! polaris_remove_orphan_socket "$socket"; then
+        echo "polaris: refusing destructive cleanup of live unowned $socket" >&2
+        return 1
+      fi
+    else
+      rm -f "$socket.lock" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
 polaris_xwayland_pid() {
   local pid="$1" executable exe_path
   exe_path="$(readlink "$(polaris_proc_root)/$pid/exe" 2>/dev/null)" || return 1
@@ -180,8 +248,24 @@ polaris_xwayland_pid() {
   [ "${executable##*/}" = Xwayland ]
 }
 
+# gamescope may reparent Xwayland under the user manager while keeping the
+# service cgroup; treat same-cgroup as related when ancestry is gone.
+polaris_pid_same_cgroup() {
+  local a="$1" b="$2" ca cb
+  ca="$(cat "$(polaris_proc_root)/$a/cgroup" 2>/dev/null)" || return 1
+  cb="$(cat "$(polaris_proc_root)/$b/cgroup" 2>/dev/null)" || return 1
+  [ -n "$ca" ] && [ "$ca" = "$cb" ]
+}
+
+polaris_pid_related_to_root() {
+  local pid="$1" root="$2"
+  [ "$pid" = "$root" ] && return 0
+  polaris_pid_is_descendant "$pid" "$root" && return 0
+  polaris_pid_same_cgroup "$pid" "$root"
+}
+
 polaris_discover_xwayland_display() {
-  local marker="$1" expected_role="${2:-}" xdir socket name display inode process pid best=
+  local marker="$1" expected_role="${2:-}" xdir socket name display inode path process pid best=
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local root_pid="$POLARIS_MARKER_PID"
   xdir="$(polaris_x11_socket_dir)"
@@ -190,18 +274,24 @@ polaris_discover_xwayland_display() {
     name="${socket##*/}"
     display="${name#X}"
     case "$display" in ''|*[!0-9]*) continue ;; esac
-    inode="$(polaris_socket_inode "$socket")" || continue
-    for process in "$(polaris_proc_root)"/[0-9]*; do
-      [ -d "$process" ] || continue
-      pid="${process##*/}"
-      [ "$pid" != "$root_pid" ] || continue
-      if polaris_pid_is_descendant "$pid" "$root_pid" && polaris_xwayland_pid "$pid" \
-          && polaris_pid_holds_inode "$pid" "$inode"; then
-        if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
-          best="$display"
+    # Walk every /proc/net/unix row for this path. Ambiguous unlink/rebind
+    # residue is ok if a related Xwayland still holds one of the inodes.
+    while read -r _ _ _ _ _ _ inode path _; do
+      [ "$path" = "$socket" ] || continue
+      case "$inode" in ''|*[!0-9]*) continue ;; esac
+      for process in "$(polaris_proc_root)"/[0-9]*; do
+        [ -d "$process" ] || continue
+        pid="${process##*/}"
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        [ "$pid" != "$root_pid" ] || continue
+        if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
+            && polaris_pid_holds_inode "$pid" "$inode"; then
+          if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
+            best="$display"
+          fi
         fi
-      fi
-    done
+      done
+    done <"$(polaris_proc_net_unix)" 2>/dev/null
   done
   [ -n "$best" ] || return 1
   printf ':%s\n' "$best"
@@ -230,7 +320,7 @@ polaris_write_runtime_env() (
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
-  local marker_line pid start_time executable_path socket inode entry current_inode attempt
+  local marker_line pid start_time executable_path socket inode entry current_inode
   local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
   umask 077
   exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
@@ -252,7 +342,7 @@ polaris_stop_marked_gamescope() (
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
   "$kill_bin" -TERM "-$pid" 2>/dev/null || "$kill_bin" -TERM "$pid" 2>/dev/null || return 1
-  for attempt in $(seq 1 "$term_steps"); do
+  for _ in $(seq 1 "$term_steps"); do
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
     if ! polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
       break
@@ -262,7 +352,7 @@ polaris_stop_marked_gamescope() (
   if polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
     "$kill_bin" -KILL "-$pid" 2>/dev/null || "$kill_bin" -KILL "$pid" 2>/dev/null || return 1
-    for attempt in $(seq 1 "$kill_steps"); do
+    for _ in $(seq 1 "$kill_steps"); do
       [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
       polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || break
       sleep 0.1

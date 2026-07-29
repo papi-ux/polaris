@@ -266,6 +266,42 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
 
+    std::optional<std::string> read_cgroup(const lookup_paths_t &paths, int pid) {
+      std::ifstream input(paths.proc_root / std::to_string(pid) / "cgroup");
+      std::string line;
+      std::string last;
+      while (std::getline(input, line)) {
+        if (!line.empty()) {
+          last = line;
+        }
+      }
+      if (last.empty()) {
+        return std::nullopt;
+      }
+      return last;
+    }
+
+    bool same_cgroup(const lookup_paths_t &paths, int a, int b) {
+      const auto ca = read_cgroup(paths, a);
+      const auto cb = read_cgroup(paths, b);
+      return ca && cb && *ca == *cb;
+    }
+
+    bool related_to_root(
+      int pid,
+      int root,
+      const std::map<int, process_t> &processes,
+      const lookup_paths_t &paths
+    ) {
+      if (pid == root) {
+        return true;
+      }
+      if (is_descendant_of(pid, root, processes)) {
+        return true;
+      }
+      return same_cgroup(paths, pid, root);
+    }
+
     std::optional<std::uint64_t> inode_for_path(
       const socket_inode_map_t &inodes,
       const fs::path &path
@@ -275,6 +311,39 @@ namespace stream_runtime::gamescope_process {
         return std::nullopt;
       }
       return *found->second;
+    }
+
+    // All inode numbers listed for pathname (including ambiguous multi-row sets).
+    std::vector<std::uint64_t> all_inodes_for_path(
+      const fs::path &proc_net_unix,
+      const fs::path &path
+    ) {
+      std::vector<std::uint64_t> out;
+      std::ifstream input(proc_net_unix);
+      std::string line;
+      std::getline(input, line);  // header
+      while (std::getline(input, line)) {
+        std::istringstream row(line);
+        std::string num;
+        std::string ref_count;
+        std::string protocol;
+        std::string flags;
+        std::string type;
+        std::string state;
+        std::string inode_text;
+        if (!(row >> num >> ref_count >> protocol >> flags >> type >> state >> inode_text)) {
+          continue;
+        }
+        std::string sock_path;
+        std::getline(row >> std::ws, sock_path);
+        if (sock_path != path.string()) {
+          continue;
+        }
+        if (const auto inode = parse_integer<std::uint64_t>(inode_text)) {
+          out.push_back(*inode);
+        }
+      }
+      return out;
     }
   }  // namespace
 
@@ -408,6 +477,51 @@ namespace stream_runtime::gamescope_process {
     return false;
   }
 
+  bool socket_has_live_holder(
+    const fs::path &socket_path,
+    const lookup_paths_t &paths
+  ) {
+    std::error_code ec;
+    if (!fs::exists(socket_path, ec) || ec) {
+      return false;
+    }
+    const auto inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    const auto found = inodes.find(socket_path.string());
+    // No /proc/net/unix row → filesystem residue only.
+    if (found == inodes.end()) {
+      return false;
+    }
+    // Ambiguous duplicate pathname rows: treat as live so callers fail closed.
+    if (!found->second) {
+      return true;
+    }
+    const auto processes = read_processes(paths.proc_root);
+    for (const auto &[pid, process] : processes) {
+      (void) process;
+      if (process_holds_inode(paths, pid, *found->second)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool remove_orphan_socket(
+    const fs::path &socket_path,
+    const lookup_paths_t &paths
+  ) {
+    std::error_code ec;
+    if (!fs::exists(socket_path, ec) || ec) {
+      fs::remove(fs::path(socket_path.string() + ".lock"), ec);
+      return true;
+    }
+    if (socket_has_live_holder(socket_path, paths)) {
+      return false;
+    }
+    fs::remove(socket_path, ec);
+    fs::remove(fs::path(socket_path.string() + ".lock"), ec);
+    return !fs::exists(socket_path, ec);
+  }
+
   std::optional<std::string> discover_owned_x11_display(
     const marker_t &marker,
     const lookup_paths_t &paths
@@ -415,41 +529,41 @@ namespace stream_runtime::gamescope_process {
     if (!validate_process(marker, paths)) {
       return std::nullopt;
     }
-    const auto inodes = read_unix_socket_inodes(paths.proc_net_unix);
     const auto processes = read_processes(paths.proc_root);
-    std::vector<std::pair<int, std::uint64_t>> candidates;
-    for (const auto &[path, inode] : inodes) {
-      if (!inode) {
-        continue;
+    std::optional<int> best;
+
+    std::error_code ec;
+    for (const auto &entry : fs::directory_iterator(paths.x11_socket_dir, ec)) {
+      if (ec) {
+        break;
       }
-      const fs::path socket_path(path);
-      if (socket_path.parent_path() != paths.x11_socket_dir) {
-        continue;
-      }
-      const auto name = socket_path.filename().string();
+      const auto name = entry.path().filename().string();
       if (name.size() < 2 || name.front() != 'X') {
         continue;
       }
       const auto display = parse_integer<int>(std::string_view {name}.substr(1));
-      std::error_code ec;
-      if (display && *display >= 0 && fs::exists(socket_path, ec) && !ec) {
-        candidates.emplace_back(*display, *inode);
+      if (!display || *display < 0 || !entry.exists(ec)) {
+        continue;
+      }
+      // Include every inode row for this path so unlink/rebind residue does not
+      // hide a live Xwayland still related to the marker generation.
+      for (const auto inode : all_inodes_for_path(paths.proc_net_unix, entry.path())) {
+        for (const auto &[pid, process] : processes) {
+          if (pid == marker.pid || !executable_named(process, "Xwayland") ||
+              !related_to_root(pid, marker.pid, processes, paths) ||
+              !process_holds_inode(paths, pid, inode)) {
+            continue;
+          }
+          if (!best || *display < *best) {
+            best = *display;
+          }
+        }
       }
     }
-    std::sort(candidates.begin(), candidates.end());
-
-    for (const auto &[display, inode] : candidates) {
-      for (const auto &[pid, process] : processes) {
-        if (pid == marker.pid || !is_descendant_of(pid, marker.pid, processes) ||
-            !executable_named(process, "Xwayland")) {
-          continue;
-        }
-        if (process_holds_inode(paths, pid, inode)) {
-          return ":" + std::to_string(display);
-        }
-      }
+    if (!best) {
+      return std::nullopt;
     }
-    return std::nullopt;
+    return ":" + std::to_string(*best);
   }
 
 }  // namespace stream_runtime::gamescope_process
