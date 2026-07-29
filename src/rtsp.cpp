@@ -599,7 +599,13 @@ namespace rtsp_stream {
 
     void handle_accept(const boost::system::error_code &ec) {
       if (ec) {
-        BOOST_LOG(error) << "Couldn't accept incoming connections: "sv << ec.message();
+        // Service stop/restart cancels the acceptor — expected, not a fault.
+        if (ec == boost::asio::error::operation_aborted ||
+            ec == boost::system::errc::operation_canceled) {
+          BOOST_LOG(info) << "RTSP acceptor stopped: "sv << ec.message();
+        } else {
+          BOOST_LOG(error) << "Couldn't accept incoming connections: "sv << ec.message();
+        }
 
         // Stop server
         clear();
