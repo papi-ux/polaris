@@ -355,9 +355,10 @@ polaris_discover_xwayland_display() {
 }
 
 polaris_write_runtime_env() (
-  local marker="$1" wayland="$2" expected_role="${3:-}" runtime_dir="$4" display tmp
+  local marker="$1" wayland="$2" expected_role="${3:-}" runtime_dir="$4" display final_display tmp
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}" marker_line role
   umask 077
+  trap 'rm -f "${tmp:-}"' EXIT
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
     "$lock_bin" -x 9 || return 1
@@ -373,6 +374,16 @@ polaris_write_runtime_env() (
   tmp="$runtime_dir/polaris-gamescope.env.tmp.$$"
   (umask 077; printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nGAMESCOPE_WAYLAND_DISPLAY=%s\nPOLARIS_GAMESCOPE_PID=%s\nPOLARIS_GAMESCOPE_START_TIME=%s\nPOLARIS_GAMESCOPE_ROLE=%s\nPOLARIS_GAMESCOPE_EXECUTABLE=%s\n' \
     "$display" "$wayland" "$wayland" "$pid" "$start_time" "$role" "$executable_path" >"$tmp") || return 1
+  if [ -n "${POLARIS_RUNTIME_ENV_BEFORE_COMMIT_HOOK:-}" ]; then
+    "${POLARIS_RUNTIME_ENV_BEFORE_COMMIT_HOOK}" || return 1
+  fi
+  # Joint publication boundary: neither selected pathname may have rebound
+  # while the other was being discovered or while the temporary file was built.
+  polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  polaris_marker_owns_socket "$marker" "$runtime_dir/$wayland" "$expected_role" || return 1
+  final_display="$(polaris_discover_xwayland_display "$marker" "$expected_role")" || return 1
+  [ "$final_display" = "$display" ] || return 1
   mv -f "$tmp" "$runtime_dir/polaris-gamescope.env"
 )
 
@@ -420,7 +431,7 @@ polaris_private_group_alive() {
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
-  local marker_line pid start_time executable_path pgid session_id socket inode entry current_inode
+  local marker_line pid start_time executable_path pgid session_id group_leader_start group_leader_executable socket inode entry current_inode
   local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
   umask 077
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
@@ -445,6 +456,12 @@ polaris_stop_marked_gamescope() (
   pgid="$POLARIS_PROCESS_PGID"
   session_id="$POLARIS_PROCESS_SESSION_ID"
   [ "$pgid" -gt 1 ] 2>/dev/null && [ "$session_id" = "$pgid" ] || return 1
+  polaris_process_fields "$pgid" || return 1
+  [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  group_leader_start="$POLARIS_PROCESS_START_TIME"
+  group_leader_executable="$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" || return 1
+  [ -n "$group_leader_executable" ] || return 1
   [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
@@ -464,8 +481,16 @@ polaris_stop_marked_gamescope() (
   done
   if polaris_private_group_alive "$pgid"; then
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-    # The private session still has exact PGID/SID members even if its marked
-    # compositor exited after TERM. Escalate the whole surviving generation.
+    # Keep the exact private-session leader allocation as an immutable PGID-reuse
+    # barrier through the last negative-PGID operation. The marked compositor may
+    # be a launcher child and may exit after TERM; only the retained leader can
+    # authorize safe escalation.
+    polaris_process_fields "$pgid" || return 1
+    [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
+      && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+    [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ] || return 1
+    [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
     "$kill_bin" -KILL "-$pgid" 2>/dev/null || return 1
     for _ in $(seq 1 "$kill_steps"); do
       [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1

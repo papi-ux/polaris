@@ -19,6 +19,7 @@ gs_height="${POLARIS_HDR_HEIGHT:-2160}"
 gs_refresh="${POLARIS_HDR_REFRESH:-120}"
 
 session_id_file="$rt/polaris-gamescope-session-id"
+session_mode_file="$rt/polaris-gamescope-session-mode"
 
 publish_nested_claim() (
   local new_state="$1" expected_state="${2:-absent}"
@@ -32,6 +33,20 @@ publish_nested_claim() (
   tmp="$rt/.polaris-gamescope-wsi-nested.$$"
   printf '%s\n' "$new_state" >"$tmp" || return 1
   mv -f -- "$tmp" "$rt/polaris-gamescope-wsi-nested"
+)
+
+publish_session_mode() (
+  local mode="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp
+  case "$mode" in attach|nested) ;; *) return 1 ;; esac
+  exec 9>>"$rt/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
+  [ ! -e "$session_id_file" ] && [ ! -e "$session_mode_file" ] || return 1
+  local id_tmp="$session_id_file.tmp.$$"
+  printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$id_tmp" || return 1
+  mv -f -- "$id_tmp" "$session_id_file" || return 1
+  tmp="$session_mode_file.tmp.$$"
+  printf '%s\n' "$mode" >"$tmp" || return 1
+  mv -f -- "$tmp" "$session_mode_file"
 )
 
 remove_nested_claim() (
@@ -173,9 +188,6 @@ case "${1:-}" in
       echo "polaris-gamescope-session: recovery claim lacks its immutable session credential" >&2
       exit 1
     fi
-    session_id_tmp="$session_id_file.tmp.$$"
-    printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$session_id_tmp"
-    mv -f "$session_id_tmp" "$session_id_file"
     # Soft env hint for nested games (PULSE_SINK / PIPEWIRE_NODE).
     # Polaris itself picks the capture sink: EasyEffects when it is the
     # host default (FMOD target.object sticks there); otherwise virtual
@@ -258,6 +270,17 @@ case "${1:-}" in
     case "${POLARIS_GAMESCOPE_WSI:-1}" in
       false|FALSE|0|no|NO) want_wsi=0 ;;
     esac
+    if [ "$want_wsi" = 1 ]; then
+      publish_session_mode nested || {
+        echo "polaris-gamescope-session: could not publish durable nested recovery mode" >&2
+        exit 1
+      }
+    else
+      publish_session_mode attach || {
+        echo "polaris-gamescope-session: could not publish durable attach recovery mode" >&2
+        exit 1
+      }
+    fi
 
     # Nested WSI: gamescope --steam with Steam as primary child.
     # Plain "-silent -applaunch" creates a WSI surface but often no
@@ -623,6 +646,16 @@ case "${1:-}" in
       echo "polaris-gamescope-session: missing or mismatched session credential during stop" >&2
       exit 1
     }
+    [ -f "$session_mode_file" ] || {
+      echo "polaris-gamescope-session: durable session mode missing; retaining credential" >&2
+      exit 1
+    }
+    session_mode="$(tr -d '[:space:]' <"$session_mode_file")"
+    case "$session_mode" in attach|nested) ;; *)
+      echo "polaris-gamescope-session: invalid durable session mode; retaining credential" >&2
+      exit 1
+      ;;
+    esac
     rm -f "$rt/polaris-gamescope-appid" "$rt/polaris-gamescope-audio-sink" "$rt/polaris-gamescope-audio-skip-pin"
     # Keep null sinks loaded (permanent capture targets).
     rm -f "$rt/polaris-gamescope-sink-module"
@@ -630,6 +663,10 @@ case "${1:-}" in
     rm -f "$rt/polaris-gamescope-prev-default-sink" "$rt/polaris-gamescope-easyeffects-units"
     nested_claim="$rt/polaris-gamescope-wsi-nested"
     if [ -f "$nested_claim" ]; then
+      [ "$session_mode" = nested ] || {
+        echo "polaris-gamescope-session: nested claim conflicts with durable attach mode" >&2
+        exit 1
+      }
       claim_state="$(tr -d '[:space:]' <"$nested_claim")"
       case "$claim_state" in
         transition)
@@ -740,12 +777,26 @@ case "${1:-}" in
       rm -f -- "$nested_claim"
       "${POLARIS_FLOCK_BIN:-flock}" -u 8
       export POLARIS_GAMESCOPE_LOCK_HELD=0
-    elif [ -f "$rt/polaris-gamescope-force" ] && [ "$(tr -d '[:space:]' <"$rt/polaris-gamescope-force")" = "1" ]; then
-      kill_session_steam || exit 1
-      printf '0\n' >"$rt/polaris-gamescope-force"
-      systemctl --user restart polaris-gamescope-idle.service || true
+    else
+      [ "$session_mode" = attach ] || {
+        echo "polaris-gamescope-session: nested mode lost its recovery claim; retaining credential" >&2
+        exit 1
+      }
+      kill_session_steam || {
+        echo "polaris-gamescope-session: attach recovery could not terminate exact-session Steam" >&2
+        exit 1
+      }
+      session_steam_absent || {
+        echo "polaris-gamescope-session: attach generation still alive; retaining credential" >&2
+        exit 1
+      }
+      if [ -f "$rt/polaris-gamescope-force" ] \
+          && [ "$(tr -d '[:space:]' <"$rt/polaris-gamescope-force")" = "1" ]; then
+        printf '0\n' >"$rt/polaris-gamescope-force"
+        systemctl --user restart polaris-gamescope-idle.service || true
+      fi
     fi
-    rm -f "$session_id_file"
+    rm -f "$session_mode_file" "$session_id_file"
     ;;
   *)
     echo "usage: polaris-gamescope-session start [steam_appid]|wait|stop" >&2

@@ -85,6 +85,7 @@ write_process_with_group 999 1 999 999 9999 /usr/bin/sleep infinity
 
 # The exact compositor may be a child of the setsid launcher. Signal the
 # validated private process group, never assume compositor PID equals PGID.
+write_process_with_group 400 1 400 400 9000 /usr/bin/sleep infinity
 write_process_with_group 410 1 400 400 9001 /usr/bin/gamescope --backend headless
 write_process_with_group 411 410 400 400 9002 /usr/bin/tail -f /dev/null
 : >"$work/run/gamescope-0"
@@ -104,7 +105,7 @@ if [ "\${1:-}" = -TERM ] && [ "\${2:-}" = -400 ]; then
   rm -rf "$POLARIS_PROC_ROOT/410"
   rm -f "$work/run/gamescope-0"
 elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -400 ]; then
-  rm -rf "$POLARIS_PROC_ROOT/411"
+  rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/411"
 fi
 EOF
 chmod +x "$work/bin/kill"
@@ -117,6 +118,34 @@ if grep -q -- '-410' "$work/kills"; then
 fi
 mv "$work/bin/kill.default" "$work/bin/kill"
 chmod +x "$work/bin/kill"
+
+# If the private-session leader generation changes after TERM, numeric PGID
+# escalation loses its immutable reuse barrier and must fail closed.
+write_process_with_group 400 1 400 400 9300 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 9301 /usr/bin/gamescope --backend headless
+write_process_with_group 411 410 400 400 9302 /usr/bin/tail -f /dev/null
+: >"$work/run/gamescope-0"
+write_unix_header
+printf 'row row row row row row 801 %s\n' "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+ln -sfn 'socket:[801]' "$POLARIS_PROC_ROOT/410/fd/3"
+printf '410 9301 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+: >"$work/kills"
+cat >"$work/bin/kill-reused-leader" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -TERM ]; then
+  printf '400 (sleep) S 1 400 400 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 9400\n' >"$POLARIS_PROC_ROOT/400/stat"
+  rm -rf "$POLARIS_PROC_ROOT/410"
+fi
+EOF
+chmod +x "$work/bin/kill-reused-leader"
+if POLARIS_KILL_BIN="$work/bin/kill-reused-leader" \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "recycled private-session leader authorized PGID escalation"
+fi
+! grep -q -- '-KILL' "$work/kills" || fail "recycled PGID received KILL"
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "leader-reuse failure cleared marker authority"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/411"
 
 # A non-private or moved compositor group is not authorized for negative
 # signaling even when PID/start/executable still match the marker.
@@ -181,6 +210,31 @@ polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$w
 grep -qx 'DISPLAY=:4' "$work/run/polaris-gamescope.env" || fail "runtime env routed to host X display"
 grep -qx 'POLARIS_GAMESCOPE_PID=410' "$work/run/polaris-gamescope.env" || fail "runtime env lacks owner pid"
 [ -e "$POLARIS_X11_SOCKET_DIR/X0" ] || fail "host X0 was removed"
+
+# Rebinding Wayland after X11 selection but before env publication must reject
+# the entire Wayland/X11 pair and leave no committed environment.
+cp "$POLARIS_PROC_NET_UNIX" "$work/unix.before-env-rebind"
+cat >"$work/bin/rebind-wayland-before-env" <<EOF
+#!/usr/bin/env bash
+python3 - "$POLARIS_PROC_NET_UNIX" "$work/run/gamescope-0" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+socket = sys.argv[2]
+data = path.read_text()
+data = data.replace(f" 500 {socket}\\n", f" 501 {socket}\\n")
+path.write_text(data)
+PY
+EOF
+chmod +x "$work/bin/rebind-wayland-before-env"
+rm -f "$work/run/polaris-gamescope.env"
+if POLARIS_RUNTIME_ENV_BEFORE_COMMIT_HOOK="$work/bin/rebind-wayland-before-env" \
+    polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$work/run"; then
+  fail "Wayland pathname rebound was accepted at runtime-env commit"
+fi
+[ ! -e "$work/run/polaris-gamescope.env" ] || fail "rebound ownership published a runtime env"
+mv "$work/unix.before-env-rebind" "$POLARIS_PROC_NET_UNIX"
+polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$work/run" ||
+  fail "runtime env did not recover after rejected rebound"
 
 # Duplicate pathname rows represent unlink/rebind generations; holding the old
 # inode must not authorize clients to route to the replacement.

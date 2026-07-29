@@ -170,6 +170,23 @@ namespace stream_runtime {
       return result == 1 && (descriptor.revents & (POLLIN | POLLHUP)) != 0;
     }
 
+    bool pidfd_targets_pid(int pidfd, pid_t expected_pid) {
+      if (pidfd < 0 || expected_pid <= 1) {
+        return false;
+      }
+      std::ifstream info("/proc/self/fdinfo/" + std::to_string(pidfd));
+      std::string key;
+      pid_t pid = -1;
+      while (info >> key) {
+        if (key == "Pid:") {
+          return (info >> pid) && pid == expected_pid;
+        }
+        std::string ignored;
+        std::getline(info, ignored);
+      }
+      return false;
+    }
+
     bool drain_private_process_group(
       pid_t pgid,
       int leader_pidfd,
@@ -177,7 +194,7 @@ namespace stream_runtime {
       int term_steps = 30,
       int kill_steps = 20
     ) {
-      if (leader_pidfd < 0 || fcntl(leader_pidfd, F_GETFD) < 0 || !authority_still_current()) {
+      if (!pidfd_targets_pid(leader_pidfd, pgid) || !authority_still_current()) {
         return false;
       }
       auto state = private_group_state(pgid);
@@ -196,7 +213,8 @@ namespace stream_runtime {
         state = private_group_state(pgid);
       }
       if (state == private_group_state_e::alive) {
-        if (!authority_still_current() || (kill(-pgid, SIGKILL) != 0 && errno != ESRCH)) {
+        if (!pidfd_targets_pid(leader_pidfd, pgid) || !authority_still_current() ||
+            (kill(-pgid, SIGKILL) != 0 && errno != ESRCH)) {
           return false;
         }
         for (int i = 0; i < kill_steps && state == private_group_state_e::alive; ++i) {
@@ -270,18 +288,33 @@ namespace stream_runtime {
 
       bool start(const start_params_t &params) override {
         std::lock_guard lock(mu_);
-        if (is_running_unlocked()) {
-          // Crash/teardown can leave in-memory attach state while gamescope is dead.
-          // Re-validate exact generation + socket ownership before reuse.
-          if (revalidate_running_unlocked(params)) {
+        const bool retained_state =
+          owned_ || pid_ > 0 || leader_pidfd_ >= 0 || marker_ ||
+          !socket_name_.empty() || !x11_display_.empty();
+        if (retained_state) {
+          if (is_running_unlocked() && revalidate_running_unlocked(params)) {
             BOOST_LOG(info) << "gamescope_runtime: already "sv
                             << (owned_ ? "owned"sv : "attached"sv)
                             << " "sv << (socket_name_.empty() ? "gamescope-0" : socket_name_)
                             << "; reusing"sv;
             return true;
           }
-          BOOST_LOG(warning) << "gamescope_runtime: dropping stale in-memory gamescope state"sv;
-          clear_runtime_state_unlocked();
+          if (owned_) {
+            if (!marker_) {
+              BOOST_LOG(error) << "gamescope_runtime: retained owned state lacks immutable marker authority; refusing restart"sv;
+              return false;
+            }
+            BOOST_LOG(warning) << "gamescope_runtime: draining retained owned generation before restart"sv;
+            stop_unlocked();
+            if (owned_ || pid_ > 0 || leader_pidfd_ >= 0 || marker_) {
+              BOOST_LOG(error) << "gamescope_runtime: retained owned generation did not drain; refusing replacement launch"sv;
+              return false;
+            }
+          }
+          else {
+            BOOST_LOG(warning) << "gamescope_runtime: dropping stale attached gamescope state"sv;
+            clear_runtime_state_unlocked();
+          }
         }
 
         ensure_portal_stack();
@@ -822,10 +855,13 @@ namespace stream_runtime {
         if (!owner_lock) {
           return false;
         }
-        const auto current = validated_marker_for_socket(socket_name_, marker_->role);
-        const auto current_display = gp::discover_owned_x11_display(*marker_);
-        if (!current || *current != *marker_ ||
-            !current_display || *current_display != x11_display_) {
+        const auto revalidate_publication_pair = [this]() {
+          const auto current = validated_marker_for_socket(socket_name_, marker_->role);
+          const auto current_display = gp::discover_owned_x11_display(*marker_);
+          return current && *current == *marker_ &&
+                 current_display && *current_display == x11_display_;
+        };
+        if (!revalidate_publication_pair()) {
           return false;
         }
 
@@ -845,6 +881,10 @@ namespace stream_runtime {
           out << "POLARIS_GAMESCOPE_EXECUTABLE=" << marker_->executable.string() << "\n";
         }
         std::error_code ec;
+        if (!revalidate_publication_pair()) {
+          fs::remove(temporary, ec);
+          return false;
+        }
         fs::rename(temporary, path, ec);
         if (ec) {
           fs::remove(temporary, ec);

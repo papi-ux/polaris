@@ -264,6 +264,8 @@ TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebin
   EXPECT_NE(recovery.find("claim_state=absent"), std::string::npos);
   EXPECT_NE(session.find("restart polaris-portal-gamescope.service"), std::string::npos);
   EXPECT_NE(session.find("publish_nested_claim transition absent"), std::string::npos);
+  EXPECT_NE(session.find("polaris-gamescope-session-mode"), std::string::npos);
+  EXPECT_NE(session.find("attach recovery could not terminate exact-session Steam"), std::string::npos);
   const auto idle = read_source_for_contract("scripts/install/lib/polaris-gamescope-idle.sh");
   ASSERT_FALSE(idle.empty());
   EXPECT_NE(idle.find("polaris-gamescope.lock"), std::string::npos);
@@ -281,6 +283,11 @@ TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState
   EXPECT_NE(source.find("private group did not drain"), std::string::npos);
   EXPECT_NE(source.find("SIGKILL"), std::string::npos);
   EXPECT_NE(source.find("SYS_pidfd_open"), std::string::npos);
+  EXPECT_NE(source.find("pidfd_targets_pid(leader_pidfd, pgid)"), std::string::npos);
+  EXPECT_NE(source.find("retained owned generation did not drain; refusing replacement launch"), std::string::npos);
+  const auto pair_validation = source.find("revalidate_publication_pair()");
+  ASSERT_NE(pair_validation, std::string::npos);
+  EXPECT_NE(source.find("revalidate_publication_pair()", pair_validation + 1), std::string::npos);
   EXPECT_NE(source.find("Keep the leader unreaped until every negative-PGID operation finishes"), std::string::npos);
   const auto drain_start = source.find("bool drain_private_process_group(");
   const auto rollback_start = source.find("bool rollback_spawned_private_group(", drain_start);
@@ -357,6 +364,35 @@ TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
   errno = 0;
   EXPECT_EQ(kill(sibling, 0), -1);
   EXPECT_EQ(errno, ESRCH);
+#endif
+}
+
+TEST(SessionStopContractTests, SpawnRollbackRejectsPidfdForDifferentLeader) {
+#ifdef __linux__
+  const pid_t first = fork();
+  ASSERT_GE(first, 0);
+  if (first == 0) {
+    if (setsid() < 0) _exit(125);
+    signal(SIGTERM, SIG_IGN);
+    for (;;) pause();
+  }
+  const pid_t second = fork();
+  ASSERT_GE(second, 0);
+  if (second == 0) {
+    if (setsid() < 0) _exit(126);
+    signal(SIGTERM, SIG_IGN);
+    for (;;) pause();
+  }
+  const int second_pidfd = static_cast<int>(syscall(SYS_pidfd_open, second, 0));
+  ASSERT_GE(second_pidfd, 0);
+  EXPECT_FALSE(stream_runtime::rollback_gamescope_spawn_for_tests(first, second_pidfd));
+  close(second_pidfd);
+  EXPECT_EQ(kill(first, 0), 0);
+  EXPECT_EQ(kill(second, 0), 0);
+  (void) kill(-first, SIGKILL);
+  (void) kill(-second, SIGKILL);
+  EXPECT_EQ(waitpid(first, nullptr, 0), first);
+  EXPECT_EQ(waitpid(second, nullptr, 0), second);
 #endif
 }
 

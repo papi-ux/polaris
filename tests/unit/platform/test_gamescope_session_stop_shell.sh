@@ -89,6 +89,7 @@ reset_state() {
   rm -rf "$work/run"/*
   mkdir -p "$work/run"
   printf '1\n' >"$work/run/polaris-gamescope-wsi-nested"
+  printf 'nested\n' >"$work/run/polaris-gamescope-session-mode"
   printf '1\n' >"$work/run/polaris-gamescope-force"
   : >"$work/run/polaris-gamescope.pid"
   : >"$actions"
@@ -179,6 +180,32 @@ POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 \
 grep -qx 'kill -TERM 101' "$actions" || fail "recovery did not use persisted exact-session credential"
 [ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "successful recovery retained session credential"
 
+# Persisted attach mode is also a durable recovery claim: exact-session Steam
+# must be absent before either the mode or credential can be cleared.
+reset_state
+rm -f "$work/run/polaris-gamescope-wsi-nested"
+printf 'attach\n' >"$work/run/polaris-gamescope-session-mode"
+printf '0\n' >"$work/run/polaris-gamescope-force"
+printf 'session-A\n' >"$work/run/polaris-gamescope-session-id"
+mkdir -p "$work/proc/101"
+printf '11\n' >"$work/proc/101/start"
+printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 run_stop >/dev/null 2>&1 ||
+  fail "persisted attach recovery failed"
+grep -qx 'kill -TERM 101' "$actions" || fail "attach recovery did not terminate exact-session Steam"
+[ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "attach recovery cleared no credential"
+[ ! -e "$work/run/polaris-gamescope-session-mode" ] || fail "attach recovery retained mode"
+
+# Lost nested claims cannot be misclassified as attach recovery.
+reset_state
+rm -f "$work/run/polaris-gamescope-wsi-nested"
+printf 'nested\n' >"$work/run/polaris-gamescope-session-mode"
+printf 'session-A\n' >"$work/run/polaris-gamescope-session-id"
+if POLARIS_SESSION_INSTANCE_ID= run_stop >/dev/null 2>&1; then
+  fail "claimless nested mode fell back to attach recovery"
+fi
+[ -e "$work/run/polaris-gamescope-session-id" ] || fail "claimless nested failure cleared credential"
+
 grep -Fq 'if [ -s "$session_id_file" ]; then' "$script" ||
   fail "start does not recover every persisted session credential before replacement"
 grep -Fq 'POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1' "$script" ||
@@ -189,6 +216,8 @@ mask_line="$(grep -nF 'polaris_mask_idle_unit_runtime' "$script" | tail -n1 | cu
   fail "nested transition claim is not published before idle destruction"
 grep -Fq 'publish_nested_claim nested transition' "$script" ||
   fail "nested launch does not CAS transition ownership before spawn"
+grep -Fq '[ ! -e "$session_id_file" ] && [ ! -e "$session_mode_file" ]' "$script" ||
+  fail "credential and mode publication is not fenced against concurrent starts"
 grep -Fq 'export POLARIS_GAMESCOPE_LOCK_HELD=1' "$script" ||
   fail "portal handoff is not finalized under the ownership lock"
 
