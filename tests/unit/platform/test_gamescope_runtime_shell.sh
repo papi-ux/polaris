@@ -81,6 +81,7 @@ fi
 [ -e "$work/run/gamescope-0" ] || fail "stale generation removed a socket"
 [ -e "$work/run/polaris-gamescope.env" ] || fail "stale generation removed runtime env"
 [ "$(<"$work/run/polaris-gamescope.lock")" = "lock-sentinel" ] || fail "owner lock open truncated existing data"
+write_process_with_group 999 1 999 999 9999 /usr/bin/sleep infinity
 
 # The exact compositor may be a child of the setsid launcher. Signal the
 # validated private process group, never assume compositor PID equals PGID.
@@ -127,6 +128,14 @@ if polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work
 fi
 [ ! -s "$work/kills" ] || fail "non-private process group was signalled"
 [ -e "$work/run/polaris-gamescope.pid" ] || fail "failed group proof removed marker authority"
+
+mv "$POLARIS_PROC_ROOT" "$work/proc-group-hidden"
+if polaris_private_group_alive 400; then
+  fail "missing proc root was treated as a drained private group"
+else
+  [ "$?" -eq 2 ] || fail "missing proc root did not return unknown group state"
+fi
+mv "$work/proc-group-hidden" "$POLARIS_PROC_ROOT"
 
 # Nix wrapProgram executes .gamescope-wrapped while preserving argv[0] as
 # gamescope. Capture and validate that exact executable instead of rejecting it.
@@ -337,6 +346,20 @@ fi
 [ -e "$work/run/gamescope-0" ] || fail "bind-window socket was removed"
 # Restore the production helper overridden by this deterministic race fixture.
 # shellcheck source=/dev/null
+source "$runtime_lib"
+rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
+
+: >"$work/run/gamescope-0"
+: >"$work/run/gamescope-0.lock"
+polaris_socket_is_orphan() {
+  rm -f "$1"
+  : >"$1"
+  return 0
+}
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "socket replacement did not revoke reclaim"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "replacement socket was removed"
 source "$runtime_lib"
 rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
 

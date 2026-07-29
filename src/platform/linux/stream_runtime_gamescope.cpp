@@ -20,6 +20,7 @@
   #include <cstring>
   #include <filesystem>
   #include <fstream>
+  #include <functional>
   #include <fcntl.h>
   #include <mutex>
   #include <optional>
@@ -107,6 +108,39 @@ namespace stream_runtime {
       }
       const auto sid = getsid(pid);
       return sid >= 0 && pgid == pid && sid == pid;
+    }
+
+    bool drain_private_process_group(
+      pid_t pgid,
+      const std::function<bool()> &authority_still_current,
+      int term_steps = 30,
+      int kill_steps = 20
+    ) {
+      if (!is_private_group_leader(pgid) || !authority_still_current()) {
+        return false;
+      }
+      if (kill(-pgid, SIGTERM) != 0 && errno != ESRCH) {
+        return false;
+      }
+      int status = 0;
+      auto state = private_group_state(pgid);
+      for (int i = 0; i < term_steps && state == private_group_state_e::alive; ++i) {
+        (void) waitpid(pgid, &status, WNOHANG);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        state = private_group_state(pgid);
+      }
+      if (state == private_group_state_e::alive) {
+        if (!authority_still_current() || (kill(-pgid, SIGKILL) != 0 && errno != ESRCH)) {
+          return false;
+        }
+        for (int i = 0; i < kill_steps && state == private_group_state_e::alive; ++i) {
+          (void) waitpid(pgid, &status, WNOHANG);
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          state = private_group_state(pgid);
+        }
+      }
+      (void) waitpid(pgid, &status, WNOHANG);
+      return state == private_group_state_e::drained;
     }
 
     /// Wait until socket exists for two consecutive polls (avoids attach races).
@@ -517,39 +551,14 @@ namespace stream_runtime {
                                << marker_->pid;
             return;
           }
-          if (kill(-marker_->pid, SIGTERM) != 0 && errno != ESRCH) {
-            BOOST_LOG(error) << "gamescope_runtime: failed to signal owned group="sv << marker_->pid;
-            return;
-          }
-          int status = 0;
-          (void) waitpid(marker_->pid, &status, WNOHANG);
-          auto group_state = private_group_state(marker_->pid);
-          for (int i = 0; i < 30 && group_state == private_group_state_e::alive; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            (void) waitpid(marker_->pid, &status, WNOHANG);
-            group_state = private_group_state(marker_->pid);
-          }
-          if (group_state == private_group_state_e::alive) {
+          const auto authority_still_current = [this]() {
             const auto marker_on_disk = gp::read_marker(marker_path());
-            if (!marker_on_disk || *marker_on_disk != *marker_ ||
-                (kill(-marker_->pid, SIGKILL) != 0 && errno != ESRCH)) {
-              BOOST_LOG(error) << "gamescope_runtime: ownership changed before group escalation"sv;
-              return;
-            }
-            for (int i = 0; i < 20; ++i) {
-              (void) waitpid(marker_->pid, &status, WNOHANG);
-              group_state = private_group_state(marker_->pid);
-              if (group_state != private_group_state_e::alive) {
-                break;
-              }
-              std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-          }
-          if (group_state != private_group_state_e::drained) {
+            return marker_on_disk && *marker_on_disk == *marker_;
+          };
+          if (!drain_private_process_group(marker_->pid, authority_still_current)) {
             BOOST_LOG(error) << "gamescope_runtime: private group did not drain; preserving ownership state"sv;
             return;
           }
-          (void) waitpid(marker_->pid, &status, WNOHANG);
           BOOST_LOG(info) << "gamescope_runtime: drained owned gamescope group="sv << marker_->pid;
           remove_owned_files_if_current_unlocked();
         }
@@ -748,6 +757,10 @@ namespace stream_runtime {
     gamescope_runtime_t g_gamescope_runtime;
 
   }  // namespace
+
+  bool drain_gamescope_private_group_for_tests(pid_t pgid) {
+    return drain_private_process_group(pgid, []() { return true; }, 3, 20);
+  }
 
   stream_runtime_t *gamescope_runtime_instance() {
     return &g_gamescope_runtime;

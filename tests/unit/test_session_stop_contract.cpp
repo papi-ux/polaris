@@ -6,15 +6,20 @@
 #include <src/nvhttp.h>
 #include <src/process.h>
 #include <src/rtsp.h>
+#include <src/platform/linux/stream_runtime.h>
 
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <sstream>
 #include <thread>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
   using proc::session_stop_outcome_t;
@@ -266,6 +271,39 @@ TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState
   EXPECT_NE(source.find("private_group_state"), std::string::npos);
   EXPECT_NE(source.find("private group did not drain"), std::string::npos);
   EXPECT_NE(source.find("SIGKILL"), std::string::npos);
+}
+
+TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
+#ifdef __linux__
+  int ready[2] {-1, -1};
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t leader = fork();
+  ASSERT_GE(leader, 0);
+  if (leader == 0) {
+    close(ready[0]);
+    if (setsid() < 0) _exit(125);
+    signal(SIGTERM, SIG_IGN);
+    const pid_t sibling = fork();
+    if (sibling < 0) _exit(126);
+    if (sibling == 0) {
+      signal(SIGTERM, SIG_IGN);
+      for (;;) pause();
+    }
+    (void) write(ready[1], &sibling, sizeof(sibling));
+    close(ready[1]);
+    for (;;) pause();
+  }
+  close(ready[1]);
+  pid_t sibling = -1;
+  ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
+  close(ready[0]);
+  const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
+  if (!drained) (void) kill(-leader, SIGKILL);
+  EXPECT_TRUE(drained);
+  errno = 0;
+  EXPECT_EQ(kill(sibling, 0), -1);
+  EXPECT_EQ(errno, ESRCH);
+#endif
 }
 
 TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {

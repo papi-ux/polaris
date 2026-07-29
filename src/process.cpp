@@ -2034,18 +2034,26 @@ namespace proc {
       });
 
       const auto this_pid = getpid();
-      const auto is_candidate = [&steam_appid](
+      const auto is_trusted_host_infrastructure = [](std::string comm, const std::string &cmdline) {
+        boost::to_lower(comm);
+        boost::trim(comm);
+        return comm == "polaris" || comm.find("polaris") != std::string::npos ||
+          comm == "sleep" || comm == "dbus-daemon" || comm == "systemd" ||
+          comm == "(sd-pam)" || comm == "kwin_wayland" ||
+          comm == "polkit-kde-auth" || comm == "ssh-agent" ||
+          comm == "sshd-session" || comm == "kscreenlocker_g" ||
+          cmdline.find("systemd-inhibit") != std::string::npos ||
+          cmdline.find("srt-logger") != std::string::npos ||
+          is_gamescope_infrastructure_process(comm, cmdline);
+      };
+      const auto is_candidate = [&steam_appid, &is_trusted_host_infrastructure](
                                   std::string comm,
                                   const std::string &cmdline,
                                   const std::string &environ
                                 ) {
         boost::to_lower(comm);
         boost::trim(comm);
-        if (comm == "polaris" || comm.find("polaris") != std::string::npos ||
-            comm == "sleep" || comm == "dbus-daemon" || comm == "systemd" ||
-            cmdline.find("systemd-inhibit") != std::string::npos ||
-            cmdline.find("srt-logger") != std::string::npos ||
-            is_gamescope_infrastructure_process(comm, cmdline)) {
+        if (is_trusted_host_infrastructure(comm, cmdline)) {
           return false;
         }
         const bool gamescope_attached = proc_environ_is_gamescope_stream_attached(environ);
@@ -2083,34 +2091,36 @@ namespace proc {
         auto cmdline_before = read_proc_status_file_result(pid, "cmdline");
         auto environ_before = read_proc_status_file_result(pid, "environ");
 #ifdef POLARIS_TESTS
-        const bool forced_unreadable = pid == forced_unreadable_gamescope_attached_pid;
-        if (forced_unreadable) {
+        if (pid == forced_unreadable_gamescope_attached_pid) {
           environ_before = {{}, EACCES};
         }
-#else
-        constexpr bool forced_unreadable = false;
 #endif
+        if (comm_before.ok() && cmdline_before.ok() &&
+            is_trusted_host_infrastructure(comm_before.bytes, cmdline_before.bytes)) {
+          continue;
+        }
         if (!identity_before || !comm_before.ok() || !cmdline_before.ok()) {
+          const auto status = read_proc_status_file_result(pid, "status");
+          if (status.ok() && proc_status_is_zombie(status.bytes)) {
+            continue;
+          }
           errno = 0;
           if (kill(pid, 0) != 0 && errno == ESRCH) {
             continue;
           }
-          if (forced_unreadable ||
-              (comm_before.ok() && cmdline_before.ok() &&
-               is_steam_or_game_client_process(comm_before.bytes, cmdline_before.bytes, "", steam_appid))) {
-            snapshot.capture_complete = false;
-          }
+          snapshot.capture_complete = false;
           continue;
         }
         if (!environ_before.ok()) {
+          const auto status = read_proc_status_file_result(pid, "status");
+          if (status.ok() && proc_status_is_zombie(status.bytes)) {
+            continue;
+          }
           errno = 0;
           if (kill(pid, 0) != 0 && errno == ESRCH) {
             continue;
           }
-          if (forced_unreadable ||
-              is_steam_or_game_client_process(comm_before.bytes, cmdline_before.bytes, "", steam_appid)) {
-            snapshot.capture_complete = false;
-          }
+          snapshot.capture_complete = false;
           continue;
         }
         if (!is_candidate(comm_before.bytes, cmdline_before.bytes, environ_before.bytes)) {

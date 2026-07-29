@@ -313,6 +313,21 @@ TEST(GamescopeProcessOwnershipTests, RefusesLockReplacementBetweenValidationAndU
   EXPECT_TRUE(fs::exists(lock_path));
 }
 
+TEST(GamescopeProcessOwnershipTests, RefusesSocketReplacementBeforeUnlink) {
+  fake_proc_tree_t tree;
+  const auto socket = tree.runtime / "gamescope-0";
+  std::ofstream(socket).put('\n');
+  std::ofstream(socket.string() + ".lock").put('\n');
+  tree.flush_unix_sockets();
+  auto paths = paths_for(tree);
+  paths.before_socket_unlink_for_tests = [&]() {
+    fs::remove(socket);
+    std::ofstream(socket).put('x');
+  };
+  EXPECT_FALSE(gp::remove_orphan_socket(socket, paths));
+  EXPECT_TRUE(fs::exists(socket));
+}
+
 TEST(GamescopeProcessOwnershipTests, MissingSocketDoesNotUnlinkPotentiallyHeldLock) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";

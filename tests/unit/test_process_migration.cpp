@@ -1207,6 +1207,31 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedClientPidReuseFailsClosedBefore
   EXPECT_TRUE(WIFSIGNALED(status));
 }
 
+TEST(ProcessRuntimeConfigTests, GamescopeAttachedUnreadableLiveProcessFailsClosed) {
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    setenv("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0", 1);
+    setenv("STEAM_COMPAT_APP_ID", "4242", 1);
+    if (prctl(PR_SET_NAME, "game-client", 0, 0, 0) != 0) _exit(125);
+    if (prctl(PR_SET_DUMPABLE, 0) != 0) _exit(126);
+    const char ready = 'x';
+    (void) write(ready_pipe[1], &ready, 1);
+    close(ready_pipe[1]);
+    for (;;) pause();
+  }
+  linux_child_guard_t child_guard {child};
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+  EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
+  EXPECT_EQ(kill(child, 0), 0);
+}
+
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupRejectsUnownedSameAppProcess) {
   int ready_pipe[2] {-1, -1};
   ASSERT_EQ(pipe(ready_pipe), 0);

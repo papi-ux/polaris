@@ -578,6 +578,10 @@ namespace stream_runtime::gamescope_process {
     if (!fs::exists(socket_path, ec) || ec) {
       return !ec;
     }
+    struct stat socket_identity {};
+    if (lstat(socket_path.c_str(), &socket_identity) != 0 || S_ISLNK(socket_identity.st_mode)) {
+      return false;
+    }
     if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
       return false;
     }
@@ -588,6 +592,13 @@ namespace stream_runtime::gamescope_process {
       paths.before_socket_unlink_for_tests();
     }
     if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+      return false;
+    }
+    struct stat socket_now {};
+    if (lstat(socket_path.c_str(), &socket_now) != 0 ||
+        socket_now.st_dev != socket_identity.st_dev ||
+        socket_now.st_ino != socket_identity.st_ino ||
+        socket_now.st_mode != socket_identity.st_mode) {
       return false;
     }
     if (!fs::remove(socket_path, ec) || ec) {

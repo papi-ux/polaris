@@ -54,6 +54,8 @@ namespace stream_runtime {
     bool runtime_gpu_native_override_active = false
   );
 
+  bool drain_gamescope_private_group_for_tests(pid_t pgid);
+
   /**
    * Labwc-only free functions — only stream_runtime_labwc.cpp may include
    * cage_display_router. All other TUs call through this namespace.

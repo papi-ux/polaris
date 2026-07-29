@@ -232,7 +232,7 @@ polaris_wayland_lock_has_no_deleted_holder() {
 
 # Remove one socket path if orphaned. 0 = missing/removed, 1 = live holder.
 polaris_remove_orphan_socket() (
-  local socket="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}"
+  local socket="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}" socket_identity current_identity
   if [ ! -e "$socket" ]; then
     return 0
   fi
@@ -246,9 +246,13 @@ polaris_remove_orphan_socket() (
   polaris_wayland_lock_is_stable "$socket.lock" || return 1
   polaris_wayland_lock_has_no_deleted_holder "$socket.lock" || return 1
   [ -e "$socket" ] || return 0
+  [ ! -L "$socket" ] || return 1
+  socket_identity="$(stat -Lc '%d:%i:%f' "$socket" 2>/dev/null)" || return 1
   polaris_socket_is_orphan "$socket" || return 1
   polaris_wayland_lock_is_stable "$socket.lock" || return 1
   polaris_wayland_lock_has_no_deleted_holder "$socket.lock" || return 1
+  current_identity="$(stat -Lc '%d:%i:%f' "$socket" 2>/dev/null)" || return 1
+  [ "$current_identity" = "$socket_identity" ] || return 1
   echo "polaris: reclaiming orphan socket $socket" >&2
   rm -f "$socket" 2>/dev/null || return 1
   [ ! -e "$socket" ] && [ ! -S "$socket" ] || return 1
@@ -389,10 +393,12 @@ polaris_unmask_idle_unit_runtime() {
 }
 
 polaris_private_group_alive() {
-  local pgid="$1" proc_root process pid found=1
+  local pgid="$1" proc_root process pid found=1 seen=0
   proc_root="$(polaris_proc_root)"
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 2
   for process in "$proc_root"/[0-9]*; do
     [ -d "$process" ] || continue
+    seen=1
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     if ! polaris_process_fields "$pid"; then
@@ -403,6 +409,7 @@ polaris_private_group_alive() {
     [ "$POLARIS_PROCESS_SESSION_ID" = "$pgid" ] || return 2
     found=0
   done
+  [ "$seen" = 1 ] || return 2
   return "$found"
 }
 
