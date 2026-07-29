@@ -196,14 +196,27 @@ polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "orphan reclaim fai
 [ ! -e "$work/run/gamescope-0-ei" ] || fail "orphan gamescope-0-ei survived reclaim"
 [ ! -e "$work/run/gamescope-0.lock" ] || fail "orphan lock survived reclaim"
 
-# Dead listener inode with no process holder is reclaimable.
+# A lock file without a socket may belong to a compositor between lock and
+# bind. It is harmless when stale and unsafe to unlink while another process
+# may hold it.
+: >"$work/run/gamescope-0.lock"
+polaris_remove_orphan_socket "$work/run/gamescope-0" || fail "missing socket was not accepted"
+[ -e "$work/run/gamescope-0.lock" ] || fail "missing socket caused lock-only race cleanup"
+rm -f "$work/run/gamescope-0.lock"
+
+# A kernel socket-table row without a visible process holder is still unknown.
+# The holder may be hidden by procfs permissions, so fail closed.
 : >"$work/run/gamescope-0"
 write_unix_header
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 901 %s\n' \
   "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
-polaris_socket_is_orphan "$work/run/gamescope-0" || fail "dead listener not treated as orphan"
-polaris_remove_orphan_socket "$work/run/gamescope-0" || fail "dead listener not removed"
-[ ! -e "$work/run/gamescope-0" ] || fail "dead listener socket survived"
+if polaris_socket_is_orphan "$work/run/gamescope-0"; then
+  fail "kernel socket row without a visible holder treated as orphan"
+fi
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "kernel socket row without a visible holder was removed"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "unknown kernel socket row was removed"
 
 # Live unowned holder must fail closed (do not unlink).
 write_process 430 1 9300 /usr/bin/gamescope --backend headless
@@ -229,6 +242,19 @@ printf '0000000000000001: 00000002 00000000 00010000 0001 01 904 %s\n' \
 if polaris_socket_is_orphan "$work/run/gamescope-0"; then
   fail "ambiguous socket pathname treated as orphan"
 fi
+
+# Missing ownership metadata is unknown, not proof of an orphan. Reclaim must
+# fail closed and leave the socket path untouched.
+saved_proc_net_unix="$POLARIS_PROC_NET_UNIX"
+export POLARIS_PROC_NET_UNIX="$work/proc/net/missing-unix"
+if polaris_socket_is_orphan "$work/run/gamescope-0"; then
+  fail "missing /proc/net/unix treated as proof of an orphan"
+fi
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "missing /proc/net/unix authorized destructive reclaim"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "unknown ownership removed the socket"
+export POLARIS_PROC_NET_UNIX="$saved_proc_net_unix"
 
 # Production call sites must use exact markers, never process-name-wide pkill/pgrep.
 for source in \

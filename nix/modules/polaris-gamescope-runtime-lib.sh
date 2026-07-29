@@ -176,45 +176,30 @@ polaris_marker_owns_socket() {
   polaris_process_tree_holds_inode "$POLARIS_MARKER_PID" "$inode"
 }
 
-polaris_any_process_holds_inode() {
-  local inode="$1" process pid
-  for process in "$(polaris_proc_root)"/[0-9]*; do
-    [ -d "$process" ] || continue
-    pid="${process##*/}"
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if polaris_pid_holds_inode "$pid" "$inode"; then
-      return 0
-    fi
-  done
-  return 1
-}
-
 # True (0) when $1 is missing or has no live holder — safe to unlink.
-# False (1) when a live process holds the socket or the pathname is ambiguous.
+# False (1) when a live process holds the socket, ownership metadata is
+# unavailable, or the pathname is ambiguous.
 polaris_socket_is_orphan() {
-  local socket="$1" inode path found="" count=0
+  local socket="$1" inode path count=0 proc_net_unix
   [ -e "$socket" ] || return 0
+  proc_net_unix="$(polaris_proc_net_unix)"
+  # Unknown ownership is not evidence of an orphan. Destructive reclaim must
+  # fail closed when the kernel socket table cannot be read.
+  [ -r "$proc_net_unix" ] || return 1
   while read -r _ _ _ _ _ _ inode path _; do
     [ "$path" = "$socket" ] || continue
     case "$inode" in ''|*[!0-9]*) continue ;; esac
     count=$((count + 1))
-    found="$inode"
-  done <"$(polaris_proc_net_unix)" 2>/dev/null
-  # Duplicate pathname rows are ambiguous (unlink/rebind); refuse reclaim.
-  [ "$count" -le 1 ] || return 1
-  # Filesystem residue with no /proc/net/unix listener is safe to remove.
-  [ "$count" -eq 1 ] || return 0
-  if polaris_any_process_holds_inode "$found"; then
-    return 1
-  fi
-  return 0
+  done <"$proc_net_unix"
+  # Any kernel row means the socket is still referenced. Its fd holder may be
+  # hidden by procfs permissions, so only a path with no row is reclaimable.
+  [ "$count" -eq 0 ]
 }
 
 # Remove one socket path if orphaned. 0 = missing/removed, 1 = live holder.
 polaris_remove_orphan_socket() {
   local socket="$1"
   if [ ! -e "$socket" ]; then
-    rm -f "$socket.lock" 2>/dev/null || true
     return 0
   fi
   polaris_socket_is_orphan "$socket" || return 1

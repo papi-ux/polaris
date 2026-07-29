@@ -250,16 +250,38 @@ TEST(GamescopeProcessOwnershipTests, ReclaimsFilesystemResidueWithoutListener) {
   EXPECT_FALSE(fs::exists(gamescope_socket));
 }
 
-TEST(GamescopeProcessOwnershipTests, ReclaimsDeadListenerWithoutHolder) {
+TEST(GamescopeProcessOwnershipTests, MissingSocketDoesNotUnlinkPotentiallyHeldLock) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(lock_path).put('\n');
+
+  EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesKernelSocketRowWithoutVisibleHolder) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
   tree.add_unix_socket(700, gamescope_socket);
   tree.flush_unix_sockets();
-  // No process holds inode 700.
+  // Procfs permissions can hide the holder. A kernel row is still unsafe.
 
-  EXPECT_FALSE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
-  EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
-  EXPECT_FALSE(fs::exists(gamescope_socket));
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenProcSocketMetadataIsUnavailable) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket).put('\n');
+  auto paths = paths_for(tree);
+  paths.proc_net_unix = tree.proc / "net" / "missing-unix";
+
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
 }
 
 TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {

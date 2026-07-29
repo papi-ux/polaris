@@ -209,11 +209,14 @@ namespace stream_runtime::gamescope_process {
 
     using socket_inode_map_t = std::unordered_map<std::string, std::optional<std::uint64_t>>;
 
-    socket_inode_map_t read_unix_socket_inodes(
+    std::optional<socket_inode_map_t> read_unix_socket_inodes(
       const fs::path &proc_net_unix
     ) {
-      socket_inode_map_t inodes;
       std::ifstream input(proc_net_unix);
+      if (!input) {
+        return std::nullopt;
+      }
+      socket_inode_map_t inodes;
       std::string line;
       std::getline(input, line);  // header
       while (std::getline(input, line)) {
@@ -463,7 +466,10 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
     const auto inodes = read_unix_socket_inodes(paths.proc_net_unix);
-    const auto inode = inode_for_path(inodes, socket_path);
+    if (!inodes) {
+      return false;
+    }
+    const auto inode = inode_for_path(*inodes, socket_path);
     if (!inode) {
       return false;
     }
@@ -482,27 +488,26 @@ namespace stream_runtime::gamescope_process {
     const lookup_paths_t &paths
   ) {
     std::error_code ec;
-    if (!fs::exists(socket_path, ec) || ec) {
+    const bool socket_exists = fs::exists(socket_path, ec);
+    if (ec) {
+      return true;
+    }
+    if (!socket_exists) {
       return false;
     }
     const auto inodes = read_unix_socket_inodes(paths.proc_net_unix);
-    const auto found = inodes.find(socket_path.string());
-    // No /proc/net/unix row → filesystem residue only.
-    if (found == inodes.end()) {
-      return false;
-    }
-    // Ambiguous duplicate pathname rows: treat as live so callers fail closed.
-    if (!found->second) {
+    if (!inodes) {
       return true;
     }
-    const auto processes = read_processes(paths.proc_root);
-    for (const auto &[pid, process] : processes) {
-      (void) process;
-      if (process_holds_inode(paths, pid, *found->second)) {
-        return true;
-      }
+    const auto found = inodes->find(socket_path.string());
+    // No /proc/net/unix row → filesystem residue only.
+    if (found == inodes->end()) {
+      return false;
     }
-    return false;
+    // Any kernel socket-table row means the socket is still referenced. The
+    // owning fd may be hidden by procfs permissions, so never use a failed fd
+    // scan as permission to unlink the pathname.
+    return true;
   }
 
   bool remove_orphan_socket(
@@ -511,8 +516,7 @@ namespace stream_runtime::gamescope_process {
   ) {
     std::error_code ec;
     if (!fs::exists(socket_path, ec) || ec) {
-      fs::remove(fs::path(socket_path.string() + ".lock"), ec);
-      return true;
+      return !ec;
     }
     if (socket_has_live_holder(socket_path, paths)) {
       return false;
