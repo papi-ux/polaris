@@ -105,8 +105,8 @@ jobs:
       - name: Build sanitizer unit tests
         run: cmake --build build-sanitize --target test_polaris test_polaris_steam_shutdown -j"$(nproc)"
 
-      - name: Run sanitizer unit tests
-        run: ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_steam_shutdown)$'
+      - name: Run sanitizer and gamescope ownership tests
+        run: ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_steam_shutdown|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell)$'
 
   arch-build:
     name: Arch build
