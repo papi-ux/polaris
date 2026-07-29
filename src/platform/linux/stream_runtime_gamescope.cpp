@@ -683,6 +683,10 @@ namespace stream_runtime {
                                << marker_->pid;
             return;
           }
+          // The pidfd keeps the unreaped leader allocation as the PGID barrier.
+          // After TERM the leader may be a zombie, so this callback deliberately
+          // fences only the immutable marker record instead of requiring live
+          // cmdline/exe/socket validation before SIGKILL escalation.
           const auto authority_still_current = [this]() {
             const auto marker_on_disk = gp::read_marker(marker_path());
             return marker_on_disk && *marker_on_disk == *marker_;
