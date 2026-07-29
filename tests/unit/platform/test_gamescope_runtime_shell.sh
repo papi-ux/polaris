@@ -194,7 +194,7 @@ polaris_socket_is_orphan "$work/run/gamescope-0" || fail "filesystem residue not
 polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "orphan reclaim failed"
 [ ! -e "$work/run/gamescope-0" ] || fail "orphan gamescope-0 survived reclaim"
 [ ! -e "$work/run/gamescope-0-ei" ] || fail "orphan gamescope-0-ei survived reclaim"
-[ ! -e "$work/run/gamescope-0.lock" ] || fail "orphan lock survived reclaim"
+[ -e "$work/run/gamescope-0.lock" ] || fail "reclaim unlinked the reusable Wayland lock"
 
 # A lock file without a socket may belong to a compositor between lock and
 # bind. It is harmless when stale and unsafe to unlink while another process
@@ -203,6 +203,23 @@ polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "orphan reclaim fai
 polaris_remove_orphan_socket "$work/run/gamescope-0" || fail "missing socket was not accepted"
 [ -e "$work/run/gamescope-0.lock" ] || fail "missing socket caused lock-only race cleanup"
 rm -f "$work/run/gamescope-0.lock"
+
+# Reclaim must take the authoritative Wayland socket lock. A compositor may
+# hold that lock before its socket path becomes visible.
+: >"$work/run/gamescope-0"
+write_unix_header
+saved_flock_bin="$POLARIS_FLOCK_BIN"
+export POLARIS_FLOCK_BIN=flock
+exec 8>>"$work/run/gamescope-0.lock"
+flock -x 8
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "held Wayland socket lock did not block reclaim"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "socket was removed while its lock was held"
+flock -u 8
+exec 8>&-
+export POLARIS_FLOCK_BIN="$saved_flock_bin"
+rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
 
 # A kernel socket-table row without a visible process holder is still unknown.
 # The holder may be hidden by procfs permissions, so fail closed.

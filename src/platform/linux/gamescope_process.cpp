@@ -16,6 +16,10 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 namespace stream_runtime::gamescope_process {
   namespace {
     namespace fs = std::filesystem;
@@ -27,6 +31,39 @@ namespace stream_runtime::gamescope_process {
       fs::path executable;
       std::vector<std::string> argv;
     };
+
+    class locked_fd_t {
+    public:
+      explicit locked_fd_t(int fd):
+          fd_(fd) {}
+
+      locked_fd_t(const locked_fd_t &) = delete;
+      locked_fd_t &operator=(const locked_fd_t &) = delete;
+      locked_fd_t(locked_fd_t &&other) noexcept:
+          fd_(std::exchange(other.fd_, -1)) {}
+
+      ~locked_fd_t() {
+        if (fd_ >= 0) {
+          close(fd_);
+        }
+      }
+
+    private:
+      int fd_;
+    };
+
+    std::optional<locked_fd_t> lock_wayland_socket_path(const fs::path &socket_path) {
+      const fs::path lock_path {socket_path.string() + ".lock"};
+      const int fd = open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+      if (fd < 0) {
+        return std::nullopt;
+      }
+      if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return std::nullopt;
+      }
+      return locked_fd_t {fd};
+    }
 
     template<typename T>
     std::optional<T> parse_integer(std::string_view value) {
@@ -518,12 +555,25 @@ namespace stream_runtime::gamescope_process {
     if (!fs::exists(socket_path, ec) || ec) {
       return !ec;
     }
+    // Libwayland holds this advisory lock from bind through display teardown.
+    // Taking it non-blocking closes the check/unlink race with a compositor
+    // that has locked the name but has not created its socket yet.
+    auto socket_lock = lock_wayland_socket_path(socket_path);
+    if (!socket_lock) {
+      return false;
+    }
+    if (!fs::exists(socket_path, ec) || ec) {
+      return !ec;
+    }
     if (socket_has_live_holder(socket_path, paths)) {
       return false;
     }
-    fs::remove(socket_path, ec);
-    fs::remove(fs::path(socket_path.string() + ".lock"), ec);
-    return !fs::exists(socket_path, ec);
+    if (!fs::remove(socket_path, ec) || ec) {
+      return false;
+    }
+    // Leave the unlocked lock file in place. Unlinking a held lock creates a
+    // second inode that another binder can acquire concurrently.
+    return true;
   }
 
   std::optional<std::string> discover_owned_x11_display(

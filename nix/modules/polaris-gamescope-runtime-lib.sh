@@ -197,16 +197,24 @@ polaris_socket_is_orphan() {
 }
 
 # Remove one socket path if orphaned. 0 = missing/removed, 1 = live holder.
-polaris_remove_orphan_socket() {
-  local socket="$1"
+polaris_remove_orphan_socket() (
+  local socket="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   if [ ! -e "$socket" ]; then
     return 0
   fi
+  # Libwayland holds this lock across bind and display lifetime. Acquire it
+  # non-blocking so reclaim cannot race a compositor between lock and bind.
+  exec 8>>"$socket.lock" || return 1
+  "$lock_bin" -n -x 8 || return 1
+  [ -e "$socket" ] || return 0
   polaris_socket_is_orphan "$socket" || return 1
   echo "polaris: reclaiming orphan socket $socket" >&2
-  rm -f "$socket" "$socket.lock" 2>/dev/null || true
+  rm -f "$socket" 2>/dev/null || return 1
+  [ ! -e "$socket" ] && [ ! -S "$socket" ] || return 1
+  # Never unlink the lock path: a process may hold its inode while another
+  # binder creates and acquires a replacement inode.
   return 0
-}
+)
 
 # Reclaim dead gamescope-* residue after crash. Fails closed on live holders.
 polaris_reclaim_orphan_gamescope_sockets() {
@@ -218,8 +226,6 @@ polaris_reclaim_orphan_gamescope_sockets() {
         echo "polaris: refusing destructive cleanup of live unowned $socket" >&2
         return 1
       fi
-    else
-      rm -f "$socket.lock" 2>/dev/null || true
     fi
   done
   return 0

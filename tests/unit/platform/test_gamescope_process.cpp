@@ -13,6 +13,10 @@
   #include <string>
   #include <vector>
 
+  #include <fcntl.h>
+  #include <sys/file.h>
+  #include <unistd.h>
+
 namespace {
   namespace fs = std::filesystem;
   namespace gp = stream_runtime::gamescope_process;
@@ -258,6 +262,24 @@ TEST(GamescopeProcessOwnershipTests, MissingSocketDoesNotUnlinkPotentiallyHeldLo
 
   EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
   EXPECT_TRUE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, HeldWaylandSocketLockBlocksReclaim) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  tree.flush_unix_sockets();
+
+  const int lock_fd = open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  ASSERT_GE(lock_fd, 0);
+  ASSERT_EQ(flock(lock_fd, LOCK_EX | LOCK_NB), 0);
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+
+  EXPECT_EQ(flock(lock_fd, LOCK_UN), 0);
+  EXPECT_EQ(close(lock_fd), 0);
 }
 
 TEST(GamescopeProcessOwnershipTests, RefusesKernelSocketRowWithoutVisibleHolder) {
