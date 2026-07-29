@@ -326,15 +326,28 @@ namespace session_manager {
     const bool private_headless_runtime =
       config::video.linux_display.headless_mode &&
       config::video.linux_display.use_cage_compositor;
+    // gamescope_stream / unit hosts intentionally unset host WAYLAND_DISPLAY so
+    // probes do not bind KWin; capture uses GAMESCOPE_WAYLAND_DISPLAY=gamescope-0.
+    const char *gamescope_wl = getenv("GAMESCOPE_WAYLAND_DISPLAY");
+    const bool gamescope_stream_host =
+      config::video.linux_display.stream_mode == "gamescope_stream" ||
+      (gamescope_wl && gamescope_wl[0] != '\0');
+    const bool wayland_optional = private_headless_runtime || gamescope_stream_host;
 
     const char *vars[] = {"WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"};
     for (auto var : vars) {
       const char *val = getenv(var);
       if (!val || val[0] == '\0') {
-        if (std::string_view {var} == "WAYLAND_DISPLAY"sv && private_headless_runtime) {
-          BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY is not set; continuing because Private Stream "
-                          << "will start a private labwc socket. Desktop preview and portal capture may be "
-                          << "unavailable until Polaris is launched from a desktop session."sv;
+        if (std::string_view {var} == "WAYLAND_DISPLAY"sv && wayland_optional) {
+          if (gamescope_stream_host) {
+            BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY unset (expected for gamescope_stream); "
+                            << "using GAMESCOPE_WAYLAND_DISPLAY="sv
+                            << (gamescope_wl && gamescope_wl[0] ? gamescope_wl : "gamescope-0") << ""sv;
+          } else {
+            BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY is not set; continuing because Private Stream "
+                            << "will start a private labwc socket. Desktop preview and portal capture may be "
+                            << "unavailable until Polaris is launched from a desktop session."sv;
+          }
           continue;
         }
 
@@ -445,7 +458,9 @@ namespace session_manager {
       } catch (...) {}
     }
 
-    BOOST_LOG(warning) << "session_manager: Failed to inhibit lock screen via D-Bus"sv;
+    // D-Bus ScreenSaver is often missing under pure gamescope/headless user units;
+    // systemd-inhibit is the normal path there — do not warn as if streaming is broken.
+    BOOST_LOG(info) << "session_manager: ScreenSaver.Inhibit unavailable; using systemd-inhibit fallback"sv;
 
     // Fallback: use systemd-inhibit style via loginctl
     run("systemd-inhibit --what=idle:sleep --who=polaris "

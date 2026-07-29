@@ -204,7 +204,12 @@ namespace system_tray {
   #endif
 
     if (tray_init(&tray) < 0) {
-      BOOST_LOG(warning) << "Failed to create system tray"sv;
+      // Headless / gamescope user services often have no tray host — not a fault.
+      static bool logged_once = false;
+      if (!logged_once) {
+        logged_once = true;
+        BOOST_LOG(info) << "System tray unavailable (no tray host / headless session); continuing without it"sv;
+      }
       return 1;
     }
 

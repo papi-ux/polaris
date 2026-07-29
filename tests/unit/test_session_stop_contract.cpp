@@ -402,7 +402,8 @@ TEST(SessionStopContractTests, CompositorTerminationRetainsRootMediaFenceUntilCl
   const auto terminate = process.find("void proc_t::terminate_impl(");
   ASSERT_NE(terminate, std::string::npos);
   const auto terminate_body = process.substr(terminate, 4200);
-  const auto fence = terminate_body.find("media_stop_fence = session_media::prepare_for_stop()");
+  // Function-scoped holder so the fence outlives early #ifdef blocks through undo.
+  const auto fence = terminate_body.find("media_stop.fence = session_media::prepare_for_stop()");
   const auto compositor_stop = terminate_body.find("terminate_isolated_session_generation()");
   ASSERT_NE(fence, std::string::npos);
   ASSERT_NE(compositor_stop, std::string::npos);

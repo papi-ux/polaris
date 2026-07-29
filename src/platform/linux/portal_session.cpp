@@ -701,6 +701,11 @@ namespace portal {
         // Bad/stale restore token often hangs Start with no Response; drop it so
         // the next connect can re-bootstrap with a visible picker.
         clear_restore_token();
+        // Nested↔idle gamescope handoff leaves a short window where
+        // xdg-desktop-portal-gamescope cannot open WAYLAND_DISPLAY=gamescope-0
+        // ("failed to connect to wayland socket" → Response code 2). One delayed
+        // retry on a *fresh* session is owned by the caller; here we only clear
+        // the token so the next CreateSession is clean.
         BOOST_LOG(warning) << "portal: Start timeout/failure — cleared restore_token (no Start retry; session is single-use)"sv;
         session->failed = true;
         return session;
