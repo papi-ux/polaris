@@ -24,6 +24,7 @@ exit 0
 EOF
 chmod +x "$work/bin/flock"
 export POLARIS_FLOCK_BIN="$work/bin/flock"
+printf 'lock-sentinel\n' >"$work/run/polaris-gamescope.lock"
 
 write_process() {
   local pid="$1" ppid="$2" start_time="$3" exe="$4"
@@ -68,6 +69,7 @@ fi
 [ ! -e "$work/kills" ] || fail "stale generation was signalled"
 [ -e "$work/run/gamescope-0" ] || fail "stale generation removed a socket"
 [ -e "$work/run/polaris-gamescope.env" ] || fail "stale generation removed runtime env"
+[ "$(<"$work/run/polaris-gamescope.lock")" = "lock-sentinel" ] || fail "owner lock open truncated existing data"
 
 # Select only the Xwayland that descends from and is socket-owned by the marker.
 write_process 410 1 9001 /usr/bin/gamescope --backend headless --hdr-enabled

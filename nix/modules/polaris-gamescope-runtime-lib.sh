@@ -81,7 +81,8 @@ polaris_process_has_argument() {
 
 polaris_write_marker_for_pid() (
   local marker="$1" pid="$2" role="$3" attempt tmp lock_bin="${POLARIS_FLOCK_BIN:-flock}"
-  exec 9>"${marker%/*}/polaris-gamescope.lock" || return 1
+  umask 077
+  exec 9>>"${marker%/*}/polaris-gamescope.lock" || return 1
   "$lock_bin" -x 9 || return 1
   for attempt in $(seq 1 100); do
     if polaris_process_fields "$pid" && polaris_headless_gamescope_pid "$pid"; then
@@ -194,7 +195,8 @@ polaris_discover_xwayland_display() {
 polaris_write_runtime_env() (
   local marker="$1" wayland="$2" expected_role="${3:-}" runtime_dir="$4" display tmp
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}" marker_line role
-  exec 9>"$runtime_dir/polaris-gamescope.lock" || return 1
+  umask 077
+  exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
   "$lock_bin" -x 9 || return 1
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local pid="$POLARIS_MARKER_PID" start_time="$POLARIS_MARKER_START_TIME"
@@ -215,7 +217,8 @@ polaris_stop_marked_gamescope() (
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   local marker_line pid start_time socket inode entry current_inode attempt marker_replaced=0
   local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
-  exec 9>"$runtime_dir/polaris-gamescope.lock" || return 1
+  umask 077
+  exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
   "$lock_bin" -x 9 || return 1
   polaris_validate_marker "$marker" "$expected_role" || return 1
   marker_line="$(<"$marker")"
