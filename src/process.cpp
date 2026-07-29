@@ -71,6 +71,7 @@
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/session_launch_linux.h"
   #include "platform/linux/display_topology.h"
+  #include "platform/linux/gamescope_process.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <fcntl.h>
@@ -995,15 +996,83 @@ namespace proc {
       return false;
     }
 
+    // True when environ looks like a Polaris session / Steam / Proton game client
+    // rather than a host helper that merely inherited gamescope attach keys.
+    bool proc_environ_is_session_game_client(std::string_view environ) {
+      std::size_t start = 0;
+      while (start < environ.size()) {
+        const auto end = environ.find('\0', start);
+        if (end == std::string_view::npos) {
+          break;
+        }
+        const auto entry = environ.substr(start, end - start);
+        if (entry.starts_with("POLARIS_SESSION_INSTANCE_ID="sv) && entry.size() > 28) {
+          return true;
+        }
+        if (entry.starts_with("STEAM_COMPAT_APP_ID="sv) ||
+            entry.starts_with("SteamAppId="sv) ||
+            entry.starts_with("SteamGameId="sv) ||
+            entry.starts_with("STEAM_COMPAT_DATA_PATH="sv) ||
+            entry.starts_with("PRESSURE_VESSEL_"sv) ||
+            entry.starts_with("WINEPREFIX="sv) ||
+            entry.starts_with("PROTON_"sv)) {
+          return true;
+        }
+        start = end + 1;
+      }
+      return false;
+    }
+
+    bool is_steam_or_game_client_process(
+      std::string_view comm,
+      std::string_view cmdline,
+      std::string_view environ,
+      const std::string &steam_appid
+    ) {
+      if (proc_environ_is_session_game_client(environ)) {
+        return true;
+      }
+      if (!steam_appid.empty()) {
+        const std::string appid_marker = "AppId=" + steam_appid;
+        if (cmdline.find(appid_marker) != std::string_view::npos ||
+            cmdline.find("steam://rungameid/" + steam_appid) != std::string_view::npos ||
+            cmdline.find("rungameid/" + steam_appid) != std::string_view::npos) {
+          return true;
+        }
+      }
+      if (comm.find("steam") != std::string_view::npos ||
+          comm == "reaper" ||
+          comm.find("pressure-vessel") != std::string_view::npos ||
+          comm.find("proton") != std::string_view::npos ||
+          comm.find("wine") != std::string_view::npos ||
+          comm.find("wineserver") != std::string_view::npos) {
+        return true;
+      }
+      if (cmdline.find("SteamLaunch") != std::string_view::npos ||
+          cmdline.find("steam://rungameid/") != std::string_view::npos ||
+          cmdline.find("pressure-vessel") != std::string_view::npos ||
+          cmdline.find("/proton") != std::string_view::npos ||
+          cmdline.find("steam-runtime") != std::string_view::npos ||
+          cmdline.find("steamapps/common/") != std::string_view::npos ||
+          cmdline.find("steamapps\\common\\") != std::string_view::npos) {
+        return true;
+      }
+      return false;
+    }
+
     bool is_gamescope_infrastructure_process(std::string_view comm, std::string_view cmdline) {
       if (comm == "gamescope" || comm == "gamescope-wl" || comm == "gamescopereaper" ||
-          comm == "Xwayland" || comm == "Xwayland.bin") {
+          comm == ".gamescope-wrapped" || comm == "Xwayland" || comm == "Xwayland.bin") {
         return true;
       }
       if (comm.find("portal-gamescope") != std::string_view::npos) {
         return true;
       }
       if (cmdline.find("xdg-desktop-portal-gamescope") != std::string_view::npos) {
+        return true;
+      }
+      // Idle unit primary child: setsid gamescope … -- sleep infinity
+      if (comm == "sleep" && cmdline.find("infinity") != std::string_view::npos) {
         return true;
       }
       if (cmdline.find("gamescope --backend") != std::string_view::npos ||
@@ -1015,6 +1084,40 @@ namespace proc {
         }
       }
       return false;
+    }
+
+    // After attach-path client cleanup, gamescope may ABRT on X11 I/O when Steam
+    // disconnects. Idle must stay up for portal capture on the next session.
+    void ensure_idle_gamescope_alive_for_portal() {
+      namespace fs = std::filesystem;
+      namespace gp = stream_runtime::gamescope_process;
+
+      const char *xdg = std::getenv("XDG_RUNTIME_DIR");
+      const fs::path rt = (xdg && *xdg) ? fs::path(xdg) : fs::path("/run/user") / std::to_string(getuid());
+      const auto marker_path = rt / "polaris-gamescope.pid";
+      const auto socket_path = rt / "gamescope-0";
+
+      if (const auto marker = gp::validated_marker(marker_path)) {
+        if (marker->role == "nested" || marker->role == "runtime") {
+          // Owned session compositor — not the idle portal path.
+          return;
+        }
+        if (marker->role == "idle" && gp::process_tree_owns_socket(*marker, socket_path)) {
+          return;
+        }
+      }
+
+      BOOST_LOG(info) << "process: idle gamescope not healthy after session client cleanup; restarting unit"sv;
+      (void) std::system(
+        "systemctl --user start polaris-portal-dbus.service "
+        "polaris-portal-gamescope.service polaris-portal.service 2>/dev/null"
+      );
+      (void) std::system(
+        "systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null; "
+        "systemctl --user reset-failed polaris-gamescope-idle.service 2>/dev/null; "
+        "systemctl --user restart polaris-gamescope-idle.service 2>/dev/null || "
+        "systemctl --user start polaris-gamescope-idle.service 2>/dev/null"
+      );
     }
 
     struct pidfd_handle_t {
@@ -1900,9 +2003,13 @@ namespace proc {
     }
 
     /**
-     * Kill gamescope-attached clients (games reaper, game binary, leftover Steam)
-     * that pressure-vessel stripped of POLARIS_SESSION_INSTANCE_ID. Does not touch
-     * the gamescope compositor or desktop processes without gamescope attach env.
+     * Kill gamescope-attached Steam/game clients that pressure-vessel stripped of
+     * POLARIS_SESSION_INSTANCE_ID. Does not touch the idle gamescope compositor,
+     * Xwayland, reaper, or host helpers that only inherited attach env keys.
+     *
+     * Attach-env alone is not enough: hard-killing arbitrary X11 clients on the
+     * idle compositor causes gamescope xwm "X11 I/O error" ABRT and takes down
+     * the portal capture target.
      */
     bool terminate_gamescope_attached_session_clients(const std::string &steam_appid) {
       std::vector<pidfd_handle_t> targets;
@@ -1915,7 +2022,6 @@ namespace proc {
       });
 
       const auto this_pid = getpid();
-      const std::string appid_marker = steam_appid.empty() ? std::string {} : ("AppId=" + steam_appid);
 
       for (;;) {
         auto *entry = read_next_proc_entry(dir);
@@ -1954,14 +2060,21 @@ namespace proc {
         }
 
         const bool gamescope_attached = proc_environ_is_gamescope_stream_attached(environ_r.bytes);
+        const bool game_client = is_steam_or_game_client_process(
+          comm,
+          cmdline,
+          environ_r.bytes,
+          steam_appid
+        );
         const bool steam_launch_for_app =
-          !appid_marker.empty() && cmdline.find(appid_marker) != std::string::npos &&
+          game_client && !steam_appid.empty() &&
           (cmdline.find("SteamLaunch") != std::string::npos ||
            cmdline.find("steam://rungameid/") != std::string::npos ||
            cmdline.find("rungameid/") != std::string::npos);
 
-        // Gamescope-attached Steam/game, or reaper for this appid (may lose attach env).
-        if (!gamescope_attached && !steam_launch_for_app) {
+        // Require attach env + steam/game identity, or an explicit app launch line.
+        // Bare attach-env matches are too broad and can crash idle gamescope.
+        if (!(gamescope_attached && game_client) && !steam_launch_for_app) {
           continue;
         }
 
@@ -1970,17 +2083,23 @@ namespace proc {
         if (!handle) {
           continue;
         }
+        BOOST_LOG(debug) << "process: gamescope session client candidate pid="sv << pid
+                         << " comm="sv << comm;
         targets.emplace_back(std::move(*handle));
       }
 
       if (targets.empty()) {
         BOOST_LOG(info) << "process: no gamescope-attached session clients to terminate"sv;
+        ensure_idle_gamescope_alive_for_portal();
         return true;
       }
 
       BOOST_LOG(info) << "process: terminating "sv << targets.size()
                       << " gamescope-attached session client(s) (game/reaper/steam)"sv;
-      return terminate_pidfds(targets, 3s, 2s, "gamescope session client"sv);
+      const bool ok = terminate_pidfds(targets, 3s, 2s, "gamescope session client"sv);
+      // Steam disconnect often ABRTs idle gamescope (xwm X11 I/O). Restore portal target.
+      ensure_idle_gamescope_alive_for_portal();
+      return ok;
     }
 
     bool is_active_desktop_steam_client_process(
@@ -6432,7 +6551,8 @@ namespace proc {
 
     // Gamescope Steam/pressure-vessel often strips POLARIS_SESSION_INSTANCE_ID, so
     // exact-generation + session-owned Steam paths find nothing and webui close
-    // leaves the game running. Always sweep gamescope-attached clients by attach env.
+    // leaves the game running. Sweep attach-env Steam/game clients only (not bare
+    // infrastructure), then ensure idle gamescope survives for portal capture.
     if (_session_used_cage_compositor && !immediate) {
       const bool gamescope_session =
         config::video.linux_display.stream_mode == "gamescope_stream" ||
