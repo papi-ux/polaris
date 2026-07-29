@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <utility>
 
 namespace session_media {
@@ -149,6 +150,21 @@ namespace session_media {
       std::unique_lock lock(state_->mutex);
       state_->changed.wait(lock, [this]() {
         return state_->start_owners == 0 && state_->teardown_owners == 0;
+      });
+    }
+
+    /**
+     * Wait until all admitted starts and every teardown owner except the
+     * supplied root fence have completed. The root remains held so begin_start
+     * cannot reopen admission before the caller terminates the compositor.
+     */
+    void wait_for_other_teardowns(const teardown_owner_t &root) const {
+      if (!root.state_ || root.state_.get() != state_.get()) {
+        throw std::logic_error("session media root teardown fence does not belong to this gate");
+      }
+      std::unique_lock lock(state_->mutex);
+      state_->changed.wait(lock, [this, &root]() {
+        return root.state_ && state_->start_owners == 0 && state_->teardown_owners == 1;
       });
     }
 

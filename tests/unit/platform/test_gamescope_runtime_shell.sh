@@ -50,8 +50,8 @@ write_unix_header
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 500 %s\n' \
   "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
 ln -s 'socket:[500]' "$POLARIS_PROC_ROOT/410/fd/3"
-printf '410 9000 nested\n' >"$work/run/polaris-gamescope.pid"
-printf 'DISPLAY=:9\nPOLARIS_GAMESCOPE_PID=410\nPOLARIS_GAMESCOPE_START_TIME=9000\n' \
+printf '410 9000 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+printf 'DISPLAY=:9\nPOLARIS_GAMESCOPE_PID=410\nPOLARIS_GAMESCOPE_START_TIME=9000\nPOLARIS_GAMESCOPE_EXECUTABLE=/usr/bin/gamescope\n' \
   >"$work/run/polaris-gamescope.env"
 cat >"$work/bin/kill" <<EOF
 #!/usr/bin/env bash
@@ -70,6 +70,13 @@ fi
 [ -e "$work/run/gamescope-0" ] || fail "stale generation removed a socket"
 [ -e "$work/run/polaris-gamescope.env" ] || fail "stale generation removed runtime env"
 [ "$(<"$work/run/polaris-gamescope.lock")" = "lock-sentinel" ] || fail "owner lock open truncated existing data"
+
+# Nix wrapProgram executes .gamescope-wrapped while preserving argv[0] as
+# gamescope. Capture and validate that exact executable instead of rejecting it.
+write_process 420 1 9200 /nix/store/fake-gamescope/bin/.gamescope-wrapped --backend headless
+printf '/nix/store/fake-gamescope/bin/gamescope\0--backend\0headless\0' >"$POLARIS_PROC_ROOT/420/cmdline"
+printf '420 9200 idle /nix/store/fake-gamescope/bin/.gamescope-wrapped\n' >"$work/run/polaris-gamescope.pid"
+polaris_validate_marker "$work/run/polaris-gamescope.pid" idle || fail "Nix-wrapped gamescope marker rejected"
 
 # Select only the Xwayland that descends from and is socket-owned by the marker.
 write_process 410 1 9001 /usr/bin/gamescope --backend headless --hdr-enabled
@@ -90,7 +97,7 @@ printf '0000000000000000: 00000002 00000000 00010000 0001 01 500 %s\n' "$work/ru
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 600 %s\n' "$POLARIS_X11_SOCKET_DIR/X0" >>"$POLARIS_PROC_NET_UNIX"
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 603 %s\n' "$POLARIS_X11_SOCKET_DIR/X3" >>"$POLARIS_PROC_NET_UNIX"
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 604 %s\n' "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
-printf '410 9001 idle\n' >"$work/run/polaris-gamescope.pid"
+printf '410 9001 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
 
 polaris_validate_marker "$work/run/polaris-gamescope.pid" idle || fail "valid marker rejected"
 [ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
@@ -120,7 +127,7 @@ ln -s 'socket:[700]' "$POLARIS_PROC_ROOT/410/fd/3"
 write_unix_header
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 700 %s\n' \
   "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
-printf '410 9100 idle\n' >"$work/run/polaris-gamescope.pid"
+printf '410 9100 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
 : >"$work/kills"
 cat >"$work/bin/kill-successor" <<EOF
 #!/usr/bin/env bash
@@ -128,7 +135,7 @@ echo "\$*" >>"$work/kills"
 if [ "\${1:-}" = -TERM ]; then
   printf '410 (gamescope) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 9101\n' \
     >"$POLARIS_PROC_ROOT/410/stat"
-  printf '410 9101 idle\n' >"$work/run/polaris-gamescope.pid"
+  printf '410 9101 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
 fi
 EOF
 chmod +x "$work/bin/kill-successor"
@@ -138,7 +145,7 @@ POLARIS_KILL_BIN="$work/bin/kill-successor" \
 if grep -q -- '-KILL' "$work/kills"; then
   fail "same-role successor received predecessor escalation"
 fi
-[ "$(<"$work/run/polaris-gamescope.pid")" = '410 9101 idle' ] ||
+[ "$(<"$work/run/polaris-gamescope.pid")" = '410 9101 idle /usr/bin/gamescope' ] ||
   fail "same-role successor marker was removed"
 [ -e "$work/run/gamescope-0" ] || fail "same-role successor socket was removed"
 

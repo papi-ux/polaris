@@ -16,6 +16,7 @@ namespace stream_runtime::gamescope_process {
     int pid = 0;
     std::uint64_t start_time = 0;
     std::string role;
+    std::filesystem::path executable;
 
     bool operator==(const marker_t &) const = default;
   };

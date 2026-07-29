@@ -40,12 +40,14 @@ namespace {
       int ppid,
       std::uint64_t start_time,
       const std::vector<std::string> &argv,
-      const std::vector<std::uint64_t> &socket_inodes = {}
+      const std::vector<std::uint64_t> &socket_inodes = {},
+      const fs::path &executable_override = {}
     ) {
       const auto dir = proc / std::to_string(pid);
       fs::remove_all(dir);
       fs::create_directories(dir / "fd");
-      const auto executable = argv.empty() ? fs::path {"/usr/bin/process"} : fs::path {argv.front()};
+      const auto executable = !executable_override.empty() ? executable_override :
+                              argv.empty() ? fs::path {"/usr/bin/process"} : fs::path {argv.front()};
       fs::create_symlink(executable, dir / "exe");
 
       std::ofstream stat(dir / "stat");
@@ -102,15 +104,21 @@ TEST(GamescopeProcessOwnershipTests, MarkerRequiresExactGenerationRoleAndHeadles
   tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend", "headless", "--", "sleep", "infinity"});
   const auto marker_path = tree.runtime / "polaris-gamescope.pid";
 
-  ASSERT_TRUE(gp::write_marker(marker_path, {.pid = 410, .start_time = 9001, .role = "idle"}));
+  ASSERT_TRUE(gp::write_marker(marker_path, {
+    .pid = 410, .start_time = 9001, .role = "idle", .executable = "/usr/bin/gamescope"
+  }));
   EXPECT_TRUE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
   EXPECT_FALSE(gp::validated_marker(marker_path, "nested", paths_for(tree)).has_value());
 
-  ASSERT_TRUE(gp::write_marker(marker_path, {.pid = 410, .start_time = 9000, .role = "idle"}));
+  ASSERT_TRUE(gp::write_marker(marker_path, {
+    .pid = 410, .start_time = 9000, .role = "idle", .executable = "/usr/bin/gamescope"
+  }));
   EXPECT_FALSE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
 
   tree.add_process(410, 1, 9001, {"/usr/bin/unrelated-compositor", "--backend", "headless"});
-  ASSERT_TRUE(gp::write_marker(marker_path, {.pid = 410, .start_time = 9001, .role = "idle"}));
+  ASSERT_TRUE(gp::write_marker(marker_path, {
+    .pid = 410, .start_time = 9001, .role = "idle", .executable = "/usr/bin/gamescope"
+  }));
   EXPECT_FALSE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
 
   // argv[0] alone is forgeable; /proc/<pid>/exe must also resolve to gamescope.
@@ -120,13 +128,37 @@ TEST(GamescopeProcessOwnershipTests, MarkerRequiresExactGenerationRoleAndHeadles
   EXPECT_FALSE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
 }
 
+TEST(GamescopeProcessOwnershipTests, AcceptsAndPinsNixWrappedGamescopeExecutable) {
+  fake_proc_tree_t tree;
+  const fs::path wrapper = "/nix/store/fake-gamescope/bin/gamescope";
+  const fs::path wrapped = "/nix/store/fake-gamescope/bin/.gamescope-wrapped";
+  tree.add_process(420, 1, 9200, {wrapper.string(), "--backend", "headless"}, {}, wrapped);
+
+  const auto marker = gp::marker_for_pid(420, "idle", paths_for(tree));
+  ASSERT_TRUE(marker.has_value());
+  EXPECT_EQ(marker->executable, wrapped);
+
+  const auto marker_path = tree.runtime / "polaris-gamescope.pid";
+  ASSERT_TRUE(gp::write_marker(marker_path, *marker));
+  EXPECT_TRUE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
+
+  fs::remove(tree.proc / "420" / "exe");
+  fs::create_symlink("/nix/store/other-gamescope/bin/.gamescope-wrapped", tree.proc / "420" / "exe");
+  EXPECT_FALSE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
+}
+
 TEST(GamescopeProcessOwnershipTests, CapturesGenerationFromProcAndReadsExactArguments) {
   fake_proc_tree_t tree;
-  tree.add_process(410, 1, 9001, {"gamescope", "--backend=headless", "--hdr-enabled"});
+  tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend=headless", "--hdr-enabled"});
 
   const auto marker = gp::marker_for_pid(410, "runtime", paths_for(tree));
   ASSERT_TRUE(marker.has_value());
-  EXPECT_EQ(*marker, (gp::marker_t {.pid = 410, .start_time = 9001, .role = "runtime"}));
+  EXPECT_EQ(*marker, (gp::marker_t {
+    .pid = 410,
+    .start_time = 9001,
+    .role = "runtime",
+    .executable = "/usr/bin/gamescope",
+  }));
   EXPECT_TRUE(gp::process_has_argument(*marker, "--hdr-enabled", paths_for(tree)));
   EXPECT_FALSE(gp::process_has_argument(*marker, "--hdr-debug-force-output", paths_for(tree)));
 }
@@ -152,7 +184,9 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
   fs::create_symlink("/usr/bin/sleep", tree.proc / "412" / "exe");
   tree.add_process(99, 1, 100, {"/usr/bin/Xorg", ":0"}, {600});
 
-  const gp::marker_t marker {.pid = 410, .start_time = 9001, .role = "idle"};
+  const gp::marker_t marker {
+    .pid = 410, .start_time = 9001, .role = "idle", .executable = "/usr/bin/gamescope"
+  };
   EXPECT_TRUE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
   EXPECT_EQ(gp::discover_owned_x11_display(marker, paths_for(tree)), std::optional<std::string>(":4"));
   EXPECT_TRUE(fs::exists(host_x0));
@@ -167,10 +201,12 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedWhenOnlyUnrelatedXwaylandExists)
   tree.add_unix_socket(602, unrelated_x2);
   tree.flush_unix_sockets();
 
-  tree.add_process(410, 1, 9001, {"gamescope", "--backend=headless"}, {500});
+  tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend=headless"}, {500});
   tree.add_process(777, 1, 300, {"Xwayland.bin", ":2"}, {602});
 
-  const gp::marker_t marker {.pid = 410, .start_time = 9001, .role = "runtime"};
+  const gp::marker_t marker {
+    .pid = 410, .start_time = 9001, .role = "runtime", .executable = "/usr/bin/gamescope"
+  };
   EXPECT_FALSE(gp::discover_owned_x11_display(marker, paths_for(tree)).has_value());
   EXPECT_TRUE(fs::exists(unrelated_x2));
 }
@@ -186,10 +222,12 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   tree.add_unix_socket(604, x4);
   tree.add_unix_socket(605, x4);
   tree.flush_unix_sockets();
-  tree.add_process(410, 1, 9001, {"gamescope", "--backend=headless"}, {500});
+  tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend=headless"}, {500});
   tree.add_process(411, 410, 9002, {"Xwayland", ":4"}, {604});
 
-  const gp::marker_t marker {.pid = 410, .start_time = 9001, .role = "runtime"};
+  const gp::marker_t marker {
+    .pid = 410, .start_time = 9001, .role = "runtime", .executable = "/usr/bin/gamescope"
+  };
   EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
   EXPECT_FALSE(gp::discover_owned_x11_display(marker, paths_for(tree)).has_value());
 }

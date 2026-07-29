@@ -58,6 +58,29 @@ TEST(LinuxStreamContractTests, GamescopeOwnershipTransitionsUseOneCrossProcessLo
   ASSERT_FALSE(runtime.empty());
   EXPECT_NE(shell.find("polaris-gamescope.lock"), std::string::npos);
   EXPECT_NE(shell.find("flock"), std::string::npos);
+  EXPECT_NE(shell.find("POLARIS_MARKER_EXECUTABLE"), std::string::npos);
+  EXPECT_NE(shell.find("gamescope|.gamescope-wrapped"), std::string::npos);
   EXPECT_NE(runtime.find("owner_transition_lock_t"), std::string::npos);
   EXPECT_NE(runtime.find("polaris-gamescope.lock"), std::string::npos);
+  EXPECT_NE(runtime.find("POLARIS_GAMESCOPE_EXECUTABLE"), std::string::npos);
+}
+
+TEST(LinuxStreamContractTests, RootMediaFenceSurvivesThroughCompositorTermination) {
+  const auto media = read_source("src/platform/linux/session_media.cpp");
+  const auto process = read_source("src/process.cpp");
+  ASSERT_FALSE(media.empty());
+  ASSERT_FALSE(process.empty());
+
+  EXPECT_NE(media.find("wait_for_other_teardowns(teardown)"), std::string::npos);
+  EXPECT_NE(media.find("return teardown;"), std::string::npos);
+  EXPECT_EQ(media.find("teardown.reset()"), std::string::npos);
+
+  const auto terminate = process.find("void proc_t::terminate_impl(");
+  ASSERT_NE(terminate, std::string::npos);
+  const auto body = process.substr(terminate, 4200);
+  const auto fence = body.find("media_stop_fence = session_media::prepare_for_stop()");
+  const auto compositor = body.find("terminate_isolated_session_generation()");
+  ASSERT_NE(fence, std::string::npos);
+  ASSERT_NE(compositor, std::string::npos);
+  EXPECT_LT(fence, compositor);
 }

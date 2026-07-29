@@ -97,7 +97,7 @@ namespace session_media {
     return media_gate().begin_teardown();
   }
 
-  void prepare_for_stop() {
+  teardown_owner_t prepare_for_stop() {
     auto &state = worker_state();
     {
       std::unique_lock lock(state.mutex);
@@ -106,7 +106,7 @@ namespace session_media {
         state.changed.wait(lock, [&state] {
           return !state.prepare_inflight;
         });
-        return;
+        return begin_teardown();
       }
       state.prepare_inflight = true;
     }
@@ -127,13 +127,15 @@ namespace session_media {
     // short synchronous response budgets.
     auto teardown = begin_teardown();
     browser_stream::prepare_for_session_teardown();
-    teardown.reset();
 
-    // Compositor/process termination occurs immediately after this function.
-    // Do not return until every owned cleanup reaches terminal state: killing
+    // Wait for every subordinate cleanup while retaining the root owner.
+    // Compositor/process termination occurs immediately after this function;
+    // the returned fence keeps begin_start blocked until that kill completes.
+    // Killing
     // gamescope while PipeWire still tears down can deadlock pw_thread_loop_stop,
-    // and allowing a reconnect would overlap two capture generations.
-    media_gate().wait_for_idle();
+    // and reopening capture admission would overlap two generations.
+    media_gate().wait_for_other_teardowns(teardown);
+    return teardown;
   }
 
   void schedule(std::function<void()> work) {

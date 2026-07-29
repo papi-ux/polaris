@@ -116,12 +116,20 @@ namespace stream_runtime::gamescope_process {
       };
     }
 
+    bool gamescope_executable_name(const fs::path &path) {
+      const auto name = path.filename();
+      return name == "gamescope" || name == ".gamescope-wrapped";
+    }
+
     bool executable_named(const process_t &process, std::string_view expected) {
       if (process.argv.empty()) {
         return false;
       }
-      return fs::path(process.argv.front()).filename() == expected &&
-             process.executable.filename() == expected;
+      if (fs::path(process.argv.front()).filename() != expected) {
+        return false;
+      }
+      return expected == "gamescope" ? gamescope_executable_name(process.executable) :
+                                        process.executable.filename() == expected;
     }
 
     bool is_headless_gamescope(const process_t &process) {
@@ -150,8 +158,12 @@ namespace stream_runtime::gamescope_process {
       const marker_t &marker,
       const lookup_paths_t &paths
     ) {
+      if (!marker.executable.is_absolute() || !gamescope_executable_name(marker.executable)) {
+        return std::nullopt;
+      }
       const auto process = read_process(paths.proc_root, marker.pid);
-      if (!process || process->start_time != marker.start_time || !is_headless_gamescope(*process)) {
+      if (!process || process->start_time != marker.start_time ||
+          process->executable != marker.executable || !is_headless_gamescope(*process)) {
         return std::nullopt;
       }
       return process;
@@ -271,20 +283,30 @@ namespace stream_runtime::gamescope_process {
     std::string pid_text;
     std::string start_time_text;
     std::string role;
+    std::string executable_text;
     std::string extra;
-    if (!(input >> pid_text >> start_time_text >> role) || (input >> extra)) {
+    if (!(input >> pid_text >> start_time_text >> role >> executable_text) || (input >> extra)) {
       return std::nullopt;
     }
     const auto pid = parse_integer<int>(pid_text);
     const auto start_time = parse_integer<std::uint64_t>(start_time_text);
-    if (!pid || *pid <= 0 || !start_time || *start_time == 0 || !valid_role(role)) {
+    const fs::path executable {executable_text};
+    if (!pid || *pid <= 0 || !start_time || *start_time == 0 || !valid_role(role) ||
+        !executable.is_absolute() || !gamescope_executable_name(executable)) {
       return std::nullopt;
     }
-    return marker_t {.pid = *pid, .start_time = *start_time, .role = std::move(role)};
+    return marker_t {
+      .pid = *pid,
+      .start_time = *start_time,
+      .role = std::move(role),
+      .executable = executable,
+    };
   }
 
   bool write_marker(const fs::path &path, const marker_t &marker) {
-    if (marker.pid <= 0 || marker.start_time == 0 || !valid_role(marker.role)) {
+    if (marker.pid <= 0 || marker.start_time == 0 || !valid_role(marker.role) ||
+        !marker.executable.is_absolute() || !gamescope_executable_name(marker.executable) ||
+        marker.executable.string().find_first_of(" \t\r\n") != std::string::npos) {
       return false;
     }
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -295,7 +317,8 @@ namespace stream_runtime::gamescope_process {
       if (!output) {
         return false;
       }
-      output << marker.pid << ' ' << marker.start_time << ' ' << marker.role << '\n';
+      output << marker.pid << ' ' << marker.start_time << ' ' << marker.role << ' '
+             << marker.executable.string() << '\n';
       output.flush();
       if (!output) {
         std::error_code remove_ec;
@@ -329,6 +352,7 @@ namespace stream_runtime::gamescope_process {
       .pid = pid,
       .start_time = process->start_time,
       .role = std::string {role},
+      .executable = process->executable,
     };
   }
 

@@ -84,6 +84,28 @@ TEST(SessionMediaGateTests, TerminalWaitDoesNotReturnWhileAnOwnedCleanupIsRunnin
   EXPECT_EQ(terminal.wait_for(1s), std::future_status::ready);
 }
 
+TEST(SessionMediaGateTests, RootFenceKeepsAdmissionClosedAfterSubordinateCleanupCompletes) {
+  session_media::teardown_gate_t gate;
+  std::optional<session_media::teardown_owner_t> root {gate.begin_teardown()};
+  std::optional<session_media::teardown_owner_t> cleanup {gate.begin_teardown()};
+
+  auto quiescent = std::async(std::launch::async, [&gate, &root]() {
+    gate.wait_for_other_teardowns(*root);
+  });
+  auto pending_start = std::async(std::launch::async, [&gate]() {
+    return gate.begin_start();
+  });
+
+  EXPECT_EQ(quiescent.wait_for(20ms), std::future_status::timeout);
+  EXPECT_EQ(pending_start.wait_for(20ms), std::future_status::timeout);
+  cleanup.reset();
+  EXPECT_EQ(quiescent.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(pending_start.wait_for(20ms), std::future_status::timeout);
+  root.reset();
+  ASSERT_EQ(pending_start.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(pending_start.get().owns_start());
+}
+
 TEST(SessionMediaGateTests, OutstandingOwnerCanFinishAfterGateWrapperIsDestroyed) {
   std::optional<session_media::teardown_owner_t> teardown;
   {

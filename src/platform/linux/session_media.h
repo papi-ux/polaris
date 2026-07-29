@@ -39,11 +39,13 @@ namespace session_media {
    * 2) portal::release_global_capture() once
    * 3) use short synchronous budgets for HTTP responsiveness
    * 4) wait for every owned asynchronous cleanup to reach terminal state
+   * 5) return the root teardown fence so admission remains closed through
+   *    compositor/process termination
    *
    * Idempotent and safe when no media is active. Nested compositor kill stays
    * outside this function and is fenced until the final teardown owner exits.
    */
-  void prepare_for_stop();
+  teardown_owner_t prepare_for_stop();
 
   /**
    * @brief Run work on the coalescing teardown worker (after HTTPS responds).

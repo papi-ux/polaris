@@ -241,8 +241,7 @@ namespace stream_runtime {
           if (owner_lock) {
             const auto current_owner = gp::validated_marker(marker_path());
             const bool authority_free = !current_owner ||
-              (current_owner->pid == marker_->pid && current_owner->start_time == marker_->start_time &&
-               current_owner->role == marker_->role);
+              *current_owner == *marker_;
             marker_written = authority_free && gp::write_marker(marker_path(), *marker_);
           }
         }
@@ -412,7 +411,7 @@ namespace stream_runtime {
           return false;
         }
         const auto current = validated_marker_for_socket(socket_name_, marker_->role);
-        return current && current->pid == marker_->pid && current->start_time == marker_->start_time;
+        return current && *current == *marker_;
       }
 
       void remove_owned_files_if_current() const {
@@ -428,8 +427,7 @@ namespace stream_runtime {
           return;
         }
         const auto current = gp::read_marker(marker_path());
-        if (!current || current->pid != marker_->pid || current->start_time != marker_->start_time ||
-            current->role != marker_->role) {
+        if (!current || *current != *marker_) {
           return;
         }
         std::error_code ec;
@@ -445,7 +443,7 @@ namespace stream_runtime {
             return;
           }
           const auto current = gp::validated_marker(marker_path(), "runtime");
-          if (current && current->pid == marker_->pid && current->start_time == marker_->start_time) {
+          if (current && *current == *marker_) {
             // The marker validates this exact PID generation immediately before
             // signalling its setsid-owned process group.
             kill(-marker_->pid, SIGTERM);
@@ -578,7 +576,7 @@ namespace stream_runtime {
         }
         const auto current = validated_marker_for_socket(socket_name_, marker_->role);
         const auto current_display = gp::discover_owned_x11_display(*marker_);
-        if (!current || current->pid != marker_->pid || current->start_time != marker_->start_time ||
+        if (!current || *current != *marker_ ||
             !current_display || *current_display != x11_display_) {
           return false;
         }
@@ -596,6 +594,7 @@ namespace stream_runtime {
           out << "POLARIS_GAMESCOPE_PID=" << marker_->pid << "\n";
           out << "POLARIS_GAMESCOPE_START_TIME=" << marker_->start_time << "\n";
           out << "POLARIS_GAMESCOPE_ROLE=" << marker_->role << "\n";
+          out << "POLARIS_GAMESCOPE_EXECUTABLE=" << marker_->executable.string() << "\n";
         }
         std::error_code ec;
         fs::rename(temporary, path, ec);

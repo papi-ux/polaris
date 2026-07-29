@@ -387,18 +387,26 @@ TEST(SessionStopContractTests, TimedOutBrowserJoinRetainsTeardownOwnership) {
   EXPECT_NE(body.find("joiner.detach()"), std::string::npos);
 }
 
-TEST(SessionStopContractTests, CompositorTerminationWaitsForEveryOwnedMediaCleanup) {
-  const auto source = read_source_for_contract("src/platform/linux/session_media.cpp");
-  ASSERT_FALSE(source.empty());
-  const auto start = source.find("void prepare_for_stop()");
-  ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 2400);
-  const auto release_root = body.find("teardown.reset()");
-  const auto terminal_fence = body.find("media_gate().wait_for_idle()");
-  ASSERT_NE(release_root, std::string::npos);
-  ASSERT_NE(terminal_fence, std::string::npos);
-  EXPECT_LT(release_root, terminal_fence);
-  EXPECT_EQ(body.find("skipping nested prepare"), std::string::npos);
+TEST(SessionStopContractTests, CompositorTerminationRetainsRootMediaFenceUntilCleanupIsQuiescent) {
+  const auto media = read_source_for_contract("src/platform/linux/session_media.cpp");
+  ASSERT_FALSE(media.empty());
+  const auto prepare = media.find("teardown_owner_t prepare_for_stop()");
+  ASSERT_NE(prepare, std::string::npos);
+  const auto prepare_body = media.substr(prepare, 2600);
+  EXPECT_NE(prepare_body.find("media_gate().wait_for_other_teardowns(teardown)"), std::string::npos);
+  EXPECT_NE(prepare_body.find("return teardown;"), std::string::npos);
+  EXPECT_EQ(prepare_body.find("teardown.reset()"), std::string::npos);
+
+  const auto process = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(process.empty());
+  const auto terminate = process.find("void proc_t::terminate_impl(");
+  ASSERT_NE(terminate, std::string::npos);
+  const auto terminate_body = process.substr(terminate, 4200);
+  const auto fence = terminate_body.find("media_stop_fence = session_media::prepare_for_stop()");
+  const auto compositor_stop = terminate_body.find("terminate_isolated_session_generation()");
+  ASSERT_NE(fence, std::string::npos);
+  ASSERT_NE(compositor_stop, std::string::npos);
+  EXPECT_LT(fence, compositor_stop);
 }
 
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {

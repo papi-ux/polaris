@@ -6419,7 +6419,7 @@ namespace proc {
 #ifdef __linux__
     // Single media owner: signal → portal release → bounded front-end wait →
     // terminal ownership fence. Nested kill only after every owned cleanup exits.
-    session_media::prepare_for_stop();
+    [[maybe_unused]] auto media_stop_fence = session_media::prepare_for_stop();
     stop_steam_big_picture_input_guard();
     if (!immediate) {
       terminate_session_owned_steam_before_cage_stop();
