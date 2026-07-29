@@ -72,8 +72,9 @@
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <fcntl.h>
-  #include <signal.h>
   #include <poll.h>
+  #include <pwd.h>
+  #include <signal.h>
   #include <sys/stat.h>
   #include <sys/syscall.h>
   #include <unistd.h>
@@ -1729,12 +1730,90 @@ namespace proc {
       return true;
     }
 
-    bool steam_instance_singleton_released() {
-      const char *home = getenv("HOME");
-      if (home == nullptr || *home == '\0') {
-        return true;
+    std::string account_home_directory() {
+      constexpr std::size_t default_buffer_size = 16 * 1024;
+      constexpr std::size_t maximum_buffer_size = 1024 * 1024;
+      const auto configured_size = sysconf(_SC_GETPW_R_SIZE_MAX);
+      const auto buffer_size = configured_size > 0 ?
+        std::min(static_cast<std::size_t>(configured_size), maximum_buffer_size) :
+        default_buffer_size;
+
+      std::vector<char> buffer(buffer_size);
+      passwd entry {};
+      passwd *result = nullptr;
+      if (getpwuid_r(geteuid(), &entry, buffer.data(), buffer.size(), &result) != 0 ||
+          result == nullptr || entry.pw_dir == nullptr || *entry.pw_dir == '\0') {
+        return {};
       }
-      return !steam_instance_pipe_listener_active(std::string(home) + "/.steam/steam.pipe");
+      return entry.pw_dir;
+    }
+
+    std::optional<std::string> steam_instance_pipe_path(
+      const std::optional<std::string> &home_env,
+      const std::optional<std::string> &account_home
+    ) {
+      const std::string *home = nullptr;
+      if (home_env && !home_env->empty()) {
+        home = &*home_env;
+      } else if (account_home && !account_home->empty()) {
+        home = &*account_home;
+      }
+      if (home == nullptr) {
+        return std::nullopt;
+      }
+      return (std::filesystem::path(*home) / ".steam/steam.pipe").string();
+    }
+
+    std::optional<std::string> steam_instance_pipe_path() {
+      const char *home = getenv("HOME");
+      std::optional<std::string> home_env;
+      if (home != nullptr) {
+        home_env = home;
+      }
+
+      const auto account_home = account_home_directory();
+      return steam_instance_pipe_path(
+        home_env,
+        account_home.empty() ? std::nullopt : std::optional<std::string> {account_home}
+      );
+    }
+
+    bool steam_instance_singleton_released(const std::string &pipe_path) {
+      return !steam_instance_pipe_listener_active(pipe_path);
+    }
+
+    using steam_shutdown_clock_t = std::chrono::steady_clock;
+
+    bool wait_for_desktop_steam_quiescence(
+      const std::function<bool()> &desktop_steam_active,
+      const std::function<bool()> &singleton_released,
+      const std::function<steam_shutdown_clock_t::time_point()> &now,
+      const std::function<void(steam_shutdown_clock_t::duration)> &sleep_for,
+      steam_shutdown_clock_t::duration timeout,
+      steam_shutdown_clock_t::duration poll_interval
+    ) {
+      if (timeout < steam_shutdown_clock_t::duration::zero() ||
+          poll_interval <= steam_shutdown_clock_t::duration::zero()) {
+        return false;
+      }
+
+      const auto deadline = now() + timeout;
+      for (;;) {
+        // Recheck the process state after observing the FIFO as released. This
+        // prevents a Steam instance that starts during the FIFO probe from
+        // being accepted as quiescent.
+        if (!desktop_steam_active() &&
+            singleton_released() &&
+            !desktop_steam_active()) {
+          return true;
+        }
+
+        const auto current = now();
+        if (current >= deadline) {
+          return false;
+        }
+        sleep_for(std::min(poll_interval, deadline - current));
+      }
     }
 
     bool desktop_steam_client_active_impl() {
@@ -3308,6 +3387,20 @@ namespace proc {
     );
   }
 
+  desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_after_shutdown(
+    const proc::ctx_t &app,
+    bool active_desktop_game
+  ) {
+    return resolve_desktop_launch_safety_policy(
+      true,
+      false,
+      false,
+      app,
+      desktop_steam_client_active_impl(),
+      active_desktop_game
+    );
+  }
+
   nlohmann::json desktop_launch_safety_policy_to_json(const desktop_launch_safety_policy_t &policy) {
     return {
       {"desktopSteamActive", policy.desktopSteamActive},
@@ -3327,6 +3420,12 @@ namespace proc {
   }
 
   bool request_desktop_steam_shutdown_for_private_stream() {
+    const auto pipe_path = steam_instance_pipe_path();
+    if (!pipe_path) {
+      BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing private stream shutdown handoff";
+      return false;
+    }
+
     const auto command = canonical_steam_shutdown_command("steam");
     BOOST_LOG(info) << "process: explicit Nova request closing desktop Steam before private stream using [" << command << "]";
     auto env = boost::this_process::environment();
@@ -3338,29 +3437,27 @@ namespace proc {
       return false;
     }
     child.detach();
-    for (int i = 0; i < 50; ++i) {
-      if (!desktop_steam_client_active_impl()) {
-        break;
-      }
-      std::this_thread::sleep_for(100ms);
+
+    const bool quiescent = wait_for_desktop_steam_quiescence(
+      []() {
+        return desktop_steam_client_active_impl();
+      },
+      [pipe_path]() {
+        return steam_instance_singleton_released(*pipe_path);
+      },
+      []() {
+        return steam_shutdown_clock_t::now();
+      },
+      [](steam_shutdown_clock_t::duration duration) {
+        std::this_thread::sleep_for(duration);
+      },
+      10s,
+      100ms
+    );
+    if (!quiescent) {
+      BOOST_LOG(warning) << "process: desktop Steam did not reach process/FIFO quiescence before shutdown deadline";
     }
-    if (desktop_steam_client_active_impl()) {
-      BOOST_LOG(warning) << "process: desktop Steam still active after explicit shutdown wait";
-      return false;
-    }
-    // The client processes are gone, but Steam's instance singleton can still
-    // be held by teardown. Launching `steam steam://rungameid/...` in that
-    // window forwards the URI to the dying instance, which swallows it, so
-    // the game never starts. Wait for the singleton to be released before
-    // reporting the shutdown as complete.
-    for (int i = 0; i < 50; ++i) {
-      if (steam_instance_singleton_released()) {
-        return true;
-      }
-      std::this_thread::sleep_for(100ms);
-    }
-    BOOST_LOG(warning) << "process: desktop Steam instance singleton still held after shutdown wait";
-    return steam_instance_singleton_released();
+    return quiescent;
   }
 #endif
 
@@ -3381,6 +3478,61 @@ namespace proc {
       active_desktop_game,
       force_private_after_desktop_steam_shutdown
     );
+  }
+
+  steam_shutdown_quiescence_test_result_t run_steam_shutdown_quiescence_scenario_for_tests(
+    const std::vector<bool> &process_active_observations,
+    const std::vector<bool> &fifo_listener_observations,
+    std::chrono::milliseconds timeout,
+    std::chrono::milliseconds poll_interval
+  ) {
+    std::size_t process_index = 0;
+    std::size_t fifo_index = 0;
+    auto current = steam_shutdown_clock_t::time_point {};
+    steam_shutdown_quiescence_test_result_t result;
+
+    const auto next_observation = [](
+      const std::vector<bool> &observations,
+      std::size_t &index,
+      bool fallback
+    ) {
+      if (observations.empty()) {
+        return fallback;
+      }
+      const auto value = observations[std::min(index, observations.size() - 1)];
+      ++index;
+      return value;
+    };
+
+    result.quiescent = wait_for_desktop_steam_quiescence(
+      [&]() {
+        ++result.process_checks;
+        return next_observation(process_active_observations, process_index, true);
+      },
+      [&]() {
+        ++result.fifo_checks;
+        return !next_observation(fifo_listener_observations, fifo_index, true);
+      },
+      [&]() {
+        return current;
+      },
+      [&](steam_shutdown_clock_t::duration duration) {
+        current += duration;
+      },
+      timeout,
+      poll_interval
+    );
+    result.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      current.time_since_epoch()
+    );
+    return result;
+  }
+
+  std::optional<std::string> steam_instance_pipe_path_for_tests(
+    const std::optional<std::string> &home_env,
+    const std::optional<std::string> &account_home
+  ) {
+    return steam_instance_pipe_path(home_env, account_home);
   }
 
   bool desktop_steam_client_process_for_tests(std::string_view comm,

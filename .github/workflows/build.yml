@@ -93,6 +93,7 @@ jobs:
         run: |
           cmake -B build-sanitize -G Ninja \
             -DBUILD_TESTS=ON \
+            -DBUILD_FULL_TESTS=ON \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all' \
             -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all' \
@@ -102,10 +103,10 @@ jobs:
             -DCUDA_FAIL_ON_MISSING=OFF
 
       - name: Build sanitizer unit tests
-        run: cmake --build build-sanitize --target test_polaris -j"$(nproc)"
+        run: cmake --build build-sanitize --target test_polaris test_polaris_steam_shutdown -j"$(nproc)"
 
       - name: Run sanitizer unit tests
-        run: ctest --test-dir build-sanitize/tests --output-on-failure -R '^test_polaris$'
+        run: ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_steam_shutdown)$'
 
   arch-build:
     name: Arch build
