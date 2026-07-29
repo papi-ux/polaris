@@ -6417,8 +6417,8 @@ namespace proc {
     placebo = false;
 
 #ifdef __linux__
-    // Single media owner: signal → portal release → bounded join. Nested kill
-    // only after that (see session_media / SB-2). Do not call portal release again.
+    // Single media owner: signal → portal release → bounded front-end wait →
+    // terminal ownership fence. Nested kill only after every owned cleanup exits.
     session_media::prepare_for_stop();
     stop_steam_big_picture_input_guard();
     if (!immediate) {

@@ -10,7 +10,6 @@
   #include "src/browser_stream.h"
   #include "src/logging.h"
 
-  #include <chrono>
   #include <condition_variable>
   #include <deque>
   #include <mutex>
@@ -103,13 +102,10 @@ namespace session_media {
     {
       std::unique_lock lock(state.mutex);
       if (state.prepare_inflight) {
-        BOOST_LOG(info) << "session_media: prepare_for_stop already in flight; waiting on condition_variable"sv;
-        const bool done = state.changed.wait_for(lock, std::chrono::seconds(2), [&state] {
+        BOOST_LOG(info) << "session_media: prepare_for_stop already in flight; waiting for terminal media teardown"sv;
+        state.changed.wait(lock, [&state] {
           return !state.prepare_inflight;
         });
-        if (!done) {
-          BOOST_LOG(warning) << "session_media: previous prepare still busy after 2s wait_for; skipping nested prepare"sv;
-        }
         return;
       }
       state.prepare_inflight = true;
@@ -127,10 +123,17 @@ namespace session_media {
     } release_prepare_flag {state};
 
     // The root owner blocks reconnect immediately. Portal destruction and
-    // Browser capture joins acquire additional owners when they outlive the
-    // bounded prepare_for_stop() response budget.
+    // Browser capture joins acquire additional owners when they outlive their
+    // short synchronous response budgets.
     auto teardown = begin_teardown();
     browser_stream::prepare_for_session_teardown();
+    teardown.reset();
+
+    // Compositor/process termination occurs immediately after this function.
+    // Do not return until every owned cleanup reaches terminal state: killing
+    // gamescope while PipeWire still tears down can deadlock pw_thread_loop_stop,
+    // and allowing a reconnect would overlap two capture generations.
+    media_gate().wait_for_idle();
   }
 
   void schedule(std::function<void()> work) {

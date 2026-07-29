@@ -71,6 +71,19 @@ TEST(SessionMediaGateTests, TeardownWaitsForAnAdmittedStartBeforeTakingOwnership
   EXPECT_TRUE(teardown.owns_teardown());
 }
 
+TEST(SessionMediaGateTests, TerminalWaitDoesNotReturnWhileAnOwnedCleanupIsRunning) {
+  session_media::teardown_gate_t gate;
+  std::optional<session_media::teardown_owner_t> cleanup_owner {gate.begin_teardown()};
+
+  auto terminal = std::async(std::launch::async, [&gate]() {
+    gate.wait_for_idle();
+  });
+
+  EXPECT_EQ(terminal.wait_for(20ms), std::future_status::timeout);
+  cleanup_owner.reset();
+  EXPECT_EQ(terminal.wait_for(1s), std::future_status::ready);
+}
+
 TEST(SessionMediaGateTests, OutstandingOwnerCanFinishAfterGateWrapperIsDestroyed) {
   std::optional<session_media::teardown_owner_t> teardown;
   {

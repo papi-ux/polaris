@@ -37,11 +37,11 @@ namespace session_media {
    *
    * 1) signal Browser Stream capture shutdown (if any)
    * 2) portal::release_global_capture() once
-   * 3) bounded capture thread join (≤3s)
-   * 4) brief settle only when media was live
+   * 3) use short synchronous budgets for HTTP responsiveness
+   * 4) wait for every owned asynchronous cleanup to reach terminal state
    *
    * Idempotent and safe when no media is active. Nested compositor kill stays
-   * outside this function (caller runs proc::terminate / runtime stop after).
+   * outside this function and is fenced until the final teardown owner exits.
    */
   void prepare_for_stop();
 

@@ -54,7 +54,8 @@ namespace browser_stream {
   /**
    * @brief Synchronously stop Browser Stream media capture before nested teardown.
    *
-   * Order: signal shutdown → portal::release_global_capture → bounded join (≤3s).
+   * Order: signal shutdown → portal release → short front-end wait. The shared
+   * session_media fence then waits for owned cleanup to reach terminal state.
    * Prefer session_media::prepare_for_stop() from process/confighttp so concurrent
    * stop paths do not double-enter. HTTP handlers should schedule after response.
    */

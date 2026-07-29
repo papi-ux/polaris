@@ -1500,15 +1500,6 @@ namespace browser_stream {
       finish_video_capture_stop(take_capture_state_for_stop(), 3s);
     }
 
-    void stop_video_capture_async() {
-      auto state = take_capture_state_for_stop();
-      if (!state) {
-        return;
-      }
-      std::thread {[state = std::move(state)]() mutable {
-        finish_video_capture_stop_join(std::move(state));
-      }}.detach();
-    }
 
     bool video_capture_active() {
       std::lock_guard lock(capture_mutex);

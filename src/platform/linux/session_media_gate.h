@@ -145,6 +145,13 @@ namespace session_media {
       return teardown_owner_t {state_};
     }
 
+    void wait_for_idle() const {
+      std::unique_lock lock(state_->mutex);
+      state_->changed.wait(lock, [this]() {
+        return state_->start_owners == 0 && state_->teardown_owners == 0;
+      });
+    }
+
     bool teardown_in_progress() const {
       std::lock_guard lock(state_->mutex);
       return state_->teardown_owners != 0;

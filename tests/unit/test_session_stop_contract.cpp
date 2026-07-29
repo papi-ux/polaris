@@ -350,6 +350,20 @@ TEST(SessionStopContractTests, TimedOutBrowserJoinRetainsTeardownOwnership) {
   EXPECT_NE(body.find("joiner.detach()"), std::string::npos);
 }
 
+TEST(SessionStopContractTests, CompositorTerminationWaitsForEveryOwnedMediaCleanup) {
+  const auto source = read_source_for_contract("src/platform/linux/session_media.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void prepare_for_stop()");
+  ASSERT_NE(start, std::string::npos);
+  const auto body = source.substr(start, 2400);
+  const auto release_root = body.find("teardown.reset()");
+  const auto terminal_fence = body.find("media_gate().wait_for_idle()");
+  ASSERT_NE(release_root, std::string::npos);
+  ASSERT_NE(terminal_fence, std::string::npos);
+  EXPECT_LT(release_root, terminal_fence);
+  EXPECT_EQ(body.find("skipping nested prepare"), std::string::npos);
+}
+
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {
   EXPECT_EQ(
     decide(true, true, 1, true, session_role_e::controller, true),
