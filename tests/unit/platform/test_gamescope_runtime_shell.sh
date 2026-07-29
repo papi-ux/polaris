@@ -202,6 +202,8 @@ polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "orphan reclaim fai
 : >"$work/run/gamescope-0.lock"
 polaris_remove_orphan_socket "$work/run/gamescope-0" || fail "missing socket was not accepted"
 [ -e "$work/run/gamescope-0.lock" ] || fail "missing socket caused lock-only race cleanup"
+polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "lock-only wrapper state was rejected"
+[ -e "$work/run/gamescope-0.lock" ] || fail "production wrapper removed a lock-only state"
 rm -f "$work/run/gamescope-0.lock"
 
 # Reclaim must take the authoritative Wayland socket lock. A compositor may
@@ -212,8 +214,8 @@ saved_flock_bin="$POLARIS_FLOCK_BIN"
 export POLARIS_FLOCK_BIN=flock
 exec 8>>"$work/run/gamescope-0.lock"
 flock -x 8
-if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
-  fail "held Wayland socket lock did not block reclaim"
+if polaris_reclaim_orphan_gamescope_sockets "$work/run"; then
+  fail "held Wayland socket lock did not block production reclaim"
 fi
 [ -e "$work/run/gamescope-0" ] || fail "socket was removed while its lock was held"
 flock -u 8
