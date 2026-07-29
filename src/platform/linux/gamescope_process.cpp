@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <fstream>
 #include <map>
 #include <set>
@@ -18,6 +19,7 @@
 
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace stream_runtime::gamescope_process {
@@ -48,21 +50,82 @@ namespace stream_runtime::gamescope_process {
         }
       }
 
+      bool still_names(const fs::path &path) const {
+        struct stat fd_stat {};
+        struct stat path_stat {};
+        return fd_ >= 0 && fstat(fd_, &fd_stat) == 0 && lstat(path.c_str(), &path_stat) == 0 &&
+               S_ISREG(fd_stat.st_mode) && S_ISREG(path_stat.st_mode) &&
+               fd_stat.st_dev == path_stat.st_dev && fd_stat.st_ino == path_stat.st_ino;
+      }
+
     private:
       int fd_;
     };
 
-    std::optional<locked_fd_t> lock_wayland_socket_path(const fs::path &socket_path) {
+    bool process_holds_deleted_path(const fs::path &proc_root, const fs::path &path, uid_t owner) {
+      const auto expected = path.string() + " (deleted)";
+      std::error_code ec;
+      for (const auto &process : fs::directory_iterator(proc_root, ec)) {
+        if (ec) {
+          return true;
+        }
+        const auto name = process.path().filename().string();
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
+          continue;
+        }
+        struct stat process_stat {};
+        if (lstat(process.path().c_str(), &process_stat) != 0) {
+          return true;
+        }
+        if (process_stat.st_uid != owner) {
+          continue;
+        }
+        std::error_code fd_ec;
+        for (const auto &entry : fs::directory_iterator(process.path() / "fd", fd_ec)) {
+          if (fd_ec) {
+            return true;
+          }
+          std::error_code link_ec;
+          const auto target = fs::read_symlink(entry.path(), link_ec);
+          if (!link_ec && target == expected) {
+            return true;
+          }
+        }
+        if (fd_ec) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    bool deleted_lock_state_unsafe(const fs::path &proc_root, const fs::path &lock_path) {
+      struct stat lock_stat {};
+      if (lstat(lock_path.c_str(), &lock_stat) != 0 || !S_ISREG(lock_stat.st_mode)) {
+        return true;
+      }
+      return process_holds_deleted_path(proc_root, lock_path, lock_stat.st_uid);
+    }
+
+    std::optional<locked_fd_t> lock_wayland_socket_path(
+      const fs::path &socket_path,
+      const lookup_paths_t &paths
+    ) {
       const fs::path lock_path {socket_path.string() + ".lock"};
+      if (deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+        return std::nullopt;
+      }
       const int fd = open(lock_path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
       if (fd < 0) {
         return std::nullopt;
       }
-      if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        close(fd);
+      locked_fd_t locked {fd};
+      if (!locked.still_names(lock_path) || flock(fd, LOCK_EX | LOCK_NB) != 0) {
         return std::nullopt;
       }
-      return locked_fd_t {fd};
+      if (!locked.still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+        return std::nullopt;
+      }
+      return locked;
     }
 
     template<typename T>
@@ -530,14 +593,21 @@ namespace stream_runtime::gamescope_process {
     // Libwayland holds this advisory lock from bind through display teardown.
     // Taking it non-blocking closes the check/unlink race with a compositor
     // that has locked the name but has not created its socket yet.
-    auto socket_lock = lock_wayland_socket_path(socket_path);
+    const fs::path lock_path {socket_path.string() + ".lock"};
+    auto socket_lock = lock_wayland_socket_path(socket_path, paths);
     if (!socket_lock) {
       return false;
     }
     if (!fs::exists(socket_path, ec) || ec) {
       return !ec;
     }
+    if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
+      return false;
+    }
     if (socket_has_live_holder(socket_path, paths)) {
+      return false;
+    }
+    if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
       return false;
     }
     if (!fs::remove(socket_path, ec) || ec) {

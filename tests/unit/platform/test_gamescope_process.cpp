@@ -226,6 +226,7 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedWhenOnlyUnrelatedXwaylandExists)
 TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
   const auto x4 = tree.x11 / "X4";
 
   // /proc/net/unix may retain an unlinked old listener while a successor has
@@ -278,6 +279,22 @@ TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenWaylandLockIsMissing) {
   EXPECT_FALSE(fs::exists(lock_path));
 }
 
+TEST(GamescopeProcessOwnershipTests, RefusesReplacementLockWhileDeletedLockIsHeld) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(lock_path).put('\n');
+  tree.flush_unix_sockets();
+  const auto fd_dir = tree.proc / "990" / "fd";
+  fs::create_directories(fd_dir);
+  fs::create_symlink(lock_path.string() + " (deleted)", fd_dir / "8");
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
 TEST(GamescopeProcessOwnershipTests, MissingSocketDoesNotUnlinkPotentiallyHeldLock) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
@@ -309,6 +326,7 @@ TEST(GamescopeProcessOwnershipTests, HeldWaylandSocketLockBlocksReclaim) {
 TEST(GamescopeProcessOwnershipTests, RefusesKernelSocketRowWithoutVisibleHolder) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
   tree.add_unix_socket(700, gamescope_socket);
   tree.flush_unix_sockets();
   // Procfs permissions can hide the holder. A kernel row is still unsafe.
@@ -322,6 +340,7 @@ TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenProcSocketMetadataIsUnava
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
   std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
   auto paths = paths_for(tree);
   paths.proc_net_unix = tree.proc / "net" / "missing-unix";
 
@@ -333,6 +352,7 @@ TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenProcSocketMetadataIsUnava
 TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
   tree.add_unix_socket(701, gamescope_socket);
   tree.flush_unix_sockets();
   tree.add_process(440, 1, 9400, {"/usr/bin/gamescope", "--backend=headless"}, {701});

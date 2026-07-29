@@ -200,6 +200,34 @@ polaris_socket_is_orphan() {
   [ "$count" -eq 0 ]
 }
 
+polaris_wayland_lock_is_stable() {
+  local lock="$1" fd_identity path_identity
+  [ ! -L "$lock" ] || return 1
+  fd_identity="$(stat -Lc '%d:%i:%u' "/proc/$BASHPID/fd/8" 2>/dev/null)" || return 1
+  path_identity="$(stat -Lc '%d:%i:%u' "$lock" 2>/dev/null)" || return 1
+  [ "$fd_identity" = "$path_identity" ]
+}
+
+# Fail closed if an older producer still holds an unlinked lock inode with the
+# same pathname. An unlocked replacement lock cannot serialize with it.
+polaris_wayland_lock_has_no_deleted_holder() {
+  local lock="$1" owner proc_root process process_owner fd target
+  owner="$(stat -Lc '%u' "$lock" 2>/dev/null)" || return 1
+  proc_root="$(polaris_proc_root)"
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    process_owner="$(stat -Lc '%u' "$process" 2>/dev/null)" || return 1
+    [ "$process_owner" = "$owner" ] || continue
+    [ -d "$process/fd" ] || return 1
+    for fd in "$process"/fd/*; do
+      [ -e "$fd" ] || [ -L "$fd" ] || continue
+      target="$(readlink "$fd" 2>/dev/null)" || return 1
+      [ "$target" != "$lock (deleted)" ] || return 1
+    done
+  done
+  return 0
+}
+
 # Remove one socket path if orphaned. 0 = missing/removed, 1 = live holder.
 polaris_remove_orphan_socket() (
   local socket="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}"
@@ -209,10 +237,16 @@ polaris_remove_orphan_socket() (
   # Libwayland holds this lock across bind and display lifetime. Acquire it
   # non-blocking so reclaim cannot race a compositor between lock and bind.
   [ -f "$socket.lock" ] && [ ! -L "$socket.lock" ] || return 1
+  polaris_wayland_lock_has_no_deleted_holder "$socket.lock" || return 1
   exec 8<"$socket.lock" || return 1
+  polaris_wayland_lock_is_stable "$socket.lock" || return 1
   "$lock_bin" -n -x 8 || return 1
+  polaris_wayland_lock_is_stable "$socket.lock" || return 1
+  polaris_wayland_lock_has_no_deleted_holder "$socket.lock" || return 1
   [ -e "$socket" ] || return 0
   polaris_socket_is_orphan "$socket" || return 1
+  polaris_wayland_lock_is_stable "$socket.lock" || return 1
+  polaris_wayland_lock_has_no_deleted_holder "$socket.lock" || return 1
   echo "polaris: reclaiming orphan socket $socket" >&2
   rm -f "$socket" 2>/dev/null || return 1
   [ ! -e "$socket" ] && [ ! -S "$socket" ] || return 1

@@ -2,8 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
+runtime_lib="$repo_root/nix/modules/polaris-gamescope-runtime-lib.sh"
 # shellcheck source=/dev/null
-. "$repo_root/nix/modules/polaris-gamescope-runtime-lib.sh"
+. "$runtime_lib"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -285,6 +286,37 @@ if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
 fi
 [ -e "$work/run/gamescope-0" ] || fail "symlink-lock socket was removed"
 rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock" "$work/run/foreign-lock"
+
+# An unlocked regular replacement lock is still unsafe while a producer holds
+# the deleted predecessor inode under the same pathname.
+: >"$work/run/gamescope-0"
+: >"$work/run/gamescope-0.lock"
+mkdir -p "$POLARIS_PROC_ROOT/990/fd"
+ln -s "$work/run/gamescope-0.lock (deleted)" "$POLARIS_PROC_ROOT/990/fd/8"
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "replacement lock was accepted while deleted predecessor was held"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "split-lock socket was removed"
+rm -rf "$POLARIS_PROC_ROOT/990"
+rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
+
+# Replacing the lock after socket-table validation must revoke cleanup before
+# unlink, even if the replacement is an unlocked regular file.
+: >"$work/run/gamescope-0"
+: >"$work/run/gamescope-0.lock"
+polaris_socket_is_orphan() {
+  rm -f "$1.lock"
+  : >"$1.lock"
+  return 0
+}
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "bind-window lock replacement did not revoke reclaim"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "bind-window socket was removed"
+# Restore the production helper overridden by this deterministic race fixture.
+# shellcheck source=/dev/null
+source "$runtime_lib"
+rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
 
 # Reclaim must take the authoritative Wayland socket lock. A compositor may
 # hold that lock before its socket path becomes visible.
