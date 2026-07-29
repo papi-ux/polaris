@@ -478,7 +478,10 @@ case "${1:-}" in
         polaris_stop_marked_gamescope "$marker" nested "$rt" || true
         exit 1
       fi
-      publish_nested_claim
+      publish_nested_claim nested nested || {
+        echo "polaris-gamescope-session: nested ownership changed before portal rebind" >&2
+        exit 1
+      }
       # Portal + polaris-gamescope.env assume gamescope-0. Bail if we lost the race.
       if rg -q "wayland display 'gamescope-1'" "$steam_log" 2>/dev/null; then
         echo "polaris-gamescope-session: nested bound gamescope-1 (portal captures gamescope-0) — see $steam_log" >&2

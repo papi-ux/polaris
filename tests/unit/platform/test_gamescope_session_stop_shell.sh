@@ -216,6 +216,11 @@ mask_line="$(grep -nF 'polaris_mask_idle_unit_runtime' "$script" | tail -n1 | cu
   fail "nested transition claim is not published before idle destruction"
 grep -Fq 'publish_nested_claim nested transition' "$script" ||
   fail "nested launch does not CAS transition ownership before spawn"
+grep -Fq 'publish_nested_claim nested nested' "$script" ||
+  fail "nested portal rebind does not revalidate its claim"
+if grep -Eq '^[[:space:]]*publish_nested_claim[[:space:]]*$' "$script"; then
+  fail "nested claim helper was called without CAS arguments"
+fi
 grep -Fq '[ ! -e "$session_id_file" ] && [ ! -e "$session_mode_file" ]' "$script" ||
   fail "credential and mode publication is not fenced against concurrent starts"
 grep -Fq 'export POLARIS_GAMESCOPE_LOCK_HELD=1' "$script" ||
