@@ -407,8 +407,8 @@ polaris_unmask_idle_unit_runtime() {
   systemctl --user unmask --runtime "$unit" 2>/dev/null || true
 }
 
-polaris_private_group_alive() {
-  local pgid="$1" proc_root process pid found=1 seen=0
+polaris_private_session_alive() {
+  local session_id="$1" proc_root process pid found=1 seen=0
   proc_root="$(polaris_proc_root)"
   [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 2
   for process in "$proc_root"/[0-9]*; do
@@ -420,8 +420,9 @@ polaris_private_group_alive() {
       [ ! -e "$process" ] && continue
       return 2
     fi
-    [ "$POLARIS_PROCESS_PGID" = "$pgid" ] || continue
-    [ "$POLARIS_PROCESS_SESSION_ID" = "$pgid" ] || return 2
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    # Any live member of the authorized private session keeps teardown alive,
+    # including descendants that moved to a separate process group.
     found=0
   done
   [ "$seen" = 1 ] || return 2
@@ -488,7 +489,7 @@ polaris_stop_marked_gamescope() (
   group_rc=0
   for _ in $(seq 1 "$term_steps"); do
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-    if polaris_private_group_alive "$pgid"; then
+    if polaris_private_session_alive "$pgid"; then
       sleep 0.1
       continue
     else
@@ -497,7 +498,7 @@ polaris_stop_marked_gamescope() (
       break
     fi
   done
-  if polaris_private_group_alive "$pgid"; then
+  if polaris_private_session_alive "$pgid"; then
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
     # Keep the exact private-session leader allocation as an immutable PGID-reuse
     # barrier through the last negative-PGID operation. The marked compositor may
@@ -512,7 +513,7 @@ polaris_stop_marked_gamescope() (
     "$kill_bin" -KILL "-$pgid" 2>/dev/null || return 1
     for _ in $(seq 1 "$kill_steps"); do
       [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-      if polaris_private_group_alive "$pgid"; then
+      if polaris_private_session_alive "$pgid"; then
         sleep 0.1
         continue
       else
@@ -525,7 +526,7 @@ polaris_stop_marked_gamescope() (
     group_rc=$?
     [ "$group_rc" -eq 1 ] || return 1
   fi
-  if polaris_private_group_alive "$pgid"; then
+  if polaris_private_session_alive "$pgid"; then
     return 1
   else
     group_rc=$?

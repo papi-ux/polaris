@@ -120,6 +120,34 @@ fi
 mv "$work/bin/kill.default" "$work/bin/kill"
 chmod +x "$work/bin/kill"
 
+# A descendant that moved to another PGID but retained the private SID must
+# prevent marker/environment deletion after the original group is drained.
+write_process_with_group 400 1 400 400 9200 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 9201 /usr/bin/gamescope --backend headless
+write_process_with_group 420 410 420 400 9202 /usr/bin/sleep infinity
+: >"$work/run/gamescope-0"
+write_unix_header
+printf 'row row row row row row 802 %s\n' "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+ln -sfn 'socket:[802]' "$POLARIS_PROC_ROOT/410/fd/3"
+printf '410 9201 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+printf 'DISPLAY=:2\n' >"$work/run/polaris-gamescope.env"
+cat >"$work/bin/kill-escaped-sid" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = -TERM ]; then
+  rm -rf "$POLARIS_PROC_ROOT/410"
+elif [ "\${1:-}" = -KILL ]; then
+  rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+fi
+EOF
+chmod +x "$work/bin/kill-escaped-sid"
+if POLARIS_KILL_BIN="$work/bin/kill-escaped-sid" POLARIS_STOP_WAIT_STEPS=1 POLARIS_KILL_WAIT_STEPS=1 \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "separate-PGID private-session descendant was reported drained"
+fi
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "escaped SID descendant allowed marker deletion"
+[ -e "$work/run/polaris-gamescope.env" ] || fail "escaped SID descendant allowed env deletion"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/420"
+
 # If the private-session leader generation changes after TERM, numeric PGID
 # escalation loses its immutable reuse barrier and must fail closed.
 write_process_with_group 400 1 400 400 9300 /usr/bin/sleep infinity
@@ -160,7 +188,7 @@ fi
 [ -e "$work/run/polaris-gamescope.pid" ] || fail "failed group proof removed marker authority"
 
 mv "$POLARIS_PROC_ROOT" "$work/proc-group-hidden"
-if polaris_private_group_alive 400; then
+if polaris_private_session_alive 400; then
   fail "missing proc root was treated as a drained private group"
 else
   [ "$?" -eq 2 ] || fail "missing proc root did not return unknown group state"
