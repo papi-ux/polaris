@@ -61,6 +61,19 @@ those less-turnkey paths.
 | Debian-family other than Ubuntu 24.04 | Source build | No general Debian package asset yet. |
 | openSUSE Leap, NixOS, Gentoo, custom hosts | Source build/community validation | Please report distro, GPU, driver, compositor, package list, and stream runtime details. |
 
+## Non-NixOS install scripts (this branch)
+
+Automated source install + **gamescope_stream** user units (idle gamescope, session helper, systemd):
+
+```bash
+git submodule update --init --recursive
+./scripts/install/install.sh --from-source          # or --from-source --cuda
+# package already installed:
+./scripts/install/install.sh --package-only
+```
+
+See [`scripts/install/README.md`](../scripts/install/README.md) for steps, PREFIX, and labwc-only mode.
+
 ## Source Build
 
 ### Requirements

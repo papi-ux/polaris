@@ -17,6 +17,21 @@ Reliability patch focused on stream lifecycle, Linux private-session isolation, 
 - Exposed clearer Linux GPU probe topology diagnostics for capture-path troubleshooting
 - Hardened Dashboard smoke navigation so release checks do not issue duplicate route requests
 
+### Linux stream modes / private runtime foundation
+- Add first-class `linux_stream_mode` and `linux_private_runtime` config (Private Stream, Host Virtual Display, Mirror Desktop, GPU-native preference, Gamescope Stream, Headless Dongle).
+- Keep legacy `headless_mode` / `linux_use_cage_compositor` / `linux_prefer_gpu_native_capture` as a compatibility mapping; UI and client-settings write both.
+- Centralize mode resolve/apply/labels in `stream_display_policy`; path availability probes `gamescope` on PATH (and dongle outputs at apply).
+- Introduce `stream_runtime` interface with labwc and gamescope adapters so process session start does not hard-code cage forever.
+- Add `stream_path` registry (runtime × capture × topology) with reserved slots for community EVDI/Family Mode paths; honest `runtime_backend` for portal/host/gamescope/labwc.
+- Document the path plugin contract in `docs/stream-paths.md`.
+- Enable **Headless Dongle** path (`headless_dongle`): privacy/extended swap via kscreen-doctor (`display_topology`, `headless_swap_mode`); DRM sysfs connector discovery + `/api/linux/display-outputs` auto-suggest.
+- Enable **Gamescope Stream** ownership: attach idle `gamescope-0` (start `polaris-gamescope-idle` if needed) or spawn owned headless; wrap app launches into that runtime; never use `gamescope-1` for portal.
+- Harden portal/PipeWire capture: disconnect under loop lock; keep restore_token with invalidate+retry on SelectSources failure; wait for `AvailableCursorModes` ≠ 0; shared ownership so release cannot UAF negotiate/capture waiters.
+- Solid-base stop path: Moonlight `/cancel` responds before nested teardown; owner cancel ignores stale sessiontoken (case-insensitive UUID); Browser Stream signals shutdown, **releases portal/PipeWire**, then joins capture (bounded) **before** pidfd-killing gamescope/labwc; `terminate_impl` and WebUI disconnect share the same prepare path.
+- Dashboard preview tries labwc, gamescope-0/1, host Wayland (grim), then spectacle — works across stream paths.
+- Web UI: selectable path cards write full config (including dongle outputs and gamescope/portal capture).
+- SB-5 mode-neutral Steam apps (issue #5): migration v9 + load-time normalize unwrap `polaris-gamescope-session` hardwires to `steam-appid` + detached `rungameid`; gamescope path applies attach X11 env (no host Wayland) via `stream_runtime::wrap_cmd` / process. Optional Steam Big Picture may keep nested WSI shell.
+
 ## v1.3.1 - 2026-07-12
 
 Security and pairing-state patch focused on current cryptography dependencies, durable client authorization, and clearer paired-device history.
