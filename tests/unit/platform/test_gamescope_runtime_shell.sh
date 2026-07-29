@@ -247,6 +247,7 @@ fi
 : >"$work/run/gamescope-0"
 : >"$work/run/gamescope-0.lock"
 : >"$work/run/gamescope-0-ei"
+: >"$work/run/gamescope-0-ei.lock"
 write_unix_header
 polaris_socket_is_orphan "$work/run/gamescope-0" || fail "filesystem residue not treated as orphan"
 polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "orphan reclaim failed"
@@ -263,6 +264,17 @@ polaris_remove_orphan_socket "$work/run/gamescope-0" || fail "missing socket was
 polaris_reclaim_orphan_gamescope_sockets "$work/run" || fail "lock-only wrapper state was rejected"
 [ -e "$work/run/gamescope-0.lock" ] || fail "production wrapper removed a lock-only state"
 rm -f "$work/run/gamescope-0.lock"
+
+# A socket without its authoritative lock can be a split-lock generation from
+# an earlier unlink. Reclaim must not create a replacement lock inode.
+: >"$work/run/gamescope-0"
+write_unix_header
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "socket without authoritative lock was reclaimed"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "lockless socket was removed"
+[ ! -e "$work/run/gamescope-0.lock" ] || fail "reclaim created a replacement lock inode"
+rm -f "$work/run/gamescope-0"
 
 # Reclaim must take the authoritative Wayland socket lock. A compositor may
 # hold that lock before its socket path becomes visible.

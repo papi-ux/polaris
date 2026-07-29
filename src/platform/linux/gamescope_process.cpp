@@ -54,7 +54,7 @@ namespace stream_runtime::gamescope_process {
 
     std::optional<locked_fd_t> lock_wayland_socket_path(const fs::path &socket_path) {
       const fs::path lock_path {socket_path.string() + ".lock"};
-      const int fd = open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+      const int fd = open(lock_path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
       if (fd < 0) {
         return std::nullopt;
       }

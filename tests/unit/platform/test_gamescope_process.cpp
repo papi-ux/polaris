@@ -255,12 +255,27 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
 TEST(GamescopeProcessOwnershipTests, ReclaimsFilesystemResidueWithoutListener) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
   std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(lock_path).put('\n');
   tree.flush_unix_sockets();  // header only — no listener row
 
   EXPECT_FALSE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
   EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
   EXPECT_FALSE(fs::exists(gamescope_socket));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenWaylandLockIsMissing) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  tree.flush_unix_sockets();
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+  EXPECT_FALSE(fs::exists(lock_path));
 }
 
 TEST(GamescopeProcessOwnershipTests, MissingSocketDoesNotUnlinkPotentiallyHeldLock) {
