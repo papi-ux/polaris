@@ -49,6 +49,25 @@ publish_session_mode() (
   mv -f -- "$tmp" "$session_mode_file"
 )
 
+recover_missing_nested_claim() (
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp
+  exec 9>>"$rt/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
+  [ ! -e "$rt/polaris-gamescope-wsi-nested" ] || return 0
+  [ -s "$session_id_file" ] \
+    && [ "$(tr -d '\r\n' <"$session_id_file")" = "$POLARIS_SESSION_INSTANCE_ID" ] \
+    && [ -f "$session_mode_file" ] \
+    && [ "$(tr -d '[:space:]' <"$session_mode_file")" = nested ] || return 1
+  export POLARIS_GAMESCOPE_LOCK_HELD=1
+  if ! polaris_validate_marker "$marker" idle \
+      && ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+    return 1
+  fi
+  tmp="$rt/.polaris-gamescope-wsi-nested.$$"
+  printf 'transition\n' >"$tmp" || return 1
+  mv -f -- "$tmp" "$rt/polaris-gamescope-wsi-nested"
+)
+
 remove_nested_claim() (
   local expected_state="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}" current_state
   exec 9>>"$rt/polaris-gamescope.lock" || return 1
@@ -665,6 +684,12 @@ case "${1:-}" in
     # Legacy flags from builds that killed EasyEffects / hijacked default.
     rm -f "$rt/polaris-gamescope-prev-default-sink" "$rt/polaris-gamescope-easyeffects-units"
     nested_claim="$rt/polaris-gamescope-wsi-nested"
+    if [ "$session_mode" = nested ] && [ ! -e "$nested_claim" ]; then
+      recover_missing_nested_claim || {
+        echo "polaris-gamescope-session: claimless nested credential is not provably pre-transition; retaining it" >&2
+        exit 1
+      }
+    fi
     if [ -f "$nested_claim" ]; then
       [ "$session_mode" = nested ] || {
         echo "polaris-gamescope-session: nested claim conflicts with durable attach mode" >&2

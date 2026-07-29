@@ -196,15 +196,25 @@ grep -qx 'kill -TERM 101' "$actions" || fail "attach recovery did not terminate 
 [ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "attach recovery cleared no credential"
 [ ! -e "$work/run/polaris-gamescope-session-mode" ] || fail "attach recovery retained mode"
 
-# Lost nested claims cannot be misclassified as attach recovery.
+# A crash after nested mode publication but before transition publication is
+# recoverable only while exact idle ownership proves destruction never began.
 reset_state
 rm -f "$work/run/polaris-gamescope-wsi-nested"
 printf 'nested\n' >"$work/run/polaris-gamescope-session-mode"
 printf 'session-A\n' >"$work/run/polaris-gamescope-session-id"
-if POLARIS_SESSION_INSTANCE_ID= run_stop >/dev/null 2>&1; then
-  fail "claimless nested mode fell back to attach recovery"
+POLARIS_SESSION_INSTANCE_ID= IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 PORTAL_READY=1 \
+  run_stop >/dev/null 2>&1 || fail "pre-transition nested credential recovery failed"
+[ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "pre-transition recovery retained credential"
+
+# A missing claim with a live nested marker remains ambiguous and fails closed.
+reset_state
+rm -f "$work/run/polaris-gamescope-wsi-nested"
+printf 'nested\n' >"$work/run/polaris-gamescope-session-mode"
+printf 'session-A\n' >"$work/run/polaris-gamescope-session-id"
+if POLARIS_SESSION_INSTANCE_ID= NESTED_VALID=1 IDLE_VALID=0 run_stop >/dev/null 2>&1; then
+  fail "claimless live nested generation was adopted without its claim"
 fi
-[ -e "$work/run/polaris-gamescope-session-id" ] || fail "claimless nested failure cleared credential"
+[ -e "$work/run/polaris-gamescope-session-id" ] || fail "ambiguous nested failure cleared credential"
 
 grep -Fq 'if [ -s "$session_id_file" ]; then' "$script" ||
   fail "start does not recover every persisted session credential before replacement"
