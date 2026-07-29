@@ -1523,6 +1523,7 @@ namespace proc {
     thread_local bool forced_proc_directory_enumeration_error = false;
     thread_local pid_t forced_proc_directory_error_after_capture_pid = -1;
     thread_local pid_t forced_reused_exact_generation_pid = -1;
+    thread_local pid_t forced_reused_gamescope_attached_pid = -1;
     thread_local pid_t forced_steam_ownership_capture_failure_pid = -1;
 #endif
 
@@ -2019,7 +2020,10 @@ namespace proc {
      * the portal capture target.
      */
     bool terminate_gamescope_attached_session_clients(const std::string &steam_appid) {
-      std::vector<pidfd_handle_t> targets;
+      struct snapshot_t {
+        std::vector<pidfd_handle_t> targets;
+        bool capture_complete = true;
+      } snapshot;
       DIR *dir = opendir("/proc");
       if (!dir) {
         return false;
@@ -2029,6 +2033,29 @@ namespace proc {
       });
 
       const auto this_pid = getpid();
+      const auto is_candidate = [&steam_appid](
+                                  std::string comm,
+                                  const std::string &cmdline,
+                                  const std::string &environ
+                                ) {
+        boost::to_lower(comm);
+        boost::trim(comm);
+        if (comm == "polaris" || comm.find("polaris") != std::string::npos ||
+            comm == "sleep" || comm == "dbus-daemon" || comm == "systemd" ||
+            cmdline.find("systemd-inhibit") != std::string::npos ||
+            cmdline.find("srt-logger") != std::string::npos ||
+            is_gamescope_infrastructure_process(comm, cmdline)) {
+          return false;
+        }
+        const bool gamescope_attached = proc_environ_is_gamescope_stream_attached(environ);
+        const bool game_client = is_steam_or_game_client_process(comm, cmdline, environ, steam_appid);
+        const bool steam_launch_for_app =
+          !steam_appid.empty() &&
+          (cmdline.find("AppId=" + steam_appid) != std::string::npos ||
+           cmdline.find("steam://rungameid/" + steam_appid) != std::string::npos ||
+           cmdline.find("rungameid/" + steam_appid) != std::string::npos);
+        return (gamescope_attached && game_client) || steam_launch_for_app;
+      };
 
       for (;;) {
         auto *entry = read_next_proc_entry(dir);
@@ -2044,68 +2071,63 @@ namespace proc {
           continue;
         }
 
-        const auto comm_r = read_proc_status_file_result(pid, "comm");
-        const auto cmdline_r = read_proc_status_file_result(pid, "cmdline");
-        const auto environ_r = read_proc_status_file_result(pid, "environ");
-        if (!comm_r.ok() || !cmdline_r.ok() || !environ_r.ok()) {
-          continue;
-        }
-        auto comm = boost::to_lower_copy(comm_r.bytes);
-        boost::trim(comm);
-        const auto &cmdline = cmdline_r.bytes;
-        if (comm == "polaris" || comm.find("polaris") != std::string::npos) {
-          continue;
-        }
-        // Host helpers that inherit gamescope env from the polaris unit — not game clients.
-        if (comm == "sleep" || comm == "dbus-daemon" || comm == "systemd" ||
-            cmdline.find("systemd-inhibit") != std::string::npos ||
-            cmdline.find("srt-logger") != std::string::npos) {
-          continue;
-        }
-        if (is_gamescope_infrastructure_process(comm, cmdline)) {
-          continue;
-        }
-
-        const bool gamescope_attached = proc_environ_is_gamescope_stream_attached(environ_r.bytes);
-        const bool game_client = is_steam_or_game_client_process(
-          comm,
-          cmdline,
-          environ_r.bytes,
-          steam_appid
-        );
-        // Fallback without attach env: only the same appid (not any SteamLaunch).
-        const bool steam_launch_for_app =
-          !steam_appid.empty() &&
-          (cmdline.find("AppId=" + steam_appid) != std::string::npos ||
-           cmdline.find("steam://rungameid/" + steam_appid) != std::string::npos ||
-           cmdline.find("rungameid/" + steam_appid) != std::string::npos);
-
-        // Require attach env + steam/game identity, or an explicit same-app launch line.
-        // Bare attach-env matches are too broad and can crash idle gamescope.
-        if (!(gamescope_attached && game_client) && !steam_launch_for_app) {
+        const auto identity_before = proc_start_time_ticks(pid);
+        const auto comm_before = read_proc_status_file_result(pid, "comm");
+        const auto cmdline_before = read_proc_status_file_result(pid, "cmdline");
+        const auto environ_before = read_proc_status_file_result(pid, "environ");
+        if (!identity_before || !comm_before.ok() || !cmdline_before.ok() || !environ_before.ok() ||
+            !is_candidate(comm_before.bytes, cmdline_before.bytes, environ_before.bytes)) {
           continue;
         }
 
         int open_error = 0;
         auto handle = open_process_pidfd(pid, open_error);
         if (!handle) {
+          if (!process_vanished_during_proc_read(open_error)) {
+            snapshot.capture_complete = false;
+          }
           continue;
         }
-        BOOST_LOG(debug) << "process: gamescope session client candidate pid="sv << pid
-                         << " comm="sv << comm;
-        targets.emplace_back(std::move(*handle));
-      }
 
-      if (targets.empty()) {
+        const auto comm_after = read_proc_status_file_result(pid, "comm");
+        const auto cmdline_after = read_proc_status_file_result(pid, "cmdline");
+        const auto environ_after = read_proc_status_file_result(pid, "environ");
+        auto identity_after = proc_start_time_ticks(pid);
+#ifdef POLARIS_TESTS
+        if (pid == forced_reused_gamescope_attached_pid && identity_after) {
+          ++*identity_after;
+        }
+#endif
+        const bool capture_matches =
+          steam_pidfd_capture_identity_matches(identity_before, identity_after) &&
+          comm_after.ok() && cmdline_after.ok() && environ_after.ok() &&
+          is_candidate(comm_after.bytes, cmdline_after.bytes, environ_after.bytes);
+        if (!capture_matches) {
+          if (!pidfd_has_exited(*handle)) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+
+        BOOST_LOG(debug) << "process: exact gamescope session client pidfd captured pid="sv << pid;
+        snapshot.targets.emplace_back(std::move(*handle));
+      }
+      if (errno != 0) {
+        snapshot.capture_complete = false;
+      }
+      if (!snapshot.capture_complete) {
+        BOOST_LOG(error) << "process: gamescope-attached client capture incomplete; refusing partial termination"sv;
+        return false;
+      }
+      if (snapshot.targets.empty()) {
         BOOST_LOG(info) << "process: no gamescope-attached session clients to terminate"sv;
         ensure_idle_gamescope_alive_for_portal();
         return true;
       }
 
-      BOOST_LOG(info) << "process: terminating "sv << targets.size()
-                      << " gamescope-attached session client(s) (game/reaper/steam)"sv;
-      const bool ok = terminate_pidfds(targets, 3s, 2s, "gamescope session client"sv);
-      // Steam disconnect often ABRTs idle gamescope (xwm X11 I/O). Restore portal target.
+      BOOST_LOG(info) << "process: terminating "sv << snapshot.targets.size()
+                      << " exact gamescope-attached session client(s)"sv;
+      const bool ok = terminate_pidfds(snapshot.targets, 3s, 2s, "gamescope session client"sv);
       ensure_idle_gamescope_alive_for_portal();
       return ok;
     }
@@ -4113,6 +4135,18 @@ namespace proc {
     std::optional<std::uint64_t> after
   ) {
     return steam_pidfd_capture_identity_matches(before, after);
+  }
+
+  bool terminate_gamescope_attached_clients_for_tests(
+    const std::string &steam_appid,
+    pid_t forced_reused_pid
+  ) {
+    const auto previous = forced_reused_gamescope_attached_pid;
+    auto restore = util::fail_guard([previous]() {
+      forced_reused_gamescope_attached_pid = previous;
+    });
+    forced_reused_gamescope_attached_pid = forced_reused_pid;
+    return terminate_gamescope_attached_session_clients(steam_appid);
   }
 
   bool terminate_pid_with_pidfd_for_tests(
@@ -6774,7 +6808,10 @@ namespace proc {
         config::video.linux_display.stream_mode == "gamescope_stream" ||
         config::video.linux_display.private_runtime == "gamescope";
       if (gamescope_session) {
-        terminate_gamescope_attached_session_clients(steam_appid_for_context(_app));
+        const bool attached_cleanup_complete =
+          terminate_gamescope_attached_session_clients(steam_appid_for_context(_app));
+        _exact_generation_cleanup_complete =
+          _exact_generation_cleanup_complete && attached_cleanup_complete;
       }
     }
 
@@ -6811,10 +6848,11 @@ namespace proc {
       platf::unset_env(key);
     }
     for (const auto &key : _session_env_keys) {
-      _env.erase(key);
+      // Parent state must not leak, but preserve the immutable child environment
+      // until prep undo completes. polaris-gamescope-session stop consumes the
+      // exact session credential to avoid targeting desktop Steam.
       platf::unset_env(key);
     }
-    _session_env_keys.clear();
     _audio_context = {};
 
 #ifdef __linux__
@@ -6877,6 +6915,11 @@ namespace proc {
         BOOST_LOG(warning) << "Return code ["sv << ret << ']';
       }
     }
+
+    for (const auto &key : _session_env_keys) {
+      _env.erase(key);
+    }
+    _session_env_keys.clear();
 
 #ifdef __linux__
     finish_isolated_session_generation_cleanup();

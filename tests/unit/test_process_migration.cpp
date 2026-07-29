@@ -1166,6 +1166,44 @@ TEST(ProcessRuntimeConfigTests, SteamPidfdCaptureRejectsStartTimeMismatch) {
   EXPECT_FALSE(proc::steam_pidfd_capture_identity_matches_for_tests(4242, std::nullopt));
 }
 
+TEST(ProcessRuntimeConfigTests, GamescopeAttachedClientPidReuseFailsClosedBeforePidfdSignal) {
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    close(ready_pipe[0]);
+    if (dup2(ready_pipe[1], 3) < 0) {
+      _exit(126);
+    }
+    close(ready_pipe[1]);
+    execl(
+      "/usr/bin/env",
+      "env",
+      "GAMESCOPE_WAYLAND_DISPLAY=gamescope-0",
+      "STEAM_COMPAT_APP_ID=4242",
+      "/bin/sh",
+      "-c",
+      "printf x >&3; exec /usr/bin/tail -f /dev/null",
+      static_cast<char *>(nullptr)
+    );
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+  close(ready_pipe[1]);
+  char ready = 0;
+  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+  close(ready_pipe[0]);
+
+  EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242", child));
+  EXPECT_EQ(kill(child, 0), 0) << "PID-reuse simulation signalled the captured process";
+
+  EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
+  int status = 0;
+  ASSERT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(WIFSIGNALED(status));
+}
+
 TEST(ProcessRuntimeConfigTests, SteamShutdownOwnershipRejectsUnmarkedActiveClients) {
   const std::string running_status = "Name:\tsteam\nState:\tS (sleeping)\n";
   const std::string zombie_status = "Name:\tsteam\nState:\tZ (zombie)\n";
