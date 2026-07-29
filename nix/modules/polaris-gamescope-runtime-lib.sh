@@ -234,7 +234,8 @@ polaris_wayland_lock_has_no_deleted_holder() {
 
 # Remove one socket path if orphaned. 0 = missing/removed, 1 = live holder.
 polaris_remove_orphan_socket() (
-  local socket="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}" socket_identity current_identity
+  local socket="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}" \
+    socket_identity current_identity pin_identity socket_pin
   if [ ! -e "$socket" ]; then
     return 0
   fi
@@ -249,12 +250,21 @@ polaris_remove_orphan_socket() (
   polaris_wayland_lock_has_no_deleted_holder "$socket.lock" || return 1
   [ -e "$socket" ] || return 0
   [ ! -L "$socket" ] || return 1
-  socket_identity="$(stat -Lc '%d:%i:%f' "$socket" 2>/dev/null)" || return 1
+  # Pin the original inode with a same-filesystem hard link. If the pathname is
+  # replaced during orphan validation, the original inode cannot be recycled
+  # into the replacement while this pin exists.
+  socket_pin="${socket}.polaris-pin.$$.$RANDOM"
+  [ ! -e "$socket_pin" ] && [ ! -L "$socket_pin" ] || return 1
+  ln -- "$socket" "$socket_pin" 2>/dev/null || return 1
+  trap 'rm -f -- "$socket_pin"' EXIT
+  socket_identity="$(stat -Lc '%d:%i:%f' "$socket_pin" 2>/dev/null)" || return 1
   polaris_socket_is_orphan "$socket" || return 1
   polaris_wayland_lock_is_stable "$socket.lock" || return 1
   polaris_wayland_lock_has_no_deleted_holder "$socket.lock" || return 1
   current_identity="$(stat -Lc '%d:%i:%f' "$socket" 2>/dev/null)" || return 1
-  [ "$current_identity" = "$socket_identity" ] || return 1
+  pin_identity="$(stat -Lc '%d:%i:%f' "$socket_pin" 2>/dev/null)" || return 1
+  [ "$pin_identity" = "$socket_identity" ] \
+    && [ "$current_identity" = "$socket_identity" ] || return 1
   echo "polaris: reclaiming orphan socket $socket" >&2
   rm -f "$socket" 2>/dev/null || return 1
   [ ! -e "$socket" ] && [ ! -S "$socket" ] || return 1

@@ -286,6 +286,10 @@ TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebin
 TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState) {
   const auto source = read_source_for_contract("src/platform/linux/stream_runtime_gamescope.cpp");
   ASSERT_FALSE(source.empty());
+  const auto ownership_source = read_source_for_contract("src/platform/linux/gamescope_process.cpp");
+  ASSERT_FALSE(ownership_source.empty());
+  EXPECT_NE(ownership_source.find("O_PATH | O_CLOEXEC | O_NOFOLLOW"), std::string::npos);
+  EXPECT_NE(ownership_source.find("socket_pin.still_names_node(socket_path)"), std::string::npos);
   EXPECT_NE(source.find("private_group_state"), std::string::npos);
   EXPECT_NE(source.find("private group did not drain"), std::string::npos);
   EXPECT_NE(source.find("SIGKILL"), std::string::npos);

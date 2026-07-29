@@ -58,6 +58,15 @@ namespace stream_runtime::gamescope_process {
                fd_stat.st_dev == path_stat.st_dev && fd_stat.st_ino == path_stat.st_ino;
       }
 
+      bool still_names_node(const fs::path &path) const {
+        struct stat fd_stat {};
+        struct stat path_stat {};
+        return fd_ >= 0 && fstat(fd_, &fd_stat) == 0 && lstat(path.c_str(), &path_stat) == 0 &&
+               !S_ISLNK(path_stat.st_mode) &&
+               fd_stat.st_dev == path_stat.st_dev && fd_stat.st_ino == path_stat.st_ino &&
+               fd_stat.st_mode == path_stat.st_mode;
+      }
+
     private:
       int fd_;
     };
@@ -596,8 +605,12 @@ namespace stream_runtime::gamescope_process {
     if (!fs::exists(socket_path, ec) || ec) {
       return !ec;
     }
-    struct stat socket_identity {};
-    if (lstat(socket_path.c_str(), &socket_identity) != 0 || S_ISLNK(socket_identity.st_mode)) {
+    const int socket_pin_fd = open(socket_path.c_str(), O_PATH | O_CLOEXEC | O_NOFOLLOW);
+    if (socket_pin_fd < 0) {
+      return false;
+    }
+    locked_fd_t socket_pin {socket_pin_fd};
+    if (!socket_pin.still_names_node(socket_path)) {
       return false;
     }
     if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
@@ -612,11 +625,9 @@ namespace stream_runtime::gamescope_process {
     if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
       return false;
     }
-    struct stat socket_now {};
-    if (lstat(socket_path.c_str(), &socket_now) != 0 ||
-        socket_now.st_dev != socket_identity.st_dev ||
-        socket_now.st_ino != socket_identity.st_ino ||
-        socket_now.st_mode != socket_identity.st_mode) {
+    // Keep an O_PATH descriptor for the original node until unlink completes.
+    // A replacement path therefore cannot reuse the original inode allocation.
+    if (!socket_pin.still_names_node(socket_path)) {
       return false;
     }
     if (!fs::remove(socket_path, ec) || ec) {

@@ -443,6 +443,9 @@ if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
   fail "socket replacement did not revoke reclaim"
 fi
 [ -e "$work/run/gamescope-0" ] || fail "replacement socket was removed"
+if compgen -G "$work/run/gamescope-0.polaris-pin.*" >/dev/null; then
+  fail "socket replacement left an inode pin behind"
+fi
 source "$runtime_lib"
 rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
 
@@ -557,6 +560,11 @@ grep -q 'user.control' \
 if grep -E 'systemctl --user mask --runtime polaris-gamescope-idle' \
     "$repo_root/nix/modules/polaris-gamescope-session.sh"; then
   fail "session still uses ineffective mask --runtime for idle"
+fi
+grep -Fq 'ln -- "$socket" "$socket_pin"' "$runtime_lib" ||
+  fail "shell socket reclaim does not pin the original inode"
+if compgen -G "$work/run/*.polaris-pin.*" >/dev/null; then
+  fail "socket reclaim retained an inode pin"
 fi
 
 printf 'PASS: gamescope shell ownership and display routing\n'
