@@ -40,6 +40,10 @@ polaris_read_marker() {
 
 polaris_headless_gamescope_pid() {
   local pid="$1" arg first=1 executable= backend=0 previous=
+  local exe_path exe_name
+  exe_path="$(readlink "$(polaris_proc_root)/$pid/exe" 2>/dev/null)" || return 1
+  exe_name="${exe_path##*/}"
+  [ "$exe_name" = gamescope ] || return 1
   while IFS= read -r arg; do
     if [ "$first" = 1 ]; then
       executable="${arg##*/}"
@@ -52,13 +56,18 @@ polaris_headless_gamescope_pid() {
   [ "$executable" = gamescope ] && [ "$backend" = 1 ]
 }
 
+polaris_validate_process_generation() {
+  local pid="$1" start_time="$2"
+  polaris_process_fields "$pid" || return 1
+  [ "$POLARIS_PROCESS_START_TIME" = "$start_time" ] || return 1
+  polaris_headless_gamescope_pid "$pid"
+}
+
 polaris_validate_marker() {
   local marker="$1" expected_role="${2:-}"
   polaris_read_marker "$marker" || return 1
   [ -z "$expected_role" ] || [ "$POLARIS_MARKER_ROLE" = "$expected_role" ] || return 1
-  polaris_process_fields "$POLARIS_MARKER_PID" || return 1
-  [ "$POLARIS_PROCESS_START_TIME" = "$POLARIS_MARKER_START_TIME" ] || return 1
-  polaris_headless_gamescope_pid "$POLARIS_MARKER_PID"
+  polaris_validate_process_generation "$POLARIS_MARKER_PID" "$POLARIS_MARKER_START_TIME"
 }
 
 polaris_process_has_argument() {
@@ -136,7 +145,9 @@ polaris_marker_owns_socket() {
 }
 
 polaris_xwayland_pid() {
-  local pid="$1" executable
+  local pid="$1" executable exe_path
+  exe_path="$(readlink "$(polaris_proc_root)/$pid/exe" 2>/dev/null)" || return 1
+  [ "${exe_path##*/}" = Xwayland ] || return 1
   IFS= read -r executable < <(tr '\0' '\n' <"$(polaris_proc_root)/$pid/cmdline" 2>/dev/null) || return 1
   [ "${executable##*/}" = Xwayland ]
 }
@@ -182,7 +193,8 @@ polaris_write_runtime_env() {
 
 polaris_stop_marked_gamescope() {
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
-  local marker_line pid start_time socket owned_sockets=() attempt
+  local marker_line pid start_time socket inode entry current_inode attempt marker_replaced=0
+  local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
   polaris_validate_marker "$marker" "$expected_role" || return 1
   marker_line="$(<"$marker")"
   pid="$POLARIS_MARKER_PID"
@@ -191,35 +203,47 @@ polaris_stop_marked_gamescope() {
   for socket in "$runtime_dir"/gamescope-[0-9]* "$runtime_dir"/gamescope-[0-9]*-ei; do
     [ -e "$socket" ] || [ -S "$socket" ] || continue
     if polaris_marker_owns_socket "$marker" "$socket" "$expected_role"; then
-      owned_sockets+=("$socket")
+      inode="$(polaris_socket_inode "$socket")" || continue
+      owned_sockets+=("$socket|$inode")
     fi
   done
 
+  polaris_validate_process_generation "$pid" "$start_time" || return 1
   "$kill_bin" -TERM "-$pid" 2>/dev/null || "$kill_bin" -TERM "$pid" 2>/dev/null || return 1
-  for attempt in $(seq 1 30); do
-    if ! polaris_validate_marker "$marker" "$expected_role"; then
+  for attempt in $(seq 1 "$term_steps"); do
+    if ! polaris_validate_process_generation "$pid" "$start_time"; then
       break
     fi
     sleep 0.1
   done
-  if polaris_validate_marker "$marker" "$expected_role"; then
+  if polaris_validate_process_generation "$pid" "$start_time"; then
     "$kill_bin" -KILL "-$pid" 2>/dev/null || "$kill_bin" -KILL "$pid" 2>/dev/null || return 1
-    for attempt in $(seq 1 20); do
-      polaris_validate_marker "$marker" "$expected_role" || break
+    for attempt in $(seq 1 "$kill_steps"); do
+      polaris_validate_process_generation "$pid" "$start_time" || break
       sleep 0.1
     done
   fi
-  polaris_validate_marker "$marker" "$expected_role" && return 1
+  polaris_validate_process_generation "$pid" "$start_time" && return 1
 
   if [ -f "$runtime_dir/polaris-gamescope.env" ] \
       && grep -qx "POLARIS_GAMESCOPE_PID=$pid" "$runtime_dir/polaris-gamescope.env" \
       && grep -qx "POLARIS_GAMESCOPE_START_TIME=$start_time" "$runtime_dir/polaris-gamescope.env"; then
     rm -f "$runtime_dir/polaris-gamescope.env"
   fi
-  for socket in "${owned_sockets[@]}"; do
-    rm -f "$socket" "$socket.lock"
-  done
-  if [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ]; then
+  if [ -f "$marker" ] && [ "$(<"$marker")" != "$marker_line" ]; then
+    marker_replaced=1
+  fi
+  if [ "$marker_replaced" = 0 ]; then
+    for entry in "${owned_sockets[@]}"; do
+      socket="${entry%|*}"
+      inode="${entry##*|}"
+      current_inode="$(polaris_socket_inode "$socket" 2>/dev/null || true)"
+      if [ -n "$current_inode" ] && [ "$current_inode" = "$inode" ]; then
+        rm -f "$socket" "$socket.lock"
+      fi
+    done
+  fi
+  if [ "$marker_replaced" = 0 ] && [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ]; then
     rm -f "$marker"
   fi
 }

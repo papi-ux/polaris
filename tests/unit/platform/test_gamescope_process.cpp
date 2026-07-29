@@ -43,7 +43,10 @@ namespace {
       const std::vector<std::uint64_t> &socket_inodes = {}
     ) {
       const auto dir = proc / std::to_string(pid);
+      fs::remove_all(dir);
       fs::create_directories(dir / "fd");
+      const auto executable = argv.empty() ? fs::path {"/usr/bin/process"} : fs::path {argv.front()};
+      fs::create_symlink(executable, dir / "exe");
 
       std::ofstream stat(dir / "stat");
       stat << pid << " (" << (argv.empty() ? "process" : fs::path(argv.front()).filename().string())
@@ -109,6 +112,12 @@ TEST(GamescopeProcessOwnershipTests, MarkerRequiresExactGenerationRoleAndHeadles
   tree.add_process(410, 1, 9001, {"/usr/bin/unrelated-compositor", "--backend", "headless"});
   ASSERT_TRUE(gp::write_marker(marker_path, {.pid = 410, .start_time = 9001, .role = "idle"}));
   EXPECT_FALSE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
+
+  // argv[0] alone is forgeable; /proc/<pid>/exe must also resolve to gamescope.
+  tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend", "headless"});
+  fs::remove(tree.proc / "410" / "exe");
+  fs::create_symlink("/usr/bin/sleep", tree.proc / "410" / "exe");
+  EXPECT_FALSE(gp::validated_marker(marker_path, "idle", paths_for(tree)).has_value());
 }
 
 TEST(GamescopeProcessOwnershipTests, CapturesGenerationFromProcAndReadsExactArguments) {
@@ -126,16 +135,21 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
   const auto host_x0 = tree.x11 / "X0";
+  const auto spoofed_x3 = tree.x11 / "X3";
   const auto owned_x4 = tree.x11 / "X4";
 
   tree.add_unix_socket(500, gamescope_socket);
   tree.add_unix_socket(600, host_x0);
+  tree.add_unix_socket(603, spoofed_x3);
   tree.add_unix_socket(604, owned_x4);
   tree.flush_unix_sockets();
 
   tree.add_process(410, 1, 9001,
                    {"/usr/bin/gamescope", "--backend", "headless", "--xwayland-count", "2"}, {500});
   tree.add_process(411, 410, 9002, {"/usr/bin/Xwayland", ":4"}, {604});
+  tree.add_process(412, 410, 9003, {"/usr/bin/Xwayland", ":3"}, {603});
+  fs::remove(tree.proc / "412" / "exe");
+  fs::create_symlink("/usr/bin/sleep", tree.proc / "412" / "exe");
   tree.add_process(99, 1, 100, {"/usr/bin/Xorg", ":0"}, {600});
 
   const gp::marker_t marker {.pid = 410, .start_time = 9001, .role = "idle"};

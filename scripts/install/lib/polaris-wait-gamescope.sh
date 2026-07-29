@@ -3,15 +3,33 @@
 # Optional private portal bus at $XDG_RUNTIME_DIR/polaris-portal/bus.
 set -euo pipefail
 
+if ! declare -F polaris_validate_marker >/dev/null 2>&1; then
+  runtime_lib="${POLARIS_GAMESCOPE_RUNTIME_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/polaris-gamescope-runtime-lib.sh}"
+  # shellcheck source=/dev/null
+  . "$runtime_lib"
+fi
+
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+marker="$rt/polaris-gamescope.pid"
 
 # Nested stop can leave runtime-masked idle / no gamescope-0.
 if [ -f "$rt/polaris-gamescope-wsi-nested" ] || [ ! -S "$rt/gamescope-0" ]; then
   echo "polaris: recover idle gamescope-0 (nested leftover or missing socket)" >&2
+  marker_role=""
+  if polaris_validate_marker "$marker"; then
+    marker_role="$POLARIS_MARKER_ROLE"
+    if [ "$marker_role" = nested ]; then
+      polaris_stop_marked_gamescope "$marker" nested "$rt" || {
+        echo "polaris: refusing to replace a live nested gamescope generation" >&2
+        exit 1
+      }
+      marker_role=""
+    fi
+  fi
   rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
-    "$rt/polaris-gamescope-audio-sink" "$rt/polaris-gamescope.pid" || true
+    "$rt/polaris-gamescope-audio-sink" || true
   systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
-  if [ ! -S "$rt/gamescope-0" ]; then
+  if [ ! -S "$rt/gamescope-0" ] && [ "$marker_role" != runtime ]; then
     systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
       || systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
   fi

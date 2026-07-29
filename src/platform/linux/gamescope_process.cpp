@@ -24,6 +24,7 @@ namespace stream_runtime::gamescope_process {
       int pid = 0;
       int ppid = 0;
       std::uint64_t start_time = 0;
+      fs::path executable;
       std::vector<std::string> argv;
     };
 
@@ -97,10 +98,20 @@ namespace stream_runtime::gamescope_process {
         return std::nullopt;
       }
 
+      std::error_code executable_ec;
+      const auto executable = fs::read_symlink(
+        proc_root / std::to_string(pid) / "exe",
+        executable_ec
+      );
+      if (executable_ec || executable.empty()) {
+        return std::nullopt;
+      }
+
       return process_t {
         .pid = pid,
         .ppid = *ppid,
         .start_time = *start_time,
+        .executable = executable,
         .argv = std::move(argv),
       };
     }
@@ -109,7 +120,8 @@ namespace stream_runtime::gamescope_process {
       if (process.argv.empty()) {
         return false;
       }
-      return fs::path(process.argv.front()).filename() == expected;
+      return fs::path(process.argv.front()).filename() == expected &&
+             process.executable.filename() == expected;
     }
 
     bool is_headless_gamescope(const process_t &process) {

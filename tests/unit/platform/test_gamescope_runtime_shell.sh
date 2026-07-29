@@ -22,7 +22,9 @@ write_process() {
   local pid="$1" ppid="$2" start_time="$3" exe="$4"
   shift 4
   local dir="$POLARIS_PROC_ROOT/$pid"
+  rm -rf "$dir"
   mkdir -p "$dir/fd"
+  ln -s "$exe" "$dir/exe"
   # state(field 3), ppid(field 4), fields 5..21, starttime(field 22)
   printf '%s (%s) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' \
     "$pid" "${exe##*/}" "$ppid" "$start_time" >"$dir/stat"
@@ -63,14 +65,21 @@ fi
 # Select only the Xwayland that descends from and is socket-owned by the marker.
 write_process 410 1 9001 /usr/bin/gamescope --backend headless --hdr-enabled
 write_process 411 410 9002 /usr/bin/Xwayland :4
+write_process 412 410 9003 /usr/bin/Xwayland :3
+rm -f "$POLARIS_PROC_ROOT/412/exe"
+ln -s /usr/bin/sleep "$POLARIS_PROC_ROOT/412/exe"
 write_process 99 1 100 /usr/bin/Xorg :0
 : >"$POLARIS_X11_SOCKET_DIR/X0"
+: >"$POLARIS_X11_SOCKET_DIR/X3"
 : >"$POLARIS_X11_SOCKET_DIR/X4"
+ln -s 'socket:[500]' "$POLARIS_PROC_ROOT/410/fd/3"
+ln -s 'socket:[603]' "$POLARIS_PROC_ROOT/412/fd/3"
 ln -s 'socket:[604]' "$POLARIS_PROC_ROOT/411/fd/3"
 ln -s 'socket:[600]' "$POLARIS_PROC_ROOT/99/fd/3"
 write_unix_header
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 500 %s\n' "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 600 %s\n' "$POLARIS_X11_SOCKET_DIR/X0" >>"$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 603 %s\n' "$POLARIS_X11_SOCKET_DIR/X3" >>"$POLARIS_PROC_NET_UNIX"
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 604 %s\n' "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
 printf '410 9001 idle\n' >"$work/run/polaris-gamescope.pid"
 
@@ -94,11 +103,42 @@ grep -qx -- '-TERM -410' "$work/kills" || fail "exact marked process group was n
 [ ! -e "$work/run/polaris-gamescope.env" ] || fail "owned runtime env survived terminal stop"
 [ -e "$POLARIS_X11_SOCKET_DIR/X0" ] || fail "host X0 was removed during owned stop"
 
+# A same-role successor replacing the PID generation during TERM must never
+# receive the predecessor's escalation or lose its socket/marker.
+write_process 410 1 9100 /usr/bin/gamescope --backend headless
+: >"$work/run/gamescope-0"
+ln -s 'socket:[700]' "$POLARIS_PROC_ROOT/410/fd/3"
+write_unix_header
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 700 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+printf '410 9100 idle\n' >"$work/run/polaris-gamescope.pid"
+: >"$work/kills"
+cat >"$work/bin/kill-successor" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -TERM ]; then
+  printf '410 (gamescope) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 9101\n' \
+    >"$POLARIS_PROC_ROOT/410/stat"
+  printf '410 9101 idle\n' >"$work/run/polaris-gamescope.pid"
+fi
+EOF
+chmod +x "$work/bin/kill-successor"
+POLARIS_KILL_BIN="$work/bin/kill-successor" \
+  polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run" ||
+  fail "predecessor stop should finish safely after successor replacement"
+if grep -q -- '-KILL' "$work/kills"; then
+  fail "same-role successor received predecessor escalation"
+fi
+[ "$(<"$work/run/polaris-gamescope.pid")" = '410 9101 idle' ] ||
+  fail "same-role successor marker was removed"
+[ -e "$work/run/gamescope-0" ] || fail "same-role successor socket was removed"
+
 # Production call sites must use exact markers, never process-name-wide pkill/pgrep.
 for source in \
   "$repo_root/src/platform/linux/stream_runtime_gamescope.cpp" \
   "$repo_root/nix/modules/polaris-gamescope-session.sh" \
   "$repo_root/nix/modules/session-lib.nix" \
+  "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" \
   "$repo_root/scripts/install/lib/polaris-gamescope-idle.sh"; do
   if grep -Eq "p(kill|grep).*gamescope|gamescope.*p(kill|grep)" "$source"; then
     fail "broad gamescope process matching remains in ${source#$repo_root/}"
@@ -108,5 +148,11 @@ grep -q 'gamescope_process::validated_marker' "$repo_root/src/platform/linux/str
   fail "C++ runtime does not validate exact marker generation"
 grep -q 'polaris_stop_marked_gamescope' "$repo_root/nix/modules/polaris-gamescope-session.sh" ||
   fail "session lifecycle does not stop the marked generation"
+grep -q 'polaris_stop_marked_gamescope' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" ||
+  fail "non-Nix readiness helper does not stop nested ownership exactly"
+if grep -Eq 'rm .*polaris-gamescope\.pid|rm -f .*polaris-gamescope\.pid' \
+    "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh"; then
+  fail "non-Nix readiness helper still removes ownership markers unconditionally"
+fi
 
 printf 'PASS: gamescope shell ownership and display routing\n'
