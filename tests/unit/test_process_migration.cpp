@@ -1389,7 +1389,7 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownUsesImmutableExact
   steam_app.name = "Steam Big Picture";
   steam_app.cmd = "steam -gamepadui";
 
-  auto spawn_steam_like = [&](bool marked) {
+  auto spawn_steam_like = [&](bool marked, const char *argv0 = "steam") {
     const auto child = fork();
     EXPECT_GE(child, 0);
     if (child == 0) {
@@ -1398,7 +1398,7 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownUsesImmutableExact
       } else {
         unsetenv("POLARIS_SESSION_INSTANCE_ID");
       }
-      execl("/bin/sleep", "steam", "60", nullptr);
+      execl("/bin/sleep", argv0, "60", nullptr);
       _exit(127);
     }
     return child;
@@ -1433,7 +1433,7 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownUsesImmutableExact
 
   auto faulted_owned = spawn_steam_like(true);
   linux_child_guard_t faulted_guard {faulted_owned};
-  auto faulted_control = spawn_steam_like(true);
+  auto faulted_control = spawn_steam_like(true, "steamwebhelper");
   linux_child_guard_t faulted_control_guard {faulted_control};
   ASSERT_GT(faulted_owned, 0);
   ASSERT_GT(faulted_control, 0);
@@ -1493,6 +1493,327 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownUsesImmutableExact
   EXPECT_EQ(mirror_guard.wait(&status, WNOHANG), 0);
 #else
   GTEST_SKIP() << "Linux-only immutable private Steam teardown wiring";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownDrainsHelpersBeforeFallbackSignals) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t config_guard;
+  const std::string token = "steam-root-first-generation";
+  proc::ctx_t steam_app {};
+  steam_app.name = "MOUSE: P.I. For Hire";
+  steam_app.source = "steam";
+  steam_app.steam_appid = "2416450";
+
+  int ready_pipe[2] {-1, -1};
+  int event_pipe[2] {-1, -1};
+  int helper_pid_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  ASSERT_EQ(pipe(event_pipe), 0);
+  ASSERT_EQ(pipe(helper_pid_pipe), 0);
+
+  const auto root = fork();
+  ASSERT_NE(root, -1);
+  if (root == 0) {
+    close(ready_pipe[0]);
+    close(event_pipe[0]);
+    close(helper_pid_pipe[0]);
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+
+    const auto helper_script =
+      "import os, signal, time\n"
+      "event_fd = " + std::to_string(event_pipe[1]) + "\n"
+      "ready_fd = " + std::to_string(ready_pipe[1]) + "\n"
+      "def on_term(signum, frame):\n"
+      "    os.write(event_fd, b'H')\n"
+      "def on_drain(signum, frame):\n"
+      "    time.sleep(1.0)\n"
+      "    os.write(event_fd, b'G')\n"
+      "    raise SystemExit(0)\n"
+      "signal.signal(signal.SIGTERM, on_term)\n"
+      "signal.signal(signal.SIGUSR1, on_drain)\n"
+      "os.write(ready_fd, b'H')\n"
+      "while True:\n"
+      "    signal.pause()\n";
+    setenv("POLARIS_TEST_STEAM_HELPER_SCRIPT", helper_script.c_str(), 1);
+    const auto root_script =
+      std::string {"exec -a steamwebhelper python3 -c \"$POLARIS_TEST_STEAM_HELPER_SCRIPT\" & "} +
+      "helper=$!; printf '%s\\n' \"$helper\" >&" + std::to_string(helper_pid_pipe[1]) + "; " +
+      "trap 'printf R >&" + std::to_string(event_pipe[1]) +
+      "; kill -USR1 \"$helper\"; exit 0' TERM; " +
+      "printf R >&" + std::to_string(ready_pipe[1]) + "; " +
+      "wait \"$helper\"";
+    execl("/bin/bash", "/tmp/ubuntu12_32/steam", "-c", root_script.c_str(), nullptr);
+    _exit(120);
+  }
+  linux_child_guard_t root_guard {root};
+
+  close(ready_pipe[1]);
+  close(event_pipe[1]);
+  close(helper_pid_pipe[1]);
+  std::string helper_pid_text;
+  for (;;) {
+    char digit = 0;
+    ASSERT_EQ(read(helper_pid_pipe[0], &digit, 1), 1);
+    if (digit == '\n') {
+      break;
+    }
+    helper_pid_text.push_back(digit);
+  }
+  close(helper_pid_pipe[0]);
+  const auto helper = static_cast<pid_t>(std::stol(helper_pid_text));
+  ASSERT_GT(helper, 0);
+
+  std::string ready_events;
+  while (ready_events.size() < 2) {
+    char event = 0;
+    ASSERT_EQ(read(ready_pipe[0], &event, 1), 1);
+    ready_events.push_back(event);
+  }
+  close(ready_pipe[0]);
+  EXPECT_NE(ready_events.find('R'), std::string::npos);
+  EXPECT_NE(ready_events.find('H'), std::string::npos);
+
+  config::video.linux_display.use_cage_compositor = false;
+  const bool terminated = proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, token
+  );
+  if (!terminated) {
+    (void) kill(root, SIGKILL);
+    (void) kill(helper, SIGKILL);
+    int ignored_status = 0;
+    (void) root_guard.wait(&ignored_status, 0);
+    close(event_pipe[0]);
+    FAIL() << "production pre-cage Steam ownership capture unexpectedly refused the test graph";
+    return;
+  }
+
+  int root_status = 0;
+  ASSERT_EQ(root_guard.wait(&root_status, 0), root);
+  ASSERT_TRUE(WIFEXITED(root_status));
+  EXPECT_EQ(WEXITSTATUS(root_status), 0);
+
+  std::string shutdown_events;
+  for (;;) {
+    char buffer[16];
+    const auto bytes = read(event_pipe[0], buffer, sizeof(buffer));
+    if (bytes > 0) {
+      shutdown_events.append(buffer, static_cast<std::size_t>(bytes));
+      continue;
+    }
+    ASSERT_EQ(bytes, 0);
+    break;
+  }
+  close(event_pipe[0]);
+
+  EXPECT_NE(shutdown_events.find('R'), std::string::npos)
+    << "the Steam client root must receive the initial graceful signal";
+  EXPECT_NE(shutdown_events.find('G'), std::string::npos)
+    << "the Steam helper must drain through the client root";
+  EXPECT_EQ(shutdown_events.find('H'), std::string::npos)
+    << "Steam helpers must not receive fallback SIGTERM before the client root can drain them";
+#else
+  GTEST_SKIP() << "Linux-only private Steam process-graph teardown ordering";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownTreatsSteamScriptAsClientRoot) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t config_guard;
+  const std::string token = "steam-script-root-generation";
+  proc::ctx_t steam_app {};
+  steam_app.name = "Steam Big Picture";
+  steam_app.source = "steam";
+
+  const auto root = fork();
+  ASSERT_NE(root, -1);
+  if (root == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "/tmp/steam.sh", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t root_guard {root};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool ready = false;
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    std::ifstream environ("/proc/" + std::to_string(root) + "/environ", std::ios::binary);
+    std::ostringstream bytes;
+    bytes << environ.rdbuf();
+    if (bytes.str().find(expected) != std::string::npos) {
+      ready = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  ASSERT_TRUE(ready);
+
+  config::video.linux_display.use_cage_compositor = false;
+  EXPECT_TRUE(proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, token
+  ));
+
+  int status = 0;
+  const auto waited = root_guard.wait(&status, WNOHANG);
+  EXPECT_EQ(waited, root);
+  if (waited == 0) {
+    EXPECT_EQ(root_guard.terminate_and_reap(&status), root);
+  }
+#else
+  GTEST_SKIP() << "Linux-only private Steam script root classification";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownPrefersNativeClientOverSteamLauncher) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t config_guard;
+  const std::string token = "native-steam-root-priority-generation";
+  proc::ctx_t steam_app {};
+  steam_app.name = "MOUSE: P.I. For Hire";
+  steam_app.source = "steam";
+  steam_app.steam_appid = "2416450";
+
+  auto spawn_owned = [&](const char *argv0) {
+    const auto child = fork();
+    EXPECT_NE(child, -1);
+    if (child == 0) {
+      setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      execl("/bin/sleep", argv0, "60", nullptr);
+      _exit(127);
+    }
+    return child;
+  };
+
+  const auto native_root = spawn_owned("/tmp/ubuntu12_32/steam");
+  linux_child_guard_t native_guard {native_root};
+  const auto launcher = spawn_owned("steam");
+  linux_child_guard_t launcher_guard {launcher};
+  ASSERT_GT(native_root, 0);
+  ASSERT_GT(launcher, 0);
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  auto wait_for_token = [&](pid_t pid) {
+    for (int attempt = 0; attempt < 40; ++attempt) {
+      std::ifstream environ("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+      std::ostringstream bytes;
+      bytes << environ.rdbuf();
+      if (bytes.str().find(expected) != std::string::npos) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+  };
+  ASSERT_TRUE(wait_for_token(native_root));
+  ASSERT_TRUE(wait_for_token(launcher));
+
+  config::video.linux_display.use_cage_compositor = false;
+  EXPECT_TRUE(proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, token
+  ));
+
+  int status = 0;
+  const auto native_wait = native_guard.wait(&status, WNOHANG);
+  EXPECT_EQ(native_wait, native_root);
+  if (native_wait == 0) {
+    EXPECT_EQ(native_guard.terminate_and_reap(&status), native_root);
+  }
+  const auto launcher_wait = launcher_guard.wait(&status, WNOHANG);
+  EXPECT_EQ(launcher_wait, launcher);
+  if (launcher_wait == 0) {
+    EXPECT_EQ(launcher_guard.terminate_and_reap(&status), launcher);
+  }
+#else
+  GTEST_SKIP() << "Linux-only native Steam root priority";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownSelectsTopLevelLauncherFromLauncherTree) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t config_guard;
+  const std::string token = "steam-launcher-tree-generation";
+  proc::ctx_t steam_app {};
+  steam_app.name = "Steam Big Picture";
+  steam_app.source = "steam";
+
+  int child_pid_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(child_pid_pipe), 0);
+  const auto launcher_root = fork();
+  ASSERT_NE(launcher_root, -1);
+  if (launcher_root == 0) {
+    close(child_pid_pipe[0]);
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    const auto launcher_child = fork();
+    if (launcher_child < 0) {
+      _exit(120);
+    }
+    if (launcher_child == 0) {
+      close(child_pid_pipe[1]);
+      execl("/bin/sleep", "steam", "60", nullptr);
+      _exit(121);
+    }
+    (void) write(child_pid_pipe[1], &launcher_child, sizeof(launcher_child));
+    close(child_pid_pipe[1]);
+    execl("/bin/sleep", "steam", "60", nullptr);
+    _exit(122);
+  }
+  linux_child_guard_t root_guard {launcher_root};
+
+  close(child_pid_pipe[1]);
+  pid_t launcher_child = -1;
+  ASSERT_EQ(read(child_pid_pipe[0], &launcher_child, sizeof(launcher_child)), sizeof(launcher_child));
+  close(child_pid_pipe[0]);
+  ASSERT_GT(launcher_child, 0);
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  auto wait_for_token = [&](pid_t pid) {
+    for (int attempt = 0; attempt < 40; ++attempt) {
+      std::ifstream environ("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+      std::ostringstream bytes;
+      bytes << environ.rdbuf();
+      if (bytes.str().find(expected) != std::string::npos) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+  };
+  ASSERT_TRUE(wait_for_token(launcher_root));
+  ASSERT_TRUE(wait_for_token(launcher_child));
+
+  config::video.linux_display.use_cage_compositor = false;
+  const bool terminated = proc::terminate_session_owned_steam_before_cage_stop_for_tests(
+    steam_app, true, token
+  );
+  if (!terminated) {
+    (void) kill(launcher_child, SIGKILL);
+  }
+  EXPECT_TRUE(terminated);
+
+  int status = 0;
+  const auto root_wait = root_guard.wait(&status, WNOHANG);
+  EXPECT_EQ(root_wait, launcher_root);
+  if (root_wait == 0) {
+    EXPECT_EQ(root_guard.terminate_and_reap(&status), launcher_root);
+  }
+
+  bool child_exited = false;
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    std::ifstream status_file("/proc/" + std::to_string(launcher_child) + "/status");
+    std::ostringstream status_bytes;
+    status_bytes << status_file.rdbuf();
+    if (!status_file || status_bytes.str().find("State:\tZ") != std::string::npos) {
+      child_exited = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  if (!child_exited) {
+    (void) kill(launcher_child, SIGKILL);
+  }
+  EXPECT_TRUE(child_exited);
+#else
+  GTEST_SKIP() << "Linux-only Steam launcher tree root selection";
 #endif
 }
 

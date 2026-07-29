@@ -1016,6 +1016,8 @@ namespace proc {
 #ifdef POLARIS_TESTS
     thread_local pid_t forced_pidfd_open_failure_pid = -1;
     thread_local std::atomic<bool> *pidfd_wait_entered_for_tests = nullptr;
+    thread_local bool forced_steam_ownership_descendants_only = false;
+    thread_local std::set<pid_t> forced_steam_ownership_test_pids;
 #endif
 
     std::optional<pidfd_handle_t> open_process_pidfd(pid_t pid, int &open_error) {
@@ -1254,6 +1256,26 @@ namespace proc {
       const auto effective_argv0 = argv0_path.empty() ? proc_argv0_from_cmdline(cmdline) : std::string {argv0_path};
       return is_desktop_steam_client_process(comm, effective_argv0) &&
              !proc_status_is_zombie(status);
+    }
+
+    enum class steam_client_process_role_e {
+      native_root,
+      launcher_root,
+      helper,
+    };
+
+    steam_client_process_role_e steam_client_process_role(std::string_view comm, std::string_view argv0_path) {
+      const auto argv0 = basename_from_path(argv0_path);
+      if (path_has_suffix(argv0_path, "/ubuntu12_32/steam")) {
+        return steam_client_process_role_e::native_root;
+      }
+      if (comm == "steam" ||
+          argv0 == "steam" ||
+          argv0 == "steam.sh" ||
+          path_has_suffix(argv0_path, "/steam.sh")) {
+        return steam_client_process_role_e::launcher_root;
+      }
+      return steam_client_process_role_e::helper;
     }
 
 #ifdef POLARIS_TESTS
@@ -1509,10 +1531,89 @@ namespace proc {
     }
 
     struct steam_client_ownership_snapshot_t {
-      std::vector<pidfd_handle_t> owned;
+      std::vector<pidfd_handle_t> roots;
+      std::vector<pidfd_handle_t> launcher_roots;
+      std::vector<pidfd_handle_t> helpers;
       std::vector<pidfd_handle_t> unowned;
       bool capture_complete = true;
+
+      std::size_t owned_count() const {
+        return roots.size() + launcher_roots.size() + helpers.size();
+      }
     };
+
+    std::optional<std::size_t> unique_top_level_steam_launcher(
+      const std::vector<pidfd_handle_t> &launchers
+    ) {
+      std::optional<std::size_t> selected;
+      for (std::size_t candidate_index = 0; candidate_index < launchers.size(); ++candidate_index) {
+        bool descends_from_another_launcher = false;
+        for (std::size_t ancestor_index = 0; ancestor_index < launchers.size(); ++ancestor_index) {
+          if (candidate_index == ancestor_index) {
+            continue;
+          }
+          const auto descends = proc_pid_descends_from(
+            launchers[candidate_index].pid,
+            launchers[ancestor_index].pid
+          );
+          if (!descends) {
+            return std::nullopt;
+          }
+          if (*descends) {
+            descends_from_another_launcher = true;
+            break;
+          }
+        }
+        if (!descends_from_another_launcher) {
+          if (selected) {
+            return std::nullopt;
+          }
+          selected = candidate_index;
+        }
+      }
+      return selected;
+    }
+
+    void select_ordered_steam_root(steam_client_ownership_snapshot_t &snapshot) {
+      if (snapshot.roots.size() == 1) {
+        for (auto &launcher : snapshot.launcher_roots) {
+          snapshot.helpers.emplace_back(std::move(launcher));
+        }
+        snapshot.launcher_roots.clear();
+        return;
+      }
+      if (!snapshot.roots.empty()) {
+        return;
+      }
+
+      const auto launcher_index = unique_top_level_steam_launcher(snapshot.launcher_roots);
+      if (!launcher_index) {
+        return;
+      }
+      for (std::size_t index = 0; index < snapshot.launcher_roots.size(); ++index) {
+        if (index == *launcher_index) {
+          snapshot.roots.emplace_back(std::move(snapshot.launcher_roots[index]));
+        } else {
+          snapshot.helpers.emplace_back(std::move(snapshot.launcher_roots[index]));
+        }
+      }
+      snapshot.launcher_roots.clear();
+    }
+
+    std::vector<pidfd_handle_t> take_owned_steam_handles(steam_client_ownership_snapshot_t &snapshot) {
+      std::vector<pidfd_handle_t> handles;
+      handles.reserve(snapshot.owned_count());
+      for (auto &handle : snapshot.roots) {
+        handles.emplace_back(std::move(handle));
+      }
+      for (auto &handle : snapshot.launcher_roots) {
+        handles.emplace_back(std::move(handle));
+      }
+      for (auto &handle : snapshot.helpers) {
+        handles.emplace_back(std::move(handle));
+      }
+      return handles;
+    }
 
     steam_client_ownership_snapshot_t steam_client_ownership_snapshot(std::string_view session_instance_id) {
       steam_client_ownership_snapshot_t snapshot;
@@ -1538,7 +1639,6 @@ namespace proc {
         if (pid <= 1 || pid == getpid()) {
           continue;
         }
-
         const auto identity_before = proc_start_time_ticks(pid);
         const auto comm_before = read_proc_status_file_result(pid, "comm");
         const auto cmdline_before = read_proc_status_file_result(pid, "cmdline");
@@ -1609,6 +1709,17 @@ namespace proc {
         if (!is_active_steam_shutdown_ownership_process(comm, argv0, cmdline, status)) {
           continue;
         }
+#ifdef POLARIS_TESTS
+        if (forced_steam_ownership_descendants_only) {
+          if (!forced_steam_ownership_test_pids.contains(pid)) {
+            const auto descends_from_test = proc_pid_descends_from(pid, getpid());
+            if (!descends_from_test || !*descends_from_test) {
+              continue;
+            }
+            forced_steam_ownership_test_pids.emplace(pid);
+          }
+        }
+#endif
         auto identity_after = proc_start_time_ticks(pid);
 #ifdef POLARIS_TESTS
         if (pid == forced_reused_exact_generation_pid && identity_after) {
@@ -1636,7 +1747,17 @@ namespace proc {
           continue;
         }
         if (proc_environ_matches_isolated_session(environ.bytes, session_instance_id)) {
-          snapshot.owned.emplace_back(std::move(*handle));
+          switch (steam_client_process_role(comm, argv0)) {
+            case steam_client_process_role_e::native_root:
+              snapshot.roots.emplace_back(std::move(*handle));
+              break;
+            case steam_client_process_role_e::launcher_root:
+              snapshot.launcher_roots.emplace_back(std::move(*handle));
+              break;
+            case steam_client_process_role_e::helper:
+              snapshot.helpers.emplace_back(std::move(*handle));
+              break;
+          }
         } else {
           snapshot.unowned.emplace_back(std::move(*handle));
         }
@@ -1648,6 +1769,7 @@ namespace proc {
       }
 
       closedir(dir);
+      select_ordered_steam_root(snapshot);
       return snapshot;
     }
 
@@ -1666,7 +1788,7 @@ namespace proc {
             app,
             session_owned_cage,
             !session_instance_id.empty(),
-            !ownership.owned.empty(),
+            ownership.owned_count() > 0,
             !ownership.unowned.empty(),
             ownership.capture_complete
           )) {
@@ -1675,20 +1797,62 @@ namespace proc {
         } else if (!ownership.unowned.empty()) {
           BOOST_LOG(warning) << "process: skipping pre-cage private Steam termination because "sv
                              << ownership.unowned.size() << " active Steam client process(es) are not session-owned"sv;
-        } else if (ownership.owned.empty()) {
+        } else if (ownership.owned_count() == 0) {
           BOOST_LOG(info) << "process: skipping pre-cage private Steam termination because no session-owned Steam client is active"sv;
         }
         return false;
       }
 
-      BOOST_LOG(info) << "process: terminating "sv << ownership.owned.size()
-                      << " session-owned Steam process(es) through pidfd before isolated cage stop"sv;
-      if (terminate_pidfds(ownership.owned, 5s, 1s, "private Steam"sv)) {
+      if (ownership.roots.size() != 1) {
+        BOOST_LOG(warning) << "process: skipping ordered pre-cage private Steam termination because ownership capture found "sv
+                           << ownership.roots.size() << " selected root process(es) and "sv
+                           << ownership.launcher_roots.size() << " unresolved launcher root candidate(s)"sv;
+        return false;
+      }
+
+      BOOST_LOG(info) << "process: terminating the session-owned Steam client root through pidfd before "sv
+                      << ownership.helpers.size() << " helper process(es)"sv;
+      if (!terminate_pidfds(ownership.roots, 5s, 1s, "private Steam client root"sv)) {
+        BOOST_LOG(warning) << "process: session-owned Steam client root remained after bounded pidfd termination; "sv
+                           << "continuing with isolated cage fallback cleanup"sv;
+        return false;
+      }
+
+      if (!ownership.helpers.empty()) {
+        BOOST_LOG(info) << "process: allowing "sv << ownership.helpers.size()
+                        << " session-owned Steam helper process(es) to drain after client-root exit"sv;
+        if (wait_for_pidfds_exit(ownership.helpers, 2s)) {
+          BOOST_LOG(info) << "process: session-owned Steam helpers drained without direct signaling"sv;
+        } else {
+          BOOST_LOG(info) << "process: session-owned Steam helper drain grace elapsed; capturing exact survivors"sv;
+        }
+      }
+
+      auto survivors = steam_client_ownership_snapshot(session_instance_id);
+      if (!survivors.capture_complete) {
+        BOOST_LOG(warning) << "process: skipping private Steam survivor cleanup because post-root ownership capture was incomplete"sv;
+        return false;
+      }
+      if (!survivors.unowned.empty()) {
+        BOOST_LOG(warning) << "process: skipping private Steam survivor cleanup because "sv
+                           << survivors.unowned.size() << " active Steam client process(es) are not session-owned"sv;
+        return false;
+      }
+      if (survivors.owned_count() == 0) {
+        BOOST_LOG(info) << "process: session-owned Steam client root drained all helpers before isolated cage stop"sv;
+        return true;
+      }
+
+      auto survivor_handles = take_owned_steam_handles(survivors);
+      BOOST_LOG(info) << "process: terminating "sv << survivor_handles.size()
+                      << " session-owned Steam survivor process(es) after client-root drain"sv;
+      if (terminate_pidfds(survivor_handles, 2s, 1s, "private Steam survivor"sv)) {
         BOOST_LOG(info) << "process: session-owned Steam exited before isolated cage stop"sv;
         return true;
       }
 
-      BOOST_LOG(warning) << "process: session-owned Steam remained after bounded pidfd termination; continuing with isolated cage fallback cleanup"sv;
+      BOOST_LOG(warning) << "process: session-owned Steam survivors remained after bounded pidfd termination; "sv
+                         << "continuing with isolated cage fallback cleanup"sv;
       return false;
     }
 
@@ -3620,18 +3784,26 @@ namespace proc {
     const auto previous_app = _app;
     const auto previous_used_cage = _session_used_cage_compositor;
     const auto previous_instance_id = _session_instance_id;
+    const auto previous_descendants_only = forced_steam_ownership_descendants_only;
+    const auto previous_test_pids = forced_steam_ownership_test_pids;
     _app = app;
     _session_used_cage_compositor = session_owned_cage;
     _session_instance_id = session_instance_id;
+    forced_steam_ownership_descendants_only = true;
+    forced_steam_ownership_test_pids.clear();
     auto restore_state = util::fail_guard([
       this,
       previous_app,
       previous_used_cage,
-      previous_instance_id
+      previous_instance_id,
+      previous_descendants_only,
+      previous_test_pids
     ]() {
       _app = previous_app;
       _session_used_cage_compositor = previous_used_cage;
       _session_instance_id = previous_instance_id;
+      forced_steam_ownership_descendants_only = previous_descendants_only;
+      forced_steam_ownership_test_pids = previous_test_pids;
     });
     return terminate_session_owned_steam_before_cage_stop();
   }

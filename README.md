@@ -92,15 +92,14 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.3.1
+## What is New in v1.3.2
 
-Polaris v1.3.1 is a focused security and pairing-state patch: current Browser Stream cryptography dependencies, stronger client authorization persistence, and clearer paired-device history without changing the streaming workflow.
+Polaris v1.3.2 is a focused reliability patch for stream lifecycle, Linux private sessions, reconnect recovery, and truthful diagnostics.
 
-- **Browser Stream security refresh**: current Go cryptography and supporting modules clear the dependency alerts previously attached to the helper dependency graph.
-- **Added and Last seen timestamps**: newly paired and authenticated clients expose localized history while legacy records remain honestly labeled as not recorded.
-- **Fail-closed client authorization**: canonical certificate identity, revocation, duplicate-state validation, and request-time authorization snapshots are hardened.
-- **Safer state persistence**: paired-client records use private, cross-process atomic state replacement.
-- **Truthful client controls**: failed paired-client mutations remain visible instead of being presented as successful in the web console.
+- **More reliable stream handoff**: RTSP follow-up control connections and started commands stay bound to the live session while PulseAudio operations remain serialized.
+- **Safer session cleanup**: lifecycle teardown, private Steam ownership, interrupted process waits, and Big Picture input isolation are hardened without broadly touching desktop Steam.
+- **Resilient web recovery**: the web console survives transient host outages and preserves authenticated sessions across host restarts.
+- **Truthful stream health**: near-target FPS no longer produces misleading degraded-state noise, and Linux GPU probe topology is easier to diagnose.
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
