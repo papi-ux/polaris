@@ -432,7 +432,7 @@ polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   local marker_line pid start_time executable_path pgid session_id group_leader_start group_leader_executable socket inode entry current_inode
-  local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
+  local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}" leader_stopped=0
   umask 077
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
@@ -466,6 +466,24 @@ polaris_stop_marked_gamescope() (
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
     && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  resume_group_leader_on_failure() {
+    [ "$leader_stopped" = 1 ] || return 0
+    if polaris_process_fields "$pgid" \
+        && [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
+        && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] \
+        && [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ]; then
+      "$kill_bin" -CONT "$pgid" 2>/dev/null || true
+    fi
+  }
+  trap resume_group_leader_on_failure EXIT
+  "$kill_bin" -STOP "$pgid" 2>/dev/null || return 1
+  leader_stopped=1
+  polaris_process_fields "$pgid" || return 1
+  [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
+    && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ] || return 1
   "$kill_bin" -TERM "-$pgid" 2>/dev/null || return 1
   group_rc=0
   for _ in $(seq 1 "$term_steps"); do

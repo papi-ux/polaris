@@ -111,6 +111,7 @@ EOF
 chmod +x "$work/bin/kill"
 polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
   fail "private child compositor group did not stop"
+grep -qx -- '-STOP 400' "$work/kills" || fail "private-session leader was not pinned before TERM"
 grep -qx -- '-TERM -400' "$work/kills" || fail "validated PGID was not signalled"
 grep -qx -- '-KILL -400' "$work/kills" || fail "TERM-resistant group sibling was not escalated"
 if grep -q -- '-410' "$work/kills"; then
