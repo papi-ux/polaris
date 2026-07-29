@@ -7,6 +7,7 @@
 #include "src/platform/linux/pipewire_transport_policy.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cinttypes>
 #include <cstdlib>
@@ -40,6 +41,16 @@ using namespace std::literals;
 
 namespace pipewire_capture {
   namespace {
+    std::atomic<std::uint64_t> next_buffer_allocation_key {1};
+
+    std::uint64_t allocate_buffer_key() {
+      auto key = next_buffer_allocation_key.fetch_add(1, std::memory_order_relaxed);
+      if (key == 0) {
+        key = next_buffer_allocation_key.fetch_add(1, std::memory_order_relaxed);
+      }
+      return key;
+    }
+
     void init_pipewire_once() {
       static std::once_flag init_flag;
       std::call_once(init_flag, [] {
@@ -441,11 +452,25 @@ namespace pipewire_capture {
   }
 
   capture_t::~capture_t() {
+    shutdown();
+  }
+
+  void capture_t::shutdown() {
+    std::lock_guard shutdown_lk(shutdown_mtx_);
+    if (shutdown_complete_) {
+      return;
+    }
+    shutdown_complete_ = true;
     {
-      std::lock_guard lk(frame_mtx_);
+      std::unique_lock lk(frame_mtx_);
       running_ = false;
       terminal_result_ = wait_result_e::reinit;
+      front_dmabuf_buffer_ = nullptr;
+      front_dmabuf_buffer_key_ = 0;
+      front_dmabuf_frame_.reset();
+      frame_available_ = false;
       frame_cv_.notify_all();
+      frame_cv_.wait(lk, [this] { return active_dmabuf_leases_ == 0; });
     }
 
     // Sunshine-style teardown: hold the loop lock while disconnecting the stream
@@ -478,6 +503,7 @@ namespace pipewire_capture {
       pw_thread_loop_destroy(loop_);
       loop_ = nullptr;
     }
+    buffer_keys_.clear();
   }
 
   bool capture_t::start() {
@@ -576,6 +602,8 @@ namespace pipewire_capture {
       .version = PW_VERSION_STREAM_EVENTS,
       .state_changed = capture_t::on_state_changed,
       .param_changed = capture_t::on_param_changed,
+      .add_buffer = capture_t::on_add_buffer,
+      .remove_buffer = capture_t::on_remove_buffer,
       .process = capture_t::on_process,
     };
 
@@ -724,7 +752,7 @@ namespace pipewire_capture {
       descriptor->row_pitch = front_dmabuf_frame_->width * 4;
       descriptor->data = nullptr;
       descriptor->sequence = front_dmabuf_sequence_;
-      descriptor->dmabuf_buffer_key = reinterpret_cast<std::uintptr_t>(front_dmabuf_buffer_->buffer);
+      descriptor->dmabuf_buffer_key = front_dmabuf_buffer_key_;
       descriptor->frame_timestamp = front_dmabuf_timestamp_;
       descriptor->frame_metadata = dmabuf_frame_metadata(
         options_.capture_render_node.value_or(std::string {}),
@@ -734,14 +762,14 @@ namespace pipewire_capture {
       auto pooled = std::move(image);
       auto *pooled_image = pooled.get();
       front_dmabuf_buffer_ = nullptr;
+      front_dmabuf_buffer_key_ = 0;
       front_dmabuf_frame_.reset();
       frame_available_ = false;
-      std::weak_ptr<capture_t> weak_self = weak_from_this();
-      image = std::shared_ptr<platf::img_t>(pooled_image, [pooled = std::move(pooled), weak_self, retained_buffer](platf::img_t *) mutable {
-        if (auto self = weak_self.lock()) {
-          self->queue_buffer(retained_buffer);
-        }
+      ++active_dmabuf_leases_;
+      auto self = shared_from_this();
+      image = std::shared_ptr<platf::img_t>(pooled_image, [pooled = std::move(pooled), self = std::move(self), retained_buffer](platf::img_t *) mutable {
         pooled.reset();
+        self->release_buffer_lease(retained_buffer);
       });
       return true;
     }
@@ -872,6 +900,11 @@ namespace pipewire_capture {
         };
       }
 
+      const auto [key_entry, inserted] = buffer_keys_.try_emplace(buffer, 0);
+      if (inserted || key_entry->second == 0) {
+        key_entry->second = allocate_buffer_key();
+      }
+      const auto buffer_key = key_entry->second;
       auto frame_timestamp = std::chrono::steady_clock::now();
       // Polaris reserves sequence 0 for dummy images and the encoder cache
       // expects a strictly increasing sequence for every published frame.
@@ -885,6 +918,7 @@ namespace pipewire_capture {
         front_dmabuf_frame_ = frame;
         front_dmabuf_timestamp_ = frame_timestamp;
         front_dmabuf_sequence_ = frame_sequence;
+        front_dmabuf_buffer_key_ = buffer_key;
         front_dmabuf_buffer_ = buffer;
         frame_available_ = true;
       }
@@ -1000,6 +1034,8 @@ namespace pipewire_capture {
 
     pw_buffer *replaced_buffer = nullptr;
     bool requires_reinit = false;
+    const auto negotiated_modifier = dmabuf_negotiated ? effective_modifier :
+      (raw_info.flags & SPA_VIDEO_FLAG_MODIFIER ? raw_info.modifier : DRM_FORMAT_MOD_INVALID);
     {
       std::lock_guard lk(cap->frame_mtx_);
       const auto width = static_cast<int>(raw_info.size.width);
@@ -1007,20 +1043,22 @@ namespace pipewire_capture {
       requires_reinit = cap->negotiated_ &&
                         (cap->negotiated_dmabuf_ != dmabuf_negotiated ||
                          cap->front_info_.width != width ||
-                         cap->front_info_.height != height);
+                         cap->front_info_.height != height ||
+                         cap->front_info_.spa_format != raw_info.format ||
+                         cap->front_info_.modifier != negotiated_modifier);
       replaced_buffer = cap->front_dmabuf_buffer_;
       cap->front_info_ = {
         .width = width,
         .height = height,
         .stride = width * 4,
         .spa_format = raw_info.format,
-        .modifier = dmabuf_negotiated ? effective_modifier :
-          (raw_info.flags & SPA_VIDEO_FLAG_MODIFIER ? raw_info.modifier : DRM_FORMAT_MOD_INVALID),
+        .modifier = negotiated_modifier,
       };
       cap->front_frame_.clear();
       cap->back_frame_.clear();
       cap->front_dmabuf_frame_.reset();
       cap->front_dmabuf_buffer_ = nullptr;
+      cap->front_dmabuf_buffer_key_ = 0;
       cap->frame_available_ = false;
       cap->negotiated_ = true;
       cap->negotiated_dmabuf_ = dmabuf_negotiated;
@@ -1035,7 +1073,8 @@ namespace pipewire_capture {
                     << " format="sv << spa_debug_type_find_name(spa_type_video_format, raw_info.format);
 
     if (requires_reinit) {
-      BOOST_LOG(info) << "portal: PipeWire capture transport or dimensions changed; reinitializing encoder"sv;
+      cap->buffer_keys_.clear();
+      BOOST_LOG(info) << "portal: PipeWire transport/format/layout changed; reinitializing encoder"sv;
       cap->set_terminal(wait_result_e::reinit);
       return;
     }
@@ -1053,6 +1092,29 @@ namespace pipewire_capture {
       SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(static_cast<int>(data_type_mask))));
 
     pw_stream_update_params(cap->stream_, &buf_param, 1);
+  }
+
+  void capture_t::on_add_buffer(void *userdata, pw_buffer *buffer) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap || !buffer) {
+      return;
+    }
+    cap->buffer_keys_[buffer] = allocate_buffer_key();
+  }
+
+  void capture_t::on_remove_buffer(void *userdata, pw_buffer *buffer) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap || !buffer) {
+      return;
+    }
+    cap->buffer_keys_.erase(buffer);
+    std::lock_guard lk(cap->frame_mtx_);
+    if (cap->front_dmabuf_buffer_ == buffer) {
+      cap->front_dmabuf_buffer_ = nullptr;
+      cap->front_dmabuf_buffer_key_ = 0;
+      cap->front_dmabuf_frame_.reset();
+      cap->frame_available_ = false;
+    }
   }
 
   void capture_t::on_state_changed(void *userdata, pw_stream_state old, pw_stream_state state, const char *errmsg) noexcept {
@@ -1086,7 +1148,8 @@ namespace pipewire_capture {
   }
 
   void capture_t::queue_buffer(pw_buffer *buffer) {
-    if (!buffer || !stream_) {
+    std::lock_guard shutdown_lk(shutdown_mtx_);
+    if (shutdown_complete_ || !buffer || !stream_) {
       return;
     }
     // Drop buffers once teardown cleared running_; never touch PW after stop.
@@ -1102,6 +1165,21 @@ namespace pipewire_capture {
       return;
     }
     pw_stream_queue_buffer(stream_, buffer);
+  }
+
+  void capture_t::release_buffer_lease(pw_buffer *buffer) {
+    bool should_queue = false;
+    {
+      std::lock_guard lk(frame_mtx_);
+      if (active_dmabuf_leases_ > 0) {
+        --active_dmabuf_leases_;
+      }
+      should_queue = running_;
+    }
+    frame_cv_.notify_all();
+    if (should_queue) {
+      queue_buffer(buffer);
+    }
   }
 
   namespace {

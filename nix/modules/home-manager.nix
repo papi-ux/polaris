@@ -114,8 +114,16 @@ in
           cfg.desktopUserTarget
           ready
           "polaris-gamescope-idle.service"
+          "polaris-portal-dbus.service"
+          "polaris-portal-gamescope.service"
+          "polaris-portal.service"
         ];
-        Wants = [ "polaris-gamescope-idle.service" ];
+        Wants = [
+          "polaris-gamescope-idle.service"
+          "polaris-portal-dbus.service"
+          "polaris-portal-gamescope.service"
+          "polaris-portal.service"
+        ];
         PartOf = [ cfg.desktopUserTarget ];
       };
       Service = {

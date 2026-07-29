@@ -214,8 +214,6 @@ case "${1:-}" in
       elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
         echo "polaris-gamescope-session: refusing unowned gamescope socket cleanup" >&2
         exit 1
-      else
-        rm -f "$marker" "$rt/polaris-gamescope.env"
       fi
       for _ in $(seq 1 100); do
         [ ! -S "$rt/gamescope-0" ] && [ ! -S "$rt/gamescope-1" ] && break
@@ -225,7 +223,6 @@ case "${1:-}" in
         echo "polaris-gamescope-session: headless ${POLARIS_GAMESCOPE_BIN:-gamescope} socket still held after stop" >&2
         exit 1
       fi
-      rm -f "$rt/polaris-gamescope.env" "$rt/polaris-gamescope.pid"
 
       # shellcheck source=/dev/null
 
@@ -466,8 +463,6 @@ case "${1:-}" in
           echo "polaris-gamescope-session: nested owner did not reach terminal state" >&2
       elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
         echo "polaris-gamescope-session: leaving unowned gamescope sockets untouched" >&2
-      else
-        rm -f "$marker" "$rt/polaris-gamescope.env"
       fi
       rm -f "$rt/polaris-gamescope-wsi-nested"
       printf '0\n' >"$rt/polaris-gamescope-force"

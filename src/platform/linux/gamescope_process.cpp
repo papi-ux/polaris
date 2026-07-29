@@ -195,10 +195,12 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
 
-    std::unordered_map<std::string, std::uint64_t> read_unix_socket_inodes(
+    using socket_inode_map_t = std::unordered_map<std::string, std::optional<std::uint64_t>>;
+
+    socket_inode_map_t read_unix_socket_inodes(
       const fs::path &proc_net_unix
     ) {
-      std::unordered_map<std::string, std::uint64_t> inodes;
+      socket_inode_map_t inodes;
       std::ifstream input(proc_net_unix);
       std::string line;
       std::getline(input, line);  // header
@@ -218,7 +220,14 @@ namespace stream_runtime::gamescope_process {
         std::getline(row >> std::ws, path);
         const auto inode = parse_integer<std::uint64_t>(inode_text);
         if (inode && !path.empty()) {
-          inodes[path] = *inode;
+          const auto [entry, inserted] = inodes.emplace(path, *inode);
+          if (!inserted) {
+            // An unlinked old listener and a rebound successor can coexist in
+            // /proc/net/unix with the same pathname. Path identity is
+            // ambiguous in that state, so fail closed instead of selecting a
+            // row based on kernel iteration order.
+            entry->second.reset();
+          }
         }
       }
       return inodes;
@@ -246,14 +255,14 @@ namespace stream_runtime::gamescope_process {
     }
 
     std::optional<std::uint64_t> inode_for_path(
-      const std::unordered_map<std::string, std::uint64_t> &inodes,
+      const socket_inode_map_t &inodes,
       const fs::path &path
     ) {
       const auto found = inodes.find(path.string());
-      if (found == inodes.end()) {
+      if (found == inodes.end() || !found->second) {
         return std::nullopt;
       }
-      return found->second;
+      return *found->second;
     }
   }  // namespace
 
@@ -386,6 +395,9 @@ namespace stream_runtime::gamescope_process {
     const auto processes = read_processes(paths.proc_root);
     std::vector<std::pair<int, std::uint64_t>> candidates;
     for (const auto &[path, inode] : inodes) {
+      if (!inode) {
+        continue;
+      }
       const fs::path socket_path(path);
       if (socket_path.parent_path() != paths.x11_socket_dir) {
         continue;
@@ -397,7 +409,7 @@ namespace stream_runtime::gamescope_process {
       const auto display = parse_integer<int>(std::string_view {name}.substr(1));
       std::error_code ec;
       if (display && *display >= 0 && fs::exists(socket_path, ec) && !ec) {
-        candidates.emplace_back(*display, inode);
+        candidates.emplace_back(*display, *inode);
       }
     }
     std::sort(candidates.begin(), candidates.end());

@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <pipewire/pipewire.h>
@@ -148,6 +149,9 @@ namespace pipewire_capture {
     bool start();
     // Wake waiters and mark capture terminal without destroying (SB-2 teardown).
     void stop();
+    // Idempotently disconnect and destroy PipeWire resources even while other
+    // shared_ptr aliases still retain this capture generation.
+    void shutdown();
     bool running() const;
     bool negotiated() const;
     bool negotiated_dmabuf() const;
@@ -157,12 +161,15 @@ namespace pipewire_capture {
 
   private:
     static void on_process(void *userdata) noexcept;
+    static void on_add_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
+    static void on_remove_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
     static void on_param_changed(void *userdata, std::uint32_t id, const struct spa_pod *param) noexcept;
     static void on_state_changed(void *userdata, enum pw_stream_state old, enum pw_stream_state state, const char *errmsg) noexcept;
 
     bool process_buffer(struct pw_buffer *buffer);
     void set_terminal(wait_result_e result);
     void queue_buffer(struct pw_buffer *buffer);
+    void release_buffer_lease(struct pw_buffer *buffer);
 
     capture_options_t options_;
     int remote_fd_ = -1;
@@ -171,6 +178,10 @@ namespace pipewire_capture {
     pw_core *core_ = nullptr;
     pw_stream *stream_ = nullptr;
     spa_hook stream_listener_ {};
+    std::unordered_map<struct pw_buffer *, std::uint64_t> buffer_keys_;
+
+    std::mutex shutdown_mtx_;
+    bool shutdown_complete_ = false;
 
     mutable std::mutex frame_mtx_;
     std::condition_variable frame_cv_;
@@ -179,7 +190,9 @@ namespace pipewire_capture {
     std::optional<dmabuf_frame_t> front_dmabuf_frame_;
     std::chrono::steady_clock::time_point front_dmabuf_timestamp_ {};
     std::uint64_t front_dmabuf_sequence_ = 0;
+    std::uint64_t front_dmabuf_buffer_key_ = 0;
     struct pw_buffer *front_dmabuf_buffer_ = nullptr;
+    std::size_t active_dmabuf_leases_ = 0;
     frame_info_t front_info_;
     bool frame_available_ = false;
     bool negotiated_ = false;

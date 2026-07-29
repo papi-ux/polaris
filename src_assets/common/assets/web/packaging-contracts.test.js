@@ -86,6 +86,18 @@ describe('Linux packaging contracts', () => {
     expect(session).toContain('org.freedesktop.impl.portal.desktop.gamescope')
     expect(homeManager).toContain('RuntimeDirectory = "polaris-portal";')
     expect(homeManager).toContain('Requires = [ "polaris-portal-dbus.service" ];')
+    const polarisUnit = section(
+      homeManager,
+      'systemd.user.services.polaris = {',
+      'home.activation.polarisConfSeed',
+    )
+    for (const unit of [
+      'polaris-portal-dbus.service',
+      'polaris-portal-gamescope.service',
+      'polaris-portal.service',
+    ]) {
+      expect(polarisUnit).toContain(`"${unit}"`)
+    }
   })
 
   it('uses the private portal only after it is ready and preserves host fallback', () => {
@@ -111,6 +123,8 @@ describe('Linux packaging contracts', () => {
     expect(polarisStart).toContain('export POLARIS_PORTAL_DBUS_ADDRESS="$private_address"')
     expect(polarisStart).not.toContain('unix:path=%t/polaris-portal/bus')
     expect(waitPortal).toContain('private_address="unix:path=$bus_path"')
+    expect(waitPortal).toContain('bus_deadline=$((SECONDS + 10))')
+    expect(waitPortal).toContain('while [ ! -S "$bus_path" ]')
     expect(waitPortal).toContain('--address="$private_address"')
     expect(waitPortal).not.toContain('busctl --user')
     expect(session).toContain('UnsetEnvironment=WAYLAND_DISPLAY')
@@ -133,5 +147,28 @@ describe('Linux packaging contracts', () => {
     expect(streamSizePatch).not.toContain('.output()\n+        .await\n+        .ok()?;')
     expect(streamSizePatch).not.toContain('width = 0;')
     expect(streamSizePatch).not.toContain('height = 0;')
+  })
+
+  it('keeps optional gamescope and Steam packages out of required build transactions', () => {
+    const deps = readSource('scripts/install/01-install-deps.sh')
+    const driver = readSource('scripts/install/install.sh')
+    expect(deps).toContain('--gamescope-stack')
+    expect(driver).toContain('DEPS_ARGS+=(--gamescope-stack)')
+
+    for (const [start, end] of [
+      ['  fedora)', '  arch)'],
+      ['  arch)', '  debian)'],
+      ['  debian)', '  suse)'],
+      ['  suse)', '  *)'],
+    ]) {
+      const distroBlock = section(deps, start, end)
+      const optionalIndex = distroBlock.indexOf('if [ "$WITH_GAMESCOPE_STACK" = 1 ]; then')
+      expect(optionalIndex, `${start} must isolate gamescope runtime packages`).toBeGreaterThanOrEqual(0)
+      expect(distroBlock.indexOf('gamescope'), `${start} gamescope must be optional`).toBeGreaterThan(optionalIndex)
+      const steamIndex = distroBlock.search(/steam(?:-installer)?/)
+      if (steamIndex >= 0) {
+        expect(steamIndex, `${start} Steam must be optional`).toBeGreaterThan(optionalIndex)
+      }
+    }
   })
 })

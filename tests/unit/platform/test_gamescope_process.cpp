@@ -174,4 +174,23 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedWhenOnlyUnrelatedXwaylandExists)
   EXPECT_FALSE(gp::discover_owned_x11_display(marker, paths_for(tree)).has_value());
   EXPECT_TRUE(fs::exists(unrelated_x2));
 }
+TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const auto x4 = tree.x11 / "X4";
+
+  // /proc/net/unix may retain an unlinked old listener while a successor has
+  // rebound the same pathname. Neither row is authoritative by pathname.
+  tree.add_unix_socket(500, gamescope_socket);
+  tree.add_unix_socket(501, gamescope_socket);
+  tree.add_unix_socket(604, x4);
+  tree.add_unix_socket(605, x4);
+  tree.flush_unix_sockets();
+  tree.add_process(410, 1, 9001, {"gamescope", "--backend=headless"}, {500});
+  tree.add_process(411, 410, 9002, {"Xwayland", ":4"}, {604});
+
+  const gp::marker_t marker {.pid = 410, .start_time = 9001, .role = "runtime"};
+  EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::discover_owned_x11_display(marker, paths_for(tree)).has_value());
+}
 #endif

@@ -79,19 +79,28 @@ polaris_process_has_argument() {
   return 1
 }
 
-polaris_write_marker_for_pid() {
-  local marker="$1" pid="$2" role="$3" attempt tmp
+polaris_write_marker_for_pid() (
+  local marker="$1" pid="$2" role="$3" attempt tmp lock_bin="${POLARIS_FLOCK_BIN:-flock}"
+  exec 9>"${marker%/*}/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
   for attempt in $(seq 1 100); do
     if polaris_process_fields "$pid" && polaris_headless_gamescope_pid "$pid"; then
+      local start_time="$POLARIS_PROCESS_START_TIME"
+      if polaris_validate_marker "$marker"; then
+        [ "$POLARIS_MARKER_PID" = "$pid" ] \
+          && [ "$POLARIS_MARKER_START_TIME" = "$start_time" ] \
+          && [ "$POLARIS_MARKER_ROLE" = "$role" ]
+        return
+      fi
       tmp="$marker.tmp.$$"
-      (umask 077; printf '%s %s %s\n' "$pid" "$POLARIS_PROCESS_START_TIME" "$role" >"$tmp") || return 1
+      (umask 077; printf '%s %s %s\n' "$pid" "$start_time" "$role" >"$tmp") || return 1
       mv -f "$tmp" "$marker"
       return 0
     fi
     sleep 0.02
   done
   return 1
-}
+)
 
 polaris_pid_is_descendant() {
   local candidate="$1" root="$2" depth=0
@@ -105,14 +114,17 @@ polaris_pid_is_descendant() {
 }
 
 polaris_socket_inode() {
-  local wanted="$1" num ref protocol flags type state inode path rest
+  local wanted="$1" num ref protocol flags type state inode path rest found=""
   while read -r num ref protocol flags type state inode path rest; do
     [ "$path" = "$wanted" ] || continue
     case "$inode" in ''|*[!0-9]*) return 1 ;; esac
-    printf '%s\n' "$inode"
-    return 0
+    # Duplicate pathname rows are ambiguous: an unlinked old listener may
+    # coexist with a successor that rebound the same filesystem path.
+    [ -z "$found" ] || return 1
+    found="$inode"
   done <"$(polaris_proc_net_unix)" 2>/dev/null
-  return 1
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
 }
 
 polaris_pid_holds_inode() {
@@ -179,22 +191,32 @@ polaris_discover_xwayland_display() {
   printf ':%s\n' "$best"
 }
 
-polaris_write_runtime_env() {
+polaris_write_runtime_env() (
   local marker="$1" wayland="$2" expected_role="${3:-}" runtime_dir="$4" display tmp
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" marker_line role
+  exec 9>"$runtime_dir/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local pid="$POLARIS_MARKER_PID" start_time="$POLARIS_MARKER_START_TIME"
+  role="$POLARIS_MARKER_ROLE"
+  marker_line="$(<"$marker")"
   polaris_marker_owns_socket "$marker" "$runtime_dir/$wayland" "$expected_role" || return 1
   display="$(polaris_discover_xwayland_display "$marker" "$expected_role")" || return 1
+  polaris_validate_process_generation "$pid" "$start_time" || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
   tmp="$runtime_dir/polaris-gamescope.env.tmp.$$"
   (umask 077; printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nGAMESCOPE_WAYLAND_DISPLAY=%s\nPOLARIS_GAMESCOPE_PID=%s\nPOLARIS_GAMESCOPE_START_TIME=%s\nPOLARIS_GAMESCOPE_ROLE=%s\n' \
-    "$display" "$wayland" "$wayland" "$pid" "$start_time" "$POLARIS_MARKER_ROLE" >"$tmp") || return 1
+    "$display" "$wayland" "$wayland" "$pid" "$start_time" "$role" >"$tmp") || return 1
   mv -f "$tmp" "$runtime_dir/polaris-gamescope.env"
-}
+)
 
-polaris_stop_marked_gamescope() {
+polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   local marker_line pid start_time socket inode entry current_inode attempt marker_replaced=0
   local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
+  exec 9>"$runtime_dir/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
   polaris_validate_marker "$marker" "$expected_role" || return 1
   marker_line="$(<"$marker")"
   pid="$POLARIS_MARKER_PID"
@@ -246,4 +268,4 @@ polaris_stop_marked_gamescope() {
   if [ "$marker_replaced" = 0 ] && [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ]; then
     rm -f "$marker"
   fi
-}
+)

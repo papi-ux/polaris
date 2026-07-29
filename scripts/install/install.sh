@@ -66,6 +66,9 @@ fi
 if [ "$FROM_SOURCE" = 1 ] && [ "$SKIP_DEPS" = 0 ]; then
   DEPS_ARGS=()
   [ "$WITH_CUDA" = 1 ] && DEPS_ARGS+=(--cuda)
+  if [ "$SKIP_STACK" = 0 ] && [ "$LABWC_ONLY" = 0 ]; then
+    DEPS_ARGS+=(--gamescope-stack)
+  fi
   "$INSTALL_DIR/01-install-deps.sh" "${DEPS_ARGS[@]}"
 fi
 

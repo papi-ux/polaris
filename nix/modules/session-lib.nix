@@ -145,6 +145,7 @@ let
   waitPortal = pkgs.writeShellScript "polaris-wait-private-screencast" ''
     set -euo pipefail
     rt="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export POLARIS_FLOCK_BIN=${lib.getExe' pkgs.util-linux "flock"}
     ${builtins.readFile ./polaris-gamescope-runtime-lib.sh}
 
     # Nested stop can leave runtime-masked idle / no gamescope-0.
@@ -173,8 +174,12 @@ let
       sleep 0.2
     done
 
+    bus_deadline=$((SECONDS + 10))
+    while [ ! -S "$bus_path" ] && [ "$SECONDS" -lt "$bus_deadline" ]; do
+      sleep 0.1
+    done
     if [ ! -S "$bus_path" ]; then
-      echo "polaris: gamescope-0 ready (no private portal bus)" >&2
+      echo "polaris: gamescope-0 ready (private portal bus unavailable; using host fallback)" >&2
       exit 0
     fi
 

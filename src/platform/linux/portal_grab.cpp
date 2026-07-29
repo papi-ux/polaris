@@ -103,6 +103,7 @@ namespace portal {
   };
 
   static std::mutex g_media_mu;
+  static std::mutex g_capture_transition_mu;
   static media_cache_t g_media;
 
   struct portal_cleanup_state_t {
@@ -219,6 +220,9 @@ namespace portal {
                                     teardown = std::move(teardown),
                                     &cleanup]() mutable {
       BOOST_LOG(info) << "portal: async capture/session destroy begin"sv;
+      if (capture) {
+        capture->shutdown();
+      }
       capture.reset();
       portal.reset();
       kwin.reset();
@@ -270,6 +274,7 @@ namespace portal {
   }
 
   static bool ensure_global_session() {
+    std::lock_guard transition_lock(g_capture_transition_mu);
     auto start = session_media::begin_start();
     reap_portal_cleanup();
     std::lock_guard lock(g_media_mu);
@@ -277,6 +282,8 @@ namespace portal {
   }
 
   static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(int width, int height, platf::mem_type_e mem_type) {
+    // Only one configuration transition may retire/publish a capture generation.
+    std::lock_guard transition_lock(g_capture_transition_mu);
     auto start = session_media::begin_start();
     reap_portal_cleanup();
     // Lock contract (SB-2 + S4 single mutex):
@@ -284,7 +291,7 @@ namespace portal {
     // 2) Wait for negotiation OUTSIDE the lock so release_global_capture can progress.
     std::shared_ptr<pipewire_capture::capture_t> capture;
     {
-      std::lock_guard lock(g_media_mu);
+      std::unique_lock lock(g_media_mu);
 
       const auto requested_adapter = config::video.adapter_name;
       if (g_media.capture && g_media.capture->running()) {
@@ -296,14 +303,20 @@ namespace portal {
           return g_media.capture;
         }
 
-        BOOST_LOG(info) << "portal: capture configuration changed; reconnecting PipeWire before encoder selection"sv;
-        g_media.capture.reset();
-        // kwingrab stream is sized to the prior session; recreate with portal/kwin path below.
-        g_media.kwin.reset();
+        BOOST_LOG(info) << "portal: capture configuration changed; retiring PipeWire generation before reconnect"sv;
+        auto retired_capture = std::move(g_media.capture);
+        auto retired_kwin = std::move(g_media.kwin);
+        g_media.clear_meta();
+        lock.unlock();
+        retired_capture->stop();
+        retired_capture->shutdown();
+        retired_capture.reset();
+        retired_kwin.reset();
+        lock.lock();
 
         // A PipeWire remote FD is a protocol connection, not a reusable device
-        // handle. Request a fresh remote for the existing portal session so an
-        // encoder retry does not reopen the picker or reuse a consumed socket.
+        // handle. Request a fresh remote only after the old producer is fully
+        // quiescent; the transition mutex prevents a concurrent replacement.
         if (g_media.portal && g_media.portal->conn && !g_media.portal->session_handle.empty()) {
           if (g_media.portal->pw_remote_fd >= 0) {
             close(g_media.portal->pw_remote_fd);
@@ -316,11 +329,18 @@ namespace portal {
           g_media.portal.reset();
         }
       } else if (g_media.capture) {
-        // A dead stream invalidates the node on this private remote. Recreate the
-        // portal session rather than trying to reuse a stale target ID.
-        g_media.capture.reset();
-        g_media.portal.reset();
-        g_media.kwin.reset();
+        // A dead stream invalidates the node on this private remote. Explicitly
+        // retire it outside g_media_mu before replacing portal/session state.
+        auto retired_capture = std::move(g_media.capture);
+        auto retired_portal = std::move(g_media.portal);
+        auto retired_kwin = std::move(g_media.kwin);
+        g_media.clear_meta();
+        lock.unlock();
+        retired_capture->shutdown();
+        retired_capture.reset();
+        retired_portal.reset();
+        retired_kwin.reset();
+        lock.lock();
       }
 
       // W3/W5 gamescopegrab: prefer session-graph Video/Source (media.name=gamescope)

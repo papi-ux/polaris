@@ -20,11 +20,13 @@
   #include <cstring>
   #include <filesystem>
   #include <fstream>
+  #include <fcntl.h>
   #include <mutex>
   #include <optional>
   #include <signal.h>
   #include <string>
   #include <string_view>
+  #include <sys/file.h>
   #include <sys/stat.h>
   #include <sys/types.h>
   #include <sys/wait.h>
@@ -39,6 +41,35 @@ namespace stream_runtime {
 
     namespace fs = std::filesystem;
     namespace gp = gamescope_process;
+
+    std::string xdg_runtime_dir();
+
+    class owner_transition_lock_t {
+    public:
+      owner_transition_lock_t() {
+        const auto path = fs::path(xdg_runtime_dir()) / "polaris-gamescope.lock";
+        fd_ = open(path.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, 0600);
+        if (fd_ >= 0 && flock(fd_, LOCK_EX) != 0) {
+          close(fd_);
+          fd_ = -1;
+        }
+      }
+
+      ~owner_transition_lock_t() {
+        if (fd_ >= 0) {
+          flock(fd_, LOCK_UN);
+          close(fd_);
+        }
+      }
+
+      owner_transition_lock_t(const owner_transition_lock_t &) = delete;
+      owner_transition_lock_t &operator=(const owner_transition_lock_t &) = delete;
+
+      explicit operator bool() const { return fd_ >= 0; }
+
+    private:
+      int fd_ = -1;
+    };
 
     std::string xdg_runtime_dir() {
       if (const char *xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && *xdg) {
@@ -204,7 +235,18 @@ namespace stream_runtime {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
           }
         }
-        if (!marker_ || !gp::write_marker(marker_path(), *marker_)) {
+        bool marker_written = false;
+        if (marker_) {
+          owner_transition_lock_t owner_lock;
+          if (owner_lock) {
+            const auto current_owner = gp::validated_marker(marker_path());
+            const bool authority_free = !current_owner ||
+              (current_owner->pid == marker_->pid && current_owner->start_time == marker_->start_time &&
+               current_owner->role == marker_->role);
+            marker_written = authority_free && gp::write_marker(marker_path(), *marker_);
+          }
+        }
+        if (!marker_written) {
           BOOST_LOG(error) << "gamescope_runtime: could not record exact owned gamescope generation"sv;
           kill(child, SIGTERM);
           waitpid(child, nullptr, 0);
@@ -374,6 +416,14 @@ namespace stream_runtime {
       }
 
       void remove_owned_files_if_current() const {
+        owner_transition_lock_t owner_lock;
+        if (!owner_lock) {
+          return;
+        }
+        remove_owned_files_if_current_unlocked();
+      }
+
+      void remove_owned_files_if_current_unlocked() const {
         if (!marker_) {
           return;
         }
@@ -389,6 +439,11 @@ namespace stream_runtime {
 
       void stop_unlocked() {
         if (owned_ && marker_) {
+          owner_transition_lock_t owner_lock;
+          if (!owner_lock) {
+            BOOST_LOG(error) << "gamescope_runtime: could not acquire ownership transition lock; refusing teardown"sv;
+            return;
+          }
           const auto current = gp::validated_marker(marker_path(), "runtime");
           if (current && current->pid == marker_->pid && current->start_time == marker_->start_time) {
             // The marker validates this exact PID generation immediately before
@@ -412,7 +467,7 @@ namespace stream_runtime {
             BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale/reused owned pid="sv
                                << marker_->pid;
           }
-          remove_owned_files_if_current();
+          remove_owned_files_if_current_unlocked();
         }
         else if (!owned_ && marker_) {
           BOOST_LOG(info) << "gamescope_runtime: detached from validated "sv << socket_name_
@@ -517,8 +572,14 @@ namespace stream_runtime {
         if (!marker_ || x11_display_.empty() || socket_name_.empty()) {
           return false;
         }
+        owner_transition_lock_t owner_lock;
+        if (!owner_lock) {
+          return false;
+        }
         const auto current = validated_marker_for_socket(socket_name_, marker_->role);
-        if (!current || current->pid != marker_->pid || current->start_time != marker_->start_time) {
+        const auto current_display = gp::discover_owned_x11_display(*marker_);
+        if (!current || current->pid != marker_->pid || current->start_time != marker_->start_time ||
+            !current_display || *current_display != x11_display_) {
           return false;
         }
 

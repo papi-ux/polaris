@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 # Install build + runtime dependencies for Polaris on non-NixOS hosts.
-# Usage: ./01-install-deps.sh [--cuda]
+# Usage: ./01-install-deps.sh [--cuda] [--gamescope-stack]
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 WITH_CUDA=0
+WITH_GAMESCOPE_STACK=0
 for arg in "$@"; do
   case "$arg" in
     --cuda) WITH_CUDA=1 ;;
+    --gamescope-stack) WITH_GAMESCOPE_STACK=1 ;;
     -h|--help)
       cat <<EOF
 Install Polaris build/runtime dependencies (Fedora, Arch, Debian/Ubuntu, openSUSE).
 
-Usage: $0 [--cuda]
+Usage: $0 [--cuda] [--gamescope-stack]
 
   --cuda   Also install CUDA toolkit packages when the distro provides them
+  --gamescope-stack
+           Attempt mode-specific gamescope/Steam runtime packages separately.
+           Missing optional repositories do not abort build dependency setup.
 EOF
       exit 0
       ;;
@@ -43,7 +48,7 @@ case "$DISTRO" in
       json-devel libappindicator-gtk3-devel gtk3-devel \
       ffmpeg-free-devel \
       grim labwc wlr-randr xorg-x11-server-Xwayland xdpyinfo \
-      gamescope steam bubblewrap util-linux wireplumber \
+      bubblewrap util-linux wireplumber \
       avahi-devel numactl-devel \
       systemd-devel pkgconf-pkg-config
     if [ "$WITH_CUDA" = 1 ]; then
@@ -51,6 +56,12 @@ case "$DISTRO" in
       maybe_sudo dnf install -y vulkan-loader-devel
       maybe_sudo dnf install -y cuda-nvcc cuda-cudart-devel 2>/dev/null \
         || warn "CUDA packages not found via dnf; install NVIDIA CUDA toolkit manually"
+    fi
+    if [ "$WITH_GAMESCOPE_STACK" = 1 ]; then
+      maybe_sudo dnf install -y gamescope \
+        || warn "gamescope is unavailable from enabled Fedora repositories"
+      maybe_sudo dnf install -y steam \
+        || warn "Steam is optional and may require RPM Fusion/non-free repositories"
     fi
     ;;
   arch)
@@ -62,12 +73,18 @@ case "$DISTRO" in
       libva miniupnpc libnotify nlohmann-json \
       libappindicator-gtk3 gtk3 \
       grim labwc wlr-randr xorg-xwayland xorg-xdpyinfo \
-      gamescope steam bubblewrap util-linux wireplumber \
+      bubblewrap util-linux wireplumber \
       avahi numactl systemd pkgconf
     if [ "$WITH_CUDA" = 1 ]; then
       maybe_sudo pacman -S --needed --noconfirm vulkan-headers vulkan-icd-loader
       maybe_sudo pacman -S --needed --noconfirm cuda 2>/dev/null \
         || warn "install 'cuda' from official/extra or use the NVIDIA runfile"
+    fi
+    if [ "$WITH_GAMESCOPE_STACK" = 1 ]; then
+      maybe_sudo pacman -S --needed --noconfirm gamescope \
+        || warn "gamescope is unavailable from enabled Arch repositories"
+      maybe_sudo pacman -S --needed --noconfirm steam \
+        || warn "Steam is optional and requires the Arch multilib repository"
     fi
     ;;
   debian)
@@ -84,12 +101,18 @@ case "$DISTRO" in
       libappindicator3-dev libgtk-3-dev \
       libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
       grim labwc wlr-randr xwayland x11-utils \
-      gamescope steam-installer bubblewrap util-linux wireplumber \
+      bubblewrap util-linux wireplumber \
       libavahi-client-dev libnuma-dev \
       pkg-config
     if [ "$WITH_CUDA" = 1 ]; then
       maybe_sudo apt-get install -y libvulkan-dev
       warn "On Ubuntu/Debian install CUDA from NVIDIA; apt package names vary by release"
+    fi
+    if [ "$WITH_GAMESCOPE_STACK" = 1 ]; then
+      maybe_sudo apt-get install -y gamescope \
+        || warn "gamescope is unavailable from enabled Debian/Ubuntu repositories"
+      maybe_sudo apt-get install -y steam-installer \
+        || warn "Steam is optional and may require non-free/multiverse repositories"
     fi
     ;;
   suse)
@@ -104,11 +127,15 @@ case "$DISTRO" in
       libva-devel libminiupnpc-devel libnotify-devel nlohmann_json-devel \
       libappindicator3-devel gtk3-devel \
       grim labwc wlr-randr xwayland xdpyinfo \
-      gamescope bubblewrap util-linux wireplumber \
+      bubblewrap util-linux wireplumber \
       pkgconf-pkg-config
     if [ "$WITH_CUDA" = 1 ]; then
       maybe_sudo zypper install -y vulkan-devel
       warn "Install CUDA toolkit from NVIDIA for openSUSE"
+    fi
+    if [ "$WITH_GAMESCOPE_STACK" = 1 ]; then
+      maybe_sudo zypper install -y gamescope \
+        || warn "gamescope is unavailable from enabled openSUSE repositories"
     fi
     ;;
   *)

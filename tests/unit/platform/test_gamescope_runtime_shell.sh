@@ -17,6 +17,13 @@ export POLARIS_PROC_NET_UNIX="$work/proc/net/unix"
 export POLARIS_X11_SOCKET_DIR="$work/tmp/.X11-unix"
 export POLARIS_STOP_WAIT_STEPS=2
 mkdir -p "$POLARIS_PROC_ROOT/net" "$POLARIS_X11_SOCKET_DIR" "$work/run" "$work/bin"
+cat >"$work/bin/flock" <<'EOF'
+#!/usr/bin/env bash
+# Unit tests are single-process; production uses util-linux flock on fd 9.
+exit 0
+EOF
+chmod +x "$work/bin/flock"
+export POLARIS_FLOCK_BIN="$work/bin/flock"
 
 write_process() {
   local pid="$1" ppid="$2" start_time="$3" exe="$4"
@@ -132,6 +139,14 @@ fi
 [ "$(<"$work/run/polaris-gamescope.pid")" = '410 9101 idle' ] ||
   fail "same-role successor marker was removed"
 [ -e "$work/run/gamescope-0" ] || fail "same-role successor socket was removed"
+
+# Duplicate pathname rows are ambiguous after unlink/rebind and must fail closed
+# rather than selecting a stale generation by /proc/net/unix row order.
+printf '0000000000000001: 00000002 00000000 00010000 0001 01 701 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+if polaris_marker_owns_socket "$work/run/polaris-gamescope.pid" "$work/run/gamescope-0" idle; then
+  fail "duplicate socket pathname was accepted as owned"
+fi
 
 # Production call sites must use exact markers, never process-name-wide pkill/pgrep.
 for source in \
