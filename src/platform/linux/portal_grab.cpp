@@ -8,8 +8,8 @@
  */
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -39,6 +39,7 @@
 #endif
 #include "src/platform/linux/pipewire_capture.h"
 #include "src/platform/linux/portal_session.h"
+#include "src/platform/linux/session_media.h"
 
 #ifdef POLARIS_BUILD_CUDA
   #include "src/platform/linux/cuda.h"
@@ -104,6 +105,35 @@ namespace portal {
   static std::mutex g_media_mu;
   static media_cache_t g_media;
 
+  struct portal_cleanup_state_t {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::thread worker;
+    bool running = false;
+  };
+
+  // The state owns the joinable cleanup thread and intentionally has process
+  // lifetime. A blocked PipeWire destructor therefore cannot outlive the
+  // synchronization it reports completion through during static teardown.
+  static portal_cleanup_state_t &portal_cleanup_state() {
+    static auto *state = new portal_cleanup_state_t;
+    return *state;
+  }
+
+  static void reap_portal_cleanup() {
+    auto &state = portal_cleanup_state();
+    std::thread completed;
+    {
+      std::lock_guard lock(state.mutex);
+      if (!state.running && state.worker.joinable()) {
+        completed = std::move(state.worker);
+      }
+    }
+    if (completed.joinable()) {
+      completed.join();
+    }
+  }
+
   // Local-graph PW capture (gamescopegrab / kwingrab): remote_fd=-1, no portal session.
   static std::shared_ptr<pipewire_capture::capture_t> start_local_pw_capture(
     std::uint32_t node_id,
@@ -153,6 +183,7 @@ namespace portal {
 
   // Idempotent sole public release entry (S4).
   void release_global_capture() {
+    auto teardown = session_media::begin_teardown();
     std::shared_ptr<pipewire_capture::capture_t> capture;
     std::unique_ptr<portal_session_t> portal;
     std::shared_ptr<void> kwin;
@@ -174,35 +205,47 @@ namespace portal {
       capture->stop();
     }
     // ~capture_t / pw_thread_loop_stop can block indefinitely with gamescope.
-    // Never run those dtors on the confighttp thread — async destroy with a
-    // short sync budget, then detach (lea 2026-07-28 step2 hang).
-    // Drop kwin after capture stop so the Wayland stream is closed only once
-    // (no bare .detach; session_media remains sole ordered prepare owner).
+    // Keep the cleanup on an owned worker and preserve the short caller budget;
+    // its teardown owner keeps reconnect blocked until all dtors finish.
     constexpr auto k_sync_budget = std::chrono::milliseconds(400);
-    auto done = std::make_shared<std::atomic<bool>>(false);
-    std::thread destroyer {[capture = std::move(capture), portal = std::move(portal), kwin = std::move(kwin), done]() mutable {
+    reap_portal_cleanup();
+    auto &cleanup = portal_cleanup_state();
+    {
+      std::lock_guard lock(cleanup.mutex);
+      cleanup.running = true;
+      cleanup.worker = std::thread {[capture = std::move(capture),
+                                    portal = std::move(portal),
+                                    kwin = std::move(kwin),
+                                    teardown = std::move(teardown),
+                                    &cleanup]() mutable {
       BOOST_LOG(info) << "portal: async capture/session destroy begin"sv;
       capture.reset();
       portal.reset();
       kwin.reset();
-      done->store(true, std::memory_order_release);
       BOOST_LOG(info) << "portal: async capture/session destroy done"sv;
+      {
+        std::lock_guard lock(cleanup.mutex);
+        cleanup.running = false;
+      }
+      cleanup.changed.notify_all();
     }};
-    const auto deadline = std::chrono::steady_clock::now() + k_sync_budget;
-    while (!done->load(std::memory_order_acquire) &&
-           std::chrono::steady_clock::now() < deadline) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    if (done->load(std::memory_order_acquire)) {
-      if (destroyer.joinable()) {
-        destroyer.join();
+
+    std::thread completed;
+    {
+      std::unique_lock lock(cleanup.mutex);
+      if (cleanup.changed.wait_for(lock, k_sync_budget, [&cleanup] {
+            return !cleanup.running;
+          })) {
+        completed = std::move(cleanup.worker);
       }
     }
-    else {
+    if (completed.joinable()) {
+      completed.join();
+    } else {
       BOOST_LOG(warning) << "portal: capture/session destroy exceeded "
                          << k_sync_budget.count()
-                         << "ms; detaching so HTTPS stop can return"sv;
-      destroyer.detach();
+                         << "ms; owned cleanup continues while reconnect remains gated"sv;
     }
   }
 
@@ -227,11 +270,15 @@ namespace portal {
   }
 
   static bool ensure_global_session() {
+    auto start = session_media::begin_start();
+    reap_portal_cleanup();
     std::lock_guard lock(g_media_mu);
     return ensure_session_unlocked();
   }
 
   static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(int width, int height, platf::mem_type_e mem_type) {
+    auto start = session_media::begin_start();
+    reap_portal_cleanup();
     // Lock contract (SB-2 + S4 single mutex):
     // 1) Under g_media_mu: ensure session + start PipeWire (no dual-mutex nesting).
     // 2) Wait for negotiation OUTSIDE the lock so release_global_capture can progress.
@@ -548,6 +595,11 @@ namespace portal {
             cfg_height = info.height;
           }
         } else {
+          // Direct compositor capture bypasses the gated portal helpers. Take
+          // admission here so reconnect cannot overlap a prior async teardown.
+          auto start = session_media::begin_start();
+          (void) start;
+          reap_portal_cleanup();
           BOOST_LOG(info) << "portal: Cage/labwc active — skipping portal, will use direct screencopy"sv;
         }
       } else {

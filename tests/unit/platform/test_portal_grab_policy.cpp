@@ -420,9 +420,9 @@ TEST(PipeWireCapturePolicyTests, DmaBufDescriptorDuplicatesFdAndNormalizesChunkO
   close(pipe_fds[1]);
 }
 
-TEST(PipeWireCapturePolicyTests, BufferDataTypePolicyKeepsMappedCpuFallbacksRepresented) {
+TEST(PipeWireCapturePolicyTests, BufferDataTypePolicyMatchesNegotiatedEncoderTransport) {
   EXPECT_EQ(pipewire_capture::offered_buffer_data_types(true),
-            (std::vector<std::uint32_t> {SPA_DATA_DmaBuf, SPA_DATA_MemFd, SPA_DATA_MemPtr}));
+            (std::vector<std::uint32_t> {SPA_DATA_DmaBuf}));
   EXPECT_EQ(pipewire_capture::offered_buffer_data_types(false),
             (std::vector<std::uint32_t> {SPA_DATA_MemFd, SPA_DATA_MemPtr}));
 }

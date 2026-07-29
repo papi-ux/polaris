@@ -4,6 +4,7 @@
  */
 
 #include "src/platform/linux/pipewire_capture.h"
+#include "src/platform/linux/pipewire_transport_policy.h"
 
 #include <algorithm>
 #include <array>
@@ -214,10 +215,21 @@ namespace pipewire_capture {
   }
 
   std::vector<std::uint32_t> offered_buffer_data_types(bool may_use_dmabuf) {
-    if (may_use_dmabuf) {
-      return {SPA_DATA_DmaBuf, SPA_DATA_MemFd, SPA_DATA_MemPtr};
+    std::vector<std::uint32_t> data_types;
+    for (const auto transport : pipewire_transport::offered_buffer_transports(may_use_dmabuf)) {
+      switch (transport) {
+        case pipewire_transport::buffer_transport_e::dmabuf:
+          data_types.push_back(SPA_DATA_DmaBuf);
+          break;
+        case pipewire_transport::buffer_transport_e::memfd:
+          data_types.push_back(SPA_DATA_MemFd);
+          break;
+        case pipewire_transport::buffer_transport_e::memptr:
+          data_types.push_back(SPA_DATA_MemPtr);
+          break;
+      }
     }
-    return {SPA_DATA_MemFd, SPA_DATA_MemPtr};
+    return data_types;
   }
 
   bool fill_dmabuf_descriptor(const dmabuf_frame_t &frame, egl::img_descriptor_t &image) {

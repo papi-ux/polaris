@@ -10,9 +10,27 @@
 
 #ifdef __linux__
 
+  #include "session_media_gate.h"
+
   #include <functional>
 
 namespace session_media {
+
+  /**
+   * @brief Admit a capture/runtime start after all prior teardown owners finish.
+   *
+   * Hold the returned owner until the new media resource is fully published.
+   */
+  start_owner_t begin_start();
+
+  /**
+   * @brief Mark teardown active and wait for already-admitted starts to finish.
+   *
+   * Every asynchronous cleanup path keeps an owner until its resource release or
+   * capture join reaches a terminal state. New starts remain blocked until the
+   * final owner is destroyed.
+   */
+  teardown_owner_t begin_teardown();
 
   /**
    * @brief Ordered media teardown for an ending stream session.

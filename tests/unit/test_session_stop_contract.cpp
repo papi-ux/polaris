@@ -326,15 +326,28 @@ TEST(SessionStopContractTests, BrowserStreamStopRespondsBeforeOwnedAppTerminate)
 }
 
 TEST(SessionStopContractTests, PortalReleaseDestroysCaptureOffHttpCriticalPath) {
-  // pw_thread_loop_stop can block forever; release must not run it synchronously
-  // on the caller without a timeout/detach budget.
+  // pw_thread_loop_stop can block forever; release must keep an owned worker and
+  // a teardown owner instead of abandoning cleanup with a detached thread.
   const auto source = read_portal_grab_source_for_contract();
   ASSERT_FALSE(source.empty());
   const auto release = source.find("void release_global_capture()");
   ASSERT_NE(release, std::string::npos);
   const auto release_body = source.substr(release, 2200);
   EXPECT_NE(release_body.find("async capture/session destroy"), std::string::npos);
-  EXPECT_NE(release_body.find("detach"), std::string::npos);
+  EXPECT_NE(release_body.find("session_media::begin_teardown"), std::string::npos);
+  EXPECT_NE(release_body.find("cleanup.worker"), std::string::npos);
+  EXPECT_EQ(release_body.find("destroyer.detach"), std::string::npos);
+}
+
+TEST(SessionStopContractTests, TimedOutBrowserJoinRetainsTeardownOwnership) {
+  const auto source = read_source_for_contract("src/browser_stream.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("void finish_video_capture_stop(");
+  ASSERT_NE(start, std::string::npos);
+  const auto body = source.substr(start, 2200);
+  EXPECT_NE(body.find("session_media::begin_teardown"), std::string::npos);
+  EXPECT_NE(body.find("teardown = std::move(teardown)"), std::string::npos);
+  EXPECT_NE(body.find("joiner.detach()"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, DuplicateStopIsRejectedWhileStopIsInProgress) {

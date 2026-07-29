@@ -53,6 +53,7 @@ extern "C" {
   #include <boost/process/v1/handles.hpp>
   #include <boost/process/v1/io.hpp>
   #include <boost/process/v1/start_dir.hpp>
+  #include "platform/linux/session_media.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_PORTAL
@@ -1450,7 +1451,8 @@ namespace browser_stream {
 
     // Join capture threads, but never block the HTTP/lifecycle thread past
     // `timeout` (SB-2: unbounded join hung :47990 → 10s force-shutdown SIGTRAP).
-    // On timeout, hand ownership to a detached joiner so state lifetime is safe.
+    // The teardown owner moves into a timed-out joiner, keeping reconnect blocked
+    // until every capture thread has actually reached its terminal state.
     void finish_video_capture_stop(
       std::unique_ptr<capture_state_t> state,
       std::chrono::milliseconds timeout = std::chrono::milliseconds {0}
@@ -1458,13 +1460,20 @@ namespace browser_stream {
       if (!state) {
         return;
       }
+#ifdef __linux__
+      auto teardown = session_media::begin_teardown();
+#endif
       if (timeout.count() <= 0) {
         finish_video_capture_stop_join(std::move(state));
         return;
       }
 
       auto done = std::make_shared<std::atomic<bool>>(false);
-      std::thread joiner {[state = std::move(state), done]() mutable {
+      std::thread joiner {[state = std::move(state), done
+#ifdef __linux__
+                           , teardown = std::move(teardown)
+#endif
+                          ]() mutable {
         finish_video_capture_stop_join(std::move(state));
         done->store(true, std::memory_order_release);
       }};

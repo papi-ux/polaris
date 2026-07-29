@@ -152,7 +152,6 @@ namespace pipewire_capture {
     bool negotiated() const;
     bool negotiated_dmabuf() const;
     frame_info_t frame_info() const;
-
     wait_result_e wait_for_frame(std::chrono::milliseconds timeout);
     bool fill_frame(std::shared_ptr<platf::img_t> &image);
 

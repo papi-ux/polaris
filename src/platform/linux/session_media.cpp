@@ -10,7 +10,6 @@
   #include "src/browser_stream.h"
   #include "src/logging.h"
 
-  #include <atomic>
   #include <chrono>
   #include <condition_variable>
   #include <deque>
@@ -21,29 +20,43 @@ using namespace std::literals;
 
 namespace session_media {
   namespace {
+    struct worker_state_t {
+      std::mutex mutex;
+      std::condition_variable changed;
+      std::deque<std::function<void()>> queue;
+      std::thread worker;
+      bool worker_started = false;
+      bool prepare_inflight = false;
+    };
 
-    std::mutex g_worker_mu;
-    std::condition_variable g_worker_cv;
-    std::deque<std::function<void()>> g_queue;
-    std::atomic<bool> g_worker_started {false};
-    std::atomic<bool> g_prepare_inflight {false};
+    // The worker is process-lifetime and owns its joinable thread. Deliberately
+    // retain the state so neither the worker nor late teardown owners can touch
+    // objects destroyed by static teardown.
+    worker_state_t &worker_state() {
+      static auto *state = new worker_state_t;
+      return *state;
+    }
 
-    void worker_main() {
+    teardown_gate_t &media_gate() {
+      static auto *gate = new teardown_gate_t;
+      return *gate;
+    }
+
+    void worker_main(worker_state_t *state) {
       for (;;) {
         std::function<void()> job;
         {
-          std::unique_lock lock(g_worker_mu);
-          g_worker_cv.wait(lock, [] {
-            return !g_queue.empty();
+          std::unique_lock lock(state->mutex);
+          state->changed.wait(lock, [state] {
+            return !state->queue.empty();
           });
-          job = std::move(g_queue.front());
-          g_queue.pop_front();
-          // Coalesce: drop identical no-op floods; keep only the latest pending
-          // jobs after the one we take (stop storms from double-click UI).
-          if (g_queue.size() > 2) {
-            auto last = std::move(g_queue.back());
-            g_queue.clear();
-            g_queue.push_back(std::move(last));
+          job = std::move(state->queue.front());
+          state->queue.pop_front();
+          // Coalesce stop storms while retaining the current and latest jobs.
+          if (state->queue.size() > 2) {
+            auto last = std::move(state->queue.back());
+            state->queue.clear();
+            state->queue.push_back(std::move(last));
             BOOST_LOG(info) << "session_media: coalesced teardown queue to latest job"sv;
           }
         }
@@ -61,41 +74,62 @@ namespace session_media {
     }
 
     void ensure_worker() {
-      bool expected = false;
-      if (g_worker_started.compare_exchange_strong(expected, true)) {
-        std::thread {worker_main}.detach();
+      auto &state = worker_state();
+      std::lock_guard lock(state.mutex);
+      if (state.worker_started) {
+        return;
+      }
+
+      state.worker_started = true;
+      try {
+        state.worker = std::thread {worker_main, &state};
+      } catch (...) {
+        state.worker_started = false;
+        throw;
       }
     }
-
   }  // namespace
 
+  start_owner_t begin_start() {
+    return media_gate().begin_start();
+  }
+
+  teardown_owner_t begin_teardown() {
+    return media_gate().begin_teardown();
+  }
+
   void prepare_for_stop() {
-    // Serialize concurrent prepare (HTTP stop + terminate_impl can race).
-    bool expected = false;
-    if (!g_prepare_inflight.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      BOOST_LOG(info) << "session_media: prepare_for_stop already in flight; waiting on condition_variable"sv;
-      // Slop #8: condition_variable + timeout (no spin-sleep). Waiters share g_worker_mu
-      // with the in-flight prepare's release_flag so notify_all unblocks promptly.
-      std::unique_lock lock(g_worker_mu);
-      const bool done = g_worker_cv.wait_for(lock, std::chrono::seconds(2), [] {
-        return !g_prepare_inflight.load(std::memory_order_acquire);
-      });
-      if (!done) {
-        BOOST_LOG(warning) << "session_media: previous prepare still busy after 2s wait_for; skipping nested prepare"sv;
+    auto &state = worker_state();
+    {
+      std::unique_lock lock(state.mutex);
+      if (state.prepare_inflight) {
+        BOOST_LOG(info) << "session_media: prepare_for_stop already in flight; waiting on condition_variable"sv;
+        const bool done = state.changed.wait_for(lock, std::chrono::seconds(2), [&state] {
+          return !state.prepare_inflight;
+        });
+        if (!done) {
+          BOOST_LOG(warning) << "session_media: previous prepare still busy after 2s wait_for; skipping nested prepare"sv;
+        }
+        return;
       }
-      return;
+      state.prepare_inflight = true;
     }
 
-    struct release_flag {
-      ~release_flag() {
-        g_prepare_inflight.store(false, std::memory_order_release);
-        g_worker_cv.notify_all();
+    struct release_prepare_flag_t {
+      worker_state_t &state;
+      ~release_prepare_flag_t() {
+        {
+          std::lock_guard lock(state.mutex);
+          state.prepare_inflight = false;
+        }
+        state.changed.notify_all();
       }
-    } guard;
+    } release_prepare_flag {state};
 
-    // browser_stream owns Browser Stream capture threads; it also performs the
-    // ordered portal release + bounded join. This is the single call site for
-    // that sequence from process/confighttp/lifecycle.
+    // The root owner blocks reconnect immediately. Portal destruction and
+    // Browser capture joins acquire additional owners when they outlive the
+    // bounded prepare_for_stop() response budget.
+    auto teardown = begin_teardown();
     browser_stream::prepare_for_session_teardown();
   }
 
@@ -104,11 +138,12 @@ namespace session_media {
       return;
     }
     ensure_worker();
+    auto &state = worker_state();
     {
-      std::lock_guard lock(g_worker_mu);
-      g_queue.push_back(std::move(work));
+      std::lock_guard lock(state.mutex);
+      state.queue.push_back(std::move(work));
     }
-    g_worker_cv.notify_one();
+    state.changed.notify_one();
   }
 
 }  // namespace session_media
