@@ -134,8 +134,8 @@ reset_state
 mkdir -p "$work/proc/100" "$work/proc/101"
 printf '10\n' >"$work/proc/100/start"
 printf '11\n' >"$work/proc/101/start"
-printf 'HOME=/home/papi\0' >"$work/proc/100/environ"
-printf 'HOME=/home/papi\0POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+printf 'HOME=/srv/example\0' >"$work/proc/100/environ"
+printf 'HOME=/srv/example\0POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
 POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=$'100\n101' \
   NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
   PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "exact-session Steam handoff failed"
