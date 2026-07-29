@@ -25,27 +25,27 @@ elif ! polaris_marker_owns_socket "$marker" "$rt/gamescope-0" 2>/dev/null; then
   polaris_reclaim_orphan_gamescope_sockets "$rt" || true
 fi
 
-# Nested stop can leave runtime-masked idle / no gamescope-0.
-if [ -f "$rt/polaris-gamescope-wsi-nested" ] || [ ! -S "$rt/gamescope-0" ]; then
-  echo "polaris: recover idle gamescope-0 (nested leftover or missing socket)" >&2
-  marker_role=""
-  if polaris_validate_marker "$marker"; then
-    marker_role="$POLARIS_MARKER_ROLE"
-    if [ "$marker_role" = nested ]; then
-      polaris_stop_marked_gamescope "$marker" nested "$rt" || {
-        echo "polaris: refusing to replace a live nested gamescope generation" >&2
-        exit 1
-      }
-      marker_role=""
-    fi
-  fi
-  rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
-    "$rt/polaris-gamescope-audio-sink" || true
+# Nested recovery is credentialed and transactional: only the session stop state
+# machine may drain exact-session Steam, restore idle ownership, rebind the
+# private portal, and clear the durable claim.
+if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
+  session_cmd="${POLARIS_GAMESCOPE_SESSION_BIN:-polaris-gamescope-session}"
+  [ -s "$rt/polaris-gamescope-session-id" ] || {
+    echo "polaris: nested recovery lacks its immutable session credential" >&2
+    exit 1
+  }
+  command -v "$session_cmd" >/dev/null 2>&1 || {
+    echo "polaris: credentialed gamescope session recovery command is unavailable" >&2
+    exit 1
+  }
+  echo "polaris: complete credentialed nested recovery" >&2
+  POLARIS_SESSION_INSTANCE_ID= "$session_cmd" stop || exit 1
+  [ ! -e "$rt/polaris-gamescope-wsi-nested" ] || exit 1
+elif [ ! -S "$rt/gamescope-0" ]; then
+  echo "polaris: restore missing idle gamescope-0" >&2
   polaris_unmask_idle_unit_runtime
-  if [ ! -S "$rt/gamescope-0" ] && [ "$marker_role" != runtime ]; then
-    systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
-      || systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
-  fi
+  systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
+    || systemctl --user start polaris-gamescope-idle.service 2>/dev/null || exit 1
 fi
 
 deadline=$((SECONDS + 60))
@@ -57,6 +57,12 @@ while [ ! -S "$rt/gamescope-0" ]; do
   sleep 0.2
 done
 
+if ! polaris_validate_marker "$marker" \
+    || ! polaris_marker_owns_socket "$marker" "$rt/gamescope-0" 2>/dev/null; then
+  echo "polaris: gamescope-0 appeared without exact idle ownership" >&2
+  exit 1
+fi
+
 bus_path="$rt/polaris-portal/bus"
 if [ ! -e "$bus_path" ]; then
   echo "polaris: gamescope-0 ready (no private portal bus — host portal or gamescopegrab OK)" >&2
@@ -64,6 +70,10 @@ if [ ! -e "$bus_path" ]; then
 fi
 
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"
+systemctl --user restart polaris-portal-gamescope.service >/dev/null 2>&1 || {
+  echo "polaris: failed to restart private gamescope portal" >&2
+  exit 1
+}
 deadline=$((SECONDS + 45))
 while true; do
   modes=""
@@ -78,8 +88,8 @@ while true; do
     exit 0
   fi
   if [ "$SECONDS" -ge "$deadline" ]; then
-    echo "polaris: portal not ready; continuing (gamescopegrab may still work)" >&2
-    exit 0
+    echo "polaris: private ScreenCast portal did not become ready" >&2
+    exit 1
   fi
   sleep 0.25
 done

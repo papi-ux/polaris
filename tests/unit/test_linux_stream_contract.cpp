@@ -66,7 +66,7 @@ TEST(LinuxStreamContractTests, GamescopeOwnershipTransitionsUseOneCrossProcessLo
 
   const auto marker_failure = runtime.find("if (!marker_written)");
   ASSERT_NE(marker_failure, std::string::npos);
-  const auto failure_body = runtime.substr(marker_failure, 1200);
+  const auto failure_body = runtime.substr(marker_failure, 5000);
   const auto child_check = failure_body.find("waitpid(child, &status, WNOHANG)");
   const auto signal = failure_body.find("kill(child, SIGTERM)");
   ASSERT_NE(child_check, std::string::npos);

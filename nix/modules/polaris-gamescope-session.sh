@@ -135,10 +135,21 @@ steam_app_game_alive() {
 
 case "${1:-}" in
   start)
-    [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ] || {
+    requested_session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
+    [ -n "$requested_session_id" ] || {
       echo "polaris-gamescope-session: missing immutable session credential" >&2
       exit 1
     }
+    if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
+      [ -s "$session_id_file" ] || {
+        echo "polaris-gamescope-session: nested recovery lacks its immutable session credential" >&2
+        exit 1
+      }
+      echo "polaris-gamescope-session: complete prior nested recovery before new launch" >&2
+      POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1
+      POLARIS_SESSION_INSTANCE_ID="$requested_session_id"
+      export POLARIS_SESSION_INSTANCE_ID
+    fi
     session_id_tmp="$session_id_file.tmp.$$"
     printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$session_id_tmp"
     mv -f "$session_id_tmp" "$session_id_file"
@@ -449,18 +460,8 @@ case "${1:-}" in
     else
       # --- Attach path (known-good stream, no WSI) ---
       if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
-        if polaris_validate_marker "$marker" nested; then
-          polaris_stop_marked_gamescope "$marker" nested "$rt" || {
-            echo "polaris-gamescope-session: nested owner did not stop" >&2
-            exit 1
-          }
-        elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-          echo "polaris-gamescope-session: refusing to clean unowned nested sockets" >&2
-          exit 1
-        fi
-        rm -f "$rt/polaris-gamescope-wsi-nested"
-        polaris_unmask_idle_unit_runtime
-        systemctl --user start polaris-gamescope-idle.service || true
+        echo "polaris-gamescope-session: nested recovery claim changed during attach setup" >&2
+        exit 1
       elif ! systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null; then
         systemctl --user start polaris-gamescope-idle.service || true
       elif [ "${prev_force:-}" != "$want_hdr" ]; then

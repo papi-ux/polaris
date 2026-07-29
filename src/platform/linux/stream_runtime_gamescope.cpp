@@ -82,6 +82,33 @@ namespace stream_runtime {
       return fs::exists(xdg_runtime_dir() + "/" + name);
     }
 
+    enum class private_group_state_e {
+      alive,
+      drained,
+      unknown,
+    };
+
+    private_group_state_e private_group_state(pid_t pgid) {
+      errno = 0;
+      if (kill(-pgid, 0) == 0 || errno == EPERM) {
+        return private_group_state_e::alive;
+      }
+      if (errno == ESRCH) {
+        return private_group_state_e::drained;
+      }
+      return private_group_state_e::unknown;
+    }
+
+    bool is_private_group_leader(pid_t pid) {
+      errno = 0;
+      const auto pgid = getpgid(pid);
+      if (pgid < 0) {
+        return false;
+      }
+      const auto sid = getsid(pid);
+      return sid >= 0 && pgid == pid && sid == pid;
+    }
+
     /// Wait until socket exists for two consecutive polls (avoids attach races).
     bool wait_for_stable_socket(const std::string &name, int timeout_ms = 8000) {
       const auto step = 50;
@@ -219,7 +246,9 @@ namespace stream_runtime {
           return false;
         }
         if (child == 0) {
-          setsid();
+          if (setsid() < 0) {
+            _exit(126);
+          }
           unsetenv("WAYLAND_DISPLAY");
           unsetenv("ENABLE_GAMESCOPE_WSI");
           unsetenv("ENABLE_HDR_WSI");
@@ -247,6 +276,9 @@ namespace stream_runtime {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
           }
         }
+        if (marker_ && !is_private_group_leader(child)) {
+          marker_.reset();
+        }
         bool marker_written = false;
         if (marker_) {
           owner_transition_lock_t owner_lock;
@@ -266,8 +298,24 @@ namespace stream_runtime {
             int status = 0;
             const auto child_state = waitpid(child, &status, WNOHANG);
             if (child_state == 0) {
-              kill(child, SIGTERM);
-              waitpid(child, nullptr, 0);
+              if (is_private_group_leader(child)) {
+                (void) kill(-child, SIGTERM);
+                for (int i = 0; i < 20 && private_group_state(child) == private_group_state_e::alive; ++i) {
+                  (void) waitpid(child, &status, WNOHANG);
+                  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                const auto final_group_state = private_group_state(child);
+                if (final_group_state == private_group_state_e::alive) {
+                  (void) kill(-child, SIGKILL);
+                }
+                else if (final_group_state == private_group_state_e::unknown) {
+                  (void) kill(child, SIGKILL);
+                }
+              }
+              else {
+                (void) kill(child, SIGTERM);
+              }
+              (void) waitpid(child, nullptr, 0);
             }
           }
           pid_ = 0;
@@ -464,28 +512,45 @@ namespace stream_runtime {
             return;
           }
           const auto current = gp::validated_marker(marker_path(), "runtime");
-          if (current && *current == *marker_) {
-            // The marker validates this exact PID generation immediately before
-            // signalling its setsid-owned process group.
-            kill(-marker_->pid, SIGTERM);
-            for (int i = 0; i < 30; ++i) {
-              int status = 0;
-              const auto result = waitpid(marker_->pid, &status, WNOHANG);
-              if (result == marker_->pid || (result < 0 && errno == ECHILD)) {
+          if (!current || *current != *marker_ || !is_private_group_leader(marker_->pid)) {
+            BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale or unverified group="sv
+                               << marker_->pid;
+            return;
+          }
+          if (kill(-marker_->pid, SIGTERM) != 0 && errno != ESRCH) {
+            BOOST_LOG(error) << "gamescope_runtime: failed to signal owned group="sv << marker_->pid;
+            return;
+          }
+          int status = 0;
+          (void) waitpid(marker_->pid, &status, WNOHANG);
+          auto group_state = private_group_state(marker_->pid);
+          for (int i = 0; i < 30 && group_state == private_group_state_e::alive; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            (void) waitpid(marker_->pid, &status, WNOHANG);
+            group_state = private_group_state(marker_->pid);
+          }
+          if (group_state == private_group_state_e::alive) {
+            const auto marker_on_disk = gp::read_marker(marker_path());
+            if (!marker_on_disk || *marker_on_disk != *marker_ ||
+                (kill(-marker_->pid, SIGKILL) != 0 && errno != ESRCH)) {
+              BOOST_LOG(error) << "gamescope_runtime: ownership changed before group escalation"sv;
+              return;
+            }
+            for (int i = 0; i < 20; ++i) {
+              (void) waitpid(marker_->pid, &status, WNOHANG);
+              group_state = private_group_state(marker_->pid);
+              if (group_state != private_group_state_e::alive) {
                 break;
               }
               std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            if (gp::is_valid_headless_gamescope(*marker_)) {
-              kill(-marker_->pid, SIGKILL);
-              waitpid(marker_->pid, nullptr, 0);
-            }
-            BOOST_LOG(info) << "gamescope_runtime: stopped owned gamescope pid="sv << marker_->pid;
           }
-          else {
-            BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale/reused owned pid="sv
-                               << marker_->pid;
+          if (group_state != private_group_state_e::drained) {
+            BOOST_LOG(error) << "gamescope_runtime: private group did not drain; preserving ownership state"sv;
+            return;
           }
+          (void) waitpid(marker_->pid, &status, WNOHANG);
+          BOOST_LOG(info) << "gamescope_runtime: drained owned gamescope group="sv << marker_->pid;
           remove_owned_files_if_current_unlocked();
         }
         else if (!owned_ && marker_) {

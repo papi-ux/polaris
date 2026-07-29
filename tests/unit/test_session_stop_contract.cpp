@@ -242,6 +242,8 @@ TEST(SessionStopContractTests, UnclassifiedNestedLaunchHasNoNumericGroupKillFall
   ASSERT_NE(claim, std::string::npos);
   ASSERT_NE(launch, std::string::npos);
   EXPECT_LT(claim, launch);
+  const auto recover = source.find("\"$0\" stop");
+  ASSERT_NE(recover, std::string::npos);
 }
 
 TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebind) {
@@ -252,6 +254,18 @@ TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebin
   EXPECT_NE(recovery.find("${lib.getExe sessionBin} stop"), std::string::npos);
   EXPECT_NE(recovery.find("polaris-gamescope-session-id"), std::string::npos);
   EXPECT_NE(session.find("restart polaris-portal-gamescope.service"), std::string::npos);
+  const auto non_nix = read_source_for_contract("scripts/install/lib/polaris-wait-gamescope.sh");
+  ASSERT_FALSE(non_nix.empty());
+  EXPECT_NE(non_nix.find("POLARIS_GAMESCOPE_SESSION_BIN"), std::string::npos);
+  EXPECT_NE(non_nix.find("polaris-gamescope-session-id"), std::string::npos);
+}
+
+TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState) {
+  const auto source = read_source_for_contract("src/platform/linux/stream_runtime_gamescope.cpp");
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(source.find("private_group_state"), std::string::npos);
+  EXPECT_NE(source.find("private group did not drain"), std::string::npos);
+  EXPECT_NE(source.find("SIGKILL"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {
