@@ -208,7 +208,8 @@ polaris_remove_orphan_socket() (
   fi
   # Libwayland holds this lock across bind and display lifetime. Acquire it
   # non-blocking so reclaim cannot race a compositor between lock and bind.
-  exec 8<"$socket.lock" 2>/dev/null || return 1
+  [ -f "$socket.lock" ] && [ ! -L "$socket.lock" ] || return 1
+  exec 8<"$socket.lock" || return 1
   "$lock_bin" -n -x 8 || return 1
   [ -e "$socket" ] || return 0
   polaris_socket_is_orphan "$socket" || return 1

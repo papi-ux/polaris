@@ -276,6 +276,16 @@ fi
 [ ! -e "$work/run/gamescope-0.lock" ] || fail "reclaim created a replacement lock inode"
 rm -f "$work/run/gamescope-0"
 
+# A symlink is not the authoritative Wayland lock inode and must not be followed.
+: >"$work/run/gamescope-0"
+: >"$work/run/foreign-lock"
+ln -s "$work/run/foreign-lock" "$work/run/gamescope-0.lock"
+if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+  fail "symlinked Wayland lock was accepted"
+fi
+[ -e "$work/run/gamescope-0" ] || fail "symlink-lock socket was removed"
+rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock" "$work/run/foreign-lock"
+
 # Reclaim must take the authoritative Wayland socket lock. A compositor may
 # hold that lock before its socket path becomes visible.
 : >"$work/run/gamescope-0"
