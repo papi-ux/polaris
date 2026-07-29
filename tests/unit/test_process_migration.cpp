@@ -314,6 +314,15 @@ TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunc
   EXPECT_LT(credential, prep_loop);
   EXPECT_NE(body.find("critical nested gamescope prep command failed"), std::string::npos);
   EXPECT_NE(body.find("return 503;", prep_loop), std::string::npos);
+  const auto app_env_loop = body.find("for (const auto &[key, val] : _app.env_vars)", prep_loop);
+  ASSERT_NE(app_env_loop, std::string::npos);
+  const auto reserved_filter = body.find("is_reserved_session_env_key(key)", app_env_loop);
+  ASSERT_NE(reserved_filter, std::string::npos);
+  const auto credential_reassert = body.find("set_child_only_session_env_var(", credential + 1);
+  ASSERT_NE(credential_reassert, std::string::npos);
+  EXPECT_LT(app_env_loop, reserved_filter);
+  EXPECT_LT(reserved_filter, credential_reassert);
+  EXPECT_NE(body.find("platf::unset_env(\"POLARIS_SESSION_INSTANCE_ID\")", app_env_loop), std::string::npos);
 }
 
 TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWithoutCrossLockingRtsp) {

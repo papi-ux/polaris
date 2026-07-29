@@ -2993,6 +2993,10 @@ namespace proc {
       tracked_keys.insert(key);
     }
 
+    bool is_reserved_session_env_key(std::string_view key) {
+      return key == "POLARIS_SESSION_INSTANCE_ID"sv;
+    }
+
     void set_child_only_session_env_var(boost::process::v1::environment &env,
                                         std::unordered_set<std::string> &tracked_keys,
                                         const std::string &key,
@@ -5798,12 +5802,26 @@ namespace proc {
     // Apply per-app environment variables (e.g., MANGOHUD=1, PROTON_NO_FSYNC=1)
     // Set on both boost _env (for non-cage launches) and real environ (for fork/exec in cage)
     for (const auto &[key, val] : _app.env_vars) {
+      if (is_reserved_session_env_key(key)) {
+        BOOST_LOG(warning) << "Ignoring reserved per-app environment key: " << key;
+        continue;
+      }
       _env[key] = val;
       platf::set_env(key, val);
       BOOST_LOG(info) << "Per-app env: " << key << "=" << val;
     }
 
 #ifdef __linux__
+    // Generic app environment is untrusted configuration. Reassert the exact
+    // generated credential child-only after overlay application and ensure no
+    // value remains in the daemon environment for later sessions to inherit.
+    platf::unset_env("POLARIS_SESSION_INSTANCE_ID");
+    set_child_only_session_env_var(
+      _env,
+      _session_env_keys,
+      "POLARIS_SESSION_INSTANCE_ID",
+      _session_instance_id
+    );
     _audio_context = {};
     if (config::audio.stream) {
       _audio_context = audio::get_audio_ctx_ref();
