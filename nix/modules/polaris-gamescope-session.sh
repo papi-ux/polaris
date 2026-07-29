@@ -1,0 +1,424 @@
+export PATH="${POLARIS_SESSION_PATH:-$PATH}"
+
+set -euo pipefail
+rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus"
+# Module option services.polarisGamescopeSession.hdr — allow force-HDR path at all.
+allow_client_hdr=1
+gs_width="${POLARIS_HDR_WIDTH:-3840}"
+gs_height="${POLARIS_HDR_HEIGHT:-2160}"
+gs_refresh="${POLARIS_HDR_REFRESH:-120}"
+
+session_steam_pids() {
+  local p h
+  for p in $(pgrep -x steam 2>/dev/null || true); do
+    h="$(tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | sed -n 's/^HOME=//p' | head -n1 || true)"
+    if [ "$h" = "${HOME}" ]; then
+      printf '%s\n' "$p"
+    fi
+  done
+}
+session_steam_alive() { [ -n "$(session_steam_pids)" ]; }
+
+kill_session_steam() {
+  if session_steam_alive; then
+    steam -shutdown 2>/dev/null || true
+    sleep 1
+    pkill -TERM -x steam 2>/dev/null || true
+    for _ in $(seq 1 40); do
+      session_steam_alive || break
+      sleep 0.25
+    done
+  fi
+}
+
+# True while a real game process for $1 (Steam appid) is running.
+# Steam client / webhelper also inherit SteamAppId — exclude those so
+# Big Picture alone does not count as "game still up".
+steam_app_game_alive() {
+  local appid="$1" pid cmd envf
+  [ -n "$appid" ] || return 1
+  for envf in /proc/[0-9]*/environ; do
+    pid="${envf#/proc/}"
+    pid="${pid%/environ}"
+    case "$pid" in
+      *[!0-9]*) continue ;;
+    esac
+    if ! tr '\0' '\n' <"$envf" 2>/dev/null | grep -qx "SteamAppId=${appid}"; then
+      continue
+    fi
+    cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+    # Skip empty / Steam client helpers (not the game binary).
+    if [ -z "$cmd" ]; then
+      continue
+    fi
+    case "$cmd" in
+      *steamwebhelper*|*steam-runtime*|*/steam.sh*|*/ubuntu12_32/steam*|*/ubuntu12_64/steam*|*steam\ -gamepadui*|*steam\ -silent*|*srt-logger*)
+        continue
+        ;;
+    esac
+    return 0
+  done
+  return 1
+}
+
+case "${1:-}" in
+  start)
+    # Soft env hint for nested games (PULSE_SINK / PIPEWIRE_NODE).
+    # Polaris itself picks the capture sink: EasyEffects when it is the
+    # host default (FMOD target.object sticks there); otherwise virtual
+    # sink-sunshine-*. Do NOT re-pin streams here — that thrash fought
+    # WirePlumber and killed main-menu audio.
+    audio_cfg="${POLARIS_CLIENT_AUDIO_CONFIGURATION:-}"
+    # Quoted names: shellcheck SC2100 treats unquoted *51 as arithmetic.
+    audio_sink="sink-sunshine-surround51"
+    audio_map="front-left,front-right,rear-left,rear-right,front-center,lfe"
+    audio_desc="Polaris-5.1"
+    case "$audio_cfg" in
+      *2.0*|*[Ss]tereo*|*2ch*|2)
+        audio_sink="sink-sunshine-stereo"
+        audio_map="front-left,front-right"
+        audio_desc="Polaris-stereo"
+        ;;
+      *7.1*|7)
+        audio_sink="sink-sunshine-surround71"
+        audio_map="front-left,front-right,rear-left,rear-right,front-center,lfe,side-left,side-right"
+        audio_desc="Polaris-7.1"
+        ;;
+      *5.1*|5|"")
+        audio_sink="sink-sunshine-surround51"
+        audio_map="front-left,front-right,rear-left,rear-right,front-center,lfe"
+        audio_desc="Polaris-5.1"
+        ;;
+    esac
+    echo "polaris-gamescope-session: audio_cfg=${audio_cfg:-unset} → sink=$audio_sink" >&2
+
+    ensure_null_sink() {
+      local name="$1" map="$2" desc="$3"
+      if ! pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$name"; then
+        pactl load-module module-null-sink \
+          media.class=Audio/Sink \
+          sink_name="$name" \
+          channel_map="$map" \
+          sink_properties="node.description=$desc" \
+          >/dev/null 2>&1 || true
+      fi
+    }
+    # Virtual sinks for non-EE isolation (Polaris also creates them).
+    ensure_null_sink "sink-sunshine-stereo" \
+      "front-left,front-right" \
+      "Polaris-stereo"
+    ensure_null_sink "sink-sunshine-surround51" \
+      "front-left,front-right,rear-left,rear-right,front-center,lfe" \
+      "Polaris-5.1"
+    ensure_null_sink "sink-sunshine-surround71" \
+      "front-left,front-right,rear-left,rear-right,front-center,lfe,side-left,side-right" \
+      "Polaris-7.1"
+    ensure_null_sink "$audio_sink" "$audio_map" "$audio_desc"
+
+    # Prefer host processing sink for child env when EE/JamesDSP is default
+    # (matches Polaris capture; avoids PULSE_SINK pointing at empty null).
+    host_default="$(pactl get-default-sink 2>/dev/null || true)"
+    case "$host_default" in
+      *easyeffects*|*EasyEffects*|*jamesdsp*|*JamesDSP*|*pulseeffects*|*PulseEffects*)
+        audio_sink="$host_default"
+        echo "polaris-gamescope-session: host default is processing sink [$host_default] — child env uses it" >&2
+        ;;
+    esac
+
+    printf '%s\n' "$audio_sink" >"$rt/polaris-gamescope-audio-sink"
+    echo "polaris-gamescope-session: audio env sink=$audio_sink (no re-pin; EasyEffects left running)" >&2
+
+    # True SDR when POLARIS_CLIENT_HDR is false: force file 0 + no --hdr-enabled.
+    # Hybrid (HDR gamescope + SDR encode) is the iPhone chroma disaster; polaris 06 also syncs force.
+    want_hdr=0
+    if [ "$allow_client_hdr" = 1 ]; then
+      case "${POLARIS_CLIENT_HDR:-false}" in
+        true|TRUE|1|yes|YES) want_hdr=1 ;;
+      esac
+    fi
+    # Nested WSI by default: Steam is gamescope primary child.
+    # Polaris prep-cmd strips leading "env FOO=1 …", so WSI cannot be
+    # toggled via apps.json env — default on; set POLARIS_GAMESCOPE_WSI=0
+    # only for explicit attach experiments.
+    # Attach-to-idle often blacks out direct applaunch (no focus/paint).
+    want_wsi=1
+    case "${POLARIS_GAMESCOPE_WSI:-1}" in
+      false|FALSE|0|no|NO) want_wsi=0 ;;
+    esac
+
+    # Nested WSI: gamescope --steam with Steam as primary child.
+    # Plain "-silent -applaunch" creates a WSI surface but often no
+    # PipeWire paint (black stream). BP works because -gamepadui owns
+    # focus; direct titles use the same UI + applaunch.
+    steam_launch=(steam -gamepadui)
+    if [ -n "${2:-}" ]; then
+      case "$2" in
+        *[!0-9]*)
+          echo "polaris-gamescope-session: appid must be numeric, got: $2" >&2
+          exit 2
+          ;;
+      esac
+      # Direct library title: same HDR gate as Big Picture
+      # (POLARIS_CLIENT_HDR / client profile). No force-SDR.
+      steam_launch=(steam -gamepadui -applaunch "$2")
+      # wait monitors this: game exit → steam -shutdown → stream ends
+      # (otherwise gamepadui returns to BP and the stream never stops).
+      printf '%s\n' "$2" >"$rt/polaris-gamescope-appid"
+      echo "polaris-gamescope-session: Steam -gamepadui -applaunch $2 (nested WSI, hdr=$want_hdr, exit-on-game-close)" >&2
+    else
+      rm -f "$rt/polaris-gamescope-appid"
+    fi
+
+    prev_force="$(tr -d '[:space:]' <"$rt/polaris-gamescope-force" 2>/dev/null || true)"
+    printf '%s\n' "$want_hdr" >"$rt/polaris-gamescope-force"
+    if [ "$want_hdr" = 1 ]; then
+      echo "polaris-gamescope-session: HDR session (force=1, ${POLARIS_GAMESCOPE_BIN:-gamescope} --hdr-enabled when started)" >&2
+    else
+      echo "polaris-gamescope-session: true SDR (force=0, no --hdr-enabled; not hybrid PQ+SDR)" >&2
+    fi
+
+    kill_session_steam
+
+    if [ "$want_wsi" = 1 ]; then
+      # --- Nested WSI path (games as gamescope child) ---
+      echo "polaris-gamescope-session: WSI nested mode — Steam is ${POLARIS_GAMESCOPE_BIN:-gamescope} primary child" >&2
+      # Runtime-mask so polaris Wants= / on-failure cannot respawn idle
+      # while nested needs exclusive gamescope-0 (portal is hard-wired).
+      systemctl --user mask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+      systemctl --user stop polaris-gamescope-idle.service 2>/dev/null || true
+      # Drop leftover headless gamescope holding gamescope-0.
+      if [ -S "$rt/gamescope-0" ]; then
+        pkill -f 'gamescope.*--backend headless' 2>/dev/null || true
+      fi
+      for _ in $(seq 1 100); do
+        [ ! -S "$rt/gamescope-0" ] && [ ! -S "$rt/gamescope-1" ] && break
+        sleep 0.1
+      done
+      if [ -S "$rt/gamescope-0" ] || [ -S "$rt/gamescope-1" ]; then
+        echo "polaris-gamescope-session: headless ${POLARIS_GAMESCOPE_BIN:-gamescope} socket still held after stop" >&2
+        exit 1
+      fi
+      rm -f "$rt/polaris-gamescope.env" "$rt/polaris-gamescope.pid"
+
+      # shellcheck source=/dev/null
+
+      prefer_vk=()
+      if [ -n "${POLARIS_GAMESCOPE_PREFER_VK:-}" ]; then
+        prefer_vk=(--prefer-vk-device "$POLARIS_GAMESCOPE_PREFER_VK")
+      fi
+      hdr_flags=()
+      if [ "$want_hdr" = 1 ]; then
+        # Nested: --hdr-enabled only (no --hdr-debug-force-*).
+        # WSI can still create HDR10 swapchains; PW spa 81 may need force later.
+        hdr_flags=(
+          --hdr-enabled
+          --sdr-gamut-wideness 0.000000
+          --hdr-sdr-content-nits 203
+        )
+        echo "polaris-gamescope-session: nested HDR (enabled, no debug-force-*)" >&2
+      fi
+      # Always --steam on nested WSI (input + multi-xwayland Steam integration).
+      steam_flags=(--steam)
+
+      # gamescope itself setenv(ENABLE_GAMESCOPE_WSI,1) for nested children.
+      # Do NOT set ENABLE_HDR_WSI (separate VK_hdr_layer; can break Gamescope WSI).
+      # Do NOT pass host WAYLAND_DISPLAY into children: FROG WSI only creates
+      # Gamescope surfaces when GAMESCOPE_WAYLAND_DISPLAY is set and does not
+      # conflict with another non-empty WAYLAND_DISPLAY (KWin wayland-0).
+      # Desktop nested AC6 success had WAYLAND_DISPLAY unset on the game.
+      # No GAMESCOPE_WSI_FORCE_BYPASS: bypass kept swapchains non-HDR.
+      child_env=(
+        # Stream capture only: leave system default + EasyEffects alone.
+        PULSE_SINK="$audio_sink"
+        PIPEWIRE_NODE="$audio_sink"
+        POLARIS_SESSION_AUDIO_SINK="$audio_sink"
+        STEAM_MULTIPLE_XWAYLANDS=1
+        QT_QPA_PLATFORM=xcb
+        DISABLE_HDR_WSI=1
+      )
+      if [ "$want_hdr" = 1 ]; then
+        child_env+=(STEAM_GAMESCOPE_HDR_SUPPORTED=1 DXVK_HDR=1)
+      fi
+
+      steam_log=/tmp/polaris-gamescope-steam-wsi.log
+      : >"$steam_log"
+      # gamescope runs Steam as primary child; portal still captures gamescope-0.
+      # Omit --expose-wayland so children stay on XWayland + GAMESCOPE_WAYLAND_DISPLAY
+      # (WSI X11 path). Portal uses compositor socket gamescope-0, not child WAYLAND.
+      # env -u: drop host KWin Wayland/DISPLAY inherited from polaris user session.
+      echo "polaris-gamescope-session: nested geometry ${gs_width}x${gs_height}@${gs_refresh}" >&2
+      setsid -f env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
+        "${child_env[@]}" ${POLARIS_GAMESCOPE_BIN:-gamescope} \
+        --backend headless \
+        "${steam_flags[@]}" \
+        --xwayland-count 2 \
+        "${prefer_vk[@]}" \
+        "${hdr_flags[@]}" \
+        -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
+        -w "$gs_width" -h "$gs_height" \
+        -- "${steam_launch[@]}" \
+        >"$steam_log" 2>&1
+      # Parent of setsid is hard to pin; mark nested mode for stop.
+      printf '1\n' >"$rt/polaris-gamescope-wsi-nested"
+      # Portal / polaris still talk to the nested compositor socket.
+      printf 'DISPLAY=:0\nWAYLAND_DISPLAY=gamescope-0\nGAMESCOPE_WAYLAND_DISPLAY=gamescope-0\n' \
+        >"$rt/polaris-gamescope.env"
+
+      for _ in $(seq 1 300); do
+        [ -S "$rt/gamescope-0" ] && break
+        sleep 0.1
+      done
+      if [ ! -S "$rt/gamescope-0" ]; then
+        echo "polaris-gamescope-session: nested gamescope-0 not ready — see $steam_log" >&2
+        exit 1
+      fi
+      # Portal + polaris-gamescope.env assume gamescope-0. Bail if we lost the race.
+      if rg -q "wayland display 'gamescope-1'" "$steam_log" 2>/dev/null; then
+        echo "polaris-gamescope-session: nested bound gamescope-1 (portal captures gamescope-0) — see $steam_log" >&2
+        exit 1
+      fi
+      # Do NOT systemctl-restart portal here: it races Steam's udev/controller
+      # hotplug (pad is created only after prep returns) and left the virtual
+      # Xbox pad unopened — no controller after 2026-07-27 deploy.
+      # Portal already tracks gamescope-0; capture rebinds on stream start.
+      sleep 2
+      echo "polaris-gamescope-session: nested ${POLARIS_GAMESCOPE_BIN:-gamescope} ready; WSI logs → $steam_log and ~/.local/share/Steam/logs/console-linux.txt" >&2
+      echo "polaris-gamescope-session: pass = 'Creating Gamescope surface' + 'hdr formats exposed: true'" >&2
+    else
+      # --- Attach path (known-good stream, no WSI) ---
+      if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
+        rm -f "$rt/polaris-gamescope-wsi-nested"
+        pkill -f 'gamescope.*--backend headless' 2>/dev/null || true
+        systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+        systemctl --user start polaris-gamescope-idle.service || true
+      elif ! systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null; then
+        systemctl --user start polaris-gamescope-idle.service || true
+      elif [ "${prev_force:-}" != "$want_hdr" ]; then
+        echo "polaris-gamescope-session: attach force=$want_hdr (was ${prev_force:-unset}); restart idle" >&2
+        systemctl --user restart polaris-gamescope-idle.service || true
+      fi
+
+      for _ in $(seq 1 300); do
+        [ -f "$rt/polaris-gamescope.env" ] && [ -S "$rt/gamescope-0" ] && break
+        sleep 0.1
+      done
+      if [ ! -S "$rt/gamescope-0" ]; then
+        echo "polaris-gamescope-session: gamescope-0 not ready (is polaris-gamescope-idle running?)" >&2
+        exit 1
+      fi
+      sleep 1
+
+      # shellcheck disable=SC1091
+      . "$rt/polaris-gamescope.env"
+      hdr_steam_env=()
+      if [ "$want_hdr" = 1 ]; then
+        hdr_steam_env=(STEAM_GAMESCOPE_HDR_SUPPORTED=1 DXVK_HDR=1)
+        echo "polaris-gamescope-session: attach Steam HDR env on (no WSI)" >&2
+      else
+        echo "polaris-gamescope-session: attach Steam HDR env off" >&2
+      fi
+      steam_log=/tmp/polaris-gamescope-steam.log
+      # Force X11 on gamescope XWayland for attach. Polaris inherits the
+      # host KDE session (WAYLAND_DISPLAY=wayland-0, GDK_BACKEND=wayland);
+      # native titles (e.g. bg3) then paint on KWin while the portal
+      # captures empty gamescope → black stream (measured 2026-07-14).
+      # Do not pass host WAYLAND_DISPLAY; do not enable FROG WSI here.
+      echo "polaris-gamescope-session: attach Steam on DISPLAY=${DISPLAY:-:1} (X11 only, host Wayland stripped)" >&2
+      setsid -f env \
+        -u WAYLAND_DISPLAY \
+        -u CLUTTER_BACKEND \
+        -u ELECTRON_OZONE_PLATFORM_HINT \
+        -u MOZ_ENABLE_WAYLAND \
+        -u ENABLE_GAMESCOPE_WSI \
+        -u ENABLE_HDR_WSI \
+        DISPLAY="${DISPLAY:-:1}" \
+        GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
+        PULSE_SINK="$audio_sink" \
+        PIPEWIRE_NODE="$audio_sink" \
+        POLARIS_SESSION_AUDIO_SINK="$audio_sink" \
+        STEAM_MULTIPLE_XWAYLANDS=1 \
+        QT_QPA_PLATFORM=xcb \
+        GDK_BACKEND=x11 \
+        SDL_VIDEODRIVER=x11 \
+        XDG_SESSION_TYPE=x11 \
+        "${hdr_steam_env[@]}" \
+        setpriv --inh-caps=-all --ambient-caps=-all -- \
+        "${steam_launch[@]}" >"$steam_log" 2>&1
+      sleep 2
+    fi
+    ;;
+  wait)
+    for _ in $(seq 1 60); do
+      session_steam_alive && break
+      sleep 0.5
+    done
+    appid="$(tr -d '[:space:]' <"$rt/polaris-gamescope-appid" 2>/dev/null || true)"
+    if [ -n "$appid" ]; then
+      # Direct library launch: end stream when the game exits, not when
+      # the user leaves Big Picture. gamepadui keeps Steam alive after
+      # the title quits → without this, Moonlight stays on BP forever.
+      echo "polaris-gamescope-session: wait appid=$appid (exit-on-game-close)" >&2
+      seen=0
+      gone=0
+      while :; do
+        if ! session_steam_alive; then
+          # Steam already gone (user quit BP / crash).
+          break
+        fi
+        if steam_app_game_alive "$appid"; then
+          if [ "$seen" = 0 ]; then
+            echo "polaris-gamescope-session: game process for appid=$appid seen" >&2
+          fi
+          seen=1
+          gone=0
+        elif [ "$seen" = 1 ]; then
+          gone=$((gone + 1))
+          # ~3s debounce: launchers/anti-cheat may respawn once.
+          if [ "$gone" -ge 6 ]; then
+            echo "polaris-gamescope-session: game appid=$appid exited — shutting down Steam (end stream)" >&2
+            kill_session_steam
+            break
+          fi
+        fi
+        sleep 0.5
+      done
+    else
+      # Big Picture / no appid: stream lives until Steam exits.
+      gone=0
+      while :; do
+        if session_steam_alive; then
+          gone=0
+        else
+          gone=$((gone + 1))
+          [ "$gone" -ge 6 ] && break
+        fi
+        sleep 0.5
+      done
+    fi
+    ;;
+  stop)
+    kill_session_steam
+    rm -f "$rt/polaris-gamescope-appid" "$rt/polaris-gamescope-audio-sink" "$rt/polaris-gamescope-audio-skip-pin"
+    # Keep null sinks loaded (permanent capture targets).
+    rm -f "$rt/polaris-gamescope-sink-module"
+    # Legacy flags from builds that killed EasyEffects / hijacked default.
+    rm -f "$rt/polaris-gamescope-prev-default-sink" "$rt/polaris-gamescope-easyeffects-units"
+    if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
+      echo "polaris-gamescope-session: tearing down nested WSI gamescope" >&2
+      pkill -f 'gamescope.*--backend headless' 2>/dev/null || true
+      rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope.pid"
+      printf '0\n' >"$rt/polaris-gamescope-force"
+      systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+      systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
+    elif [ -f "$rt/polaris-gamescope-force" ] && [ "$(tr -d '[:space:]' <"$rt/polaris-gamescope-force")" = "1" ]; then
+      printf '0\n' >"$rt/polaris-gamescope-force"
+      systemctl --user restart polaris-gamescope-idle.service || true
+    fi
+    ;;
+  *)
+    echo "usage: polaris-gamescope-session start [steam_appid]|wait|stop" >&2
+    exit 2
+    ;;
+esac
+

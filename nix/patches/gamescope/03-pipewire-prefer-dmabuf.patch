@@ -1,0 +1,40 @@
+--- a/src/pipewire.cpp
++++ b/src/pipewire.cpp
+@@ -380,6 +380,8 @@
+ 	state->shm_stride = SPA_ROUND_UP_N(state->video_info.size.width * bpp, 4);
+ 
+ 	const struct spa_pod_prop *modifier_prop = spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier);
++	// Upstream used modifier fixation to gate DmaBuf; we still record it for logs,
++	// but ParamBuffers now always advertises DmaBuf|MemFd|MemPtr (see data_type).
+ 	state->dmabuf = modifier_prop != nullptr;
+ 
+ 	uint8_t buf[1024];
+@@ -390,7 +392,12 @@
+ 	if (state->video_info.format == SPA_VIDEO_FORMAT_NV12) {
+ 		shm_size += ((state->video_info.size.height + 1) / 2) * state->shm_stride;
+ 	}
+-	int data_type = state->dmabuf ? (1 << SPA_DATA_DmaBuf) : (1 << SPA_DATA_MemFd);
++	// Advertise every type we can satisfy. add_buffer prefers DmaBuf when the
++	// peer allows it; MemFd/MemPtr keep the known-good SHM path for clients that
++	// only request those (e.g. polaris portal MemPtr baseline).
++	int data_type = (1 << SPA_DATA_DmaBuf)
++		| (1 << SPA_DATA_MemFd)
++		| (1 << SPA_DATA_MemPtr);
+ 
+ 	const struct spa_pod *buffers_param =
+ 		(const struct spa_pod *) spa_pod_builder_add_object(&builder,
+@@ -477,8 +484,12 @@
+ 	buffer->video_info = state->video_info;
+ 	buffer->gamescope_info = state->gamescope_info;
+ 
+-	bool is_dmabuf = (spa_data->type & (1 << SPA_DATA_DmaBuf)) != 0;
+-	bool is_memfd = (spa_data->type & (1 << SPA_DATA_MemFd)) != 0;
++	// During allocation spa_data->type is a bitmask of allowed types
++	// (see spa/buffer/buffer.h). After we fill the buffer it becomes an enum.
++	// Prefer DmaBuf over SHM when both are allowed (is_dmabuf branch first).
++	bool is_dmabuf = (spa_data->type & (1u << SPA_DATA_DmaBuf)) != 0;
++	bool is_memfd = (spa_data->type & (1u << SPA_DATA_MemFd)) != 0
++		|| (spa_data->type & (1u << SPA_DATA_MemPtr)) != 0;
+ 
+ 	EStreamColorspace colorspace = k_EStreamColorspace_Unknown;
+ 	switch (state->video_info.color_matrix) {

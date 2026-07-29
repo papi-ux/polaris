@@ -1,0 +1,70 @@
+diff --git a/src/screencast.rs b/src/screencast.rs
+index 637649b..366bfdc 100644
+--- a/src/screencast.rs
++++ b/src/screencast.rs
+@@ -28,6 +28,32 @@ use crate::gamescope_pipewire::get_gamescope_pipewire_node_id;
+ #[derive(Default)]
+ pub struct Screencast {}
+ 
++/// Query PipeWire node for its display resolution from EnumFormat params.
++async fn query_node_size(node_id: u32) -> Option<(u32, u32)> {
++    let output = tokio::process::Command::new("pw-cli")
++        .arg("enum-params")
++        .arg(node_id.to_string())
++        .arg("3")
++        .output()
++        .await
++        .ok()?;
++
++    if !output.status.success() {
++        return None;
++    }
++
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    for line in stdout.lines() {
++        if let Some(rect) = line.trim().strip_prefix("Rectangle ") {
++            if let Some((w_str, h_str)) = rect.split_once("x") {
++                return Some((w_str.trim().parse().ok()?, h_str.trim().parse().ok()?));
++            }
++        }
++    }
++    None
++}
++
++
+ #[async_trait]
+ impl RequestImpl for Screencast {
+     async fn close(&self, _token: HandleToken) {}
+@@ -78,15 +104,24 @@ impl ScreencastImpl for Screencast {
+         match get_gamescope_pipewire_node_id() {
+             Ok(node_id) => {
+                 log::info!(
+-                    "ScreenCast for session {session_token} starting with pipewire node {node_id}"
+-                );
+-                let mut streams = vec![];
+-                streams.push(
+-                    StreamBuilder::new(node_id)
+-                        .source_type(SourceType::Monitor)
+-                        .build(),
++                    "ScreenCast for session {session_token} starting with pipewire node {node_id}",
+                 );
+-                Ok(StreamsBuilder::new(streams).build())
++                let width;
++                let height;
++                if let Some((w, h)) = query_node_size(node_id).await {
++                    log::info!("ScreenCast for session {session_token}: node {node_id} has resolution {w}x{h}");
++                    width = w;
++                    height = h;
++                } else {
++                    log::warn!("ScreenCast for session {session_token}: could not determine resolution for node {node_id}, omitting stream size");
++                    width = 0;
++                    height = 0;
++                }
++                let stream = StreamBuilder::new(node_id)
++                    .source_type(SourceType::Monitor)
++                    .size(Some((width as i32, height as i32)))
++                    .build();
++                Ok(StreamsBuilder::new(vec![stream]).build())
+             }
+             Err(msg) => {
+                 let errormsg = format!("gamescope stream not available: {msg}");
