@@ -5726,6 +5726,19 @@ namespace proc {
 #endif
     }
 
+    _session_env_keys.clear();
+#ifdef __linux__
+    // Prep commands are child processes too. Publish the immutable session
+    // credential before the nested gamescope start command executes, while
+    // keeping it out of the daemon's real environment.
+    set_child_only_session_env_var(
+      _env,
+      _session_env_keys,
+      "POLARIS_SESSION_INSTANCE_ID",
+      _session_instance_id
+    );
+#endif
+
     std::error_code ec;
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
@@ -5738,6 +5751,13 @@ namespace proc {
         continue;
       }
 
+#ifdef __linux__
+      const bool critical_nested_session_prep =
+        nested_wsi_hdr_session && command_uses_polaris_gamescope_session(cmd.do_cmd);
+#else
+      const bool critical_nested_session_prep = false;
+#endif
+
       boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                               find_working_directory(cmd.do_cmd, _env) :
                                               boost::filesystem::path(_app.working_dir);
@@ -5747,7 +5767,12 @@ namespace proc {
       if (ec) {
         BOOST_LOG(warning) << "Couldn't run ["sv << cmd.do_cmd << "]: System: "sv << ec.message();
         confighttp::emit_session_event("warning", "Prep command failed: " + cmd.do_cmd);
-        // Non-fatal: continue session even if prep-cmd fails
+        if (critical_nested_session_prep) {
+          BOOST_LOG(error) << "session_manager: critical nested gamescope prep command failed to execute"sv;
+          confighttp::emit_session_event("error", "Nested gamescope session failed to start");
+          return 503;
+        }
+        // Non-fatal: continue session even if ordinary prep-cmd fails
         continue;
       }
 
@@ -5756,7 +5781,15 @@ namespace proc {
       if (ret != 0) {
         BOOST_LOG(warning) << '[' << cmd.do_cmd << "] returned code ["sv << ret << ']';
         confighttp::emit_session_event("warning", "Prep command returned " + std::to_string(ret));
-        // Non-fatal: continue session
+        if (critical_nested_session_prep) {
+          // The command may have published durable recovery state before failing.
+          // Mark its undo as eligible so terminate_impl can drive credentialed stop.
+          ++_app_prep_it;
+          BOOST_LOG(error) << "session_manager: critical nested gamescope prep command failed"sv;
+          confighttp::emit_session_event("error", "Nested gamescope session failed to start");
+          return 503;
+        }
+        // Non-fatal: continue session for ordinary prep commands
       }
     }
 
@@ -5769,15 +5802,8 @@ namespace proc {
       platf::set_env(key, val);
       BOOST_LOG(info) << "Per-app env: " << key << "=" << val;
     }
-    _session_env_keys.clear();
 
 #ifdef __linux__
-    set_child_only_session_env_var(
-      _env,
-      _session_env_keys,
-      "POLARIS_SESSION_INSTANCE_ID",
-      _session_instance_id
-    );
     _audio_context = {};
     if (config::audio.stream) {
       _audio_context = audio::get_audio_ctx_ref();

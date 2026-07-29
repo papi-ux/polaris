@@ -299,6 +299,23 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   );
 }
 
+TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunchClosed) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(", execute_start);
+  ASSERT_NE(execute_start, std::string::npos);
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto body = source.substr(execute_start, terminate_start - execute_start);
+  const auto credential = body.find("set_child_only_session_env_var(");
+  const auto prep_loop = body.find("for (; _app_prep_it != std::end(_app.prep_cmds)");
+  ASSERT_NE(credential, std::string::npos);
+  ASSERT_NE(prep_loop, std::string::npos);
+  EXPECT_LT(credential, prep_loop);
+  EXPECT_NE(body.find("critical nested gamescope prep command failed"), std::string::npos);
+  EXPECT_NE(body.find("return 503;", prep_loop), std::string::npos);
+}
+
 TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWithoutCrossLockingRtsp) {
   const auto header = read_source_file_for_contract("src/process.h");
   const auto source = read_source_file_for_contract("src/process.cpp");
