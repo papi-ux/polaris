@@ -130,7 +130,8 @@ describe('Linux Streaming Setup checklist', () => {
     const response = new Promise((resolve) => {
       resolveFetch = resolve
     })
-    vi.stubGlobal('fetch', vi.fn(() => response))
+    const fetchMock = vi.fn(() => response)
+    vi.stubGlobal('fetch', fetchMock)
 
     const config = linuxConfig({
       linux_stream_mode: 'desktop_display',
@@ -147,6 +148,7 @@ describe('Linux Streaming Setup checklist', () => {
     expect(dongle).toBeDefined()
     expect(desktop).toBeDefined()
     await dongle.trigger('click')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     await desktop.trigger('click')
 
     resolveFetch({

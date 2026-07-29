@@ -350,9 +350,6 @@ function setStreamDisplayMode(mode) {
   config.value.linux_auto_manage_displays = next.linux_auto_manage_displays
   config.value.headless_swap_mode = next.headless_swap_mode
   config.value.capture = next.capture
-  if (mode === 'headless_dongle') {
-    refreshDongleOutputs()
-  }
 }
 
 watch(streamDisplayMode, (mode) => {
