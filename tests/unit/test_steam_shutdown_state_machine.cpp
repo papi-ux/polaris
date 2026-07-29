@@ -117,10 +117,10 @@ TEST(SteamShutdownStateMachineTests, EmptyOrUnsetHomeFallsBackToAccountHome) {
 TEST(SteamShutdownStateMachineTests, EnvironmentHomeTakesPrecedence) {
   EXPECT_EQ(
     proc::steam_instance_pipe_path_for_tests(
-      std::string {"/home/from-environment"},
-      std::string {"/home/from-account"}
+      std::string {"/srv/environment-home"},
+      std::string {"/srv/account-home"}
     ),
-    std::optional<std::string> {"/home/from-environment/.steam/steam.pipe"}
+    std::optional<std::string> {"/srv/environment-home/.steam/steam.pipe"}
   );
 }
 
