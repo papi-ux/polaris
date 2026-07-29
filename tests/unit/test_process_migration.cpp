@@ -2382,8 +2382,8 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   ASSERT_NE(clear_legacy_child, std::string::npos);
   ASSERT_NE(immutable_undo_guard, std::string::npos);
   ASSERT_NE(finish_generation, std::string::npos);
-  EXPECT_LT(terminate_private_steam, terminate_attached);
-  EXPECT_LT(terminate_attached, terminate_generation);
+  EXPECT_LT(terminate_attached, terminate_private_steam);
+  EXPECT_LT(terminate_private_steam, terminate_generation);
   EXPECT_LT(terminate_generation, terminate_main);
   EXPECT_LT(terminate_generation, legacy_group_gate);
   EXPECT_LT(legacy_group_gate, legacy_detach_gate);

@@ -6794,14 +6794,10 @@ namespace proc {
     // terminal ownership fence. Nested kill only after every owned cleanup exits.
     media_stop.fence = session_media::prepare_for_stop();
     stop_steam_big_picture_input_guard();
-    if (!immediate) {
-      terminate_session_owned_steam_before_cage_stop();
-    }
 
-    // Gamescope Steam/pressure-vessel often strips POLARIS_SESSION_INSTANCE_ID, so
-    // exact-generation + session-owned Steam paths find nothing and webui close
-    // leaves the game running. Sweep attach-env Steam/game clients only (not bare
-    // infrastructure), then ensure idle gamescope survives for portal capture.
+    // Gamescope Steam/pressure-vessel may strip POLARIS_SESSION_INSTANCE_ID.
+    // Freeze and capture the full ancestry closure while its exact credentialed
+    // roots are still alive, then terminate only that immutable closure.
     if (_session_used_cage_compositor && !immediate) {
       const bool gamescope_session =
         config::video.linux_display.stream_mode == "gamescope_stream" ||
@@ -6815,6 +6811,13 @@ namespace proc {
         _exact_generation_cleanup_complete =
           _exact_generation_cleanup_complete && attached_cleanup_complete;
       }
+    }
+
+    // Preserve exact-generation roots until the Gamescope ancestry closure is
+    // frozen. Steam cleanup may otherwise destroy the authority needed to prove
+    // stripped pressure-vessel descendants.
+    if (!immediate) {
+      terminate_session_owned_steam_before_cage_stop();
     }
 
     // The immutable launch generation, not mutable config, owns this cleanup.
