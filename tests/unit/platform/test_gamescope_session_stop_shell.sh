@@ -54,6 +54,7 @@ EOF
 cat >"$work/bin/pgrep" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "${POLARIS_PGREP_OUTPUT:-}"
+exit "${POLARIS_PGREP_STATUS:-0}"
 EOF
 cat >"$work/bin/kill" <<'EOF'
 #!/usr/bin/env bash
@@ -73,8 +74,9 @@ run_stop() {
     POLARIS_PROC_ROOT="$work/proc" \
     POLARIS_ACTIONS="$actions" \
     POLARIS_KILL_BIN="$work/bin/kill" \
-    POLARIS_SESSION_INSTANCE_ID="${POLARIS_SESSION_INSTANCE_ID:-}" \
+    POLARIS_SESSION_INSTANCE_ID="${POLARIS_SESSION_INSTANCE_ID-session-test}" \
     POLARIS_PGREP_OUTPUT="${POLARIS_PGREP_OUTPUT:-}" \
+    POLARIS_PGREP_STATUS="${POLARIS_PGREP_STATUS:-0}" \
     POLARIS_IDLE_WAIT_STEPS=2 POLARIS_PORTAL_WAIT_STEPS=2 \
     NESTED_VALID="${NESTED_VALID:-0}" STOP_OK="${STOP_OK:-0}" \
     RECLAIM_OK="${RECLAIM_OK:-0}" IDLE_VALID="${IDLE_VALID:-0}" \
@@ -129,6 +131,24 @@ NESTED_VALID=0 STOP_OK=0 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
 grep -qx 'write-idle-env' "$actions" || fail "idle runtime environment was not committed"
 grep -q 'restart polaris-portal-gamescope.service' "$actions" || fail "portal was not rebound"
 
+# Enumeration and procfs failures are unknown ownership, never "no Steam".
+reset_state
+if POLARIS_PGREP_STATUS=2 NESTED_VALID=1 STOP_OK=1 run_stop >/dev/null 2>&1; then
+  fail "pgrep failure was treated as an empty exact-session drain"
+fi
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = 1 ] ||
+  fail "pgrep failure advanced the recovery claim"
+
+reset_state
+mkdir -p "$work/proc/102"
+printf '12\n' >"$work/proc/102/start"
+if POLARIS_PGREP_OUTPUT=102 NESTED_VALID=1 STOP_OK=1 run_stop >/dev/null 2>&1; then
+  fail "unreadable Steam environment was treated as unowned"
+fi
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = 1 ] ||
+  fail "unreadable Steam metadata advanced the recovery claim"
+rm -rf "$work/proc/102"
+
 # Only Steam carrying the exact Polaris session credential may be signalled.
 reset_state
 mkdir -p "$work/proc/100" "$work/proc/101"
@@ -142,5 +162,18 @@ POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=$'100\n101' \
 grep -qx 'kill -TERM 101' "$actions" || fail "exact-session Steam was not signalled"
 ! grep -q 'kill .*100' "$actions" || fail "desktop Steam was signalled"
 [ -d "$work/proc/100" ] || fail "desktop Steam process was removed"
+
+# Recovery may run in a fresh process environment; the immutable credential is
+# persisted until the full idle/portal handoff completes.
+reset_state
+mkdir -p "$work/proc/101"
+printf '11\n' >"$work/proc/101/start"
+printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+printf 'session-A\n' >"$work/run/polaris-gamescope-session-id"
+POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 \
+  NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
+  PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "persisted-session recovery failed"
+grep -qx 'kill -TERM 101' "$actions" || fail "recovery did not use persisted exact-session credential"
+[ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "successful recovery retained session credential"
 
 echo "PASS: gamescope session stop state machine"

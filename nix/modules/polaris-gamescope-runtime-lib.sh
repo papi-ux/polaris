@@ -373,6 +373,24 @@ polaris_unmask_idle_unit_runtime() {
   systemctl --user unmask --runtime "$unit" 2>/dev/null || true
 }
 
+polaris_private_group_alive() {
+  local pgid="$1" proc_root process pid found=1
+  proc_root="$(polaris_proc_root)"
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$process" ] && continue
+      return 2
+    fi
+    [ "$POLARIS_PROCESS_PGID" = "$pgid" ] || continue
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$pgid" ] || return 2
+    found=0
+  done
+  return "$found"
+}
+
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
@@ -404,31 +422,44 @@ polaris_stop_marked_gamescope() (
   [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
     && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
   "$kill_bin" -TERM "-$pgid" 2>/dev/null || return 1
+  group_rc=0
   for _ in $(seq 1 "$term_steps"); do
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-    if ! polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
+    if polaris_private_group_alive "$pgid"; then
+      sleep 0.1
+      continue
+    else
+      group_rc=$?
+      [ "$group_rc" -eq 1 ] || return 1
       break
     fi
-    [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
-      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
-    sleep 0.1
   done
-  if polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
-    [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
-      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  if polaris_private_group_alive "$pgid"; then
     [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+    # The private session still has exact PGID/SID members even if its marked
+    # compositor exited after TERM. Escalate the whole surviving generation.
     "$kill_bin" -KILL "-$pgid" 2>/dev/null || return 1
     for _ in $(seq 1 "$kill_steps"); do
       [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-      if ! polaris_validate_process_generation "$pid" "$start_time" "$executable_path"; then
+      if polaris_private_group_alive "$pgid"; then
+        sleep 0.1
+        continue
+      else
+        group_rc=$?
+        [ "$group_rc" -eq 1 ] || return 1
         break
       fi
-      [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
-        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
-      sleep 0.1
     done
+  else
+    group_rc=$?
+    [ "$group_rc" -eq 1 ] || return 1
   fi
-  polaris_validate_process_generation "$pid" "$start_time" "$executable_path" && return 1
+  if polaris_private_group_alive "$pgid"; then
+    return 1
+  else
+    group_rc=$?
+    [ "$group_rc" -eq 1 ] || return 1
+  fi
 
   # Runtime state belongs to the exact marker generation, not merely the PID.
   # Missing or changed authority fails closed and leaves env/socket state alone.

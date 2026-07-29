@@ -158,36 +158,15 @@ let
     # durable recovery claim until exact nested teardown and idle handoff finish.
     nested_claim="$rt/polaris-gamescope-wsi-nested"
     if [ -f "$nested_claim" ]; then
-      claim_state="$(tr -d '[:space:]' <"$nested_claim")"
-      case "$claim_state" in
-        1|nested)
-          echo "polaris: recover exact nested gamescope generation" >&2
-          if polaris_validate_marker "$rt/polaris-gamescope.pid" nested; then
-            polaris_stop_marked_gamescope "$rt/polaris-gamescope.pid" nested "$rt" || {
-              echo "polaris: nested recovery could not prove terminal state" >&2
-              exit 1
-            }
-          elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-            echo "polaris: live or unknown sockets block nested recovery" >&2
-            exit 1
-          fi
-          claim_tmp="$nested_claim.tmp.$$"
-          printf 'restore-idle\n' >"$claim_tmp"
-          mv -f "$claim_tmp" "$nested_claim"
-          ;;
-        restore-idle) ;;
-        *)
-          echo "polaris: invalid nested recovery state '$claim_state'" >&2
-          exit 1
-          ;;
-      esac
-      rm -f "$rt/polaris-gamescope-appid" "$rt/polaris-gamescope-audio-sink" || true
-      polaris_unmask_idle_unit_runtime
-      if [ ! -S "$rt/gamescope-0" ]; then
-        ${pkgs.systemd}/bin/systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
-          || ${pkgs.systemd}/bin/systemctl --user start polaris-gamescope-idle.service 2>/dev/null \
-          || exit 1
+      echo "polaris: recover nested generation through the exact session stop state machine" >&2
+      if [ ! -s "$rt/polaris-gamescope-session-id" ]; then
+        echo "polaris: nested recovery is missing its immutable session credential" >&2
+        exit 1
       fi
+      ${lib.getExe sessionBin} stop || {
+        echo "polaris: nested recovery did not reach idle/portal terminal state" >&2
+        exit 1
+      }
     elif [ ! -S "$rt/gamescope-0" ]; then
       echo "polaris: gamescope-0 missing; starting idle owner" >&2
       polaris_unmask_idle_unit_runtime

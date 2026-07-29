@@ -220,7 +220,7 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 1200);
+  const auto body = source.substr(start, 5000);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto steam = body.find("terminate_session_owned_steam_before_cage_stop(");
   const auto gen = body.find("terminate_isolated_session_generation(");
@@ -231,6 +231,27 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   EXPECT_LT(prepare, gen);
   // Double portal release is forbidden — only session_media may release.
   EXPECT_EQ(body.find("portal::release_global_capture("), std::string::npos);
+}
+
+TEST(SessionStopContractTests, UnclassifiedNestedLaunchHasNoNumericGroupKillFallback) {
+  const auto source = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
+  ASSERT_FALSE(source.empty());
+  EXPECT_EQ(source.find("kill -TERM \"-$nested_launch_pid\""), std::string::npos);
+  const auto claim = source.find("printf 'nested\\n' >\"$rt/polaris-gamescope-wsi-nested\"");
+  const auto launch = source.find("setsid env -u WAYLAND_DISPLAY");
+  ASSERT_NE(claim, std::string::npos);
+  ASSERT_NE(launch, std::string::npos);
+  EXPECT_LT(claim, launch);
+}
+
+TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebind) {
+  const auto recovery = read_source_for_contract("nix/modules/session-lib.nix");
+  const auto session = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
+  ASSERT_FALSE(recovery.empty());
+  ASSERT_FALSE(session.empty());
+  EXPECT_NE(recovery.find("${lib.getExe sessionBin} stop"), std::string::npos);
+  EXPECT_NE(recovery.find("polaris-gamescope-session-id"), std::string::npos);
+  EXPECT_NE(session.find("restart polaris-portal-gamescope.service"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, StreamingWillStopReleasesPortalCapture) {

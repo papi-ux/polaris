@@ -18,23 +18,67 @@ gs_width="${POLARIS_HDR_WIDTH:-3840}"
 gs_height="${POLARIS_HDR_HEIGHT:-2160}"
 gs_refresh="${POLARIS_HDR_REFRESH:-120}"
 
+session_id_file="$rt/polaris-gamescope-session-id"
+
+load_session_instance_id() {
+  local persisted
+  if [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ]; then
+    if [ -f "$session_id_file" ]; then
+      persisted="$(tr -d '\n' <"$session_id_file")" || return 1
+      [ "$persisted" = "$POLARIS_SESSION_INSTANCE_ID" ] || return 1
+    fi
+    return 0
+  fi
+  [ -f "$session_id_file" ] || return 1
+  persisted="$(tr -d '\n' <"$session_id_file")" || return 1
+  [ -n "$persisted" ] || return 1
+  export POLARIS_SESSION_INSTANCE_ID="$persisted"
+}
+
 session_steam_pids() {
-  local p envf session_id="${POLARIS_SESSION_INSTANCE_ID:-}" proc_root
-  [ -n "$session_id" ] || return 1
+  local p pids rc envf env_lines session_id="${POLARIS_SESSION_INSTANCE_ID:-}" proc_root
+  [ -n "$session_id" ] || return 2
   proc_root="$(polaris_proc_root)"
-  for p in $(pgrep -x steam 2>/dev/null || true); do
-    case "$p" in ''|*[!0-9]*) continue ;; esac
+  if pids="$(pgrep -x steam 2>/dev/null)"; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return 2
+    pids=""
+  fi
+  for p in $pids; do
+    case "$p" in ''|*[!0-9]*) return 2 ;; esac
     envf="$proc_root/$p/environ"
-    tr '\0' '\n' <"$envf" 2>/dev/null |
-      grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" || continue
+    if [ ! -r "$envf" ]; then
+      [ ! -e "$proc_root/$p" ] && continue
+      return 2
+    fi
+    env_lines="$(tr '\0' '\n' <"$envf" 2>/dev/null)" || return 2
+    grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" <<<"$env_lines" || continue
     printf '%s\n' "$p"
   done
 }
-session_steam_alive() { [ -n "$(session_steam_pids)" ]; }
+
+session_steam_alive() {
+  local pids
+  pids="$(session_steam_pids)" || return 2
+  [ -n "$pids" ]
+}
+
+session_steam_absent() {
+  local rc
+  if session_steam_alive; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ]
+}
 
 kill_session_steam() {
-  local pid start_time kill_bin="${POLARIS_KILL_BIN:-kill}" session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
-  [ -n "$session_id" ] || return 0
+  local pid pids start_time kill_bin="${POLARIS_KILL_BIN:-kill}" session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
+  [ -n "$session_id" ] || return 1
+  pids="$(session_steam_pids)" || return 1
   while read -r pid; do
     [ -n "$pid" ] || continue
     polaris_process_fields "$pid" || return 1
@@ -47,12 +91,13 @@ kill_session_steam() {
            grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" \
       || return 1
     "$kill_bin" -TERM "$pid" 2>/dev/null || return 1
-  done < <(session_steam_pids)
+  done <<<"$pids"
   for _ in $(seq 1 40); do
-    session_steam_alive || return 0
+    session_steam_absent && return 0
+    session_steam_alive || [ "$?" -eq 1 ] || return 1
     sleep 0.25
   done
-  ! session_steam_alive
+  session_steam_absent
 }
 
 # True while a real game process for $1 (Steam appid) is running.
@@ -90,6 +135,13 @@ steam_app_game_alive() {
 
 case "${1:-}" in
   start)
+    [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ] || {
+      echo "polaris-gamescope-session: missing immutable session credential" >&2
+      exit 1
+    }
+    session_id_tmp="$session_id_file.tmp.$$"
+    printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$session_id_tmp"
+    mv -f "$session_id_tmp" "$session_id_file"
     # Soft env hint for nested games (PULSE_SINK / PIPEWIRE_NODE).
     # Polaris itself picks the capture sink: EasyEffects when it is the
     # host default (FMOD target.object sticks there); otherwise virtual
@@ -285,6 +337,9 @@ case "${1:-}" in
       # (WSI X11 path). Portal uses compositor socket gamescope-0, not child WAYLAND.
       # env -u: drop host KWin Wayland/DISPLAY inherited from polaris user session.
       echo "polaris-gamescope-session: nested geometry ${gs_width}x${gs_height}@${gs_refresh}" >&2
+      # Claim ownership before launch so marker-capture failure remains
+      # recoverable without an unsafe numeric PGID fallback.
+      printf 'nested\n' >"$rt/polaris-gamescope-wsi-nested"
       setsid env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
         "${child_env[@]}" "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
         --backend headless \
@@ -336,10 +391,10 @@ case "${1:-}" in
         echo "polaris-gamescope-session: failed to record an exact nested gamescope generation in its private setsid group" >&2
         if [ -f "$marker" ] && polaris_validate_marker "$marker" nested; then
           polaris_stop_marked_gamescope "$marker" nested "$rt" || true
-        else
-          kill -TERM "-$nested_launch_pid" 2>/dev/null || true
         fi
-        wait "$nested_launch_pid" 2>/dev/null || true
+        # Without an exact marker plus PGID/SID proof there is no safe numeric
+        # fallback. Preserve the recovery claim and let service/cgroup teardown
+        # contain an unclassified launch instead of risking PID/PGID reuse.
         exit 1
       fi
 
@@ -466,8 +521,16 @@ case "${1:-}" in
     fi
     ;;
   wait)
+    load_session_instance_id || {
+      echo "polaris-gamescope-session: missing or mismatched session credential during wait" >&2
+      exit 1
+    }
     for _ in $(seq 1 60); do
-      session_steam_alive && break
+      if session_steam_alive; then
+        break
+      fi
+      steam_rc=$?
+      [ "$steam_rc" -eq 1 ] || exit 1
       sleep 0.5
     done
     appid="$(tr -d '[:space:]' <"$rt/polaris-gamescope-appid" 2>/dev/null || true)"
@@ -479,9 +542,15 @@ case "${1:-}" in
       seen=0
       gone=0
       while :; do
-        if ! session_steam_alive; then
-          # Steam already gone (user quit BP / crash).
-          break
+        if session_steam_alive; then
+          :
+        else
+          steam_rc=$?
+          if [ "$steam_rc" -eq 1 ]; then
+            # Steam already gone (user quit BP / crash).
+            break
+          fi
+          exit 1
         fi
         if steam_app_game_alive "$appid"; then
           if [ "$seen" = 0 ]; then
@@ -507,6 +576,8 @@ case "${1:-}" in
         if session_steam_alive; then
           gone=0
         else
+          steam_rc=$?
+          [ "$steam_rc" -eq 1 ] || exit 1
           gone=$((gone + 1))
           [ "$gone" -ge 6 ] && break
         fi
@@ -515,6 +586,10 @@ case "${1:-}" in
     fi
     ;;
   stop)
+    load_session_instance_id || {
+      echo "polaris-gamescope-session: missing or mismatched session credential during stop" >&2
+      exit 1
+    }
     rm -f "$rt/polaris-gamescope-appid" "$rt/polaris-gamescope-audio-sink" "$rt/polaris-gamescope-audio-skip-pin"
     # Keep null sinks loaded (permanent capture targets).
     rm -f "$rt/polaris-gamescope-sink-module"
@@ -535,7 +610,7 @@ case "${1:-}" in
             echo "polaris-gamescope-session: live or unknown gamescope sockets block teardown; retaining recovery claim" >&2
             exit 1
           fi
-          if ! kill_session_steam || session_steam_alive; then
+          if ! kill_session_steam || ! session_steam_absent; then
             echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
             exit 1
           fi
@@ -601,6 +676,7 @@ case "${1:-}" in
       printf '0\n' >"$rt/polaris-gamescope-force"
       systemctl --user restart polaris-gamescope-idle.service || true
     fi
+    rm -f "$session_id_file"
     ;;
   *)
     echo "usage: polaris-gamescope-session start [steam_appid]|wait|stop" >&2

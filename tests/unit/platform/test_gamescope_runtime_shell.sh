@@ -85,6 +85,7 @@ fi
 # The exact compositor may be a child of the setsid launcher. Signal the
 # validated private process group, never assume compositor PID equals PGID.
 write_process_with_group 410 1 400 400 9001 /usr/bin/gamescope --backend headless
+write_process_with_group 411 410 400 400 9002 /usr/bin/tail -f /dev/null
 : >"$work/run/gamescope-0"
 write_unix_header
 printf '0000000000000000: 00000002 00000000 00010000 0001 01 501 %s\n' \
@@ -101,12 +102,15 @@ echo "\$*" >>"$work/kills"
 if [ "\${1:-}" = -TERM ] && [ "\${2:-}" = -400 ]; then
   rm -rf "$POLARIS_PROC_ROOT/410"
   rm -f "$work/run/gamescope-0"
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -400 ]; then
+  rm -rf "$POLARIS_PROC_ROOT/411"
 fi
 EOF
 chmod +x "$work/bin/kill"
 polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
   fail "private child compositor group did not stop"
 grep -qx -- '-TERM -400' "$work/kills" || fail "validated PGID was not signalled"
+grep -qx -- '-KILL -400' "$work/kills" || fail "TERM-resistant group sibling was not escalated"
 if grep -q -- '-410' "$work/kills"; then
   fail "compositor PID was used as a process group"
 fi
