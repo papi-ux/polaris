@@ -650,6 +650,7 @@ namespace proc {
     std::shared_ptr<steam_big_picture_guard_runtime_t> _steam_big_picture_guard;
     std::string _session_instance_id;
     bool _session_used_cage_compositor = false;
+    bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;

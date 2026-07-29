@@ -1172,6 +1172,7 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedClientPidReuseFailsClosedBefore
   const pid_t child = fork();
   ASSERT_GE(child, 0);
   if (child == 0) {
+    if (setsid() < 0) _exit(124);
     close(ready_pipe[0]);
     if (dup2(ready_pipe[1], 3) < 0) {
       _exit(126);
@@ -1214,6 +1215,7 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedUnreadableLiveProcessFailsClose
   const pid_t child = fork();
   ASSERT_GE(child, 0);
   if (child == 0) {
+    if (setsid() < 0) _exit(124);
     close(ready_pipe[0]);
     setenv("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0", 1);
     setenv("STEAM_COMPAT_APP_ID", "4242", 1);
@@ -1243,6 +1245,7 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsStrippedExactGener
   const pid_t root = fork();
   ASSERT_GE(root, 0);
   if (root == 0) {
+    if (setsid() < 0) _exit(124);
     close(ready_pipe[0]);
     const std::string fd = std::to_string(ready_pipe[1]);
     const std::string command =
@@ -1266,6 +1269,56 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsStrippedExactGener
   if (!terminated) {
     (void) kill(root, SIGKILL);
     (void) kill(descendant, SIGKILL);
+  }
+  EXPECT_TRUE(terminated);
+  EXPECT_EQ(waitpid(root, nullptr, 0), root);
+  errno = 0;
+  EXPECT_EQ(kill(descendant, 0), -1);
+  EXPECT_EQ(errno, ESRCH);
+}
+
+TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateGroupDescendant) {
+  int ready_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(ready_pipe), 0);
+  setenv("POLARIS_SESSION_INSTANCE_ID", "gamescope-attached-test", 1);
+  const pid_t root = fork();
+  ASSERT_GE(root, 0);
+  if (root == 0) {
+    close(ready_pipe[0]);
+    if (setsid() < 0 || dup2(ready_pipe[1], 3) < 0) _exit(124);
+    close(ready_pipe[1]);
+    const char *program =
+      "import os,signal,time\n"
+      "middle=os.fork()\n"
+      "if middle==0:\n"
+      " descendant=os.fork()\n"
+      " if descendant==0:\n"
+      "  time.sleep(0.05)\n"
+      "  os.setpgid(0,0)\n"
+      "  os.write(3, str(os.getpid()).encode()+b'\\n')\n"
+      "  os.environ.clear()\n"
+      "  signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+      "  while True: time.sleep(1)\n"
+      " os._exit(0)\n"
+      "os.waitpid(middle,0)\n"
+      "signal.pause()\n";
+    execl(
+      "/usr/bin/env", "env",
+      "POLARIS_SESSION_INSTANCE_ID=gamescope-attached-test",
+      "/usr/bin/python3", "-c", program,
+      static_cast<char *>(nullptr)
+    );
+    _exit(127);
+  }
+  close(ready_pipe[1]);
+  char descendant_text[32] {};
+  ASSERT_GT(read(ready_pipe[0], descendant_text, sizeof(descendant_text) - 1), 0);
+  close(ready_pipe[0]);
+  const pid_t descendant = static_cast<pid_t>(std::strtol(descendant_text, nullptr, 10));
+  ASSERT_GT(descendant, 1);
+  const bool terminated = proc::terminate_gamescope_attached_clients_for_tests("4242");
+  if (!terminated) {
+    (void) kill(-root, SIGKILL);
   }
   EXPECT_TRUE(terminated);
   EXPECT_EQ(waitpid(root, nullptr, 0), root);
@@ -2358,6 +2411,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
   const auto terminate_private_steam = terminate.find("terminate_session_owned_steam_before_cage_stop(");
   const auto terminate_attached = terminate.find("terminate_gamescope_attached_session_clients(");
+  const auto attached_failure_barrier = terminate.find("refusing all later teardown because exact Gamescope ancestry closure was incomplete");
   const auto terminate_generation = terminate.find("terminate_isolated_session_generation();");
   const auto terminate_main = terminate.find("terminate_process_group(");
   const auto legacy_group_gate = terminate.find(
@@ -2373,6 +2427,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   const auto finish_generation = terminate.find("finish_isolated_session_generation_cleanup();");
   ASSERT_NE(terminate_private_steam, std::string::npos);
   ASSERT_NE(terminate_attached, std::string::npos);
+  ASSERT_NE(attached_failure_barrier, std::string::npos);
   ASSERT_NE(terminate_generation, std::string::npos);
   ASSERT_NE(terminate_main, std::string::npos);
   ASSERT_NE(legacy_group_gate, std::string::npos);
@@ -2382,8 +2437,11 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   ASSERT_NE(clear_legacy_child, std::string::npos);
   ASSERT_NE(immutable_undo_guard, std::string::npos);
   ASSERT_NE(finish_generation, std::string::npos);
-  EXPECT_LT(terminate_attached, terminate_private_steam);
+  EXPECT_LT(terminate_attached, attached_failure_barrier);
+  EXPECT_LT(attached_failure_barrier, terminate_private_steam);
   EXPECT_LT(terminate_private_steam, terminate_generation);
+  EXPECT_NE(source.find("_session_used_gamescope_runtime = gamescope_stream_session;"), std::string::npos);
+  EXPECT_NE(terminate.find("_session_used_gamescope_runtime"), std::string::npos);
   EXPECT_NE(source.find("const bool prior_cleanup_complete = _exact_generation_cleanup_complete;"), std::string::npos);
   EXPECT_NE(source.find("prior_cleanup_complete && isolated_cleanup_complete"), std::string::npos);
   EXPECT_LT(terminate_generation, terminate_main);

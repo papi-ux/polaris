@@ -103,8 +103,10 @@ polaris_process_has_argument() {
 polaris_write_marker_for_pid() (
   local marker="$1" pid="$2" role="$3" tmp lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   umask 077
-  exec 9>>"${marker%/*}/polaris-gamescope.lock" || return 1
-  "$lock_bin" -x 9 || return 1
+  if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
+    exec 9>>"${marker%/*}/polaris-gamescope.lock" || return 1
+    "$lock_bin" -x 9 || return 1
+  fi
   for _ in $(seq 1 100); do
     if polaris_process_fields "$pid" && polaris_headless_gamescope_pid "$pid"; then
       local start_time="$POLARIS_PROCESS_START_TIME" executable_path="$POLARIS_GAMESCOPE_EXECUTABLE"
@@ -356,8 +358,10 @@ polaris_write_runtime_env() (
   local marker="$1" wayland="$2" expected_role="${3:-}" runtime_dir="$4" display tmp
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}" marker_line role
   umask 077
-  exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
-  "$lock_bin" -x 9 || return 1
+  if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
+    exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
+    "$lock_bin" -x 9 || return 1
+  fi
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local pid="$POLARIS_MARKER_PID" start_time="$POLARIS_MARKER_START_TIME" executable_path="$POLARIS_MARKER_EXECUTABLE"
   role="$POLARIS_MARKER_ROLE"
@@ -419,8 +423,10 @@ polaris_stop_marked_gamescope() (
   local marker_line pid start_time executable_path pgid session_id socket inode entry current_inode
   local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
   umask 077
-  exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
-  "$lock_bin" -x 9 || return 1
+  if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
+    exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
+    "$lock_bin" -x 9 || return 1
+  fi
   polaris_validate_marker "$marker" "$expected_role" || return 1
   marker_line="$(<"$marker")"
   pid="$POLARIS_MARKER_PID"

@@ -1389,6 +1389,27 @@ namespace proc {
       return parent_pid;
     }
 
+    struct proc_group_session_t {
+      pid_t process_group;
+      pid_t session;
+    };
+
+    std::optional<proc_group_session_t> proc_group_session_from_stat(std::string_view stat) {
+      const auto comm_end = stat.rfind(')');
+      if (comm_end == std::string_view::npos || comm_end + 1 >= stat.size()) {
+        return std::nullopt;
+      }
+      std::istringstream fields(std::string {stat.substr(comm_end + 1)});
+      std::string state;
+      pid_t parent_pid = -1;
+      proc_group_session_t result {};
+      if (!(fields >> state >> parent_pid >> result.process_group >> result.session) ||
+          result.process_group <= 1 || result.session <= 1) {
+        return std::nullopt;
+      }
+      return result;
+    }
+
 #ifdef POLARIS_TESTS
     thread_local pid_t forced_proc_ancestry_unknown_pid = -1;
 #endif
@@ -1943,7 +1964,11 @@ namespace proc {
       } snapshot;
       std::vector<pidfd_handle_t> owned_frozen_generation;
       auto &frozen = frozen_generation ? *frozen_generation : owned_frozen_generation;
-      auto resume_on_failure = util::fail_guard([&frozen]() {
+      std::set<pid_t> authorized_private_groups;
+      auto resume_on_failure = util::fail_guard([&frozen, &authorized_private_groups]() {
+        for (const auto group : authorized_private_groups) {
+          (void) kill(-group, SIGCONT);
+        }
         for (const auto &handle : frozen) {
           (void) send_pidfd_signal(handle, SIGCONT);
         }
@@ -1953,20 +1978,64 @@ namespace proc {
       if (!authority.capture_complete || authority.owned.empty()) {
         return false;
       }
-      const auto has_exact_generation_ancestry = [&authority](pid_t pid) -> std::optional<bool> {
-        for (const auto &root : authority.owned) {
-          if (pid == root.pid) {
-            return true;
-          }
-          const auto descends = proc_pid_descends_from(pid, root.pid);
-          if (!descends) {
-            return std::nullopt;
-          }
-          if (*descends) {
-            return true;
-          }
+      for (auto &root : authority.owned) {
+#ifdef POLARIS_TESTS
+        if (root.pid == forced_reused_gamescope_attached_pid ||
+            root.pid == forced_unreadable_gamescope_attached_pid) {
+          return false;
         }
+#endif
+        const auto root_group = proc_group_session_from_stat(read_proc_status_file(root.pid, "stat"));
+        if (!root_group) {
+          BOOST_LOG(error) << "process: exact Gamescope root lacks stable PGID/SID metadata pid="sv << root.pid;
+          return false;
+        }
+        if (root.pid == root_group->process_group && root_group->process_group == root_group->session) {
+          authorized_private_groups.insert(root_group->session);
+        }
+      }
+      if (authorized_private_groups.empty()) {
+        BOOST_LOG(error) << "process: exact Gamescope generation lacks a private session leader"sv;
         return false;
+      }
+      for (const auto &root : authority.owned) {
+        const auto root_group = proc_group_session_from_stat(read_proc_status_file(root.pid, "stat"));
+        if (!root_group || !authorized_private_groups.contains(root_group->session)) {
+          BOOST_LOG(error) << "process: exact Gamescope root is outside the authorized private session pid="sv << root.pid;
+          return false;
+        }
+      }
+      for (const auto group : authorized_private_groups) {
+        if (kill(-group, SIGSTOP) != 0) {
+          BOOST_LOG(error) << "process: failed to freeze exact Gamescope private group="sv << group;
+          return false;
+        }
+      }
+      std::this_thread::sleep_for(10ms);
+      for (auto &root : authority.owned) {
+#ifdef POLARIS_TESTS
+        if (root.pid == forced_reused_gamescope_attached_pid ||
+            root.pid == forced_unreadable_gamescope_attached_pid) {
+          return false;
+        }
+#endif
+        const auto root_group = proc_group_session_from_stat(read_proc_status_file(root.pid, "stat"));
+        if (!root_group ||
+            !authorized_private_groups.contains(root_group->session) || pidfd_has_exited(root)) {
+          return false;
+        }
+        if (std::none_of(frozen.begin(), frozen.end(), [&root](const auto &handle) {
+              return handle.pid == root.pid;
+            })) {
+          frozen.emplace_back(std::move(root));
+        }
+      }
+      const auto has_exact_private_group = [&authorized_private_groups](pid_t pid) -> std::optional<bool> {
+        const auto membership = proc_group_session_from_stat(read_proc_status_file(pid, "stat"));
+        if (!membership) {
+          return std::nullopt;
+        }
+        return authorized_private_groups.contains(membership->session);
       };
       DIR *dir = opendir("/proc");
       if (!dir) {
@@ -2002,12 +2071,13 @@ namespace proc {
         if (proc_dir_stat.st_uid != geteuid()) {
           continue;
         }
-        const auto exact_generation_ancestry = has_exact_generation_ancestry(pid);
-        if (!exact_generation_ancestry) {
+        const auto exact_private_group = has_exact_private_group(pid);
+        if (!exact_private_group) {
+          BOOST_LOG(error) << "process: incomplete private-group membership for pid="sv << pid;
           snapshot.capture_complete = false;
           continue;
         }
-        if (!*exact_generation_ancestry) {
+        if (!*exact_private_group) {
           continue;
         }
         if (std::any_of(frozen.begin(), frozen.end(), [pid](const auto &handle) {
@@ -2068,13 +2138,14 @@ namespace proc {
           ++*identity_after;
         }
 #endif
-        const auto ancestry_after = has_exact_generation_ancestry(pid);
+        const auto group_after = has_exact_private_group(pid);
         const bool capture_matches =
-          ancestry_after && *ancestry_after &&
+          group_after && *group_after &&
           steam_pidfd_capture_identity_matches(identity_before, identity_after) &&
           comm_after.ok() && cmdline_after.ok() && environ_after.ok();
         if (!capture_matches) {
           if (!pidfd_has_exited(*handle)) {
+            BOOST_LOG(error) << "process: private-group pidfd capture changed for pid="sv << pid;
             snapshot.capture_complete = false;
           }
           continue;
@@ -2086,7 +2157,7 @@ namespace proc {
       if (errno != 0) {
         snapshot.capture_complete = false;
       }
-      for (const auto &root : authority.owned) {
+      for (const auto &root : frozen) {
         if (pidfd_has_exited(root)) {
           snapshot.capture_complete = false;
         }
@@ -4805,6 +4876,7 @@ namespace proc {
 #ifdef __linux__
     _session_instance_id = generate_session_token();
     _session_used_cage_compositor = false;
+    _session_used_gamescope_runtime = false;
 #endif
     _app = app;
     _app_id = util::from_view(app.id);
@@ -4823,6 +4895,7 @@ namespace proc {
     const bool gamescope_stream_session =
       config::video.linux_display.stream_mode == "gamescope_stream" ||
       config::video.linux_display.private_runtime == "gamescope";
+    _session_used_gamescope_runtime = gamescope_stream_session;
     // Set true after enable_hdr when rewiring to polaris-gamescope-session nested WSI.
     bool nested_wsi_hdr_session = false;
     // Private nested runtime: labwc cage and/or owned/attach gamescope.
@@ -6769,6 +6842,7 @@ namespace proc {
         )) {
       _session_instance_id.clear();
       _session_used_cage_compositor = false;
+      _session_used_gamescope_runtime = false;
     }
   }
 
@@ -6799,18 +6873,17 @@ namespace proc {
     // Gamescope Steam/pressure-vessel may strip POLARIS_SESSION_INSTANCE_ID.
     // Freeze and capture the full ancestry closure while its exact credentialed
     // roots are still alive, then terminate only that immutable closure.
-    if (_session_used_cage_compositor && !immediate) {
-      const bool gamescope_session =
-        config::video.linux_display.stream_mode == "gamescope_stream" ||
-        config::video.linux_display.private_runtime == "gamescope";
-      if (gamescope_session) {
-        const bool attached_cleanup_complete =
-          terminate_gamescope_attached_session_clients(
-            steam_appid_for_context(_app),
-            _session_instance_id
-          );
-        _exact_generation_cleanup_complete =
-          _exact_generation_cleanup_complete && attached_cleanup_complete;
+    if (_session_used_cage_compositor && !immediate && _session_used_gamescope_runtime) {
+      const bool attached_cleanup_complete =
+        terminate_gamescope_attached_session_clients(
+          steam_appid_for_context(_app),
+          _session_instance_id
+        );
+      _exact_generation_cleanup_complete =
+        _exact_generation_cleanup_complete && attached_cleanup_complete;
+      if (!attached_cleanup_complete) {
+        BOOST_LOG(error) << "process: refusing all later teardown because exact Gamescope ancestry closure was incomplete"sv;
+        return;
       }
     }
 

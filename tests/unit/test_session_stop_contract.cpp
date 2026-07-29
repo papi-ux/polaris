@@ -260,7 +260,14 @@ TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebin
   ASSERT_FALSE(session.empty());
   EXPECT_NE(recovery.find("${lib.getExe sessionBin} stop"), std::string::npos);
   EXPECT_NE(recovery.find("polaris-gamescope-session-id"), std::string::npos);
+  EXPECT_NE(recovery.find("POLARIS_GAMESCOPE_LOCK_HELD=1"), std::string::npos);
+  EXPECT_NE(recovery.find("claim_state=absent"), std::string::npos);
   EXPECT_NE(session.find("restart polaris-portal-gamescope.service"), std::string::npos);
+  EXPECT_NE(session.find("publish_nested_claim transition absent"), std::string::npos);
+  const auto idle = read_source_for_contract("scripts/install/lib/polaris-gamescope-idle.sh");
+  ASSERT_FALSE(idle.empty());
+  EXPECT_NE(idle.find("polaris-gamescope.lock"), std::string::npos);
+  EXPECT_NE(idle.find("transition|nested|1"), std::string::npos);
   const auto non_nix = read_source_for_contract("scripts/install/lib/polaris-wait-gamescope.sh");
   ASSERT_FALSE(non_nix.empty());
   EXPECT_NE(non_nix.find("POLARIS_GAMESCOPE_SESSION_BIN"), std::string::npos);

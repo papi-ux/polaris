@@ -21,12 +21,27 @@ gs_refresh="${POLARIS_HDR_REFRESH:-120}"
 session_id_file="$rt/polaris-gamescope-session-id"
 
 publish_nested_claim() (
-  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp
+  local new_state="$1" expected_state="${2:-absent}"
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp current_state=absent
   exec 9>>"$rt/polaris-gamescope.lock" || return 1
   "$lock_bin" -x 9 || return 1
+  if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
+    current_state="$(tr -d '[:space:]' <"$rt/polaris-gamescope-wsi-nested")"
+  fi
+  [ "$current_state" = "$expected_state" ] || return 1
   tmp="$rt/.polaris-gamescope-wsi-nested.$$"
-  printf 'nested\n' >"$tmp" || return 1
+  printf '%s\n' "$new_state" >"$tmp" || return 1
   mv -f -- "$tmp" "$rt/polaris-gamescope-wsi-nested"
+)
+
+remove_nested_claim() (
+  local expected_state="$1" lock_bin="${POLARIS_FLOCK_BIN:-flock}" current_state
+  exec 9>>"$rt/polaris-gamescope.lock" || return 1
+  "$lock_bin" -x 9 || return 1
+  [ -f "$rt/polaris-gamescope-wsi-nested" ] || return 1
+  current_state="$(tr -d '[:space:]' <"$rt/polaris-gamescope-wsi-nested")"
+  [ "$current_state" = "$expected_state" ] || return 1
+  rm -f -- "$rt/polaris-gamescope-wsi-nested"
 )
 
 load_session_instance_id() {
@@ -278,6 +293,12 @@ case "${1:-}" in
     if [ "$want_wsi" = 1 ]; then
       # --- Nested WSI path (games as gamescope child) ---
       echo "polaris-gamescope-session: WSI nested mode — Steam is ${POLARIS_GAMESCOPE_BIN:-gamescope} primary child" >&2
+      # Publish a fenced transition before masking/stopping idle ownership so no
+      # readiness actor can interpret the destructive handoff as an unowned gap.
+      publish_nested_claim transition absent || {
+        echo "polaris-gamescope-session: another ownership transition is already active" >&2
+        exit 1
+      }
       # Runtime-mask so polaris Wants= / portal-gamescope Wants= cannot respawn
       # idle while nested needs exclusive gamescope-0 (portal is hard-wired).
       # Use user.control — plain mask --runtime loses to Hjem ~/.config units.
@@ -358,7 +379,10 @@ case "${1:-}" in
       echo "polaris-gamescope-session: nested geometry ${gs_width}x${gs_height}@${gs_refresh}" >&2
       # Claim ownership before launch so marker-capture failure remains
       # recoverable without an unsafe numeric PGID fallback.
-      publish_nested_claim
+      publish_nested_claim nested transition || {
+        echo "polaris-gamescope-session: ownership transition changed before nested launch" >&2
+        exit 1
+      }
       setsid env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
         "${child_env[@]}" "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
         --backend headless \
@@ -608,6 +632,21 @@ case "${1:-}" in
     if [ -f "$nested_claim" ]; then
       claim_state="$(tr -d '[:space:]' <"$nested_claim")"
       case "$claim_state" in
+        transition)
+          if polaris_validate_marker "$marker" nested; then
+            echo "polaris-gamescope-session: transition claim unexpectedly owns a nested generation" >&2
+            exit 1
+          fi
+          if ! polaris_validate_marker "$marker" idle \
+              && ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+            echo "polaris-gamescope-session: transition recovery cannot prove idle-or-orphan ownership" >&2
+            exit 1
+          fi
+          publish_nested_claim restore-idle "$claim_state" || {
+            echo "polaris-gamescope-session: transition claim changed before idle restoration" >&2
+            exit 1
+          }
+          ;;
         1|nested)
           echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
           if polaris_validate_marker "$marker" nested; then
@@ -623,9 +662,10 @@ case "${1:-}" in
             echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
             exit 1
           fi
-          claim_tmp="$nested_claim.tmp.$$"
-          printf 'restore-idle\n' >"$claim_tmp"
-          mv -f "$claim_tmp" "$nested_claim"
+          publish_nested_claim restore-idle "$claim_state" || {
+            echo "polaris-gamescope-session: transition claim changed before idle restoration" >&2
+            exit 1
+          }
           ;;
         restore-idle)
           ;;
@@ -659,6 +699,17 @@ case "${1:-}" in
         echo "polaris-gamescope-session: idle gamescope-0 not ready; retaining restore-idle claim" >&2
         exit 1
       fi
+      exec 8>>"$rt/polaris-gamescope.lock" || exit 1
+      "${POLARIS_FLOCK_BIN:-flock}" -x 8 || exit 1
+      export POLARIS_GAMESCOPE_LOCK_HELD=1
+      [ -f "$nested_claim" ] \
+        && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ] \
+        && polaris_validate_marker "$marker" idle \
+        && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle \
+        && polaris_write_runtime_env "$marker" gamescope-0 idle "$rt" || {
+          echo "polaris-gamescope-session: idle ownership changed before portal handoff" >&2
+          exit 1
+        }
       echo "polaris-gamescope-session: idle gamescope restored after nested stop" >&2
 
       if ! systemctl --user restart polaris-portal-gamescope.service 2>/dev/null; then
@@ -679,7 +730,16 @@ case "${1:-}" in
         echo "polaris-gamescope-session: portal did not bind idle generation; retaining restore-idle claim" >&2
         exit 1
       fi
-      rm -f "$nested_claim"
+      polaris_validate_marker "$marker" idle \
+        && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle \
+        && [ -f "$nested_claim" ] \
+        && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ] || {
+          echo "polaris-gamescope-session: ownership changed during portal readiness" >&2
+          exit 1
+        }
+      rm -f -- "$nested_claim"
+      "${POLARIS_FLOCK_BIN:-flock}" -u 8
+      export POLARIS_GAMESCOPE_LOCK_HELD=0
     elif [ -f "$rt/polaris-gamescope-force" ] && [ "$(tr -d '[:space:]' <"$rt/polaris-gamescope-force")" = "1" ]; then
       kill_session_steam || exit 1
       printf '0\n' >"$rt/polaris-gamescope-force"

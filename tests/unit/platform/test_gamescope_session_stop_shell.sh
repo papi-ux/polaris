@@ -183,5 +183,13 @@ grep -Fq 'if [ -s "$session_id_file" ]; then' "$script" ||
   fail "start does not recover every persisted session credential before replacement"
 grep -Fq 'POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1' "$script" ||
   fail "start does not route persisted attach/nested recovery through credentialed stop"
+transition_line="$(grep -nF 'publish_nested_claim transition absent' "$script" | head -n1 | cut -d: -f1)"
+mask_line="$(grep -nF 'polaris_mask_idle_unit_runtime' "$script" | tail -n1 | cut -d: -f1)"
+[ -n "$transition_line" ] && [ -n "$mask_line" ] && [ "$transition_line" -lt "$mask_line" ] ||
+  fail "nested transition claim is not published before idle destruction"
+grep -Fq 'publish_nested_claim nested transition' "$script" ||
+  fail "nested launch does not CAS transition ownership before spawn"
+grep -Fq 'export POLARIS_GAMESCOPE_LOCK_HELD=1' "$script" ||
+  fail "portal handoff is not finalized under the ownership lock"
 
 echo "PASS: gamescope session stop state machine"

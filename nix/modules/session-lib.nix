@@ -204,18 +204,44 @@ let
         org.freedesktop.impl.portal.ScreenCast AvailableCursorModes 2>/dev/null \
         | ${pkgs.gawk}/bin/awk '{print $2}' || true)"
       if [ -n "''${modes:-}" ] && [ "''${modes}" != "0" ]; then
-        if ! polaris_validate_marker "$rt/polaris-gamescope.pid" idle \
+        exec 8>>"$rt/polaris-gamescope.lock" || exit 1
+        ${lib.getExe' pkgs.util-linux "flock"} -x 8 || exit 1
+        export POLARIS_GAMESCOPE_LOCK_HELD=1
+        claim_state=absent
+        if [ -f "''${nested_claim:-}" ]; then
+          claim_state="$(tr -d '[:space:]' <"$nested_claim")"
+        fi
+        case "$claim_state" in
+          absent|restore-idle) ;;
+          *)
+            ${lib.getExe' pkgs.util-linux "flock"} -u 8
+            export POLARIS_GAMESCOPE_LOCK_HELD=0
+            echo "polaris: ownership transition changed during readiness ($claim_state)" >&2
+            sleep 0.1
+            continue
+            ;;
+        esac
+        locked_modes="$(${pkgs.systemd}/bin/busctl --address="$private_address" get-property \
+          org.freedesktop.impl.portal.desktop.gamescope \
+          /org/freedesktop/portal/desktop \
+          org.freedesktop.impl.portal.ScreenCast AvailableCursorModes 2>/dev/null \
+          | ${pkgs.gawk}/bin/awk '{print $2}' || true)"
+        if [ -z "''${locked_modes:-}" ] || [ "''${locked_modes}" = 0 ] \
+            || ! polaris_validate_marker "$rt/polaris-gamescope.pid" idle \
             || ! polaris_marker_owns_socket "$rt/polaris-gamescope.pid" "$rt/gamescope-0" idle \
             || ! polaris_write_runtime_env "$rt/polaris-gamescope.pid" gamescope-0 idle "$rt"; then
+          ${lib.getExe' pkgs.util-linux "flock"} -u 8
+          export POLARIS_GAMESCOPE_LOCK_HELD=0
           echo "polaris: portal is up but exact idle gamescope ownership is not ready" >&2
           sleep 0.1
           continue
         fi
-        if [ -f "''${nested_claim:-}" ] \
-            && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ]; then
-          rm -f "$nested_claim"
+        if [ "$claim_state" = restore-idle ]; then
+          rm -f -- "$nested_claim"
         fi
-        echo "polaris: private ScreenCast ready (gamescope-0 + portal, cursor_modes=$modes)" >&2
+        ${lib.getExe' pkgs.util-linux "flock"} -u 8
+        export POLARIS_GAMESCOPE_LOCK_HELD=0
+        echo "polaris: private ScreenCast ready (gamescope-0 + portal, cursor_modes=$locked_modes)" >&2
         exit 0
       fi
       if [ "$SECONDS" -ge "$deadline" ]; then

@@ -18,6 +18,25 @@ marker="$rt/polaris-gamescope.pid"
 child=""
 child_start=""
 
+exec 8>>"$rt/polaris-gamescope.lock" || exit 1
+"${POLARIS_FLOCK_BIN:-flock}" -x 8 || exit 1
+export POLARIS_GAMESCOPE_LOCK_HELD=1
+nested_claim="$rt/polaris-gamescope-wsi-nested"
+if [ -f "$nested_claim" ]; then
+  claim_state="$(tr -d '[:space:]' <"$nested_claim")"
+  case "$claim_state" in
+    restore-idle) ;;
+    transition|nested|1)
+      echo "polaris-gamescope-idle: yielding to active ownership transition ($claim_state)" >&2
+      exit 0
+      ;;
+    *)
+      echo "polaris-gamescope-idle: refusing unknown ownership claim ($claim_state)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 command -v "$gs" >/dev/null 2>&1 || {
   echo "polaris-gamescope-idle: gamescope not found (set POLARIS_GAMESCOPE_BIN)" >&2
   exit 1
@@ -136,6 +155,9 @@ if [ "$ready" != 1 ]; then
   echo "polaris-gamescope-idle: owned gamescope-0/Xwayland did not become ready" >&2
   exit 1
 fi
+
+"${POLARIS_FLOCK_BIN:-flock}" -u 8
+export POLARIS_GAMESCOPE_LOCK_HELD=0
 
 echo "polaris-gamescope-idle: ready pid=$child generation=$child_start" >&2
 wait "$child"
