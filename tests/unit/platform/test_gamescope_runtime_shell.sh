@@ -173,6 +173,15 @@ grep -qx 'DISPLAY=:4' "$work/run/polaris-gamescope.env" || fail "runtime env rou
 grep -qx 'POLARIS_GAMESCOPE_PID=410' "$work/run/polaris-gamescope.env" || fail "runtime env lacks owner pid"
 [ -e "$POLARIS_X11_SOCKET_DIR/X0" ] || fail "host X0 was removed"
 
+# Duplicate pathname rows represent unlink/rebind generations; holding the old
+# inode must not authorize clients to route to the replacement.
+cp "$POLARIS_PROC_NET_UNIX" "$work/unix.unique"
+printf 'row row row row row row 605 %s\n' "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+if polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle >/dev/null; then
+  fail duplicate
+fi
+mv "$work/unix.unique" "$POLARIS_PROC_NET_UNIX"
+
 # Exact valid ownership is signalled by process group and only its runtime
 # metadata/socket are removed. The unrelated host X display survives.
 polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run" ||
@@ -304,6 +313,15 @@ fi
 rm -rf "$POLARIS_PROC_ROOT/990"
 rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
 
+# Incomplete procfs enumeration is unknown ownership, not an empty holder set.
+: >"$work/run/gamescope-0.lock"
+mv "$POLARIS_PROC_ROOT" "$work/proc-hidden"
+if polaris_wayland_lock_has_no_deleted_holder "$work/run/gamescope-0.lock"; then
+  fail "missing proc root was treated as a complete deleted-lock scan"
+fi
+mv "$work/proc-hidden" "$POLARIS_PROC_ROOT"
+rm -f "$work/run/gamescope-0.lock"
+
 # Replacing the lock after socket-table validation must revoke cleanup before
 # unlink, even if the replacement is an unlocked regular file.
 : >"$work/run/gamescope-0"
@@ -406,8 +424,10 @@ grep -q 'gamescope_process::validated_marker' "$repo_root/src/platform/linux/str
   fail "C++ runtime does not validate exact marker generation"
 grep -q 'polaris_stop_marked_gamescope' "$repo_root/nix/modules/polaris-gamescope-session.sh" ||
   fail "session lifecycle does not stop the marked generation"
-grep -q 'polaris_stop_marked_gamescope' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" ||
-  fail "non-Nix readiness helper does not stop nested ownership exactly"
+grep -q 'POLARIS_GAMESCOPE_SESSION_BIN' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" \
+  || fail "non-Nix readiness helper does not use credentialed session recovery"
+grep -q 'polaris-gamescope-session-id' "$repo_root/scripts/install/lib/polaris-wait-gamescope.sh" \
+  || fail "non-Nix readiness helper does not require durable session identity"
 grep -q 'polaris_reclaim_orphan_gamescope_sockets' \
   "$repo_root/scripts/install/lib/polaris-gamescope-idle.sh" ||
   fail "idle unit does not reclaim orphan gamescope sockets"

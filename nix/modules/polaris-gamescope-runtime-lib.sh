@@ -211,11 +211,13 @@ polaris_wayland_lock_is_stable() {
 # Fail closed if an older producer still holds an unlinked lock inode with the
 # same pathname. An unlocked replacement lock cannot serialize with it.
 polaris_wayland_lock_has_no_deleted_holder() {
-  local lock="$1" owner proc_root process process_owner fd target
+  local lock="$1" owner proc_root process process_owner fd target seen=0
   owner="$(stat -Lc '%u' "$lock" 2>/dev/null)" || return 1
   proc_root="$(polaris_proc_root)"
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 1
   for process in "$proc_root"/[0-9]*; do
     [ -d "$process" ] || continue
+    seen=1
     process_owner="$(stat -Lc '%u' "$process" 2>/dev/null)" || return 1
     [ "$process_owner" = "$owner" ] || continue
     [ -d "$process/fd" ] || return 1
@@ -225,7 +227,7 @@ polaris_wayland_lock_has_no_deleted_holder() {
       [ "$target" != "$lock (deleted)" ] || return 1
     done
   done
-  return 0
+  [ "$seen" = 1 ]
 }
 
 # Remove one socket path if orphaned. 0 = missing/removed, 1 = live holder.
@@ -286,9 +288,22 @@ polaris_pid_related_to_root() {
   [ "$pid" != "$root" ] && polaris_pid_is_descendant "$pid" "$root"
 }
 
+polaris_unique_unix_socket_inode() {
+  local wanted="$1" inode path count=0 selected=
+  [ -r "$(polaris_proc_net_unix)" ] || return 1
+  while read -r _ _ _ _ _ _ inode path _; do
+    [ "$path" = "$wanted" ] || continue
+    case "$inode" in ''|*[!0-9]*) return 1 ;; esac
+    count=$((count + 1))
+    selected="$inode"
+  done <"$(polaris_proc_net_unix)" || return 1
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$selected"
+}
+
 polaris_discover_xwayland_display() {
-  local marker="$1" expected_role="${2:-}" xdir socket name display inode path process pid
-  local best= best_pid= best_start= best_inode= marker_line
+  local marker="$1" expected_role="${2:-}" xdir socket name display inode process pid final_inode
+  local best= best_pid= best_start= best_inode= best_socket= marker_line
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local root_pid="$POLARIS_MARKER_PID" root_start="$POLARIS_MARKER_START_TIME" root_executable="$POLARIS_MARKER_EXECUTABLE"
   marker_line="$(<"$marker")"
@@ -298,28 +313,26 @@ polaris_discover_xwayland_display() {
     name="${socket##*/}"
     display="${name#X}"
     case "$display" in ''|*[!0-9]*) continue ;; esac
-    # Walk every /proc/net/unix row for this path. Ambiguous unlink/rebind
-    # residue is ok if a related Xwayland still holds one of the inodes.
-    while read -r _ _ _ _ _ _ inode path _; do
-      [ "$path" = "$socket" ] || continue
-      case "$inode" in ''|*[!0-9]*) continue ;; esac
-      for process in "$(polaris_proc_root)"/[0-9]*; do
-        [ -d "$process" ] || continue
-        pid="${process##*/}"
-        case "$pid" in ''|*[!0-9]*) continue ;; esac
-        [ "$pid" != "$root_pid" ] || continue
-        if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
-            && polaris_pid_holds_inode "$pid" "$inode" \
-            && polaris_process_fields "$pid"; then
-          if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
-            best="$display"
-            best_pid="$pid"
-            best_start="$POLARIS_PROCESS_START_TIME"
-            best_inode="$inode"
-          fi
+    # Duplicate pathname generations are ambiguous after unlink/rebind. The
+    # process may hold an old inode while clients route to an unrelated new one.
+    inode="$(polaris_unique_unix_socket_inode "$socket")" || continue
+    for process in "$(polaris_proc_root)"/[0-9]*; do
+      [ -d "$process" ] || continue
+      pid="${process##*/}"
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      [ "$pid" != "$root_pid" ] || continue
+      if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
+          && polaris_pid_holds_inode "$pid" "$inode" \
+          && polaris_process_fields "$pid"; then
+        if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
+          best="$display"
+          best_pid="$pid"
+          best_start="$POLARIS_PROCESS_START_TIME"
+          best_inode="$inode"
+          best_socket="$socket"
         fi
-      done
-    done <"$(polaris_proc_net_unix)" 2>/dev/null
+      fi
+    done
   done
   [ -n "$best" ] || return 1
   # Revalidate both process generations and the exact socket ownership after
@@ -330,6 +343,8 @@ polaris_discover_xwayland_display() {
   polaris_xwayland_pid "$best_pid" \
     && polaris_pid_related_to_root "$best_pid" "$root_pid" \
     && polaris_pid_holds_inode "$best_pid" "$best_inode" || return 1
+  final_inode="$(polaris_unique_unix_socket_inode "$best_socket")" || return 1
+  [ "$final_inode" = "$best_inode" ] || return 1
   printf ':%s\n' "$best"
 }
 

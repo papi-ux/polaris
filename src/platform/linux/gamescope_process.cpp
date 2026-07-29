@@ -87,13 +87,22 @@ namespace stream_runtime::gamescope_process {
           }
           std::error_code link_ec;
           const auto target = fs::read_symlink(entry.path(), link_ec);
-          if (!link_ec && target == expected) {
+          if (link_ec) {
+            if (link_ec == std::errc::no_such_file_or_directory) {
+              continue;
+            }
+            return true;
+          }
+          if (target == expected) {
             return true;
           }
         }
         if (fd_ec) {
           return true;
         }
+      }
+      if (ec) {
+        return true;
       }
       return false;
     }
@@ -574,6 +583,9 @@ namespace stream_runtime::gamescope_process {
     }
     if (socket_has_live_holder(socket_path, paths)) {
       return false;
+    }
+    if (paths.before_socket_unlink_for_tests) {
+      paths.before_socket_unlink_for_tests();
     }
     if (!socket_lock->still_names(lock_path) || deleted_lock_state_unsafe(paths.proc_root, lock_path)) {
       return false;

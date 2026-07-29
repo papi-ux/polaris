@@ -295,6 +295,24 @@ TEST(GamescopeProcessOwnershipTests, RefusesReplacementLockWhileDeletedLockIsHel
   EXPECT_TRUE(fs::exists(lock_path));
 }
 
+TEST(GamescopeProcessOwnershipTests, RefusesLockReplacementBetweenValidationAndUnlink) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  const fs::path lock_path {gamescope_socket.string() + ".lock"};
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(lock_path).put('\n');
+  tree.flush_unix_sockets();
+  auto paths = paths_for(tree);
+  paths.before_socket_unlink_for_tests = [&]() {
+    fs::remove(lock_path);
+    std::ofstream(lock_path).put('\n');
+  };
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+  EXPECT_TRUE(fs::exists(lock_path));
+}
+
 TEST(GamescopeProcessOwnershipTests, MissingSocketDoesNotUnlinkPotentiallyHeldLock) {
   fake_proc_tree_t tree;
   const auto gamescope_socket = tree.runtime / "gamescope-0";
@@ -333,6 +351,19 @@ TEST(GamescopeProcessOwnershipTests, RefusesKernelSocketRowWithoutVisibleHolder)
 
   EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
   EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, RefusesReclaimWhenProcEnumerationIsUnavailable) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  std::ofstream(gamescope_socket).put('\n');
+  std::ofstream(gamescope_socket.string() + ".lock").put('\n');
+  tree.flush_unix_sockets();
+  auto paths = paths_for(tree);
+  paths.proc_root = tree.root / "missing-proc";
+
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths));
   EXPECT_TRUE(fs::exists(gamescope_socket));
 }
 

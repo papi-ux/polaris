@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,6 +26,7 @@ namespace stream_runtime::gamescope_process {
     std::filesystem::path proc_root = "/proc";
     std::filesystem::path proc_net_unix = "/proc/net/unix";
     std::filesystem::path x11_socket_dir = "/tmp/.X11-unix";
+    std::function<void()> before_socket_unlink_for_tests;
   };
 
   std::optional<marker_t> read_marker(const std::filesystem::path &path);
@@ -75,7 +77,7 @@ namespace stream_runtime::gamescope_process {
   );
 
   /**
-   * Unlink a crash-orphaned Wayland socket (and .lock) when no live holder exists.
+   * Unlink a crash-orphaned Wayland socket while preserving its existing lock.
    * Returns true when the path is gone afterward; false if a live holder (or
    * ambiguous pathname) still owns it.
    */
