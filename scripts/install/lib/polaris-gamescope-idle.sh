@@ -35,25 +35,42 @@ trap cleanup EXIT
 trap 'exit 143' TERM INT
 
 if polaris_validate_marker "$marker"; then
-  if [ "$POLARIS_MARKER_ROLE" = idle ]; then
-    polaris_stop_marked_gamescope "$marker" idle "$rt" || {
-      echo "polaris-gamescope-idle: existing idle owner did not stop" >&2
+  case "$POLARIS_MARKER_ROLE" in
+    idle)
+      polaris_stop_marked_gamescope "$marker" idle "$rt" || {
+        echo "polaris-gamescope-idle: existing idle owner did not stop" >&2
+        exit 1
+      }
+      ;;
+    nested|runtime)
+      # Nested WSI / owned spawn holds gamescope-0. Exit 0 so Restart=on-failure
+      # does not fight polaris-gamescope-session (mask can race with restart).
+      echo "polaris-gamescope-idle: yielding to active $POLARIS_MARKER_ROLE owner pid=$POLARIS_MARKER_PID" >&2
+      exit 0
+      ;;
+    *)
+      echo "polaris-gamescope-idle: refusing to replace active $POLARIS_MARKER_ROLE owner pid=$POLARIS_MARKER_PID" >&2
       exit 1
-    }
-  else
-    echo "polaris-gamescope-idle: refusing to replace active $POLARIS_MARKER_ROLE owner pid=$POLARIS_MARKER_PID" >&2
-    exit 1
-  fi
+      ;;
+  esac
 else
-  # Invalid marker is safe to discard. Crash residue sockets are reclaimed only
-  # when no live process holds them; live unowned holders still fail closed.
+  # No valid marker. If gamescope-0 is still live (nested race, or marker write
+  # lag), yield cleanly — do NOT delete someone else's state or restart-loop.
+  if [ -e "$rt/gamescope-0" ] || [ -S "$rt/gamescope-0" ]; then
+    if ! polaris_socket_is_orphan "$rt/gamescope-0"; then
+      echo "polaris-gamescope-idle: yielding to live gamescope-0 holder (not idle-owned)" >&2
+      exit 0
+    fi
+  fi
+  # Invalid marker + orphan sockets only: safe to discard and reclaim residue.
   rm -f "$marker"
   rm -f "$rt/polaris-gamescope.env"
 fi
 
 if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-  echo "polaris-gamescope-idle: cannot start while live unowned gamescope sockets remain" >&2
-  exit 1
+  # Live holder appeared between checks (nested start race): yield, don't loop.
+  echo "polaris-gamescope-idle: yielding; live gamescope sockets remain" >&2
+  exit 0
 fi
 
 prefer_vk=()
