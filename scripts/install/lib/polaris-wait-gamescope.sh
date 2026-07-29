@@ -46,7 +46,8 @@ fi
 # private portal, and clear the durable claim.
 if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
   session_cmd="${POLARIS_GAMESCOPE_SESSION_BIN:-polaris-gamescope-session}"
-  [ -s "$rt/polaris-gamescope-session-id" ] || {
+  { [ -s "$rt/polaris-gamescope-session-state" ] \
+      || [ -s "$rt/polaris-gamescope-session-id" ]; } || {
     echo "polaris: nested recovery lacks its immutable session credential" >&2
     exit 1
   }

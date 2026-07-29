@@ -196,6 +196,48 @@ grep -qx 'kill -TERM 101' "$actions" || fail "attach recovery did not terminate 
 [ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "attach recovery cleared no credential"
 [ ! -e "$work/run/polaris-gamescope-session-mode" ] || fail "attach recovery retained mode"
 
+# New credentials publish ID+mode as one atomic record; stop must consume that
+# record and clear it only after exact-session Steam is absent.
+reset_state
+rm -f "$work/run/polaris-gamescope-wsi-nested" \
+  "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+printf 'session-A attach\n' >"$work/run/polaris-gamescope-session-state"
+mkdir -p "$work/proc/101"
+printf '11\n' >"$work/proc/101/start"
+printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 run_stop >/dev/null 2>&1 ||
+  fail "atomic persisted attach recovery failed"
+[ ! -e "$work/run/polaris-gamescope-session-state" ] || fail "atomic credential survived complete stop"
+
+# Interruption before the one rename leaves no half credential; retry commits one
+# complete ID+mode record.
+prefix="$work/session-functions.sh"
+: >"$prefix"
+while IFS= read -r line; do
+  [ "$line" = 'case "${1:-}" in' ] && break
+  printf '%s\n' "$line" >>"$prefix"
+done <"$script"
+(
+  export XDG_RUNTIME_DIR="$work/run"
+  export POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh"
+  export POLARIS_SESSION_INSTANCE_ID=session-B
+  rm -f "$work/run/polaris-gamescope-session-state" \
+    "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+  # shellcheck source=/dev/null
+  . "$prefix"
+  if POLARIS_SESSION_STATE_BEFORE_COMMIT_HOOK=false publish_session_mode nested; then
+    fail "interrupted atomic session publication unexpectedly succeeded"
+  fi
+  [ ! -e "$session_state_file" ] || fail "interrupted publication exposed a half credential"
+  if compgen -G "$session_state_file.tmp.*" >/dev/null; then
+    fail "interrupted publication retained a temporary credential"
+  fi
+  publish_session_mode nested || fail "atomic session publication retry failed"
+  [ "$(<"$session_state_file")" = 'session-B nested' ] ||
+    fail "atomic session record did not contain exact ID and mode"
+)
+rm -f "$work/run/polaris-gamescope-session-state"
+
 # A crash after nested mode publication but before transition publication is
 # recoverable only while exact idle ownership proves destruction never began.
 reset_state
@@ -216,8 +258,8 @@ if POLARIS_SESSION_INSTANCE_ID= NESTED_VALID=1 IDLE_VALID=0 run_stop >/dev/null 
 fi
 [ -e "$work/run/polaris-gamescope-session-id" ] || fail "ambiguous nested failure cleared credential"
 
-grep -Fq 'if [ -s "$session_id_file" ]; then' "$script" ||
-  fail "start does not recover every persisted session credential before replacement"
+grep -Fq 'if [ -e "$session_state_file" ] || [ -s "$session_id_file" ]; then' "$script" ||
+  fail "start does not recover every atomic or legacy credential before replacement"
 grep -Fq 'POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1' "$script" ||
   fail "start does not route persisted attach/nested recovery through credentialed stop"
 transition_line="$(grep -nF 'publish_nested_claim transition absent' "$script" | head -n1 | cut -d: -f1)"
@@ -231,8 +273,12 @@ grep -Fq 'publish_nested_claim nested nested' "$script" ||
 if grep -Eq '^[[:space:]]*publish_nested_claim[[:space:]]*$' "$script"; then
   fail "nested claim helper was called without CAS arguments"
 fi
-grep -Fq '[ ! -e "$session_id_file" ] && [ ! -e "$session_mode_file" ]' "$script" ||
-  fail "credential and mode publication is not fenced against concurrent starts"
+grep -Fq "printf '%s %s\\n' \"\$POLARIS_SESSION_INSTANCE_ID\" \"\$mode\" >\"\$tmp\"" "$script" ||
+  fail "session ID and mode are not assembled into one atomic record"
+grep -Fq 'mv -f -- "$tmp" "$session_state_file"' "$script" ||
+  fail "atomic session record is not committed by one rename"
+grep -Fq 'POLARIS_SESSION_STATE_BEFORE_COMMIT_HOOK' "$script" ||
+  fail "atomic publication interruption hook is missing"
 grep -Fq 'export POLARIS_GAMESCOPE_LOCK_HELD=1' "$script" ||
   fail "portal handoff is not finalized under the ownership lock"
 

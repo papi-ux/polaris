@@ -15,10 +15,12 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <fcntl.h>
 #include <poll.h>
 #include <sstream>
 #include <thread>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -260,11 +262,15 @@ TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebin
   ASSERT_FALSE(session.empty());
   EXPECT_NE(recovery.find("${lib.getExe sessionBin} stop"), std::string::npos);
   EXPECT_NE(recovery.find("polaris-gamescope-session-id"), std::string::npos);
+  EXPECT_NE(recovery.find("polaris-gamescope-session-state"), std::string::npos);
   EXPECT_NE(recovery.find("POLARIS_GAMESCOPE_LOCK_HELD=1"), std::string::npos);
   EXPECT_NE(recovery.find("claim_state=absent"), std::string::npos);
   EXPECT_NE(session.find("restart polaris-portal-gamescope.service"), std::string::npos);
   EXPECT_NE(session.find("publish_nested_claim transition absent"), std::string::npos);
   EXPECT_NE(session.find("polaris-gamescope-session-mode"), std::string::npos);
+  EXPECT_NE(session.find("polaris-gamescope-session-state"), std::string::npos);
+  EXPECT_NE(session.find("printf '%s %s\\n' \"$POLARIS_SESSION_INSTANCE_ID\" \"$mode\""), std::string::npos);
+  EXPECT_NE(session.find("mv -f -- \"$tmp\" \"$session_state_file\""), std::string::npos);
   EXPECT_NE(session.find("attach recovery could not terminate exact-session Steam"), std::string::npos);
   const auto idle = read_source_for_contract("scripts/install/lib/polaris-gamescope-idle.sh");
   ASSERT_FALSE(idle.empty());
@@ -274,6 +280,7 @@ TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebin
   ASSERT_FALSE(non_nix.empty());
   EXPECT_NE(non_nix.find("POLARIS_GAMESCOPE_SESSION_BIN"), std::string::npos);
   EXPECT_NE(non_nix.find("polaris-gamescope-session-id"), std::string::npos);
+  EXPECT_NE(non_nix.find("polaris-gamescope-session-state"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState) {
@@ -296,12 +303,106 @@ TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState
   const auto stop_body = source.substr(stop_start, refresh_start - stop_start);
   EXPECT_NE(stop_body.find("gp::read_marker(marker_path())"), std::string::npos);
   EXPECT_EQ(stop_body.find("validated_marker_for_socket"), std::string::npos);
+  const auto runtime_start = source.find("bool start(const start_params_t &params) override");
+  const auto runtime_stop = source.find("void stop() override", runtime_start);
+  ASSERT_NE(runtime_start, std::string::npos);
+  ASSERT_NE(runtime_stop, std::string::npos);
+  const auto start_body = source.substr(runtime_start, runtime_stop - runtime_start);
+  const auto acquisition = start_body.find("owner_transition_lock_t acquisition_lock");
+  const auto reclaim = start_body.find("reclaim_orphan_gamescope_sockets()");
+  const auto spawn = start_body.find("const pid_t child = fork()");
+  const auto marker_write = start_body.find("gp::write_marker(marker_path(), *marker_)");
+  ASSERT_NE(acquisition, std::string::npos);
+  ASSERT_NE(reclaim, std::string::npos);
+  ASSERT_NE(spawn, std::string::npos);
+  ASSERT_NE(marker_write, std::string::npos);
+  EXPECT_LT(acquisition, reclaim);
+  EXPECT_LT(reclaim, spawn);
+  EXPECT_LT(spawn, marker_write);
+  EXPECT_NE(start_body.find("runtime_acquisition_allowed_locked()"), std::string::npos);
+  EXPECT_NE(source.find("try_attach_gamescope0(params, true)"), std::string::npos);
   const auto drain_start = source.find("bool drain_private_process_group(");
   const auto rollback_start = source.find("bool rollback_spawned_private_group(", drain_start);
   ASSERT_NE(drain_start, std::string::npos);
   ASSERT_NE(rollback_start, std::string::npos);
   const auto drain = source.substr(drain_start, rollback_start - drain_start);
   EXPECT_EQ(drain.find("waitpid(pgid", drain.find("for (int i = 0")), drain.rfind("waitpid(pgid"));
+}
+
+TEST(SessionStopContractTests, RuntimeAcquisitionRejectsNestedOrIncompleteDurableClaims) {
+#ifdef __linux__
+  namespace fs = std::filesystem;
+  const auto dir = fs::temp_directory_path() /
+    ("polaris-runtime-claim-test-" + std::to_string(getpid()));
+  fs::remove_all(dir);
+  ASSERT_TRUE(fs::create_directories(dir));
+  const char *old_runtime = std::getenv("XDG_RUNTIME_DIR");
+  const std::string saved_runtime = old_runtime ? old_runtime : "";
+  ASSERT_EQ(setenv("XDG_RUNTIME_DIR", dir.c_str(), 1), 0);
+
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  const int lock_fd = open((dir / "polaris-gamescope.lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  ASSERT_GE(lock_fd, 0);
+  ASSERT_EQ(flock(lock_fd, LOCK_EX), 0);
+  auto blocked_acquisition = std::async(std::launch::async, []() {
+    return stream_runtime::gamescope_runtime_acquisition_allowed_for_tests();
+  });
+  EXPECT_EQ(blocked_acquisition.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state");
+    state << "session-A nested\n";
+  }
+  ASSERT_EQ(flock(lock_fd, LOCK_UN), 0);
+  close(lock_fd);
+  EXPECT_FALSE(blocked_acquisition.get());
+  fs::remove(dir / "polaris-gamescope-session-state");
+
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state");
+    state << "session-A nested\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A attach\n";
+  }
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream claim(dir / "polaris-gamescope-wsi-nested");
+    claim << "transition\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  fs::remove(dir / "polaris-gamescope-wsi-nested");
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  fs::remove(dir / "polaris-gamescope-session-state");
+  {
+    std::ofstream id(dir / "polaris-gamescope-session-id");
+    id << "session-A\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream mode(dir / "polaris-gamescope-session-mode");
+    mode << "attach\n";
+  }
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream mode(dir / "polaris-gamescope-session-mode", std::ios::trunc);
+    mode << "nested\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+
+  if (old_runtime) {
+    ASSERT_EQ(setenv("XDG_RUNTIME_DIR", saved_runtime.c_str(), 1), 0);
+  }
+  else {
+    ASSERT_EQ(unsetenv("XDG_RUNTIME_DIR"), 0);
+  }
+  fs::remove_all(dir);
+#endif
 }
 
 TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {

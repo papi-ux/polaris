@@ -51,7 +51,10 @@ namespace stream_runtime {
 
     class owner_transition_lock_t {
     public:
-      owner_transition_lock_t() {
+      explicit owner_transition_lock_t(bool acquire = true) {
+        if (!acquire) {
+          return;
+        }
         const auto path = fs::path(xdg_runtime_dir()) / "polaris-gamescope.lock";
         fd_ = open(path.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, 0600);
         if (fd_ >= 0 && flock(fd_, LOCK_EX) != 0) {
@@ -72,6 +75,14 @@ namespace stream_runtime {
 
       explicit operator bool() const { return fd_ >= 0; }
 
+      void unlock() {
+        if (fd_ >= 0) {
+          flock(fd_, LOCK_UN);
+          close(fd_);
+          fd_ = -1;
+        }
+      }
+
     private:
       int fd_ = -1;
     };
@@ -81,6 +92,51 @@ namespace stream_runtime {
         return xdg;
       }
       return "/run/user/" + std::to_string(getuid());
+    }
+
+    bool runtime_acquisition_allowed_locked() {
+      const auto rt = fs::path(xdg_runtime_dir());
+      const auto path_is_absent = [](const fs::path &path) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        if (ec == std::errc::no_such_file_or_directory) {
+          return true;
+        }
+        return !ec && status.type() == fs::file_type::not_found;
+      };
+      if (!path_is_absent(rt / "polaris-gamescope-wsi-nested")) {
+        return false;
+      }
+
+      const auto state_path = rt / "polaris-gamescope-session-state";
+      if (!path_is_absent(state_path)) {
+        std::ifstream state(state_path);
+        std::string session_id;
+        std::string mode;
+        std::string extra;
+        if (!(state >> session_id >> mode) || (state >> extra) || session_id.empty()) {
+          return false;
+        }
+        return mode == "attach";
+      }
+
+      const auto legacy_id = rt / "polaris-gamescope-session-id";
+      const auto legacy_mode = rt / "polaris-gamescope-session-mode";
+      const bool id_absent = path_is_absent(legacy_id);
+      const bool mode_absent = path_is_absent(legacy_mode);
+      if (id_absent && mode_absent) {
+        return true;
+      }
+      if (id_absent || mode_absent) {
+        return false;
+      }
+      std::ifstream mode_file(legacy_mode);
+      std::string mode;
+      std::string extra;
+      if (!(mode_file >> mode) || (mode_file >> extra)) {
+        return false;
+      }
+      return mode == "attach";
     }
 
     bool socket_exists(const std::string &name) {
@@ -296,13 +352,19 @@ namespace stream_runtime {
           owned_ || pid_ > 0 || leader_pidfd_ >= 0 || marker_ ||
           !socket_name_.empty() || !x11_display_.empty();
         if (retained_state) {
-          if (is_running_unlocked() && revalidate_running_unlocked(params)) {
+          owner_transition_lock_t retained_lock;
+          if (!retained_lock || !runtime_acquisition_allowed_locked()) {
+            BOOST_LOG(warning) << "gamescope_runtime: nested ownership claim blocks retained runtime reuse"sv;
+            return false;
+          }
+          if (is_running_unlocked() && revalidate_running_unlocked(params, true)) {
             BOOST_LOG(info) << "gamescope_runtime: already "sv
                             << (owned_ ? "owned"sv : "attached"sv)
                             << " "sv << (socket_name_.empty() ? "gamescope-0" : socket_name_)
                             << "; reusing"sv;
             return true;
           }
+          retained_lock.unlock();
           if (owned_) {
             if (!marker_) {
               BOOST_LOG(error) << "gamescope_runtime: retained owned state lacks immutable marker authority; refusing restart"sv;
@@ -323,12 +385,22 @@ namespace stream_runtime {
 
         ensure_portal_stack();
 
-        // 1) Prefer attach to idle gamescope-0 (portal + polaris-gamescope.env contract).
-        if (try_attach_gamescope0(params)) {
-          return true;
+        // 1) Prefer attach to idle gamescope-0, but participate in the same
+        // locked durable-claim protocol as nested shell recovery.
+        {
+          owner_transition_lock_t acquisition_lock;
+          if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+            BOOST_LOG(warning) << "gamescope_runtime: nested ownership claim blocks runtime acquisition"sv;
+            return false;
+          }
+          if (try_attach_gamescope0(params, true)) {
+            return true;
+          }
         }
 
-        // 2) Ask the host idle unit to start (if present) before we spawn our own.
+        // 2) Ask the host idle unit to start. This helper releases the ownership
+        // lock around systemd activation, then reacquires and rechecks the claim
+        // before attaching.
         if (try_start_idle_unit_and_attach(params)) {
           return true;
         }
@@ -338,12 +410,18 @@ namespace stream_runtime {
           return false;
         }
 
-        // 3) Spawn owned headless gamescope — only if gamescope-0 is still free.
+        // 3) Spawn owned headless gamescope only inside the same ownership lock
+        // and after proving no durable nested transition/recovery claim exists.
+        owner_transition_lock_t acquisition_lock;
+        if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+          BOOST_LOG(warning) << "gamescope_runtime: nested claim appeared before owned spawn"sv;
+          return false;
+        }
         // Never attach/spawn onto gamescope-1 (portal is hard-wired to gamescope-0).
-        // Crash residue with no live holder is reclaimed; live unowned holders fail closed.
+        // Crash residue with no live holder is reclaimed under this transaction.
         reclaim_orphan_gamescope_sockets();
         if (socket_exists("gamescope-0") && wait_for_stable_socket("gamescope-0", 1500)) {
-          if (try_attach_gamescope0(params)) {
+          if (try_attach_gamescope0(params, true)) {
             return true;
           }
           BOOST_LOG(error) << "gamescope_runtime: gamescope-0 exists but is not a validated owner; refusing destructive cleanup"sv;
@@ -441,14 +519,15 @@ namespace stream_runtime {
           marker_.reset();
         }
         bool marker_written = false;
-        if (marker_) {
-          owner_transition_lock_t owner_lock;
-          if (owner_lock) {
-            const auto current_owner = gp::validated_marker(marker_path());
-            const bool authority_free = !current_owner ||
-              *current_owner == *marker_;
-            marker_written = authority_free && gp::write_marker(marker_path(), *marker_);
-          }
+        if (marker_ && runtime_acquisition_allowed_locked()) {
+          const auto current_owner = gp::validated_marker(marker_path());
+          const bool authority_free = !current_owner || *current_owner == *marker_;
+          marker_written = authority_free && gp::write_marker(marker_path(), *marker_);
+        }
+        if (marker_written) {
+          // The exact runtime generation is now durable. Release the acquisition
+          // transaction so nested recovery can observe and stop this marker.
+          acquisition_lock.unlock();
         }
         if (!marker_written) {
           BOOST_LOG(error) << "gamescope_runtime: could not record exact owned gamescope generation"sv;
@@ -733,7 +812,7 @@ namespace stream_runtime {
         state_ = {};
       }
 
-      bool revalidate_running_unlocked(const start_params_t &params) {
+      bool revalidate_running_unlocked(const start_params_t &params, bool ownership_lock_held = false) {
         if (!marker_ || socket_name_.empty() || x11_display_.empty()) {
           return false;
         }
@@ -746,7 +825,7 @@ namespace stream_runtime {
           return false;
         }
         refresh_runtime_state(params);
-        return write_env_file();
+        return write_env_file(ownership_lock_held);
       }
 
       static void ensure_portal_stack() {
@@ -773,7 +852,7 @@ namespace stream_runtime {
         }
       }
 
-      bool try_attach_gamescope0(const start_params_t &params) {
+      bool try_attach_gamescope0(const start_params_t &params, bool ownership_lock_held = false) {
         if (!wait_for_stable_socket("gamescope-0", 2000)) {
           return false;
         }
@@ -794,7 +873,7 @@ namespace stream_runtime {
         socket_name_ = "gamescope-0";
         x11_display_ = display;
         refresh_runtime_state(params);
-        if (!write_env_file()) {
+        if (!write_env_file(ownership_lock_held)) {
           marker_.reset();
           pid_ = 0;
           socket_name_.clear();
@@ -829,9 +908,8 @@ namespace stream_runtime {
       }
 
       bool try_start_idle_unit_and_attach(const start_params_t &params) {
-        // Best-effort: host may ship polaris-gamescope-idle.service that owns gamescope-0.
-        // Clear crash residue so idle can bind gamescope-0 again.
-        reclaim_orphan_gamescope_sockets();
+        // Best-effort: host may ship polaris-gamescope-idle.service. Its own
+        // startup transaction reclaims residue under the shared ownership lock.
         const bool active =
           std::system("systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null") == 0;
         const bool activating =
@@ -839,28 +917,38 @@ namespace stream_runtime {
             "test \"$(systemctl --user show -p ActiveState --value polaris-gamescope-idle.service 2>/dev/null)\" = activating") == 0;
         if ((active || activating) && idle_hdr_flags_match_force()) {
           if (wait_for_stable_socket("gamescope-0", 8000)) {
-            return try_attach_gamescope0(params);
+            owner_transition_lock_t acquisition_lock;
+            if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+              return false;
+            }
+            return try_attach_gamescope0(params, true);
           }
         }
         if (active && !idle_hdr_flags_match_force()) {
           BOOST_LOG(info) << "gamescope_runtime: restarting polaris-gamescope-idle to match polaris-gamescope-force"sv;
         }
         if (restart_or_start_idle_unit()) {
-          if (wait_for_stable_socket("gamescope-0", 12000) && try_attach_gamescope0(params)) {
-            BOOST_LOG(info) << "gamescope_runtime: polaris-gamescope-idle ready (HDR flags synced); attached to gamescope-0"sv;
-            return true;
+          if (wait_for_stable_socket("gamescope-0", 12000)) {
+            owner_transition_lock_t acquisition_lock;
+            if (!acquisition_lock || !runtime_acquisition_allowed_locked()) {
+              return false;
+            }
+            if (try_attach_gamescope0(params, true)) {
+              BOOST_LOG(info) << "gamescope_runtime: polaris-gamescope-idle ready (HDR flags synced); attached to gamescope-0"sv;
+              return true;
+            }
           }
           BOOST_LOG(warning) << "gamescope_runtime: polaris-gamescope-idle started but gamescope-0 not ready; will try owned spawn"sv;
         }
         return false;
       }
 
-      bool write_env_file() const {
+      bool write_env_file(bool ownership_lock_held = false) const {
         if (!marker_ || x11_display_.empty() || socket_name_.empty()) {
           return false;
         }
-        owner_transition_lock_t owner_lock;
-        if (!owner_lock) {
+        owner_transition_lock_t owner_lock(!ownership_lock_held);
+        if ((!ownership_lock_held && !owner_lock) || !runtime_acquisition_allowed_locked()) {
           return false;
         }
         const auto revalidate_publication_pair = [this]() {
@@ -919,6 +1007,11 @@ namespace stream_runtime {
 
   bool rollback_gamescope_spawn_for_tests(pid_t pgid, int leader_pidfd) {
     return rollback_spawned_private_group(pgid, leader_pidfd);
+  }
+
+  bool gamescope_runtime_acquisition_allowed_for_tests() {
+    owner_transition_lock_t owner_lock;
+    return owner_lock && runtime_acquisition_allowed_locked();
   }
 
   stream_runtime_t *gamescope_runtime_instance() {

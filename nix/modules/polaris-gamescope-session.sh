@@ -20,6 +20,7 @@ gs_refresh="${POLARIS_HDR_REFRESH:-120}"
 
 session_id_file="$rt/polaris-gamescope-session-id"
 session_mode_file="$rt/polaris-gamescope-session-mode"
+session_state_file="$rt/polaris-gamescope-session-state"
 
 publish_nested_claim() (
   local new_state="$1" expected_state="${2:-absent}"
@@ -40,24 +41,34 @@ publish_session_mode() (
   case "$mode" in attach|nested) ;; *) return 1 ;; esac
   exec 9>>"$rt/polaris-gamescope.lock" || return 1
   "$lock_bin" -x 9 || return 1
-  [ ! -e "$session_id_file" ] && [ ! -e "$session_mode_file" ] || return 1
-  local id_tmp="$session_id_file.tmp.$$"
-  printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$id_tmp" || return 1
-  mv -f -- "$id_tmp" "$session_id_file" || return 1
-  tmp="$session_mode_file.tmp.$$"
-  printf '%s\n' "$mode" >"$tmp" || return 1
-  mv -f -- "$tmp" "$session_mode_file"
+  [ ! -e "$session_state_file" ] \
+    && [ ! -e "$session_id_file" ] \
+    && [ ! -e "$session_mode_file" ] || return 1
+  tmp="$session_state_file.tmp.$$"
+  trap 'rm -f -- "$tmp"' EXIT
+  printf '%s %s\n' "$POLARIS_SESSION_INSTANCE_ID" "$mode" >"$tmp" || return 1
+  if [ -n "${POLARIS_SESSION_STATE_BEFORE_COMMIT_HOOK:-}" ]; then
+    eval "$POLARIS_SESSION_STATE_BEFORE_COMMIT_HOOK" || return 1
+  fi
+  mv -f -- "$tmp" "$session_state_file"
 )
 
 recover_missing_nested_claim() (
-  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp persisted persisted_mode extra
   exec 9>>"$rt/polaris-gamescope.lock" || return 1
   "$lock_bin" -x 9 || return 1
   [ ! -e "$rt/polaris-gamescope-wsi-nested" ] || return 0
-  [ -s "$session_id_file" ] \
-    && [ "$(tr -d '\r\n' <"$session_id_file")" = "$POLARIS_SESSION_INSTANCE_ID" ] \
-    && [ -f "$session_mode_file" ] \
-    && [ "$(tr -d '[:space:]' <"$session_mode_file")" = nested ] || return 1
+  if [ -f "$session_state_file" ]; then
+    read -r persisted persisted_mode extra <"$session_state_file" || return 1
+    [ -z "${extra:-}" ] \
+      && [ "$persisted" = "$POLARIS_SESSION_INSTANCE_ID" ] \
+      && [ "$persisted_mode" = nested ] || return 1
+  else
+    [ -s "$session_id_file" ] \
+      && [ "$(tr -d '\r\n' <"$session_id_file")" = "$POLARIS_SESSION_INSTANCE_ID" ] \
+      && [ -f "$session_mode_file" ] \
+      && [ "$(tr -d '[:space:]' <"$session_mode_file")" = nested ] || return 1
+  fi
   export POLARIS_GAMESCOPE_LOCK_HELD=1
   if ! polaris_validate_marker "$marker" idle \
       && ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
@@ -79,7 +90,21 @@ remove_nested_claim() (
 )
 
 load_session_instance_id() {
-  local persisted
+  local persisted persisted_mode extra
+  POLARIS_PERSISTED_SESSION_MODE=""
+  if [ -f "$session_state_file" ]; then
+    read -r persisted persisted_mode extra <"$session_state_file" || return 1
+    [ -z "${extra:-}" ] || return 1
+    case "$persisted_mode" in attach|nested) ;; *) return 1 ;; esac
+    [ -n "$persisted" ] || return 1
+    if [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ]; then
+      [ "$persisted" = "$POLARIS_SESSION_INSTANCE_ID" ] || return 1
+    else
+      export POLARIS_SESSION_INSTANCE_ID="$persisted"
+    fi
+    POLARIS_PERSISTED_SESSION_MODE="$persisted_mode"
+    return 0
+  fi
   if [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ]; then
     if [ -f "$session_id_file" ]; then
       persisted="$(tr -d '\n' <"$session_id_file")" || return 1
@@ -198,7 +223,7 @@ case "${1:-}" in
       echo "polaris-gamescope-session: missing immutable session credential" >&2
       exit 1
     }
-    if [ -s "$session_id_file" ]; then
+    if [ -e "$session_state_file" ] || [ -s "$session_id_file" ]; then
       echo "polaris-gamescope-session: complete prior session recovery before new launch" >&2
       POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1
       POLARIS_SESSION_INSTANCE_ID="$requested_session_id"
@@ -668,11 +693,15 @@ case "${1:-}" in
       echo "polaris-gamescope-session: missing or mismatched session credential during stop" >&2
       exit 1
     }
-    [ -f "$session_mode_file" ] || {
-      echo "polaris-gamescope-session: durable session mode missing; retaining credential" >&2
-      exit 1
-    }
-    session_mode="$(tr -d '[:space:]' <"$session_mode_file")"
+    if [ -n "${POLARIS_PERSISTED_SESSION_MODE:-}" ]; then
+      session_mode="$POLARIS_PERSISTED_SESSION_MODE"
+    else
+      [ -f "$session_mode_file" ] || {
+        echo "polaris-gamescope-session: durable session mode missing; retaining credential" >&2
+        exit 1
+      }
+      session_mode="$(tr -d '[:space:]' <"$session_mode_file")"
+    fi
     case "$session_mode" in attach|nested) ;; *)
       echo "polaris-gamescope-session: invalid durable session mode; retaining credential" >&2
       exit 1
@@ -824,7 +853,7 @@ case "${1:-}" in
         systemctl --user restart polaris-gamescope-idle.service || true
       fi
     fi
-    rm -f "$session_mode_file" "$session_id_file"
+    rm -f "$session_state_file" "$session_mode_file" "$session_id_file"
     ;;
   *)
     echo "usage: polaris-gamescope-session start [steam_appid]|wait|stop" >&2

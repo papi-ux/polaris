@@ -56,6 +56,7 @@ namespace stream_runtime {
 
   bool drain_gamescope_private_group_for_tests(pid_t pgid);
   bool rollback_gamescope_spawn_for_tests(pid_t pgid, int leader_pidfd);
+  bool gamescope_runtime_acquisition_allowed_for_tests();
 
   /**
    * Labwc-only free functions — only stream_runtime_labwc.cpp may include

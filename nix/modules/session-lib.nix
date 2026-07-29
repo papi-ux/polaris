@@ -159,7 +159,8 @@ let
     nested_claim="$rt/polaris-gamescope-wsi-nested"
     if [ -f "$nested_claim" ]; then
       echo "polaris: recover nested generation through the exact session stop state machine" >&2
-      if [ ! -s "$rt/polaris-gamescope-session-id" ]; then
+      if [ ! -s "$rt/polaris-gamescope-session-state" ] \
+          && [ ! -s "$rt/polaris-gamescope-session-id" ]; then
         echo "polaris: nested recovery is missing its immutable session credential" >&2
         exit 1
       fi
