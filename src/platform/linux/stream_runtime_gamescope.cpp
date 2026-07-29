@@ -11,6 +11,7 @@
 #ifdef __linux__
 
   #include "stream_path.h"
+  #include "gamescope_process.h"
   #include "src/logging.h"
 
   #include <chrono>
@@ -20,6 +21,7 @@
   #include <filesystem>
   #include <fstream>
   #include <mutex>
+  #include <optional>
   #include <signal.h>
   #include <string>
   #include <string_view>
@@ -36,6 +38,7 @@ namespace stream_runtime {
   namespace {
 
     namespace fs = std::filesystem;
+    namespace gp = gamescope_process;
 
     std::string xdg_runtime_dir() {
       if (const char *xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && *xdg) {
@@ -92,16 +95,10 @@ namespace stream_runtime {
       bool start(const start_params_t &params) override {
         std::lock_guard lock(mu_);
         if (is_running_unlocked()) {
-          // Attach-mode is_running() treats empty socket_name as gamescope-0 for
-          // existence checks — always materialize the name so child env gets it.
-          if (socket_name_.empty() && socket_exists("gamescope-0")) {
-            socket_name_ = "gamescope-0";
-            owned_ = false;
-            pid_ = 0;
-            x11_display_ = detect_x11_display();
-          }
           refresh_runtime_state(params);
-          write_env_file();
+          if (!write_env_file()) {
+            return false;
+          }
           BOOST_LOG(info) << "gamescope_runtime: already "sv
                           << (owned_ ? "owned"sv : "attached"sv)
                           << " "sv << (socket_name_.empty() ? "gamescope-0" : socket_name_)
@@ -130,8 +127,8 @@ namespace stream_runtime {
           return try_attach_gamescope0(params);
         }
         if (socket_exists("gamescope-1") && !socket_exists("gamescope-0")) {
-          BOOST_LOG(warning) << "gamescope_runtime: stale gamescope-1 present without gamescope-0; cleaning and spawning owned gamescope-0"sv;
-          cleanup_stale_sockets_aggressive();
+          BOOST_LOG(error) << "gamescope_runtime: gamescope-1 exists without a validated gamescope-0 owner; refusing destructive cleanup"sv;
+          return false;
         }
 
         const auto width = std::max(params.width, 640);
@@ -195,6 +192,29 @@ namespace stream_runtime {
         owned_ = true;
         socket_name_ = "gamescope-0";
 
+        // Capture the exact PID generation only after exec has exposed the
+        // expected gamescope --backend headless argv.
+        for (int i = 0; i < 100 && !marker_; ++i) {
+          marker_ = gp::marker_for_pid(child, "runtime");
+          if (!marker_) {
+            int status = 0;
+            if (waitpid(child, &status, WNOHANG) == child) {
+              break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          }
+        }
+        if (!marker_ || !gp::write_marker(marker_path(), *marker_)) {
+          BOOST_LOG(error) << "gamescope_runtime: could not record exact owned gamescope generation"sv;
+          kill(child, SIGTERM);
+          waitpid(child, nullptr, 0);
+          pid_ = 0;
+          owned_ = false;
+          marker_.reset();
+          socket_name_.clear();
+          return false;
+        }
+
         const bool socket_ok = wait_for_stable_socket("gamescope-0", 10000);
         if (!socket_ok) {
           // If we got gamescope-1, fail — portal cannot use it reliably.
@@ -206,8 +226,11 @@ namespace stream_runtime {
           int status = 0;
           if (waitpid(pid_, &status, WNOHANG) == pid_) {
             BOOST_LOG(error) << "gamescope_runtime: gamescope exited before socket appeared"sv;
+            remove_owned_files_if_current();
             pid_ = 0;
             owned_ = false;
+            marker_.reset();
+            socket_name_.clear();
             return false;
           }
           BOOST_LOG(error) << "gamescope_runtime: gamescope-0 never appeared (owned spawn)"sv;
@@ -215,11 +238,20 @@ namespace stream_runtime {
           return false;
         }
 
-        x11_display_ = detect_x11_display();
+        if (!gp::process_tree_owns_socket(*marker_, socket_path("gamescope-0"))) {
+          BOOST_LOG(error) << "gamescope_runtime: gamescope-0 is not owned by the spawned generation"sv;
+          stop_unlocked();
+          return false;
+        }
+        x11_display_ = wait_for_owned_x11(*marker_, 8000);
+        if (x11_display_.empty()) {
+          BOOST_LOG(error) << "gamescope_runtime: spawned generation exposed no owned Xwayland socket"sv;
+          stop_unlocked();
+          return false;
+        }
         refresh_runtime_state(params);
-        write_env_file();
-        if (!is_running_unlocked()) {
-          BOOST_LOG(error) << "gamescope_runtime: owned gamescope-0 up but not healthy"sv;
+        if (!write_env_file() || !is_running_unlocked()) {
+          BOOST_LOG(error) << "gamescope_runtime: owned gamescope-0 up but ownership/env validation failed"sv;
           stop_unlocked();
           return false;
         }
@@ -243,6 +275,7 @@ namespace stream_runtime {
         }
         pid_ = 0;
         owned_ = false;
+        marker_.reset();
         socket_name_.clear();
         x11_display_.clear();
         state_ = {};
@@ -291,6 +324,7 @@ namespace stream_runtime {
       mutable std::mutex mu_;
       pid_t pid_ = 0;
       bool owned_ = false;
+      std::optional<gp::marker_t> marker_;
       std::string socket_name_;
       std::string x11_display_;
       platf::runtime_state_t state_ {
@@ -301,44 +335,92 @@ namespace stream_runtime {
         .path_id = "gamescope_stream",
       };
 
-      bool is_running_unlocked() const {
-        if (owned_ && pid_ > 0) {
-          if (kill(pid_, 0) != 0) {
-            return false;
-          }
-          return socket_exists(socket_name_.empty() ? "gamescope-0" : socket_name_);
+      fs::path marker_path() const {
+        return fs::path(xdg_runtime_dir()) / "polaris-gamescope.pid";
+      }
+
+      fs::path socket_path(std::string_view name) const {
+        return fs::path(xdg_runtime_dir()) / name;
+      }
+
+      std::optional<gp::marker_t> validated_marker_for_socket(
+        std::string_view socket,
+        std::string_view expected_role = {}
+      ) const {
+        auto marker = gamescope_process::validated_marker(marker_path(), expected_role);
+        if (!marker || !gp::process_tree_owns_socket(*marker, socket_path(socket))) {
+          return std::nullopt;
         }
-        // Attach mode: socket presence is enough.
-        return socket_exists(socket_name_.empty() ? "gamescope-0" : socket_name_);
+        return marker;
+      }
+
+      std::string wait_for_owned_x11(const gp::marker_t &marker, int timeout_ms) const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        do {
+          if (const auto display = gp::discover_owned_x11_display(marker)) {
+            return *display;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } while (std::chrono::steady_clock::now() < deadline);
+        return {};
+      }
+
+      bool is_running_unlocked() const {
+        if (!marker_ || socket_name_.empty()) {
+          return false;
+        }
+        const auto current = validated_marker_for_socket(socket_name_, marker_->role);
+        return current && current->pid == marker_->pid && current->start_time == marker_->start_time;
+      }
+
+      void remove_owned_files_if_current() const {
+        if (!marker_) {
+          return;
+        }
+        const auto current = gp::read_marker(marker_path());
+        if (!current || current->pid != marker_->pid || current->start_time != marker_->start_time ||
+            current->role != marker_->role) {
+          return;
+        }
+        std::error_code ec;
+        fs::remove(marker_path(), ec);
+        fs::remove(fs::path(xdg_runtime_dir()) / "polaris-gamescope.env", ec);
       }
 
       void stop_unlocked() {
-        if (owned_ && pid_ > 0) {
-          // Signal process group (setsid child).
-          kill(-pid_, SIGTERM);
-          for (int i = 0; i < 30; ++i) {
-            int status = 0;
-            const auto r = waitpid(pid_, &status, WNOHANG);
-            if (r == pid_ || (r < 0 && errno == ECHILD)) {
-              break;
+        if (owned_ && marker_) {
+          const auto current = gp::validated_marker(marker_path(), "runtime");
+          if (current && current->pid == marker_->pid && current->start_time == marker_->start_time) {
+            // The marker validates this exact PID generation immediately before
+            // signalling its setsid-owned process group.
+            kill(-marker_->pid, SIGTERM);
+            for (int i = 0; i < 30; ++i) {
+              int status = 0;
+              const auto result = waitpid(marker_->pid, &status, WNOHANG);
+              if (result == marker_->pid || (result < 0 && errno == ECHILD)) {
+                break;
+              }
+              std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (gp::is_valid_headless_gamescope(*marker_)) {
+              kill(-marker_->pid, SIGKILL);
+              waitpid(marker_->pid, nullptr, 0);
+            }
+            BOOST_LOG(info) << "gamescope_runtime: stopped owned gamescope pid="sv << marker_->pid;
           }
-          if (kill(pid_, 0) == 0) {
-            kill(-pid_, SIGKILL);
-            waitpid(pid_, nullptr, 0);
+          else {
+            BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale/reused owned pid="sv
+                               << marker_->pid;
           }
-          BOOST_LOG(info) << "gamescope_runtime: stopped owned gamescope pid="sv << pid_;
-          // Drop session env when we own the compositor so next attach is honest.
-          std::error_code ec;
-          fs::remove(xdg_runtime_dir() + "/polaris-gamescope.env", ec);
+          remove_owned_files_if_current();
         }
-        else if (!owned_ && !socket_name_.empty()) {
-          BOOST_LOG(info) << "gamescope_runtime: detach from "sv << socket_name_
-                          << " (left running for idle unit)"sv;
+        else if (!owned_ && marker_) {
+          BOOST_LOG(info) << "gamescope_runtime: detached from validated "sv << socket_name_
+                          << " owner pid="sv << marker_->pid << " (left running)"sv;
         }
         pid_ = 0;
         owned_ = false;
+        marker_.reset();
         socket_name_.clear();
         x11_display_.clear();
         state_.backend_name = "gamescope";
@@ -354,24 +436,35 @@ namespace stream_runtime {
       }
 
       bool try_attach_gamescope0(const start_params_t &params) {
-        if (!socket_exists("gamescope-0")) {
-          return false;
-        }
         if (!wait_for_stable_socket("gamescope-0", 2000)) {
           return false;
         }
-        owned_ = false;
-        socket_name_ = "gamescope-0";
-        x11_display_ = detect_x11_display();
-        pid_ = 0;
-        refresh_runtime_state(params);
-        write_env_file();
-        if (!is_running_unlocked()) {
-          BOOST_LOG(warning) << "gamescope_runtime: gamescope-0 socket present but not healthy yet"sv;
-          // Still accept attach — idle unit may be mid-start; portal can retry.
+        const auto marker = validated_marker_for_socket("gamescope-0");
+        if (!marker) {
+          BOOST_LOG(warning) << "gamescope_runtime: refusing unmarked/unowned gamescope-0 socket"sv;
+          return false;
         }
-        BOOST_LOG(info) << "gamescope_runtime: attached to existing gamescope-0 (idle/unit preferred)"
-                        << " healthy="sv << (is_running_unlocked() ? 1 : 0);
+        const auto display = wait_for_owned_x11(*marker, 5000);
+        if (display.empty()) {
+          BOOST_LOG(warning) << "gamescope_runtime: marked gamescope-0 has no owned Xwayland socket"sv;
+          return false;
+        }
+        marker_ = marker;
+        owned_ = false;
+        pid_ = marker->pid;
+        socket_name_ = "gamescope-0";
+        x11_display_ = display;
+        refresh_runtime_state(params);
+        if (!write_env_file()) {
+          marker_.reset();
+          pid_ = 0;
+          socket_name_.clear();
+          x11_display_.clear();
+          return false;
+        }
+        BOOST_LOG(info) << "gamescope_runtime: attached to validated gamescope-0 owner pid="sv
+                        << marker->pid << " generation="sv << marker->start_time
+                        << " display="sv << display;
         return true;
       }
 
@@ -380,21 +473,12 @@ namespace stream_runtime {
       // SDR stays SDR while portal claims HDR (BGRx + PQ washout). Restart when needed.
       static bool idle_hdr_flags_match_force() {
         const bool want_hdr = read_hdr_force();
-        // Inspect running headless gamescope cmdline for --hdr-enabled.
-        FILE *pipe = popen(
-          "pgrep -a -u \"$(id -u)\" -f 'gamescope .*--backend headless' 2>/dev/null | head -1",
-          "r");
-        if (!pipe) {
-          return !want_hdr;
+        const auto marker_path = fs::path(xdg_runtime_dir()) / "polaris-gamescope.pid";
+        const auto marker = gp::validated_marker(marker_path, "idle");
+        if (!marker || !gp::process_tree_owns_socket(*marker, fs::path(xdg_runtime_dir()) / "gamescope-0")) {
+          return false;
         }
-        char buf[1024] {};
-        const bool got = fgets(buf, sizeof(buf), pipe) != nullptr;
-        pclose(pipe);
-        if (!got) {
-          return !want_hdr;
-        }
-        const bool running_hdr = std::string_view(buf).find("--hdr-enabled") != std::string_view::npos;
-        return running_hdr == want_hdr;
+        return gp::process_has_argument(*marker, "--hdr-enabled") == want_hdr;
       }
 
       static bool restart_or_start_idle_unit() {
@@ -429,44 +513,36 @@ namespace stream_runtime {
         return false;
       }
 
-      static void cleanup_stale_sockets_aggressive() {
-        // Only used when we are about to spawn and gamescope-0 is free but -1 is leftover.
-        std::system("pkill -u \"$(id -u)\" -f 'gamescope .*--backend headless' 2>/dev/null || true");
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
-        const auto rt = xdg_runtime_dir();
-        std::error_code ec;
-        for (const char *name : {
-               "gamescope-0", "gamescope-0.lock", "gamescope-0-ei", "gamescope-0-ei.lock",
-               "gamescope-1", "gamescope-1.lock", "gamescope-1-ei", "gamescope-1-ei.lock"
-             }) {
-          fs::remove(rt + "/" + name, ec);
+      bool write_env_file() const {
+        if (!marker_ || x11_display_.empty() || socket_name_.empty()) {
+          return false;
         }
-      }
+        const auto current = validated_marker_for_socket(socket_name_, marker_->role);
+        if (!current || current->pid != marker_->pid || current->start_time != marker_->start_time) {
+          return false;
+        }
 
-      static std::string detect_x11_display() {
-        // With --xwayland-count 2 + STEAM_MULTIPLE_XWAYLANDS, Steam must use the
-        // first XWayland so games land on the second. Prefer lowest present socket
-        // (:0 base → game on :1). Preferring :1 first made Steam launch games on
-        // missing :2 → black composite / wayland fallback.
-        for (const char *disp : {":0", ":1", ":2"}) {
-          if (fs::exists(std::string("/tmp/.X11-unix/X") + (disp + 1))) {
-            return disp;
+        const auto path = fs::path(xdg_runtime_dir()) / "polaris-gamescope.env";
+        const auto temporary = path.string() + ".tmp." + std::to_string(getpid());
+        {
+          std::ofstream out(temporary, std::ios::trunc);
+          if (!out) {
+            return false;
           }
-        }
-        return ":0";
-      }
-
-      void write_env_file() const {
-        const auto path = xdg_runtime_dir() + "/polaris-gamescope.env";
-        std::ofstream out(path, std::ios::trunc);
-        if (!out) {
-          return;
-        }
-        out << "WAYLAND_DISPLAY=" << (socket_name_.empty() ? "gamescope-0" : socket_name_) << "\n";
-        out << "GAMESCOPE_WAYLAND_DISPLAY=" << (socket_name_.empty() ? "gamescope-0" : socket_name_) << "\n";
-        if (!x11_display_.empty()) {
+          out << "WAYLAND_DISPLAY=" << socket_name_ << "\n";
+          out << "GAMESCOPE_WAYLAND_DISPLAY=" << socket_name_ << "\n";
           out << "DISPLAY=" << x11_display_ << "\n";
+          out << "POLARIS_GAMESCOPE_PID=" << marker_->pid << "\n";
+          out << "POLARIS_GAMESCOPE_START_TIME=" << marker_->start_time << "\n";
+          out << "POLARIS_GAMESCOPE_ROLE=" << marker_->role << "\n";
         }
+        std::error_code ec;
+        fs::rename(temporary, path, ec);
+        if (ec) {
+          fs::remove(temporary, ec);
+          return false;
+        }
+        return true;
       }
     };
 

@@ -80,6 +80,12 @@ if(NOT WIN32 AND NOT APPLE AND NOT POLARIS_HAVE_LIBVA_MAP_BUFFER2)
     )
 endif()
 
+if(NOT WIN32)
+    list(APPEND TEST_SUPPORT_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/gamescope_process.cpp
+    )
+endif()
+
 set(TEST_AUDIT_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
@@ -108,6 +114,12 @@ set(TEST_FAST_SOURCES
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
+    )
+endif()
+
+if (NOT WIN32)
+    list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_process.cpp
     )
 endif()
 
@@ -271,6 +283,13 @@ if (UNIX AND NOT APPLE)
                 LANG=zz_ZZ.UTF-8
                 LC_ALL=zz_ZZ.UTF-8
                 $<TARGET_FILE:polaris> --version
+    )
+endif()
+
+if (UNIX)
+    add_test(
+        NAME polaris_gamescope_runtime_shell
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_runtime_shell.sh
     )
 endif()
 

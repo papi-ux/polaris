@@ -77,72 +77,17 @@ let
 
   idleApp = pkgs.writeShellApplication {
     name = "polaris-gamescope-idle";
-    runtimeInputs = [
-      gamescope
-      pkgs.coreutils
-      pkgs.procps
+    runtimeInputs = with pkgs; [
+      bash coreutils gnugrep gnused util-linux gamescope
     ];
     text = ''
-      set -euo pipefail
-      width="''${POLARIS_HDR_WIDTH:-${toString cfg.width}}"
-      height="''${POLARIS_HDR_HEIGHT:-${toString cfg.height}}"
-      refresh="''${POLARIS_HDR_REFRESH:-${toString cfg.refresh}}"
-      rt="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-
-      # Only kill idle-style headless (sleep infinity), never nested Steam sessions.
-      pkill -u "$(id -u)" -f 'gamescope .*--backend headless.*sleep infinity' 2>/dev/null || true
-      n=10
-      while [ "$n" -gt 0 ]; do
-        if ! pgrep -u "$(id -u)" -f 'gamescope .*--backend headless.*sleep infinity' >/dev/null 2>&1; then
-          break
-        fi
-        sleep 0.2
-        n=$((n - 1))
-      done
-      if ! pgrep -u "$(id -u)" -f 'gamescope .*--backend headless' >/dev/null 2>&1; then
-        rm -f \
-          "$rt/gamescope-0" "$rt/gamescope-0.lock" \
-          "$rt/gamescope-0-ei" "$rt/gamescope-0-ei.lock" \
-          "$rt/gamescope-1" "$rt/gamescope-1.lock" \
-          2>/dev/null || true
-      fi
-
-      # Steam base XWayland :0; STEAM_MULTIPLE_XWAYLANDS → games on :1.
-      printf 'DISPLAY=:0\nWAYLAND_DISPLAY=gamescope-0\nGAMESCOPE_WAYLAND_DISPLAY=gamescope-0\n' \
-        >"$rt/polaris-gamescope.env"
-
-      prefer_vk=()
-      if [ -n "''${POLARIS_GAMESCOPE_PREFER_VK:-}" ]; then
-        prefer_vk=(--prefer-vk-device "$POLARIS_GAMESCOPE_PREFER_VK")
-        echo "polaris-gamescope-idle: --prefer-vk-device=$POLARIS_GAMESCOPE_PREFER_VK" >&2
-      fi
-
-      force=0
-      if [ -f "$rt/polaris-gamescope-force" ]; then
-        force="$(tr -d '[:space:]' <"$rt/polaris-gamescope-force" || true)"
-      fi
-      hdr_flags=()
-      if [ "$force" = "1" ] || [ "$force" = "true" ]; then
-        echo "polaris-gamescope-idle: HDR mode" >&2
-        hdr_flags=(
-          --hdr-enabled
-          --sdr-gamut-wideness ${toString cfg.sdrGamutWideness}
-          --hdr-sdr-content-nits ${toString cfg.sdrContentNits}
-        )
-      else
-        echo "polaris-gamescope-idle: SDR mode" >&2
-      fi
-
-      exec gamescope \
-        --backend headless \
-        --expose-wayland \
-        --steam \
-        --xwayland-count 2 \
-        "''${prefer_vk[@]}" \
-        "''${hdr_flags[@]}" \
-        -W "$width" -H "$height" -r "$refresh" \
-        -w "$width" -h "$height" \
-        -- sleep infinity
+      export POLARIS_HDR_WIDTH="''${POLARIS_HDR_WIDTH:-${toString cfg.width}}"
+      export POLARIS_HDR_HEIGHT="''${POLARIS_HDR_HEIGHT:-${toString cfg.height}}"
+      export POLARIS_HDR_REFRESH="''${POLARIS_HDR_REFRESH:-${toString cfg.refresh}}"
+      export POLARIS_SDR_GAMUT_WIDENESS="''${POLARIS_SDR_GAMUT_WIDENESS:-${toString cfg.sdrGamutWideness}}"
+      export POLARIS_SDR_CONTENT_NITS="''${POLARIS_SDR_CONTENT_NITS:-${toString cfg.sdrContentNits}}"
+      ${builtins.readFile ./polaris-gamescope-runtime-lib.sh}
+      ${builtins.readFile ../../scripts/install/lib/polaris-gamescope-idle.sh}
     '';
   };
 
@@ -165,6 +110,7 @@ let
       export POLARIS_HDR_WIDTH="''${POLARIS_HDR_WIDTH:-${toString cfg.width}}"
       export POLARIS_HDR_HEIGHT="''${POLARIS_HDR_HEIGHT:-${toString cfg.height}}"
       export POLARIS_HDR_REFRESH="''${POLARIS_HDR_REFRESH:-${toString cfg.refresh}}"
+      ${builtins.readFile ./polaris-gamescope-runtime-lib.sh}
       ${builtins.readFile ./polaris-gamescope-session.sh}
     '';
   };
@@ -199,12 +145,16 @@ let
   waitPortal = pkgs.writeShellScript "polaris-wait-private-screencast" ''
     set -euo pipefail
     rt="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    ${builtins.readFile ./polaris-gamescope-runtime-lib.sh}
 
     # Nested stop can leave runtime-masked idle / no gamescope-0.
     if [ -f "$rt/polaris-gamescope-wsi-nested" ] || [ ! -S "$rt/gamescope-0" ]; then
       echo "polaris: recover idle gamescope-0 (nested leftover or missing socket)" >&2
+      if polaris_validate_marker "$rt/polaris-gamescope.pid" nested; then
+        polaris_stop_marked_gamescope "$rt/polaris-gamescope.pid" nested "$rt" || true
+      fi
       rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
-        "$rt/polaris-gamescope-audio-sink" "$rt/polaris-gamescope.pid" || true
+        "$rt/polaris-gamescope-audio-sink" || true
       ${pkgs.systemd}/bin/systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
       if [ ! -S "$rt/gamescope-0" ]; then
         ${pkgs.systemd}/bin/systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \

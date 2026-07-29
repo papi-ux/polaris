@@ -387,6 +387,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_display_policy.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_display_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/gamescope_process.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/gamescope_process.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_labwc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_gamescope.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.h"

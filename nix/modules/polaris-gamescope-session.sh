@@ -1,7 +1,16 @@
 export PATH="${POLARIS_SESSION_PATH:-$PATH}"
 
 set -euo pipefail
+umask 077
+
+if ! declare -F polaris_validate_marker >/dev/null 2>&1; then
+  runtime_lib="${POLARIS_GAMESCOPE_RUNTIME_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/polaris-gamescope-runtime-lib.sh}"
+  # shellcheck source=/dev/null
+  . "$runtime_lib"
+fi
+
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+marker="$rt/polaris-gamescope.pid"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus"
 # Module option services.polarisGamescopeSession.hdr — allow force-HDR path at all.
 allow_client_hdr=1
@@ -187,9 +196,26 @@ case "${1:-}" in
       # while nested needs exclusive gamescope-0 (portal is hard-wired).
       systemctl --user mask --runtime polaris-gamescope-idle.service 2>/dev/null || true
       systemctl --user stop polaris-gamescope-idle.service 2>/dev/null || true
-      # Drop leftover headless gamescope holding gamescope-0.
-      if [ -S "$rt/gamescope-0" ]; then
-        pkill -f 'gamescope.*--backend headless' 2>/dev/null || true
+      # Stop only the exact marked owner of gamescope-0. Unknown sockets fail
+      # closed instead of risking another user's compositor.
+      if polaris_validate_marker "$marker"; then
+        case "$POLARIS_MARKER_ROLE" in
+          idle|nested)
+            polaris_stop_marked_gamescope "$marker" "$POLARIS_MARKER_ROLE" "$rt" || {
+              echo "polaris-gamescope-session: marked $POLARIS_MARKER_ROLE owner did not stop" >&2
+              exit 1
+            }
+            ;;
+          *)
+            echo "polaris-gamescope-session: refusing to replace marked $POLARIS_MARKER_ROLE owner" >&2
+            exit 1
+            ;;
+        esac
+      elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
+        echo "polaris-gamescope-session: refusing unowned gamescope socket cleanup" >&2
+        exit 1
+      else
+        rm -f "$marker" "$rt/polaris-gamescope.env"
       fi
       for _ in $(seq 1 100); do
         [ ! -S "$rt/gamescope-0" ] && [ ! -S "$rt/gamescope-1" ] && break
@@ -241,15 +267,14 @@ case "${1:-}" in
         child_env+=(STEAM_GAMESCOPE_HDR_SUPPORTED=1 DXVK_HDR=1)
       fi
 
-      steam_log=/tmp/polaris-gamescope-steam-wsi.log
-      : >"$steam_log"
+      steam_log="$(mktemp "$rt/polaris-gamescope-steam-wsi.XXXXXX.log")"
       # gamescope runs Steam as primary child; portal still captures gamescope-0.
       # Omit --expose-wayland so children stay on XWayland + GAMESCOPE_WAYLAND_DISPLAY
       # (WSI X11 path). Portal uses compositor socket gamescope-0, not child WAYLAND.
       # env -u: drop host KWin Wayland/DISPLAY inherited from polaris user session.
       echo "polaris-gamescope-session: nested geometry ${gs_width}x${gs_height}@${gs_refresh}" >&2
-      setsid -f env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
-        "${child_env[@]}" ${POLARIS_GAMESCOPE_BIN:-gamescope} \
+      setsid env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
+        "${child_env[@]}" "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
         --backend headless \
         "${steam_flags[@]}" \
         --xwayland-count 2 \
@@ -258,21 +283,40 @@ case "${1:-}" in
         -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
         -w "$gs_width" -h "$gs_height" \
         -- "${steam_launch[@]}" \
-        >"$steam_log" 2>&1
-      # Parent of setsid is hard to pin; mark nested mode for stop.
-      printf '1\n' >"$rt/polaris-gamescope-wsi-nested"
-      # Portal / polaris still talk to the nested compositor socket.
-      printf 'DISPLAY=:0\nWAYLAND_DISPLAY=gamescope-0\nGAMESCOPE_WAYLAND_DISPLAY=gamescope-0\n' \
-        >"$rt/polaris-gamescope.env"
+        >"$steam_log" 2>&1 &
+      nested_pid=$!
 
-      for _ in $(seq 1 300); do
-        [ -S "$rt/gamescope-0" ] && break
-        sleep 0.1
+      nested_marked=0
+      for _ in $(seq 1 100); do
+        if polaris_write_marker_for_pid "$marker" "$nested_pid" nested; then
+          nested_marked=1
+          break
+        fi
+        kill -0 "$nested_pid" 2>/dev/null || break
+        sleep 0.02
       done
-      if [ ! -S "$rt/gamescope-0" ]; then
-        echo "polaris-gamescope-session: nested gamescope-0 not ready — see $steam_log" >&2
+      if [ "$nested_marked" != 1 ]; then
+        echo "polaris-gamescope-session: failed to record exact nested gamescope generation" >&2
+        kill "$nested_pid" 2>/dev/null || true
+        wait "$nested_pid" 2>/dev/null || true
         exit 1
       fi
+
+      ready=0
+      for _ in $(seq 1 300); do
+        if polaris_write_runtime_env "$marker" gamescope-0 nested "$rt"; then
+          ready=1
+          break
+        fi
+        kill -0 "$nested_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      if [ "$ready" != 1 ]; then
+        echo "polaris-gamescope-session: owned nested gamescope-0/Xwayland not ready — see $steam_log" >&2
+        polaris_stop_marked_gamescope "$marker" nested "$rt" || true
+        exit 1
+      fi
+      printf '1\n' >"$rt/polaris-gamescope-wsi-nested"
       # Portal + polaris-gamescope.env assume gamescope-0. Bail if we lost the race.
       if rg -q "wayland display 'gamescope-1'" "$steam_log" 2>/dev/null; then
         echo "polaris-gamescope-session: nested bound gamescope-1 (portal captures gamescope-0) — see $steam_log" >&2
@@ -288,8 +332,16 @@ case "${1:-}" in
     else
       # --- Attach path (known-good stream, no WSI) ---
       if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
+        if polaris_validate_marker "$marker" nested; then
+          polaris_stop_marked_gamescope "$marker" nested "$rt" || {
+            echo "polaris-gamescope-session: nested owner did not stop" >&2
+            exit 1
+          }
+        elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
+          echo "polaris-gamescope-session: refusing to clean unowned nested sockets" >&2
+          exit 1
+        fi
         rm -f "$rt/polaris-gamescope-wsi-nested"
-        pkill -f 'gamescope.*--backend headless' 2>/dev/null || true
         systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
         systemctl --user start polaris-gamescope-idle.service || true
       elif ! systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null; then
@@ -299,15 +351,18 @@ case "${1:-}" in
         systemctl --user restart polaris-gamescope-idle.service || true
       fi
 
+      attach_ready=0
       for _ in $(seq 1 300); do
-        [ -f "$rt/polaris-gamescope.env" ] && [ -S "$rt/gamescope-0" ] && break
+        if polaris_write_runtime_env "$marker" gamescope-0 idle "$rt"; then
+          attach_ready=1
+          break
+        fi
         sleep 0.1
       done
-      if [ ! -S "$rt/gamescope-0" ]; then
-        echo "polaris-gamescope-session: gamescope-0 not ready (is polaris-gamescope-idle running?)" >&2
+      if [ "$attach_ready" != 1 ]; then
+        echo "polaris-gamescope-session: validated idle gamescope-0/Xwayland not ready" >&2
         exit 1
       fi
-      sleep 1
 
       # shellcheck disable=SC1091
       . "$rt/polaris-gamescope.env"
@@ -318,7 +373,7 @@ case "${1:-}" in
       else
         echo "polaris-gamescope-session: attach Steam HDR env off" >&2
       fi
-      steam_log=/tmp/polaris-gamescope-steam.log
+      steam_log="$(mktemp "$rt/polaris-gamescope-steam-attach.XXXXXX.log")"
       # Force X11 on gamescope XWayland for attach. Polaris inherits the
       # host KDE session (WAYLAND_DISPLAY=wayland-0, GDK_BACKEND=wayland);
       # native titles (e.g. bg3) then paint on KWin while the portal
@@ -405,9 +460,16 @@ case "${1:-}" in
     # Legacy flags from builds that killed EasyEffects / hijacked default.
     rm -f "$rt/polaris-gamescope-prev-default-sink" "$rt/polaris-gamescope-easyeffects-units"
     if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
-      echo "polaris-gamescope-session: tearing down nested WSI gamescope" >&2
-      pkill -f 'gamescope.*--backend headless' 2>/dev/null || true
-      rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope.pid"
+      echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
+      if polaris_validate_marker "$marker" nested; then
+        polaris_stop_marked_gamescope "$marker" nested "$rt" ||
+          echo "polaris-gamescope-session: nested owner did not reach terminal state" >&2
+      elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
+        echo "polaris-gamescope-session: leaving unowned gamescope sockets untouched" >&2
+      else
+        rm -f "$marker" "$rt/polaris-gamescope.env"
+      fi
+      rm -f "$rt/polaris-gamescope-wsi-nested"
       printf '0\n' >"$rt/polaris-gamescope-force"
       systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
       systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true

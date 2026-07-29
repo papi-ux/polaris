@@ -76,6 +76,7 @@ EOF
 log "example conf: $SEED"
 
 # --- helper scripts ---
+install_user_or_sudo "$REPO_ROOT/nix/modules/polaris-gamescope-runtime-lib.sh" "$BIN_DIR/polaris-gamescope-runtime-lib.sh"
 install_user_or_sudo "$INSTALL_DIR/lib/polaris-gamescope-idle.sh" "$BIN_DIR/polaris-gamescope-idle"
 install_user_or_sudo "$INSTALL_DIR/lib/polaris-wait-gamescope.sh" "$BIN_DIR/polaris-wait-gamescope"
 
