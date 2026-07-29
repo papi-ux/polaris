@@ -232,7 +232,7 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   EXPECT_FALSE(gp::discover_owned_x11_display(marker, paths_for(tree)).has_value());
   // Ambiguous pathnames are not safe to reclaim.
   EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
-  EXPECT_FALSE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
   EXPECT_TRUE(fs::exists(gamescope_socket));
 }
 
@@ -242,9 +242,9 @@ TEST(GamescopeProcessOwnershipTests, ReclaimsFilesystemResidueWithoutListener) {
   std::ofstream(gamescope_socket).put('\n');
   tree.flush_unix_sockets();  // header only — no listener row
 
-  EXPECT_FALSE(gp::socket_has_live_holder(gamecope_socket, paths_for(tree)));
-  EXPECT_TRUE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
-  EXPECT_FALSE(fs::exists(gamecope_socket));
+  EXPECT_FALSE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(fs::exists(gamescope_socket));
 }
 
 TEST(GamescopeProcessOwnershipTests, ReclaimsDeadListenerWithoutHolder) {
@@ -254,9 +254,9 @@ TEST(GamescopeProcessOwnershipTests, ReclaimsDeadListenerWithoutHolder) {
   tree.flush_unix_sockets();
   // No process holds inode 700.
 
-  EXPECT_FALSE(gp::socket_has_live_holder(gamecope_socket, paths_for(tree)));
-  EXPECT_TRUE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
-  EXPECT_FALSE(fs::exists(gamecope_socket));
+  EXPECT_FALSE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(fs::exists(gamescope_socket));
 }
 
 TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {
@@ -266,8 +266,8 @@ TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {
   tree.flush_unix_sockets();
   tree.add_process(440, 1, 9400, {"/usr/bin/gamescope", "--backend=headless"}, {701});
 
-  EXPECT_TRUE(gp::socket_has_live_holder(gamecope_socket, paths_for(tree)));
-  EXPECT_FALSE(gp::remove_orphan_socket(gamecope_socket, paths_for(tree)));
-  EXPECT_TRUE(fs::exists(gamecope_socket));
+  EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
+  EXPECT_TRUE(fs::exists(gamescope_socket));
 }
 #endif
