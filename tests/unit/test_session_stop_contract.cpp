@@ -15,9 +15,11 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <poll.h>
 #include <sstream>
 #include <thread>
 #include <signal.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -271,6 +273,14 @@ TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState
   EXPECT_NE(source.find("private_group_state"), std::string::npos);
   EXPECT_NE(source.find("private group did not drain"), std::string::npos);
   EXPECT_NE(source.find("SIGKILL"), std::string::npos);
+  EXPECT_NE(source.find("SYS_pidfd_open"), std::string::npos);
+  EXPECT_NE(source.find("Keep the leader unreaped until every negative-PGID operation finishes"), std::string::npos);
+  const auto drain_start = source.find("bool drain_private_process_group(");
+  const auto rollback_start = source.find("bool rollback_spawned_private_group(", drain_start);
+  ASSERT_NE(drain_start, std::string::npos);
+  ASSERT_NE(rollback_start, std::string::npos);
+  const auto drain = source.substr(drain_start, rollback_start - drain_start);
+  EXPECT_EQ(drain.find("waitpid(pgid", drain.find("for (int i = 0")), drain.rfind("waitpid(pgid"));
 }
 
 TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
@@ -329,8 +339,12 @@ TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
   pid_t sibling = -1;
   ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
   close(ready[0]);
-  ASSERT_EQ(waitpid(leader, nullptr, 0), leader);
-  const bool drained = stream_runtime::rollback_gamescope_spawn_for_tests(leader, true);
+  const int leader_pidfd = static_cast<int>(syscall(SYS_pidfd_open, leader, 0));
+  ASSERT_GE(leader_pidfd, 0);
+  pollfd leader_exit {.fd = leader_pidfd, .events = POLLIN, .revents = 0};
+  ASSERT_EQ(poll(&leader_exit, 1, 5000), 1);
+  const bool drained = stream_runtime::rollback_gamescope_spawn_for_tests(leader, leader_pidfd);
+  close(leader_pidfd);
   if (!drained) (void) kill(-leader, SIGKILL);
   EXPECT_TRUE(drained);
   errno = 0;

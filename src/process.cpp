@@ -6740,15 +6740,16 @@ namespace proc {
   }
 
   void proc_t::terminate_isolated_session_generation() {
-    _exact_generation_cleanup_complete = true;
+    const bool prior_cleanup_complete = _exact_generation_cleanup_complete;
     if (!_session_used_cage_compositor) {
       return;
     }
 
-    _exact_generation_cleanup_complete = terminate_isolated_session_processes(
+    const bool isolated_cleanup_complete = terminate_isolated_session_processes(
       _session_instance_id,
       "after private Steam pre-cage termination"sv
     );
+    _exact_generation_cleanup_complete = prior_cleanup_complete && isolated_cleanup_complete;
     if (isolated_session_cleanup_resets_router(
           _session_used_cage_compositor,
           !_session_instance_id.empty(),

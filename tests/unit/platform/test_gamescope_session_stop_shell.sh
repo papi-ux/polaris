@@ -104,14 +104,17 @@ fi
 ! grep -Eq 'unmask|start polaris-gamescope-idle|restart polaris-portal|busctl' "$actions" ||
   fail "stop failure advanced idle/portal handoff"
 
-# Unknown/live socket ownership must fail with the same durable state.
+# An unclassified nested launch is never converted into orphan-socket cleanup:
+# without an exact marker, recovery authority is incomplete and the claim stays.
 reset_state
-if NESTED_VALID=0 RECLAIM_OK=0 run_stop >/dev/null 2>&1; then
-  fail "unknown socket reclaim failure returned success"
+if NESTED_VALID=0 RECLAIM_OK=1 run_stop >/dev/null 2>&1; then
+  fail "unclassified nested launch returned success"
 fi
-[ -e "$work/run/polaris-gamescope-wsi-nested" ] || fail "reclaim failure cleared nested claim"
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = 1 ] ||
+  fail "unclassified launch advanced its recovery claim"
+! grep -qx 'reclaim' "$actions" || fail "unclassified launch attempted orphan reclaim"
 ! grep -Eq 'unmask|start polaris-gamescope-idle|restart polaris-portal|busctl' "$actions" ||
-  fail "reclaim failure advanced idle/portal handoff"
+  fail "unclassified launch advanced idle/portal handoff"
 
 # A failed idle handoff retains restore-idle state for a safe retry.
 reset_state
@@ -175,5 +178,10 @@ POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 \
   PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "persisted-session recovery failed"
 grep -qx 'kill -TERM 101' "$actions" || fail "recovery did not use persisted exact-session credential"
 [ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "successful recovery retained session credential"
+
+grep -Fq 'if [ -s "$session_id_file" ]; then' "$script" ||
+  fail "start does not recover every persisted session credential before replacement"
+grep -Fq 'POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1' "$script" ||
+  fail "start does not route persisted attach/nested recovery through credentialed stop"
 
 echo "PASS: gamescope session stop state machine"

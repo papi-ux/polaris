@@ -2384,6 +2384,8 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   ASSERT_NE(finish_generation, std::string::npos);
   EXPECT_LT(terminate_attached, terminate_private_steam);
   EXPECT_LT(terminate_private_steam, terminate_generation);
+  EXPECT_NE(source.find("const bool prior_cleanup_complete = _exact_generation_cleanup_complete;"), std::string::npos);
+  EXPECT_NE(source.find("prior_cleanup_complete && isolated_cleanup_complete"), std::string::npos);
   EXPECT_LT(terminate_generation, terminate_main);
   EXPECT_LT(terminate_generation, legacy_group_gate);
   EXPECT_LT(legacy_group_gate, legacy_detach_gate);
@@ -2410,7 +2412,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
     generation_finish_end - generation_finish_start
   );
   const auto cleanup_result = generation_cleanup.find(
-    "_exact_generation_cleanup_complete = terminate_isolated_session_processes("
+    "const bool isolated_cleanup_complete = terminate_isolated_session_processes("
   );
   const auto cleanup_success_gate = generation_cleanup.find("isolated_session_cleanup_resets_router(");
   const auto reset_cage = generation_cleanup.find("cage_display_router::reset_after_external_stop()");

@@ -523,13 +523,31 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
     const auto processes = read_processes(paths.proc_root);
+    std::optional<pid_t> holder_pid;
     for (const auto &[pid, process] : processes) {
       (void) process;
       if (is_descendant_of(pid, marker.pid, processes) && process_holds_inode(paths, pid, *inode)) {
-        return true;
+        holder_pid = pid;
+        break;
       }
     }
-    return false;
+    if (!holder_pid) {
+      return false;
+    }
+    if (paths.before_socket_ownership_return_for_tests) {
+      paths.before_socket_ownership_return_for_tests();
+    }
+    if (!validate_process(marker, paths)) {
+      return false;
+    }
+    const auto final_inodes = read_unix_socket_inodes(paths.proc_net_unix);
+    const auto final_inode = final_inodes ? inode_for_path(*final_inodes, socket_path) : std::nullopt;
+    if (!final_inode || *final_inode != *inode) {
+      return false;
+    }
+    const auto final_processes = read_processes(paths.proc_root);
+    return is_descendant_of(*holder_pid, marker.pid, final_processes) &&
+           process_holds_inode(paths, *holder_pid, *inode);
   }
 
   bool socket_has_live_holder(

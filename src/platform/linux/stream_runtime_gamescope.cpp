@@ -18,17 +18,21 @@
   #include <cstdio>
   #include <cstdlib>
   #include <cstring>
+  #include <dirent.h>
   #include <filesystem>
   #include <fstream>
   #include <functional>
   #include <fcntl.h>
   #include <mutex>
   #include <optional>
+  #include <poll.h>
   #include <signal.h>
+  #include <sstream>
   #include <string>
   #include <string_view>
   #include <sys/file.h>
   #include <sys/stat.h>
+  #include <sys/syscall.h>
   #include <sys/types.h>
   #include <sys/wait.h>
   #include <thread>
@@ -90,14 +94,64 @@ namespace stream_runtime {
     };
 
     private_group_state_e private_group_state(pid_t pgid) {
-      errno = 0;
-      if (kill(-pgid, 0) == 0 || errno == EPERM) {
-        return private_group_state_e::alive;
+      DIR *proc = opendir("/proc");
+      if (!proc) {
+        return private_group_state_e::unknown;
       }
-      if (errno == ESRCH) {
-        return private_group_state_e::drained;
+      bool alive = false;
+      bool complete = true;
+      while (true) {
+        errno = 0;
+        auto *entry = readdir(proc);
+        if (!entry) {
+          if (errno != 0) {
+            complete = false;
+          }
+          break;
+        }
+        char *end = nullptr;
+        const long parsed = std::strtol(entry->d_name, &end, 10);
+        if (parsed <= 1 || !end || *end != '\0') {
+          continue;
+        }
+        const pid_t pid = static_cast<pid_t>(parsed);
+        std::ifstream stat_file("/proc/" + std::to_string(pid) + "/stat");
+        std::string stat_line;
+        if (!std::getline(stat_file, stat_line)) {
+          if (kill(pid, 0) == 0 || errno == EPERM) {
+            complete = false;
+          }
+          continue;
+        }
+        const auto close = stat_line.rfind(')');
+        if (close == std::string::npos || close + 2 >= stat_line.size()) {
+          complete = false;
+          continue;
+        }
+        std::istringstream fields(stat_line.substr(close + 2));
+        char state = '\0';
+        pid_t ppid = 0;
+        pid_t process_group = 0;
+        pid_t session = 0;
+        if (!(fields >> state >> ppid >> process_group >> session)) {
+          complete = false;
+          continue;
+        }
+        if (process_group == pgid) {
+          if (session != pgid) {
+            complete = false;
+            continue;
+          }
+          if (state != 'Z' && state != 'X') {
+            alive = true;
+          }
+        }
       }
-      return private_group_state_e::unknown;
+      closedir(proc);
+      if (!complete) {
+        return private_group_state_e::unknown;
+      }
+      return alive ? private_group_state_e::alive : private_group_state_e::drained;
     }
 
     bool is_private_group_leader(pid_t pid) {
@@ -110,13 +164,20 @@ namespace stream_runtime {
       return sid >= 0 && pgid == pid && sid == pid;
     }
 
+    bool pidfd_has_exited(int pidfd) {
+      pollfd descriptor {.fd = pidfd, .events = POLLIN, .revents = 0};
+      const int result = poll(&descriptor, 1, 0);
+      return result == 1 && (descriptor.revents & (POLLIN | POLLHUP)) != 0;
+    }
+
     bool drain_private_process_group(
       pid_t pgid,
+      int leader_pidfd,
       const std::function<bool()> &authority_still_current,
       int term_steps = 30,
       int kill_steps = 20
     ) {
-      if (!authority_still_current()) {
+      if (leader_pidfd < 0 || fcntl(leader_pidfd, F_GETFD) < 0 || !authority_still_current()) {
         return false;
       }
       auto state = private_group_state(pgid);
@@ -131,7 +192,6 @@ namespace stream_runtime {
       }
       int status = 0;
       for (int i = 0; i < term_steps && state == private_group_state_e::alive; ++i) {
-        (void) waitpid(pgid, &status, WNOHANG);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         state = private_group_state(pgid);
       }
@@ -140,7 +200,6 @@ namespace stream_runtime {
           return false;
         }
         for (int i = 0; i < kill_steps && state == private_group_state_e::alive; ++i) {
-          (void) waitpid(pgid, &status, WNOHANG);
           std::this_thread::sleep_for(std::chrono::milliseconds(100));
           state = private_group_state(pgid);
         }
@@ -149,16 +208,13 @@ namespace stream_runtime {
       return state == private_group_state_e::drained;
     }
 
-    bool rollback_spawned_private_group(pid_t child, bool child_reaped) {
+    bool rollback_spawned_private_group(pid_t child, int leader_pidfd) {
       const auto group_state = private_group_state(child);
       if (group_state == private_group_state_e::unknown) {
         return false;
       }
       if (group_state == private_group_state_e::alive) {
-        return drain_private_process_group(child, []() { return true; });
-      }
-      if (child_reaped) {
-        return true;
+        return drain_private_process_group(child, leader_pidfd, []() { return true; });
       }
       int status = 0;
       const auto child_state = waitpid(child, &status, WNOHANG);
@@ -320,19 +376,25 @@ namespace stream_runtime {
           _exit(127);
         }
 
+        leader_pidfd_ = static_cast<int>(syscall(SYS_pidfd_open, child, 0));
+        if (leader_pidfd_ < 0) {
+          (void) kill(child, SIGKILL);
+          (void) waitpid(child, nullptr, 0);
+          BOOST_LOG(error) << "gamescope_runtime: pidfd_open failed for owned leader"sv;
+          return false;
+        }
         pid_ = child;
         owned_ = true;
         socket_name_ = "gamescope-0";
 
         // Capture the exact PID generation only after exec has exposed the
         // expected gamescope --backend headless argv.
-        bool child_reaped = false;
+        // Keep the leader unreaped until every negative-PGID operation finishes;
+        // its live/zombie PID allocation prevents the numeric PGID from being reused.
         for (int i = 0; i < 100 && !marker_; ++i) {
           marker_ = gp::marker_for_pid(child, "runtime");
           if (!marker_) {
-            int status = 0;
-            if (waitpid(child, &status, WNOHANG) == child) {
-              child_reaped = true;
+            if (pidfd_has_exited(leader_pidfd_)) {
               break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -354,11 +416,12 @@ namespace stream_runtime {
         if (!marker_written) {
           BOOST_LOG(error) << "gamescope_runtime: could not record exact owned gamescope generation"sv;
 
-          const bool rollback_drained = rollback_spawned_private_group(child, child_reaped);
+          const bool rollback_drained = rollback_spawned_private_group(child, leader_pidfd_);
           if (!rollback_drained) {
             BOOST_LOG(error) << "gamescope_runtime: launch rollback could not prove private group drained; preserving state"sv;
             return false;
           }
+          close_leader_pidfd();
           pid_ = 0;
           owned_ = false;
           marker_.reset();
@@ -374,14 +437,13 @@ namespace stream_runtime {
             stop_unlocked();
             return false;
           }
-          int status = 0;
-          if (waitpid(pid_, &status, WNOHANG) == pid_) {
+          if (pidfd_has_exited(leader_pidfd_)) {
             BOOST_LOG(error) << "gamescope_runtime: gamescope exited before socket appeared"sv;
             const auto marker_matches = [this]() {
               const auto marker_on_disk = gp::read_marker(marker_path());
               return marker_ && marker_on_disk && *marker_on_disk == *marker_;
             };
-            if (!drain_private_process_group(pid_, marker_matches)) {
+            if (!drain_private_process_group(pid_, leader_pidfd_, marker_matches)) {
               BOOST_LOG(error) << "gamescope_runtime: exited leader left an unverified private group; preserving ownership"sv;
               return false;
             }
@@ -389,6 +451,7 @@ namespace stream_runtime {
               BOOST_LOG(error) << "gamescope_runtime: failed to remove drained generation marker; preserving ownership"sv;
               return false;
             }
+            close_leader_pidfd();
             pid_ = 0;
             owned_ = false;
             marker_.reset();
@@ -435,6 +498,7 @@ namespace stream_runtime {
           int status = 0;
           waitpid(pid_, &status, WNOHANG);
         }
+        close_leader_pidfd();
         pid_ = 0;
         owned_ = false;
         marker_.reset();
@@ -485,6 +549,7 @@ namespace stream_runtime {
     private:
       mutable std::mutex mu_;
       pid_t pid_ = 0;
+      int leader_pidfd_ = -1;
       bool owned_ = false;
       std::optional<gp::marker_t> marker_;
       std::string socket_name_;
@@ -496,6 +561,13 @@ namespace stream_runtime {
         .backend_name = "gamescope",
         .path_id = "gamescope_stream",
       };
+
+      void close_leader_pidfd() {
+        if (leader_pidfd_ >= 0) {
+          close(leader_pidfd_);
+          leader_pidfd_ = -1;
+        }
+      }
 
       fs::path marker_path() const {
         return fs::path(xdg_runtime_dir()) / "polaris-gamescope.pid";
@@ -578,7 +650,7 @@ namespace stream_runtime {
             const auto marker_on_disk = gp::read_marker(marker_path());
             return marker_on_disk && *marker_on_disk == *marker_;
           };
-          if (!drain_private_process_group(marker_->pid, authority_still_current)) {
+          if (!drain_private_process_group(marker_->pid, leader_pidfd_, authority_still_current)) {
             BOOST_LOG(error) << "gamescope_runtime: private group did not drain; preserving ownership state"sv;
             return;
           }
@@ -592,6 +664,7 @@ namespace stream_runtime {
           BOOST_LOG(info) << "gamescope_runtime: detached from validated "sv << socket_name_
                           << " owner pid="sv << marker_->pid << " (left running)"sv;
         }
+        close_leader_pidfd();
         pid_ = 0;
         owned_ = false;
         marker_.reset();
@@ -610,6 +683,7 @@ namespace stream_runtime {
       }
 
       void clear_runtime_state_unlocked() {
+        close_leader_pidfd();
         marker_.reset();
         owned_ = false;
         pid_ = 0;
@@ -672,6 +746,7 @@ namespace stream_runtime {
           BOOST_LOG(warning) << "gamescope_runtime: marked gamescope-0 has no owned Xwayland socket"sv;
           return false;
         }
+        close_leader_pidfd();
         marker_ = marker;
         owned_ = false;
         pid_ = marker->pid;
@@ -785,11 +860,17 @@ namespace stream_runtime {
   }  // namespace
 
   bool drain_gamescope_private_group_for_tests(pid_t pgid) {
-    return drain_private_process_group(pgid, []() { return true; }, 3, 20);
+    const int pidfd = static_cast<int>(syscall(SYS_pidfd_open, pgid, 0));
+    if (pidfd < 0) {
+      return false;
+    }
+    const bool drained = drain_private_process_group(pgid, pidfd, []() { return true; }, 3, 20);
+    close(pidfd);
+    return drained;
   }
 
-  bool rollback_gamescope_spawn_for_tests(pid_t pgid, bool leader_reaped) {
-    return rollback_spawned_private_group(pgid, leader_reaped);
+  bool rollback_gamescope_spawn_for_tests(pid_t pgid, int leader_pidfd) {
+    return rollback_spawned_private_group(pgid, leader_pidfd);
   }
 
   stream_runtime_t *gamescope_runtime_instance() {

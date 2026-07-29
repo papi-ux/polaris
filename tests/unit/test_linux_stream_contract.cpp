@@ -67,7 +67,7 @@ TEST(LinuxStreamContractTests, GamescopeOwnershipTransitionsUseOneCrossProcessLo
   const auto marker_failure = runtime.find("if (!marker_written)");
   ASSERT_NE(marker_failure, std::string::npos);
   const auto failure_body = runtime.substr(marker_failure, 5000);
-  const auto rollback = failure_body.find("rollback_spawned_private_group(child, child_reaped)");
+  const auto rollback = failure_body.find("rollback_spawned_private_group(child, leader_pidfd_)");
   const auto clear_state = failure_body.find("pid_ = 0");
   ASSERT_NE(rollback, std::string::npos);
   ASSERT_NE(clear_state, std::string::npos);

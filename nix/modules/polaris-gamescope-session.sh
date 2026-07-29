@@ -149,15 +149,14 @@ case "${1:-}" in
       echo "polaris-gamescope-session: missing immutable session credential" >&2
       exit 1
     }
-    if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
-      [ -s "$session_id_file" ] || {
-        echo "polaris-gamescope-session: nested recovery lacks its immutable session credential" >&2
-        exit 1
-      }
-      echo "polaris-gamescope-session: complete prior nested recovery before new launch" >&2
+    if [ -s "$session_id_file" ]; then
+      echo "polaris-gamescope-session: complete prior session recovery before new launch" >&2
       POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1
       POLARIS_SESSION_INSTANCE_ID="$requested_session_id"
       export POLARIS_SESSION_INSTANCE_ID
+    elif [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
+      echo "polaris-gamescope-session: recovery claim lacks its immutable session credential" >&2
+      exit 1
     fi
     session_id_tmp="$session_id_file.tmp.$$"
     printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$session_id_tmp"
@@ -616,8 +615,8 @@ case "${1:-}" in
               echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
               exit 1
             fi
-          elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-            echo "polaris-gamescope-session: live or unknown gamescope sockets block teardown; retaining recovery claim" >&2
+          else
+            echo "polaris-gamescope-session: nested launch lacks a valid exact marker; retaining recovery claim" >&2
             exit 1
           fi
           if ! kill_session_steam || ! session_steam_absent; then

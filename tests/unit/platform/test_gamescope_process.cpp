@@ -207,6 +207,14 @@ TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRunti
     .pid = 410, .start_time = 9001, .role = "idle", .executable = "/usr/bin/gamescope"
   };
   EXPECT_TRUE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
+  const auto original_unix_rows = tree.unix_rows;
+  auto rebound_wayland_paths = paths_for(tree);
+  rebound_wayland_paths.before_socket_ownership_return_for_tests = [&]() {
+    tree.replace_unix_socket(501, gamescope_socket);
+  };
+  EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, rebound_wayland_paths));
+  tree.unix_rows = original_unix_rows;
+  tree.flush_unix_sockets();
   EXPECT_EQ(gp::discover_owned_x11_display(marker, paths_for(tree)), std::optional<std::string>(":4"));
   auto rebound_paths = paths_for(tree);
   rebound_paths.before_x11_return_for_tests = [&]() { tree.replace_unix_socket(605, owned_x4); };
