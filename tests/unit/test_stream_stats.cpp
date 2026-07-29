@@ -90,20 +90,17 @@ TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
   EXPECT_EQ(json.at("capture_path"), "shm_cpu_capture");
   EXPECT_EQ(json.at("capture_path_reason"), "headless_shm_fallback");
   EXPECT_FALSE(json.at("capture_path_reason_message").get<std::string>().empty());
-  ASSERT_TRUE(json.contains("capture_decision"));
-  const auto &decision = json.at("capture_decision");
-  EXPECT_EQ(decision.at("path"), json.at("capture_path"));
-  EXPECT_EQ(decision.at("reason"), json.at("capture_path_reason"));
-  EXPECT_EQ(decision.at("reason_message"), json.at("capture_path_reason_message"));
-  EXPECT_EQ(decision.at("transport"), "shm");
-  EXPECT_EQ(decision.at("residency"), "cpu");
-  EXPECT_EQ(decision.at("format"), "bgra8");
-  EXPECT_TRUE(decision.at("cpu_copy"));
-  EXPECT_FALSE(decision.at("gpu_native"));
-  EXPECT_EQ(decision.at("runtime_backend"), "labwc");
-  EXPECT_TRUE(decision.at("requested_headless"));
-  EXPECT_TRUE(decision.at("effective_headless"));
-  EXPECT_FALSE(decision.at("gpu_native_override_active"));
+  // Flat capture_* only (nested capture_decision removed as pure UI-unused duplicate).
+  EXPECT_FALSE(json.contains("capture_decision"));
+  EXPECT_EQ(json.at("capture_transport"), "shm");
+  EXPECT_EQ(json.at("capture_residency"), "cpu");
+  EXPECT_EQ(json.at("capture_format"), "bgra8");
+  EXPECT_TRUE(json.at("capture_cpu_copy"));
+  EXPECT_FALSE(json.at("capture_gpu_native"));
+  EXPECT_EQ(json.at("runtime_backend"), "labwc");
+  EXPECT_TRUE(json.at("runtime_requested_headless"));
+  EXPECT_TRUE(json.at("runtime_effective_headless"));
+  EXPECT_FALSE(json.at("runtime_gpu_native_override_active"));
 }
 
 TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNativeCapture) {
@@ -506,15 +503,12 @@ TEST(StreamStatsCapturePathTests, FlagsHeadlessCrossGpuDmabufRisk) {
 
   const auto json = nlohmann::json::parse(stats.to_json());
   EXPECT_EQ(json.at("capture_device"), "/dev/zero");
-  ASSERT_TRUE(json.contains("capture_decision"));
-  const auto &decision = json.at("capture_decision");
-  EXPECT_EQ(decision.at("capture_device"), "/dev/zero");
-  EXPECT_EQ(decision.at("encoder_adapter"), "/dev/null");
+  EXPECT_FALSE(json.contains("capture_decision"));
 #ifdef __linux__
-  EXPECT_TRUE(decision.at("cross_gpu_dmabuf_risk"));
-  EXPECT_EQ(decision.at("reason"), "headless_extcopy_dmabuf_cross_gpu_risk");
+  EXPECT_TRUE(json.at("capture_cross_gpu_dmabuf_risk"));
+  EXPECT_EQ(json.at("capture_path_reason"), "headless_extcopy_dmabuf_cross_gpu_risk");
 #else
-  EXPECT_FALSE(decision.at("cross_gpu_dmabuf_risk"));
+  EXPECT_FALSE(json.at("capture_cross_gpu_dmabuf_risk"));
 #endif
   EXPECT_FALSE(stream_stats::capture_path_uses_cpu_copy(stats));
   EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));

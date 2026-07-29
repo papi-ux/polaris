@@ -113,16 +113,54 @@ TEST(AudioSinkSelectionTest, SelectsHostSinkWhenHostAudioIsEnabled) {
   config::audio.sink = old_sink;
 }
 
-TEST(AudioSinkSelectionTest, ExplicitConfiguredSinkKeepsDefaultRoutingBehavior) {
+TEST(AudioSinkSelectionTest, CapturesEasyEffectsInsteadOfVirtualIsolation) {
+  auto old_sink = config::audio.sink;
+  config::audio.sink.clear();
+  auto ctx = make_sink_context();
+  ctx.sink.host = "easyeffects_sink";
+
+  const auto sink = audio::select_sink_name(ctx, 6, false);
+
+  EXPECT_EQ(sink, "easyeffects_sink");
+  EXPECT_TRUE(audio::host_sink_is_processing(ctx.sink.host));
+  EXPECT_FALSE(audio::sink_is_virtual(ctx, sink));
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
+
+  config::audio.sink = old_sink;
+}
+
+TEST(AudioSinkSelectionTest, ExplicitConfiguredSinkIsEnforced) {
   auto old_sink = config::audio.sink;
   config::audio.sink = "alsa_output.configured";
   auto ctx = make_sink_context();
 
   const auto sink = audio::select_sink_name(ctx, 2, false);
 
-  EXPECT_EQ(sink, "sink-sunshine-stereo");
-  EXPECT_TRUE(audio::sink_is_virtual(ctx, sink));
+  // Web UI / conf audio_sink wins over auto virtual isolation.
+  EXPECT_EQ(sink, "alsa_output.configured");
+  EXPECT_FALSE(audio::sink_is_virtual(ctx, sink));
+#ifdef __linux__
+  // Still pin session apps to that sink without clobbering the host default.
+  EXPECT_TRUE(audio::should_route_session_sink_without_default(ctx, sink, false));
+#else
   EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
+#endif
+
+  config::audio.sink = old_sink;
+}
+
+TEST(AudioSinkSelectionTest, ExplicitVirtualSinkIsEnforcedAndRouted) {
+  auto old_sink = config::audio.sink;
+  config::audio.sink = "sink-sunshine-surround51";
+  auto ctx = make_sink_context();
+
+  const auto sink = audio::select_sink_name(ctx, 2, false);
+
+  EXPECT_EQ(sink, "sink-sunshine-surround51");
+  EXPECT_TRUE(audio::sink_is_virtual(ctx, sink));
+#ifdef __linux__
+  EXPECT_TRUE(audio::should_route_session_sink_without_default(ctx, sink, false));
+#endif
 
   config::audio.sink = old_sink;
 }
