@@ -1068,7 +1068,9 @@ namespace pipewire_capture {
       cap->negotiated_dmabuf_ = dmabuf_negotiated;
     }
     if (replaced_buffer) {
-      cap->queue_buffer(replaced_buffer);
+      // Format callbacks run with PipeWire's thread-loop lock held. Queue
+      // directly so shutdown_mtx_ is never acquired in loop callback context.
+      pw_stream_queue_buffer(cap->stream_, replaced_buffer);
     }
     cap->frame_cv_.notify_all();
 

@@ -69,13 +69,16 @@ TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {
   const auto source = read_source("src/platform/linux/pipewire_capture.cpp");
   ASSERT_FALSE(source.empty());
 
-  const auto process = source.find("bool capture_t::process_buffer(pw_buffer *buffer)");
-  const auto process_end = source.find("void capture_t::on_param_changed", process);
-  ASSERT_NE(process, std::string::npos);
-  ASSERT_NE(process_end, std::string::npos);
-  const auto body = source.substr(process, process_end - process);
-  EXPECT_EQ(body.find("queue_buffer(replaced_buffer)"), std::string::npos);
-  EXPECT_NE(body.find("pw_stream_queue_buffer(stream_, replaced_buffer)"), std::string::npos);
+  const auto callbacks_start = source.find("void capture_t::on_process(");
+  const auto callbacks_end = source.find("void capture_t::set_terminal(", callbacks_start);
+  ASSERT_NE(callbacks_start, std::string::npos);
+  ASSERT_NE(callbacks_end, std::string::npos);
+  const auto callbacks = source.substr(callbacks_start, callbacks_end - callbacks_start);
+
+  EXPECT_EQ(callbacks.find("cap->queue_buffer("), std::string::npos);
+  EXPECT_EQ(callbacks.find("\n        queue_buffer("), std::string::npos);
+  EXPECT_NE(callbacks.find("pw_stream_queue_buffer(stream_, replaced_buffer)"), std::string::npos);
+  EXPECT_NE(callbacks.find("pw_stream_queue_buffer(cap->stream_, replaced_buffer)"), std::string::npos);
 }
 
 TEST(LinuxStreamContractTests, RootMediaFenceSurvivesThroughCompositorTermination) {
