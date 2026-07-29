@@ -139,9 +139,10 @@ if [ "\${1:-}" = -TERM ]; then
 fi
 EOF
 chmod +x "$work/bin/kill-successor"
-POLARIS_KILL_BIN="$work/bin/kill-successor" \
-  polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run" ||
-  fail "predecessor stop should finish safely after successor replacement"
+if POLARIS_KILL_BIN="$work/bin/kill-successor" \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run"; then
+  fail "predecessor stop accepted a replacement marker as terminal cleanup authority"
+fi
 if grep -q -- '-KILL' "$work/kills"; then
   fail "same-role successor received predecessor escalation"
 fi
@@ -156,6 +157,33 @@ printf '0000000000000001: 00000002 00000000 00010000 0001 01 701 %s\n' \
 if polaris_marker_owns_socket "$work/run/polaris-gamescope.pid" "$work/run/gamescope-0" idle; then
   fail "duplicate socket pathname was accepted as owned"
 fi
+
+# A marker removed after TERM also revokes all cleanup authority. Environment
+# and socket state must remain untouched because no exact generation is current.
+write_process 410 1 9200 /usr/bin/gamescope --backend headless
+rm -f "$POLARIS_PROC_ROOT/410/fd/3"
+ln -s 'socket:[800]' "$POLARIS_PROC_ROOT/410/fd/3"
+: >"$work/run/gamescope-0"
+write_unix_header
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 800 %s\n' \
+  "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+printf '410 9200 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+printf 'POLARIS_GAMESCOPE_PID=410\nPOLARIS_GAMESCOPE_START_TIME=9200\nPOLARIS_GAMESCOPE_EXECUTABLE=/usr/bin/gamescope\n' \
+  >"$work/run/polaris-gamescope.env"
+cat >"$work/bin/kill-missing-marker" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -TERM ]; then
+  rm -f "$work/run/polaris-gamescope.pid"
+fi
+EOF
+chmod +x "$work/bin/kill-missing-marker"
+if POLARIS_KILL_BIN="$work/bin/kill-missing-marker" \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run"; then
+  fail "stop accepted missing marker as cleanup authority"
+fi
+[ -e "$work/run/polaris-gamescope.env" ] || fail "missing marker allowed runtime env cleanup"
+[ -e "$work/run/gamescope-0" ] || fail "missing marker allowed socket cleanup"
 
 # Production call sites must use exact markers, never process-name-wide pkill/pgrep.
 for source in \

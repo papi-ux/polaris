@@ -63,6 +63,16 @@ TEST(LinuxStreamContractTests, GamescopeOwnershipTransitionsUseOneCrossProcessLo
   EXPECT_NE(runtime.find("owner_transition_lock_t"), std::string::npos);
   EXPECT_NE(runtime.find("polaris-gamescope.lock"), std::string::npos);
   EXPECT_NE(runtime.find("POLARIS_GAMESCOPE_EXECUTABLE"), std::string::npos);
+
+  const auto marker_failure = runtime.find("if (!marker_written)");
+  ASSERT_NE(marker_failure, std::string::npos);
+  const auto failure_body = runtime.substr(marker_failure, 1200);
+  const auto child_check = failure_body.find("waitpid(child, &status, WNOHANG)");
+  const auto signal = failure_body.find("kill(child, SIGTERM)");
+  ASSERT_NE(child_check, std::string::npos);
+  ASSERT_NE(signal, std::string::npos);
+  EXPECT_LT(child_check, signal);
+  EXPECT_NE(failure_body.find("if (!child_reaped)"), std::string::npos);
 }
 
 TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {

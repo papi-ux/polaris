@@ -225,11 +225,13 @@ namespace stream_runtime {
 
         // Capture the exact PID generation only after exec has exposed the
         // expected gamescope --backend headless argv.
+        bool child_reaped = false;
         for (int i = 0; i < 100 && !marker_; ++i) {
           marker_ = gp::marker_for_pid(child, "runtime");
           if (!marker_) {
             int status = 0;
             if (waitpid(child, &status, WNOHANG) == child) {
+              child_reaped = true;
               break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -247,8 +249,17 @@ namespace stream_runtime {
         }
         if (!marker_written) {
           BOOST_LOG(error) << "gamescope_runtime: could not record exact owned gamescope generation"sv;
-          kill(child, SIGTERM);
-          waitpid(child, nullptr, 0);
+          // An unreaped child PID cannot be reused. Re-check that relationship
+          // immediately before signaling; if the loop already reaped it (or it
+          // is no longer our child), the numeric PID is no longer authority.
+          if (!child_reaped) {
+            int status = 0;
+            const auto child_state = waitpid(child, &status, WNOHANG);
+            if (child_state == 0) {
+              kill(child, SIGTERM);
+              waitpid(child, nullptr, 0);
+            }
+          }
           pid_ = 0;
           owned_ = false;
           marker_.reset();

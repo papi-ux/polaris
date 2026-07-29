@@ -91,16 +91,21 @@ describe('Linux packaging contracts', () => {
       'systemd.user.services.polaris = {',
       'home.activation.polarisConfSeed',
     )
+    const homeRequires = section(polarisUnit, 'Requires = [', '];')
+    const generatedPolaris = section(session, '"polaris.service" = mkUnit {', '\n    };')
+    const generatedRequires = section(generatedPolaris, 'requires = [', '];')
     for (const unit of [
       'polaris-portal-dbus.service',
       'polaris-portal-gamescope.service',
       'polaris-portal.service',
     ]) {
       expect(polarisUnit).toContain(`"${unit}"`)
+      expect(homeRequires).toContain(`"${unit}"`)
+      expect(generatedRequires).toContain(`"${unit}"`)
     }
   })
 
-  it('uses the private portal only after it is ready and preserves host fallback', () => {
+  it('requires the private portal through readiness and final startup', () => {
     const session = readSource('nix/modules/session-lib.nix')
     const homeManager = readSource('nix/modules/home-manager.nix')
     const installer = readSource('scripts/install/03-install-gamescope-stack.sh')
@@ -117,15 +122,21 @@ describe('Linux packaging contracts', () => {
     )
 
     expect(serviceEnvironment).not.toContain('POLARIS_PORTAL_DBUS_ADDRESS')
-    expect(polarisStart).toContain('[ -S "$bus_path" ]')
+    expect(polarisStart).toContain('[ ! -S "$bus_path" ]')
     expect(polarisStart).toContain('status org.freedesktop.portal.Desktop')
     expect(polarisStart).toContain('status org.freedesktop.impl.portal.desktop.gamescope')
     expect(polarisStart).toContain('export POLARIS_PORTAL_DBUS_ADDRESS="$private_address"')
+    expect(polarisStart).toMatch(/required private ScreenCast portal disappeared before startup[\s\S]*exit 1/)
+    expect(polarisStart).not.toContain('host session portal')
     expect(polarisStart).not.toContain('unix:path=%t/polaris-portal/bus')
     expect(waitPortal).toContain('private_address="unix:path=$bus_path"')
     expect(waitPortal).toContain('bus_deadline=$((SECONDS + 10))')
     expect(waitPortal).toContain('while [ ! -S "$bus_path" ]')
     expect(waitPortal).toContain('--address="$private_address"')
+    expect(waitPortal).toMatch(/required private portal bus did not appear[\s\S]*exit 1/)
+    expect(waitPortal).toMatch(/required private ScreenCast portal did not become ready[\s\S]*exit 1/)
+    expect(waitPortal).not.toContain('using host fallback')
+    expect(waitPortal).not.toContain('gamescopegrab may still work')
     expect(waitPortal).not.toContain('busctl --user')
     expect(session).toContain('UnsetEnvironment=WAYLAND_DISPLAY')
     expect(homeManager).toContain('UnsetEnvironment = [ "WAYLAND_DISPLAY" ];')
@@ -154,6 +165,8 @@ describe('Linux packaging contracts', () => {
     const driver = readSource('scripts/install/install.sh')
     expect(deps).toContain('--gamescope-stack')
     expect(driver).toContain('DEPS_ARGS+=(--gamescope-stack)')
+    expect(driver).toContain('--skip-stack) SKIP_STACK=1')
+    expect(driver).toContain('if [ "$SKIP_STACK" = 0 ] && [ "$LABWC_ONLY" = 0 ]; then')
 
     for (const [start, end] of [
       ['  fedora)', '  arch)'],

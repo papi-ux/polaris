@@ -124,20 +124,21 @@ let
       chmod 600 "$confdir/polaris.conf"
     fi
 
-    # Prefer the managed private portal only after both portal names own the
-    # private bus. If it is absent or failed, leave the variable unset so
-    # Polaris can use the host session portal instead.
+    # The managed service is coupled to its private portal generation. Recheck
+    # both names immediately before exec so readiness cannot silently fall back
+    # to an unrelated host-session portal.
     rt="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     bus_path="$rt/polaris-portal/bus"
     private_address="unix:path=$bus_path"
-    if [ -z "''${POLARIS_PORTAL_DBUS_ADDRESS:-}" ] \
-      && [ -S "$bus_path" ] \
-      && ${pkgs.systemd}/bin/busctl --address="$private_address" --no-pager \
+    if [ ! -S "$bus_path" ] \
+      || ! ${pkgs.systemd}/bin/busctl --address="$private_address" --no-pager \
         status org.freedesktop.portal.Desktop >/dev/null 2>&1 \
-      && ${pkgs.systemd}/bin/busctl --address="$private_address" --no-pager \
+      || ! ${pkgs.systemd}/bin/busctl --address="$private_address" --no-pager \
         status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
-      export POLARIS_PORTAL_DBUS_ADDRESS="$private_address"
+      echo "polaris: required private ScreenCast portal disappeared before startup" >&2
+      exit 1
     fi
+    export POLARIS_PORTAL_DBUS_ADDRESS="$private_address"
 
     exec ${lib.getExe polarisPkg}
   '';
@@ -179,8 +180,8 @@ let
       sleep 0.1
     done
     if [ ! -S "$bus_path" ]; then
-      echo "polaris: gamescope-0 ready (private portal bus unavailable; using host fallback)" >&2
-      exit 0
+      echo "polaris: required private portal bus did not appear" >&2
+      exit 1
     fi
 
     private_address="unix:path=$bus_path"
@@ -196,8 +197,8 @@ let
         exit 0
       fi
       if [ "$SECONDS" -ge "$deadline" ]; then
-        echo "polaris: portal not ready; continuing (gamescopegrab may still work)" >&2
-        exit 0
+        echo "polaris: required private ScreenCast portal did not become ready" >&2
+        exit 1
       fi
       sleep 0.25
     done
@@ -306,6 +307,11 @@ let
       ];
       wants = [
         "polaris-gamescope-idle.service"
+        "polaris-portal.service"
+      ];
+      requires = [
+        "polaris-portal-dbus.service"
+        "polaris-portal-gamescope.service"
         "polaris-portal.service"
       ];
       serviceConfig = ''

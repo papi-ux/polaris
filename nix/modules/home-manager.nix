@@ -124,6 +124,11 @@ in
           "polaris-portal-gamescope.service"
           "polaris-portal.service"
         ];
+        Requires = [
+          "polaris-portal-dbus.service"
+          "polaris-portal-gamescope.service"
+          "polaris-portal.service"
+        ];
         PartOf = [ cfg.desktopUserTarget ];
       };
       Service = {
