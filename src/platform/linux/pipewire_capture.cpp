@@ -923,7 +923,11 @@ namespace pipewire_capture {
         frame_available_ = true;
       }
       if (replaced_buffer) {
-        queue_buffer(replaced_buffer);
+        // process_buffer() runs only from PipeWire's process callback, which
+        // already holds the thread-loop lock. Queue directly here: taking
+        // shutdown_mtx_ from the callback would invert shutdown's
+        // shutdown_mtx_ -> thread-loop-lock order and deadlock teardown.
+        pw_stream_queue_buffer(stream_, replaced_buffer);
       }
       frame_cv_.notify_one();
       return true;
