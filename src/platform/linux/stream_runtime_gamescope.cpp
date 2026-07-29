@@ -126,16 +126,20 @@ namespace stream_runtime {
       bool start(const start_params_t &params) override {
         std::lock_guard lock(mu_);
         if (is_running_unlocked()) {
-          refresh_runtime_state(params);
-          if (!write_env_file()) {
-            return false;
+          // Crash/teardown can leave in-memory attach state while gamescope is dead.
+          // Re-validate exact generation + socket ownership before reuse.
+          if (revalidate_running_unlocked(params)) {
+            BOOST_LOG(info) << "gamescope_runtime: already "sv
+                            << (owned_ ? "owned"sv : "attached"sv)
+                            << " "sv << (socket_name_.empty() ? "gamescope-0" : socket_name_)
+                            << "; reusing"sv;
+            return true;
           }
-          BOOST_LOG(info) << "gamescope_runtime: already "sv
-                          << (owned_ ? "owned"sv : "attached"sv)
-                          << " "sv << (socket_name_.empty() ? "gamescope-0" : socket_name_)
-                          << "; reusing"sv;
-          return true;
+          BOOST_LOG(warning) << "gamescope_runtime: dropping stale in-memory gamescope state"sv;
+          clear_runtime_state_unlocked();
         }
+
+        ensure_portal_stack();
 
         // 1) Prefer attach to idle gamescope-0 (portal + polaris-gamescope.env contract).
         if (try_attach_gamescope0(params)) {
@@ -154,8 +158,14 @@ namespace stream_runtime {
 
         // 3) Spawn owned headless gamescope — only if gamescope-0 is still free.
         // Never attach/spawn onto gamescope-1 (portal is hard-wired to gamescope-0).
+        // Crash residue with no live holder is reclaimed; live unowned holders fail closed.
+        reclaim_orphan_gamescope_sockets();
         if (socket_exists("gamescope-0") && wait_for_stable_socket("gamescope-0", 1500)) {
-          return try_attach_gamescope0(params);
+          if (try_attach_gamescope0(params)) {
+            return true;
+          }
+          BOOST_LOG(error) << "gamescope_runtime: gamescope-0 exists but is not a validated owner; refusing destructive cleanup"sv;
+          return false;
         }
         if (socket_exists("gamescope-1") && !socket_exists("gamescope-0")) {
           BOOST_LOG(error) << "gamescope_runtime: gamescope-1 exists without a validated gamescope-0 owner; refusing destructive cleanup"sv;
@@ -499,6 +509,55 @@ namespace stream_runtime {
         (void) params;
       }
 
+      void clear_runtime_state_unlocked() {
+        marker_.reset();
+        owned_ = false;
+        pid_ = 0;
+        socket_name_.clear();
+        x11_display_.clear();
+        state_ = {};
+      }
+
+      bool revalidate_running_unlocked(const start_params_t &params) {
+        if (!marker_ || socket_name_.empty() || x11_display_.empty()) {
+          return false;
+        }
+        const auto current = validated_marker_for_socket(socket_name_, marker_->role);
+        if (!current || *current != *marker_) {
+          return false;
+        }
+        const auto display = gp::discover_owned_x11_display(*marker_);
+        if (!display || *display != x11_display_) {
+          return false;
+        }
+        refresh_runtime_state(params);
+        return write_env_file();
+      }
+
+      static void ensure_portal_stack() {
+        // Best-effort: private portal frontend can be TERM'd while polaris stays up.
+        // Idle recovery alone is not enough — CreateSession needs org.freedesktop.portal.Desktop.
+        (void) std::system(
+          "systemctl --user start polaris-portal-dbus.service "
+          "polaris-portal-gamescope.service polaris-portal.service 2>/dev/null"
+        );
+      }
+
+      // Best-effort: drop crash residue only. Live holders are left for attach / fail-closed.
+      static void reclaim_orphan_gamescope_sockets() {
+        const auto rt = fs::path(xdg_runtime_dir());
+        for (const char *name : {"gamescope-0", "gamescope-1", "gamescope-0-ei", "gamescope-1-ei"}) {
+          const auto path = rt / name;
+          std::error_code ec;
+          if (!fs::exists(path, ec) || ec) {
+            continue;
+          }
+          if (gp::remove_orphan_socket(path)) {
+            BOOST_LOG(info) << "gamescope_runtime: reclaimed orphan socket "sv << path.string();
+          }
+        }
+      }
+
       bool try_attach_gamescope0(const start_params_t &params) {
         if (!wait_for_stable_socket("gamescope-0", 2000)) {
           return false;
@@ -546,6 +605,7 @@ namespace stream_runtime {
       }
 
       static bool restart_or_start_idle_unit() {
+        ensure_portal_stack();
         const int rc = std::system(
           "systemctl --user restart polaris-gamescope-idle.service 2>/dev/null || "
           "systemctl --user start polaris-gamescope-idle.service 2>/dev/null");
@@ -554,6 +614,8 @@ namespace stream_runtime {
 
       bool try_start_idle_unit_and_attach(const start_params_t &params) {
         // Best-effort: host may ship polaris-gamescope-idle.service that owns gamescope-0.
+        // Clear crash residue so idle can bind gamescope-0 again.
+        reclaim_orphan_gamescope_sockets();
         const bool active =
           std::system("systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null") == 0;
         const bool activating =

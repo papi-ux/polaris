@@ -77,8 +77,13 @@ let
 
   idleApp = pkgs.writeShellApplication {
     name = "polaris-gamescope-idle";
-    runtimeInputs = with pkgs; [
-      bash coreutils gnugrep gnused util-linux gamescope
+    runtimeInputs = [
+      pkgs.bash
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.gnused
+      pkgs.util-linux
+      gamescope # cfg.packageGamescope (gamescope-polaris), not stock pkgs.gamescope
     ];
     text = ''
       export POLARIS_HDR_WIDTH="''${POLARIS_HDR_WIDTH:-${toString cfg.width}}"
@@ -93,16 +98,16 @@ let
 
   sessionBin = pkgs.writeShellApplication {
     name = "polaris-gamescope-session";
-    runtimeInputs = with pkgs; [
-      coreutils
-      gamescope
-      gnugrep
-      gnused
-      procps
-      pulseaudio
-      systemd
-      util-linux
-      wireplumber
+    runtimeInputs = [
+      pkgs.coreutils
+      gamescope # cfg.packageGamescope
+      pkgs.gnugrep
+      pkgs.gnused
+      pkgs.procps
+      pkgs.pulseaudio
+      pkgs.systemd
+      pkgs.util-linux
+      pkgs.wireplumber
     ];
     text = ''
       export POLARIS_GAMESCOPE_BIN=${lib.getExe gamescope}
@@ -157,7 +162,7 @@ let
       fi
       rm -f "$rt/polaris-gamescope-wsi-nested" "$rt/polaris-gamescope-appid" \
         "$rt/polaris-gamescope-audio-sink" || true
-      ${pkgs.systemd}/bin/systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+      polaris_unmask_idle_unit_runtime
       if [ ! -S "$rt/gamescope-0" ]; then
         ${pkgs.systemd}/bin/systemctl --user restart polaris-gamescope-idle.service 2>/dev/null \
           || ${pkgs.systemd}/bin/systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
@@ -243,8 +248,11 @@ let
       serviceConfig = ''
         Type=simple
         ExecStart=${lib.getExe idleApp}
-        # on-abnormal: stop/mask for nested WSI must not look like a crash restart.
-        Restart=on-abnormal
+        # on-failure: gamescope ABRT ends the wrapper with exit 134; on-abnormal
+        # ignores that and leaves idle permanently failed (orphan sockets stick).
+        # Nested WSI masks via user.control (not plain mask --runtime) so
+        # portal-gamescope Wants= cannot respawn idle under ~/.config units.
+        Restart=on-failure
         RestartSec=5s
         TimeoutStopSec=10s
         ${envToUnitLines baseEnvironment}
@@ -291,7 +299,9 @@ let
       serviceConfig = ''
         Type=simple
         ExecStart=${portalFrontendExec}
-        Restart=on-failure
+        # always: frontend can be cleanly stopped while polaris stays up; stream
+        # needs org.freedesktop.portal.Desktop on the private bus.
+        Restart=always
         RestartSec=1s
         ${envToUnitLines portalEnvironment}
       '';
@@ -305,15 +315,17 @@ let
         "polaris-portal-gamescope.service"
         "polaris-portal.service"
       ];
+      # Soft deps: nested↔idle handoff restarts portal-gamescope (and sometimes
+      # portal frontend). Requires= would stop polaris mid-stream teardown.
+      # Hard dep: private bus only — without it the portal path cannot exist.
+      # Start readiness is still gated by ExecStartPre=waitPortal.
       wants = [
         "polaris-gamescope-idle.service"
-        "polaris-portal.service"
-      ];
-      requires = [
         "polaris-portal-dbus.service"
         "polaris-portal-gamescope.service"
         "polaris-portal.service"
       ];
+      requires = [ "polaris-portal-dbus.service" ];
       serviceConfig = ''
         Type=simple
         ExecStartPre=${waitPortal}

@@ -192,10 +192,10 @@ case "${1:-}" in
     if [ "$want_wsi" = 1 ]; then
       # --- Nested WSI path (games as gamescope child) ---
       echo "polaris-gamescope-session: WSI nested mode — Steam is ${POLARIS_GAMESCOPE_BIN:-gamescope} primary child" >&2
-      # Runtime-mask so polaris Wants= / on-failure cannot respawn idle
-      # while nested needs exclusive gamescope-0 (portal is hard-wired).
-      systemctl --user mask --runtime polaris-gamescope-idle.service 2>/dev/null || true
-      systemctl --user stop polaris-gamescope-idle.service 2>/dev/null || true
+      # Runtime-mask so polaris Wants= / portal-gamescope Wants= cannot respawn
+      # idle while nested needs exclusive gamescope-0 (portal is hard-wired).
+      # Use user.control — plain mask --runtime loses to Hjem ~/.config units.
+      polaris_mask_idle_unit_runtime
       # Stop only the exact marked owner of gamescope-0. Unknown sockets fail
       # closed instead of risking another user's compositor.
       if polaris_validate_marker "$marker"; then
@@ -211,7 +211,7 @@ case "${1:-}" in
             exit 1
             ;;
         esac
-      elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
+      elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
         echo "polaris-gamescope-session: refusing unowned gamescope socket cleanup" >&2
         exit 1
       fi
@@ -283,10 +283,29 @@ case "${1:-}" in
         >"$steam_log" 2>&1 &
       nested_pid=$!
 
+      # Resolve the real headless gamescope PID. setsid/env/wrapProgram may leave
+      # $! as a short-lived parent; marker must pin the compositor generation.
+      resolve_nested_gamescope_pid() {
+        local root="$1" p
+        if polaris_headless_gamescope_pid "$root" 2>/dev/null; then
+          printf '%s\n' "$root"
+          return 0
+        fi
+        for p in $(pgrep -P "$root" 2>/dev/null || true); do
+          if polaris_headless_gamescope_pid "$p" 2>/dev/null; then
+            printf '%s\n' "$p"
+            return 0
+          fi
+        done
+        return 1
+      }
+
       nested_marked=0
-      for _ in $(seq 1 100); do
-        if polaris_write_marker_for_pid "$marker" "$nested_pid" nested; then
+      for _ in $(seq 1 150); do
+        gs_pid="$(resolve_nested_gamescope_pid "$nested_pid" 2>/dev/null || true)"
+        if [ -n "${gs_pid:-}" ] && polaris_write_marker_for_pid "$marker" "$gs_pid" nested; then
           nested_marked=1
+          nested_pid="$gs_pid"
           break
         fi
         kill -0 "$nested_pid" 2>/dev/null || break
@@ -319,11 +338,32 @@ case "${1:-}" in
         echo "polaris-gamescope-session: nested bound gamescope-1 (portal captures gamescope-0) — see $steam_log" >&2
         exit 1
       fi
-      # Do NOT systemctl-restart portal here: it races Steam's udev/controller
-      # hotplug (pad is created only after prep returns) and left the virtual
-      # Xbox pad unopened — no controller after 2026-07-27 deploy.
-      # Portal already tracks gamescope-0; capture rebinds on stream start.
-      sleep 2
+      # Rebind private portal backend to this gamescope generation. Without this,
+      # xdg-desktop-portal-gamescope keeps the prior (idle) wayland connection and
+      # Start fails with "gamescope stream not available: failed to connect to
+      # wayland socket" when the compositor was replaced under it.
+      # Restart only the gamescope impl — not the full portal frontend — so we
+      # avoid the udev/controller race that killing xdg-desktop-portal caused.
+      # polaris must Wants= (not Requires=) this unit so rebind never cascade-stops it.
+      systemctl --user restart polaris-portal-gamescope.service 2>/dev/null || true
+      portal_bus="unix:path=$rt/polaris-portal/bus"
+      portal_ready=0
+      for _ in $(seq 1 80); do
+        if busctl --address="$portal_bus" --no-pager \
+            status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
+          portal_ready=1
+          break
+        fi
+        sleep 0.1
+      done
+      if [ "$portal_ready" != 1 ]; then
+        echo "polaris-gamescope-session: portal-gamescope did not rebind after nested start" >&2
+        # Non-fatal: stream may still gamescopegrab the PW node.
+      else
+        echo "polaris-gamescope-session: portal-gamescope rebound to nested gamescope-0" >&2
+      fi
+      # Brief settle so Steam's first controller udev events land after portal is up.
+      sleep 1
       echo "polaris-gamescope-session: nested ${POLARIS_GAMESCOPE_BIN:-gamescope} ready; WSI logs → $steam_log and ~/.local/share/Steam/logs/console-linux.txt" >&2
       echo "polaris-gamescope-session: pass = 'Creating Gamescope surface' + 'hdr formats exposed: true'" >&2
     else
@@ -334,12 +374,12 @@ case "${1:-}" in
             echo "polaris-gamescope-session: nested owner did not stop" >&2
             exit 1
           }
-        elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
+        elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
           echo "polaris-gamescope-session: refusing to clean unowned nested sockets" >&2
           exit 1
         fi
         rm -f "$rt/polaris-gamescope-wsi-nested"
-        systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+        polaris_unmask_idle_unit_runtime
         systemctl --user start polaris-gamescope-idle.service || true
       elif ! systemctl --user is-active --quiet polaris-gamescope-idle.service 2>/dev/null; then
         systemctl --user start polaris-gamescope-idle.service || true
@@ -461,13 +501,41 @@ case "${1:-}" in
       if polaris_validate_marker "$marker" nested; then
         polaris_stop_marked_gamescope "$marker" nested "$rt" ||
           echo "polaris-gamescope-session: nested owner did not reach terminal state" >&2
-      elif [ -e "$rt/gamescope-0" ] || [ -e "$rt/gamescope-1" ]; then
-        echo "polaris-gamescope-session: leaving unowned gamescope sockets untouched" >&2
+      elif ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+        echo "polaris-gamescope-session: leaving live unowned gamescope sockets untouched" >&2
       fi
       rm -f "$rt/polaris-gamescope-wsi-nested"
       printf '0\n' >"$rt/polaris-gamescope-force"
-      systemctl --user unmask --runtime polaris-gamescope-idle.service 2>/dev/null || true
+      # Ordered handoff: idle must own gamescope-0 before portal capture can
+      # reconnect. Otherwise portal-gamescope hits "failed to connect to wayland
+      # socket" (Response code 2) during the gap.
+      polaris_unmask_idle_unit_runtime
+      systemctl --user reset-failed polaris-gamescope-idle.service 2>/dev/null || true
       systemctl --user start polaris-gamescope-idle.service 2>/dev/null || true
+      idle_ready=0
+      for _ in $(seq 1 100); do
+        if polaris_validate_marker "$marker" idle &&
+           polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle; then
+          polaris_write_runtime_env "$marker" gamescope-0 idle "$rt" 2>/dev/null || true
+          idle_ready=1
+          break
+        fi
+        sleep 0.1
+      done
+      if [ "$idle_ready" != 1 ]; then
+        echo "polaris-gamescope-session: idle gamescope-0 not ready after nested stop" >&2
+      else
+        echo "polaris-gamescope-session: idle gamescope restored after nested stop" >&2
+      fi
+      # Rebind backend to idle generation. polaris must Wants= (not Requires=)
+      # this unit so the restart does not cascade-stop the stream host.
+      systemctl --user restart polaris-portal-gamescope.service 2>/dev/null || true
+      portal_bus="unix:path=$rt/polaris-portal/bus"
+      for _ in $(seq 1 50); do
+        busctl --address="$portal_bus" --no-pager \
+          status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1 && break
+        sleep 0.1
+      done
     elif [ -f "$rt/polaris-gamescope-force" ] && [ "$(tr -d '[:space:]' <"$rt/polaris-gamescope-force")" = "1" ]; then
       printf '0\n' >"$rt/polaris-gamescope-force"
       systemctl --user restart polaris-gamescope-idle.service || true

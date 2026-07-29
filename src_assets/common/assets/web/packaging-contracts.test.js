@@ -85,6 +85,8 @@ describe('Linux packaging contracts', () => {
     expect(session).toContain('XDG_DESKTOP_PORTAL_DIR')
     expect(session).toContain('org.freedesktop.impl.portal.desktop.gamescope')
     expect(homeManager).toContain('RuntimeDirectory = "polaris-portal";')
+    // Hard dep: private bus only. Portal backend/frontend are Wants= so nested
+    // handoff can restart polaris-portal-gamescope without cascade-stopping polaris.
     expect(homeManager).toContain('Requires = [ "polaris-portal-dbus.service" ];')
     const polarisUnit = section(
       homeManager,
@@ -92,16 +94,24 @@ describe('Linux packaging contracts', () => {
       'home.activation.polarisConfSeed',
     )
     const homeRequires = section(polarisUnit, 'Requires = [', '];')
+    const homeWants = section(polarisUnit, 'Wants = [', '];')
     const generatedPolaris = section(session, '"polaris.service" = mkUnit {', '\n    };')
     const generatedRequires = section(generatedPolaris, 'requires = [', '];')
+    const generatedWants = section(generatedPolaris, 'wants = [', '];')
+    expect(homeRequires).toContain('"polaris-portal-dbus.service"')
+    expect(homeRequires).not.toContain('"polaris-portal-gamescope.service"')
+    expect(homeRequires).not.toContain('"polaris-portal.service"')
+    expect(generatedRequires).toContain('"polaris-portal-dbus.service"')
+    expect(generatedRequires).not.toContain('"polaris-portal-gamescope.service"')
+    expect(generatedRequires).not.toContain('"polaris-portal.service"')
     for (const unit of [
       'polaris-portal-dbus.service',
       'polaris-portal-gamescope.service',
       'polaris-portal.service',
     ]) {
       expect(polarisUnit).toContain(`"${unit}"`)
-      expect(homeRequires).toContain(`"${unit}"`)
-      expect(generatedRequires).toContain(`"${unit}"`)
+      expect(homeWants).toContain(`"${unit}"`)
+      expect(generatedWants).toContain(`"${unit}"`)
     }
   })
 
