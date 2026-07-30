@@ -137,6 +137,57 @@ def markdown_section(text: str, heading: str) -> str:
     return "".join(lines[start:end])
 
 
+def markdown_table(section: str, label: str) -> list[list[str]]:
+    """Parse the first contiguous Markdown table in a bounded section."""
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in section.splitlines():
+        if line.strip().startswith("|"):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if not blocks:
+        print(f"{label} is missing its Markdown table", file=sys.stderr)
+        sys.exit(1)
+
+    rows = [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in blocks[0]
+    ]
+    if len(rows) < 3 or rows[0] != ["Tool", "Notes"]:
+        print(f"{label} has an invalid Tool/Notes table", file=sys.stderr)
+        sys.exit(1)
+    if len(rows[1]) != 2 or not all(
+        re.fullmatch(r":?-{3,}:?", cell) for cell in rows[1]
+    ):
+        print(f"{label} has an invalid table separator", file=sys.stderr)
+        sys.exit(1)
+    return rows[2:]
+
+
+def shell_commands(block: str) -> list[list[str]]:
+    """Return tokenized, uncommented logical shell commands from a fenced block."""
+    commands: list[list[str]] = []
+    pending = ""
+    for raw_line in block.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        continued = stripped.endswith("\\")
+        fragment = stripped[:-1].rstrip() if continued else stripped
+        pending = f"{pending} {fragment}".strip()
+        if continued:
+            continue
+        commands.append(shlex.split(pending, comments=True, posix=True))
+        pending = ""
+    if pending:
+        commands.append(shlex.split(pending, comments=True, posix=True))
+    return commands
+
+
 def bounded_release_section(text: str, current: str, following: str) -> str:
     current_heading = rf"^## {re.escape(current)}(?:\s+-[^\n]+)?\s*$"
     following_heading = rf"^## {re.escape(following)}(?:\s+-[^\n]+)?\s*$"
@@ -154,12 +205,13 @@ def bounded_release_section(text: str, current: str, following: str) -> str:
 
 
 requirements_section = markdown_section(building, "### Requirements")
-required_compiler_row = re.compile(
-    r"^\|\s*C\+\+23 compiler\s*\|\s*GCC or Clang\s*\|\s*$",
-    re.MULTILINE,
-)
-if not required_compiler_row.search(requirements_section):
-    print("docs/building.md must declare C++23 in the Requirements table", file=sys.stderr)
+requirements_rows = markdown_table(requirements_section, "docs/building.md Requirements")
+compiler_rows = [row for row in requirements_rows if row and row[0].startswith("C++")]
+if compiler_rows != [["C++23 compiler", "GCC or Clang"]]:
+    print(
+        "docs/building.md Requirements table must contain exactly the C++23 compiler row",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 arch_section = markdown_section(building, "#### Arch / CachyOS")
@@ -170,7 +222,16 @@ arch_block = re.search(
 if not arch_block:
     print("docs/building.md is missing the bounded Arch/CachyOS install command", file=sys.stderr)
     sys.exit(1)
-arch_tokens = set(shlex.split(arch_block.group("commands").replace("\\\n", " ")))
+arch_commands = shell_commands(arch_block.group("commands"))
+pacman_commands = [
+    tokens
+    for tokens in arch_commands
+    if len(tokens) >= 3 and tokens[:2] == ["sudo", "pacman"] and "-S" in tokens
+]
+if len(pacman_commands) != 1:
+    print("Arch/CachyOS block must contain exactly one sudo pacman -S command", file=sys.stderr)
+    sys.exit(1)
+arch_tokens = set(pacman_commands[0])
 for dependency in ("vulkan-headers", "vulkan-icd-loader"):
     if dependency not in arch_tokens:
         print(
