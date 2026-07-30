@@ -250,11 +250,14 @@ def backtick_closer_map(text: str):
                 paragraph_start = offset
                 paragraph_depth = depth
                 paragraph_list_indent = None
-            elif depth != paragraph_depth:
+            elif depth > paragraph_depth:
                 close_paragraph(offset)
                 paragraph_start = offset
                 paragraph_depth = depth
                 paragraph_list_indent = None
+            elif depth < paragraph_depth:
+                # Unmarked lazy blockquote continuation remains in the open paragraph.
+                pass
         elif kind == "list":
             close_paragraph(offset)
             paragraph_start = offset
@@ -664,17 +667,24 @@ def rendered_markdown(text: str) -> str:
         if closer is not None
     ]
     line_offset = 0
+    inline_range_index = 0
     for line in text.splitlines(keepends=True):
         line_start = line_offset
         line_end = line_start + len(line)
         line_offset = line_end
+        while (
+            inline_range_index < len(inline_ranges)
+            and inline_ranges[inline_range_index][1] <= line_start
+        ):
+            inline_range_index += 1
+        overlaps_inline_code = False
+        if inline_range_index < len(inline_ranges):
+            span_start, span_end = inline_ranges[inline_range_index]
+            overlaps_inline_code = line_start < span_end and line_end > span_start
         fence, delimiter = advance_fence(fence, line)
         if delimiter or fence is not None:
             continue
-        if is_indented_code(line) and not any(
-            line_start < span_end and line_end > span_start
-            for span_start, span_end in inline_ranges
-        ):
+        if is_indented_code(line) and not overlaps_inline_code:
             continue
         if re.match(r"^[ ]{0,3}\[[^]]+\]:\s+", line):
             continue
@@ -759,6 +769,11 @@ def verify_rendered_markdown_parser() -> None:
         if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(list_code_span):
             print("Inline-code span was not preserved inside a list paragraph", file=sys.stderr)
             sys.exit(1)
+
+    lazy_quote_code = "> `\n<span hidden>Polaris-extra-x86_64.AppImage</span>\n> `"
+    if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(lazy_quote_code):
+        print("Inline-code span did not preserve a lazy blockquote continuation", file=sys.stderr)
+        sys.exit(1)
 
     separate_list_items = "- `\n- <!-- Polaris-extra-x86_64.AppImage -->\n- `"
     if "Polaris-extra-x86_64.AppImage" in rendered_markdown(separate_list_items):
