@@ -168,12 +168,15 @@ def backtick_run_end(text: str, start: int) -> int:
 def backtick_closer_map(text: str):
     """Map opener runs to the next equal run within the same Markdown paragraph."""
     closers = {}
-    boundaries = [match.span() for match in re.finditer(r"\r?\n[ \t]*\r?\n", text)]
     segments = []
     start = 0
-    for boundary_start, boundary_end in boundaries:
-        segments.append((start, boundary_start))
-        start = boundary_end
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        line_end = offset + len(line)
+        if not fence_context_line(line).strip():
+            segments.append((start, offset))
+            start = line_end
+        offset = line_end
     segments.append((start, len(text)))
 
     for segment_start, segment_end in segments:
@@ -622,6 +625,7 @@ def verify_rendered_markdown_parser() -> None:
     for cross_block in (
         "`\n\n<!-- Polaris-extra-x86_64.AppImage -->\n\n`",
         "`\n\n<span hidden>Polaris-extra-x86_64.AppImage</span>\n\n`",
+        "> `\n>\n> <!-- Polaris-extra-x86_64.AppImage -->\n>\n> `",
     ):
         if "Polaris-extra-x86_64.AppImage" in rendered_markdown(cross_block):
             print("Inline-code span crossed a Markdown paragraph boundary", file=sys.stderr)
