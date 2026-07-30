@@ -496,6 +496,22 @@ def rendered_markdown(text: str) -> str:
     return restore_inline_code_comments(visible_html_text(protected))
 
 
+def verify_rendered_markdown_parser() -> None:
+    inline = "`<!--` Polaris-extra-x86_64.AppImage `-->`"
+    rendered_inline = rendered_markdown(inline)
+    if "Polaris-extra-x86_64.AppImage" not in rendered_inline:
+        print("Rendered Markdown dropped visible inline-code content", file=sys.stderr)
+        sys.exit(1)
+
+    rendered_comment = rendered_markdown("visible <!-- hidden --> prose")
+    if "hidden" in rendered_comment or "visible" not in rendered_comment:
+        print("Rendered Markdown exposed an actual HTML comment", file=sys.stderr)
+        sys.exit(1)
+
+
+verify_rendered_markdown_parser()
+
+
 def markdown_table(section: str, label: str) -> list[list[str]]:
     """Parse the first contiguous Markdown table in a bounded section."""
     blocks: list[list[str]] = []
