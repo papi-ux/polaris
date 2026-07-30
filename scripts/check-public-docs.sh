@@ -910,6 +910,8 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
     current: list[str] = []
     fence = None
     html_block = None
+    active_list_indent = None
+    active_list_quote_depth = None
     inline_ranges = []
     for opener, closer_start, _ in inline_code_ranges(section):
         opener_line_start = section.rfind("\n", 0, opener) + 1
@@ -965,13 +967,36 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
                 blocks.append(current)
                 current = []
             continue
-        if is_indented_code(line):
+        quote_depth, quote_content = blockquote_context(line)
+        stripped_content = quote_content.lstrip(" \t")
+        leading_columns = len(quote_content) - len(stripped_content)
+        list_marker = re.match(r"(?:[-+*]|\d{1,9}[.)])([ \t]+)", stripped_content)
+        table_line = None
+        if list_marker is not None:
+            active_list_indent = list_content_indent(line)
+            active_list_quote_depth = quote_depth
+            after_marker = stripped_content[list_marker.end() :].lstrip(" \t")
+            if after_marker.startswith("|"):
+                table_line = after_marker
+        else:
+            list_continuation = (
+                active_list_indent is not None
+                and quote_depth == active_list_quote_depth
+                and leading_columns >= active_list_indent
+            )
+            if stripped_content.startswith("|") and (
+                leading_columns <= 3 or list_continuation
+            ):
+                table_line = stripped_content
+            if stripped_content and not list_continuation:
+                active_list_indent = None
+                active_list_quote_depth = None
+        if table_line is None and is_indented_code(line):
             if current:
                 blocks.append(current)
                 current = []
             continue
-        stripped_line = line.strip()
-        if stripped_line.startswith("|"):
+        if table_line is not None:
             pipe_position = line_start + line.index("|")
             while (
                 inline_range_index < len(inline_ranges)
@@ -1001,7 +1026,7 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
                     blocks.append(current)
                     current = []
                 continue
-            current.append(line)
+            current.append(table_line)
         elif current:
             blocks.append(current)
             current = []
@@ -1024,6 +1049,18 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
         print(f"{label} has an invalid table separator", file=sys.stderr)
         sys.exit(1)
     return rows[2:]
+
+
+def visible_table_cell(cell: str) -> str:
+    """Return normalized visible inline text for semantic table comparisons."""
+    text = rendered_markdown(cell)
+    text = re.sub(
+        r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])",
+        r"\1",
+        text,
+    )
+    text = re.sub(r"[*_~`]+", "", text)
+    return " ".join(text.split())
 
 
 def tokenize_shell_command(command: str) -> list[str]:
@@ -1059,7 +1096,13 @@ requirements_section = markdown_section(
     "### Example packages",
 )
 requirements_rows = markdown_table(requirements_section, "docs/building.md Requirements")
-compiler_rows = [row for row in requirements_rows if row and row[0].startswith("C++")]
+visible_requirements_rows = [
+    [visible_table_cell(cell) for cell in row]
+    for row in requirements_rows
+]
+compiler_rows = [
+    row for row in visible_requirements_rows if row and row[0].startswith("C++")
+]
 if compiler_rows != [["C++23 compiler", "GCC or Clang"]]:
     print(
         "docs/building.md Requirements table must contain exactly the C++23 compiler row",
