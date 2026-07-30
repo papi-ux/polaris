@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import re
+import shlex
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,6 +34,17 @@ def workflow_job(text: str, name: str) -> str:
     return match.group("body")
 
 
+def workflow_run_tokens(step: str) -> list[str]:
+    run = re.search(
+        r"(?ms)^        run: \|\n(?P<script>(?:^          .*(?:\n|\Z))*)",
+        step,
+    )
+    if not run:
+        raise AssertionError("missing shell run block in workflow step")
+    script = "\n".join(line[10:] for line in run.group("script").splitlines())
+    return shlex.split(script.replace("\\\n", " "), comments=True, posix=True)
+
+
 arch = read("packaging/linux/Arch/PKGBUILD")
 require_package(shell_array(arch, "depends"), "vulkan-icd-loader", "Arch runtime dependencies")
 require_package(shell_array(arch, "makedepends"), "vulkan-headers", "Arch build dependencies")
@@ -49,8 +61,9 @@ arch_install = re.search(
 )
 if not arch_install:
     raise AssertionError("missing Arch Install dependencies workflow step")
+arch_install_tokens = workflow_run_tokens(arch_install.group("body"))
 for package in ("vulkan-headers", "vulkan-icd-loader"):
-    if not re.search(rf"\b{re.escape(package)}\b", arch_install.group("body")):
+    if package not in arch_install_tokens:
         raise AssertionError(f"Arch CI dependencies must explicitly install {package}")
 
 print("Release package Vulkan dependency contracts look correct.")
