@@ -165,19 +165,75 @@ def backtick_run_end(text: str, start: int) -> int:
     return end
 
 
+def blockquote_context(line: str):
+    depth = 0
+    while True:
+        match = re.match(r"^[ \t]{0,3}>[ \t]?", line)
+        if not match:
+            return depth, line
+        depth += 1
+        line = line[match.end() :]
+
+
+def line_block_kind(line: str) -> str:
+    """Classify block lines that cannot continue an inline-code paragraph."""
+    _, content = blockquote_context(line)
+    if not content.strip():
+        return "blank"
+    if is_indented_code(content):
+        return "opaque"
+    if re.match(r"^[ ]{0,3}(?:`{3,}|~{3,})", content):
+        return "opaque"
+    stripped = content.lstrip(" ")
+    lower = stripped.lower()
+    if (
+        lower.startswith(("<!--", "<?", "<![cdata["))
+        or re.match(r"<![A-Z]", stripped)
+        or re.match(r"</?(script|pre|style|textarea)(?:\s|>|$)", stripped, re.I)
+    ):
+        return "opaque"
+    if (
+        re.match(r"#{1,6}(?:\s|$)", stripped)
+        or re.match(r"(?:[-+*]|\d{1,9}[.)])\s+", stripped)
+        or re.match(r"(?:\*\s*){3,}$|(?:-\s*){3,}$|(?:_\s*){3,}$", stripped)
+    ):
+        return "single"
+    return "paragraph"
+
+
 def backtick_closer_map(text: str):
-    """Map opener runs to the next equal run within the same Markdown paragraph."""
+    """Map opener runs to equal runs in the same CommonMark inline container."""
     closers = {}
     segments = []
-    start = 0
+    paragraph_start = None
+    paragraph_depth = None
     offset = 0
+
+    def close_paragraph(end: int) -> None:
+        nonlocal paragraph_start, paragraph_depth
+        if paragraph_start is not None:
+            segments.append((paragraph_start, end))
+            paragraph_start = None
+            paragraph_depth = None
+
     for line in text.splitlines(keepends=True):
         line_end = offset + len(line)
-        if not fence_context_line(line).strip():
-            segments.append((start, offset))
-            start = line_end
+        depth, _ = blockquote_context(line)
+        kind = line_block_kind(line)
+        if kind == "paragraph":
+            if paragraph_start is None:
+                paragraph_start = offset
+                paragraph_depth = depth
+            elif depth != paragraph_depth:
+                close_paragraph(offset)
+                paragraph_start = offset
+                paragraph_depth = depth
+        else:
+            close_paragraph(offset)
+            if kind == "single":
+                segments.append((offset, line_end))
         offset = line_end
-    segments.append((start, len(text)))
+    close_paragraph(len(text))
 
     for segment_start, segment_end in segments:
         runs = []
@@ -192,9 +248,12 @@ def backtick_closer_map(text: str):
 
         next_by_length = {}
         for run_start, run_end in reversed(runs):
-            length = run_end - run_start
-            closers[run_start] = next_by_length.get(length)
-            next_by_length[length] = (run_start, run_end)
+            raw_length = run_end - run_start
+            opener_start = run_start + 1 if backtick_is_escaped(text, run_start) else run_start
+            opener_length = run_end - opener_start
+            if opener_length:
+                closers[opener_start] = next_by_length.get(opener_length)
+            next_by_length[raw_length] = (run_start, run_end)
     return closers
 
 
@@ -247,8 +306,14 @@ def strip_html_comments(text: str) -> str:
     output: list[str] = []
     fence = None
     in_comment = False
+    lines = text.splitlines(keepends=True)
+    suffix_has_comment_close = [False] * (len(lines) + 1)
+    for index in range(len(lines) - 1, -1, -1):
+        suffix_has_comment_close[index] = (
+            "-->" in lines[index] or suffix_has_comment_close[index + 1]
+        )
 
-    for line in text.splitlines(keepends=True):
+    for line_index, line in enumerate(lines):
         if fence is not None:
             output.append(line)
             fence, _ = advance_fence(fence, line)
@@ -284,6 +349,12 @@ def strip_html_comments(text: str) -> str:
                 visible.append(body[position:])
                 break
             visible.append(body[position:start])
+            if (
+                body.find("-->", start + 4) < 0
+                and not suffix_has_comment_close[line_index + 1]
+            ):
+                visible.append(body[start:])
+                break
             in_comment = True
             position = start + 4
 
@@ -295,6 +366,11 @@ def strip_html_comments(text: str) -> str:
 def verify_html_comment_parser() -> None:
     cases = (
         ("visible <!-- hidden --> prose", "visible  prose", "ordinary HTML comment"),
+        (
+            "visible <!-- unclosed Polaris-extra-x86_64.AppImage",
+            "visible <!-- unclosed Polaris-extra-x86_64.AppImage",
+            "unclosed comment marker rendered literally",
+        ),
         (
             "`<!--` Polaris-extra-x86_64.AppImage `-->`",
             "`<!--` Polaris-extra-x86_64.AppImage `-->`",
@@ -615,6 +691,13 @@ def verify_rendered_markdown_parser() -> None:
         print("Rendered Markdown treated escaped backticks as code", file=sys.stderr)
         sys.exit(1)
 
+    escaped_split_run = rendered_markdown(
+        r"\``<span hidden>Polaris-extra-x86_64.AppImage</span>`"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in escaped_split_run:
+        print("Escaping one backtick incorrectly escaped the entire run", file=sys.stderr)
+        sys.exit(1)
+
     escaped_closer = rendered_markdown(
         r"`<span hidden>Polaris-extra-x86_64.AppImage</span>\`"
     )
@@ -626,6 +709,9 @@ def verify_rendered_markdown_parser() -> None:
         "`\n\n<!-- Polaris-extra-x86_64.AppImage -->\n\n`",
         "`\n\n<span hidden>Polaris-extra-x86_64.AppImage</span>\n\n`",
         "> `\n>\n> <!-- Polaris-extra-x86_64.AppImage -->\n>\n> `",
+        "`\n<!-- Polaris-extra-x86_64.AppImage -->\n`",
+        "`\n<script>Polaris-extra-x86_64.AppImage</script>\n`",
+        "`\n> <!-- Polaris-extra-x86_64.AppImage -->\n`",
     ):
         if "Polaris-extra-x86_64.AppImage" in rendered_markdown(cross_block):
             print("Inline-code span crossed a Markdown paragraph boundary", file=sys.stderr)
