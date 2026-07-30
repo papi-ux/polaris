@@ -7,6 +7,7 @@ import {
   resolveStreamDisplayRuntimeNotice,
   streamDisplayModeAvailable,
   stripClientSettingsResponseOnly,
+  stripConfigResponseOnly,
 } from './client-settings-sync'
 
 describe('client settings sync helpers', () => {
@@ -228,5 +229,34 @@ describe('client settings sync helpers', () => {
     })
 
     expect(config).toEqual({ headless_mode: 'enabled' })
+  })
+
+  it('strips all GET-only runtime metadata before a config POST', () => {
+    const config = stripConfigResponseOnly({
+      headless_mode: 'enabled',
+      linux_stream_mode: 'headless_stream',
+      status: true,
+      platform: 'linux',
+      version: '1.3.2',
+      has_ai_api_key: true,
+      has_steamgriddb_api_key: true,
+      has_api_key: true,
+      vdisplayStatus: 1,
+      vdisplayAvailable: true,
+      vdisplayBackend: 'evdi',
+      runtime_backend: 'Labwc',
+      runtime_requested_headless: true,
+      runtime_effective_headless: true,
+      runtime_gpu_native_override_active: false,
+      stream_display_mode: 'Private Stream',
+      stream_path_id: 'headless_stream',
+      stream_path_label: 'Private Stream',
+      client_settings_available: true,
+    })
+
+    expect(config).toEqual({
+      headless_mode: 'enabled',
+      linux_stream_mode: 'headless_stream',
+    })
   })
 })
