@@ -105,6 +105,7 @@ done
 
 python3 <<'PY'
 from collections import Counter
+from html.parser import HTMLParser
 from pathlib import Path
 import re
 import shlex
@@ -243,6 +244,63 @@ def markdown_section(
     return "".join(lines[start:end])
 
 
+class VisibleHTMLText(HTMLParser):
+    """Collect browser-visible text while excluding hidden/raw non-content elements."""
+
+    void_tags = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+    noncontent_tags = {"script", "style", "template"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.stack = []
+        self.hidden_depth = 0
+
+    def _is_hidden(self, tag, attrs):
+        values = {name.lower(): (value or "") for name, value in attrs}
+        if tag in self.noncontent_tags or "hidden" in values:
+            return True
+        if values.get("aria-hidden", "").strip().lower() == "true":
+            return True
+        style = values.get("style", "")
+        return bool(re.search(r"(?:^|;)\s*display\s*:\s*none(?:\s*!important)?\s*(?:;|$)", style, re.I))
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        hidden = self._is_hidden(tag, attrs)
+        if tag in self.void_tags:
+            return
+        self.stack.append((tag, hidden))
+        if hidden:
+            self.hidden_depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        return
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                removed = self.stack[index:]
+                del self.stack[index:]
+                self.hidden_depth -= sum(1 for _, hidden in removed if hidden)
+                return
+
+    def handle_data(self, data):
+        if self.hidden_depth == 0:
+            self.parts.append(data)
+
+
+def visible_html_text(text: str) -> str:
+    parser = VisibleHTMLText()
+    parser.feed(text)
+    parser.close()
+    return "".join(parser.parts)
+
+
 def rendered_markdown(text: str) -> str:
     """Return visible Markdown text with fenced blocks and destinations excluded."""
     rendered: list[str] = []
@@ -257,25 +315,6 @@ def rendered_markdown(text: str) -> str:
 
     visible = "".join(rendered)
     visible = re.sub(
-        r"<(script|style|template)\b[^>]*>.*?</\1\s*>",
-        "",
-        visible,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    hidden_element = re.compile(
-        r"<([A-Za-z][\w:-]*)\b"
-        r"(?=[^>]*(?:\shidden(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+))?"
-        r"|\saria-hidden\s*=\s*(?:\"true\"|'true'|true)"
-        r"|\sstyle\s*=\s*(?:\"[^\"]*display\s*:\s*none[^\"]*\""
-        r"|'[^']*display\s*:\s*none[^']*')))"
-        r"[^>]*>.*?</\1\s*>",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    while True:
-        visible, removed = hidden_element.subn("", visible)
-        if removed == 0:
-            break
-    visible = re.sub(
         r"!?\[([^]]*)\]\((?:\\.|[^)\n])*\)",
         lambda match: match.group(1),
         visible,
@@ -285,8 +324,7 @@ def rendered_markdown(text: str) -> str:
         lambda match: match.group(1),
         visible,
     )
-    visible = re.sub(r"</?[A-Za-z][^>]*>", "", visible)
-    return visible
+    return visible_html_text(visible)
 
 
 def markdown_table(section: str, label: str) -> list[list[str]]:
