@@ -444,7 +444,7 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
 
 current_release = markdown_section(
     changelog,
-    "## v1.3.2 - 2026-07-29",
+    "## v1.3.2 - 2026-07-30",
     "## v1.3.1 - 2026-07-12",
 )
 current_release_prose = rendered_markdown(current_release)
