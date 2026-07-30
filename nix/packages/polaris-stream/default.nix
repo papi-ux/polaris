@@ -159,7 +159,7 @@ stdenv'.mkDerivation (finalAttrs: {
         inherit (finalAttrs) src version;
         pname = "polaris-browser-stream-helper";
         modRoot = "browser_stream_helper";
-        vendorHash = "sha256-U86YEOm+YaT4S1c7eE1WCKcrINb8b3RFl201JwNpKYA=";
+        vendorHash = "sha256-MEQl1/E6vm+wGRwNWNaRiXaoZZ+bEzi8ItVXEexHujI=";
         subPackages = [ "." ];
       }
     else
