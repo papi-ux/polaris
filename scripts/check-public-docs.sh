@@ -257,6 +257,25 @@ def rendered_markdown(text: str) -> str:
 
     visible = "".join(rendered)
     visible = re.sub(
+        r"<(script|style|template)\b[^>]*>.*?</\1\s*>",
+        "",
+        visible,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    hidden_element = re.compile(
+        r"<([A-Za-z][\w:-]*)\b"
+        r"(?=[^>]*(?:\shidden(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+))?"
+        r"|\saria-hidden\s*=\s*(?:\"true\"|'true'|true)"
+        r"|\sstyle\s*=\s*(?:\"[^\"]*display\s*:\s*none[^\"]*\""
+        r"|'[^']*display\s*:\s*none[^']*')))"
+        r"[^>]*>.*?</\1\s*>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    while True:
+        visible, removed = hidden_element.subn("", visible)
+        if removed == 0:
+            break
+    visible = re.sub(
         r"!?\[([^]]*)\]\((?:\\.|[^)\n])*\)",
         lambda match: match.group(1),
         visible,
