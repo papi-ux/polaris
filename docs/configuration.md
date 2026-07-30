@@ -46,6 +46,7 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
 | `headless_gamepad_isolation` | `enabled` | Hide host-connected gamepads from private headless streams; disable only when you intentionally want a wired host controller visible inside the stream |
+| `client_gamepad_seat_isolation` | `disabled` | Assign Polaris-created client gamepads to a dedicated Linux seat so other active-seat users do not receive automatic device ACLs |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
@@ -55,6 +56,31 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | `enable_discovery` | `enabled` | Advertise Polaris over mDNS |
 | `stream_audio` | `enabled` | Capture and stream audio |
 | `steamgriddb_api_key` | key | Cover art lookups for non-Steam apps |
+
+### Linux client-gamepad access boundary
+
+`headless_gamepad_isolation` controls the **opposite** direction: it hides controllers physically
+connected to the host from a private stream. It does not make a client-created virtual controller
+disappear from the host kernel.
+
+When `client_gamepad_seat_isolation` is enabled, Polaris marks client gamepads for the bundled host
+rules to assign them to the `seat-polaris` seat. This prevents logind from granting the active local
+desktop user an automatic `uaccess` ACL. The device nodes remain `root:input` with mode `0660`, so
+the Polaris streaming user must belong to the `input` group. The option is disabled by default to
+preserve existing virtual-controller identity and local access; enabling it gives isolated gamepads
+Polaris-specific device names so current Inputtino uinput backends can enforce the udev policy.
+
+Re-run `sudo polaris --setup-host` after upgrading so the installed udev rules understand the
+dedicated device names and marker. Existing virtual controller nodes keep their previous access policy
+until recreated; stop active streams and restart Polaris after host setup. AppImage users should
+re-run the AppImage install action for the same reason.
+
+This is a Unix-user boundary, not a same-account process sandbox. Local users who are deliberately
+members of `input`, and local applications running under the same Unix account as Polaris, can still
+open the virtual controller. For concurrent gaming, run Polaris under a dedicated Unix account and
+do not add local desktop users to `input`. Strong same-UID isolation requires a privileged broker,
+container/security-domain boundary, or equivalent system-level policy; a per-session Web toggle
+cannot provide it safely.
 
 ## Linux HDR and Main10
 

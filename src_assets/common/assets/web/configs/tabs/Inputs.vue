@@ -107,6 +107,13 @@ const config = ref(props.config)
                   v-model="config.headless_gamepad_isolation"
                   default="true"
         ></Checkbox>
+        <Checkbox class="mb-3"
+                  v-if="platform === 'linux'"
+                  id="client_gamepad_seat_isolation"
+                  locale-prefix="config"
+                  v-model="config.client_gamepad_seat_isolation"
+                  default="false"
+        ></Checkbox>
       </template>
 
       <div class="mb-3" v-if="config.controller === 'enabled'">

@@ -6,6 +6,8 @@
 #include <boost/locale.hpp>
 #include <inputtino/input.hpp>
 #include <libevdev/libevdev.h>
+#include <string>
+#include <string_view>
 
 // local includes
 #include "inputtino_common.h"
@@ -33,6 +35,19 @@ namespace platf::gamepad {
     }, joypad);
   }
 
+  isolation::client_gamepad_identity_t client_gamepad_identity(int globalIndex,
+                                                                std::string_view legacy_name,
+                                                                std::string_view isolated_name,
+                                                                std::string_view legacy_phys) {
+    return isolation::client_gamepad_identity(
+      config::input.client_gamepad_seat_isolation,
+      globalIndex,
+      legacy_name,
+      isolated_name,
+      legacy_phys
+    );
+  }
+
   void register_created_joypad_nodes(int globalIndex, const joypads_t &joypad) {
     isolation::register_virtual_gamepad_nodes(globalIndex, joypad_nodes(joypad));
   }
@@ -44,12 +59,19 @@ namespace platf::gamepad {
       device_id = std::format("02:00:00:00:10:{:02x}", globalIndex);
     }
 
-    return inputtino::XboxOneJoypad::create({.name = "Sunshine X-Box One (virtual) pad",
+    const auto identity = client_gamepad_identity(
+      globalIndex,
+      "Sunshine X-Box One (virtual) pad",
+      "Polaris X-Box One (virtual) pad",
+      device_id
+    );
+
+    return inputtino::XboxOneJoypad::create({.name = identity.name,
                                              // https://github.com/torvalds/linux/blob/master/drivers/input/joystick/xpad.c#L147
                                              .vendor_id = 0x045E,
                                              .product_id = 0x02EA,
                                              .version = 0x0408,
-                                             .device_phys = device_id,
+                                             .device_phys = identity.phys,
                                              .device_uniq = device_id});
   }
 
@@ -60,12 +82,19 @@ namespace platf::gamepad {
       device_id = std::format("02:00:00:00:20:{:02x}", globalIndex);
     }
 
-    return inputtino::SwitchJoypad::create({.name = "Sunshine Nintendo (virtual) pad",
+    const auto identity = client_gamepad_identity(
+      globalIndex,
+      "Sunshine Nintendo (virtual) pad",
+      "Polaris Nintendo (virtual) pad",
+      device_id
+    );
+
+    return inputtino::SwitchJoypad::create({.name = identity.name,
                                             // https://github.com/torvalds/linux/blob/master/drivers/hid/hid-ids.h#L981
                                             .vendor_id = 0x057e,
                                             .product_id = 0x2009,
                                             .version = 0x8111,
-                                            .device_phys = device_id,
+                                            .device_phys = identity.phys,
                                             .device_uniq = device_id});
   }
 
@@ -77,10 +106,20 @@ namespace platf::gamepad {
       device_mac = std::format("02:00:00:00:00:{:02x}", globalIndex);
     }
 
-    return inputtino::PS5Joypad::create({.name = "Sunshine PS5 (virtual) pad", .vendor_id = 0x054C, .product_id = 0x0CE6, .version = 0x8111, .device_phys = device_mac, .device_uniq = device_mac});
+    const auto identity = client_gamepad_identity(
+      globalIndex,
+      "Sunshine PS5 (virtual) pad",
+      "Polaris PS5 (virtual) pad",
+      device_mac
+    );
+
+    return inputtino::PS5Joypad::create({.name = identity.name, .vendor_id = 0x054C, .product_id = 0x0CE6, .version = 0x8111, .device_phys = identity.phys, .device_uniq = device_mac});
   }
 
   int alloc(input_raw_t *raw, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
+    BOOST_LOG(info) << "Gamepad " << id.globalIndex << " client seat isolation: "
+                    << (config::input.client_gamepad_seat_isolation ? "seat-polaris" : "disabled");
+
     ControllerType selectedGamepadType;
 
     if (config::input.gamepad == "xone"sv) {

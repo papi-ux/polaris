@@ -253,6 +253,7 @@ namespace args {
 
     std::cout
       << "Linux host setup complete."sv << std::endl
+      << "Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation."sv << std::endl
       << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl;
     return 0;
   }

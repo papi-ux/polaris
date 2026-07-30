@@ -365,6 +365,8 @@
     "gamepad_xone": "XOne (Xbox One)",
     "headless_gamepad_isolation": "Isolate Host Gamepads in Private Stream",
     "headless_gamepad_isolation_desc": "Prevents controllers physically connected to the host from appearing inside Private Stream sessions. Disable only when you intentionally use a host-wired controller, such as a DualSense for haptics or adaptive triggers.",
+    "client_gamepad_seat_isolation": "Isolate Client Gamepads from Other Linux Users",
+    "client_gamepad_seat_isolation_desc": "Disabled by default to preserve controller identity and local access. When enabled, uses Polaris-specific device names and a dedicated Linux seat so logind does not grant the active local desktop user automatic access. This does not isolate applications running under the same Unix account or users in the input group. Re-run Polaris host setup after upgrading, then stop active streams and restart Polaris so existing controller nodes are recreated.",
     "global_prep_cmd": "Command Preparations",
     "global_prep_cmd_desc": "Configure a list of commands to be executed before or after running any application. If any of the specified preparation commands fail, the application launch process will be aborted.",
     "global_state_cmd": "Resume/Pause Commands",
