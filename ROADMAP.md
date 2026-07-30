@@ -4,7 +4,7 @@ Polaris is public and usable today, but it is still early. This roadmap is meant
 
 ## Current Focus
 
-- Keep Fedora 42/43/44 and Arch release packages reliable.
+- Keep Fedora 44 and Arch release packages reliable.
 - Keep CachyOS and other pacman-compatible Arch derivatives close to the Arch package path.
 - Validate Bazzite as a tester host path using the Fedora RPM through rpm-ostree.
 - Promote Ubuntu 24.04 from experimental DEB support to a better-tested Debian-family path.
@@ -32,7 +32,7 @@ Polaris is public and usable today, but it is still early. This roadmap is meant
 ## Known Limits
 
 - Polaris is Linux-host-only today.
-- Fedora 42/43/44 and Arch have the recommended package paths.
+- Fedora 44 and Arch have the recommended package paths.
 - CachyOS generally follows the Arch package path, but derivative-specific gaps still need reports.
 - Bazzite and Ubuntu 24.04 are tester package paths.
 - openSUSE Tumbleweed is source-build supported; other distros are source-build/community-validation oriented.

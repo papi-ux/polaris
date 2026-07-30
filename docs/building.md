@@ -3,16 +3,15 @@
 Polaris is a Linux-first host today. The most validated install paths are the Fedora RPM and Arch
 package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). CachyOS and
 most pacman-compatible Arch derivatives should start with the Arch package path. Bazzite can use the
-matching Fedora RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both package paths
+Fedora 44 RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both package paths
 need broader real-hardware validation. openSUSE Tumbleweed is source-build supported with a dedicated
 [openSUSE guide](openSUSE.md); other distros remain source-build/community-validation oriented.
 
 ## Release packages
 
 ```bash
-fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm
+sudo dnf install ./Polaris-fedora44-x86_64.rpm
 sudo polaris --setup-host
 polaris
 ```
@@ -32,8 +31,7 @@ polaris
 ```
 
 ```bash
-fedora_version="$(rpm -E %fedora)"
-rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
+rpm_name="Polaris-fedora44-x86_64.rpm"
 wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
 sudo rpm-ostree install -r "./${rpm_name}"
 
@@ -52,7 +50,7 @@ those less-turnkey paths.
 
 | Host distro | Current path | Notes |
 | --- | --- | --- |
-| Fedora 42/43/44 | Published RPM assets | Most validated package path. |
+| Fedora 44 | Published RPM asset | Most validated package path. |
 | Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
 | CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
 | Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage and growing AMD/Mesa VAAPI validation, Steam/Game Mode needs more reports. |
@@ -210,8 +208,6 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 
 The public release assets are currently:
 
-- `Polaris-fedora42-x86_64.rpm`
-- `Polaris-fedora43-x86_64.rpm`
 - `Polaris-fedora44-x86_64.rpm`
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`

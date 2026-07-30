@@ -577,14 +577,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - fedora: '42'
-            cc: gcc-14
-            cxx: g++-14
-            boost_static: ON
-          - fedora: '43'
-            cc: gcc-14
-            cxx: g++-14
-            boost_static: ON
           - fedora: '44'
             cc: gcc-15
             cxx: g++-15
@@ -668,7 +660,7 @@ jobs:
 
           architecture="$(uname -m)"
           cuda_supported_architectures=("x86_64" "aarch64")
-          if [[ ! " ${cuda_supported_architectures[*]} " =~ " ${architecture} " ]]; then
+          if [[ " ${cuda_supported_architectures[*]} " != *" ${architecture} "* ]]; then
             echo "CUDA toolkit install skipped for unsupported architecture ${architecture}"
             exit 0
           fi
@@ -891,18 +883,6 @@ jobs:
           name: arch-package-outputs
           path: release-assets/raw/arch
 
-      - name: Download Fedora 42 RPM artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: fedora-42-rpm-artifacts
-          path: release-assets/raw/fedora42
-
-      - name: Download Fedora 43 RPM artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: fedora-43-rpm-artifacts
-          path: release-assets/raw/fedora43
-
       - name: Download Fedora 44 RPM artifacts
         uses: actions/download-artifact@v8
         with:
@@ -985,8 +965,6 @@ jobs:
             fi
           }
 
-          copy_fedora_rpms 42 release-assets/raw/fedora42
-          copy_fedora_rpms 43 release-assets/raw/fedora43
           copy_fedora_rpms 44 release-assets/raw/fedora44
 
           ubuntu_debs=()
@@ -1011,8 +989,16 @@ jobs:
           if ! gh release view "${POLARIS_PACKAGE_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${POLARIS_PACKAGE_REF_NAME}" \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
-              --notes "Automated Fedora, Ubuntu, and Arch release assets for ${POLARIS_PACKAGE_REF_NAME}."
+              --notes "Automated Fedora 44, Ubuntu, and Arch release assets for ${POLARIS_PACKAGE_REF_NAME}."
           fi
+
+          for legacy_asset in \
+            Polaris-fedora42-x86_64.rpm \
+            Polaris-fedora42-src.rpm \
+            Polaris-fedora43-x86_64.rpm \
+            Polaris-fedora43-src.rpm; do
+            gh release delete-asset "${POLARIS_PACKAGE_REF_NAME}" "${legacy_asset}" --yes >/dev/null 2>&1 || true
+          done
 
           gh release upload "${POLARIS_PACKAGE_REF_NAME}" release-assets/final/* --clobber
 
@@ -1021,8 +1007,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          asset_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora42-x86_64.rpm" or . == "Polaris-fedora43-x86_64.rpm" or . == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
-          if [ "${asset_count}" -ne 5 ]; then
-            echo "Expected Fedora 42, Fedora 43, Fedora 44, Ubuntu 24.04, and Arch binary release assets on ${POLARIS_PACKAGE_REF_NAME}, found ${asset_count}" >&2
+          supported_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
+          legacy_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(startswith("Polaris-fedora42-") or startswith("Polaris-fedora43-"))] | length')
+          if [ "${supported_count}" -ne 3 ] || [ "${legacy_count}" -ne 0 ]; then
+            echo "Expected Fedora 44, Ubuntu 24.04, and Arch binary assets with no Fedora 42/43 assets on ${POLARIS_PACKAGE_REF_NAME}; supported=${supported_count}, legacy=${legacy_count}" >&2
             exit 1
           fi

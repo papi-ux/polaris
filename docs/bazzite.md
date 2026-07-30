@@ -43,11 +43,10 @@ systemctl --user disable --now homebrew.sunshine.service 2>/dev/null || true
 systemctl --user disable --now app-dev.lizardbyte.app.Sunshine.service 2>/dev/null || true
 ```
 
-Install Polaris from the matching Fedora release RPM:
+Install Polaris from the Fedora 44 release RPM:
 
 ```bash
-fedora_version="$(rpm -E %fedora)"
-rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
+rpm_name="Polaris-fedora44-x86_64.rpm"
 wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
 sudo rpm-ostree install -r "./${rpm_name}"
 ```
@@ -244,12 +243,11 @@ warnings should be inspected next.
 
 ## Update
 
-Layer the newer matching Fedora RPM and reboot. `rpm-ostree` will stage the
+Layer the newer Fedora 44 RPM and reboot. `rpm-ostree` will stage the
 newer local RPM over the existing layered Polaris package:
 
 ```bash
-fedora_version="$(rpm -E %fedora)"
-rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
+rpm_name="Polaris-fedora44-x86_64.rpm"
 wget -O "${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
 sudo rpm-ostree install -r "./${rpm_name}"
 ```
@@ -359,7 +357,7 @@ Please include these details when reporting Bazzite issues:
 
 ## Current Status
 
-Fedora 42, Fedora 43, and Fedora 44 RPMs are release-tested in CI. Bazzite uses
-the matching Fedora RPM through `rpm-ostree`; `bazzite-nvidia-open:stable`
+Fedora 44 RPMs are release-tested in CI. Bazzite uses the Fedora 44 RPM through
+`rpm-ostree`; `bazzite-nvidia-open:stable`
 `44.20260430` has Desktop Mode service and port validation only. Game Mode still
 needs validation on a Bazzite image that exposes a real gamescope Steam session.

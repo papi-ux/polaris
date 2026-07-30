@@ -31,7 +31,7 @@ what the host is actually doing.
 >
 > Polaris is and will remain free and open source under GPLv3. It is maintainer-led and community-driven: development happens in public, contributions are welcome, and real Linux hardware testing and user feedback shape the roadmap.
 >
-> Fedora 42/43/44 and Arch Linux are the recommended package paths. CachyOS generally follows the Arch package path; Bazzite and Ubuntu 24.04 are tester package paths; openSUSE Tumbleweed builds from source with a dedicated guide.
+> Fedora 44 and Arch Linux are the recommended package paths. CachyOS generally follows the Arch package path; Bazzite and Ubuntu 24.04 are tester package paths; openSUSE Tumbleweed builds from source with a dedicated guide.
 
 > [!NOTE]
 > Start with **Headless Stream** if you want games to launch into a stream-only runtime without changing your KDE, GNOME, or wlroots desktop layout.
@@ -58,12 +58,11 @@ AI Auto Quality is optional. If you enable it, Polaris uses the provider you con
 
 ## Quick Start
 
-### Fedora 42/43/44
+### Fedora 44
 
 ```bash
-fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm
+sudo dnf install ./Polaris-fedora44-x86_64.rpm
 sudo polaris --setup-host
 polaris
 ```
@@ -108,8 +107,6 @@ Use the release package for your distro before considering source builds. Packag
 
 | Host | Best path |
 |---|---|
-| Fedora 42 | `Polaris-fedora42-x86_64.rpm` from the latest release |
-| Fedora 43 | `Polaris-fedora43-x86_64.rpm` from the latest release |
 | Fedora 44 | `Polaris-fedora44-x86_64.rpm` from the latest release |
 | Arch Linux | `Polaris-arch-x86_64.pkg.tar.zst` from the latest release |
 | CachyOS / Arch derivatives | Start with the Arch package; source/local package fallback if a derivative drifts |
@@ -128,7 +125,7 @@ Detailed source builds, local Arch package builds, distro dependency lists, open
 | Area | Status | Notes |
 |---|---|---|
 | Linux host OS | Supported | Polaris is Linux-only by design; Linux is the product focus, not a secondary target |
-| Fedora 42/43/44 | Recommended | Official RPM assets and most validated release path |
+| Fedora 44 | Recommended | Official RPM asset and most validated release path |
 | Arch Linux | Recommended | Official package asset |
 | CachyOS / Arch derivatives | Expected via Arch package | Pacman-compatible derivatives should start here; report derivative-specific dependency/runtime gaps |
 | Bazzite | Experimental | Layer the Fedora RPM with `rpm-ostree`; Desktop Mode validated on NVIDIA with Headless Stream; real Steam/Game Mode needs more coverage |
