@@ -21,7 +21,7 @@ Call out changes to authentication, pairing, trusted subnets, client commands, c
 Run the checks that match your change from a clean checkout or isolated worktree. Documentation, dependency, and release-package changes should include:
 
 ```bash
-./scripts/check-public-docs.sh
+bash scripts/check-public-docs.sh
 python3 scripts/check-release-package-dependencies.py
 npm ci
 npm audit --audit-level=high

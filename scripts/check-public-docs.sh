@@ -104,14 +104,37 @@ for expected_link in "${expected_nova_links[@]}"; do
 done
 
 python3 <<'PY'
+from collections import Counter
 from pathlib import Path
 import re
 import shlex
 import sys
 
 building = Path("docs/building.md").read_text(encoding="utf-8")
+contributing = Path(".github/CONTRIBUTING.md").read_text(encoding="utf-8")
 readme = Path("README.md").read_text(encoding="utf-8")
 changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
+
+
+def markdown_section(text: str, heading: str) -> str:
+    """Return one exact Markdown section, bounded by a same/higher-level heading."""
+    level = len(heading) - len(heading.lstrip("#"))
+    if level < 1 or heading[level:level + 1] != " ":
+        raise ValueError(f"Invalid heading: {heading}")
+
+    lines = text.splitlines(keepends=True)
+    starts = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == heading]
+    if len(starts) != 1:
+        print(f"Expected exactly one Markdown heading: {heading}", file=sys.stderr)
+        sys.exit(1)
+
+    start = starts[0] + 1
+    boundary = re.compile(rf"^#{{1,{level}}}\s+")
+    end = next(
+        (index for index in range(start, len(lines)) if boundary.match(lines[index])),
+        len(lines),
+    )
+    return "".join(lines[start:end])
 
 
 def bounded_release_section(text: str, current: str, following: str) -> str:
@@ -130,20 +153,22 @@ def bounded_release_section(text: str, current: str, following: str) -> str:
     return match.group("body")
 
 
+requirements_section = markdown_section(building, "### Requirements")
 required_compiler_row = re.compile(
     r"^\|\s*C\+\+23 compiler\s*\|\s*GCC or Clang\s*\|\s*$",
     re.MULTILINE,
 )
-if not required_compiler_row.search(building):
-    print("docs/building.md must declare C++23 in the requirements table", file=sys.stderr)
+if not required_compiler_row.search(requirements_section):
+    print("docs/building.md must declare C++23 in the Requirements table", file=sys.stderr)
     sys.exit(1)
 
+arch_section = markdown_section(building, "#### Arch / CachyOS")
 arch_block = re.search(
-    r"(?ms)^#### Arch / CachyOS\s*$.*?^```bash\s*$\n(?P<commands>.*?)^```\s*$",
-    building,
+    r"(?ms)^```bash\s*$\n(?P<commands>.*?)^```\s*$",
+    arch_section,
 )
 if not arch_block:
-    print("docs/building.md is missing the Arch/CachyOS install command", file=sys.stderr)
+    print("docs/building.md is missing the bounded Arch/CachyOS install command", file=sys.stderr)
     sys.exit(1)
 arch_tokens = set(shlex.split(arch_block.group("commands").replace("\\\n", " ")))
 for dependency in ("vulkan-headers", "vulkan-icd-loader"):
@@ -179,6 +204,7 @@ readme_release = re.search(
 if not readme_release:
     print("README is missing the bounded v1.3.2 summary", file=sys.stderr)
     sys.exit(1)
+readme_release_body = readme_release.group("body")
 required_readme_facts = (
     "webtransport-go v0.11.1",
     "quic-go v0.60.0",
@@ -191,9 +217,37 @@ required_readme_facts = (
     "GCC 15",
 )
 for fact in required_readme_facts:
-    if fact not in readme_release.group("body"):
+    if fact not in readme_release_body:
         print(f"README v1.3.2 summary is missing: {fact}", file=sys.stderr)
         sys.exit(1)
+
+expected_assets = Counter(
+    {
+        "Polaris-arch-x86_64.pkg.tar.zst": 1,
+        "Polaris-fedora44-x86_64.rpm": 1,
+        "Polaris-ubuntu24.04-x86_64.deb": 1,
+    }
+)
+asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
+for label, section in (
+    ("README v1.3.2 summary", readme_release_body),
+    ("v1.3.2 changelog", current_release),
+):
+    actual_assets = Counter(asset_pattern.findall(section))
+    if actual_assets != expected_assets:
+        print(
+            f"{label} must name exactly one of each supported asset; "
+            f"expected={dict(expected_assets)}, actual={dict(actual_assets)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+if "bash scripts/check-public-docs.sh" not in contributing:
+    print("CONTRIBUTING.md must invoke the non-executable checker through bash", file=sys.stderr)
+    sys.exit(1)
+if "./scripts/check-public-docs.sh" in contributing:
+    print("CONTRIBUTING.md must not execute the mode-100644 checker directly", file=sys.stderr)
+    sys.exit(1)
 PY
 
 echo "Public docs and release references look clean."
