@@ -114,6 +114,7 @@ set(TEST_FAST_SOURCES
 
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_executable_path.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
     )
 endif()

@@ -35,7 +35,6 @@
 #include <boost/process/v1/group.hpp>
 #include <boost/process/v1/handles.hpp>
 #include <boost/process/v1/io.hpp>
-#include <boost/process/v1/search_path.hpp>
 #include <boost/process/v1/start_dir.hpp>
 #include <fcntl.h>
 #include <unistd.h>
@@ -45,6 +44,7 @@
 #endif
 
 // local includes
+#include "executable_path.h"
 #include "graphics.h"
 #include "misc.h"
 #include "src/config.h"
@@ -516,11 +516,12 @@ std::string get_local_ip_for_gateway() {
     auto working_dir = boost::filesystem::path(std::getenv("HOME"));
     boost::process::v1::environment _env = boost::this_process::environment();
     std::error_code ec;
-    const auto opener = bp::search_path("xdg-open");
-    if (opener.empty()) {
+    const auto opener_path = linux_util::find_executable_in_path("xdg-open");
+    if (opener_path.empty()) {
       BOOST_LOG(warning) << "Couldn't open url ["sv << url << "]: xdg-open was not found in PATH"sv;
       return;
     }
+    const boost::filesystem::path opener(opener_path);
 
     auto child = bp::child(
       opener,
