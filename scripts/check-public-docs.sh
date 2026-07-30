@@ -186,15 +186,21 @@ def line_block_kind(line: str) -> str:
         return "opaque"
     stripped = content.lstrip(" ")
     lower = stripped.lower()
+    html_block_tag = (
+        r"address|article|aside|blockquote|body|details|dialog|div|dl|fieldset|"
+        r"figure|footer|form|h[1-6]|head|header|html|iframe|li|main|nav|ol|p|"
+        r"pre|script|section|style|summary|table|tbody|td|tfoot|th|thead|tr|ul"
+    )
     if (
         lower.startswith(("<!--", "<?", "<![cdata["))
         or re.match(r"<![A-Z]", stripped)
-        or re.match(r"</?(script|pre|style|textarea)(?:\s|>|$)", stripped, re.I)
+        or re.match(rf"</?(?:{html_block_tag})(?:\s|/?>|$)", stripped, re.I)
     ):
         return "opaque"
+    if re.match(r"(?:[-+*]|\d{1,9}[.)])\s+", stripped):
+        return "list"
     if (
         re.match(r"#{1,6}(?:\s|$)", stripped)
-        or re.match(r"(?:[-+*]|\d{1,9}[.)])\s+", stripped)
         or re.match(r"(?:\*\s*){3,}$|(?:-\s*){3,}$|(?:_\s*){3,}$", stripped)
     ):
         return "single"
@@ -228,6 +234,10 @@ def backtick_closer_map(text: str):
                 close_paragraph(offset)
                 paragraph_start = offset
                 paragraph_depth = depth
+        elif kind == "list":
+            close_paragraph(offset)
+            paragraph_start = offset
+            paragraph_depth = depth
         else:
             close_paragraph(offset)
             if kind == "single":
@@ -705,12 +715,26 @@ def verify_rendered_markdown_parser() -> None:
         print("Backslash inside code incorrectly escaped its closing delimiter", file=sys.stderr)
         sys.exit(1)
 
+    for list_code_span in (
+        "- `\n  <span hidden>Polaris-extra-x86_64.AppImage</span>\n  `",
+        "1. `\n   <span hidden>Polaris-extra-x86_64.AppImage</span>\n   `",
+    ):
+        if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(list_code_span):
+            print("Inline-code span was not preserved inside a list paragraph", file=sys.stderr)
+            sys.exit(1)
+
+    separate_list_items = "- `\n- <!-- Polaris-extra-x86_64.AppImage -->\n- `"
+    if "Polaris-extra-x86_64.AppImage" in rendered_markdown(separate_list_items):
+        print("Inline-code span crossed a list-item boundary", file=sys.stderr)
+        sys.exit(1)
+
     for cross_block in (
         "`\n\n<!-- Polaris-extra-x86_64.AppImage -->\n\n`",
         "`\n\n<span hidden>Polaris-extra-x86_64.AppImage</span>\n\n`",
         "> `\n>\n> <!-- Polaris-extra-x86_64.AppImage -->\n>\n> `",
         "`\n<!-- Polaris-extra-x86_64.AppImage -->\n`",
         "`\n<script>Polaris-extra-x86_64.AppImage</script>\n`",
+        "`\n<div hidden>Polaris-extra-x86_64.AppImage</div>\n`",
         "`\n> <!-- Polaris-extra-x86_64.AppImage -->\n`",
     ):
         if "Polaris-extra-x86_64.AppImage" in rendered_markdown(cross_block):
