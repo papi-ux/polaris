@@ -198,7 +198,8 @@ def line_block_kind(line: str) -> str:
     stripped = content.lstrip(" ")
     lower = stripped.lower()
     if (
-        lower.startswith(("<!--", "<?", "<![cdata["))
+        lower.startswith(("<!--", "<?"))
+        or stripped.startswith("<![CDATA[")
         or re.match(r"<![A-Z]", stripped)
         or re.match(
             rf"</?(?:{HTML_BLOCK_TAG_PATTERN})(?:\s|/?>|$)",
@@ -299,6 +300,32 @@ def backtick_closer_map(text: str):
                 closers[opener_start] = next_by_length.get(opener_length)
             next_by_length[raw_length] = (run_start, run_end)
     return closers
+
+
+def inline_code_ranges(text: str):
+    """Return actual non-overlapping code spans selected left to right."""
+    closers = backtick_closer_map(text)
+    ranges = []
+    position = 0
+    while position < len(text):
+        if text.startswith("<!--", position):
+            end = text.find("-->", position + 4)
+            if end < 0:
+                break
+            position = end + 3
+            continue
+        if text[position] == "`" and not backtick_is_escaped(text, position):
+            opener_end = backtick_run_end(text, position)
+            closing = closers.get(position)
+            if closing is not None:
+                closer_start, closer_end = closing
+                ranges.append((position, closer_start, closer_end))
+                position = closer_end
+                continue
+            position = opener_end
+            continue
+        position += 1
+    return ranges
 
 
 def protect_inline_code_markup(text: str) -> str:
@@ -669,12 +696,10 @@ def rendered_markdown(text: str) -> str:
     """Return visible Markdown text with fenced blocks and destinations excluded."""
     rendered: list[str] = []
     fence = None
-    closer_map = backtick_closer_map(text)
-    inline_ranges = sorted(
-        (opener, closer[1])
-        for opener, closer in closer_map.items()
-        if closer is not None
-    )
+    inline_ranges = [
+        (opener, closer_end)
+        for opener, _, closer_end in inline_code_ranges(text)
+    ]
     line_offset = 0
     inline_range_index = 0
     for line in text.splitlines(keepends=True):
@@ -813,6 +838,11 @@ def html_block_start(line: str):
     """Return a CommonMark raw-HTML block state for an opener line."""
     _, content = blockquote_context(line)
     stripped = content.lstrip(" ")
+    while True:
+        list_marker = re.match(r"(?:[-+*]|\d{1,9}[.)])\s+", stripped)
+        if list_marker is None:
+            break
+        stripped = stripped[list_marker.end() :].lstrip(" ")
     lower = stripped.lower()
     type_one = re.match(r"<(script|pre|style|textarea)(?:\s|>|$)", lower)
     if type_one:
@@ -821,7 +851,7 @@ def html_block_start(line: str):
         return ("until", "-->")
     if lower.startswith("<?"):
         return ("until", "?>")
-    if lower.startswith("<![cdata["):
+    if stripped.startswith("<![CDATA["):
         return ("until", "]]>")
     if re.match(r"<![A-Z]", stripped):
         return ("until", ">")
@@ -845,11 +875,10 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
     current: list[str] = []
     fence = None
     html_block = None
-    inline_ranges = sorted(
-        (opener, closer[0])
-        for opener, closer in backtick_closer_map(section).items()
-        if closer is not None
-    )
+    inline_ranges = [
+        (opener, closer_start)
+        for opener, closer_start, _ in inline_code_ranges(section)
+    ]
     inline_range_index = 0
     line_offset = 0
     for line in section.splitlines(keepends=True):
