@@ -25,6 +25,8 @@ namespace platf::gamepad {
 
   int alloc(input_raw_t *raw, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue);
 
+  void rebind_feedback(input_raw_t *raw, int nr, feedback_queue_t feedback_queue);
+
   void free(input_raw_t *raw, int nr);
 
   void update(input_raw_t *raw, int nr, const gamepad_state_t &gamepad_state);
