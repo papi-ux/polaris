@@ -808,7 +808,16 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
     blocks: list[list[str]] = []
     current: list[str] = []
     fence = None
-    for line in section.splitlines():
+    inline_ranges = [
+        (opener, closer[0])
+        for opener, closer in backtick_closer_map(section).items()
+        if closer is not None
+    ]
+    inline_range_index = 0
+    line_offset = 0
+    for line in section.splitlines(keepends=True):
+        line_start = line_offset
+        line_offset += len(line)
         fence, delimiter = advance_fence(fence, line)
         if delimiter:
             if current:
@@ -822,7 +831,23 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
                 blocks.append(current)
                 current = []
             continue
-        if line.strip().startswith("|"):
+        stripped_line = line.strip()
+        if stripped_line.startswith("|"):
+            pipe_position = line_start + line.index("|")
+            while (
+                inline_range_index < len(inline_ranges)
+                and inline_ranges[inline_range_index][1] <= pipe_position
+            ):
+                inline_range_index += 1
+            pipe_in_code_span = (
+                inline_range_index < len(inline_ranges)
+                and inline_ranges[inline_range_index][0] <= pipe_position
+            )
+            if pipe_in_code_span:
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
             current.append(line)
         elif current:
             blocks.append(current)
