@@ -910,10 +910,18 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
     current: list[str] = []
     fence = None
     html_block = None
-    inline_ranges = [
-        (opener, closer_start)
-        for opener, closer_start, _ in inline_code_ranges(section)
-    ]
+    inline_ranges = []
+    for opener, closer_start, _ in inline_code_ranges(section):
+        opener_line_start = section.rfind("\n", 0, opener) + 1
+        opener_line_end = section.find("\n", opener)
+        if opener_line_end < 0:
+            opener_line_end = len(section)
+        opener_line = section[opener_line_start:opener_line_end]
+        # GFM parses each table cell as its own inline container. A backtick
+        # opened inside a physical pipe row cannot hide later rows.
+        if opener_line.strip().startswith("|"):
+            continue
+        inline_ranges.append((opener, closer_start))
     inline_range_index = 0
     line_offset = 0
     for line in section.splitlines(keepends=True):
