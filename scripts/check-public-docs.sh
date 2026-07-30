@@ -116,7 +116,11 @@ readme = Path("README.md").read_text(encoding="utf-8")
 changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
 
 
-def markdown_section(text: str, heading: str) -> str:
+def markdown_section(
+    text: str,
+    heading: str,
+    expected_following=None,
+) -> str:
     """Return one exact Markdown section, bounded by a same/higher-level heading."""
     level = len(heading) - len(heading.lstrip("#"))
     if level < 1 or heading[level:level + 1] != " ":
@@ -130,10 +134,29 @@ def markdown_section(text: str, heading: str) -> str:
 
     start = starts[0] + 1
     boundary = re.compile(rf"^#{{1,{level}}}\s+")
-    end = next(
-        (index for index in range(start, len(lines)) if boundary.match(lines[index])),
-        len(lines),
-    )
+    fence = None
+    end = len(lines)
+    for index in range(start, len(lines)):
+        fence_match = re.match(r"^\s{0,3}(`{3,}|~{3,})", lines[index])
+        if fence_match:
+            marker = fence_match.group(1)
+            if fence is None:
+                fence = (marker[0], len(marker))
+            elif marker[0] == fence[0] and len(marker) >= fence[1]:
+                fence = None
+            continue
+        if fence is None and boundary.match(lines[index]):
+            end = index
+            break
+    if expected_following is not None:
+        actual_following = lines[end].rstrip("\r\n") if end < len(lines) else None
+        if actual_following != expected_following:
+            print(
+                f"Expected {expected_following!r} immediately after {heading!r}; "
+                f"found {actual_following!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     return "".join(lines[start:end])
 
 
@@ -188,23 +211,11 @@ def shell_commands(block: str) -> list[list[str]]:
     return commands
 
 
-def bounded_release_section(text: str, current: str, following: str) -> str:
-    current_heading = rf"^## {re.escape(current)}(?:\s+-[^\n]+)?\s*$"
-    following_heading = rf"^## {re.escape(following)}(?:\s+-[^\n]+)?\s*$"
-    match = re.search(
-        rf"(?ms){current_heading}\n(?P<body>.*?)(?={following_heading})",
-        text,
-    )
-    if not match:
-        print(
-            f"Could not find exact, bounded {current} -> {following} changelog headings",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return match.group("body")
-
-
-requirements_section = markdown_section(building, "### Requirements")
+requirements_section = markdown_section(
+    building,
+    "### Requirements",
+    "### Example packages",
+)
 requirements_rows = markdown_table(requirements_section, "docs/building.md Requirements")
 compiler_rows = [row for row in requirements_rows if row and row[0].startswith("C++")]
 if compiler_rows != [["C++23 compiler", "GCC or Clang"]]:
@@ -214,7 +225,11 @@ if compiler_rows != [["C++23 compiler", "GCC or Clang"]]:
     )
     sys.exit(1)
 
-arch_section = markdown_section(building, "#### Arch / CachyOS")
+arch_section = markdown_section(
+    building,
+    "#### Arch / CachyOS",
+    "#### openSUSE Tumbleweed",
+)
 arch_block = re.search(
     r"(?ms)^```bash\s*$\n(?P<commands>.*?)^```\s*$",
     arch_section,
@@ -240,7 +255,11 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
         )
         sys.exit(1)
 
-current_release = bounded_release_section(changelog, "v1.3.2", "v1.3.1")
+current_release = markdown_section(
+    changelog,
+    "## v1.3.2 - 2026-07-29",
+    "## v1.3.1 - 2026-07-12",
+)
 required_release_facts = (
     "webtransport-go v0.11.1",
     "quic-go v0.60.0",
@@ -258,14 +277,11 @@ for fact in required_release_facts:
         print(f"v1.3.2 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
-readme_release = re.search(
-    r"(?ms)^## What is New in v1\.3\.2\s*$\n(?P<body>.*?)(?=^## Install\s*$)",
+readme_release_body = markdown_section(
     readme,
+    "## What is New in v1.3.2",
+    "## Install",
 )
-if not readme_release:
-    print("README is missing the bounded v1.3.2 summary", file=sys.stderr)
-    sys.exit(1)
-readme_release_body = readme_release.group("body")
 required_readme_facts = (
     "webtransport-go v0.11.1",
     "quic-go v0.60.0",
