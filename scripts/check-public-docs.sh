@@ -175,6 +175,16 @@ def blockquote_context(line: str):
         line = line[match.end() :]
 
 
+HTML_BLOCK_TAG_PATTERN = (
+    r"address|article|aside|base|basefont|blockquote|body|caption|center|col|"
+    r"colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
+    r"footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|"
+    r"li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|"
+    r"pre|script|search|section|style|summary|table|tbody|td|textarea|tfoot|"
+    r"th|thead|title|tr|track|ul"
+)
+
+
 def line_block_kind(line: str) -> str:
     """Classify block lines that cannot continue an inline-code paragraph."""
     _, content = blockquote_context(line)
@@ -187,18 +197,14 @@ def line_block_kind(line: str) -> str:
         return "opaque"
     stripped = content.lstrip(" ")
     lower = stripped.lower()
-    html_block_tag = (
-        r"address|article|aside|base|basefont|blockquote|body|caption|center|col|"
-        r"colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
-        r"footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|"
-        r"li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|"
-        r"pre|script|search|section|style|summary|table|tbody|td|textarea|tfoot|"
-        r"th|thead|title|tr|track|ul"
-    )
     if (
         lower.startswith(("<!--", "<?", "<![cdata["))
         or re.match(r"<![A-Z]", stripped)
-        or re.match(rf"</?(?:{html_block_tag})(?:\s|/?>|$)", stripped, re.I)
+        or re.match(
+            rf"</?(?:{HTML_BLOCK_TAG_PATTERN})(?:\s|/?>|$)",
+            stripped,
+            re.I,
+        )
     ):
         return "opaque"
     if re.match(r"(?:[-+*]|\d{1,9}[.)])\s+", stripped):
@@ -664,11 +670,11 @@ def rendered_markdown(text: str) -> str:
     rendered: list[str] = []
     fence = None
     closer_map = backtick_closer_map(text)
-    inline_ranges = [
+    inline_ranges = sorted(
         (opener, closer[1])
         for opener, closer in closer_map.items()
         if closer is not None
-    ]
+    )
     line_offset = 0
     inline_range_index = 0
     for line in text.splitlines(keepends=True):
@@ -803,21 +809,59 @@ def verify_rendered_markdown_parser() -> None:
 verify_rendered_markdown_parser()
 
 
+def html_block_start(line: str):
+    """Return a CommonMark raw-HTML block state for an opener line."""
+    _, content = blockquote_context(line)
+    stripped = content.lstrip(" ")
+    lower = stripped.lower()
+    type_one = re.match(r"<(script|pre|style|textarea)(?:\s|>|$)", lower)
+    if type_one:
+        return ("until", f"</{type_one.group(1)}>")
+    if lower.startswith("<!--"):
+        return ("until", "-->")
+    if lower.startswith("<?"):
+        return ("until", "?>")
+    if lower.startswith("<![cdata["):
+        return ("until", "]]>")
+    if re.match(r"<![A-Z]", stripped):
+        return ("until", ">")
+    if re.match(rf"</?(?:{HTML_BLOCK_TAG_PATTERN})(?:\s|/?>|$)", stripped, re.I):
+        return ("blank", "")
+    if re.match(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s+.*)?/?>\s*$", stripped):
+        return ("blank", "")
+    return None
+
+
+def html_block_finished(state, line: str) -> bool:
+    mode, terminator = state
+    if mode == "blank":
+        return not fence_context_line(line).strip()
+    return terminator in line.lower()
+
+
 def markdown_table(section: str, label: str) -> list[list[str]]:
     """Parse the first contiguous Markdown table in a bounded section."""
     blocks: list[list[str]] = []
     current: list[str] = []
     fence = None
-    inline_ranges = [
+    html_block = None
+    inline_ranges = sorted(
         (opener, closer[0])
         for opener, closer in backtick_closer_map(section).items()
         if closer is not None
-    ]
+    )
     inline_range_index = 0
     line_offset = 0
     for line in section.splitlines(keepends=True):
         line_start = line_offset
         line_offset += len(line)
+        if html_block is not None:
+            if html_block_finished(html_block, line):
+                html_block = None
+            if current:
+                blocks.append(current)
+                current = []
+            continue
         fence, delimiter = advance_fence(fence, line)
         if delimiter:
             if current:
@@ -825,6 +869,14 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
                 current = []
             continue
         if fence is not None:
+            continue
+        new_html_block = html_block_start(line)
+        if new_html_block is not None:
+            if not html_block_finished(new_html_block, line):
+                html_block = new_html_block
+            if current:
+                blocks.append(current)
+                current = []
             continue
         if is_indented_code(line):
             if current:
