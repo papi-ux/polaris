@@ -56,6 +56,15 @@ TEST(ConfigValidationTests, AcceptsNvencSplitEncodeModeConfigKey) {
   EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
 }
 
+TEST(ConfigValidationTests, AcceptsClientGamepadSeatIsolationConfigKey) {
+  nlohmann::json payload = {
+    {"client_gamepad_seat_isolation", "enabled"}
+  };
+
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+}
+
 TEST(AppValidationTests, AcceptsAWellFormedAppPayload) {
   nlohmann::json payload = {
     {"name", "Nova"},

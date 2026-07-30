@@ -1,11 +1,24 @@
-# Allows Polaris to access /dev/uinput
+# Allows Polaris to create virtual input devices.
 KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", GROUP="input", MODE="0660", TAG+="uaccess"
-
-# Allows Polaris to access /dev/uhid
 KERNEL=="uhid", GROUP="input", MODE="0660", TAG+="uaccess"
 
-# Joypads
-KERNEL=="hidraw*", ATTRS{name}=="Polaris PS5 (virtual) pad", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEMS=="input", ATTRS{name}=="Polaris X-Box One (virtual) pad", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEMS=="input", ATTRS{name}=="Polaris gamepad (virtual) motion sensors", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEMS=="input", ATTRS{name}=="Polaris Nintendo (virtual) pad", GROUP="input", MODE="0660", TAG+="uaccess"
+# Legacy Sunshine names preserve active-seat access when isolation is disabled.
+# Polaris names are emitted only when client_gamepad_seat_isolation is enabled.
+KERNEL=="hidraw*", ATTRS{name}=="Sunshine PS5 (virtual) pad", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{name}=="Polaris PS5 (virtual) pad", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+
+SUBSYSTEMS=="input", ATTRS{name}=="Sunshine X-Box One (virtual) pad", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEMS=="input", ATTRS{name}=="Sunshine Nintendo (virtual) pad", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEMS=="input", ATTRS{name}=="Sunshine PS5 (virtual) pad*", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEMS=="input", ATTRS{name}=="Sunshine gamepad (virtual) motion sensors", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEMS=="input", ATTRS{name}=="Polaris X-Box One (virtual) pad", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+SUBSYSTEMS=="input", ATTRS{name}=="Polaris Nintendo (virtual) pad", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+SUBSYSTEMS=="input", ATTRS{name}=="Polaris PS5 (virtual) pad*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+SUBSYSTEMS=="input", ATTRS{name}=="Polaris gamepad (virtual) motion sensors", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+
+# Dedicated marker emitted when client_gamepad_seat_isolation is enabled.
+# Assigning the device to a dedicated seat prevents logind from granting the
+# active local desktop user an automatic uaccess ACL. The input-group boundary
+# remains explicit: same-UID processes and members of input are not isolated.
+KERNEL=="hidraw*", ATTRS{phys}=="polaris/client-gamepad-seat-isolated/*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+SUBSYSTEMS=="input", ATTRS{phys}=="polaris/client-gamepad-seat-isolated/*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
