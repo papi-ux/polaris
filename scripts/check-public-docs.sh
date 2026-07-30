@@ -165,16 +165,25 @@ def backtick_run_end(text: str, start: int) -> int:
     return end
 
 
-def matching_backtick_run(text: str, start: int, length: int):
-    position = start
-    while True:
-        position = text.find("`", position)
-        if position < 0:
-            return None
-        end = backtick_run_end(text, position)
-        if not backtick_is_escaped(text, position) and end - position == length:
-            return position, end
-        position = end
+def backtick_closer_map(text: str):
+    """Map each real backtick run to its next equal-length run in linear time."""
+    runs = []
+    position = 0
+    while position < len(text):
+        if text[position] == "`" and not backtick_is_escaped(text, position):
+            end = backtick_run_end(text, position)
+            runs.append((position, end))
+            position = end
+            continue
+        position += 1
+
+    next_by_length = {}
+    closers = {}
+    for start, end in reversed(runs):
+        length = end - start
+        closers[start] = next_by_length.get(length)
+        next_by_length[length] = (start, end)
+    return closers
 
 
 def protect_inline_code_markup(text: str) -> str:
@@ -182,6 +191,7 @@ def protect_inline_code_markup(text: str) -> str:
     if INLINE_CODE_LT in text or INLINE_CODE_GT in text:
         raise ValueError("Markdown contains reserved inline-code sentinel text")
 
+    closers = backtick_closer_map(text)
     output = []
     position = 0
     while position < len(text):
@@ -196,11 +206,7 @@ def protect_inline_code_markup(text: str) -> str:
 
         if text[position] == "`" and not backtick_is_escaped(text, position):
             opener_end = backtick_run_end(text, position)
-            closing = matching_backtick_run(
-                text,
-                opener_end,
-                opener_end - position,
-            )
+            closing = closers.get(position)
             if closing is not None:
                 _, closer_end = closing
                 span = text[position:closer_end]
