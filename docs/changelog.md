@@ -5,13 +5,14 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
-## v1.3.2 - Unreleased
+## v1.3.2 - 2026-07-29
 
 Reliability patch focused on stream lifecycle, Linux private-session isolation, reconnect recovery, and truthful host diagnostics.
 
 - Hardened RTSP follow-up control admission, live-session command ownership, session teardown, and serialized PulseAudio operations
 - Prevented private-stream controller input from also navigating host Steam Big Picture while preserving normal game input
 - Hardened private Steam teardown ownership and bounded interrupted process waits without broadly terminating desktop Steam
+- Prevented private-session relaunch races by waiting for the prior Steam singleton to be fully released
 - Preserved authenticated web sessions across host restarts and improved recovery from transient host outages
 - Tolerated near-target stream FPS so healthy sessions are not mislabeled as degraded
 - Exposed clearer Linux GPU probe topology diagnostics for capture-path troubleshooting
@@ -28,6 +29,7 @@ Reliability patch focused on stream lifecycle, Linux private-session isolation, 
 - Enable **Gamescope Stream** ownership: attach idle `gamescope-0` (start `polaris-gamescope-idle` if needed) or spawn owned headless; wrap app launches into that runtime; never use `gamescope-1` for portal.
 - Harden portal/PipeWire capture: disconnect under loop lock; keep restore_token with invalidate+retry on SelectSources failure; wait for `AvailableCursorModes` ≠ 0; shared ownership so release cannot UAF negotiate/capture waiters.
 - Solid-base stop path: Moonlight `/cancel` responds before nested teardown; owner cancel ignores stale sessiontoken (case-insensitive UUID); Browser Stream signals shutdown, **releases portal/PipeWire**, then joins capture (bounded) **before** pidfd-killing gamescope/labwc; `terminate_impl` and WebUI disconnect share the same prepare path.
+- Harden Gamescope orphan recovery and nested teardown with generation-pinned socket reclamation, shared shell/C++ ownership locking, atomic session credentials, exact private-SID/pidfd cleanup, and fail-closed portal/idle rebinding.
 - Dashboard preview tries labwc, gamescope-0/1, host Wayland (grim), then spectacle — works across stream paths.
 - Web UI: selectable path cards write full config (including dongle outputs and gamescope/portal capture).
 - SB-5 mode-neutral Steam apps (issue #5): migration v9 + load-time normalize unwrap `polaris-gamescope-session` hardwires to `steam-appid` + detached `rungameid`; gamescope path applies attach X11 env (no host Wayland) via `stream_runtime::wrap_cmd` / process. Optional Steam Big Picture may keep nested WSI shell.
