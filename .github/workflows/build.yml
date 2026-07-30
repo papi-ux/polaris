@@ -37,6 +37,9 @@ jobs:
       - name: Install web dependencies
         run: npm ci --no-audit --fund=false
 
+      - name: Audit web dependencies
+        run: npm audit --audit-level=high
+
       - name: Lint web UI
         run: npm run lint
 
