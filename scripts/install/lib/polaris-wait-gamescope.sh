@@ -56,7 +56,7 @@ if [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
     exit 1
   }
   echo "polaris: complete credentialed nested recovery" >&2
-  POLARIS_SESSION_INSTANCE_ID= "$session_cmd" stop || exit 1
+  POLARIS_SESSION_INSTANCE_ID='' "$session_cmd" stop || exit 1
   [ ! -e "$rt/polaris-gamescope-wsi-nested" ] || exit 1
 elif [ ! -S "$rt/gamescope-0" ]; then
   echo "polaris: restore missing idle gamescope-0" >&2
