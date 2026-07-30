@@ -60,13 +60,15 @@ export function clampPlannerScale(value) {
 }
 
 export function buildResolutionPlanner({
+  sourceMode,
   fallbackMode = '',
   device = null,
   customScale = 1,
   showAdvanced = false,
   limits = DEFAULT_LIMITS,
 } = {}) {
-  const base = normalizeDevice(device || parseDisplayMode(fallbackMode))
+  const planningSourceMode = sourceMode === undefined ? fallbackMode : sourceMode
+  const base = normalizeDevice(device || parseDisplayMode(planningSourceMode))
   const effectiveLimits = { ...DEFAULT_LIMITS, ...(limits || {}) }
   const customFactor = clampPlannerScale(customScale)
 
