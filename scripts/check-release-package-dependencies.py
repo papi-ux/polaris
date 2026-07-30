@@ -42,15 +42,29 @@ def workflow_run_tokens(step: str) -> list[str]:
     if not run:
         raise AssertionError("missing shell run block in workflow step")
     script = "\n".join(line[10:] for line in run.group("script").splitlines())
-    lexer = shlex.shlex(script.replace("\\\n", " "), posix=True, punctuation_chars=";&|")
-    lexer.whitespace_split = True
-    lexer.commenters = "#"
-    return list(lexer)
+    tokens: list[str] = []
+    for line in script.replace("\\\n", " ").splitlines():
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        line_tokens = list(lexer)
+        if not line_tokens:
+            continue
+        if tokens and tokens[-1] != ";":
+            tokens.append(";")
+        tokens.extend(line_tokens)
+    return tokens
 
 
-def contains_subsequence(tokens: list[str], expected: list[str]) -> bool:
+def contains_command(tokens: list[str], expected: list[str]) -> bool:
     width = len(expected)
-    return any(tokens[index:index + width] == expected for index in range(len(tokens) - width + 1))
+    boundaries = {";", "&&", "||", "do", "then"}
+    for index in range(len(tokens) - width + 1):
+        if tokens[index:index + width] != expected:
+            continue
+        if index == 0 or tokens[index - 1] in boundaries:
+            return True
+    return False
 
 
 arch = read("packaging/linux/Arch/PKGBUILD")
@@ -63,7 +77,10 @@ if not re.search(r"(?m)^BuildRequires:\s+vulkan-loader-devel\s*$", fedora):
 
 workflow = read(".github/workflows/build.yml")
 fedora_job = workflow_job(workflow, "fedora-rpm-build")
-fedora_versions = re.findall(r'''(?m)^          - fedora:\s*['"]?([0-9]+)['"]?\s*$''', fedora_job)
+fedora_versions = re.findall(
+    r'''(?m)(?:^\s*-\s*|[{,]\s*)['"]?fedora['"]?\s*:\s*['"]?([0-9]+)['"]?(?=\s*(?:[,}]|#|$))''',
+    fedora_job,
+)
 if fedora_versions != ["44"]:
     raise AssertionError(f"Fedora CI matrix must contain only Fedora 44, found {fedora_versions}")
 for legacy_version in ("42", "43"):
@@ -92,7 +109,7 @@ for legacy_version in ("42", "43"):
 cleanup_command = [
     "gh", "release", "delete-asset", "${POLARIS_PACKAGE_REF_NAME}", "${legacy_asset}", "--yes",
 ]
-if not contains_subsequence(release_upload_tokens, cleanup_command):
+if not contains_command(release_upload_tokens, cleanup_command):
     raise AssertionError("release workflow must invoke gh release delete-asset for each stale Fedora asset")
 release_verify = re.search(
     r"(?ms)^      - name: Verify release assets on GitHub release\n(?P<body>.*?)(?=^      - name:|\Z)",
@@ -100,13 +117,16 @@ release_verify = re.search(
 )
 if not release_verify:
     raise AssertionError("missing release asset verification workflow step")
-release_verify_body = release_verify.group("body")
-legacy_guard = 'if [ "${supported_count}" -ne 3 ] || [ "${legacy_count}" -ne 0 ]; then'
-if legacy_guard not in release_verify_body:
+release_verify_tokens = workflow_run_tokens(release_verify.group("body"))
+legacy_guard = [
+    "if", "[", "${supported_count}", "-ne", "3", "]", "||",
+    "[", "${legacy_count}", "-ne", "0", "]", ";", "then",
+]
+if not contains_command(release_verify_tokens, legacy_guard):
     raise AssertionError("release verification must fail when legacy Fedora assets remain")
 for legacy_version in ("42", "43"):
     legacy_prefix = f'startswith("Polaris-fedora{legacy_version}-")'
-    if legacy_prefix not in release_verify_body:
+    if not any(legacy_prefix in token for token in release_verify_tokens):
         raise AssertionError(f"release verification must count Fedora {legacy_version} assets")
 arch_job = workflow_job(workflow, "arch-build")
 arch_install = re.search(
