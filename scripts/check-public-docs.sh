@@ -145,13 +145,281 @@ def advance_fence(fence, line: str):
     return fence, False
 
 
+INLINE_CODE_LT = "\uf000inline-code-lt\uf001"
+INLINE_CODE_GT = "\uf000inline-code-gt\uf001"
+
+
+def backtick_is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
+
+
+def backtick_run_end(text: str, start: int) -> int:
+    end = start
+    while end < len(text) and text[end] == "`":
+        end += 1
+    return end
+
+
+def blockquote_context(line: str):
+    depth = 0
+    while True:
+        match = re.match(r"^[ \t]{0,3}>[ \t]?", line)
+        if not match:
+            return depth, line
+        depth += 1
+        line = line[match.end() :]
+
+
+HTML_BLOCK_TAG_PATTERN = (
+    r"address|article|aside|base|basefont|blockquote|body|caption|center|col|"
+    r"colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
+    r"footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|"
+    r"li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|"
+    r"pre|script|search|section|style|summary|table|tbody|td|textarea|tfoot|"
+    r"th|thead|title|tr|track|ul"
+)
+
+
+def line_block_kind(line: str) -> str:
+    """Classify block lines that cannot continue an inline-code paragraph."""
+    _, content = blockquote_context(line)
+    if not content.strip():
+        return "blank"
+    if is_indented_code(content):
+        return "indented"
+    _, fence_delimiter = advance_fence(None, content)
+    if fence_delimiter:
+        return "opaque"
+    stripped = content.lstrip(" ")
+    lower = stripped.lower()
+    if (
+        lower.startswith(("<!--", "<?"))
+        or stripped.startswith("<![CDATA[")
+        or re.match(r"<![A-Z]", stripped)
+        or re.match(
+            rf"</?(?:{HTML_BLOCK_TAG_PATTERN})(?:\s|/?>|$)",
+            stripped,
+            re.I,
+        )
+    ):
+        return "opaque"
+    if re.match(r"(?:[-+*]|\d{1,9}[.)])\s+", stripped):
+        return "list"
+    if (
+        re.match(r"#{1,6}(?:\s|$)", stripped)
+        or re.match(r"(?:\*\s*){3,}$|(?:-\s*){3,}$|(?:_\s*){3,}$", stripped)
+    ):
+        return "single"
+    return "paragraph"
+
+
+def list_content_indent(line: str):
+    _, content = blockquote_context(line)
+    match = re.match(r"^(?:[-+*]|\d{1,9}[.)])([ \t]+)", content.lstrip(" "))
+    if match is None:
+        return None
+    marker_offset = len(content) - len(content.lstrip(" "))
+    prefix = content[:marker_offset] + content.lstrip(" ")[: match.end()]
+    return len(prefix.expandtabs(4))
+
+
+def backtick_closer_map(text: str):
+    """Map opener runs to equal runs in the same CommonMark inline container."""
+    closers = {}
+    segments = []
+    paragraph_start = None
+    paragraph_depth = None
+    paragraph_list_indent = None
+    offset = 0
+
+    def close_paragraph(end: int) -> None:
+        nonlocal paragraph_start, paragraph_depth, paragraph_list_indent
+        if paragraph_start is not None:
+            segments.append((paragraph_start, end))
+            paragraph_start = None
+            paragraph_depth = None
+            paragraph_list_indent = None
+
+    for line in text.splitlines(keepends=True):
+        line_end = offset + len(line)
+        depth, _ = blockquote_context(line)
+        kind = line_block_kind(line)
+        if (
+            kind == "indented"
+            and paragraph_list_indent is not None
+            and depth == paragraph_depth
+        ):
+            kind = "paragraph"
+        if kind == "paragraph":
+            if paragraph_start is None:
+                paragraph_start = offset
+                paragraph_depth = depth
+                paragraph_list_indent = None
+            elif depth > paragraph_depth:
+                close_paragraph(offset)
+                paragraph_start = offset
+                paragraph_depth = depth
+                paragraph_list_indent = None
+            elif depth < paragraph_depth:
+                # Unmarked lazy blockquote continuation remains in the open paragraph.
+                pass
+        elif kind == "list":
+            close_paragraph(offset)
+            paragraph_start = offset
+            paragraph_depth = depth
+            paragraph_list_indent = list_content_indent(line)
+        else:
+            close_paragraph(offset)
+            if kind == "single":
+                segments.append((offset, line_end))
+        offset = line_end
+    close_paragraph(len(text))
+
+    for segment_start, segment_end in segments:
+        cached_backticks = {}
+        scanned_to_end = False
+        position = segment_start
+        while position < segment_end:
+            if text.startswith("<!--", position):
+                comment_end = text.find("-->", position + 4, segment_end)
+                if comment_end < 0:
+                    break
+                position = comment_end + 3
+                continue
+            if text[position] != "`":
+                position += 1
+                continue
+
+            run_start = position
+            run_end = backtick_run_end(text, run_start)
+            opener_start = (
+                run_start + 1 if backtick_is_escaped(text, run_start) else run_start
+            )
+            opener_length = run_end - opener_start
+            if opener_length == 0:
+                position = run_end
+                continue
+            opener_end = run_end
+
+            if (
+                scanned_to_end
+                and cached_backticks.get(opener_length, 0) <= opener_end
+            ):
+                closers[opener_start] = None
+                position = opener_end
+                continue
+
+            scan = opener_end
+            closing = None
+            while scan < segment_end:
+                next_run = text.find("`", scan, segment_end)
+                if next_run < 0:
+                    break
+                next_end = backtick_run_end(text, next_run)
+                next_length = next_end - next_run
+                cached_backticks[next_length] = next_run
+                if next_length == opener_length:
+                    closing = (next_run, next_end)
+                    break
+                scan = next_end
+
+            closers[opener_start] = closing
+            if closing is None:
+                scanned_to_end = True
+                position = opener_end
+            else:
+                position = closing[1]
+    return closers
+
+
+def inline_code_ranges(text: str):
+    """Return actual non-overlapping code spans selected left to right."""
+    closers = backtick_closer_map(text)
+    ranges = []
+    position = 0
+    while position < len(text):
+        if text.startswith("<!--", position):
+            end = text.find("-->", position + 4)
+            if end < 0:
+                break
+            position = end + 3
+            continue
+        if text[position] == "`" and not backtick_is_escaped(text, position):
+            opener_end = backtick_run_end(text, position)
+            closing = closers.get(position)
+            if closing is not None:
+                closer_start, closer_end = closing
+                ranges.append((position, closer_start, closer_end))
+                position = closer_end
+                continue
+            position = opener_end
+            continue
+        position += 1
+    return ranges
+
+
+def protect_inline_code_markup(text: str) -> str:
+    """Protect rendered code-span markup, but not markup inside HTML comments."""
+    if INLINE_CODE_LT in text or INLINE_CODE_GT in text:
+        raise ValueError("Markdown contains reserved inline-code sentinel text")
+
+    closers = backtick_closer_map(text)
+    output = []
+    position = 0
+    while position < len(text):
+        if text.startswith("<!--", position):
+            end = text.find("-->", position + 4)
+            if end < 0:
+                output.append(text[position:])
+                break
+            output.append(text[position:end + 3])
+            position = end + 3
+            continue
+
+        if text[position] == "`" and not backtick_is_escaped(text, position):
+            opener_end = backtick_run_end(text, position)
+            closing = closers.get(position)
+            if closing is not None:
+                _, closer_end = closing
+                span = text[position:closer_end]
+                output.append(
+                    span.replace("<", INLINE_CODE_LT).replace(">", INLINE_CODE_GT)
+                )
+                position = closer_end
+                continue
+            output.append(text[position:opener_end])
+            position = opener_end
+            continue
+
+        output.append(text[position])
+        position += 1
+
+    return "".join(output)
+
+
+def restore_inline_code_markup(text: str) -> str:
+    return text.replace(INLINE_CODE_LT, "<").replace(INLINE_CODE_GT, ">")
+
+
 def strip_html_comments(text: str) -> str:
-    """Remove HTML comments outside fenced code while preserving line boundaries."""
+    """Remove HTML comments outside fenced/inline code while preserving lines."""
+    text = protect_inline_code_markup(text)
     output: list[str] = []
     fence = None
     in_comment = False
+    lines = text.splitlines(keepends=True)
+    suffix_has_comment_close = [False] * (len(lines) + 1)
+    for index in range(len(lines) - 1, -1, -1):
+        suffix_has_comment_close[index] = (
+            "-->" in lines[index] or suffix_has_comment_close[index + 1]
+        )
 
-    for line in text.splitlines(keepends=True):
+    for line_index, line in enumerate(lines):
         if fence is not None:
             output.append(line)
             fence, _ = advance_fence(fence, line)
@@ -187,12 +455,66 @@ def strip_html_comments(text: str) -> str:
                 visible.append(body[position:])
                 break
             visible.append(body[position:start])
+            if (
+                body.find("-->", start + 4) < 0
+                and not suffix_has_comment_close[line_index + 1]
+            ):
+                visible.append(body[start:])
+                break
             in_comment = True
             position = start + 4
 
         output.append("".join(visible) + newline)
 
-    return "".join(output)
+    return restore_inline_code_markup("".join(output))
+
+
+def verify_html_comment_parser() -> None:
+    cases = (
+        ("visible <!-- hidden --> prose", "visible  prose", "ordinary HTML comment"),
+        (
+            "visible <!-- unclosed Polaris-extra-x86_64.AppImage",
+            "visible <!-- unclosed Polaris-extra-x86_64.AppImage",
+            "unclosed comment marker rendered literally",
+        ),
+        (
+            "`<!--` Polaris-extra-x86_64.AppImage `-->`",
+            "`<!--` Polaris-extra-x86_64.AppImage `-->`",
+            "comment delimiters inside an inline code span",
+        ),
+        (
+            "``code <!-- visible --> with ` tick``",
+            "``code <!-- visible --> with ` tick``",
+            "comment delimiters inside a multi-backtick code span",
+        ),
+        (
+            "`code <!-- visible\nacross lines -->`",
+            "`code <!-- visible\nacross lines -->`",
+            "comment delimiters inside a multiline code span",
+        ),
+    )
+    for source, expected, label in cases:
+        actual = strip_html_comments(source)
+        if actual != expected:
+            print(f"HTML-comment parser mishandled {label}", file=sys.stderr)
+            sys.exit(1)
+
+    early_close = strip_html_comments(
+        "<!-- hidden `-->` Polaris-extra-x86_64.AppImage -->"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in early_close:
+        print("HTML-comment parser ignored the first real comment close", file=sys.stderr)
+        sys.exit(1)
+
+    escaped_ticks = strip_html_comments(
+        r"\`<!--\` Polaris-extra-x86_64.AppImage \`-->\`"
+    )
+    if "Polaris-extra-x86_64.AppImage" in escaped_ticks:
+        print("Escaped backticks incorrectly opened an inline code span", file=sys.stderr)
+        sys.exit(1)
+
+
+verify_html_comment_parser()
 
 
 building = strip_html_comments(Path("docs/building.md").read_text(encoding="utf-8"))
@@ -209,7 +531,8 @@ def markdown_section(
     expected_following=None,
 ) -> str:
     """Return one exact Markdown section, bounded by a same/higher-level heading."""
-    text = mask_hidden_html(text)
+    protected = protect_inline_code_markup(text)
+    text = restore_inline_code_markup(mask_hidden_html(protected))
     level = len(heading) - len(heading.lstrip("#"))
     if level < 1 or heading[level:level + 1] != " ":
         raise ValueError(f"Invalid heading: {heading}")
@@ -408,11 +731,29 @@ def rendered_markdown(text: str) -> str:
     """Return visible Markdown text with fenced blocks and destinations excluded."""
     rendered: list[str] = []
     fence = None
+    inline_ranges = [
+        (opener, closer_end)
+        for opener, _, closer_end in inline_code_ranges(text)
+    ]
+    line_offset = 0
+    inline_range_index = 0
     for line in text.splitlines(keepends=True):
+        line_start = line_offset
+        line_end = line_start + len(line)
+        line_offset = line_end
+        while (
+            inline_range_index < len(inline_ranges)
+            and inline_ranges[inline_range_index][1] <= line_start
+        ):
+            inline_range_index += 1
+        overlaps_inline_code = False
+        if inline_range_index < len(inline_ranges):
+            span_start, span_end = inline_ranges[inline_range_index]
+            overlaps_inline_code = line_start < span_end and line_end > span_start
         fence, delimiter = advance_fence(fence, line)
         if delimiter or fence is not None:
             continue
-        if is_indented_code(line):
+        if is_indented_code(line) and not overlaps_inline_code:
             continue
         if re.match(r"^[ ]{0,3}\[[^]]+\]:\s+", line):
             continue
@@ -435,7 +776,132 @@ def rendered_markdown(text: str) -> str:
         lambda match: match.group(1),
         visible,
     )
-    return visible_html_text(visible)
+    protected = protect_inline_code_markup(visible)
+    return restore_inline_code_markup(visible_html_text(protected))
+
+
+def verify_rendered_markdown_parser() -> None:
+    inline = "`<!--` Polaris-extra-x86_64.AppImage `-->`"
+    rendered_inline = rendered_markdown(inline)
+    if "Polaris-extra-x86_64.AppImage" not in rendered_inline:
+        print("Rendered Markdown dropped visible inline-code content", file=sys.stderr)
+        sys.exit(1)
+
+    for markup in (
+        "`<div hidden>Polaris-extra-x86_64.AppImage</div>`",
+        "``<script>Polaris-extra-x86_64.AppImage</script>``",
+        "```<span hidden>Polaris-extra-x86_64.AppImage</span>```",
+        "`<div hidden>` Polaris-extra-x86_64.AppImage `</div>`",
+    ):
+        if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(markup):
+            print("Rendered Markdown interpreted literal inline-code HTML", file=sys.stderr)
+            sys.exit(1)
+
+    rendered_comment = rendered_markdown("visible <!-- hidden --> prose")
+    if "hidden" in rendered_comment or "visible" not in rendered_comment:
+        print("Rendered Markdown exposed an actual HTML comment", file=sys.stderr)
+        sys.exit(1)
+
+    early_close = rendered_markdown(
+        "<!-- hidden `-->` Polaris-extra-x86_64.AppImage -->"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in early_close:
+        print("Rendered Markdown ignored the first real comment close", file=sys.stderr)
+        sys.exit(1)
+
+    escaped_ticks = rendered_markdown(
+        r"\`<!--\` Polaris-extra-x86_64.AppImage \`-->\`"
+    )
+    if "Polaris-extra-x86_64.AppImage" in escaped_ticks:
+        print("Rendered Markdown treated escaped backticks as code", file=sys.stderr)
+        sys.exit(1)
+
+    escaped_split_run = rendered_markdown(
+        r"\``<span hidden>Polaris-extra-x86_64.AppImage</span>`"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in escaped_split_run:
+        print("Escaping one backtick incorrectly escaped the entire run", file=sys.stderr)
+        sys.exit(1)
+
+    escaped_closer = rendered_markdown(
+        r"`<span hidden>Polaris-extra-x86_64.AppImage</span>\`"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in escaped_closer:
+        print("Backslash inside code incorrectly escaped its closing delimiter", file=sys.stderr)
+        sys.exit(1)
+
+    for list_code_span in (
+        "- `\n  <span hidden>Polaris-extra-x86_64.AppImage</span>\n  `",
+        "1. `\n   <span hidden>Polaris-extra-x86_64.AppImage</span>\n   `",
+        "10. `\n    <span hidden>Polaris-extra-x86_64.AppImage</span>\n    `",
+    ):
+        if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(list_code_span):
+            print("Inline-code span was not preserved inside a list paragraph", file=sys.stderr)
+            sys.exit(1)
+
+    lazy_quote_code = "> `\n<span hidden>Polaris-extra-x86_64.AppImage</span>\n> `"
+    if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(lazy_quote_code):
+        print("Inline-code span did not preserve a lazy blockquote continuation", file=sys.stderr)
+        sys.exit(1)
+
+    separate_list_items = "- `\n- <!-- Polaris-extra-x86_64.AppImage -->\n- `"
+    if "Polaris-extra-x86_64.AppImage" in rendered_markdown(separate_list_items):
+        print("Inline-code span crossed a list-item boundary", file=sys.stderr)
+        sys.exit(1)
+
+    for cross_block in (
+        "`\n\n<!-- Polaris-extra-x86_64.AppImage -->\n\n`",
+        "`\n\n<span hidden>Polaris-extra-x86_64.AppImage</span>\n\n`",
+        "> `\n>\n> <!-- Polaris-extra-x86_64.AppImage -->\n>\n> `",
+        "`\n<!-- Polaris-extra-x86_64.AppImage -->\n`",
+        "`\n<script>Polaris-extra-x86_64.AppImage</script>\n`",
+        "`\n<div hidden>Polaris-extra-x86_64.AppImage</div>\n`",
+        "`\n<center data-probe=\"Polaris-extra-x86_64.AppImage\">prose</center>\n`",
+        "`\n<hr data-probe=\"Polaris-extra-x86_64.AppImage\">\n`",
+        "`\n<textarea data-probe=\"Polaris-extra-x86_64.AppImage\">prose</textarea>\n`",
+        "`\n> <!-- Polaris-extra-x86_64.AppImage -->\n`",
+    ):
+        if "Polaris-extra-x86_64.AppImage" in rendered_markdown(cross_block):
+            print("Inline-code span crossed a Markdown paragraph boundary", file=sys.stderr)
+            sys.exit(1)
+
+
+verify_rendered_markdown_parser()
+
+
+def html_block_start(line: str):
+    """Return a CommonMark raw-HTML block state for an opener line."""
+    _, content = blockquote_context(line)
+    stripped = content.lstrip(" ")
+    while True:
+        list_marker = re.match(r"(?:[-+*]|\d{1,9}[.)])\s+", stripped)
+        if list_marker is None:
+            break
+        stripped = stripped[list_marker.end() :].lstrip(" ")
+    lower = stripped.lower()
+    type_one = re.match(r"<(script|pre|style|textarea)(?:\s|>|$)", lower)
+    if type_one:
+        return ("until", f"</{type_one.group(1)}>")
+    if lower.startswith("<!--"):
+        return ("until", "-->")
+    if lower.startswith("<?"):
+        return ("until", "?>")
+    if stripped.startswith("<![CDATA["):
+        return ("until", "]]>")
+    if re.match(r"<![A-Z]", stripped):
+        return ("until", ">")
+    if re.match(rf"</?(?:{HTML_BLOCK_TAG_PATTERN})(?:\s|/?>|$)", stripped, re.I):
+        return ("blank", "")
+    if re.match(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s+.*)?/?>\s*$", stripped):
+        return ("blank", "")
+    return None
+
+
+def html_block_finished(state, line: str) -> bool:
+    mode, terminator = state
+    if mode == "blank":
+        return not fence_context_line(line).strip()
+    return terminator in line.lower()
 
 
 def markdown_table(section: str, label: str) -> list[list[str]]:
@@ -443,7 +909,48 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
     blocks: list[list[str]] = []
     current: list[str] = []
     fence = None
-    for line in section.splitlines():
+    html_block = None
+    active_list_indent = None
+    active_list_quote_depth = None
+    inline_ranges = []
+    for opener, closer_start, _ in inline_code_ranges(section):
+        opener_line_start = section.rfind("\n", 0, opener) + 1
+        opener_line_end = section.find("\n", opener)
+        if opener_line_end < 0:
+            opener_line_end = len(section)
+        opener_line = section[opener_line_start:opener_line_end]
+        closer_line_start = section.rfind("\n", 0, closer_start) + 1
+        closer_line_end = section.find("\n", closer_start)
+        if closer_line_end < 0:
+            closer_line_end = len(section)
+        closer_line = section[closer_line_start:closer_line_end]
+        # GFM parses the table and each cell as separate inline containers.
+        # A backtick opened or closed inside a physical pipe row cannot hide
+        # that row or bridge to rows outside that cell.
+        if opener_line.strip().startswith("|") or closer_line.strip().startswith("|"):
+            continue
+        opener_quote_depth, _ = blockquote_context(opener_line)
+        opener_list_indent = list_content_indent(opener_line)
+        # An ordinary paragraph is interrupted by a GFM table. Keep only
+        # container metadata that may make unmarked pipe rows lazy
+        # blockquote/list continuations instead of a semantic table.
+        if opener_quote_depth == 0 and opener_list_indent is None:
+            continue
+        inline_ranges.append(
+            (opener, closer_start, opener_quote_depth, opener_list_indent)
+        )
+    inline_range_index = 0
+    line_offset = 0
+    for line in section.splitlines(keepends=True):
+        line_start = line_offset
+        line_offset += len(line)
+        if html_block is not None:
+            if html_block_finished(html_block, line):
+                html_block = None
+            if current:
+                blocks.append(current)
+                current = []
+            continue
         fence, delimiter = advance_fence(fence, line)
         if delimiter:
             if current:
@@ -452,13 +959,74 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
             continue
         if fence is not None:
             continue
-        if is_indented_code(line):
+        new_html_block = html_block_start(line)
+        if new_html_block is not None:
+            if not html_block_finished(new_html_block, line):
+                html_block = new_html_block
             if current:
                 blocks.append(current)
                 current = []
             continue
-        if line.strip().startswith("|"):
-            current.append(line)
+        quote_depth, quote_content = blockquote_context(line)
+        stripped_content = quote_content.lstrip(" \t")
+        leading_columns = len(quote_content) - len(stripped_content)
+        list_marker = re.match(r"(?:[-+*]|\d{1,9}[.)])([ \t]+)", stripped_content)
+        table_line = None
+        if list_marker is not None:
+            active_list_indent = list_content_indent(line)
+            active_list_quote_depth = quote_depth
+            after_marker = stripped_content[list_marker.end() :].lstrip(" \t")
+            if after_marker.startswith("|"):
+                table_line = after_marker
+        else:
+            list_continuation = (
+                active_list_indent is not None
+                and quote_depth == active_list_quote_depth
+                and leading_columns >= active_list_indent
+            )
+            if stripped_content.startswith("|") and (
+                leading_columns <= 3 or list_continuation
+            ):
+                table_line = stripped_content
+            if stripped_content and not list_continuation:
+                active_list_indent = None
+                active_list_quote_depth = None
+        if table_line is None and is_indented_code(line):
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        if table_line is not None:
+            pipe_position = line_start + line.index("|")
+            while (
+                inline_range_index < len(inline_ranges)
+                and inline_ranges[inline_range_index][1] <= pipe_position
+            ):
+                inline_range_index += 1
+            candidate_span = (
+                inline_ranges[inline_range_index]
+                if (
+                    inline_range_index < len(inline_ranges)
+                    and inline_ranges[inline_range_index][0] <= pipe_position
+                )
+                else None
+            )
+            pipe_in_code_span = False
+            if candidate_span is not None:
+                _, _, opener_quote_depth, opener_list_indent = candidate_span
+                pipe_quote_depth, pipe_content = blockquote_context(line)
+                pipe_indent = len(pipe_content) - len(pipe_content.lstrip(" "))
+                pipe_in_code_span = opener_quote_depth > pipe_quote_depth or (
+                    opener_list_indent is not None
+                    and opener_quote_depth == pipe_quote_depth
+                    and pipe_indent < opener_list_indent
+                )
+            if pipe_in_code_span:
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
+            current.append(table_line)
         elif current:
             blocks.append(current)
             current = []
@@ -481,6 +1049,18 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
         print(f"{label} has an invalid table separator", file=sys.stderr)
         sys.exit(1)
     return rows[2:]
+
+
+def visible_table_cell(cell: str) -> str:
+    """Return normalized visible inline text for semantic table comparisons."""
+    text = rendered_markdown(cell)
+    text = re.sub(
+        r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])",
+        r"\1",
+        text,
+    )
+    text = re.sub(r"[*_~`]+", "", text)
+    return " ".join(text.split())
 
 
 def tokenize_shell_command(command: str) -> list[str]:
@@ -516,7 +1096,13 @@ requirements_section = markdown_section(
     "### Example packages",
 )
 requirements_rows = markdown_table(requirements_section, "docs/building.md Requirements")
-compiler_rows = [row for row in requirements_rows if row and row[0].startswith("C++")]
+visible_requirements_rows = [
+    [visible_table_cell(cell) for cell in row]
+    for row in requirements_rows
+]
+compiler_rows = [
+    row for row in visible_requirements_rows if row and row[0].startswith("C++")
+]
 if compiler_rows != [["C++23 compiler", "GCC or Clang"]]:
     print(
         "docs/building.md Requirements table must contain exactly the C++23 compiler row",
