@@ -54,6 +54,23 @@ write_unix_header() {
   printf 'Num RefCount Protocol Flags Type St Inode Path\n' >"$POLARIS_PROC_NET_UNIX"
 }
 
+# Rename failure must fail marker publication and leave neither authority nor
+# a stale temporary file behind.
+write_process 410 1 9001 /usr/bin/gamescope --backend headless
+marker_rename_test="$work/run/polaris-marker-rename-test.pid"
+mv() { return 1; }
+if polaris_write_marker_for_pid "$marker_rename_test" 410 nested; then
+  fail "failed marker rename was reported as published"
+fi
+unset -f mv
+[ ! -e "$marker_rename_test" ] || fail "failed marker rename published authority"
+if compgen -G "$marker_rename_test.tmp.*" >/dev/null; then
+  fail "failed marker rename left a temporary authority file"
+fi
+polaris_write_marker_for_pid "$marker_rename_test" 410 nested ||
+  fail "marker publication did not recover after rename failure"
+rm -f "$marker_rename_test"
+
 # A reused PID must never be signalled or allowed to remove owner state.
 write_process 410 1 9001 /usr/bin/gamescope --backend headless
 : >"$work/run/gamescope-0"
@@ -239,6 +256,21 @@ polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$w
 grep -qx 'DISPLAY=:4' "$work/run/polaris-gamescope.env" || fail "runtime env routed to host X display"
 grep -qx 'POLARIS_GAMESCOPE_PID=410' "$work/run/polaris-gamescope.env" || fail "runtime env lacks owner pid"
 [ -e "$POLARIS_X11_SOCKET_DIR/X0" ] || fail "host X0 was removed"
+
+# A failed atomic rename must return failure, publish no environment, remove
+# its temporary file, and allow a subsequent valid publication.
+rm -f "$work/run/polaris-gamescope.env"
+mv() { return 1; }
+if polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$work/run"; then
+  fail "failed runtime-env rename was reported as published"
+fi
+unset -f mv
+[ ! -e "$work/run/polaris-gamescope.env" ] || fail "failed runtime-env rename published an environment"
+if compgen -G "$work/run/polaris-gamescope.env.tmp.*" >/dev/null; then
+  fail "failed runtime-env rename left a temporary file"
+fi
+polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$work/run" ||
+  fail "runtime-env publication did not recover after rename failure"
 
 # Rebinding Wayland after X11 selection but before env publication must reject
 # the entire Wayland/X11 pair and leave no committed environment.

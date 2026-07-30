@@ -103,6 +103,7 @@ polaris_process_has_argument() {
 polaris_write_marker_for_pid() (
   local marker="$1" pid="$2" role="$3" marker_tmp='' lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   umask 077
+  trap 'rm -f "${marker_tmp:-}"' EXIT
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"${marker%/*}/polaris-gamescope.lock" || return 1
     "$lock_bin" -x 9 || return 1
@@ -123,6 +124,7 @@ polaris_write_marker_for_pid() (
       printf '%s %s %s %s\n' "$pid" "$start_time" "$role" "$executable_path" >"$marker_tmp" || return 1
       # Explicit status: set -e is ignored when this function is used in if/||.
       mv -f "$marker_tmp" "$marker" || return 1
+      marker_tmp=''
       return 0
     fi
     sleep 0.02
