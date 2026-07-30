@@ -917,9 +917,15 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
         if opener_line_end < 0:
             opener_line_end = len(section)
         opener_line = section[opener_line_start:opener_line_end]
-        # GFM parses each table cell as its own inline container. A backtick
-        # opened inside a physical pipe row cannot hide later rows.
-        if opener_line.strip().startswith("|"):
+        closer_line_start = section.rfind("\n", 0, closer_start) + 1
+        closer_line_end = section.find("\n", closer_start)
+        if closer_line_end < 0:
+            closer_line_end = len(section)
+        closer_line = section[closer_line_start:closer_line_end]
+        # GFM parses the table and each cell as separate inline containers.
+        # A backtick opened or closed inside a physical pipe row cannot hide
+        # that row or bridge to rows outside that cell.
+        if opener_line.strip().startswith("|") or closer_line.strip().startswith("|"):
             continue
         inline_ranges.append((opener, closer_start))
     inline_range_index = 0
