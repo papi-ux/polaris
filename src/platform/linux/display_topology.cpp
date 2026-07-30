@@ -16,7 +16,6 @@
 #include <cctype>
   #include <chrono>
   #include <cstdlib>
-  #include <cstdio>
   #include <filesystem>
   #include <fstream>
   #include <string>
@@ -30,20 +29,6 @@ namespace display_topology {
   namespace {
 
     namespace fs = std::filesystem;
-
-    std::string exec_capture(const std::string &cmd) {
-      FILE *pipe = popen(cmd.c_str(), "r");
-      if (!pipe) {
-        return {};
-      }
-      char buf[512];
-      std::string result;
-      while (fgets(buf, sizeof(buf), pipe)) {
-        result += buf;
-      }
-      pclose(pipe);
-      return result;
-    }
 
     std::string read_sysfs_file(const fs::path &path) {
       std::ifstream in(path);

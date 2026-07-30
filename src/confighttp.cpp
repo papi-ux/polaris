@@ -658,16 +658,16 @@ namespace confighttp {
       return capture_kind + "|" + socket_name + "|" + output_name;
     }
 
-    void clear_cage_preview_capture_failure(const std::string &capture_kind,
-                                            const std::string &socket_name,
-                                            const std::string &output_name) {
+    [[maybe_unused]] void clear_cage_preview_capture_failure(const std::string &capture_kind,
+                                                             const std::string &socket_name,
+                                                             const std::string &output_name) {
       std::lock_guard lock(preview_failure_log_mutex);
       preview_failure_log_state.erase(preview_failure_log_key(capture_kind, socket_name, output_name));
     }
 
-    void log_cage_preview_capture_failure(const std::string &capture_kind,
-                                          const std::string &socket_name,
-                                          const std::string &output_name) {
+    [[maybe_unused]] void log_cage_preview_capture_failure(const std::string &capture_kind,
+                                                           const std::string &socket_name,
+                                                           const std::string &output_name) {
       const auto now = std::chrono::steady_clock::now();
       std::uint32_t suppressed_count = 0;
       bool should_log = false;
