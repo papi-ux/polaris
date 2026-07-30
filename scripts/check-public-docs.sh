@@ -110,10 +110,42 @@ import re
 import shlex
 import sys
 
-building = Path("docs/building.md").read_text(encoding="utf-8")
-contributing = Path(".github/CONTRIBUTING.md").read_text(encoding="utf-8")
-readme = Path("README.md").read_text(encoding="utf-8")
-changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
+
+def strip_html_comments(text: str) -> str:
+    """Remove non-rendered HTML comments while preserving line boundaries."""
+    return re.sub(
+        r"<!--.*?-->",
+        lambda match: "\n" * match.group(0).count("\n"),
+        text,
+        flags=re.DOTALL,
+    )
+
+
+building = strip_html_comments(Path("docs/building.md").read_text(encoding="utf-8"))
+contributing = strip_html_comments(
+    Path(".github/CONTRIBUTING.md").read_text(encoding="utf-8")
+)
+readme = strip_html_comments(Path("README.md").read_text(encoding="utf-8"))
+changelog = strip_html_comments(Path("docs/changelog.md").read_text(encoding="utf-8"))
+
+
+def advance_fence(fence, line: str):
+    """Advance CommonMark-style fenced-code state; return (state, delimiter_line)."""
+    if fence is None:
+        opener = re.match(r"^\s{0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        if opener:
+            marker = opener.group(1)
+            return (marker[0], len(marker)), True
+        return None, False
+
+    char, minimum = fence
+    closer = re.match(
+        rf"^\s{{0,3}}{re.escape(char)}{{{minimum},}}\s*$",
+        line.rstrip("\r\n"),
+    )
+    if closer:
+        return None, True
+    return fence, False
 
 
 def markdown_section(
@@ -127,7 +159,14 @@ def markdown_section(
         raise ValueError(f"Invalid heading: {heading}")
 
     lines = text.splitlines(keepends=True)
-    starts = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == heading]
+    starts = []
+    fence = None
+    for index, line in enumerate(lines):
+        fence, delimiter = advance_fence(fence, line)
+        if delimiter or fence is not None:
+            continue
+        if line.rstrip("\r\n") == heading:
+            starts.append(index)
     if len(starts) != 1:
         print(f"Expected exactly one Markdown heading: {heading}", file=sys.stderr)
         sys.exit(1)
@@ -137,15 +176,10 @@ def markdown_section(
     fence = None
     end = len(lines)
     for index in range(start, len(lines)):
-        fence_match = re.match(r"^\s{0,3}(`{3,}|~{3,})", lines[index])
-        if fence_match:
-            marker = fence_match.group(1)
-            if fence is None:
-                fence = (marker[0], len(marker))
-            elif marker[0] == fence[0] and len(marker) >= fence[1]:
-                fence = None
+        fence, delimiter = advance_fence(fence, lines[index])
+        if delimiter or fence is not None:
             continue
-        if fence is None and boundary.match(lines[index]):
+        if boundary.match(lines[index]):
             end = index
             break
     if expected_following is not None:
@@ -160,11 +194,32 @@ def markdown_section(
     return "".join(lines[start:end])
 
 
+def rendered_markdown(text: str) -> str:
+    """Return rendered prose/table text with fenced code blocks excluded."""
+    rendered: list[str] = []
+    fence = None
+    for line in text.splitlines(keepends=True):
+        fence, delimiter = advance_fence(fence, line)
+        if delimiter or fence is not None:
+            continue
+        rendered.append(line)
+    return "".join(rendered)
+
+
 def markdown_table(section: str, label: str) -> list[list[str]]:
     """Parse the first contiguous Markdown table in a bounded section."""
     blocks: list[list[str]] = []
     current: list[str] = []
+    fence = None
     for line in section.splitlines():
+        fence, delimiter = advance_fence(fence, line)
+        if delimiter:
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        if fence is not None:
+            continue
         if line.strip().startswith("|"):
             current.append(line)
         elif current:
@@ -191,6 +246,13 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
     return rows[2:]
 
 
+def tokenize_shell_command(command: str) -> list[str]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    return list(lexer)
+
+
 def shell_commands(block: str) -> list[list[str]]:
     """Return tokenized, uncommented logical shell commands from a fenced block."""
     commands: list[list[str]] = []
@@ -204,10 +266,10 @@ def shell_commands(block: str) -> list[list[str]]:
         pending = f"{pending} {fragment}".strip()
         if continued:
             continue
-        commands.append(shlex.split(pending, comments=True, posix=True))
+        commands.append(tokenize_shell_command(pending))
         pending = ""
     if pending:
-        commands.append(shlex.split(pending, comments=True, posix=True))
+        commands.append(tokenize_shell_command(pending))
     return commands
 
 
@@ -246,7 +308,12 @@ pacman_commands = [
 if len(pacman_commands) != 1:
     print("Arch/CachyOS block must contain exactly one sudo pacman -S command", file=sys.stderr)
     sys.exit(1)
-arch_tokens = set(pacman_commands[0])
+arch_command = pacman_commands[0]
+shell_operators = {";", "&&", "||", "|", "&", ">", ">>", "<", "<<"}
+if shell_operators.intersection(arch_command):
+    print("Arch/CachyOS pacman command must not contain chained shell operators", file=sys.stderr)
+    sys.exit(1)
+arch_tokens = set(arch_command)
 for dependency in ("vulkan-headers", "vulkan-icd-loader"):
     if dependency not in arch_tokens:
         print(
@@ -260,6 +327,7 @@ current_release = markdown_section(
     "## v1.3.2 - 2026-07-29",
     "## v1.3.1 - 2026-07-12",
 )
+current_release_prose = rendered_markdown(current_release)
 required_release_facts = (
     "webtransport-go v0.11.1",
     "quic-go v0.60.0",
@@ -273,7 +341,7 @@ required_release_facts = (
     "GCC 15",
 )
 for fact in required_release_facts:
-    if fact not in current_release:
+    if fact not in current_release_prose:
         print(f"v1.3.2 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
@@ -282,6 +350,7 @@ readme_release_body = markdown_section(
     "## What is New in v1.3.2",
     "## Install",
 )
+readme_release_prose = rendered_markdown(readme_release_body)
 required_readme_facts = (
     "webtransport-go v0.11.1",
     "quic-go v0.60.0",
@@ -294,7 +363,7 @@ required_readme_facts = (
     "GCC 15",
 )
 for fact in required_readme_facts:
-    if fact not in readme_release_body:
+    if fact not in readme_release_prose:
         print(f"README v1.3.2 summary is missing: {fact}", file=sys.stderr)
         sys.exit(1)
 
@@ -307,8 +376,8 @@ expected_assets = Counter(
 )
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section in (
-    ("README v1.3.2 summary", readme_release_body),
-    ("v1.3.2 changelog", current_release),
+    ("README v1.3.2 summary", readme_release_prose),
+    ("v1.3.2 changelog", current_release_prose),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
     if actual_assets != expected_assets:
