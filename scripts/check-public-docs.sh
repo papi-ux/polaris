@@ -166,23 +166,32 @@ def backtick_run_end(text: str, start: int) -> int:
 
 
 def backtick_closer_map(text: str):
-    """Map each real backtick run to its next equal-length run in linear time."""
-    runs = []
-    position = 0
-    while position < len(text):
-        if text[position] == "`" and not backtick_is_escaped(text, position):
-            end = backtick_run_end(text, position)
-            runs.append((position, end))
-            position = end
-            continue
-        position += 1
-
-    next_by_length = {}
+    """Map opener runs to the next equal run within the same Markdown paragraph."""
     closers = {}
-    for start, end in reversed(runs):
-        length = end - start
-        closers[start] = next_by_length.get(length)
-        next_by_length[length] = (start, end)
+    boundaries = [match.span() for match in re.finditer(r"\r?\n[ \t]*\r?\n", text)]
+    segments = []
+    start = 0
+    for boundary_start, boundary_end in boundaries:
+        segments.append((start, boundary_start))
+        start = boundary_end
+    segments.append((start, len(text)))
+
+    for segment_start, segment_end in segments:
+        runs = []
+        position = segment_start
+        while position < segment_end:
+            if text[position] == "`":
+                end = backtick_run_end(text, position)
+                runs.append((position, end))
+                position = end
+                continue
+            position += 1
+
+        next_by_length = {}
+        for run_start, run_end in reversed(runs):
+            length = run_end - run_start
+            closers[run_start] = next_by_length.get(length)
+            next_by_length[length] = (run_start, run_end)
     return closers
 
 
@@ -602,6 +611,21 @@ def verify_rendered_markdown_parser() -> None:
     if "Polaris-extra-x86_64.AppImage" in escaped_ticks:
         print("Rendered Markdown treated escaped backticks as code", file=sys.stderr)
         sys.exit(1)
+
+    escaped_closer = rendered_markdown(
+        r"`<span hidden>Polaris-extra-x86_64.AppImage</span>\`"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in escaped_closer:
+        print("Backslash inside code incorrectly escaped its closing delimiter", file=sys.stderr)
+        sys.exit(1)
+
+    for cross_block in (
+        "`\n\n<!-- Polaris-extra-x86_64.AppImage -->\n\n`",
+        "`\n\n<span hidden>Polaris-extra-x86_64.AppImage</span>\n\n`",
+    ):
+        if "Polaris-extra-x86_64.AppImage" in rendered_markdown(cross_block):
+            print("Inline-code span crossed a Markdown paragraph boundary", file=sys.stderr)
+            sys.exit(1)
 
 
 verify_rendered_markdown_parser()
