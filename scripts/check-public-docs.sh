@@ -145,8 +145,36 @@ def advance_fence(fence, line: str):
     return fence, False
 
 
+INLINE_COMMENT_OPEN = "\uf000html-comment-open\uf001"
+INLINE_COMMENT_CLOSE = "\uf000html-comment-close\uf001"
+INLINE_CODE_SPAN = re.compile(
+    r"(?<!`)(?P<ticks>`+)(?!`)(?P<body>.*?)(?<!`)(?P=ticks)(?!`)",
+    re.S,
+)
+
+
+def protect_inline_code_comments(text: str) -> str:
+    """Protect comment delimiters that CommonMark renders inside code spans."""
+    if INLINE_COMMENT_OPEN in text or INLINE_COMMENT_CLOSE in text:
+        raise ValueError("Markdown contains reserved inline-comment sentinel text")
+
+    def protect(match) -> str:
+        return match.group(0).replace("<!--", INLINE_COMMENT_OPEN).replace(
+            "-->", INLINE_COMMENT_CLOSE
+        )
+
+    return INLINE_CODE_SPAN.sub(protect, text)
+
+
+def restore_inline_code_comments(text: str) -> str:
+    return text.replace(INLINE_COMMENT_OPEN, "<!--").replace(
+        INLINE_COMMENT_CLOSE, "-->"
+    )
+
+
 def strip_html_comments(text: str) -> str:
-    """Remove HTML comments outside fenced code while preserving line boundaries."""
+    """Remove HTML comments outside fenced/inline code while preserving lines."""
+    text = protect_inline_code_comments(text)
     output: list[str] = []
     fence = None
     in_comment = False
@@ -192,7 +220,36 @@ def strip_html_comments(text: str) -> str:
 
         output.append("".join(visible) + newline)
 
-    return "".join(output)
+    return restore_inline_code_comments("".join(output))
+
+
+def verify_html_comment_parser() -> None:
+    cases = (
+        ("visible <!-- hidden --> prose", "visible  prose", "ordinary HTML comment"),
+        (
+            "`<!--` Polaris-extra-x86_64.AppImage `-->`",
+            "`<!--` Polaris-extra-x86_64.AppImage `-->`",
+            "comment delimiters inside an inline code span",
+        ),
+        (
+            "``code <!-- visible --> with ` tick``",
+            "``code <!-- visible --> with ` tick``",
+            "comment delimiters inside a multi-backtick code span",
+        ),
+        (
+            "`code <!-- visible\nacross lines -->`",
+            "`code <!-- visible\nacross lines -->`",
+            "comment delimiters inside a multiline code span",
+        ),
+    )
+    for source, expected, label in cases:
+        actual = strip_html_comments(source)
+        if actual != expected:
+            print(f"HTML-comment parser mishandled {label}", file=sys.stderr)
+            sys.exit(1)
+
+
+verify_html_comment_parser()
 
 
 building = strip_html_comments(Path("docs/building.md").read_text(encoding="utf-8"))
@@ -435,7 +492,8 @@ def rendered_markdown(text: str) -> str:
         lambda match: match.group(1),
         visible,
     )
-    return visible_html_text(visible)
+    protected = protect_inline_code_comments(visible)
+    return restore_inline_code_comments(visible_html_text(protected))
 
 
 def markdown_table(section: str, label: str) -> list[list[str]]:
