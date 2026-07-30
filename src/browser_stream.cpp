@@ -476,7 +476,7 @@ namespace browser_stream {
     }
 
     bool private_runtime_configured() {
-      if (auto runtime = stream_runtime::acquire_for_current_policy()) {
+      if (stream_runtime::acquire_for_current_policy()) {
         return true;
       }
       const auto &mode = config::video.linux_display.stream_mode;
