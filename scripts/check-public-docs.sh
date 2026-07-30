@@ -188,9 +188,12 @@ def line_block_kind(line: str) -> str:
     stripped = content.lstrip(" ")
     lower = stripped.lower()
     html_block_tag = (
-        r"address|article|aside|blockquote|body|details|dialog|div|dl|fieldset|"
-        r"figure|footer|form|h[1-6]|head|header|html|iframe|li|main|nav|ol|p|"
-        r"pre|script|section|style|summary|table|tbody|td|tfoot|th|thead|tr|ul"
+        r"address|article|aside|base|basefont|blockquote|body|caption|center|col|"
+        r"colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
+        r"footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|"
+        r"li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|"
+        r"pre|script|search|section|style|summary|table|tbody|td|textarea|tfoot|"
+        r"th|thead|title|tr|track|ul"
     )
     if (
         lower.startswith(("<!--", "<?", "<![cdata["))
@@ -787,6 +790,9 @@ def verify_rendered_markdown_parser() -> None:
         "`\n<!-- Polaris-extra-x86_64.AppImage -->\n`",
         "`\n<script>Polaris-extra-x86_64.AppImage</script>\n`",
         "`\n<div hidden>Polaris-extra-x86_64.AppImage</div>\n`",
+        "`\n<center data-probe=\"Polaris-extra-x86_64.AppImage\">prose</center>\n`",
+        "`\n<hr data-probe=\"Polaris-extra-x86_64.AppImage\">\n`",
+        "`\n<textarea data-probe=\"Polaris-extra-x86_64.AppImage\">prose</textarea>\n`",
         "`\n> <!-- Polaris-extra-x86_64.AppImage -->\n`",
     ):
         if "Polaris-extra-x86_64.AppImage" in rendered_markdown(cross_block):
