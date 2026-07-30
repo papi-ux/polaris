@@ -281,24 +281,59 @@ def backtick_closer_map(text: str):
     close_paragraph(len(text))
 
     for segment_start, segment_end in segments:
-        runs = []
+        cached_backticks = {}
+        scanned_to_end = False
         position = segment_start
         while position < segment_end:
-            if text[position] == "`":
-                end = backtick_run_end(text, position)
-                runs.append((position, end))
-                position = end
+            if text.startswith("<!--", position):
+                comment_end = text.find("-->", position + 4, segment_end)
+                if comment_end < 0:
+                    break
+                position = comment_end + 3
                 continue
-            position += 1
+            if text[position] != "`":
+                position += 1
+                continue
 
-        next_by_length = {}
-        for run_start, run_end in reversed(runs):
-            raw_length = run_end - run_start
-            opener_start = run_start + 1 if backtick_is_escaped(text, run_start) else run_start
+            run_start = position
+            run_end = backtick_run_end(text, run_start)
+            opener_start = (
+                run_start + 1 if backtick_is_escaped(text, run_start) else run_start
+            )
             opener_length = run_end - opener_start
-            if opener_length:
-                closers[opener_start] = next_by_length.get(opener_length)
-            next_by_length[raw_length] = (run_start, run_end)
+            if opener_length == 0:
+                position = run_end
+                continue
+            opener_end = run_end
+
+            if (
+                scanned_to_end
+                and cached_backticks.get(opener_length, 0) <= opener_end
+            ):
+                closers[opener_start] = None
+                position = opener_end
+                continue
+
+            scan = opener_end
+            closing = None
+            while scan < segment_end:
+                next_run = text.find("`", scan, segment_end)
+                if next_run < 0:
+                    break
+                next_end = backtick_run_end(text, next_run)
+                next_length = next_end - next_run
+                cached_backticks[next_length] = next_run
+                if next_length == opener_length:
+                    closing = (next_run, next_end)
+                    break
+                scan = next_end
+
+            closers[opener_start] = closing
+            if closing is None:
+                scanned_to_end = True
+                position = opener_end
+            else:
+                position = closing[1]
     return closers
 
 
