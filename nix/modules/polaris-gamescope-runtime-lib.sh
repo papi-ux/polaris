@@ -121,7 +121,8 @@ polaris_write_marker_for_pid() (
       # SC2030/SC2031 do not treat marker_tmp as subshell-local vs other helpers.
       marker_tmp="$marker.tmp.$$"
       printf '%s %s %s %s\n' "$pid" "$start_time" "$role" "$executable_path" >"$marker_tmp" || return 1
-      mv -f "$marker_tmp" "$marker"
+      # Explicit status: set -e is ignored when this function is used in if/||.
+      mv -f "$marker_tmp" "$marker" || return 1
       return 0
     fi
     sleep 0.02
@@ -397,7 +398,10 @@ polaris_write_runtime_env() (
   polaris_marker_owns_socket "$marker" "$runtime_dir/$wayland" "$expected_role" || return 1
   final_display="$(polaris_discover_xwayland_display "$marker" "$expected_role")" || return 1
   [ "$final_display" = "$display" ] || return 1
-  mv -f "$env_tmp" "$runtime_dir/polaris-gamescope.env"
+  # Explicit status: set -e is ignored when this function is used in if/||.
+  # Only clear env_tmp after a successful rename so the EXIT trap still
+  # removes a leftover temp when mv fails.
+  mv -f "$env_tmp" "$runtime_dir/polaris-gamescope.env" || return 1
   env_tmp=''
 )
 
