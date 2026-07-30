@@ -99,6 +99,8 @@ Polaris v1.3.2 is a focused reliability patch for stream lifecycle, Linux privat
 - **Safer session cleanup**: lifecycle teardown, private Steam ownership, interrupted process waits, and Big Picture input isolation are hardened without broadly touching desktop Steam.
 - **Resilient web recovery**: the web console survives transient host outages and preserves authenticated sessions across host restarts.
 - **Truthful stream health**: near-target FPS no longer produces misleading degraded-state noise, and Linux GPU probe topology is easier to diagnose.
+- **Browser Stream security**: `webtransport-go v0.11.1` and `quic-go v0.60.0` fix the unknown-capsule memory-exhaustion vulnerability tracked as CVE-2026-57497 / GHSA-g35j-m5xg-vh3q.
+- **Hardened packages**: the official release is exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, and `Polaris-ubuntu24.04-x86_64.deb`, with explicit Vulkan dependencies, GCC 15 warning-as-error validation, and a permanent high-severity `npm audit` gate.
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
