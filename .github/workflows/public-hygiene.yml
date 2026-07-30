@@ -19,3 +19,6 @@ jobs:
 
       - name: Check public docs and release references
         run: bash scripts/check-public-docs.sh
+
+      - name: Check release package dependency contracts
+        run: python3 scripts/check-release-package-dependencies.py

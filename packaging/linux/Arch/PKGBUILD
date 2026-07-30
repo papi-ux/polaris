@@ -44,6 +44,7 @@ depends=(
   'opus'
   'pipewire'
   'udev'
+  'vulkan-icd-loader'
   'wayland'
   'which'
   'wlr-randr'
@@ -64,6 +65,7 @@ makedepends=(
   'nlohmann-json'
   'nodejs'
   'npm'
+  'vulkan-headers'
 )
 
 optdepends=(

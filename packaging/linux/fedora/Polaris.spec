@@ -52,6 +52,7 @@ BuildRequires: python3
 BuildRequires: rpm-build
 BuildRequires: systemd-udev
 BuildRequires: systemd-rpm-macros
+BuildRequires: vulkan-loader-devel
 %{?sysusers_requires_compat}
 BuildRequires: wget
 BuildRequires: which
