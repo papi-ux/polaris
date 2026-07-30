@@ -3,16 +3,15 @@
 Polaris is a Linux-first host today. The most validated install paths are the Fedora RPM and Arch
 package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). CachyOS and
 most pacman-compatible Arch derivatives should start with the Arch package path. Bazzite can use the
-matching Fedora RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both package paths
+Fedora 44 RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both package paths
 need broader real-hardware validation. openSUSE Tumbleweed is source-build supported with a dedicated
 [openSUSE guide](openSUSE.md); other distros remain source-build/community-validation oriented.
 
 ## Release packages
 
 ```bash
-fedora_version="$(rpm -E %fedora)"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora${fedora_version}-x86_64.rpm"
-sudo dnf install "./Polaris-fedora${fedora_version}-x86_64.rpm"
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm
+sudo dnf install ./Polaris-fedora44-x86_64.rpm
 sudo polaris --setup-host
 polaris
 ```
@@ -32,8 +31,7 @@ polaris
 ```
 
 ```bash
-fedora_version="$(rpm -E %fedora)"
-rpm_name="Polaris-fedora${fedora_version}-x86_64.rpm"
+rpm_name="Polaris-fedora44-x86_64.rpm"
 wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
 sudo rpm-ostree install -r "./${rpm_name}"
 

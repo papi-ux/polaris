@@ -50,6 +50,11 @@ legacy_assets=(
   "Polaris-fedora43-x86_64.rpm"
 )
 
+variable_fedora_patterns=(
+  'Polaris-fedora${'
+  'fedora_version="$(rpm -E %fedora)"'
+)
+
 expected_nova_links=(
   "https://github.com/papi-ux/nova/releases/latest"
   "https://github-store.org/app?repo=papi-ux/nova"
@@ -67,6 +72,7 @@ files_to_check=(
 current_docs=(
   "README.md"
   "docs/building.md"
+  "docs/bazzite.md"
 )
 
 for expected_asset in "${expected_assets[@]}"; do
@@ -79,6 +85,15 @@ for legacy_asset in "${legacy_assets[@]}"; do
   for file in "${current_docs[@]}"; do
     if grep -Fq "$legacy_asset" "$file"; then
       echo "Legacy Fedora release asset remains in $file: $legacy_asset" >&2
+      exit 1
+    fi
+  done
+done
+
+for variable_pattern in "${variable_fedora_patterns[@]}"; do
+  for file in "${current_docs[@]}"; do
+    if grep -Fq "$variable_pattern" "$file"; then
+      echo "Variable-derived Fedora asset remains in $file: $variable_pattern" >&2
       exit 1
     fi
   done
