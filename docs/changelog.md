@@ -18,6 +18,14 @@ Reliability patch focused on stream lifecycle, Linux private-session isolation, 
 - Exposed clearer Linux GPU probe topology diagnostics for capture-path troubleshooting
 - Hardened Dashboard smoke navigation so release checks do not issue duplicate route requests
 
+### Security and release packaging
+
+- Updated Browser Stream to `webtransport-go v0.11.1` and `quic-go v0.60.0`, fixing remote memory exhaustion from unknown capsule buffering (CVE-2026-57497 / GHSA-g35j-m5xg-vh3q)
+- Removed vulnerable, unnecessary web fixture-server dependencies and added `npm audit --audit-level=high` as a permanent CI gate
+- Standardized the official release on exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, and `Polaris-ubuntu24.04-x86_64.deb`; Fedora 42/43 remain historical rather than current package lanes
+- Added explicit Arch `vulkan-headers` / `vulkan-icd-loader` and Fedora `vulkan-loader-devel` package requirements
+- Cleared GCC 15 warning-as-error blockers in Browser Stream setup, dormant preview diagnostics, and Linux display-topology helpers so exact-tag package validation builds cleanly
+
 ### Linux stream modes / private runtime foundation
 - Add first-class `linux_stream_mode` and `linux_private_runtime` config (Private Stream, Host Virtual Display, Mirror Desktop, GPU-native preference, Gamescope Stream, Headless Dongle).
 - Keep legacy `headless_mode` / `linux_use_cage_compositor` / `linux_prefer_gpu_native_capture` as a compatibility mapping; UI and client-settings write both.
