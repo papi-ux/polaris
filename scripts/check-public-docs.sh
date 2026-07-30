@@ -105,33 +105,64 @@ done
 
 python3 <<'PY'
 from pathlib import Path
+import re
+import shlex
 import sys
 
 building = Path("docs/building.md").read_text(encoding="utf-8")
 readme = Path("README.md").read_text(encoding="utf-8")
 changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
 
-if "C++23" not in building or "C++20" in building:
-    print("docs/building.md must advertise the required C++23 toolchain", file=sys.stderr)
+
+def bounded_release_section(text: str, current: str, following: str) -> str:
+    current_heading = rf"^## {re.escape(current)}(?:\s+-[^\n]+)?\s*$"
+    following_heading = rf"^## {re.escape(following)}(?:\s+-[^\n]+)?\s*$"
+    match = re.search(
+        rf"(?ms){current_heading}\n(?P<body>.*?)(?={following_heading})",
+        text,
+    )
+    if not match:
+        print(
+            f"Could not find exact, bounded {current} -> {following} changelog headings",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return match.group("body")
+
+
+required_compiler_row = re.compile(
+    r"^\|\s*C\+\+23 compiler\s*\|\s*GCC or Clang\s*\|\s*$",
+    re.MULTILINE,
+)
+if not required_compiler_row.search(building):
+    print("docs/building.md must declare C++23 in the requirements table", file=sys.stderr)
     sys.exit(1)
 
+arch_block = re.search(
+    r"(?ms)^#### Arch / CachyOS\s*$.*?^```bash\s*$\n(?P<commands>.*?)^```\s*$",
+    building,
+)
+if not arch_block:
+    print("docs/building.md is missing the Arch/CachyOS install command", file=sys.stderr)
+    sys.exit(1)
+arch_tokens = set(shlex.split(arch_block.group("commands").replace("\\\n", " ")))
 for dependency in ("vulkan-headers", "vulkan-icd-loader"):
-    if dependency not in building:
-        print(f"docs/building.md is missing the Arch dependency: {dependency}", file=sys.stderr)
+    if dependency not in arch_tokens:
+        print(
+            f"Arch/CachyOS install command is missing dependency: {dependency}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-try:
-    current_release = changelog.split("## v1.3.2", 1)[1].split("## v1.3.1", 1)[0]
-except IndexError:
-    print("docs/changelog.md is missing a bounded v1.3.2 section", file=sys.stderr)
-    sys.exit(1)
-
+current_release = bounded_release_section(changelog, "v1.3.2", "v1.3.1")
 required_release_facts = (
     "webtransport-go v0.11.1",
     "quic-go v0.60.0",
     "CVE-2026-57497",
     "npm audit --audit-level=high",
+    "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
+    "Polaris-ubuntu24.04-x86_64.deb",
     "vulkan-headers",
     "vulkan-loader-devel",
     "GCC 15",
@@ -141,8 +172,26 @@ for fact in required_release_facts:
         print(f"v1.3.2 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
-for fact in ("webtransport-go v0.11.1", "CVE-2026-57497"):
-    if fact not in readme:
+readme_release = re.search(
+    r"(?ms)^## What is New in v1\.3\.2\s*$\n(?P<body>.*?)(?=^## Install\s*$)",
+    readme,
+)
+if not readme_release:
+    print("README is missing the bounded v1.3.2 summary", file=sys.stderr)
+    sys.exit(1)
+required_readme_facts = (
+    "webtransport-go v0.11.1",
+    "quic-go v0.60.0",
+    "CVE-2026-57497",
+    "npm audit",
+    "Polaris-arch-x86_64.pkg.tar.zst",
+    "Polaris-fedora44-x86_64.rpm",
+    "Polaris-ubuntu24.04-x86_64.deb",
+    "Vulkan",
+    "GCC 15",
+)
+for fact in required_readme_facts:
+    if fact not in readme_release.group("body"):
         print(f"README v1.3.2 summary is missing: {fact}", file=sys.stderr)
         sys.exit(1)
 PY
