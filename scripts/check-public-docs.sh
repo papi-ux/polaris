@@ -117,6 +117,11 @@ def fence_context_line(line: str) -> str:
     return re.sub(r"^(?:[ ]{0,3}>[ \t]?)+", "", line.rstrip("\r\n"))
 
 
+def is_indented_code(line: str) -> bool:
+    candidate = fence_context_line(line)
+    return candidate.startswith("\t") or candidate.startswith("    ")
+
+
 def advance_fence(fence, line: str):
     """Advance CommonMark-style fenced-code state; return (state, delimiter_line)."""
     candidate = fence_context_line(line)
@@ -309,6 +314,8 @@ def rendered_markdown(text: str) -> str:
         fence, delimiter = advance_fence(fence, line)
         if delimiter or fence is not None:
             continue
+        if is_indented_code(line):
+            continue
         if re.match(r"^[ ]{0,3}\[[^]]+\]:\s+", line):
             continue
         rendered.append(line)
@@ -341,6 +348,11 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
             continue
         if fence is not None:
             continue
+        if is_indented_code(line):
+            if current:
+                blocks.append(current)
+                current = []
+            continue
         if line.strip().startswith("|"):
             current.append(line)
         elif current:
@@ -368,7 +380,7 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
 
 
 def tokenize_shell_command(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
     lexer.whitespace_split = True
     lexer.commenters = "#"
     return list(lexer)
@@ -430,8 +442,14 @@ if len(pacman_commands) != 1:
     print("Arch/CachyOS block must contain exactly one sudo pacman -S command", file=sys.stderr)
     sys.exit(1)
 arch_command = pacman_commands[0]
-if any(token and set(token) <= set(";&|<>") for token in arch_command):
-    print("Arch/CachyOS pacman command must not contain chained shell operators", file=sys.stderr)
+if any(
+    (token and set(token) <= set(";&|<>()")) or "$" in token or "`" in token
+    for token in arch_command
+):
+    print(
+        "Arch/CachyOS pacman command must use literal arguments without shell control or expansion",
+        file=sys.stderr,
+    )
     sys.exit(1)
 arch_tokens = set(arch_command)
 for dependency in ("vulkan-headers", "vulkan-icd-loader"):
