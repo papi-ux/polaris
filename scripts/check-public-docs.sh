@@ -145,36 +145,87 @@ def advance_fence(fence, line: str):
     return fence, False
 
 
-INLINE_COMMENT_OPEN = "\uf000html-comment-open\uf001"
-INLINE_COMMENT_CLOSE = "\uf000html-comment-close\uf001"
-INLINE_CODE_SPAN = re.compile(
-    r"(?<!`)(?P<ticks>`+)(?!`)(?P<body>.*?)(?<!`)(?P=ticks)(?!`)",
-    re.S,
-)
+INLINE_CODE_LT = "\uf000inline-code-lt\uf001"
+INLINE_CODE_GT = "\uf000inline-code-gt\uf001"
 
 
-def protect_inline_code_comments(text: str) -> str:
-    """Protect comment delimiters that CommonMark renders inside code spans."""
-    if INLINE_COMMENT_OPEN in text or INLINE_COMMENT_CLOSE in text:
-        raise ValueError("Markdown contains reserved inline-comment sentinel text")
-
-    def protect(match) -> str:
-        return match.group(0).replace("<!--", INLINE_COMMENT_OPEN).replace(
-            "-->", INLINE_COMMENT_CLOSE
-        )
-
-    return INLINE_CODE_SPAN.sub(protect, text)
+def backtick_is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
 
 
-def restore_inline_code_comments(text: str) -> str:
-    return text.replace(INLINE_COMMENT_OPEN, "<!--").replace(
-        INLINE_COMMENT_CLOSE, "-->"
-    )
+def backtick_run_end(text: str, start: int) -> int:
+    end = start
+    while end < len(text) and text[end] == "`":
+        end += 1
+    return end
+
+
+def matching_backtick_run(text: str, start: int, length: int):
+    position = start
+    while True:
+        position = text.find("`", position)
+        if position < 0:
+            return None
+        end = backtick_run_end(text, position)
+        if not backtick_is_escaped(text, position) and end - position == length:
+            return position, end
+        position = end
+
+
+def protect_inline_code_markup(text: str) -> str:
+    """Protect rendered code-span markup, but not markup inside HTML comments."""
+    if INLINE_CODE_LT in text or INLINE_CODE_GT in text:
+        raise ValueError("Markdown contains reserved inline-code sentinel text")
+
+    output = []
+    position = 0
+    while position < len(text):
+        if text.startswith("<!--", position):
+            end = text.find("-->", position + 4)
+            if end < 0:
+                output.append(text[position:])
+                break
+            output.append(text[position:end + 3])
+            position = end + 3
+            continue
+
+        if text[position] == "`" and not backtick_is_escaped(text, position):
+            opener_end = backtick_run_end(text, position)
+            closing = matching_backtick_run(
+                text,
+                opener_end,
+                opener_end - position,
+            )
+            if closing is not None:
+                _, closer_end = closing
+                span = text[position:closer_end]
+                output.append(
+                    span.replace("<", INLINE_CODE_LT).replace(">", INLINE_CODE_GT)
+                )
+                position = closer_end
+                continue
+            output.append(text[position:opener_end])
+            position = opener_end
+            continue
+
+        output.append(text[position])
+        position += 1
+
+    return "".join(output)
+
+
+def restore_inline_code_markup(text: str) -> str:
+    return text.replace(INLINE_CODE_LT, "<").replace(INLINE_CODE_GT, ">")
 
 
 def strip_html_comments(text: str) -> str:
     """Remove HTML comments outside fenced/inline code while preserving lines."""
-    text = protect_inline_code_comments(text)
+    text = protect_inline_code_markup(text)
     output: list[str] = []
     fence = None
     in_comment = False
@@ -220,7 +271,7 @@ def strip_html_comments(text: str) -> str:
 
         output.append("".join(visible) + newline)
 
-    return restore_inline_code_comments("".join(output))
+    return restore_inline_code_markup("".join(output))
 
 
 def verify_html_comment_parser() -> None:
@@ -248,6 +299,20 @@ def verify_html_comment_parser() -> None:
             print(f"HTML-comment parser mishandled {label}", file=sys.stderr)
             sys.exit(1)
 
+    early_close = strip_html_comments(
+        "<!-- hidden `-->` Polaris-extra-x86_64.AppImage -->"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in early_close:
+        print("HTML-comment parser ignored the first real comment close", file=sys.stderr)
+        sys.exit(1)
+
+    escaped_ticks = strip_html_comments(
+        r"\`<!--\` Polaris-extra-x86_64.AppImage \`-->\`"
+    )
+    if "Polaris-extra-x86_64.AppImage" in escaped_ticks:
+        print("Escaped backticks incorrectly opened an inline code span", file=sys.stderr)
+        sys.exit(1)
+
 
 verify_html_comment_parser()
 
@@ -266,7 +331,8 @@ def markdown_section(
     expected_following=None,
 ) -> str:
     """Return one exact Markdown section, bounded by a same/higher-level heading."""
-    text = mask_hidden_html(text)
+    protected = protect_inline_code_markup(text)
+    text = restore_inline_code_markup(mask_hidden_html(protected))
     level = len(heading) - len(heading.lstrip("#"))
     if level < 1 or heading[level:level + 1] != " ":
         raise ValueError(f"Invalid heading: {heading}")
@@ -492,8 +558,8 @@ def rendered_markdown(text: str) -> str:
         lambda match: match.group(1),
         visible,
     )
-    protected = protect_inline_code_comments(visible)
-    return restore_inline_code_comments(visible_html_text(protected))
+    protected = protect_inline_code_markup(visible)
+    return restore_inline_code_markup(visible_html_text(protected))
 
 
 def verify_rendered_markdown_parser() -> None:
@@ -503,9 +569,32 @@ def verify_rendered_markdown_parser() -> None:
         print("Rendered Markdown dropped visible inline-code content", file=sys.stderr)
         sys.exit(1)
 
+    for markup in (
+        "`<div hidden>Polaris-extra-x86_64.AppImage</div>`",
+        "``<script>Polaris-extra-x86_64.AppImage</script>``",
+        "`<div hidden>` Polaris-extra-x86_64.AppImage `</div>`",
+    ):
+        if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(markup):
+            print("Rendered Markdown interpreted literal inline-code HTML", file=sys.stderr)
+            sys.exit(1)
+
     rendered_comment = rendered_markdown("visible <!-- hidden --> prose")
     if "hidden" in rendered_comment or "visible" not in rendered_comment:
         print("Rendered Markdown exposed an actual HTML comment", file=sys.stderr)
+        sys.exit(1)
+
+    early_close = rendered_markdown(
+        "<!-- hidden `-->` Polaris-extra-x86_64.AppImage -->"
+    )
+    if "Polaris-extra-x86_64.AppImage" not in early_close:
+        print("Rendered Markdown ignored the first real comment close", file=sys.stderr)
+        sys.exit(1)
+
+    escaped_ticks = rendered_markdown(
+        r"\`<!--\` Polaris-extra-x86_64.AppImage \`-->\`"
+    )
+    if "Polaris-extra-x86_64.AppImage" in escaped_ticks:
+        print("Rendered Markdown treated escaped backticks as code", file=sys.stderr)
         sys.exit(1)
 
 
