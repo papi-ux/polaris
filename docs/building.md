@@ -79,7 +79,7 @@ See [`scripts/install/README.md`](../scripts/install/README.md) for steps, PREFI
 | Tool | Notes |
 | --- | --- |
 | CMake 3.20+ | Build system |
-| C++20 compiler | GCC or Clang |
+| C++23 compiler | GCC or Clang |
 | Boost | Core libraries |
 | OpenSSL | TLS and pairing |
 | libevdev | Virtual input |
@@ -112,8 +112,10 @@ sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
   wayland-protocols libdrm libcap libnotify libayatana-appindicator \
   libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst \
   miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \
-  grim labwc wlr-randr xorg-xwayland xorg-xdpyinfo cuda
+  grim labwc wlr-randr xorg-xwayland xorg-xdpyinfo vulkan-headers vulkan-icd-loader cuda
 ```
+
+`vulkan-headers` supplies the compile-time API headers and `vulkan-icd-loader` supplies the runtime loader expected by the packaged binary.
 
 CachyOS should use the same package/dependency family first. If a CachyOS kernel, NVIDIA/CUDA stack, or pacman package split behaves differently, include those details when opening an issue.
 

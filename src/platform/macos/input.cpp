@@ -303,6 +303,10 @@ const KeyCodeMap kKeyCodesMap[] = {
     return -1;
   }
 
+  void rebind_gamepad_feedback(input_t &input, int nr, feedback_queue_t feedback_queue) {
+    BOOST_LOG(info) << "rebind_gamepad_feedback: Gamepad not yet implemented for MacOS."sv;
+  }
+
   void free_gamepad(input_t &input, int nr) {
     BOOST_LOG(info) << "free_gamepad: Gamepad not yet implemented for MacOS."sv;
   }

@@ -20,6 +20,26 @@ export const CLIENT_SETTINGS_RESPONSE_ONLY_KEYS = [
   'ai_auto_quality_enabled',
 ]
 
+export const CONFIG_RESPONSE_ONLY_KEYS = [
+  'status',
+  'platform',
+  'version',
+  'has_ai_api_key',
+  'has_steamgriddb_api_key',
+  'has_api_key',
+  'vdisplayStatus',
+  'vdisplayAvailable',
+  'vdisplayBackend',
+  'runtime_backend',
+  'runtime_requested_headless',
+  'runtime_effective_headless',
+  'runtime_gpu_native_override_active',
+  'stream_display_mode',
+  'stream_path_id',
+  'stream_path_label',
+  ...CLIENT_SETTINGS_RESPONSE_ONLY_KEYS,
+]
+
 export function isTruthySetting(value) {
   return value === true || value === 'true' || value === 'enabled' || value === 1 || value === '1'
 }
@@ -189,6 +209,13 @@ export function normalizeFieldList(value) {
 
 export function stripClientSettingsResponseOnly(config = {}) {
   for (const key of CLIENT_SETTINGS_RESPONSE_ONLY_KEYS) {
+    delete config[key]
+  }
+  return config
+}
+
+export function stripConfigResponseOnly(config = {}) {
+  for (const key of CONFIG_RESPONSE_ONLY_KEYS) {
     delete config[key]
   }
   return config

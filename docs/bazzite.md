@@ -270,6 +270,20 @@ systemctl --user disable --now polaris
 sudo rpm-ostree uninstall -r polaris
 ```
 
+After rebooting, re-enable the Sunshine user service that matches the previous
+installation. The unit names are alternatives; run only the applicable command:
+
+```bash
+# Homebrew Sunshine
+systemctl --user enable --now homebrew.sunshine.service
+
+# Flatpak Sunshine
+systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service
+```
+
+Polaris and Sunshine use the same default GameStream ports, so do not enable both
+hosts at the same time.
+
 ## Known Bazzite Log Messages
 
 `labwc: No new Wayland socket appeared within 10s` means the isolated `labwc`

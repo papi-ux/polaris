@@ -277,7 +277,10 @@ import AiOptimizer from '../configs/tabs/AiOptimizer.vue'
 import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
-import { CLIENT_SETTINGS_RESPONSE_ONLY_KEYS, stripClientSettingsResponseOnly } from '../client-settings-sync'
+import {
+  CONFIG_RESPONSE_ONLY_KEYS,
+  stripConfigResponseOnly,
+} from '../client-settings-sync'
 import { requestHostRestart } from '../restart-host.js'
 import { rankSettingsSearchTabs } from '../settings-search.js'
 
@@ -339,6 +342,7 @@ const tabs = ref([
       "touchpad_as_ds4": "enabled",
       "ds5_inputtino_randomize_mac": "enabled",
       "headless_gamepad_isolation": "enabled",
+      "client_gamepad_seat_isolation": "disabled",
       "back_button_timeout": -1,
       "keyboard": "enabled",
       "key_repeat_delay": 500,
@@ -789,7 +793,7 @@ function clearSearchHighlight() {
 
 function captureResponseOnlyConfig(source) {
   responseOnlyConfig.value = {}
-  for (const key of CLIENT_SETTINGS_RESPONSE_ONLY_KEYS) {
+  for (const key of CONFIG_RESPONSE_ONLY_KEYS) {
     if (source[key] !== undefined) {
       responseOnlyConfig.value[key] = source[key]
     }
@@ -900,7 +904,7 @@ function serialize() {
     configCopy.trusted_subnets = configCopy.trusted_subnets.filter(s => s && s.trim()).join(',')
   }
 
-  stripClientSettingsResponseOnly(configCopy)
+  stripConfigResponseOnly(configCopy)
 
   return configCopy
 }

@@ -147,6 +147,49 @@ describe('ConfigView pending changes review', () => {
     expect(wrapper.text()).toContain('Maximum Bitrate')
   })
 
+  it('strips response-only stream path metadata from config saves', async () => {
+    const wrapper = mountConfigView({
+      stream_path_id: 'headless_stream',
+      stream_path_label: 'Private Stream',
+      runtime_backend: 'Labwc',
+      vdisplayAvailable: true,
+    })
+    await flushConfigLoad()
+
+    wrapper.vm.config.sunshine_name = 'Fixed Host'
+    await nextTick()
+
+    global.fetch.mockResolvedValueOnce({ status: 200 })
+    const result = await wrapper.vm.save()
+
+    expect(result).toBe(true)
+    const saveRequest = global.fetch.mock.calls.at(-1)
+    const body = JSON.parse(saveRequest[1].body)
+    expect(body).toHaveProperty('sunshine_name', 'Fixed Host')
+    expect(body).not.toHaveProperty('stream_path_id')
+    expect(body).not.toHaveProperty('stream_path_label')
+    expect(body).not.toHaveProperty('runtime_backend')
+    expect(body).not.toHaveProperty('vdisplayAvailable')
+  })
+
+  it('preserves credential-presence metadata when resetting local changes', async () => {
+    const wrapper = mountConfigView({
+      has_ai_api_key: true,
+      has_steamgriddb_api_key: true,
+      has_api_key: true,
+    })
+    await flushConfigLoad()
+
+    wrapper.vm.config.sunshine_name = 'Temporary Name'
+    await nextTick()
+    wrapper.vm.resetLocalChanges()
+    await nextTick()
+
+    expect(wrapper.vm.config.has_ai_api_key).toBe(true)
+    expect(wrapper.vm.config.has_steamgriddb_api_key).toBe(true)
+    expect(wrapper.vm.config.has_api_key).toBe(true)
+  })
+
   it('shows backend validation details when saving configuration fails', async () => {
     const wrapper = mountConfigView()
     await flushConfigLoad()

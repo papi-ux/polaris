@@ -114,6 +114,7 @@ set(TEST_FAST_SOURCES
 
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_executable_path.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
     )
 endif()
@@ -127,6 +128,7 @@ endif()
 set(TEST_AUDIT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_config_consistency.cpp
     ${CMAKE_SOURCE_DIR}/tests/integration/test_locale_consistency.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_input_udev_contract.cpp
 )
 
 set(TEST_PLATFORM_SOURCES
@@ -148,6 +150,7 @@ if (NOT WIN32 AND NOT APPLE)
 endif()
 
 set(TEST_INPUT_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_gamepad_feedback_router.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_mouse.cpp
 )
 

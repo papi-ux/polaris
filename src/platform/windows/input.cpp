@@ -21,6 +21,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/gamepad_feedback_router.h"
 
 #ifdef __MINGW32__
 // DECLARE_HANDLE(HSYNTHETICPOINTERDEVICE);
@@ -70,7 +71,7 @@ namespace platf {
 
   struct gamepad_context_t {
     target_t gp;
-    feedback_queue_t feedback_queue;
+    std::shared_ptr<gamepad_feedback_router_t> feedback_router;
 
     union {
       XUSB_REPORT x360;
@@ -227,6 +228,7 @@ namespace platf {
 
       gamepad.client_relative_index = id.clientRelativeIndex;
       gamepad.last_report_ts = std::chrono::steady_clock::now();
+      gamepad.feedback_router = std::make_shared<gamepad_feedback_router_t>(std::move(feedback_queue));
 
       // Establish a connect to the ViGEm driver if we don't have one yet
       if (!client) {
@@ -255,8 +257,8 @@ namespace platf {
         ds4_update_motion(gamepad, LI_MOTION_TYPE_GYRO, 0.0f, 0.0f, 0.0f);
 
         // Request motion events from the client at 100 Hz
-        feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
-        feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
+        gamepad.feedback_router->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
+        gamepad.feedback_router->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
 
         // We support pointer index 0 and 1
         gamepad.available_pointers = 0x3;
@@ -269,8 +271,6 @@ namespace platf {
         return -1;
       }
 
-      gamepad.feedback_queue = std::move(feedback_queue);
-
       if (gp_type == Xbox360Wired) {
         status = vigem_target_x360_register_notification(client.get(), gamepad.gp.get(), x360_notify, this);
       } else {
@@ -282,6 +282,16 @@ namespace platf {
       }
 
       return 0;
+    }
+
+    void rebind_feedback(int nr, feedback_queue_t feedback_queue) {
+      if (nr < 0 || static_cast<std::size_t>(nr) >= gamepads.size()) {
+        return;
+      }
+      auto &gamepad = gamepads[nr];
+      if (gamepad.feedback_router) {
+        gamepad.feedback_router->rebind(std::move(feedback_queue));
+      }
     }
 
     /**
@@ -304,6 +314,7 @@ namespace platf {
       }
 
       gamepad.gp.reset();
+      gamepad.feedback_router.reset();
 
       // Disconnect from ViGEm if we just removed the last gamepad
       bool disconnect = true;
@@ -349,7 +360,7 @@ namespace platf {
               normalizedLargeMotor,
               normalizedSmallMotor
             );
-            gamepad.feedback_queue->raise(msg);
+            gamepad.feedback_router->raise(msg);
             gamepad.last_rumble = msg;
           }
           return;
@@ -375,7 +386,7 @@ namespace platf {
               b != gamepad.last_rgb_led.data.rgb_led.b) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
-            gamepad.feedback_queue->raise(msg);
+            gamepad.feedback_router->raise(msg);
             gamepad.last_rgb_led = msg;
           }
           return;
@@ -1224,6 +1235,13 @@ namespace platf {
     }
 
     return raw->vigem->alloc_gamepad_internal(id, feedback_queue, selectedGamepadType);
+  }
+
+  void rebind_gamepad_feedback(input_t &input, int nr, feedback_queue_t feedback_queue) {
+    auto raw = (input_raw_t *) input.get();
+    if (raw->vigem) {
+      raw->vigem->rebind_feedback(nr, std::move(feedback_queue));
+    }
   }
 
   void free_gamepad(input_t &input, int nr) {

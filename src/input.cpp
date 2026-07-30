@@ -1798,6 +1798,7 @@ namespace input {
       std::scoped_lock lock {preallocated_gamepad_mutex};
       if (preallocated_controller_number == 0 && preallocated_gamepad_id >= 0) {
         input->gamepads[0].id = preallocated_gamepad_id;
+        platf::rebind_gamepad_feedback(platf_input, preallocated_gamepad_id, input->feedback_queue);
         preallocated_controller_number = -1;
         preallocated_gamepad_id = -1;
         preallocated_gamepad_mail.reset();

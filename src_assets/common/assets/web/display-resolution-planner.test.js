@@ -61,6 +61,33 @@ describe('display resolution planner', () => {
     expect(clampPlannerScale(3)).toBe(2)
   })
 
+  it('keeps repeated preset applications anchored to an immutable source mode', () => {
+    const sourceMode = '1920x1080x60'
+    const first = buildResolutionPlanner({ sourceMode })
+    const firstBalanced = first.choices.find((choice) => choice.id === 'balanced')
+    expect(firstBalanced.targetMode).toBe('1440x810x60')
+
+    const rebuilt = buildResolutionPlanner({
+      sourceMode,
+      fallbackMode: firstBalanced.targetMode,
+    })
+    expect(rebuilt.choices.find((choice) => choice.id === 'balanced').targetMode).toBe('1440x810x60')
+    expect(rebuilt.choices.find((choice) => choice.id === 'native').targetMode).toBe('1920x1080x60')
+  })
+
+  it('keeps an explicitly empty source immutable after a preset writes fallback mode', () => {
+    const first = buildResolutionPlanner({ sourceMode: '', fallbackMode: '' })
+    const firstBalanced = first.choices.find((choice) => choice.id === 'balanced')
+    expect(firstBalanced.targetMode).toBe('1440x810x60')
+
+    const rebuilt = buildResolutionPlanner({
+      sourceMode: '',
+      fallbackMode: firstBalanced.targetMode,
+    })
+    expect(rebuilt.choices.find((choice) => choice.id === 'balanced').targetMode).toBe('1440x810x60')
+    expect(rebuilt.choices.find((choice) => choice.id === 'native').targetMode).toBe('1920x1080x60')
+  })
+
   it('parses and formats Moonlight-compatible WxHxFPS display modes', () => {
     expect(parseDisplayMode('3840x2160x120')).toEqual({ width: 3840, height: 2160, fps: 120 })
     expect(formatDisplayMode({ width: 1920, height: 1080, fps: 60 })).toBe('1920x1080x60')

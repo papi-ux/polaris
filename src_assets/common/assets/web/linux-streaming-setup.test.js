@@ -1,6 +1,6 @@
 import { shallowMount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nextTick, ref } from 'vue'
+import { nextTick, reactive, ref } from 'vue'
 
 import AudioVideo from './configs/tabs/AudioVideo.vue'
 
@@ -123,6 +123,56 @@ describe('Linux Streaming Setup checklist', () => {
     expect(config.capture).toBe('wlr')
     expect(config.linux_auto_manage_displays).toBe('disabled')
     expect(config.headless_swap_mode).toBe('')
+  })
+
+  it('keeps display planner presets idempotent across repeated clicks', async () => {
+    const config = reactive(linuxConfig({ fallback_mode: '1920x1080x60' }))
+    const wrapper = mountAudioVideo(config)
+    const buttons = wrapper.findAll('button')
+    const balanced = buttons.find((button) => button.text().includes('Balanced'))
+    const native = buttons.find((button) => button.text().includes('Native'))
+
+    expect(balanced).toBeDefined()
+    expect(native).toBeDefined()
+    await balanced.trigger('click')
+    expect(config.fallback_mode).toBe('1440x810x60')
+    await balanced.trigger('click')
+    expect(config.fallback_mode).toBe('1440x810x60')
+    await native.trigger('click')
+    expect(config.fallback_mode).toBe('1920x1080x60')
+
+    await balanced.trigger('click')
+    expect(config.fallback_mode).toBe('1440x810x60')
+    await wrapper.find('#fallback_mode').setValue('1440x810x60')
+    const manuallyConfirmedNative = wrapper.findAll('button').find((button) => button.text().includes('Native'))
+    await manuallyConfirmedNative.trigger('click')
+    expect(config.fallback_mode).toBe('1440x810x60')
+
+    await wrapper.find('#fallback_mode').setValue('2560x1440x60')
+    const updatedBalanced = wrapper.findAll('button').find((button) => button.text().includes('Balanced'))
+    await updatedBalanced.trigger('click')
+    expect(config.fallback_mode).toBe('1920x1080x60')
+
+    config.fallback_mode = '1600x900x60'
+    await nextTick()
+    const resetNative = wrapper.findAll('button').find((button) => button.text().includes('Native'))
+    await resetNative.trigger('click')
+    expect(config.fallback_mode).toBe('1600x900x60')
+  })
+
+  it('keeps an initially empty or manually cleared planner source stable', async () => {
+    const config = linuxConfig({ fallback_mode: '' })
+    const wrapper = mountAudioVideo(config)
+    const balanced = () => wrapper.findAll('button').find((button) => button.text().includes('Balanced'))
+
+    await balanced().trigger('click')
+    expect(config.fallback_mode).toBe('1440x810x60')
+    await balanced().trigger('click')
+    expect(config.fallback_mode).toBe('1440x810x60')
+
+    await wrapper.find('#fallback_mode').setValue('')
+    await balanced().trigger('click')
+    expect(config.fallback_mode).toBe('1440x810x60')
   })
 
   it('ignores a stale dongle discovery response after another preset is selected', async () => {

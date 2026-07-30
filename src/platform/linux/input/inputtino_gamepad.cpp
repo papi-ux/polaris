@@ -6,6 +6,8 @@
 #include <boost/locale.hpp>
 #include <inputtino/input.hpp>
 #include <libevdev/libevdev.h>
+#include <string>
+#include <string_view>
 
 // local includes
 #include "inputtino_common.h"
@@ -33,6 +35,19 @@ namespace platf::gamepad {
     }, joypad);
   }
 
+  isolation::client_gamepad_identity_t client_gamepad_identity(int globalIndex,
+                                                                std::string_view legacy_name,
+                                                                std::string_view isolated_name,
+                                                                std::string_view legacy_phys) {
+    return isolation::client_gamepad_identity(
+      config::input.client_gamepad_seat_isolation,
+      globalIndex,
+      legacy_name,
+      isolated_name,
+      legacy_phys
+    );
+  }
+
   void register_created_joypad_nodes(int globalIndex, const joypads_t &joypad) {
     isolation::register_virtual_gamepad_nodes(globalIndex, joypad_nodes(joypad));
   }
@@ -44,12 +59,19 @@ namespace platf::gamepad {
       device_id = std::format("02:00:00:00:10:{:02x}", globalIndex);
     }
 
-    return inputtino::XboxOneJoypad::create({.name = "Sunshine X-Box One (virtual) pad",
+    const auto identity = client_gamepad_identity(
+      globalIndex,
+      "Sunshine X-Box One (virtual) pad",
+      "Polaris X-Box One (virtual) pad",
+      device_id
+    );
+
+    return inputtino::XboxOneJoypad::create({.name = identity.name,
                                              // https://github.com/torvalds/linux/blob/master/drivers/input/joystick/xpad.c#L147
                                              .vendor_id = 0x045E,
                                              .product_id = 0x02EA,
                                              .version = 0x0408,
-                                             .device_phys = device_id,
+                                             .device_phys = identity.phys,
                                              .device_uniq = device_id});
   }
 
@@ -60,12 +82,19 @@ namespace platf::gamepad {
       device_id = std::format("02:00:00:00:20:{:02x}", globalIndex);
     }
 
-    return inputtino::SwitchJoypad::create({.name = "Sunshine Nintendo (virtual) pad",
+    const auto identity = client_gamepad_identity(
+      globalIndex,
+      "Sunshine Nintendo (virtual) pad",
+      "Polaris Nintendo (virtual) pad",
+      device_id
+    );
+
+    return inputtino::SwitchJoypad::create({.name = identity.name,
                                             // https://github.com/torvalds/linux/blob/master/drivers/hid/hid-ids.h#L981
                                             .vendor_id = 0x057e,
                                             .product_id = 0x2009,
                                             .version = 0x8111,
-                                            .device_phys = device_id,
+                                            .device_phys = identity.phys,
                                             .device_uniq = device_id});
   }
 
@@ -77,10 +106,20 @@ namespace platf::gamepad {
       device_mac = std::format("02:00:00:00:00:{:02x}", globalIndex);
     }
 
-    return inputtino::PS5Joypad::create({.name = "Sunshine PS5 (virtual) pad", .vendor_id = 0x054C, .product_id = 0x0CE6, .version = 0x8111, .device_phys = device_mac, .device_uniq = device_mac});
+    const auto identity = client_gamepad_identity(
+      globalIndex,
+      "Sunshine PS5 (virtual) pad",
+      "Polaris PS5 (virtual) pad",
+      device_mac
+    );
+
+    return inputtino::PS5Joypad::create({.name = identity.name, .vendor_id = 0x054C, .product_id = 0x0CE6, .version = 0x8111, .device_phys = identity.phys, .device_uniq = device_mac});
   }
 
   int alloc(input_raw_t *raw, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
+    BOOST_LOG(info) << "Gamepad " << id.globalIndex << " client seat isolation: "
+                    << (config::input.client_gamepad_seat_isolation ? "seat-polaris" : "disabled");
+
     ControllerType selectedGamepadType;
 
     if (config::input.gamepad == "xone"sv) {
@@ -132,14 +171,15 @@ namespace platf::gamepad {
     }
 
     auto gamepad = std::make_shared<joypad_state>(joypad_state {});
-    auto on_rumble_fn = [feedback_queue, idx = id.clientRelativeIndex, gamepad](int low_freq, int high_freq) {
+    gamepad->feedback_router = std::make_shared<gamepad_feedback_router_t>(std::move(feedback_queue));
+    auto on_rumble_fn = [feedback_router = gamepad->feedback_router, idx = id.clientRelativeIndex, gamepad](int low_freq, int high_freq) {
       // Don't resend duplicate rumble data
       if (gamepad->last_rumble.type == platf::gamepad_feedback_e::rumble && gamepad->last_rumble.data.rumble.lowfreq == low_freq && gamepad->last_rumble.data.rumble.highfreq == high_freq) {
         return;
       }
 
       gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(idx, low_freq, high_freq);
-      feedback_queue->raise(msg);
+      feedback_router->raise(msg);
       gamepad->last_rumble = msg;
     };
 
@@ -177,24 +217,24 @@ namespace platf::gamepad {
           auto ds5 = create_ds5(id.globalIndex);
           if (ds5) {
             (*ds5).set_on_rumble(on_rumble_fn);
-            (*ds5).set_on_led([feedback_queue, idx = id.clientRelativeIndex, gamepad](int r, int g, int b) {
+            (*ds5).set_on_led([feedback_router = gamepad->feedback_router, idx = id.clientRelativeIndex, gamepad](int r, int g, int b) {
               // Don't resend duplicate LED data
               if (gamepad->last_rgb_led.type == platf::gamepad_feedback_e::set_rgb_led && gamepad->last_rgb_led.data.rgb_led.r == r && gamepad->last_rgb_led.data.rgb_led.g == g && gamepad->last_rgb_led.data.rgb_led.b == b) {
                 return;
               }
 
               auto msg = gamepad_feedback_msg_t::make_rgb_led(idx, r, g, b);
-              feedback_queue->raise(msg);
+              feedback_router->raise(msg);
               gamepad->last_rgb_led = msg;
             });
 
-            (*ds5).set_on_trigger_effect([feedback_queue, idx = id.clientRelativeIndex](const inputtino::PS5Joypad::TriggerEffect &trigger_effect) {
-              feedback_queue->raise(gamepad_feedback_msg_t::make_adaptive_triggers(idx, trigger_effect.event_flags, trigger_effect.type_left, trigger_effect.type_right, trigger_effect.left, trigger_effect.right));
+            (*ds5).set_on_trigger_effect([feedback_router = gamepad->feedback_router, idx = id.clientRelativeIndex](const inputtino::PS5Joypad::TriggerEffect &trigger_effect) {
+              feedback_router->raise(gamepad_feedback_msg_t::make_adaptive_triggers(idx, trigger_effect.event_flags, trigger_effect.type_left, trigger_effect.type_right, trigger_effect.left, trigger_effect.right));
             });
 
             // Activate the motion sensors
-            feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
-            feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
+            gamepad->feedback_router->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
+            gamepad->feedback_router->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
 
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*ds5));
             register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
@@ -207,6 +247,16 @@ namespace platf::gamepad {
         }
     }
     return -1;
+  }
+
+  void rebind_feedback(input_raw_t *raw, int nr, feedback_queue_t feedback_queue) {
+    if (nr < 0 || static_cast<std::size_t>(nr) >= raw->gamepads.size()) {
+      return;
+    }
+    auto &gamepad = raw->gamepads[nr];
+    if (gamepad && gamepad->feedback_router) {
+      gamepad->feedback_router->rebind(std::move(feedback_queue));
+    }
   }
 
   void free(input_raw_t *raw, int nr) {

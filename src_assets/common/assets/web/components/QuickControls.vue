@@ -1,7 +1,10 @@
 <script setup>
 import { computed, ref, onMounted, onUnmounted, inject } from 'vue'
 import { useToast } from '../composables/useToast'
-import { CLIENT_SETTINGS_RESPONSE_ONLY_KEYS, resolveClientSettingsSync } from '../client-settings-sync'
+import {
+  resolveClientSettingsSync,
+  stripConfigResponseOnly,
+} from '../client-settings-sync'
 import ConfirmActionDialog from './ConfirmActionDialog.vue'
 
 const config = ref({})
@@ -28,24 +31,6 @@ const defaults = {
   enable_discovery: 'enabled',
   enable_pairing: 'enabled',
 }
-
-const responseOnlyConfigKeys = [
-  'status',
-  'platform',
-  'version',
-  'has_ai_api_key',
-  'has_steamgriddb_api_key',
-  'has_api_key',
-  'vdisplayStatus',
-  'vdisplayAvailable',
-  'vdisplayBackend',
-  'runtime_backend',
-  'runtime_requested_headless',
-  'runtime_effective_headless',
-  'runtime_gpu_native_override_active',
-  'stream_display_mode',
-  ...CLIENT_SETTINGS_RESPONSE_ONLY_KEYS,
-]
 
 function isEnabled(key) {
   const val = config.value[key] ?? defaults[key] ?? 'disabled'
@@ -90,7 +75,7 @@ async function toggle(key) {
 
     // Remove response-only keys injected by getConfig() that aren't real config settings.
     // These come from the server's status probing, not the config file.
-    for (const k of responseOnlyConfigKeys) delete existing[k]
+    stripConfigResponseOnly(existing)
 
     // Merge the toggle change
     existing[key] = newVal

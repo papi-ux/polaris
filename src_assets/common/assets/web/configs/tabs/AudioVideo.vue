@@ -39,11 +39,22 @@ const isLinux = computed(() => props.platform === 'linux')
 const isWindows = computed(() => props.platform === 'windows')
 const showDisplayPlannerAdvanced = ref(false)
 const customDisplayScale = ref(1)
+const plannerSourceMode = ref(config.value.fallback_mode || '')
+let applyingDisplayPlan = false
 const displayPlanner = computed(() => buildResolutionPlanner({
+  sourceMode: plannerSourceMode.value,
   fallbackMode: config.value.fallback_mode,
   customScale: customDisplayScale.value,
   showAdvanced: showDisplayPlannerAdvanced.value,
 }))
+
+watch(() => config.value.fallback_mode, (mode) => {
+  if (applyingDisplayPlan) {
+    applyingDisplayPlan = false
+    return
+  }
+  plannerSourceMode.value = mode || ''
+}, { flush: 'sync' })
 
 // Path cards mirror the stream_path registry (runtime × capture × topology).
 // Reserved paths (gamescope ownership, Family Mode, EVDI/dongle) stay visible but disabled
@@ -365,7 +376,8 @@ onMounted(() => {
 })
 
 function applyDisplayPlan(choice) {
-  if (!choice?.safe) return
+  if (!choice?.safe || config.value.fallback_mode === choice.targetMode) return
+  applyingDisplayPlan = true
   config.value.fallback_mode = choice.targetMode
 }
 
@@ -378,6 +390,11 @@ const validateFallbackMode = (event) => {
   }
 
   event.target.reportValidity();
+}
+
+function updateDisplayPlannerSource(event) {
+  validateFallbackMode(event)
+  plannerSourceMode.value = event.target.value
 }
 </script>
 
@@ -945,7 +962,7 @@ pactl info | grep Source</pre>
             type="text"
             class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
             placeholder="1920x1080x60"
-            @input="validateFallbackMode"
+            @input="updateDisplayPlannerSource"
           />
           <div class="text-sm text-storm mt-1">{{ $t('config.fallback_mode_desc') }}</div>
         </div>

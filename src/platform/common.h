@@ -941,6 +941,7 @@ namespace platf {
    * @return 0 on success.
    */
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue);
+  void rebind_gamepad_feedback(input_t &input, int nr, feedback_queue_t feedback_queue);
   void free_gamepad(input_t &input, int nr);
 
   /**

@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace platf::gamepad::isolation {
@@ -75,6 +76,28 @@ namespace platf::gamepad::isolation {
     }
   };
 
+  inline std::string client_gamepad_phys_marker(bool enabled, int index) {
+    return enabled ? "polaris/client-gamepad-seat-isolated/" + std::to_string(index) : "";
+  }
+
+  inline std::string client_gamepad_device_name(bool enabled, std::string_view legacy_name, std::string_view isolated_name) {
+    return std::string(enabled ? isolated_name : legacy_name);
+  }
+
+  struct client_gamepad_identity_t {
+    std::string name;
+    std::string phys;
+  };
+
+  inline client_gamepad_identity_t client_gamepad_identity(bool enabled, int index,
+                                                            std::string_view legacy_name,
+                                                            std::string_view isolated_name,
+                                                            std::string_view legacy_phys) {
+    return {
+      client_gamepad_device_name(enabled, legacy_name, isolated_name),
+      enabled ? client_gamepad_phys_marker(true, index) : std::string(legacy_phys),
+    };
+  }
   device_classification_e classify_device(const device_snapshot_t &device);
   std::vector<classified_device_t> classify_devices(const std::vector<device_snapshot_t> &devices);
   sdl_hint_plan_t build_sdl_hint_plan(const std::vector<classified_device_t> &devices);
