@@ -209,6 +209,7 @@ def markdown_section(
     expected_following=None,
 ) -> str:
     """Return one exact Markdown section, bounded by a same/higher-level heading."""
+    text = mask_hidden_html(text)
     level = len(heading) - len(heading.lstrip("#"))
     if level < 1 or heading[level:level + 1] != " ":
         raise ValueError(f"Invalid heading: {heading}")
@@ -247,6 +248,103 @@ def markdown_section(
             )
             sys.exit(1)
     return "".join(lines[start:end])
+
+
+HTML_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
+HTML_NONCONTENT_TAGS = {"script", "style", "template"}
+
+
+def html_element_is_hidden(tag, attrs):
+    values = {name.lower(): (value or "") for name, value in attrs}
+    if tag in HTML_NONCONTENT_TAGS or "hidden" in values:
+        return True
+    if values.get("aria-hidden", "").strip().lower() == "true":
+        return True
+    style = values.get("style", "")
+    return bool(
+        re.search(
+            r"(?:^|;)\s*display\s*:\s*none(?:\s*!important)?\s*(?:;|$)",
+            style,
+            re.I,
+        )
+    )
+
+
+class HiddenHTMLRangeParser(HTMLParser):
+    """Locate non-rendered HTML ranges so Markdown headings cannot hide in them."""
+
+    def __init__(self, source):
+        super().__init__(convert_charrefs=False)
+        self.source = source
+        self.line_offsets = [0]
+        for match in re.finditer(r"\n", source):
+            self.line_offsets.append(match.end())
+        self.stack = []
+        self.hidden_depth = 0
+        self.hidden_start = None
+        self.ranges = []
+
+    def _offset(self):
+        line, column = self.getpos()
+        return self.line_offsets[line - 1] + column
+
+    def _tag_end(self, start):
+        end = self.source.find(">", start)
+        return len(self.source) if end < 0 else end + 1
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        hidden = html_element_is_hidden(tag, attrs)
+        start = self._offset()
+        if tag in HTML_VOID_TAGS:
+            if hidden and self.hidden_depth == 0:
+                self.ranges.append((start, self._tag_end(start)))
+            return
+        if hidden and self.hidden_depth == 0:
+            self.hidden_start = start
+        self.stack.append((tag, hidden))
+        if hidden:
+            self.hidden_depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        if html_element_is_hidden(tag.lower(), attrs) and self.hidden_depth == 0:
+            start = self._offset()
+            self.ranges.append((start, self._tag_end(start)))
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] != tag:
+                continue
+            removed = self.stack[index:]
+            del self.stack[index:]
+            prior_depth = self.hidden_depth
+            self.hidden_depth -= sum(1 for _, hidden in removed if hidden)
+            if prior_depth > 0 and self.hidden_depth == 0 and self.hidden_start is not None:
+                self.ranges.append((self.hidden_start, self._tag_end(self._offset())))
+                self.hidden_start = None
+            return
+
+    def close(self):
+        super().close()
+        if self.hidden_start is not None:
+            self.ranges.append((self.hidden_start, len(self.source)))
+            self.hidden_start = None
+
+
+def mask_hidden_html(text):
+    parser = HiddenHTMLRangeParser(text)
+    parser.feed(text)
+    parser.close()
+    masked = list(text)
+    for start, end in parser.ranges:
+        for index in range(start, end):
+            if masked[index] not in "\r\n":
+                masked[index] = " "
+    return "".join(masked)
 
 
 class VisibleHTMLText(HTMLParser):
@@ -322,12 +420,18 @@ def rendered_markdown(text: str) -> str:
 
     visible = "".join(rendered)
     visible = re.sub(
-        r"!?\[([^]]*)\]\((?:\\.|[^)\n])*\)",
-        lambda match: match.group(1),
+        r"!\[[^]]*\]\((?:\\.|[^)\n])*\)",
+        "",
         visible,
     )
     visible = re.sub(
-        r"!?\[([^]]*)\]\[[^]]*\]",
+        r"\[([^]]*)\]\((?:\\.|[^)\n])*\)",
+        lambda match: match.group(1),
+        visible,
+    )
+    visible = re.sub(r"!\[[^]]*\]\[[^]]*\]", "", visible)
+    visible = re.sub(
+        r"\[([^]]*)\]\[[^]]*\]",
         lambda match: match.group(1),
         visible,
     )
