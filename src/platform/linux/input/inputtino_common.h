@@ -17,6 +17,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/gamepad_feedback_router.h"
 #include "src/utility.h"
 
 using namespace std::literals;
@@ -27,6 +28,7 @@ namespace platf {
 
   struct joypad_state {
     std::unique_ptr<joypads_t> joypad;
+    std::shared_ptr<gamepad_feedback_router_t> feedback_router;
     gamepad_feedback_msg_t last_rumble;
     gamepad_feedback_msg_t last_rgb_led;
   };
