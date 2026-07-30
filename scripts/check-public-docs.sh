@@ -40,10 +40,14 @@ if missing:
 PY
 
 expected_assets=(
-  "Polaris-fedora42-x86_64.rpm"
-  "Polaris-fedora43-x86_64.rpm"
+  "Polaris-fedora44-x86_64.rpm"
   "Polaris-ubuntu24.04-x86_64.deb"
   "Polaris-arch-x86_64.pkg.tar.zst"
+)
+
+legacy_assets=(
+  "Polaris-fedora42-x86_64.rpm"
+  "Polaris-fedora43-x86_64.rpm"
 )
 
 expected_nova_links=(
@@ -60,9 +64,23 @@ files_to_check=(
   ".github/workflows/build.yml"
 )
 
+current_docs=(
+  "README.md"
+  "docs/building.md"
+)
+
 for expected_asset in "${expected_assets[@]}"; do
   for file in "${files_to_check[@]}"; do
     grep -Fq "$expected_asset" "$file"
+  done
+done
+
+for legacy_asset in "${legacy_assets[@]}"; do
+  for file in "${current_docs[@]}"; do
+    if grep -Fq "$legacy_asset" "$file"; then
+      echo "Legacy Fedora release asset remains in $file: $legacy_asset" >&2
+      exit 1
+    fi
   done
 done
 

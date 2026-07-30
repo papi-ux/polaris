@@ -52,7 +52,7 @@ those less-turnkey paths.
 
 | Host distro | Current path | Notes |
 | --- | --- | --- |
-| Fedora 42/43/44 | Published RPM assets | Most validated package path. |
+| Fedora 44 | Published RPM asset | Most validated package path. |
 | Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
 | CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
 | Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage and growing AMD/Mesa VAAPI validation, Steam/Game Mode needs more reports. |
@@ -210,8 +210,6 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 
 The public release assets are currently:
 
-- `Polaris-fedora42-x86_64.rpm`
-- `Polaris-fedora43-x86_64.rpm`
 - `Polaris-fedora44-x86_64.rpm`
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`

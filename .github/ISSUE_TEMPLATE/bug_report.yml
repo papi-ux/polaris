@@ -51,7 +51,7 @@ body:
     attributes:
       label: Host OS
       description: Linux distribution and version running Polaris.
-      placeholder: e.g. Fedora 43, Bazzite stable, Ubuntu 24.04, Arch Linux, Debian 13
+      placeholder: e.g. Fedora 44, Bazzite stable, Ubuntu 24.04, Arch Linux, Debian 13
     validations:
       required: true
 

@@ -313,8 +313,6 @@ Highlights:
 
 Current official public assets:
 
-- `Polaris-fedora42-x86_64.rpm`
-- `Polaris-fedora43-x86_64.rpm`
 - `Polaris-fedora44-x86_64.rpm`
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`

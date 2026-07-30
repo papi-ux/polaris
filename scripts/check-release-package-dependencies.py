@@ -54,6 +54,24 @@ if not re.search(r"(?m)^BuildRequires:\s+vulkan-loader-devel\s*$", fedora):
     raise AssertionError("Fedora build dependencies must explicitly include vulkan-loader-devel")
 
 workflow = read(".github/workflows/build.yml")
+fedora_job = workflow_job(workflow, "fedora-rpm-build")
+fedora_versions = re.findall(r"(?m)^          - fedora: '([0-9]+)'$", fedora_job)
+if fedora_versions != ["44"]:
+    raise AssertionError(f"Fedora CI matrix must contain only Fedora 44, found {fedora_versions}")
+for legacy_version in ("42", "43"):
+    for legacy_marker in (
+        f"fedora-{legacy_version}-rpm-artifacts",
+        f"release-assets/raw/fedora{legacy_version}",
+        f"copy_fedora_rpms {legacy_version}",
+    ):
+        if legacy_marker in workflow:
+            raise AssertionError(f"release workflow retains Fedora {legacy_version}: {legacy_marker}")
+    for cleanup_asset in (
+        f"Polaris-fedora{legacy_version}-x86_64.rpm",
+        f"Polaris-fedora{legacy_version}-src.rpm",
+    ):
+        if cleanup_asset not in workflow:
+            raise AssertionError(f"release workflow must delete stale asset: {cleanup_asset}")
 arch_job = workflow_job(workflow, "arch-build")
 arch_install = re.search(
     r"(?ms)^      - name: Install dependencies\n(?P<body>.*?)(?=^      - name:|\Z)",
