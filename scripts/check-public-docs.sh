@@ -111,19 +111,28 @@ import shlex
 import sys
 
 
+def fence_context_line(line: str) -> str:
+    """Remove Markdown blockquote containers before testing a fence delimiter."""
+    return re.sub(r"^(?:[ ]{0,3}>[ \t]?)+", "", line.rstrip("\r\n"))
+
+
 def advance_fence(fence, line: str):
     """Advance CommonMark-style fenced-code state; return (state, delimiter_line)."""
+    candidate = fence_context_line(line)
     if fence is None:
-        opener = re.match(r"^\s{0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        opener = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", candidate)
         if opener:
             marker = opener.group(1)
+            info = opener.group(2)
+            if marker[0] == "`" and "`" in info:
+                return None, False
             return (marker[0], len(marker)), True
         return None, False
 
     char, minimum = fence
     closer = re.match(
-        rf"^\s{{0,3}}{re.escape(char)}{{{minimum},}}\s*$",
-        line.rstrip("\r\n"),
+        rf"^[ ]{{0,3}}{re.escape(char)}{{{minimum},}}[ \t]*$",
+        candidate,
     )
     if closer:
         return None, True
@@ -235,15 +244,30 @@ def markdown_section(
 
 
 def rendered_markdown(text: str) -> str:
-    """Return rendered prose/table text with fenced code blocks excluded."""
+    """Return visible Markdown text with fenced blocks and destinations excluded."""
     rendered: list[str] = []
     fence = None
     for line in text.splitlines(keepends=True):
         fence, delimiter = advance_fence(fence, line)
         if delimiter or fence is not None:
             continue
+        if re.match(r"^[ ]{0,3}\[[^]]+\]:\s+", line):
+            continue
         rendered.append(line)
-    return "".join(rendered)
+
+    visible = "".join(rendered)
+    visible = re.sub(
+        r"!?\[([^]]*)\]\((?:\\.|[^)\n])*\)",
+        lambda match: match.group(1),
+        visible,
+    )
+    visible = re.sub(
+        r"!?\[([^]]*)\]\[[^]]*\]",
+        lambda match: match.group(1),
+        visible,
+    )
+    visible = re.sub(r"</?[A-Za-z][^>]*>", "", visible)
+    return visible
 
 
 def markdown_table(section: str, label: str) -> list[list[str]]:
@@ -405,6 +429,19 @@ required_readme_facts = (
 for fact in required_readme_facts:
     if fact not in readme_release_prose:
         print(f"README v1.3.2 summary is missing: {fact}", file=sys.stderr)
+        sys.exit(1)
+
+asset_phrase = (
+    "`Polaris-arch-x86_64.pkg.tar.zst`, "
+    "`Polaris-fedora44-x86_64.rpm`, and "
+    "`Polaris-ubuntu24.04-x86_64.deb`"
+)
+for label, section in (
+    ("README v1.3.2 summary", readme_release_prose),
+    ("v1.3.2 changelog", current_release_prose),
+):
+    if section.count(asset_phrase) != 1:
+        print(f"{label} must contain the exact visible three-asset phrase", file=sys.stderr)
         sys.exit(1)
 
 expected_assets = Counter(
