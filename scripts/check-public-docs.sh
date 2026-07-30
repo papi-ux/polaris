@@ -927,7 +927,16 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
         # that row or bridge to rows outside that cell.
         if opener_line.strip().startswith("|") or closer_line.strip().startswith("|"):
             continue
-        inline_ranges.append((opener, closer_start))
+        opener_quote_depth, _ = blockquote_context(opener_line)
+        opener_list_indent = list_content_indent(opener_line)
+        # An ordinary paragraph is interrupted by a GFM table. Keep only
+        # container metadata that may make unmarked pipe rows lazy
+        # blockquote/list continuations instead of a semantic table.
+        if opener_quote_depth == 0 and opener_list_indent is None:
+            continue
+        inline_ranges.append(
+            (opener, closer_start, opener_quote_depth, opener_list_indent)
+        )
     inline_range_index = 0
     line_offset = 0
     for line in section.splitlines(keepends=True):
@@ -969,10 +978,24 @@ def markdown_table(section: str, label: str) -> list[list[str]]:
                 and inline_ranges[inline_range_index][1] <= pipe_position
             ):
                 inline_range_index += 1
-            pipe_in_code_span = (
-                inline_range_index < len(inline_ranges)
-                and inline_ranges[inline_range_index][0] <= pipe_position
+            candidate_span = (
+                inline_ranges[inline_range_index]
+                if (
+                    inline_range_index < len(inline_ranges)
+                    and inline_ranges[inline_range_index][0] <= pipe_position
+                )
+                else None
             )
+            pipe_in_code_span = False
+            if candidate_span is not None:
+                _, _, opener_quote_depth, opener_list_indent = candidate_span
+                pipe_quote_depth, pipe_content = blockquote_context(line)
+                pipe_indent = len(pipe_content) - len(pipe_content.lstrip(" "))
+                pipe_in_code_span = opener_quote_depth > pipe_quote_depth or (
+                    opener_list_indent is not None
+                    and opener_quote_depth == pipe_quote_depth
+                    and pipe_indent < opener_list_indent
+                )
             if pipe_in_code_span:
                 if current:
                     blocks.append(current)
