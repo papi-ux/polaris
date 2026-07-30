@@ -23,6 +23,16 @@ def require_package(section: str, package: str, context: str) -> None:
         raise AssertionError(f"{context} must explicitly include {package}")
 
 
+def workflow_job(text: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        text,
+    )
+    if not match:
+        raise AssertionError(f"missing {name} workflow job")
+    return match.group("body")
+
+
 arch = read("packaging/linux/Arch/PKGBUILD")
 require_package(shell_array(arch, "depends"), "vulkan-icd-loader", "Arch runtime dependencies")
 require_package(shell_array(arch, "makedepends"), "vulkan-headers", "Arch build dependencies")
@@ -32,14 +42,15 @@ if not re.search(r"(?m)^BuildRequires:\s+vulkan-loader-devel\s*$", fedora):
     raise AssertionError("Fedora build dependencies must explicitly include vulkan-loader-devel")
 
 workflow = read(".github/workflows/build.yml")
+arch_job = workflow_job(workflow, "arch-build")
 arch_install = re.search(
-    r"(?ms)^\s+- name: Install dependencies\n.*?^\s+- name: Configure\n",
-    workflow,
+    r"(?ms)^      - name: Install dependencies\n(?P<body>.*?)(?=^      - name:|\Z)",
+    arch_job,
 )
 if not arch_install:
     raise AssertionError("missing Arch Install dependencies workflow step")
 for package in ("vulkan-headers", "vulkan-icd-loader"):
-    if not re.search(rf"\b{re.escape(package)}\b", arch_install.group(0)):
+    if not re.search(rf"\b{re.escape(package)}\b", arch_install.group("body")):
         raise AssertionError(f"Arch CI dependencies must explicitly install {package}")
 
 print("Release package Vulkan dependency contracts look correct.")
