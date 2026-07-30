@@ -111,24 +111,6 @@ import shlex
 import sys
 
 
-def strip_html_comments(text: str) -> str:
-    """Remove non-rendered HTML comments while preserving line boundaries."""
-    return re.sub(
-        r"<!--.*?-->",
-        lambda match: "\n" * match.group(0).count("\n"),
-        text,
-        flags=re.DOTALL,
-    )
-
-
-building = strip_html_comments(Path("docs/building.md").read_text(encoding="utf-8"))
-contributing = strip_html_comments(
-    Path(".github/CONTRIBUTING.md").read_text(encoding="utf-8")
-)
-readme = strip_html_comments(Path("README.md").read_text(encoding="utf-8"))
-changelog = strip_html_comments(Path("docs/changelog.md").read_text(encoding="utf-8"))
-
-
 def advance_fence(fence, line: str):
     """Advance CommonMark-style fenced-code state; return (state, delimiter_line)."""
     if fence is None:
@@ -146,6 +128,64 @@ def advance_fence(fence, line: str):
     if closer:
         return None, True
     return fence, False
+
+
+def strip_html_comments(text: str) -> str:
+    """Remove HTML comments outside fenced code while preserving line boundaries."""
+    output: list[str] = []
+    fence = None
+    in_comment = False
+
+    for line in text.splitlines(keepends=True):
+        if fence is not None:
+            output.append(line)
+            fence, _ = advance_fence(fence, line)
+            continue
+
+        if not in_comment:
+            next_fence, delimiter = advance_fence(None, line)
+            if delimiter:
+                output.append(line)
+                fence = next_fence
+                continue
+
+        newline = ""
+        body = line
+        if body.endswith("\r\n"):
+            body, newline = body[:-2], "\r\n"
+        elif body.endswith("\n"):
+            body, newline = body[:-1], "\n"
+
+        visible: list[str] = []
+        position = 0
+        while position < len(body):
+            if in_comment:
+                end = body.find("-->", position)
+                if end < 0:
+                    position = len(body)
+                    break
+                in_comment = False
+                position = end + 3
+                continue
+            start = body.find("<!--", position)
+            if start < 0:
+                visible.append(body[position:])
+                break
+            visible.append(body[position:start])
+            in_comment = True
+            position = start + 4
+
+        output.append("".join(visible) + newline)
+
+    return "".join(output)
+
+
+building = strip_html_comments(Path("docs/building.md").read_text(encoding="utf-8"))
+contributing = strip_html_comments(
+    Path(".github/CONTRIBUTING.md").read_text(encoding="utf-8")
+)
+readme = strip_html_comments(Path("README.md").read_text(encoding="utf-8"))
+changelog = strip_html_comments(Path("docs/changelog.md").read_text(encoding="utf-8"))
 
 
 def markdown_section(
