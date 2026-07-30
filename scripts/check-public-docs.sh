@@ -373,8 +373,7 @@ if len(pacman_commands) != 1:
     print("Arch/CachyOS block must contain exactly one sudo pacman -S command", file=sys.stderr)
     sys.exit(1)
 arch_command = pacman_commands[0]
-shell_operators = {";", "&&", "||", "|", "&", ">", ">>", "<", "<<"}
-if shell_operators.intersection(arch_command):
+if any(token and set(token) <= set(";&|<>") for token in arch_command):
     print("Arch/CachyOS pacman command must not contain chained shell operators", file=sys.stderr)
     sys.exit(1)
 arch_tokens = set(arch_command)
