@@ -181,8 +181,9 @@ def line_block_kind(line: str) -> str:
     if not content.strip():
         return "blank"
     if is_indented_code(content):
-        return "opaque"
-    if re.match(r"^[ ]{0,3}(?:`{3,}|~{3,})", content):
+        return "indented"
+    _, fence_delimiter = advance_fence(None, content)
+    if fence_delimiter:
         return "opaque"
     stripped = content.lstrip(" ")
     lower = stripped.lower()
@@ -207,37 +208,58 @@ def line_block_kind(line: str) -> str:
     return "paragraph"
 
 
+def list_content_indent(line: str):
+    _, content = blockquote_context(line)
+    match = re.match(r"^(?:[-+*]|\d{1,9}[.)])([ \t]+)", content.lstrip(" "))
+    if match is None:
+        return None
+    marker_offset = len(content) - len(content.lstrip(" "))
+    prefix = content[:marker_offset] + content.lstrip(" ")[: match.end()]
+    return len(prefix.expandtabs(4))
+
+
 def backtick_closer_map(text: str):
     """Map opener runs to equal runs in the same CommonMark inline container."""
     closers = {}
     segments = []
     paragraph_start = None
     paragraph_depth = None
+    paragraph_list_indent = None
     offset = 0
 
     def close_paragraph(end: int) -> None:
-        nonlocal paragraph_start, paragraph_depth
+        nonlocal paragraph_start, paragraph_depth, paragraph_list_indent
         if paragraph_start is not None:
             segments.append((paragraph_start, end))
             paragraph_start = None
             paragraph_depth = None
+            paragraph_list_indent = None
 
     for line in text.splitlines(keepends=True):
         line_end = offset + len(line)
         depth, _ = blockquote_context(line)
         kind = line_block_kind(line)
+        if (
+            kind == "indented"
+            and paragraph_list_indent is not None
+            and depth == paragraph_depth
+        ):
+            kind = "paragraph"
         if kind == "paragraph":
             if paragraph_start is None:
                 paragraph_start = offset
                 paragraph_depth = depth
+                paragraph_list_indent = None
             elif depth != paragraph_depth:
                 close_paragraph(offset)
                 paragraph_start = offset
                 paragraph_depth = depth
+                paragraph_list_indent = None
         elif kind == "list":
             close_paragraph(offset)
             paragraph_start = offset
             paragraph_depth = depth
+            paragraph_list_indent = list_content_indent(line)
         else:
             close_paragraph(offset)
             if kind == "single":
@@ -635,11 +657,24 @@ def rendered_markdown(text: str) -> str:
     """Return visible Markdown text with fenced blocks and destinations excluded."""
     rendered: list[str] = []
     fence = None
+    closer_map = backtick_closer_map(text)
+    inline_ranges = [
+        (opener, closer[1])
+        for opener, closer in closer_map.items()
+        if closer is not None
+    ]
+    line_offset = 0
     for line in text.splitlines(keepends=True):
+        line_start = line_offset
+        line_end = line_start + len(line)
+        line_offset = line_end
         fence, delimiter = advance_fence(fence, line)
         if delimiter or fence is not None:
             continue
-        if is_indented_code(line):
+        if is_indented_code(line) and not any(
+            line_start < span_end and line_end > span_start
+            for span_start, span_end in inline_ranges
+        ):
             continue
         if re.match(r"^[ ]{0,3}\[[^]]+\]:\s+", line):
             continue
@@ -676,6 +711,7 @@ def verify_rendered_markdown_parser() -> None:
     for markup in (
         "`<div hidden>Polaris-extra-x86_64.AppImage</div>`",
         "``<script>Polaris-extra-x86_64.AppImage</script>``",
+        "```<span hidden>Polaris-extra-x86_64.AppImage</span>```",
         "`<div hidden>` Polaris-extra-x86_64.AppImage `</div>`",
     ):
         if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(markup):
@@ -718,6 +754,7 @@ def verify_rendered_markdown_parser() -> None:
     for list_code_span in (
         "- `\n  <span hidden>Polaris-extra-x86_64.AppImage</span>\n  `",
         "1. `\n   <span hidden>Polaris-extra-x86_64.AppImage</span>\n   `",
+        "10. `\n    <span hidden>Polaris-extra-x86_64.AppImage</span>\n    `",
     ):
         if "Polaris-extra-x86_64.AppImage" not in rendered_markdown(list_code_span):
             print("Inline-code span was not preserved inside a list paragraph", file=sys.stderr)
