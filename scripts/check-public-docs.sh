@@ -1152,47 +1152,52 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
 
 current_release = markdown_section(
     changelog,
+    "## v1.3.3 - 2026-07-30",
     "## v1.3.2 - 2026-07-30",
-    "## v1.3.1 - 2026-07-12",
 )
 current_release_prose = rendered_markdown(current_release)
 required_release_facts = (
-    "webtransport-go v0.11.1",
-    "quic-go v0.60.0",
-    "CVE-2026-57497",
+    "response-only",
+    "display-planner",
+    "locale-safe",
+    "controller feedback",
+    "seat isolation",
+    "Sunshine",
+    "Nix",
+    "ShellCheck",
     "npm audit --audit-level=high",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-ubuntu24.04-x86_64.deb",
-    "vulkan-headers",
-    "vulkan-loader-devel",
-    "GCC 15",
 )
 for fact in required_release_facts:
     if fact not in current_release_prose:
-        print(f"v1.3.2 changelog is missing final release fact: {fact}", file=sys.stderr)
+        print(f"v1.3.3 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
 readme_release_body = markdown_section(
     readme,
-    "## What is New in v1.3.2",
+    "## What is New in v1.3.3",
     "## Install",
 )
 readme_release_prose = rendered_markdown(readme_release_body)
 required_readme_facts = (
-    "webtransport-go v0.11.1",
-    "quic-go v0.60.0",
-    "CVE-2026-57497",
-    "npm audit",
+    "response-only",
+    "display-planner",
+    "controller feedback",
+    "seat isolation",
+    "locale-safe",
+    "Sunshine",
+    "Nix",
+    "ShellCheck",
+    "npm audit --audit-level=high",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-ubuntu24.04-x86_64.deb",
-    "Vulkan",
-    "GCC 15",
 )
 for fact in required_readme_facts:
     if fact not in readme_release_prose:
-        print(f"README v1.3.2 summary is missing: {fact}", file=sys.stderr)
+        print(f"README v1.3.3 summary is missing: {fact}", file=sys.stderr)
         sys.exit(1)
 
 asset_phrase = (
@@ -1201,8 +1206,8 @@ asset_phrase = (
     "`Polaris-ubuntu24.04-x86_64.deb`"
 )
 for label, section in (
-    ("README v1.3.2 summary", readme_release_prose),
-    ("v1.3.2 changelog", current_release_prose),
+    ("README v1.3.3 summary", readme_release_prose),
+    ("v1.3.3 changelog", current_release_prose),
 ):
     if section.count(asset_phrase) != 1:
         print(f"{label} must contain the exact visible three-asset phrase", file=sys.stderr)
@@ -1217,8 +1222,8 @@ expected_assets = Counter(
 )
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section in (
-    ("README v1.3.2 summary", readme_release_prose),
-    ("v1.3.2 changelog", current_release_prose),
+    ("README v1.3.3 summary", readme_release_prose),
+    ("v1.3.3 changelog", current_release_prose),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
     if actual_assets != expected_assets:
