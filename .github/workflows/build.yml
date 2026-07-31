@@ -470,6 +470,8 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_C_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
+            "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
             -DPOLARIS_ASSETS_DIR=share/polaris \
             -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
             -DPOLARIS_ENABLE_CUDA=OFF \
@@ -529,10 +531,9 @@ jobs:
             echo "Installed Ubuntu DEB has unresolved shared-library dependencies" >&2
             exit 1
           fi
-          if strings "$binary" | grep -Eq '/__w/|src_assets/.*/assets/shaders'; then
-            echo "Installed Ubuntu DEB binary contains a source-tree shader path" >&2
-            exit 1
-          fi
+          bash scripts/check-packaged-binary-paths.sh \
+            "$binary" \
+            build/cpack_artifacts/package-strings.txt
 
           polaris --version | tee build/cpack_artifacts/package-version.txt
 
@@ -736,6 +737,8 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_C_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
+            "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
             -DBOOST_USE_STATIC=${{ matrix.boost_static }} \
             -DPOLARIS_ASSETS_DIR=share/polaris \
             -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
@@ -818,10 +821,9 @@ jobs:
             echo "Installed Fedora RPM has unresolved shared-library dependencies" >&2
             exit 1
           fi
-          if strings "$binary" | grep -Eq '/__w/|src_assets/.*/assets/shaders'; then
-            echo "Installed Fedora RPM binary contains a source-tree shader path" >&2
-            exit 1
-          fi
+          bash scripts/check-packaged-binary-paths.sh \
+            "$binary" \
+            build/cpack_artifacts/package-strings.txt
 
           polaris --version | tee build/cpack_artifacts/package-version.txt
           if [ "${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}" = "true" ] &&

@@ -1,5 +1,7 @@
-import { readFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 const readSource = (path) => readFileSync(join(process.cwd(), path), 'utf8')
@@ -192,6 +194,146 @@ describe('Linux packaging contracts', () => {
       if (steamIndex >= 0) {
         expect(steamIndex, `${start} Steam must be optional`).toBeGreaterThan(optionalIndex)
       }
+    }
+  })
+
+  it('maps CI source prefixes and materializes package strings before path checks', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const ubuntuConfigure = section(workflow, '  ubuntu-build:', '  fedora-rpm-build:')
+    const fedoraConfigure = section(workflow, '  fedora-rpm-build:', '  release-assets:')
+
+    for (const [lane, block] of [
+      ['Ubuntu', ubuntuConfigure],
+      ['Fedora', fedoraConfigure],
+    ]) {
+      expect(block, `${lane} must remap C source paths`).toContain(
+        '"-DCMAKE_C_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=."',
+      )
+      expect(block, `${lane} must remap C++ source paths`).toContain(
+        '"-DCMAKE_CXX_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=."',
+      )
+      expect(block, `${lane} must use the full-consumption checker`).toContain(
+        'bash scripts/check-packaged-binary-paths.sh',
+      )
+      expect(block).not.toMatch(/strings "\$binary"\s*\|\s*grep/)
+    }
+  })
+
+  it('rejects contaminated strings without the legacy pipefail false negative', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-package-paths-'))
+    try {
+      const binDir = join(fixture, 'bin')
+      const stringsPath = join(binDir, 'strings')
+      const dummyBinary = join(fixture, 'polaris')
+      const report = join(fixture, 'package-strings.txt')
+      mkdirSync(binDir)
+      writeFileSync(dummyBinary, 'fixture')
+      writeFileSync(
+        stringsPath,
+        `#!/usr/bin/env bash
+printf '/__w/polaris/polaris/src/platform/linux/graphics.cpp:593\\n'
+for ((i = 0; i < 50000; i++)); do
+  printf 'safe-symbol-%s\\n' "$i"
+done
+`,
+      )
+      chmodSync(stringsPath, 0o755)
+
+      const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+      const legacy = spawnSync(
+        'bash',
+        [
+          '-c',
+          `set -o pipefail
+if strings "$1" | grep -Eq '/__w/|src_assets/.*/assets/shaders'; then
+  exit 0
+fi
+exit 42`,
+          'legacy-check',
+          dummyBinary,
+        ],
+        { encoding: 'utf8', env },
+      )
+      expect(legacy.status, `legacy stderr: ${legacy.stderr}`).toBe(42)
+
+      const contaminated = spawnSync(
+        'bash',
+        ['scripts/check-packaged-binary-paths.sh', dummyBinary, report],
+        { encoding: 'utf8', env },
+      )
+      expect(contaminated.status, `checker stderr: ${contaminated.stderr}`).toBe(1)
+      expect(contaminated.stderr).toContain('forbidden build/source path')
+
+      writeFileSync(
+        stringsPath,
+        `#!/usr/bin/env bash
+printf '/usr/share/polaris/shaders/opengl\\n'
+printf 'safe-symbol\\n'
+`,
+      )
+      const safe = spawnSync(
+        'bash',
+        ['scripts/check-packaged-binary-paths.sh', dummyBinary, report],
+        { encoding: 'utf8', env },
+      )
+      expect(safe.status, `checker stderr: ${safe.stderr}`).toBe(0)
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('fails closed when grep cannot scan the materialized report', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-package-paths-'))
+    try {
+      const binDir = join(fixture, 'bin')
+      const stringsPath = join(binDir, 'strings')
+      const grepPath = join(binDir, 'grep')
+      const dummyBinary = join(fixture, 'polaris')
+      const report = join(fixture, 'package-strings.txt')
+      mkdirSync(binDir)
+      writeFileSync(dummyBinary, 'fixture')
+      writeFileSync(stringsPath, '#!/usr/bin/env bash\nprintf \'safe-symbol\\n\'\n')
+      writeFileSync(grepPath, '#!/usr/bin/env bash\nexit 2\n')
+      chmodSync(stringsPath, 0o755)
+      chmodSync(grepPath, 0o755)
+
+      const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+      const result = spawnSync(
+        'bash',
+        ['scripts/check-packaged-binary-paths.sh', dummyBinary, report],
+        { encoding: 'utf8', env },
+      )
+
+      expect(result.status, `checker stderr: ${result.stderr}`).toBe(2)
+      expect(result.stderr).toContain('Failed to scan packaged Polaris binary strings')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('rejects aliased binary and report paths before truncating the binary', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-package-paths-'))
+    try {
+      const binDir = join(fixture, 'bin')
+      const stringsPath = join(binDir, 'strings')
+      const dummyBinary = join(fixture, 'polaris')
+      mkdirSync(binDir)
+      writeFileSync(dummyBinary, 'fixture')
+      writeFileSync(stringsPath, '#!/usr/bin/env bash\nprintf \'safe-symbol\\n\'\n')
+      chmodSync(stringsPath, 0o755)
+
+      const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+      const result = spawnSync(
+        'bash',
+        ['scripts/check-packaged-binary-paths.sh', dummyBinary, dummyBinary],
+        { encoding: 'utf8', env },
+      )
+
+      expect(result.status, `checker stderr: ${result.stderr}`).toBe(2)
+      expect(result.stderr).toContain('Binary and report must be different files')
+      expect(readFileSync(dummyBinary, 'utf8')).toBe('fixture')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
     }
   })
 })
