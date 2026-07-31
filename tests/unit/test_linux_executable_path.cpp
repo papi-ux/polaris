@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -55,4 +56,39 @@ TEST(LinuxExecutablePath, RejectsDirectoriesAndNonExecutableFiles) {
   EXPECT_TRUE(platf::linux_util::find_executable_in_path(dir, "").empty());
   unlink(plain.c_str());
   rmdir(dir.c_str());
+}
+
+TEST(LinuxExecutablePath, SteamCoverSynthesisUsesLocaleIndependentExecutableLookup) {
+  std::ifstream source(std::string {POLARIS_SOURCE_DIR} + "/src/confighttp.cpp");
+  ASSERT_TRUE(source.is_open());
+  std::ostringstream contents;
+  contents << source.rdbuf();
+  const auto source_text = contents.str();
+
+  const auto function_start = source_text.find("bool synthesize_steam_cover_from_header(");
+  const auto function_end = source_text.find("std::optional<std::string> download_best_steam_cover(", function_start);
+  ASSERT_NE(function_start, std::string::npos);
+  ASSERT_NE(function_end, std::string::npos);
+  const auto function_text = source_text.substr(function_start, function_end - function_start);
+
+  const auto linux_guard = function_text.find("#ifdef __linux__");
+  const auto linux_lookup = function_text.find(
+    "platf::linux_util::find_executable_in_path(\"magick\")",
+    linux_guard
+  );
+  const auto fallback_guard = function_text.find("#else", linux_lookup);
+  const auto fallback_lookup = function_text.find(
+    "boost::process::v1::search_path(\"magick\")",
+    fallback_guard
+  );
+  const auto guard_end = function_text.find("#endif", fallback_lookup);
+  ASSERT_NE(linux_guard, std::string::npos);
+  ASSERT_NE(linux_lookup, std::string::npos);
+  ASSERT_NE(fallback_guard, std::string::npos);
+  ASSERT_NE(fallback_lookup, std::string::npos);
+  ASSERT_NE(guard_end, std::string::npos);
+  EXPECT_LT(linux_guard, linux_lookup);
+  EXPECT_LT(linux_lookup, fallback_guard);
+  EXPECT_LT(fallback_guard, fallback_lookup);
+  EXPECT_LT(fallback_lookup, guard_end);
 }
