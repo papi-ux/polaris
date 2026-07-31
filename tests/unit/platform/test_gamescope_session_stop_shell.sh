@@ -260,7 +260,7 @@ fi
 
 grep -Fq 'if [ -e "$session_state_file" ] || [ -s "$session_id_file" ]; then' "$script" ||
   fail "start does not recover every atomic or legacy credential before replacement"
-grep -Fq 'POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1' "$script" ||
+grep -Fq "POLARIS_SESSION_INSTANCE_ID='' \"\$0\" stop || exit 1" "$script" ||
   fail "start does not route persisted attach/nested recovery through credentialed stop"
 transition_line="$(grep -nF 'publish_nested_claim transition absent' "$script" | head -n1 | cut -d: -f1)"
 mask_line="$(grep -nF 'polaris_mask_idle_unit_runtime' "$script" | tail -n1 | cut -d: -f1)"

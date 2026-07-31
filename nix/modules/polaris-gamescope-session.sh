@@ -69,7 +69,8 @@ recover_missing_nested_claim() (
       && [ -f "$session_mode_file" ] \
       && [ "$(tr -d '[:space:]' <"$session_mode_file")" = nested ] || return 1
   fi
-  export POLARIS_GAMESCOPE_LOCK_HELD=1
+  # Hold flock only; reclaim/validate do not need POLARIS_GAMESCOPE_LOCK_HELD
+  # (that flag is for write_runtime_env / stop_marked to skip nested flock).
   if ! polaris_validate_marker "$marker" idle \
       && ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
     return 1
@@ -225,7 +226,7 @@ case "${1:-}" in
     }
     if [ -e "$session_state_file" ] || [ -s "$session_id_file" ]; then
       echo "polaris-gamescope-session: complete prior session recovery before new launch" >&2
-      POLARIS_SESSION_INSTANCE_ID= "$0" stop || exit 1
+      POLARIS_SESSION_INSTANCE_ID='' "$0" stop || exit 1
       POLARIS_SESSION_INSTANCE_ID="$requested_session_id"
       export POLARIS_SESSION_INSTANCE_ID
     elif [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
@@ -796,14 +797,16 @@ case "${1:-}" in
       exec 8>>"$rt/polaris-gamescope.lock" || exit 1
       "${POLARIS_FLOCK_BIN:-flock}" -x 8 || exit 1
       export POLARIS_GAMESCOPE_LOCK_HELD=1
-      [ -f "$nested_claim" ] \
-        && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ] \
-        && polaris_validate_marker "$marker" idle \
-        && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle \
-        && polaris_write_runtime_env "$marker" gamescope-0 idle "$rt" || {
-          echo "polaris-gamescope-session: idle ownership changed before portal handoff" >&2
-          exit 1
-        }
+      if ! {
+        [ -f "$nested_claim" ] \
+          && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ] \
+          && polaris_validate_marker "$marker" idle \
+          && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle \
+          && polaris_write_runtime_env "$marker" gamescope-0 idle "$rt"
+      }; then
+        echo "polaris-gamescope-session: idle ownership changed before portal handoff" >&2
+        exit 1
+      fi
       echo "polaris-gamescope-session: idle gamescope restored after nested stop" >&2
 
       if ! systemctl --user restart polaris-portal-gamescope.service 2>/dev/null; then
@@ -824,13 +827,15 @@ case "${1:-}" in
         echo "polaris-gamescope-session: portal did not bind idle generation; retaining restore-idle claim" >&2
         exit 1
       fi
-      polaris_validate_marker "$marker" idle \
-        && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle \
-        && [ -f "$nested_claim" ] \
-        && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ] || {
-          echo "polaris-gamescope-session: ownership changed during portal readiness" >&2
-          exit 1
-        }
+      if ! {
+        polaris_validate_marker "$marker" idle \
+          && polaris_marker_owns_socket "$marker" "$rt/gamescope-0" idle \
+          && [ -f "$nested_claim" ] \
+          && [ "$(tr -d '[:space:]' <"$nested_claim")" = restore-idle ]
+      }; then
+        echo "polaris-gamescope-session: ownership changed during portal readiness" >&2
+        exit 1
+      fi
       rm -f -- "$nested_claim"
       "${POLARIS_FLOCK_BIN:-flock}" -u 8
       export POLARIS_GAMESCOPE_LOCK_HELD=0

@@ -101,8 +101,9 @@ polaris_process_has_argument() {
 }
 
 polaris_write_marker_for_pid() (
-  local marker="$1" pid="$2" role="$3" tmp lock_bin="${POLARIS_FLOCK_BIN:-flock}"
+  local marker="$1" pid="$2" role="$3" marker_tmp='' lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   umask 077
+  trap 'rm -f "${marker_tmp:-}"' EXIT
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"${marker%/*}/polaris-gamescope.lock" || return 1
     "$lock_bin" -x 9 || return 1
@@ -117,9 +118,13 @@ polaris_write_marker_for_pid() (
           && [ "$POLARIS_MARKER_EXECUTABLE" = "$executable_path" ]
         return
       fi
-      tmp="$marker.tmp.$$"
-      (umask 077; printf '%s %s %s %s\n' "$pid" "$start_time" "$role" "$executable_path" >"$tmp") || return 1
-      mv -f "$tmp" "$marker"
+      # umask already 077 for this subshell function; avoid nested (..) so
+      # SC2030/SC2031 do not treat marker_tmp as subshell-local vs other helpers.
+      marker_tmp="$marker.tmp.$$"
+      printf '%s %s %s %s\n' "$pid" "$start_time" "$role" "$executable_path" >"$marker_tmp" || return 1
+      # Explicit status: set -e is ignored when this function is used in if/||.
+      mv -f "$marker_tmp" "$marker" || return 1
+      marker_tmp=''
       return 0
     fi
     sleep 0.02
@@ -319,7 +324,7 @@ polaris_unique_unix_socket_inode() {
 
 polaris_discover_xwayland_display() {
   local marker="$1" expected_role="${2:-}" xdir socket name display inode process pid final_inode
-  local best= best_pid= best_start= best_inode= best_socket= marker_line
+  local best='' best_pid='' best_start='' best_inode='' best_socket='' marker_line
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local root_pid="$POLARIS_MARKER_PID" root_start="$POLARIS_MARKER_START_TIME" root_executable="$POLARIS_MARKER_EXECUTABLE"
   marker_line="$(<"$marker")"
@@ -365,10 +370,10 @@ polaris_discover_xwayland_display() {
 }
 
 polaris_write_runtime_env() (
-  local marker="$1" wayland="$2" expected_role="${3:-}" runtime_dir="$4" display final_display tmp
+  local marker="$1" wayland="$2" expected_role="${3:-}" runtime_dir="$4" display final_display env_tmp=''
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}" marker_line role
   umask 077
-  trap 'rm -f "${tmp:-}"' EXIT
+  trap 'rm -f "${env_tmp:-}"' EXIT
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
     "$lock_bin" -x 9 || return 1
@@ -381,9 +386,10 @@ polaris_write_runtime_env() (
   display="$(polaris_discover_xwayland_display "$marker" "$expected_role")" || return 1
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-  tmp="$runtime_dir/polaris-gamescope.env.tmp.$$"
-  (umask 077; printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nGAMESCOPE_WAYLAND_DISPLAY=%s\nPOLARIS_GAMESCOPE_PID=%s\nPOLARIS_GAMESCOPE_START_TIME=%s\nPOLARIS_GAMESCOPE_ROLE=%s\nPOLARIS_GAMESCOPE_EXECUTABLE=%s\n' \
-    "$display" "$wayland" "$wayland" "$pid" "$start_time" "$role" "$executable_path" >"$tmp") || return 1
+  # umask already 077; write env atomically then rename (no nested subshell).
+  env_tmp="$runtime_dir/polaris-gamescope.env.tmp.$$"
+  printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nGAMESCOPE_WAYLAND_DISPLAY=%s\nPOLARIS_GAMESCOPE_PID=%s\nPOLARIS_GAMESCOPE_START_TIME=%s\nPOLARIS_GAMESCOPE_ROLE=%s\nPOLARIS_GAMESCOPE_EXECUTABLE=%s\n' \
+    "$display" "$wayland" "$wayland" "$pid" "$start_time" "$role" "$executable_path" >"$env_tmp" || return 1
   if [ -n "${POLARIS_RUNTIME_ENV_BEFORE_COMMIT_HOOK:-}" ]; then
     "${POLARIS_RUNTIME_ENV_BEFORE_COMMIT_HOOK}" || return 1
   fi
@@ -394,7 +400,11 @@ polaris_write_runtime_env() (
   polaris_marker_owns_socket "$marker" "$runtime_dir/$wayland" "$expected_role" || return 1
   final_display="$(polaris_discover_xwayland_display "$marker" "$expected_role")" || return 1
   [ "$final_display" = "$display" ] || return 1
-  mv -f "$tmp" "$runtime_dir/polaris-gamescope.env"
+  # Explicit status: set -e is ignored when this function is used in if/||.
+  # Only clear env_tmp after a successful rename so the EXIT trap still
+  # removes a leftover temp when mv fails.
+  mv -f "$env_tmp" "$runtime_dir/polaris-gamescope.env" || return 1
+  env_tmp=''
 )
 
 # Hjem units live under ~/.config/systemd/user (higher priority than
@@ -477,17 +487,18 @@ polaris_stop_marked_gamescope() (
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
     && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
-  resume_group_leader_on_failure() {
-    [ "$leader_stopped" = 1 ] || return 0
-    if polaris_process_fields "$pgid" \
+  # Inline EXIT trap (not a nested function) so SC2329 does not flag a
+  # "never invoked" helper. CONT only if we STOPped the leader and authorize it.
+  trap '
+    if [ "$leader_stopped" = 1 ] \
+        && polaris_process_fields "$pgid" \
         && [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
         && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
         && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] \
         && [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ]; then
       "$kill_bin" -CONT "$pgid" 2>/dev/null || true
     fi
-  }
-  trap resume_group_leader_on_failure EXIT
+  ' EXIT
   "$kill_bin" -STOP "$pgid" 2>/dev/null || return 1
   leader_stopped=1
   polaris_process_fields "$pgid" || return 1
