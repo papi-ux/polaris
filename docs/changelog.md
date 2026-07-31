@@ -5,6 +5,19 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.3 - 2026-07-30
+
+Patch release focused on configuration-save hygiene, controller boundaries, Linux recovery guidance, and Nix session reliability.
+
+- Stripped response-only runtime, stream-path, credential-presence, and virtual-display metadata before configuration saves so valid v1.3.2 settings edits no longer fail backend validation
+- Kept display-planner presets idempotent across repeated selection and stale dongle-discovery responses
+- Made tray URL launching locale-safe on Linux desktops
+- Rebound preallocated gamepad controller feedback after device reuse so rumble and related output follow the active client
+- Added default-disabled client-gamepad seat isolation with distinct virtual-controller identities and explicit Linux seat-policy limits
+- Documented how Bazzite users can restore Sunshine after testing or uninstalling Polaris
+- Kept Nix-composed idle/session scripts ShellCheck-clean and removed temporary authority files after failed atomic runtime publication
+- Retained the exact release assets `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, and `Polaris-ubuntu24.04-x86_64.deb`; Fedora 44 remains the sole Fedora package lane and `npm audit --audit-level=high` remains mandatory
+
 ## v1.3.2 - 2026-07-30
 
 Reliability patch focused on stream lifecycle, Linux private-session isolation, reconnect recovery, and truthful host diagnostics.
