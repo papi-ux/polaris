@@ -473,6 +473,8 @@ describe('Linux packaging contracts', () => {
     const rootCreate = 'install -d -m 0755 -- "$STEAMOS_ROOT"'
     const rootResetIndex = bootstrapCommands.indexOf(rootReset)
     const rootCreateIndex = bootstrapCommands.indexOf(rootCreate)
+    const rootSelfBind = rootBindingValue ? `mount --bind ${rootBindingValue} ${rootBindingValue}` : null
+    const rootSelfBindIndex = rootSelfBind ? expandedBootstrapCommands.indexOf(rootSelfBind) : -1
     const pacstrapIndexes = shellExecutableOccurrences(expandedBootstrapCommands, 'pacstrap')
     const bootstrapBlockDepths = shellBlockDepths(bootstrapCommands)
     const bootstrapTrapCommands = shellExecutableOccurrences(canonicalBootstrapCommands, 'trap')
@@ -490,9 +492,9 @@ describe('Linux packaging contracts', () => {
           `mount --make-rslave ${rootBindingValue}${apiPath}`,
         ])
       : []
-    const allowedRootMountCommands = [...requiredRootBindCommands, ...requiredApiMountCommands]
+    const allowedRootMountCommands = [rootSelfBind, ...requiredRootBindCommands, ...requiredApiMountCommands].filter(Boolean)
     const rootBindCommands = shellExecutableOccurrences(expandedBootstrapCommands, 'mount')
-      .filter(({ command }) => command.startsWith('mount --bind '))
+      .filter(({ command }) => command.startsWith('mount --bind ') && command !== rootSelfBind)
     const rootReseedCommands = rootWriterCommands
       .filter(({ command, index }) => index !== rootCreateIndex
         && !allowedRootMountCommands.includes(command)
@@ -520,13 +522,14 @@ describe('Linux packaging contracts', () => {
     expect(protectedRootArrayBindings, 'bootstrap commands must not hide the SteamOS root in shell arrays').toEqual([])
     expect(rootResetIndex, 'SteamOS root must be deleted before every bootstrap').toBeGreaterThanOrEqual(0)
     expect(rootCreateIndex, 'SteamOS root must be recreated immediately after deletion').toBe(rootResetIndex + 1)
+    expect(rootSelfBindIndex, 'SteamOS root must become a mountpoint immediately after creation').toBe(rootCreateIndex + 1)
     expect(pacstrapIndexes, 'SteamOS root must have exactly one pacstrap population command').toHaveLength(1)
-    expect(pacstrapIndexes[0].index, 'nothing may reseed the clean root before pacstrap').toBe(rootCreateIndex + 1)
+    expect(pacstrapIndexes[0].index, 'nothing except the root self-bind may precede pacstrap').toBe(rootSelfBindIndex + 1)
     expect(
-      [rootResetIndex, rootCreateIndex, pacstrapIndexes[0].index]
+      [rootResetIndex, rootCreateIndex, rootSelfBindIndex, pacstrapIndexes[0].index]
         .map((index) => bootstrapBlockDepths[index]),
       'the clean-root lifecycle must execute at top level',
-    ).toEqual([0, 0, 0])
+    ).toEqual([0, 0, 0, 0])
     expect(rootReseedCommands, 'the clean root must not be repopulated through copy, archive, or device commands').toEqual([])
     expect(
       rootBindCommands.map(({ command }) => command),
@@ -711,6 +714,8 @@ describe('Linux packaging contracts', () => {
     expect(bootstrap).toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"')
     expect(bootstrap).toContain('chroot "$STEAMOS_ROOT" runuser --user builder --')
     expect(bootstrap).not.toContain('arch-chroot "$STEAMOS_ROOT"')
+    expect(bootstrap).toContain('mount --bind "$STEAMOS_ROOT" "$STEAMOS_ROOT"')
+    expect(bootstrap).toContain('umount "$STEAMOS_ROOT" 2>/dev/null || true')
     expect(bootstrap).toContain('mount --bind /etc/resolv.conf "$STEAMOS_ROOT/etc/resolv.conf"')
     expect(bootstrap).toContain('umount "$STEAMOS_ROOT/etc/resolv.conf" 2>/dev/null || true')
     for (const apiPath of ['/proc', '/sys', '/dev', '/run']) {

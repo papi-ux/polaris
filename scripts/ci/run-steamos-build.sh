@@ -30,6 +30,7 @@ cleanup() {
   umount -R "$STEAMOS_ROOT/dev" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/sys" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/proc" 2>/dev/null || true
+  umount "$STEAMOS_ROOT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -84,6 +85,7 @@ fi
 
 rm -rf -- "$STEAMOS_ROOT"
 install -d -m 0755 -- "$STEAMOS_ROOT"
+mount --bind "$STEAMOS_ROOT" "$STEAMOS_ROOT"
 pacstrap -G -M -C /tmp/steamos-3.8.1x.conf "$STEAMOS_ROOT" \
   base-devel appstream appstream-glib avahi binutils boost boost-libs ccache cmake curl \
   desktop-file-utils gcc git go grim labwc libayatana-appindicator libcap libdrm libevdev \
