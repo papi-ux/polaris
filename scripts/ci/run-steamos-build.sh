@@ -15,6 +15,12 @@ if [ ! -e /workspace/.git ] || [ ! -d /output ]; then
 fi
 
 STEAMOS_ROOT=/steamos-root
+POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"
+if [ "$POLARIS_LOCAL_CANDIDATE_BUILD" != 0 ] && [ "$POLARIS_LOCAL_CANDIDATE_BUILD" != 1 ]; then
+  printf '%s\n' 'POLARIS_LOCAL_CANDIDATE_BUILD must be 0 or 1' >&2
+  exit 1
+fi
+export POLARIS_LOCAL_CANDIDATE_BUILD
 
 cleanup() {
   umount -R "$STEAMOS_ROOT/opt" 2>/dev/null || true
@@ -85,7 +91,7 @@ mount --bind /output "$STEAMOS_ROOT/opt"
 arch-chroot "$STEAMOS_ROOT" useradd --create-home --uid 1000 builder
 arch-chroot "$STEAMOS_ROOT" chown -R builder:builder /home/builder /opt
 arch-chroot "$STEAMOS_ROOT" runuser --login \
-  --whitelist-environment=SOURCE_ROOT,OUTPUT_ROOT,BUILD_ROOT,POLARIS_BUILD_COMMIT \
+  --whitelist-environment=SOURCE_ROOT,OUTPUT_ROOT,BUILD_ROOT,POLARIS_BUILD_COMMIT,POLARIS_LOCAL_CANDIDATE_BUILD \
   -u builder -- \
   /mnt/scripts/ci/build-steamos-package.sh
 arch-chroot "$STEAMOS_ROOT" pacman --noconfirm -U \

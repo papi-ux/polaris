@@ -9,6 +9,11 @@ fi
 SOURCE_ROOT=/mnt
 OUTPUT_ROOT=/opt
 REQUESTED_COMMIT="${POLARIS_BUILD_COMMIT:?POLARIS_BUILD_COMMIT is required}"
+POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"
+if [ "$POLARIS_LOCAL_CANDIDATE_BUILD" != 0 ] && [ "$POLARIS_LOCAL_CANDIDATE_BUILD" != 1 ]; then
+  printf '%s\n' 'POLARIS_LOCAL_CANDIDATE_BUILD must be 0 or 1' >&2
+  exit 1
+fi
 git config --global --add safe.directory "$SOURCE_ROOT"
 SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
 SOURCE_TREE="$(git -C "$SOURCE_ROOT" rev-parse 'HEAD^{tree}')"
@@ -22,6 +27,9 @@ fi
 BRANCH="$(git -C "$SOURCE_ROOT" rev-parse --abbrev-ref HEAD)"
 BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' "$SOURCE_ROOT/CMakeLists.txt")"
 CLONE_URL=https://github.com/papi-ux/polaris.git
+if [ "$POLARIS_LOCAL_CANDIDATE_BUILD" = 1 ]; then
+  CLONE_URL=file:///mnt
+fi
 export BRANCH BUILD_VERSION CLONE_URL
 export COMMIT="$REQUESTED_COMMIT"
 CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"

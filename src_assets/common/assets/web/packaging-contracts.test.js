@@ -673,6 +673,22 @@ describe('Linux packaging contracts', () => {
     expect(releaseVerifier).toContain('"${supported_count}" -ne 4')
   })
 
+  it('keeps unpublished candidate sourcing explicit, local-only, and absent from CI', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+    const buildScript = readSource('scripts/ci/build-steamos-package.sh')
+
+    expect(workflow).not.toContain('POLARIS_LOCAL_CANDIDATE_BUILD')
+    expect(bootstrap).toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"')
+    expect(bootstrap).toContain('--whitelist-environment=SOURCE_ROOT,OUTPUT_ROOT,BUILD_ROOT,POLARIS_BUILD_COMMIT,POLARIS_LOCAL_CANDIDATE_BUILD')
+    expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
+    expect(buildScript).toContain('CLONE_URL=file:///mnt')
+    expect(buildScript).not.toMatch(/CLONE_URL=(?:file:\/\/)?\$\{?SOURCE_ROOT/)
+    for (const script of [bootstrap, buildScript]) {
+      expect(script).toContain("POLARIS_LOCAL_CANDIDATE_BUILD must be 0 or 1")
+    }
+  })
+
   it('downloads and stages the SteamOS package in release assembly', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const releaseAssetsIndex = workflow.indexOf('  release-assets:')
