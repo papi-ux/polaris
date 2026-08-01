@@ -164,6 +164,19 @@ describe('Update Center release awareness', () => {
     expect(state.asset.name).toBe('Polaris-steamos3.8-x86_64.pkg.tar.zst')
 
     const commandLines = state.installCommand.split('\n')
+    const expectedCommandLines = [
+      'wget https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst',
+      '(',
+      'set -e',
+      "trap 'sudo steamos-readonly enable' EXIT",
+      'sudo steamos-readonly disable',
+      'sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst',
+      'sudo -H polaris --setup-host',
+      'sudo steamos-readonly enable',
+      'trap - EXIT',
+      ') &&',
+      'systemctl --user enable --now polaris',
+    ]
     const downloadPackage = commandLines.indexOf('wget https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst')
     const subshellStart = commandLines.indexOf('(')
     const strictMode = commandLines.indexOf('set -e')
@@ -188,6 +201,7 @@ describe('Update Center release awareness', () => {
     expect(subshellEnd).toBeGreaterThan(clearRestoreTrap)
     expect(startService).toBeGreaterThan(restoreReadOnly)
     expect(startService).toBeGreaterThan(subshellEnd)
+    expect(commandLines, 'SteamOS install side effects must each occur exactly once').toEqual(expectedCommandLines)
   })
 
   it('restores SteamOS read-only mode and skips service startup when pacman fails', () => {

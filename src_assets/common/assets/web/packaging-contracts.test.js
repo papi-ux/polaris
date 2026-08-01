@@ -31,9 +31,9 @@ const normalizedShellCommands = (source) => {
     const trimmed = rawLine.trim()
     if (!pending && (!trimmed || trimmed.startsWith('#'))) continue
 
-    const continued = /\\\s*$/.test(trimmed)
-    const piece = trimmed.replace(/\\\s*$/, '').trim()
-    pending = pending ? `${pending} ${piece}` : piece
+    const continued = /\\$/.test(rawLine)
+    const piece = continued ? rawLine.trimStart().slice(0, -1) : trimmed
+    pending = `${pending}${piece}`
 
     if (!continued) {
       commands.push(pending.replace(/\s+/g, ' '))
@@ -43,6 +43,164 @@ const normalizedShellCommands = (source) => {
 
   if (pending) commands.push(pending.replace(/\s+/g, ' '))
   return commands
+}
+
+const shellExecutableOccurrences = (commands, executable) => {
+  const pattern = new RegExp(`(?:^|[;&|(){}]\\s*)(?:(?:if|while|until|elif|then|else|do)\\s+)?(?:!\\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|(){}]+\\s+)*(?:sudo\\s+)?(?:[^\\s;&|(){}]+/)?${executable}(?=\\s|$)`, 'g')
+  return commands.flatMap((command, index) => (
+    [...command.matchAll(pattern)].map((match) => ({ command, index, offset: match.index }))
+  ))
+}
+
+const shellSyntaxView = (command) => {
+  let quote = null
+  let doubleQuoteExecutes = false
+  let view = ''
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]
+    if (quote) {
+      if (character === quote) {
+        quote = null
+        doubleQuoteExecutes = false
+      } else if ((quote === "'" && /[;&|()#]/.test(character))
+        || (quote === '"' && !doubleQuoteExecutes && /[;&|()#]/.test(character))) {
+        view += '·'
+      } else {
+        view += character
+      }
+      continue
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character
+      if (character === '"') {
+        const closingQuote = command.indexOf('"', index + 1)
+        const quotedText = command.slice(index + 1, closingQuote >= 0 ? closingQuote : command.length)
+        doubleQuoteExecutes = quotedText.includes('$(') || quotedText.includes('`')
+      }
+      continue
+    }
+    if (character === '\\' && index + 1 < command.length) {
+      const escaped = command[index + 1]
+      view += /[\s;&|(){}#'"\\]/.test(escaped) ? '·' : escaped
+      index += 1
+      continue
+    }
+    if (character === '#' && (index === 0 || /[\s;&|()]/.test(command[index - 1]))) break
+    view += character
+  }
+
+  return view.trimEnd()
+}
+
+const canonicalShellCommands = (commands) => commands.map(shellSyntaxView)
+const dynamicShellValue = '__POLARIS_DYNAMIC_SHELL_VALUE__'
+
+const expandStaticShellVariables = (commands) => {
+  const values = new Map()
+  const blockDepths = shellBlockDepths(commands)
+  const expand = (value) => value.replace(
+    /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
+    (reference, braced, bare) => values.get(braced ?? bare) ?? reference,
+  )
+
+  return commands.map((command, index) => {
+    const controlFlowAssignment = blockDepths[index] !== 0
+      || shellFunctionDefinition.test(command)
+      || shellFunctionAnywhere.test(command)
+      || /(?:^|[;&|]\s*)(?:(?:if|then|elif|else|while|until|for|do|done|case|esac|select|function)\b|\{|\()/.test(command)
+    const syntaxView = shellSyntaxView(command)
+    const assignments = command.matchAll(
+      /(?:^|[;&|{]\s*|(?:^|[;&]\s*)[^;&{}]*\)\s*)(?:(?:if|elif|while|until|then|do|else)\s+)?(?:(?:export|readonly|declare|typeset|local)\s+(?:-[A-Za-z]+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))(?=\s*(?:[;&|}]|$))/dg,
+    )
+    for (const assignment of assignments) {
+      const [, name, doubleQuoted, singleQuoted, unquoted] = assignment
+      const nameIndex = assignment.indices[1][0]
+      if (!syntaxView.startsWith(`${name}=`, nameIndex)) continue
+      const value = singleQuoted ?? expand(doubleQuoted ?? unquoted)
+      values.set(name, controlFlowAssignment ? dynamicShellValue : value)
+    }
+    for (const loopVariable of syntaxView.matchAll(
+      /(?:^|[;&|({]\s*)(?:for|select)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g,
+    )) {
+      values.set(loopVariable[1], dynamicShellValue)
+    }
+    return expand(command)
+  })
+}
+
+const forbiddenShellWrapper = /(?:^|[;&|(){}]\s*)(?:(?:if|while|until|elif|then|else|do)\s+)?(?:!\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|(){}]+\s+)*(?:sudo\s+)?(?:(?:[^\s;&|(){}]+\/)?sudo(?:\s|$)|alias(?:\s|$)|builtin(?:\s|$)|enable(?:\s|$)|hash(?:\s|$)|command\s+(?!-(?:v|V)\b)|(?:(?:[^\s;&|(){}]+\/)?env|eval|exec|source|\.)\s+|(?:[^\s;&|(){}]+\/)?(?:xargs|find|parallel|time|timeout|nice|nohup|stdbuf|setsid|chroot|unshare|coproc|at|batch|crontab|systemd-run)\s+|(?:[^\s;&|(){}]+\/)?(?:ba|da|z)?sh(?:\s|$))/
+const shellFunctionDefinition = /^(?:function\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*\(\s*\))?|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\))(?:\s*\{)?/
+const shellFunctionAnywhere = /(?:^|[;&|]\s*)(?:function\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*\(\s*\))?|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\))\s*\{/
+const sensitiveShellName = '(?:pacstrap|cmake|makepkg|cp|mv|install|rsync|cd|test|shopt|exit|\\[)'
+const sensitiveShellShadow = new RegExp(`(?:^|[;&|]\\s*)(?:(?:${sensitiveShellName}\\s*\\(\\s*\\)|function\\s+${sensitiveShellName}(?:\\s*\\(\\s*\\))?)(?:\\s*\\{|$)|alias\\s+${sensitiveShellName}=)`)
+const hasForbiddenShellWrapper = (source) => {
+  const commands = normalizedShellCommands(source)
+  const resolvedCommands = [
+    ...canonicalShellCommands(commands),
+    ...canonicalShellCommands(expandStaticShellVariables(commands)),
+  ]
+  return /\$(?:'|")/.test(source)
+    || resolvedCommands.some((command) => forbiddenShellWrapper.test(command))
+}
+const hasSensitiveShellShadow = (source) => canonicalShellCommands(normalizedShellCommands(source))
+  .some((command) => sensitiveShellShadow.test(command))
+const hasShellDataBlock = (source) => /<<-?(?!<)/.test(source)
+const positionalShellExpansion = /\$(?:[0-9@*#?$!-]|\{(?:[0-9]+|[@*#?$!-])(?:[^}]*)?\})/
+const hasPositionalShellExpansion = (command) => positionalShellExpansion.test(command)
+const dynamicShellExecutable = /(?:^|[;&|]\s*|(?<![=])\(\s*|(?<!\$)\{\s+)(?:(?:if|while|until|elif|then|else|do)\s+)?(?:!\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;&|$`(){}]+)\s+)*(?:sudo\s+)?(?![A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?\+?=)(?=[^\s;&|]+)[^\s;&|]*(?:__POLARIS_DYNAMIC_SHELL_VALUE__|\$\(|`|\$\{[^}]+\}|\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]))/
+const hasDynamicShellExecutable = (commands) => commands.some((command) => (
+  dynamicShellExecutable.test(command)
+))
+const hasIndirectShellBinding = (commands) => commands.some((command) => (
+  /(?:^|[;&|(){}]\s*)(?:(?:printf\s+-v|read(?:array)?|mapfile|declare\s+-n|typeset\s+-n)\b|[A-Za-z_][A-Za-z0-9_]*\+=(?!\s*\()|[A-Za-z_][A-Za-z0-9_]*\[[^\]]+\]\+?=)/.test(command)
+))
+const isShellArrayBinding = (command) => /(?:^|[;&|]\s*)[A-Za-z_][A-Za-z0-9_]*\+?=\s*\(/.test(command)
+  || /(?:^|[;&|]\s*)[A-Za-z_][A-Za-z0-9_]*\[[^\]]+\]\+?=/.test(command)
+const opensShellBlock = (command) => /(?:^|[;&|]\s*)\{(?:\s+[^}]*)?$/.test(command)
+  || command === '('
+  || /\$\([^)]*$/.test(command)
+  || /^(?:case|for|if|select|until|while)\b/.test(command)
+const closesShellBlock = (command) => /^(?:\}|fi|done|esac|\)(?:\s*&&)?)$/.test(command)
+const shellBlockDepths = (commands) => {
+  let depth = 0
+  let awaitingFunctionBrace = false
+  let insideBacktickSubstitution = false
+  return commands.map((command) => {
+    const controlToken = command.replace(/;\s*$/, '')
+    const backtickCount = (command.match(/(?<!\\)`/g) ?? []).length
+    const standaloneBacktick = controlToken === '`'
+    if (insideBacktickSubstitution && standaloneBacktick) {
+      depth = Math.max(0, depth - 1)
+      insideBacktickSubstitution = false
+    }
+    if (controlToken === '{' && awaitingFunctionBrace) {
+      awaitingFunctionBrace = false
+      return depth
+    }
+    if (closesShellBlock(controlToken)) depth = Math.max(0, depth - 1)
+    const commandDepth = depth
+    if (shellFunctionDefinition.test(command)) {
+      const closesOnSameCommand = /\{.*\}/.test(shellSyntaxView(command))
+      if (!closesOnSameCommand) {
+        depth += 1
+        awaitingFunctionBrace = !command.endsWith('{')
+      }
+    } else if (opensShellBlock(controlToken)) {
+      depth += 1
+    }
+    if (backtickCount % 2 === 1 && !standaloneBacktick) {
+      if (insideBacktickSubstitution) {
+        depth = Math.max(0, depth - 1)
+        insideBacktickSubstitution = false
+      } else {
+        depth += 1
+        insideBacktickSubstitution = true
+      }
+    }
+    return commandDepth
+  })
 }
 
 describe('Linux packaging contracts', () => {
@@ -272,56 +430,166 @@ describe('Linux packaging contracts', () => {
       expect(source).not.toContain('/var/cache/pacman/pkg')
     }
 
+    for (const [scriptName, source] of [
+      ['run-steamos-build.sh', bootstrap],
+      ['build-steamos-package.sh', buildScript],
+    ]) {
+      expect(hasForbiddenShellWrapper(source), `${scriptName} must use direct shell commands`).toBe(false)
+      expect(hasSensitiveShellShadow(source), `${scriptName} must not shadow contract-sensitive commands`).toBe(false)
+      expect(hasShellDataBlock(source), `${scriptName} must not satisfy execution contracts through heredoc data`).toBe(false)
+    }
+
     const bootstrapCommands = normalizedShellCommands(bootstrap)
     const buildCommands = normalizedShellCommands(buildScript)
+    const canonicalBootstrapCommands = canonicalShellCommands(bootstrapCommands)
+    const expandedBootstrapCommands = canonicalShellCommands(expandStaticShellVariables(bootstrapCommands))
+    const canonicalBuildCommands = canonicalShellCommands(buildCommands)
+    const rootBindings = canonicalBootstrapCommands
+      .map((command, index) => ({ command, index }))
+      .filter(({ command }) => /^(?:export\s+|readonly\s+)?STEAMOS_ROOT=/.test(command))
+    const rootBindingIndex = rootBindings[0]?.index ?? -1
+    const rootBindingValue = rootBindings.length === 1
+      ? expandedBootstrapCommands[rootBindingIndex].replace(/^(?:export\s+|readonly\s+)?STEAMOS_ROOT=/, '')
+      : null
+    const rootTargets = ['STEAMOS_ROOT', rootBindingValue].filter(Boolean)
     const rootReset = 'rm -rf -- "$STEAMOS_ROOT"'
     const rootCreate = 'install -d -m 0755 -- "$STEAMOS_ROOT"'
     const rootResetIndex = bootstrapCommands.indexOf(rootReset)
     const rootCreateIndex = bootstrapCommands.indexOf(rootCreate)
-    const pacstrapIndexes = bootstrapCommands
-      .map((command, index) => ({ command, index }))
-      .filter(({ command }) => command.startsWith('pacstrap '))
+    const pacstrapIndexes = shellExecutableOccurrences(expandedBootstrapCommands, 'pacstrap')
+    const bootstrapBlockDepths = shellBlockDepths(bootstrapCommands)
+    const bootstrapTrapCommands = shellExecutableOccurrences(canonicalBootstrapCommands, 'trap')
+    const buildTrapCommands = shellExecutableOccurrences(canonicalBuildCommands, 'trap')
+    const rootWriterCommands = ['cp', 'install', 'mv', 'rsync', 'tar', 'bsdtar', 'pax', 'star', 'unzip', '7z', 'dd', 'cpio', 'mount', 'zstd', 'lz4', 'gzip', 'ln', 'tee', 'touch', 'truncate']
+      .flatMap((executable) => shellExecutableOccurrences(expandedBootstrapCommands, executable))
+    const rootReseedCommands = rootWriterCommands
+      .filter(({ command, index }) => index !== rootCreateIndex && rootTargets.some((target) => command.includes(target)))
+    const taintedTopLevelRootWriters = rootWriterCommands
+      .filter(({ command, index }) => index !== rootCreateIndex
+        && bootstrapBlockDepths[index] === 0
+        && (command.includes(dynamicShellValue) || hasPositionalShellExpansion(command)))
+    const protectedRootArrayBindings = expandedBootstrapCommands
+      .filter((command) => isShellArrayBinding(command) && rootTargets.some((target) => command.includes(target)))
+    const rootRedirectCommands = expandedBootstrapCommands
+      .filter((command) => rootTargets.some((target) => command.includes(target)) && />/.test(command))
 
+    expect(rootBindings, 'STEAMOS_ROOT must have one static binding before bootstrap').toHaveLength(1)
+    expect(bootstrapTrapCommands, 'bootstrap must have one static cleanup trap').toHaveLength(1)
+    expect(bootstrapTrapCommands[0].command, 'bootstrap cleanup trap must invoke only a static function on EXIT').toMatch(/^trap [A-Za-z_][A-Za-z0-9_]* EXIT$/)
+    expect(bootstrapBlockDepths[bootstrapTrapCommands[0].index], 'bootstrap cleanup trap must be armed at top level').toBe(0)
+    expect(buildTrapCommands, 'package generation must not defer commands through traps').toEqual([])
+    expect(rootBindingIndex, 'STEAMOS_ROOT must be bound before deleting the root').toBeGreaterThanOrEqual(0)
+    expect(rootBindingIndex, 'STEAMOS_ROOT must be bound before deleting the root').toBeLessThan(rootResetIndex)
+    expect(bootstrapBlockDepths[rootBindingIndex], 'STEAMOS_ROOT must be bound at top level').toBe(0)
+    expect(hasDynamicShellExecutable(expandedBootstrapCommands), 'bootstrap commands must not use unresolved dynamic executables').toBe(false)
+    expect(hasIndirectShellBinding(expandedBootstrapCommands), 'bootstrap commands must not create indirect shell bindings').toBe(false)
+    expect(protectedRootArrayBindings, 'bootstrap commands must not hide the SteamOS root in shell arrays').toEqual([])
     expect(rootResetIndex, 'SteamOS root must be deleted before every bootstrap').toBeGreaterThanOrEqual(0)
     expect(rootCreateIndex, 'SteamOS root must be recreated immediately after deletion').toBe(rootResetIndex + 1)
     expect(pacstrapIndexes, 'SteamOS root must have exactly one pacstrap population command').toHaveLength(1)
     expect(pacstrapIndexes[0].index, 'nothing may reseed the clean root before pacstrap').toBe(rootCreateIndex + 1)
-    expect(pacstrapIndexes[0].command).not.toMatch(/[;&|]/)
-    expect(pacstrapIndexes[0].command).not.toMatch(/(?:^|\s)--cachedir(?:=|\s)/)
-    for (const shortOption of pacstrapIndexes[0].command.match(/(?:^|\s)-[A-Za-z]+(?=\s|$)/g) ?? []) {
+    expect(
+      [rootResetIndex, rootCreateIndex, pacstrapIndexes[0].index]
+        .map((index) => bootstrapBlockDepths[index]),
+      'the clean-root lifecycle must execute at top level',
+    ).toEqual([0, 0, 0])
+    expect(rootReseedCommands, 'the clean root must not be repopulated through copy, archive, or device commands').toEqual([])
+    expect(taintedTopLevelRootWriters, 'top-level root writers must not depend on branch-sensitive shell state').toEqual([])
+    expect(rootRedirectCommands, 'the clean root must not be repopulated through shell redirection').toEqual([])
+    const pacstrapCommand = canonicalBootstrapCommands[pacstrapIndexes[0].index]
+    const expandedPacstrapCommand = expandedBootstrapCommands[pacstrapIndexes[0].index]
+    expect(pacstrapCommand, 'pacstrap must be invoked directly').toMatch(/^pacstrap\s/)
+    expect(pacstrapCommand, 'pacstrap must target the freshly recreated SteamOS root').toMatch(
+      /^pacstrap -G -M -C \S+ \$STEAMOS_ROOT(?:\s|$)/,
+    )
+    expect(pacstrapCommand).not.toMatch(/[;&|]/)
+    expect(hasPositionalShellExpansion(pacstrapCommand), 'pacstrap must not consume positional shell state').toBe(false)
+    expect(expandedPacstrapCommand).not.toMatch(/(?:^|\s)--cachedir(?:=|\s)/)
+    for (const shortOption of expandedPacstrapCommand.match(/(?:^|\s)-[A-Za-z]+(?=\s|$)/g) ?? []) {
       expect(shortOption.trim().slice(1), `pacstrap option must not enable host cache reuse: ${shortOption.trim()}`).not.toContain('c')
     }
 
     expect(buildScript).not.toContain('POLARIS_CONFIGURE_PKGBUILD')
-    expect(buildScript).not.toMatch(/\beval\b|\bbash\s+-c\b/)
-    const packageGeneratorSelectors = [...buildScript.matchAll(/-DPOLARIS_CONFIGURE_[A-Z0-9_]*PKGBUILD=ON/g)]
-      .map((match) => match[0])
+    const expandedBuildCommands = canonicalShellCommands(expandStaticShellVariables(buildCommands))
+    expect(hasDynamicShellExecutable(expandedBuildCommands), 'package generation must not use unresolved dynamic executables').toBe(false)
+    expect(hasIndirectShellBinding(expandedBuildCommands), 'package generation must not create indirect shell bindings').toBe(false)
+    const buildRootMutations = expandedBuildCommands.filter((command) => (
+      /(?:^|[\s;&|])(?:(?:export|readonly)\s+)?BUILD_ROOT\+?=/.test(command)
+      || /\bunset\s+(?:-[^\s]+\s+)*BUILD_ROOT\b/.test(command)
+      || /\bprintf\s+-v\s+BUILD_ROOT\b/.test(command)
+    ))
+    const importedCmakeState = expandedBuildCommands.filter((command) => (
+      /(?:^|[\s;&|])(?:(?:export|readonly)\s+)?(?:CMAKE_TOOLCHAIN_FILE|CMAKE_PROJECT(?:_[A-Za-z0-9_-]+)?_(?:TOP_LEVEL_INCLUDES|INCLUDE|INCLUDE_BEFORE)|CMAKE_USER_MAKE_RULES_OVERRIDE(?:_[A-Za-z0-9_-]+)?)(?:\+?=|:)/.test(command)
+    ))
+    expect(buildRootMutations, 'BUILD_ROOT must not be reassigned before generating the package').toEqual([])
+    expect(importedCmakeState, 'CMake executable import state must not be supplied through shell variables').toEqual([])
+    const packageGeneratorSelectors = [
+      ...expandedBuildCommands.join('\n').matchAll(/(?:^|\s)-D\s*POLARIS_CONFIGURE_(?!ONLY(?:[:=]|\b))[A-Z0-9_]+(?:[:=][^\s;&|]*)?/g),
+    ]
+      .map((match) => match[0].replace(/\s+/g, ''))
+    const packageGeneratorUnsets = [
+      ...expandedBuildCommands.join('\n').matchAll(/(?:^|\s)-U\s*POLARIS_CONFIGURE_(?!ONLY\b)[A-Z0-9_]+\b/g),
+    ]
+      .map((match) => match[0].replace(/\s+/g, ''))
     expect(packageGeneratorSelectors).toEqual(['-DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON'])
+    expect(packageGeneratorUnsets, 'CMake must not unset a package selector after choosing SteamOS').toEqual([])
 
-    const cmakeCommands = buildCommands.filter((command) => /\bcmake\b/.test(command))
+    const cmakeCommands = shellExecutableOccurrences(expandedBuildCommands, 'cmake')
     const cmakeConfigureCommands = cmakeCommands.filter(
-      (command) => command.startsWith('cmake ') && command.includes(' -S ') && command.includes(' -B '),
+      ({ command }) => command.startsWith('cmake ')
+        && command.includes(' -S ')
+        && command.includes(' -B ')
+        && !/[;&|]/.test(command),
     )
     expect(cmakeCommands, 'SteamOS package build must have exactly one direct CMake invocation').toHaveLength(1)
     expect(cmakeConfigureCommands, 'the sole CMake invocation must be the SteamOS configure command').toEqual(cmakeCommands)
-    expect(cmakeConfigureCommands[0]).toContain('-DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON')
-    expect(cmakeConfigureCommands[0]).not.toMatch(/-DPOLARIS_CONFIGURE_(?!STEAMOS_)[A-Z0-9_]*PKGBUILD=ON/)
+    expect(hasPositionalShellExpansion(cmakeConfigureCommands[0].command), 'CMake configure must not consume positional shell state').toBe(false)
+    expect(cmakeConfigureCommands[0].command).toContain('-DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON')
+    expect(cmakeConfigureCommands[0].command, 'the CMake configure contract must not be satisfied by inline comments').not.toContain('#')
+    expect(cmakeConfigureCommands[0].command, 'CMake must not import unresolved cache or preset state').not.toMatch(
+      /(?:^|\s)(?:-C(?:\S|\s|$)|--preset(?:=|\s)|--toolchain(?:=|\s))/,
+    )
+    expect(cmakeConfigureCommands[0].command, 'CMake must run configure mode rather than an informational or alternate mode').not.toMatch(
+      /(?:^|\s)(?:--version|--help(?:-[A-Za-z-]+)?|-E|-P|-N|--build|--install|--open|--find-package|--workflow)(?:=|\s|$)/,
+    )
+    expect(cmakeConfigureCommands[0].command, 'CMake must not import executable toolchain or project-include state').not.toMatch(
+      /-D\s*(?:CMAKE_TOOLCHAIN_FILE|CMAKE_PROJECT(?:_[A-Za-z0-9_-]+)?_(?:TOP_LEVEL_INCLUDES|INCLUDE|INCLUDE_BEFORE)|CMAKE_USER_MAKE_RULES_OVERRIDE(?:_[A-Za-z0-9_-]+)?)(?::[^=\s]+)?=/,
+    )
 
     const pkgbuildDirAssignment = 'STEAMOS_PKGBUILD_DIR="$BUILD_ROOT/packaging/linux/SteamOS"'
+    const pkgbuildDirAssignments = buildCommands.filter((command) => command.includes('STEAMOS_PKGBUILD_DIR='))
+    const pkgbuildDirMentions = buildCommands.filter((command) => command.includes('STEAMOS_PKGBUILD_DIR'))
     const pkgbuildDirIndex = buildCommands.indexOf(pkgbuildDirAssignment)
     const pkgbuildCheckIndex = buildCommands.indexOf('test -f "$STEAMOS_PKGBUILD_DIR/PKGBUILD"')
     const pkgbuildCdIndex = buildCommands.indexOf('cd "$STEAMOS_PKGBUILD_DIR"')
-    const makepkgCommands = buildCommands.filter((command) => /\bmakepkg\b/.test(command))
-    const directMakepkgCommands = makepkgCommands
-      .map((command) => ({ command, index: buildCommands.indexOf(command) }))
-      .filter(({ command }) => command.startsWith('makepkg '))
+    const makepkgCommands = shellExecutableOccurrences(expandedBuildCommands, 'makepkg')
+    const directMakepkgCommands = makepkgCommands.filter(
+      ({ command }) => command.startsWith('makepkg ') && !/[;&|]/.test(command),
+    )
+    const buildBlockDepths = shellBlockDepths(buildCommands)
 
+    expect(pkgbuildDirAssignments, 'SteamOS PKGBUILD directory must have one immutable binding').toEqual([pkgbuildDirAssignment])
+    expect(pkgbuildDirMentions, 'SteamOS PKGBUILD directory must only be bound, checked, and entered').toEqual([
+      pkgbuildDirAssignment,
+      'test -f "$STEAMOS_PKGBUILD_DIR/PKGBUILD"',
+      'cd "$STEAMOS_PKGBUILD_DIR"',
+    ])
     expect(pkgbuildDirIndex, 'SteamOS PKGBUILD directory must be assigned from the CMake build root').toBeGreaterThanOrEqual(0)
-    expect(pkgbuildCheckIndex, 'generated SteamOS PKGBUILD must be checked').toBeGreaterThan(pkgbuildDirIndex)
+    expect(cmakeCommands[0].index, 'CMake must immediately consume the immutable build-root binding').toBe(pkgbuildDirIndex + 1)
+    expect(pkgbuildCheckIndex, 'generated SteamOS PKGBUILD must be checked immediately after CMake').toBe(cmakeCommands[0].index + 1)
     expect(pkgbuildCdIndex, 'makepkg must enter the generated SteamOS directory').toBe(pkgbuildCheckIndex + 1)
     expect(makepkgCommands, 'SteamOS package build must have exactly one makepkg invocation').toHaveLength(1)
     expect(directMakepkgCommands, 'makepkg must be invoked directly').toHaveLength(1)
+    expect(hasPositionalShellExpansion(directMakepkgCommands[0].command), 'makepkg must not consume positional shell state').toBe(false)
+    expect(directMakepkgCommands[0].command, 'makepkg must use the generated PKGBUILD in the exact working directory').not.toMatch(
+      /(?:^|\s)(?:-p\S*|--buildscript(?:=|\s|$))/,
+    )
     expect(directMakepkgCommands[0].index, 'makepkg must consume the checked SteamOS PKGBUILD directory').toBe(pkgbuildCdIndex + 1)
+    expect(
+      [pkgbuildDirIndex, cmakeCommands[0].index, pkgbuildCheckIndex, pkgbuildCdIndex, directMakepkgCommands[0].index]
+        .map((index) => buildBlockDepths[index]),
+      'the SteamOS package-generator sequence must execute at top level',
+    ).toEqual([0, 0, 0, 0, 0])
   })
 
   it('keeps the SteamOS package x86_64-only and CUDA-off', () => {
@@ -349,26 +617,65 @@ describe('Linux packaging contracts', () => {
       releaseAssets,
       'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)',
     )
+    expect(hasForbiddenShellWrapper(assembly), 'release assembly must not import or wrap writer commands').toBe(false)
+    expect(hasSensitiveShellShadow(assembly), 'release assembly must not shadow guard or writer commands').toBe(false)
+    expect(hasShellDataBlock(assembly), 'release assembly must not satisfy execution contracts through heredoc data').toBe(false)
     const assemblyCommands = normalizedShellCommands(assembly)
     const nullglobCommand = 'shopt -s nullglob'
     const packageArrayCommand = 'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)'
     const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 1 ]; then'
     const exactCopy = 'cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"'
     const stagedDestination = 'release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst'
+    const stagedDirectory = 'release-assets/staged'
+    const stagedBasename = 'Polaris-steamos3.8-x86_64.pkg.tar.zst'
     const nullglobIndex = assemblyCommands.indexOf(nullglobCommand)
     const arrayIndex = assemblyCommands.indexOf(packageArrayCommand)
     const guardIndex = assemblyCommands.indexOf(cardinalityGuard)
     const guardExitIndex = assemblyCommands.indexOf('exit 1', guardIndex + 1)
     const guardCloseIndex = assemblyCommands.indexOf('fi', guardIndex + 1)
     const copyIndex = assemblyCommands.indexOf(exactCopy)
+    const expandedAssemblyCommands = canonicalShellCommands(expandStaticShellVariables(assemblyCommands))
+    const assemblyBlockDepths = shellBlockDepths(assemblyCommands)
+    const assemblyTrapCommands = shellExecutableOccurrences(canonicalShellCommands(assemblyCommands), 'trap')
+    expect(hasDynamicShellExecutable(expandedAssemblyCommands), 'release assembly must not use unresolved dynamic executables').toBe(false)
+    expect(hasIndirectShellBinding(expandedAssemblyCommands), 'release assembly must not create indirect shell bindings').toBe(false)
+    expect(assemblyTrapCommands, 'release assembly must not defer writer commands through traps').toEqual([])
+    const canonicalExactCopy = canonicalShellCommands([exactCopy])[0]
+    const allSteamOsWriterCommands = ['cp', 'mv', 'install', 'rsync', 'ln', 'tar', 'bsdtar', 'pax', 'star', 'unzip', '7z', 'dd', 'cpio', 'mount', 'zstd', 'lz4', 'gzip', 'tee', 'touch', 'truncate']
+      .flatMap((executable) => shellExecutableOccurrences(expandedAssemblyCommands, executable))
+    const steamOsPackageWriters = allSteamOsWriterCommands
+      .filter(({ command }) => command.includes(stagedDestination)
+        || (command.includes(stagedDirectory) && command.includes(stagedBasename)))
+      .map(({ command }) => command)
+    const taintedTopLevelSteamOsWriters = allSteamOsWriterCommands
+      .filter(({ command, index }) => assemblyBlockDepths[index] === 0
+        && (command.includes(dynamicShellValue) || hasPositionalShellExpansion(command)))
+    const protectedSteamOsArrayBindings = expandedAssemblyCommands
+      .filter((command) => isShellArrayBinding(command)
+        && (command.includes(stagedDestination)
+          || (command.includes(stagedDirectory) && command.includes(stagedBasename))))
+    const steamOsRedirectWriters = expandedAssemblyCommands
+      .filter((command) => command.includes(stagedDestination) && />/.test(command))
+    const stagedDirectoryChanges = ['cd', 'pushd']
+      .flatMap((executable) => shellExecutableOccurrences(expandedAssemblyCommands, executable))
+      .filter(({ command }) => command.includes(stagedDirectory))
 
     expect(nullglobIndex, 'release assembly must enable nullglob').toBeGreaterThanOrEqual(0)
     expect(arrayIndex, 'SteamOS package array must immediately follow nullglob').toBe(nullglobIndex + 1)
     expect(guardIndex, 'exact-one cardinality guard must immediately follow package discovery').toBe(arrayIndex + 1)
-    expect(guardExitIndex, 'cardinality mismatch must terminate the assembly').toBeGreaterThan(guardIndex)
-    expect(guardCloseIndex, 'cardinality guard must close after its exit').toBe(guardExitIndex + 1)
+    expect(guardExitIndex, 'cardinality mismatch must immediately terminate the assembly').toBe(guardIndex + 1)
+    expect(guardCloseIndex, 'cardinality guard must close immediately after its exit').toBe(guardExitIndex + 1)
     expect(copyIndex, 'the exact SteamOS copy must run only after cardinality validation').toBe(guardCloseIndex + 1)
-    expect(assemblyCommands.filter((command) => command.includes(stagedDestination))).toEqual([exactCopy])
+    expect(
+      [nullglobIndex, arrayIndex, guardIndex, guardExitIndex, guardCloseIndex, copyIndex]
+        .map((index) => assemblyBlockDepths[index]),
+      'the SteamOS cardinality and staging sequence must run at top level',
+    ).toEqual([0, 0, 0, 1, 0, 0])
+    expect(steamOsPackageWriters, 'cardinality must dominate every resolved SteamOS artifact writer').toEqual([canonicalExactCopy])
+    expect(taintedTopLevelSteamOsWriters, 'top-level artifact writers must not depend on branch-sensitive shell state').toEqual([])
+    expect(protectedSteamOsArrayBindings, 'release assembly must not hide the SteamOS destination in shell arrays').toEqual([])
+    expect(steamOsRedirectWriters, 'the staged SteamOS artifact must not be written through redirection').toEqual([])
+    expect(stagedDirectoryChanges, 'release assembly must not change into the staged-artifact directory').toEqual([])
   })
 
   it('maps CI source prefixes and materializes package strings before path checks', () => {
