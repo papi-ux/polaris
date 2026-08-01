@@ -711,7 +711,28 @@ describe('Linux packaging contracts', () => {
     const buildScript = readSource('scripts/ci/build-steamos-package.sh')
 
     expect(workflow).not.toContain('POLARIS_LOCAL_CANDIDATE_BUILD')
-    expect(bootstrap).toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"')
+    for (const script of [bootstrap, buildScript]) {
+      const commands = normalizedShellCommands(script)
+      expect(commands).toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD-0}"')
+      expect(commands).not.toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"')
+
+      const lines = script.split('\n')
+      const guardStart = lines.indexOf('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD-0}"')
+      const guardEnd = lines.indexOf('fi', guardStart + 1)
+      expect(guardStart).toBeGreaterThanOrEqual(0)
+      expect(guardEnd).toBeGreaterThan(guardStart)
+      const guardScript = lines.slice(guardStart, guardEnd + 1).join('\n')
+      for (const [value, expectedStatus] of [[undefined, 0], ['', 1], ['0', 0], ['1', 0], ['2', 1]]) {
+        const env = { ...process.env }
+        if (value === undefined) delete env.POLARIS_LOCAL_CANDIDATE_BUILD
+        else env.POLARIS_LOCAL_CANDIDATE_BUILD = value
+        const result = spawnSync('bash', ['-c', guardScript], { encoding: 'utf8', env })
+        expect(result.status, `unexpected guard status for ${JSON.stringify(value)}`).toBe(expectedStatus)
+        if (expectedStatus !== 0) {
+          expect(result.stderr).toContain('POLARIS_LOCAL_CANDIDATE_BUILD must be 0 or 1')
+        }
+      }
+    }
     expect(bootstrap).toContain('chroot "$STEAMOS_ROOT" runuser --user builder --')
     expect(bootstrap).not.toContain('arch-chroot "$STEAMOS_ROOT"')
     expect(bootstrap).toContain('mount --bind "$STEAMOS_ROOT" "$STEAMOS_ROOT"')
