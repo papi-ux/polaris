@@ -197,6 +197,45 @@ describe('Linux packaging contracts', () => {
     }
   })
 
+  it('defines a distinct SteamOS 3.8 build lane', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
+
+    expect(steamOs).toContain('SteamOS 3.8 build')
+    expect(steamOs).toContain('scripts/ci/run-steamos-build.sh')
+    expect(steamOs).toContain('Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    expect(steamOs).not.toContain('packaging/linux/Arch/PKGBUILD')
+  })
+
+  it('requires signed SteamOS package sources with a pinned Valve keyring', () => {
+    const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+
+    expect(bootstrap).toContain('SigLevel = Required DatabaseOptional')
+    expect(bootstrap).toContain('LocalFileSigLevel = Required')
+    expect(bootstrap).toContain('a5efa4f9c161ce9607fd9dfcccaf2a587baa9acd35eae04d3c01d967dddc9722')
+  })
+
+  it('keeps the SteamOS package x86_64-only and CUDA-off', () => {
+    const pkgbuild = readSource('packaging/linux/SteamOS/PKGBUILD')
+
+    expect(pkgbuild).toContain("arch=('x86_64')")
+    expect(pkgbuild).toContain('-D POLARIS_ENABLE_CUDA=OFF')
+  })
+
+  it('downloads and stages the SteamOS package in release assembly', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const releaseAssetsIndex = workflow.indexOf('  release-assets:')
+    expect(releaseAssetsIndex, 'missing release-assets job').toBeGreaterThanOrEqual(0)
+    const releaseAssets = workflow.slice(releaseAssetsIndex)
+    const needs = section(releaseAssets, '    needs:', '    if:')
+
+    expect(needs).toContain('- steamos-build')
+    expect(releaseAssets).toMatch(
+      /- name: Download SteamOS 3\.8[^\n]*\n\s+uses: actions\/download-artifact@v8[\s\S]*?path: release-assets\/raw\/steamos3\.8/,
+    )
+    expect(releaseAssets).toContain('Polaris-steamos3.8-x86_64.pkg.tar.zst')
+  })
+
   it('maps CI source prefixes and materializes package strings before path checks', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const ubuntuConfigure = section(workflow, '  ubuntu-build:', '  fedora-rpm-build:')
