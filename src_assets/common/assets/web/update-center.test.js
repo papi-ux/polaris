@@ -55,13 +55,25 @@ const runWithFakeInstallCommands = (command, failSudo) => {
     mkdirSync(binDir)
 
     const commandLines = command.split('\n').map((line) => line.trim()).filter(Boolean)
-    const unsafeLines = commandLines.filter((line) => !(
-      /^(?:wget|sudo|systemctl)\b/.test(line)
-      || line === '('
-      || line === ')'
-      || line === ') &&'
-      || line === 'set -e'
-      || /^trap (?:'sudo steamos-readonly enable'|- EXIT)$/.test(line)
+    const allowedExternalCommands = [
+      /^wget https:\/\/example\.test\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst$/,
+      /^sudo steamos-readonly disable$/,
+      /^sudo pacman -U \.\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst$/,
+      /^sudo -H polaris --setup-host$/,
+      /^sudo steamos-readonly enable$/,
+      /^systemctl --user enable --now polaris$/,
+    ]
+    const allowedShellControl = new Set([
+      '(',
+      ')',
+      ') &&',
+      'set -e',
+      "trap 'sudo steamos-readonly enable' EXIT",
+      'trap - EXIT',
+    ])
+    const unsafeLines = commandLines.filter((line) => (
+      !allowedShellControl.has(line)
+      && !allowedExternalCommands.some((pattern) => pattern.test(line))
     ))
     expect(unsafeLines, 'generated fixture command must contain only mocked external commands and shell control').toEqual([])
 
@@ -119,7 +131,7 @@ const expectFailureSafeSteamOsCommand = (failSudo, failedCommand) => {
   expect(failure).toBeGreaterThan(disableReadOnly)
   expect(restoreReadOnly).toBeGreaterThan(failure)
   expect(result.status, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).not.toBe(0)
-  expect(commands.some((command) => command.startsWith('systemctl '))).toBe(false)
+  expect(commands.some((command) => /(?:^|\s)systemctl(?:\s|$)/.test(command))).toBe(false)
 }
 
 describe('Update Center release awareness', () => {
@@ -167,8 +179,8 @@ describe('Update Center release awareness', () => {
     expect(downloadPackage).toBeGreaterThanOrEqual(0)
     expect(subshellStart).toBeGreaterThan(downloadPackage)
     expect(strictMode).toBeGreaterThan(subshellStart)
-    expect(disableReadOnly).toBeGreaterThan(downloadPackage)
-    expect(restoreTrap).toBeGreaterThan(disableReadOnly)
+    expect(restoreTrap).toBeGreaterThan(strictMode)
+    expect(disableReadOnly).toBeGreaterThan(restoreTrap)
     expect(installPackage).toBeGreaterThan(disableReadOnly)
     expect(setupHost).toBeGreaterThan(installPackage)
     expect(restoreReadOnly).toBeGreaterThan(setupHost)

@@ -23,6 +23,28 @@ const yamlStepContaining = (source, marker) => {
   return source.slice(stepStart + 1, nextStep >= 0 ? nextStep : source.length)
 }
 
+const normalizedShellCommands = (source) => {
+  const commands = []
+  let pending = ''
+
+  for (const rawLine of source.split('\n')) {
+    const trimmed = rawLine.trim()
+    if (!pending && (!trimmed || trimmed.startsWith('#'))) continue
+
+    const continued = /\\\s*$/.test(trimmed)
+    const piece = trimmed.replace(/\\\s*$/, '').trim()
+    pending = pending ? `${pending} ${piece}` : piece
+
+    if (!continued) {
+      commands.push(pending.replace(/\s+/g, ' '))
+      pending = ''
+    }
+  }
+
+  if (pending) commands.push(pending.replace(/\s+/g, ' '))
+  return commands
+}
+
 describe('Linux packaging contracts', () => {
   it('keeps portal/PipeWire capture independent while gating Wayland helpers', () => {
     const cmake = readSource('cmake/compile_definitions/linux.cmake')
@@ -247,28 +269,59 @@ describe('Linux packaging contracts', () => {
 
     for (const source of [steamOs, bootstrap, buildScript]) {
       expect(source).not.toContain('packaging/linux/Arch/PKGBUILD')
-    }
-    expect(steamOs).not.toContain('/var/cache/pacman/pkg')
-    expect(bootstrap).not.toContain('/var/cache/pacman/pkg')
-
-    const logicalBootstrap = bootstrap.replace(/\\\r?\n\s*/g, ' ')
-    const pacstrapCommands = logicalBootstrap
-      .split('\n')
-      .filter((line) => /\bpacstrap\b/.test(line) && !/^\s*#/.test(line))
-    expect(pacstrapCommands.length, 'missing pacstrap command').toBeGreaterThan(0)
-    for (const command of pacstrapCommands) {
-      expect(command.trim().split(/\s+/), `pacstrap must not reuse a cache: ${command}`).not.toContain('-c')
+      expect(source).not.toContain('/var/cache/pacman/pkg')
     }
 
-    const removeRoot = bootstrap.search(/^\s*rm -rf (?:-- )?"\$\{?STEAMOS_ROOT\}?"\s*$/m)
-    const recreateRoot = bootstrap.search(/^\s*mkdir -p (?:-- )?"\$\{?STEAMOS_ROOT\}?"\s*$/m)
-    const pacstrap = bootstrap.search(/^\s*pacstrap\b/m)
-    expect(removeRoot, 'SteamOS root must be deleted before every bootstrap').toBeGreaterThanOrEqual(0)
-    expect(recreateRoot, 'SteamOS root must be recreated after deletion').toBeGreaterThan(removeRoot)
-    expect(pacstrap, 'pacstrap must populate only the recreated SteamOS root').toBeGreaterThan(recreateRoot)
+    const bootstrapCommands = normalizedShellCommands(bootstrap)
+    const buildCommands = normalizedShellCommands(buildScript)
+    const rootReset = 'rm -rf -- "$STEAMOS_ROOT"'
+    const rootCreate = 'install -d -m 0755 -- "$STEAMOS_ROOT"'
+    const rootResetIndex = bootstrapCommands.indexOf(rootReset)
+    const rootCreateIndex = bootstrapCommands.indexOf(rootCreate)
+    const pacstrapIndexes = bootstrapCommands
+      .map((command, index) => ({ command, index }))
+      .filter(({ command }) => command.startsWith('pacstrap '))
 
-    expect(bootstrap).toContain('packaging/linux/SteamOS/PKGBUILD')
-    expect(bootstrap).toContain('-DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON')
+    expect(rootResetIndex, 'SteamOS root must be deleted before every bootstrap').toBeGreaterThanOrEqual(0)
+    expect(rootCreateIndex, 'SteamOS root must be recreated immediately after deletion').toBe(rootResetIndex + 1)
+    expect(pacstrapIndexes, 'SteamOS root must have exactly one pacstrap population command').toHaveLength(1)
+    expect(pacstrapIndexes[0].index, 'nothing may reseed the clean root before pacstrap').toBe(rootCreateIndex + 1)
+    expect(pacstrapIndexes[0].command).not.toMatch(/[;&|]/)
+    expect(pacstrapIndexes[0].command).not.toMatch(/(?:^|\s)--cachedir(?:=|\s)/)
+    for (const shortOption of pacstrapIndexes[0].command.match(/(?:^|\s)-[A-Za-z]+(?=\s|$)/g) ?? []) {
+      expect(shortOption.trim().slice(1), `pacstrap option must not enable host cache reuse: ${shortOption.trim()}`).not.toContain('c')
+    }
+
+    expect(buildScript).not.toContain('POLARIS_CONFIGURE_PKGBUILD')
+    expect(buildScript).not.toMatch(/\beval\b|\bbash\s+-c\b/)
+    const packageGeneratorSelectors = [...buildScript.matchAll(/-DPOLARIS_CONFIGURE_[A-Z0-9_]*PKGBUILD=ON/g)]
+      .map((match) => match[0])
+    expect(packageGeneratorSelectors).toEqual(['-DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON'])
+
+    const cmakeCommands = buildCommands.filter((command) => /\bcmake\b/.test(command))
+    const cmakeConfigureCommands = cmakeCommands.filter(
+      (command) => command.startsWith('cmake ') && command.includes(' -S ') && command.includes(' -B '),
+    )
+    expect(cmakeCommands, 'SteamOS package build must have exactly one direct CMake invocation').toHaveLength(1)
+    expect(cmakeConfigureCommands, 'the sole CMake invocation must be the SteamOS configure command').toEqual(cmakeCommands)
+    expect(cmakeConfigureCommands[0]).toContain('-DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON')
+    expect(cmakeConfigureCommands[0]).not.toMatch(/-DPOLARIS_CONFIGURE_(?!STEAMOS_)[A-Z0-9_]*PKGBUILD=ON/)
+
+    const pkgbuildDirAssignment = 'STEAMOS_PKGBUILD_DIR="$BUILD_ROOT/packaging/linux/SteamOS"'
+    const pkgbuildDirIndex = buildCommands.indexOf(pkgbuildDirAssignment)
+    const pkgbuildCheckIndex = buildCommands.indexOf('test -f "$STEAMOS_PKGBUILD_DIR/PKGBUILD"')
+    const pkgbuildCdIndex = buildCommands.indexOf('cd "$STEAMOS_PKGBUILD_DIR"')
+    const makepkgCommands = buildCommands.filter((command) => /\bmakepkg\b/.test(command))
+    const directMakepkgCommands = makepkgCommands
+      .map((command) => ({ command, index: buildCommands.indexOf(command) }))
+      .filter(({ command }) => command.startsWith('makepkg '))
+
+    expect(pkgbuildDirIndex, 'SteamOS PKGBUILD directory must be assigned from the CMake build root').toBeGreaterThanOrEqual(0)
+    expect(pkgbuildCheckIndex, 'generated SteamOS PKGBUILD must be checked').toBeGreaterThan(pkgbuildDirIndex)
+    expect(pkgbuildCdIndex, 'makepkg must enter the generated SteamOS directory').toBe(pkgbuildCheckIndex + 1)
+    expect(makepkgCommands, 'SteamOS package build must have exactly one makepkg invocation').toHaveLength(1)
+    expect(directMakepkgCommands, 'makepkg must be invoked directly').toHaveLength(1)
+    expect(directMakepkgCommands[0].index, 'makepkg must consume the checked SteamOS PKGBUILD directory').toBe(pkgbuildCdIndex + 1)
   })
 
   it('keeps the SteamOS package x86_64-only and CUDA-off', () => {
@@ -296,15 +349,26 @@ describe('Linux packaging contracts', () => {
       releaseAssets,
       'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)',
     )
-    expect(assembly).toContain('shopt -s nullglob')
-    expect(assembly).toContain('steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)')
-    expect(assembly).toContain('if [ "${#steamos_packages[@]}" -ne 1 ]; then')
+    const assemblyCommands = normalizedShellCommands(assembly)
+    const nullglobCommand = 'shopt -s nullglob'
+    const packageArrayCommand = 'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)'
+    const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 1 ]; then'
     const exactCopy = 'cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"'
-    const steamOsCopies = assembly
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => /^cp\b/.test(line) && line.includes('steamos3.8'))
-    expect(steamOsCopies).toEqual([exactCopy])
+    const stagedDestination = 'release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst'
+    const nullglobIndex = assemblyCommands.indexOf(nullglobCommand)
+    const arrayIndex = assemblyCommands.indexOf(packageArrayCommand)
+    const guardIndex = assemblyCommands.indexOf(cardinalityGuard)
+    const guardExitIndex = assemblyCommands.indexOf('exit 1', guardIndex + 1)
+    const guardCloseIndex = assemblyCommands.indexOf('fi', guardIndex + 1)
+    const copyIndex = assemblyCommands.indexOf(exactCopy)
+
+    expect(nullglobIndex, 'release assembly must enable nullglob').toBeGreaterThanOrEqual(0)
+    expect(arrayIndex, 'SteamOS package array must immediately follow nullglob').toBe(nullglobIndex + 1)
+    expect(guardIndex, 'exact-one cardinality guard must immediately follow package discovery').toBe(arrayIndex + 1)
+    expect(guardExitIndex, 'cardinality mismatch must terminate the assembly').toBeGreaterThan(guardIndex)
+    expect(guardCloseIndex, 'cardinality guard must close after its exit').toBe(guardExitIndex + 1)
+    expect(copyIndex, 'the exact SteamOS copy must run only after cardinality validation').toBe(guardCloseIndex + 1)
+    expect(assemblyCommands.filter((command) => command.includes(stagedDestination))).toEqual([exactCopy])
   })
 
   it('maps CI source prefixes and materializes package strings before path checks', () => {
