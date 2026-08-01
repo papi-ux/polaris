@@ -8,6 +8,7 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <optional>
 
 // local includes
 #include "client_profiles.h"
@@ -76,6 +77,32 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
    }},
 #endif
 };
+
+#ifdef __linux__
+std::optional<int> dispatch_setup_host_before_user_state(int argc, char **argv) {
+  for (int index = 1; index < argc; ++index) {
+    const std::string_view argument {argv[index]};
+    if (argument == "--help") {
+      return std::nullopt;
+    }
+    if (argument.size() < 2 || argument[0] != '-' || argument[1] != '-') {
+      if (!config::is_valid_command_prefix(argument)) {
+        return std::nullopt;
+      }
+      continue;
+    }
+    if (argument != "--setup-host") {
+      return std::nullopt;
+    }
+
+    // Host setup is a root-only machine operation. Dispatch it before config
+    // parsing so sudo can never initialize the caller's per-user state as root.
+    auto log_deinit_guard = logging::init(2, "");
+    return args::setup_host(argv[0], argc - index - 1, argv + index + 1);
+  }
+  return std::nullopt;
+}
+#endif
 
 #ifdef _WIN32
 LRESULT CALLBACK SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -177,6 +204,12 @@ int main(int argc, char *argv[]) {
               << "); continuing with UTF-8 path handling."sv << std::endl;
   }
 #pragma GCC diagnostic pop
+
+#ifdef __linux__
+  if (const auto setup_host_result = dispatch_setup_host_before_user_state(argc, argv)) {
+    return *setup_host_result;
+  }
+#endif
 
   mail::man = std::make_shared<safe::mail_raw_t>();
 

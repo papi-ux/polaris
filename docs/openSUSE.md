@@ -51,7 +51,7 @@ cmake -B build -G Ninja \
   -DPOLARIS_ENABLE_CUDA=OFF -DCUDA_FAIL_ON_MISSING=OFF
 cmake --build build --parallel "$(nproc)"
 sudo cmake --install build
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 ```
 
 ### openSUSE-specific notes

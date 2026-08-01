@@ -223,7 +223,7 @@ namespace args {
       std::cout
         << "Polaris host setup requires root because it writes /etc and reloads udev."sv << std::endl
         << "Run:"sv << std::endl
-        << "  sudo "sv << exe_path->string() << " --setup-host"sv;
+        << "  sudo -H "sv << exe_path->string() << " --setup-host"sv;
       if (enable_kms) {
         std::cout << " --enable-kms"sv;
       }

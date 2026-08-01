@@ -288,6 +288,12 @@ if (UNIX AND NOT APPLE)
                 LC_ALL=zz_ZZ.UTF-8
                 $<TARGET_FILE:polaris> --version
     )
+    add_test(
+        NAME polaris_setup_host_home_isolation
+        COMMAND ${CMAKE_COMMAND} -E env
+                POLARIS_TEST_BINARY=$<TARGET_FILE:polaris>
+                bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_setup_host_home_isolation.sh
+    )
 endif()
 
 if (UNIX)

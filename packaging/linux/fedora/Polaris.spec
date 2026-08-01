@@ -265,9 +265,9 @@ DESTDIR=%{buildroot} cmake --install %{_builddir}/Polaris/build
 %post
 echo "Polaris host integration is now explicit instead of automatic."
 echo "Run after install if you want virtual input and controller support:"
-echo "  sudo polaris --setup-host"
+echo "  sudo -H polaris --setup-host"
 echo "Only add KMS capability if you plan to use DRM/KMS capture:"
-echo "  sudo polaris --setup-host --enable-kms"
+echo "  sudo -H polaris --setup-host --enable-kms"
 echo "Optional background autostart:"
 echo "  systemctl --user enable --now polaris"
 
