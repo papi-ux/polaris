@@ -119,7 +119,7 @@ if not release_verify:
     raise AssertionError("missing release asset verification workflow step")
 release_verify_tokens = workflow_run_tokens(release_verify.group("body"))
 legacy_guard = [
-    "if", "[", "${supported_count}", "-ne", "3", "]", "||",
+    "if", "[", "${supported_count}", "-ne", "4", "]", "||",
     "[", "${legacy_count}", "-ne", "0", "]", ";", "then",
 ]
 if not contains_command(release_verify_tokens, legacy_guard):
