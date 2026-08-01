@@ -22,6 +22,29 @@ declare -a blocked_exact=(
   "docs/agent_handoff.md"
 )
 
+filter_allowed_content_hits() {
+  local hit
+  local path
+  local remainder
+  local content
+
+  while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    path="${hit%%:*}"
+    remainder="${hit#*:}"
+    content="${remainder#*:}"
+
+    case "$path:$content" in
+      'scripts/ci/run-steamos-build.sh:export BUILD_ROOT=/home/builder/polaris-steamos-build' | \
+        "scripts/ci/run-steamos-build.sh:chroot \"\$STEAMOS_ROOT\" chown -R builder:builder /home/builder /opt")
+        ;;
+      *)
+        printf '%s\n' "$hit"
+        ;;
+    esac
+  done
+}
+
 for path in "${blocked_exact[@]}"; do
   if git ls-files --error-unmatch "$path" >/dev/null 2>&1 && [[ -e "$path" ]]; then
     echo "Tracked private/development file detected: $path" >&2
@@ -39,7 +62,9 @@ if [[ -n "$path_hits" ]]; then
 fi
 
 content_hits="$(
-  git grep -nIE '(agent handoff|project memory anchor|VS Code sessions|(^|[^[:alnum:]_])(/home/[^/[:space:]]+|/Users/[^/[:space:]]+)|tinyurl\.com)' -- . ':(exclude)scripts/check-public-surface.sh' || true
+  git grep -nIE '(agent handoff|project memory anchor|VS Code sessions|(^|[^[:alnum:]_])(/home/[^/[:space:]]+|/Users/[^/[:space:]]+)|tinyurl\.com)' -- . ':(exclude)scripts/check-public-surface.sh' \
+    | filter_allowed_content_hits \
+    || true
 )"
 if [[ -n "$content_hits" ]]; then
   echo "Suspicious private or maintainer-only strings detected in tracked files:" >&2
