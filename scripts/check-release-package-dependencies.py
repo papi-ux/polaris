@@ -34,14 +34,18 @@ def workflow_job(text: str, name: str) -> str:
     return match.group("body")
 
 
-def workflow_run_tokens(step: str) -> list[str]:
+def workflow_run_script(step: str) -> str:
     run = re.search(
         r"(?ms)^        run: \|\n(?P<script>(?:^          .*(?:\n|\Z))*)",
         step,
     )
     if not run:
         raise AssertionError("missing shell run block in workflow step")
-    script = "\n".join(line[10:] for line in run.group("script").splitlines())
+    return "\n".join(line[10:] for line in run.group("script").splitlines())
+
+
+def workflow_run_tokens(step: str) -> list[str]:
+    script = workflow_run_script(step)
     tokens: list[str] = []
     for line in script.replace("\\\n", " ").splitlines():
         lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
@@ -76,13 +80,25 @@ if not re.search(r"(?m)^BuildRequires:\s+vulkan-loader-devel\s*$", fedora):
     raise AssertionError("Fedora build dependencies must explicitly include vulkan-loader-devel")
 
 workflow = read(".github/workflows/build.yml")
+if len(re.findall(r"(?m)^  fedora-rpm-build:\s*$", workflow)) != 1:
+    raise AssertionError("release workflow must define exactly one Fedora RPM job")
 fedora_job = workflow_job(workflow, "fedora-rpm-build")
-fedora_versions = re.findall(
-    r'''(?m)(?:^\s*-\s*|[{,]\s*)['"]?fedora['"]?\s*:\s*['"]?([0-9]+)['"]?(?=\s*(?:[,}]|#|$))''',
+fedora_strategy = re.search(
+    r"(?ms)^    strategy:\n.*?(?=^    env:\n)",
     fedora_job,
 )
-if fedora_versions != ["44"]:
-    raise AssertionError(f"Fedora CI matrix must contain only Fedora 44, found {fedora_versions}")
+expected_fedora_strategy = (
+    "    strategy:\n"
+    "      fail-fast: false\n"
+    "      matrix:\n"
+    "        include:\n"
+    "          - fedora: '44'\n"
+    "            cc: gcc-15\n"
+    "            cxx: g++-15\n"
+    "            boost_static: OFF\n"
+)
+if not fedora_strategy or fedora_strategy.group(0) != expected_fedora_strategy:
+    raise AssertionError("Fedora CI strategy must contain only the exact reviewed Fedora 44 lane")
 for legacy_version in ("42", "43"):
     for legacy_marker in (
         f"fedora-{legacy_version}-rpm-artifacts",
@@ -118,34 +134,44 @@ release_verify = re.search(
 if not release_verify:
     raise AssertionError("missing release asset verification workflow step")
 release_verify_body = release_verify.group("body")
-supported_assets = re.findall(r'\. == "([^"]+)"', release_verify_body)
-expected_supported_assets = [
-    "Polaris-fedora44-x86_64.rpm",
-    "Polaris-ubuntu24.04-x86_64.deb",
-    "Polaris-arch-x86_64.pkg.tar.zst",
-    "Polaris-steamos3.8-x86_64.pkg.tar.zst",
+release_verify_script = workflow_run_script(release_verify_body)
+expected_supported_assignment = (
+    'supported_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '
+    "'[.assets[].name | select(. == \"Polaris-fedora44-x86_64.rpm\" or "
+    ". == \"Polaris-ubuntu24.04-x86_64.deb\" or "
+    ". == \"Polaris-arch-x86_64.pkg.tar.zst\" or "
+    ". == \"Polaris-steamos3.8-x86_64.pkg.tar.zst\")] | length')"
+)
+expected_legacy_assignment = (
+    'legacy_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '
+    "'[.assets[].name | select(startswith(\"Polaris-fedora42-\") or "
+    "startswith(\"Polaris-fedora43-\"))] | length')"
+)
+for variable, expected_assignment in (
+    ("supported_count", expected_supported_assignment),
+    ("legacy_count", expected_legacy_assignment),
+):
+    assignment_mentions = [
+        line
+        for line in release_verify_script.splitlines()
+        if re.search(rf"(^|[^A-Za-z0-9_]){re.escape(variable)}=", line)
+    ]
+    if assignment_mentions != [expected_assignment]:
+        raise AssertionError(
+            f"release verification must bind {variable} exactly once at top level using the reviewed query"
+        )
+expected_release_verify_lines = [
+    expected_supported_assignment,
+    expected_legacy_assignment,
+    'if [ "${supported_count}" -ne 4 ] || [ "${legacy_count}" -ne 0 ]; then',
+    '  echo "Expected Fedora 44, Ubuntu 24.04, Arch, and SteamOS 3.8 binary assets with no Fedora 42/43 assets on ${POLARIS_PACKAGE_REF_NAME}; supported=${supported_count}, legacy=${legacy_count}" >&2',
+    "  exit 1",
+    "fi",
 ]
-if supported_assets != expected_supported_assets:
+if release_verify_script.splitlines() != expected_release_verify_lines:
     raise AssertionError(
-        f"release verification must select exactly {expected_supported_assets}, found {supported_assets}"
+        "release verification must use the exact reviewed top-level query and failure program"
     )
-legacy_prefixes = re.findall(r'startswith\("([^"]+)"\)', release_verify_body)
-expected_legacy_prefixes = ["Polaris-fedora42-", "Polaris-fedora43-"]
-if legacy_prefixes != expected_legacy_prefixes:
-    raise AssertionError(
-        f"release verification must count exactly {expected_legacy_prefixes}, found {legacy_prefixes}"
-    )
-release_verify_tokens = workflow_run_tokens(release_verify.group("body"))
-legacy_guard = [
-    "if", "[", "${supported_count}", "-ne", "4", "]", "||",
-    "[", "${legacy_count}", "-ne", "0", "]", ";", "then",
-]
-if not contains_command(release_verify_tokens, legacy_guard):
-    raise AssertionError("release verification must fail when legacy Fedora assets remain")
-for legacy_version in ("42", "43"):
-    legacy_prefix = f'startswith("Polaris-fedora{legacy_version}-")'
-    if not any(legacy_prefix in token for token in release_verify_tokens):
-        raise AssertionError(f"release verification must count Fedora {legacy_version} assets")
 arch_job = workflow_job(workflow, "arch-build")
 arch_install = re.search(
     r"(?ms)^      - name: Install dependencies\n(?P<body>.*?)(?=^      - name:|\Z)",
