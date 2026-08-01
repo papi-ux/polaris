@@ -680,7 +680,9 @@ describe('Linux packaging contracts', () => {
 
     expect(workflow).not.toContain('POLARIS_LOCAL_CANDIDATE_BUILD')
     expect(bootstrap).toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"')
-    expect(bootstrap).toContain('--whitelist-environment=SOURCE_ROOT,OUTPUT_ROOT,BUILD_ROOT,POLARIS_BUILD_COMMIT,POLARIS_LOCAL_CANDIDATE_BUILD')
+    expect(bootstrap).toContain('runuser --user builder --')
+    expect(bootstrap).not.toContain('runuser --login')
+    expect(bootstrap).not.toContain('--whitelist-environment=')
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
     expect(buildScript).toContain('CLONE_URL=file:///mnt')
     expect(buildScript).not.toMatch(/CLONE_URL=(?:file:\/\/)?\$\{?SOURCE_ROOT/)

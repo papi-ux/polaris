@@ -90,9 +90,7 @@ mount --bind /workspace "$STEAMOS_ROOT/mnt"
 mount --bind /output "$STEAMOS_ROOT/opt"
 arch-chroot "$STEAMOS_ROOT" useradd --create-home --uid 1000 builder
 arch-chroot "$STEAMOS_ROOT" chown -R builder:builder /home/builder /opt
-arch-chroot "$STEAMOS_ROOT" runuser --login \
-  --whitelist-environment=SOURCE_ROOT,OUTPUT_ROOT,BUILD_ROOT,POLARIS_BUILD_COMMIT,POLARIS_LOCAL_CANDIDATE_BUILD \
-  -u builder -- \
+arch-chroot "$STEAMOS_ROOT" runuser --user builder -- \
   /mnt/scripts/ci/build-steamos-package.sh
 arch-chroot "$STEAMOS_ROOT" pacman --noconfirm -U \
   /opt/Polaris-steamos3.8-x86_64.pkg.tar.zst
