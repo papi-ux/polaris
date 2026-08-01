@@ -231,8 +231,10 @@ The public release assets are currently:
 - `Polaris-fedora44-x86_64.rpm`
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`
+- `Polaris-steamos3.8-x86_64.pkg.tar.zst`
 
-Bazzite installs use the matching Fedora RPM through `rpm-ostree` for now. Ubuntu 24.04 has a
-direct DEB package. openSUSE Tumbleweed has source-build guidance and CI build coverage but no
-published release package asset yet. CachyOS should start with the Arch package path. Other distro
-paths are still source-build/community-validation oriented.
+Bazzite installs use the matching Fedora RPM through `rpm-ostree` for now. SteamOS 3.8 uses its
+dedicated package through the [SteamOS guide](steamos.md); the package is not interchangeable with
+the rolling Arch artifact. Ubuntu 24.04 has a direct DEB package. openSUSE Tumbleweed has source-build
+guidance and CI build coverage but no published release package asset yet. CachyOS should start with
+the Arch package path. Other distro paths are still source-build/community-validation oriented.

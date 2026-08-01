@@ -84,4 +84,18 @@ describe('v1.3.4 release contract', () => {
       expect(actualAssets.sort()).toEqual(expectedAssets)
     }
   })
+
+  it('lists all four official artifacts in the build guide packaging section', () => {
+    const building = read('docs/building.md')
+    const packagingStart = building.indexOf('## Packaging')
+    expect(packagingStart, 'missing build-guide packaging section').toBeGreaterThanOrEqual(0)
+    const packaging = building.slice(packagingStart)
+
+    for (const asset of expectedAssets) {
+      const count = packaging.split(asset).length - 1
+      expect(count, `${asset} must appear once in the build-guide packaging section`).toBe(1)
+    }
+    expect(packaging).toContain('SteamOS 3.8')
+    expect(packaging).toContain('(steamos.md)')
+  })
 })
