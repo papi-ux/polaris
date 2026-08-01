@@ -190,7 +190,7 @@ stdenv'.mkDerivation (finalAttrs: {
       substituteInPlace cmake/targets/common.cmake \
         --replace-fail 'find_program(GO_EXECUTABLE go REQUIRED)' 'set(GO_EXECUTABLE true)' \
         --replace-fail \
-          'COMMAND "''${GO_EXECUTABLE}" build -trimpath -o "''${BROWSER_STREAM_HELPER_OUTPUT}" .' \
+          'COMMAND "''${GO_EXECUTABLE}" ''${BROWSER_STREAM_HELPER_BUILD_ARGUMENTS} -o "''${BROWSER_STREAM_HELPER_OUTPUT}" .' \
           'COMMAND "''${CMAKE_COMMAND}" -E copy "${finalAttrs.browserStreamHelper}/bin/browser_stream_helper" "''${BROWSER_STREAM_HELPER_OUTPUT}"'
     '';
 

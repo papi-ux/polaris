@@ -110,10 +110,26 @@ readelf --version-info "$BINARY_PATH" > "$OUTPUT_ROOT/steamos3.8-binary-version-
 objdump -p "$BINARY_PATH" >> "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"
 "$SOURCE_ROOT/scripts/check-packaged-binary-paths.sh" \
   "$BINARY_PATH" "$OUTPUT_ROOT/steamos3.8-package-strings.txt"
-# No namcap warnings are allowed. Future exceptions require an exact reviewed line and rationale here.
-namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap.txt"
+# The Valve toolchain does not emit CET SHSTK notes for every C++/Go object,
+# cgo links libresolv through runtime-selected resolver paths, and namcap cannot
+# see command/runtime-discovered dependencies. Every exception remains exact;
+# additions, removals, or wording changes fail the candidate gate.
+NAMCAP_ACTUAL="$BUILD_ROOT/namcap-actual.sorted"
+NAMCAP_ALLOWED="$BUILD_ROOT/namcap-allowed.sorted"
+NAMCAP_MISSING="$BUILD_ROOT/namcap-reviewed-missing.txt"
+namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"
+LC_ALL=C sort -u "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" > "$NAMCAP_ACTUAL"
+LC_ALL=C sort -u "$SOURCE_ROOT/packaging/linux/SteamOS/namcap-reviewed-warnings.txt" > "$NAMCAP_ALLOWED"
+comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$OUTPUT_ROOT/steamos3.8-namcap.txt"
+comm -12 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$OUTPUT_ROOT/steamos3.8-namcap-reviewed.txt"
+comm -13 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$NAMCAP_MISSING"
 if [ -s "$OUTPUT_ROOT/steamos3.8-namcap.txt" ]; then
-  printf '%s\n' 'namcap emitted unreviewed warnings or errors' >&2
+  printf '%s\n' 'namcap emitted unreviewed warnings or a reviewed warning disappeared' >&2
   sed 's/^/namcap: /' "$OUTPUT_ROOT/steamos3.8-namcap.txt" >&2
+  exit 1
+fi
+if [ -s "$NAMCAP_MISSING" ]; then
+  printf '%s\n' 'namcap emitted unreviewed warnings or a reviewed warning disappeared' >&2
+  sed 's/^/missing reviewed namcap warning: /' "$NAMCAP_MISSING" >&2
   exit 1
 fi
