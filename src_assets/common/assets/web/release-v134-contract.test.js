@@ -57,6 +57,8 @@ describe('v1.3.4 release contract', () => {
     for (const asset of expectedAssets) {
       expect(publicDocsGate, `public checker must require: ${asset}`).toContain(asset)
     }
+    expect(publicDocsGate).toContain('building_packaging = markdown_section(')
+    expect(publicDocsGate).toContain('("docs/building.md Packaging", building_packaging_prose)')
   })
 
   it('records the #264, #265, and #266 release facts', () => {
@@ -85,16 +87,17 @@ describe('v1.3.4 release contract', () => {
     }
   })
 
-  it('lists all four official artifacts in the build guide packaging section', () => {
+  it('lists exactly the four official artifacts in the bounded build guide packaging section', () => {
     const building = read('docs/building.md')
-    const packagingStart = building.indexOf('## Packaging')
+    const heading = '## Packaging'
+    const packagingStart = building.indexOf(heading)
     expect(packagingStart, 'missing build-guide packaging section').toBeGreaterThanOrEqual(0)
-    const packaging = building.slice(packagingStart)
+    const afterHeading = building.slice(packagingStart + heading.length)
+    const nextHeading = afterHeading.search(/^#{1,2}\s+/m)
+    const packaging = afterHeading.slice(0, nextHeading >= 0 ? nextHeading : undefined)
+    const actualAssets = packaging.match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? []
 
-    for (const asset of expectedAssets) {
-      const count = packaging.split(asset).length - 1
-      expect(count, `${asset} must appear once in the build-guide packaging section`).toBe(1)
-    }
+    expect(actualAssets.sort()).toEqual(expectedAssets)
     expect(packaging).toContain('SteamOS 3.8')
     expect(packaging).toContain('(steamos.md)')
   })

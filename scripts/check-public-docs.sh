@@ -1306,8 +1306,11 @@ expected_assets = Counter(
         "Polaris-ubuntu24.04-x86_64.deb": 1,
     }
 )
+building_packaging = markdown_section(building, "## Packaging")
+building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section in (
+    ("docs/building.md Packaging", building_packaging_prose),
     ("README v1.3.4 summary", readme_release_prose),
     ("v1.3.4 changelog", current_release_prose),
 ):
