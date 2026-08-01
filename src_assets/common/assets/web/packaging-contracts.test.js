@@ -144,6 +144,7 @@ const hasForbiddenShellWrapper = (source) => {
   return /\$(?:'|")/.test(source)
     || resolvedCommands.some((command) => forbiddenShellWrapper.test(command))
 }
+const withoutSteamOsRootBoundary = (source) => source.replace(/^chroot "\$STEAMOS_ROOT" /gm, '')
 const hasSensitiveShellShadow = (source) => canonicalShellCommands(normalizedShellCommands(source))
   .some((command) => sensitiveShellShadow.test(command))
 const hasShellDataBlock = (source) => /<<-?(?!<)/.test(source)
@@ -447,7 +448,10 @@ describe('Linux packaging contracts', () => {
       ['run-steamos-build.sh', bootstrap],
       ['build-steamos-package.sh', buildScript],
     ]) {
-      expect(hasForbiddenShellWrapper(source), `${scriptName} must use direct shell commands`).toBe(false)
+      const wrapperSource = scriptName === 'run-steamos-build.sh'
+        ? withoutSteamOsRootBoundary(source)
+        : source
+      expect(hasForbiddenShellWrapper(wrapperSource), `${scriptName} must use direct shell commands`).toBe(false)
       expect(hasSensitiveShellShadow(source), `${scriptName} must not shadow contract-sensitive commands`).toBe(false)
       expect(hasShellDataBlock(source), `${scriptName} must not satisfy execution contracts through heredoc data`).toBe(false)
     }
@@ -479,11 +483,18 @@ describe('Linux packaging contracts', () => {
       `mount --bind /workspace ${rootBindingValue}/mnt`,
       `mount --bind /output ${rootBindingValue}/opt`,
     ] : []
+    const requiredApiMountCommands = rootBindingValue
+      ? ['/proc', '/sys', '/dev', '/run'].flatMap((apiPath) => [
+          `mount --rbind ${apiPath} ${rootBindingValue}${apiPath}`,
+          `mount --make-rslave ${rootBindingValue}${apiPath}`,
+        ])
+      : []
+    const allowedRootMountCommands = [...requiredRootBindCommands, ...requiredApiMountCommands]
     const rootBindCommands = shellExecutableOccurrences(expandedBootstrapCommands, 'mount')
       .filter(({ command }) => command.startsWith('mount --bind '))
     const rootReseedCommands = rootWriterCommands
       .filter(({ command, index }) => index !== rootCreateIndex
-        && !requiredRootBindCommands.includes(command)
+        && !allowedRootMountCommands.includes(command)
         && rootTargets.some((target) => command.includes(target)))
     const taintedTopLevelRootWriters = rootWriterCommands
       .filter(({ command, index }) => index !== rootCreateIndex
@@ -680,9 +691,18 @@ describe('Linux packaging contracts', () => {
 
     expect(workflow).not.toContain('POLARIS_LOCAL_CANDIDATE_BUILD')
     expect(bootstrap).toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"')
-    expect(bootstrap).toContain('runuser --user builder --')
+    expect(bootstrap).toContain('chroot "$STEAMOS_ROOT" runuser --user builder --')
+    expect(bootstrap).not.toContain('arch-chroot "$STEAMOS_ROOT"')
+    for (const apiPath of ['/proc', '/sys', '/dev', '/run']) {
+      expect(bootstrap).toContain(`mount --rbind ${apiPath} "$STEAMOS_ROOT${apiPath}"`)
+      expect(bootstrap).toContain(`mount --make-rslave "$STEAMOS_ROOT${apiPath}"`)
+      expect(bootstrap).toContain(`umount -R "$STEAMOS_ROOT${apiPath}" 2>/dev/null || true`)
+    }
     expect(bootstrap).not.toContain('runuser --login')
     expect(bootstrap).not.toContain('--whitelist-environment=')
+    expect(hasForbiddenShellWrapper(withoutSteamOsRootBoundary(
+      'chroot "$STEAMOS_ROOT" sh -c "pacman -T"',
+    ))).toBe(true)
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
     expect(buildScript).toContain('CLONE_URL=file:///mnt')
     expect(buildScript).not.toMatch(/CLONE_URL=(?:file:\/\/)?\$\{?SOURCE_ROOT/)

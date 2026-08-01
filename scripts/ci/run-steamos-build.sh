@@ -25,6 +25,10 @@ export POLARIS_LOCAL_CANDIDATE_BUILD
 cleanup() {
   umount -R "$STEAMOS_ROOT/opt" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/mnt" 2>/dev/null || true
+  umount -R "$STEAMOS_ROOT/run" 2>/dev/null || true
+  umount -R "$STEAMOS_ROOT/dev" 2>/dev/null || true
+  umount -R "$STEAMOS_ROOT/sys" 2>/dev/null || true
+  umount -R "$STEAMOS_ROOT/proc" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -88,11 +92,21 @@ pacstrap -G -M -C /tmp/steamos-3.8.1x.conf "$STEAMOS_ROOT" \
 
 mount --bind /workspace "$STEAMOS_ROOT/mnt"
 mount --bind /output "$STEAMOS_ROOT/opt"
-arch-chroot "$STEAMOS_ROOT" useradd --create-home --uid 1000 builder
-arch-chroot "$STEAMOS_ROOT" chown -R builder:builder /home/builder /opt
-arch-chroot "$STEAMOS_ROOT" runuser --user builder -- \
+# arch-chroot enters a PID namespace after mounting procfs, which hides the
+# build process from /proc. Own the API mounts here and stay in this namespace.
+mount --rbind /proc "$STEAMOS_ROOT/proc"
+mount --make-rslave "$STEAMOS_ROOT/proc"
+mount --rbind /sys "$STEAMOS_ROOT/sys"
+mount --make-rslave "$STEAMOS_ROOT/sys"
+mount --rbind /dev "$STEAMOS_ROOT/dev"
+mount --make-rslave "$STEAMOS_ROOT/dev"
+mount --rbind /run "$STEAMOS_ROOT/run"
+mount --make-rslave "$STEAMOS_ROOT/run"
+chroot "$STEAMOS_ROOT" useradd --create-home --uid 1000 builder
+chroot "$STEAMOS_ROOT" chown -R builder:builder /home/builder /opt
+chroot "$STEAMOS_ROOT" runuser --user builder -- \
   /mnt/scripts/ci/build-steamos-package.sh
-arch-chroot "$STEAMOS_ROOT" pacman --noconfirm -U \
+chroot "$STEAMOS_ROOT" pacman --noconfirm -U \
   /opt/Polaris-steamos3.8-x86_64.pkg.tar.zst
 PACKAGE_DEPENDENCIES=()
 while IFS= read -r dependency; do
@@ -100,8 +114,8 @@ while IFS= read -r dependency; do
     PACKAGE_DEPENDENCIES+=("$dependency")
   fi
 done < /output/steamos3.8-package-dependencies.txt
-arch-chroot "$STEAMOS_ROOT" pacman -T "${PACKAGE_DEPENDENCIES[@]}" \
+chroot "$STEAMOS_ROOT" pacman -T "${PACKAGE_DEPENDENCIES[@]}" \
   > /output/steamos3.8-missing-dependencies.txt
 test ! -s /output/steamos3.8-missing-dependencies.txt
-arch-chroot "$STEAMOS_ROOT" /usr/bin/polaris --version \
+chroot "$STEAMOS_ROOT" /usr/bin/polaris --version \
   > /output/steamos3.8-installed-version.txt
