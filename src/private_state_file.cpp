@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <random>
 #include <string>
 #include <utility>
@@ -30,6 +31,8 @@ namespace private_state_file {
     std::atomic<write_fault_e> write_fault {write_fault_e::none};
     std::atomic_size_t parent_component_fault_index {0};
     std::atomic_bool force_parent_eexist_race {false};
+    std::atomic_bool force_trusted_home_owner_mismatch {false};
+    std::filesystem::path trusted_home_symlink_for_tests;
 #endif
 
     int directory_open_flags() {
@@ -63,14 +66,92 @@ namespace private_state_file {
       return trusted_owner && sticky_when_writable;
     }
 
+    std::filesystem::path trusted_home_symlink() {
+#ifdef POLARIS_TESTS
+      if (!trusted_home_symlink_for_tests.empty()) {
+        return trusted_home_symlink_for_tests;
+      }
+#endif
+      return "/home";
+    }
+
+    uid_t trusted_home_symlink_owner() {
+#ifdef POLARIS_TESTS
+      if (!trusted_home_symlink_for_tests.empty()) {
+        if (force_trusted_home_owner_mismatch.load(std::memory_order_relaxed)) {
+          return ::geteuid() == 0 ? 1 : 0;
+        }
+        return ::geteuid();
+      }
+#endif
+      return 0;
+    }
+
+    bool has_component_prefix(const std::filesystem::path &path, const std::filesystem::path &prefix) {
+      auto path_component = path.begin();
+      for (auto prefix_component = prefix.begin(); prefix_component != prefix.end(); ++prefix_component) {
+        if (path_component == path.end() || *path_component != *prefix_component) {
+          return false;
+        }
+        ++path_component;
+      }
+      return true;
+    }
+
     class directory_handle_t {
     public:
       explicit directory_handle_t(const std::filesystem::path &target, bool create_missing = false):
-          path_ {target.parent_path().empty() ? std::filesystem::path {"."} : target.parent_path()},
           target_name_ {target.filename().string()},
           lock_name_ {target_name_ + ".lock"} {
         if (target_name_.empty() || target_name_ == "." || target_name_ == "..") {
           return;
+        }
+
+        auto requested_parent = target.parent_path();
+        if (requested_parent.empty()) {
+          requested_parent = ".";
+        }
+        for (const auto &component : requested_parent.relative_path()) {
+          if (component == "..") {
+            return;
+          }
+        }
+
+        path_ = requested_parent;
+        std::size_t create_missing_from_component = 0;
+        const auto trusted_home = trusted_home_symlink();
+        if (has_component_prefix(requested_parent, trusted_home)) {
+          struct stat link_metadata {};
+          if (::lstat(trusted_home.c_str(), &link_metadata) == 0 && S_ISLNK(link_metadata.st_mode)) {
+            if (link_metadata.st_uid != trusted_home_symlink_owner() || link_metadata.st_nlink != 1) {
+              return;
+            }
+
+            std::error_code link_error;
+            auto resolved_home = std::filesystem::read_symlink(trusted_home, link_error);
+            if (link_error) {
+              return;
+            }
+            if (resolved_home.is_relative()) {
+              resolved_home = trusted_home.parent_path() / resolved_home;
+            }
+            for (const auto &component : resolved_home.relative_path()) {
+              const auto name = component.string();
+              if (name == "..") {
+                return;
+              }
+              if (!name.empty() && name != ".") {
+                ++create_missing_from_component;
+              }
+            }
+
+            path_ = resolved_home;
+            auto requested_component = requested_parent.begin();
+            std::advance(requested_component, std::distance(trusted_home.begin(), trusted_home.end()));
+            for (; requested_component != requested_parent.end(); ++requested_component) {
+              path_ /= *requested_component;
+            }
+          }
         }
 
         std::vector<std::string> components;
@@ -106,7 +187,7 @@ namespace private_state_file {
           int next = ::openat(descriptor_, component.c_str(), directory_open_flags());
 #endif
           bool parent_entry_needs_sync = false;
-          if (next < 0 && errno == ENOENT && create_missing) {
+          if (next < 0 && errno == ENOENT && create_missing && index >= create_missing_from_component) {
             if (::mkdirat(descriptor_, component.c_str(), S_IRWXU) != 0 && errno != EEXIST) {
               (void) close();
               return;
@@ -539,6 +620,14 @@ namespace private_state_file {
 
   void set_parent_eexist_race_for_tests(bool enabled) {
     force_parent_eexist_race.store(enabled, std::memory_order_relaxed);
+  }
+
+  void set_trusted_home_symlink_for_tests(const std::filesystem::path &path) {
+    trusted_home_symlink_for_tests = path;
+  }
+
+  void set_trusted_home_owner_mismatch_for_tests(bool enabled) {
+    force_trusted_home_owner_mismatch.store(enabled, std::memory_order_relaxed);
   }
 #endif
 }  // namespace private_state_file

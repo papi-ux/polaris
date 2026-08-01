@@ -63,7 +63,7 @@ AI Auto Quality is optional. If you enable it, Polaris uses the provider you con
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm
 sudo dnf install ./Polaris-fedora44-x86_64.rpm
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
@@ -72,7 +72,7 @@ polaris
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
@@ -104,7 +104,7 @@ See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
 
-Use the release package for your distro before considering source builds. Packages install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit through `sudo polaris --setup-host`.
+Use the release package for your distro before considering source builds. Packages install the host binary, web console assets, desktop metadata, and user service file; host integration remains explicit through `sudo -H polaris --setup-host`.
 
 | Host | Best path |
 |---|---|
@@ -119,7 +119,7 @@ Use the release package for your distro before considering source builds. Packag
 Detailed source builds, local Arch package builds, distro dependency lists, openSUSE notes, and Browser Stream build flags live in [docs/building.md](docs/building.md).
 
 > [!WARNING]
-> Only grant `cap_sys_admin` with `sudo polaris --setup-host --enable-kms` when you actually need DRM/KMS capture. Polaris works fine without it on the default compositor and Headless Stream paths.
+> Only grant `cap_sys_admin` with `sudo -H polaris --setup-host --enable-kms` when you actually need DRM/KMS capture. Polaris works fine without it on the default compositor and Headless Stream paths.
 
 ## Compatibility
 

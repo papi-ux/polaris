@@ -90,7 +90,7 @@ export function buildManualInstallCommand(asset, host = {}) {
     return ''
   }
 
-  lines.push('sudo polaris --setup-host')
+  lines.push('sudo -H polaris --setup-host')
   lines.push('systemctl --user restart polaris')
   return lines.join('\n')
 }

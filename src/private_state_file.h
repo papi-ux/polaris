@@ -60,5 +60,7 @@ namespace private_state_file {
   void set_write_fault_for_tests(write_fault_e fault);
   void set_parent_component_fault_index_for_tests(std::size_t index);
   void set_parent_eexist_race_for_tests(bool enabled);
+  void set_trusted_home_symlink_for_tests(const std::filesystem::path &path);
+  void set_trusted_home_owner_mismatch_for_tests(bool enabled);
 #endif
 }  // namespace private_state_file

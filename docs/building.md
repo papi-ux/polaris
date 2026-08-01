@@ -12,21 +12,21 @@ need broader real-hardware validation. openSUSE Tumbleweed is source-build suppo
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm
 sudo dnf install ./Polaris-fedora44-x86_64.rpm
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
 sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
@@ -36,7 +36,7 @@ wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
 sudo rpm-ostree install -r "./${rpm_name}"
 
 # After reboot:
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 systemctl --user enable --now polaris
 ```
 
@@ -131,7 +131,7 @@ cd polaris
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DPOLARIS_ENABLE_CUDA=ON
 cmake --build build -j"$(nproc)"
 sudo cmake --install build
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
@@ -147,7 +147,7 @@ cmake --build build -j"$(nproc)"
 Optional DRM/KMS setup:
 
 ```bash
-sudo polaris --setup-host --enable-kms
+sudo -H polaris --setup-host --enable-kms
 ```
 
 Optional user-service autostart:

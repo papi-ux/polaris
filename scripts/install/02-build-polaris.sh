@@ -97,6 +97,6 @@ else
   fi
 fi
 
-log "next: sudo $BIN_DIR/polaris --setup-host"
+log "next: sudo -H $BIN_DIR/polaris --setup-host"
 log "then: ./03-install-gamescope-stack.sh   # for gamescope_stream mode"
 log "or:   ./04-enable-services.sh --labwc  # stock labwc headless only"

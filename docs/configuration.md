@@ -70,7 +70,7 @@ the Polaris streaming user must belong to the `input` group. The option is disab
 preserve existing virtual-controller identity and local access; enabling it gives isolated gamepads
 Polaris-specific device names so current Inputtino uinput backends can enforce the udev policy.
 
-Re-run `sudo polaris --setup-host` after upgrading so the installed udev rules understand the
+Re-run `sudo -H polaris --setup-host` after upgrading so the installed udev rules understand the
 dedicated device names and marker. Existing virtual controller nodes keep their previous access policy
 until recreated; stop active streams and restart Polaris after host setup. AppImage users should
 re-run the AppImage install action for the same reason.
@@ -201,11 +201,11 @@ If Polaris is running in the foreground, stop it and start it again instead.
 To re-run the host setup steps explicitly:
 
 ```bash
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 ```
 
 Optional DRM/KMS setup:
 
 ```bash
-sudo polaris --setup-host --enable-kms
+sudo -H polaris --setup-host --enable-kms
 ```

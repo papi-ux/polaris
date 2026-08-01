@@ -38,12 +38,16 @@ namespace {
       private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::none);
       private_state_file::set_parent_component_fault_index_for_tests(0);
       private_state_file::set_parent_eexist_race_for_tests(false);
+      private_state_file::set_trusted_home_symlink_for_tests({});
+      private_state_file::set_trusted_home_owner_mismatch_for_tests(false);
     }
 
     void TearDown() override {
       private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::none);
       private_state_file::set_parent_component_fault_index_for_tests(0);
       private_state_file::set_parent_eexist_race_for_tests(false);
+      private_state_file::set_trusted_home_symlink_for_tests({});
+      private_state_file::set_trusted_home_owner_mismatch_for_tests(false);
       std::error_code ec;
       std::filesystem::remove_all(directory, ec);
     }
@@ -79,6 +83,12 @@ TEST_F(PrivateStateFileTest, DoesNotCarryUnsupportedWindowsSecurityImplementatio
   EXPECT_NE(source_text.find("metadata.st_uid == 0 || metadata.st_uid == effective_user"), std::string::npos);
   EXPECT_NE(source_text.find("metadata.st_mode & S_ISVTX"), std::string::npos);
   EXPECT_NE(source_text.find("name == \"..\""), std::string::npos);
+  EXPECT_EQ(source_text.find("std::filesystem::weakly_canonical"), std::string::npos);
+  EXPECT_EQ(source_text.find("resolved_home.lexically_normal()"), std::string::npos);
+  EXPECT_NE(source_text.find("link_metadata.st_uid != trusted_home_symlink_owner()"), std::string::npos);
+  EXPECT_NE(source_text.find("link_metadata.st_nlink != 1"), std::string::npos);
+  EXPECT_NE(source_text.find("std::filesystem::read_symlink"), std::string::npos);
+  EXPECT_NE(source_text.find("index >= create_missing_from_component"), std::string::npos);
   EXPECT_NE(source_text.find("directory.sync()"), std::string::npos);
   EXPECT_NE(source_text.find("if (!directory_synchronized)"), std::string::npos);
   EXPECT_NE(source_text.find("directory.close()"), std::string::npos);
@@ -323,7 +333,7 @@ TEST_F(PrivateStateFileTest, RejectsHardLinkedStateFile) {
   );
 }
 
-TEST_F(PrivateStateFileTest, RejectsSymlinkedParentDirectory) {
+TEST_F(PrivateStateFileTest, RejectsGenericSymlinkedParentDirectory) {
   const auto real_directory = directory / "real";
   const auto linked_directory = directory / "linked";
   std::filesystem::create_directories(real_directory);
@@ -331,6 +341,138 @@ TEST_F(PrivateStateFileTest, RejectsSymlinkedParentDirectory) {
 
   EXPECT_FALSE(private_state_file::write_atomic(linked_directory / "state.json", "private"));
   EXPECT_FALSE(std::filesystem::exists(real_directory / "state.json"));
+}
+
+TEST_F(PrivateStateFileTest, AcceptsTrustedHomeSymlinkWhenResolvedTargetIsSecure) {
+  const auto real_home = directory / "real-home";
+  const auto linked_home = directory / "home";
+  const auto resolved_parent = real_home / "user" / ".config" / "polaris";
+  std::filesystem::create_directories(resolved_parent);
+  std::filesystem::create_directory_symlink(real_home, linked_home);
+  private_state_file::set_trusted_home_symlink_for_tests(linked_home);
+
+  ASSERT_TRUE(
+    private_state_file::write_atomic(
+      linked_home / "user" / ".config" / "polaris" / "state.json",
+      "private"
+    )
+  );
+  const auto result = private_state_file::read_secure(resolved_parent / "state.json", 1024);
+  ASSERT_EQ(result.status, private_state_file::read_status_e::ok);
+  EXPECT_EQ(result.payload, "private");
+}
+
+TEST_F(PrivateStateFileTest, AcceptsRelativeTrustedHomeTargetWhenResolvedPathIsSecure) {
+  const auto real_home = directory / "relative-real-home";
+  const auto linked_home = directory / "relative-home";
+  const auto resolved_parent = real_home / "user" / ".config" / "polaris";
+  std::filesystem::create_directories(resolved_parent);
+  std::filesystem::create_directory_symlink(real_home.filename(), linked_home);
+  private_state_file::set_trusted_home_symlink_for_tests(linked_home);
+
+  ASSERT_TRUE(
+    private_state_file::write_atomic(
+      linked_home / "user" / ".config" / "polaris" / "state.json",
+      "private"
+    )
+  );
+  EXPECT_EQ(
+    private_state_file::read_secure(resolved_parent / "state.json", 1024).status,
+    private_state_file::read_status_e::ok
+  );
+}
+
+TEST_F(PrivateStateFileTest, RejectsTrustedHomeTargetContainingParentTraversal) {
+  const auto real_home = directory / "dotdot-real-home";
+  const auto pivot = directory / "pivot";
+  const auto linked_home = directory / "dotdot-home";
+  std::filesystem::create_directories(real_home);
+  std::filesystem::create_directories(pivot);
+  std::filesystem::create_directory_symlink(
+    std::filesystem::path {"pivot"} / ".." / real_home.filename(),
+    linked_home
+  );
+  private_state_file::set_trusted_home_symlink_for_tests(linked_home);
+
+  EXPECT_FALSE(private_state_file::write_atomic(linked_home / "state.json", "private"));
+  EXPECT_FALSE(std::filesystem::exists(real_home / "state.json"));
+}
+
+TEST_F(PrivateStateFileTest, RejectsTrustedHomeTargetThatIsAnotherSymlink) {
+  const auto real_home = directory / "nested-real-home";
+  const auto nested_link = directory / "nested-home-link";
+  const auto linked_home = directory / "nested-home";
+  std::filesystem::create_directories(real_home);
+  std::filesystem::create_directory_symlink(real_home, nested_link);
+  std::filesystem::create_directory_symlink(nested_link, linked_home);
+  private_state_file::set_trusted_home_symlink_for_tests(linked_home);
+
+  EXPECT_FALSE(private_state_file::write_atomic(linked_home / "state.json", "private"));
+  EXPECT_FALSE(std::filesystem::exists(real_home / "state.json"));
+}
+
+TEST_F(PrivateStateFileTest, RejectsTrustedHomeSymlinkWithMultipleLinks) {
+  const auto real_home = directory / "multi-real-home";
+  const auto linked_home = directory / "multi-home";
+  const auto linked_alias = directory / "multi-home-alias";
+  std::filesystem::create_directories(real_home);
+  std::filesystem::create_directory_symlink(real_home, linked_home);
+  ASSERT_NO_THROW(std::filesystem::create_hard_link(linked_home, linked_alias));
+  private_state_file::set_trusted_home_symlink_for_tests(linked_home);
+
+  EXPECT_FALSE(private_state_file::write_atomic(linked_home / "state.json", "private"));
+  EXPECT_FALSE(std::filesystem::exists(real_home / "state.json"));
+}
+
+TEST_F(PrivateStateFileTest, RejectsTrustedHomeSymlinkWithUnexpectedOwner) {
+  const auto real_home = directory / "wrong-owner-real-home";
+  const auto linked_home = directory / "wrong-owner-home";
+  std::filesystem::create_directories(real_home);
+  std::filesystem::create_directory_symlink(real_home, linked_home);
+  private_state_file::set_trusted_home_symlink_for_tests(linked_home);
+  private_state_file::set_trusted_home_owner_mismatch_for_tests(true);
+
+  EXPECT_FALSE(private_state_file::write_atomic(linked_home / "state.json", "private"));
+  EXPECT_FALSE(std::filesystem::exists(real_home / "state.json"));
+}
+
+TEST_F(PrivateStateFileTest, RejectsTrustedHomePrefixNearCollision) {
+  const auto trusted_home = directory / "prefix-home";
+  const auto real_directory = directory / "prefix-real";
+  const auto near_collision = directory / "prefix-home-other";
+  std::filesystem::create_directories(trusted_home);
+  std::filesystem::create_directories(real_directory);
+  std::filesystem::create_directory_symlink(real_directory, near_collision);
+  private_state_file::set_trusted_home_symlink_for_tests(trusted_home);
+
+  EXPECT_FALSE(private_state_file::write_atomic(near_collision / "state.json", "private"));
+  EXPECT_FALSE(std::filesystem::exists(real_directory / "state.json"));
+}
+
+TEST_F(PrivateStateFileTest, RejectsTrustedHomeSymlinkWhenResolvedTargetIsInsecure) {
+  const auto real_directory = directory / "insecure-real";
+  const auto linked_directory = directory / "trusted-home";
+  std::filesystem::create_directories(real_directory);
+  std::filesystem::permissions(
+    real_directory,
+    std::filesystem::perms::owner_all | std::filesystem::perms::group_write,
+    std::filesystem::perm_options::replace
+  );
+  std::filesystem::create_directory_symlink(real_directory, linked_directory);
+  private_state_file::set_trusted_home_symlink_for_tests(linked_directory);
+
+  EXPECT_FALSE(private_state_file::write_atomic(linked_directory / "state.json", "private"));
+  EXPECT_FALSE(std::filesystem::exists(real_directory / "state.json"));
+}
+
+TEST_F(PrivateStateFileTest, RejectsDanglingTrustedHomeSymlink) {
+  const auto missing_directory = directory / "missing-real";
+  const auto linked_directory = directory / "trusted-home";
+  std::filesystem::create_directory_symlink(missing_directory, linked_directory);
+  private_state_file::set_trusted_home_symlink_for_tests(linked_directory);
+
+  EXPECT_FALSE(private_state_file::write_atomic(linked_directory / "state.json", "private"));
+  EXPECT_FALSE(std::filesystem::exists(missing_directory));
 }
 
 TEST_F(PrivateStateFileTest, RejectsGroupWritableParentDirectory) {
@@ -344,7 +486,7 @@ TEST_F(PrivateStateFileTest, RejectsGroupWritableParentDirectory) {
   EXPECT_FALSE(std::filesystem::exists(target));
 }
 
-TEST_F(PrivateStateFileTest, RejectsSymlinkedAncestorDirectory) {
+TEST_F(PrivateStateFileTest, RejectsGenericSymlinkedAncestorDirectory) {
   const auto real_ancestor = directory / "real-ancestor";
   const auto nested_parent = real_ancestor / "nested";
   const auto real_target = nested_parent / "state.json";

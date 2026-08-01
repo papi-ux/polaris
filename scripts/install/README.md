@@ -20,7 +20,7 @@ git submodule update --init --recursive
 # NVIDIA encode (requires CUDA toolkit / nvcc)
 ./scripts/install/install.sh --from-source --cuda
 
-# User-local prefix (no root for install; still need sudo for --setup-host)
+# User-local prefix (no root for install; still need sudo -H for --setup-host)
 PREFIX=$HOME/.local ./scripts/install/install.sh --from-source
 ```
 

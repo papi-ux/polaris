@@ -103,6 +103,72 @@ for expected_link in "${expected_nova_links[@]}"; do
   grep -Fq "$expected_link" README.md
 done
 
+setup_host_surfaces=(
+  "README.md"
+  "docs/bazzite.md"
+  "docs/building.md"
+  "docs/configuration.md"
+  "docs/openSUSE.md"
+  "docs/ubuntu.md"
+  "packaging/linux/Arch/polaris.install"
+  "packaging/linux/fedora/Polaris.spec"
+  "scripts/install/install.sh"
+  "scripts/install/README.md"
+  "scripts/install/02-build-polaris.sh"
+  "scripts/install/03-install-gamescope-stack.sh"
+  "src/entry_handler.cpp"
+  "src_assets/common/assets/web/update-center.js"
+  "src_assets/common/assets/web/update-center.test.js"
+  "src_assets/linux/misc/postinst"
+)
+
+python3 - "${setup_host_surfaces[@]}" <<'PY'
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+unsafe_setup_host = re.compile(r"\bsudo(?!\s+-H(?:\s|$))[^\n]*--setup-host")
+assert unsafe_setup_host.search('sudo "$POLARIS_BIN" --setup-host')
+assert unsafe_setup_host.search("sudo polaris --setup-host")
+assert not unsafe_setup_host.search('sudo -H "$POLARIS_BIN" --setup-host')
+assert not unsafe_setup_host.search("sudo -H polaris --setup-host")
+for filename in sys.argv[1:]:
+    path = Path(filename)
+    found_setup_host = False
+    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+        found_setup_host = found_setup_host or "--setup-host" in line
+        if unsafe_setup_host.search(line):
+            print(
+                f"Unsafe setup-host invocation remains in {path}:{line_number}; use sudo -H",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    if not found_setup_host:
+        print(f"Required setup-host guidance is missing from {path}", file=sys.stderr)
+        raise SystemExit(1)
+
+tracked_files = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+excluded = {"docs/changelog.md", "scripts/check-public-docs.sh"}
+for filename in tracked_files:
+    if not filename or filename in excluded:
+        continue
+    path = Path(filename)
+    if not path.is_file():
+        continue
+    try:
+        lines = path.read_text().splitlines()
+    except UnicodeDecodeError:
+        continue
+    for line_number, line in enumerate(lines, 1):
+        if unsafe_setup_host.search(line):
+            print(
+                f"Unsafe setup-host invocation remains in tracked file {path}:{line_number}; use sudo -H",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+PY
+
 python3 <<'PY'
 from collections import Counter
 from html.parser import HTMLParser

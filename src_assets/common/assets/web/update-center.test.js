@@ -47,7 +47,7 @@ describe('Update Center release awareness', () => {
     expect(state.packageLabel).toBe('Arch/CachyOS package')
     expect(state.installCommand).toContain('wget https://example.test/Polaris-arch-x86_64.pkg.tar.zst')
     expect(state.installCommand).toContain('sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst')
-    expect(state.installCommand).toContain('sudo polaris --setup-host')
+    expect(state.installCommand).toContain('sudo -H polaris --setup-host')
     expect(state.installCommand).toContain('systemctl --user restart polaris')
     expect(state.installCommand).not.toMatch(/curl\s+[^\n|]+\|\s*sudo/i)
   })
