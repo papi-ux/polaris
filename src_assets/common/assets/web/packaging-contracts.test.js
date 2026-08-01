@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -462,8 +462,16 @@ describe('Linux packaging contracts', () => {
     const buildTrapCommands = shellExecutableOccurrences(canonicalBuildCommands, 'trap')
     const rootWriterCommands = ['cp', 'install', 'mv', 'rsync', 'tar', 'bsdtar', 'pax', 'star', 'unzip', '7z', 'dd', 'cpio', 'mount', 'zstd', 'lz4', 'gzip', 'ln', 'tee', 'touch', 'truncate']
       .flatMap((executable) => shellExecutableOccurrences(expandedBootstrapCommands, executable))
+    const requiredRootBindCommands = rootBindingValue ? [
+      `mount --bind /workspace ${rootBindingValue}/mnt`,
+      `mount --bind /output ${rootBindingValue}/opt`,
+    ] : []
+    const rootBindCommands = shellExecutableOccurrences(expandedBootstrapCommands, 'mount')
+      .filter(({ command }) => command.startsWith('mount --bind '))
     const rootReseedCommands = rootWriterCommands
-      .filter(({ command, index }) => index !== rootCreateIndex && rootTargets.some((target) => command.includes(target)))
+      .filter(({ command, index }) => index !== rootCreateIndex
+        && !requiredRootBindCommands.includes(command)
+        && rootTargets.some((target) => command.includes(target)))
     const taintedTopLevelRootWriters = rootWriterCommands
       .filter(({ command, index }) => index !== rootCreateIndex
         && bootstrapBlockDepths[index] === 0
@@ -471,7 +479,8 @@ describe('Linux packaging contracts', () => {
     const protectedRootArrayBindings = expandedBootstrapCommands
       .filter((command) => isShellArrayBinding(command) && rootTargets.some((target) => command.includes(target)))
     const rootRedirectCommands = expandedBootstrapCommands
-      .filter((command) => rootTargets.some((target) => command.includes(target)) && />/.test(command))
+      .filter((command) => [...command.matchAll(/\d*(?:>>?|<>)\s*([^\s;&|]+)/g)]
+        .some((match) => rootTargets.some((target) => match[1].includes(target))))
 
     expect(rootBindings, 'STEAMOS_ROOT must have one static binding before bootstrap').toHaveLength(1)
     expect(bootstrapTrapCommands, 'bootstrap must have one static cleanup trap').toHaveLength(1)
@@ -494,6 +503,14 @@ describe('Linux packaging contracts', () => {
       'the clean-root lifecycle must execute at top level',
     ).toEqual([0, 0, 0])
     expect(rootReseedCommands, 'the clean root must not be repopulated through copy, archive, or device commands').toEqual([])
+    expect(
+      rootBindCommands.map(({ command }) => command),
+      'only the checkout and output directories may be bound into the populated root',
+    ).toEqual(requiredRootBindCommands)
+    expect(
+      rootBindCommands.every(({ index }) => index > pacstrapIndexes[0].index && bootstrapBlockDepths[index] === 0),
+      'checkout and output binds must execute at top level after pacstrap',
+    ).toBe(true)
     expect(taintedTopLevelRootWriters, 'top-level root writers must not depend on branch-sensitive shell state').toEqual([])
     expect(rootRedirectCommands, 'the clean root must not be repopulated through shell redirection').toEqual([])
     const pacstrapCommand = canonicalBootstrapCommands[pacstrapIndexes[0].index]
@@ -598,6 +615,49 @@ describe('Linux packaging contracts', () => {
     expect(pkgbuild).toContain("arch=('x86_64')")
     expect(pkgbuild).toContain('-DPOLARIS_ENABLE_CUDA=OFF')
     expect(pkgbuild).not.toContain('-D POLARIS_ENABLE_CUDA=OFF')
+  })
+
+  it('validates exact SteamOS source identity, package metadata, dependencies, and payload', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
+    const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+    const buildScript = readSource('scripts/ci/build-steamos-package.sh')
+
+    expect(steamOs).toContain('git fetch --no-tags --force origin "$POLARIS_CHECKOUT_REF"')
+    expect(steamOs).toContain("git rev-parse 'FETCH_HEAD^{commit}'")
+    expect(steamOs).toContain('--env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT"')
+    expect(bootstrap).toContain('${POLARIS_BUILD_COMMIT:?POLARIS_BUILD_COMMIT is required}')
+    expect(bootstrap).not.toMatch(/(?:^|\n)POLARIS_BUILD_COMMIT=/)
+    expect(bootstrap).toContain('[ ! -e /workspace/.git ]')
+
+    const exactStatus = 'git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none'
+    expect(buildScript.split(exactStatus)).toHaveLength(3)
+    expect(buildScript).toContain("pacman -Qp --print-format '%n|%v|%a'")
+    expect(buildScript).toContain("'polaris|1.3.4-1|x86_64'")
+    expect(buildScript).toContain('PACKAGE_PATHS=(polaris-[0-9]*-x86_64.pkg.tar.zst)')
+    expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
+    expect(buildScript).toContain("sed -n 's/^depend = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
+    expect(bootstrap).toContain('pacman -T "${PACKAGE_DEPENDENCIES[@]}"')
+    expect(buildScript).toContain('HOST_BINARIES=("$RECEIPT_ROOT"/usr/bin/polaris-[0-9]*)')
+    expect(buildScript).toContain('if [ -s "$OUTPUT_ROOT/steamos3.8-namcap.txt" ]; then')
+    expect(buildScript).toContain('No namcap warnings are allowed')
+    expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap.txt" || true')
+    expect(buildScript).toContain('"$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"')
+    expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/polaris"')
+    expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"')
+    expect(buildScript).toContain('"$RECEIPT_ROOT/usr/lib/systemd/user/polaris.service"')
+    const pkgbuild = readSource('packaging/linux/SteamOS/PKGBUILD')
+    expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-$pkgver"')
+    expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"')
+    expect(pkgbuild).not.toContain('mv "$pkgdir/usr/bin/polaris"')
+    expect(pkgbuild).not.toContain('ln -s "polaris-$pkgver"')
+    expect(statSync('scripts/check-packaged-binary-paths.sh').mode & 0o111).not.toBe(0)
+
+    const releaseVerifierIndex = workflow.indexOf('      - name: Verify release assets on GitHub release')
+    expect(releaseVerifierIndex).toBeGreaterThanOrEqual(0)
+    const releaseVerifier = workflow.slice(releaseVerifierIndex)
+    expect(releaseVerifier).toContain('Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    expect(releaseVerifier).toContain('"${supported_count}" -ne 4')
   })
 
   it('downloads and stages the SteamOS package in release assembly', () => {

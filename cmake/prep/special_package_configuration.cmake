@@ -28,6 +28,19 @@ elseif(UNIX)
         configure_file(packaging/linux/Arch/PKGBUILD PKGBUILD @ONLY)
         configure_file(packaging/linux/Arch/polaris.install polaris.install @ONLY)
     endif()
+
+    # configure the dedicated SteamOS package files
+    if(${POLARIS_CONFIGURE_STEAMOS_PKGBUILD})
+        file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/packaging/linux/SteamOS)
+        configure_file(
+                packaging/linux/SteamOS/PKGBUILD
+                ${CMAKE_BINARY_DIR}/packaging/linux/SteamOS/PKGBUILD
+                @ONLY)
+        configure_file(
+                packaging/linux/SteamOS/polaris.install
+                ${CMAKE_BINARY_DIR}/packaging/linux/SteamOS/polaris.install
+                @ONLY)
+    endif()
 endif()
 
 # return if configure only is set

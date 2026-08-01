@@ -1,0 +1,20 @@
+print_steamos_setup_hint() {
+  printf '%s\n' \
+    'Polaris for SteamOS 3.8 is supported in Desktop Mode.' \
+    'Steam Game Mode host operation is not yet certified.' \
+    'SteamOS updates can remove packages installed on the root filesystem.' \
+    '' \
+    'Configure host integration after installation:' \
+    '  sudo -H polaris --setup-host' \
+    '' \
+    'Optional user-service autostart:' \
+    '  systemctl --user enable --now polaris'
+}
+
+post_install() {
+  print_steamos_setup_hint
+}
+
+post_upgrade() {
+  print_steamos_setup_hint
+}

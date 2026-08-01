@@ -405,6 +405,53 @@ jobs:
             build/dev.polaris-stream.app.Polaris.terminal.desktop
           if-no-files-found: warn
 
+  steamos-build:
+    name: SteamOS 3.8 build
+    needs: web-checks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+
+      - name: Resolve exact SteamOS source commit
+        run: |
+          git fetch --no-tags --force origin "$POLARIS_CHECKOUT_REF"
+          POLARIS_BUILD_COMMIT="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          test "$(git rev-parse HEAD)" = "$POLARIS_BUILD_COMMIT"
+          printf 'POLARIS_BUILD_COMMIT=%s\n' "$POLARIS_BUILD_COMMIT" >> "$GITHUB_ENV"
+
+      - name: Initialize submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: Build and validate SteamOS 3.8 package
+        run: |
+          mkdir -p "$RUNNER_TEMP/polaris-steamos-output"
+          sudo docker run --privileged --rm \
+            --env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT" \
+            --volume "$GITHUB_WORKSPACE:/workspace:rw" \
+            --volume "$RUNNER_TEMP/polaris-steamos-output:/output:rw" \
+            archlinux:latest \
+            bash /workspace/scripts/ci/run-steamos-build.sh
+
+      - name: Upload SteamOS 3.8 package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Polaris-steamos3.8-package
+          path: "${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.8-x86_64.pkg.tar.zst"
+          if-no-files-found: error
+
+      - name: Upload SteamOS 3.8 validation receipts
+        uses: actions/upload-artifact@v7
+        with:
+          name: Polaris-steamos3.8-receipts
+          path: ${{ runner.temp }}/polaris-steamos-output/steamos3.8-*.txt
+          if-no-files-found: error
+
   ubuntu-build:
     name: Ubuntu build
     needs: web-checks
@@ -870,6 +917,7 @@ jobs:
     name: Release assets
     needs:
       - arch-build
+      - steamos-build
       - ubuntu-build
       - fedora-rpm-build
       - cpp-sanitizer-tests
@@ -897,10 +945,22 @@ jobs:
           name: ubuntu-24.04-deb-artifacts
           path: release-assets/raw/ubuntu24.04
 
+      - name: Download SteamOS 3.8 package
+        uses: actions/download-artifact@v8
+        with:
+          name: Polaris-steamos3.8-package
+          path: release-assets/raw/steamos3.8
+
       - name: Prepare release asset names
         run: |
+          mkdir -p release-assets/staged release-assets/final
           shopt -s nullglob
-          mkdir -p release-assets/final
+          steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)
+          if [ "${#steamos_packages[@]}" -ne 1 ]; then
+            exit 1
+          fi
+          cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.8-x86_64.pkg.tar.zst"
 
           arch_packages=()
           arch_sources=()
@@ -981,7 +1041,7 @@ jobs:
 
           cp "${ubuntu_debs[0]}" "release-assets/final/Polaris-ubuntu24.04-x86_64.deb"
 
-          ls -la release-assets/final
+          ls -la release-assets/staged release-assets/final
 
       - name: Upload release assets to GitHub release
         env:
@@ -991,7 +1051,7 @@ jobs:
           if ! gh release view "${POLARIS_PACKAGE_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${POLARIS_PACKAGE_REF_NAME}" \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
-              --notes "Automated Fedora 44, Ubuntu, and Arch release assets for ${POLARIS_PACKAGE_REF_NAME}."
+              --notes "Automated Fedora 44, Ubuntu, Arch, and SteamOS 3.8 release assets for ${POLARIS_PACKAGE_REF_NAME}."
           fi
 
           for legacy_asset in \
@@ -1009,9 +1069,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          supported_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst")] | length')
+          supported_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst" or . == "Polaris-steamos3.8-x86_64.pkg.tar.zst")] | length')
           legacy_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(startswith("Polaris-fedora42-") or startswith("Polaris-fedora43-"))] | length')
-          if [ "${supported_count}" -ne 3 ] || [ "${legacy_count}" -ne 0 ]; then
-            echo "Expected Fedora 44, Ubuntu 24.04, and Arch binary assets with no Fedora 42/43 assets on ${POLARIS_PACKAGE_REF_NAME}; supported=${supported_count}, legacy=${legacy_count}" >&2
+          if [ "${supported_count}" -ne 4 ] || [ "${legacy_count}" -ne 0 ]; then
+            echo "Expected Fedora 44, Ubuntu 24.04, Arch, and SteamOS 3.8 binary assets with no Fedora 42/43 assets on ${POLARIS_PACKAGE_REF_NAME}; supported=${supported_count}, legacy=${legacy_count}" >&2
             exit 1
           fi
