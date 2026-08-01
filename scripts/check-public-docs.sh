@@ -43,6 +43,7 @@ expected_assets=(
   "Polaris-fedora44-x86_64.rpm"
   "Polaris-ubuntu24.04-x86_64.deb"
   "Polaris-arch-x86_64.pkg.tar.zst"
+  "Polaris-steamos3.8-x86_64.pkg.tar.zst"
 )
 
 legacy_assets=(
@@ -50,6 +51,8 @@ legacy_assets=(
   "Polaris-fedora43-x86_64.rpm"
 )
 
+# These are literal text patterns that current docs must not derive or expand.
+# shellcheck disable=SC2016
 variable_fedora_patterns=(
   'Polaris-fedora${'
   'fedora_version="$(rpm -E %fedora)"'
@@ -73,6 +76,7 @@ current_docs=(
   "README.md"
   "docs/building.md"
   "docs/bazzite.md"
+  "docs/steamos.md"
 )
 
 for expected_asset in "${expected_assets[@]}"; do
@@ -103,10 +107,29 @@ for expected_link in "${expected_nova_links[@]}"; do
   grep -Fq "$expected_link" README.md
 done
 
+test -f docs/steamos.md
+steamos_guide_facts=(
+  "SteamOS 3.8"
+  "x86_64"
+  "Valve's versioned SteamOS 3.8 package repositories"
+  "not built against rolling Arch Linux"
+  "Desktop Mode only"
+  "Polaris-steamos3.8-x86_64.pkg.tar.zst"
+  "sudo steamos-readonly disable"
+  "sudo -H polaris --setup-host"
+  "sudo steamos-readonly enable"
+  "systemctl --user enable --now polaris"
+  "SteamOS operating-system update may remove packages"
+)
+for fact in "${steamos_guide_facts[@]}"; do
+  grep -Fq "$fact" docs/steamos.md
+done
+
 setup_host_surfaces=(
   "README.md"
   "docs/bazzite.md"
   "docs/building.md"
+  "docs/steamos.md"
   "docs/configuration.md"
   "docs/openSUSE.md"
   "docs/ubuntu.md"
@@ -1218,78 +1241,74 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
 
 current_release = markdown_section(
     changelog,
+    "## v1.3.4 - 2026-07-31",
     "## v1.3.3 - 2026-07-30",
-    "## v1.3.2 - 2026-07-30",
 )
 current_release_prose = rendered_markdown(current_release)
 required_release_facts = (
-    "response-only",
-    "display-planner",
+    "fail-closed",
+    "packaged binary path",
+    "source-prefix",
     "locale-safe",
-    "controller feedback",
-    "seat isolation",
-    "Sunshine",
-    "Nix",
-    "ShellCheck",
+    "ImageMagick",
+    "secure",
+    "Bazzite",
+    "/home",
+    "var/home",
+    "without broad canonicalization",
+    "sudo -H",
+    "SteamOS 3.8",
+    "Desktop Mode",
     "npm audit --audit-level=high",
+    "webtransport-go v0.10.0",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
+    "Polaris-steamos3.8-x86_64.pkg.tar.zst",
     "Polaris-ubuntu24.04-x86_64.deb",
 )
 for fact in required_release_facts:
     if fact not in current_release_prose:
-        print(f"v1.3.3 changelog is missing final release fact: {fact}", file=sys.stderr)
+        print(f"v1.3.4 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
 readme_release_body = markdown_section(
     readme,
-    "## What is New in v1.3.3",
+    "## What is New in v1.3.4",
     "## Install",
 )
 readme_release_prose = rendered_markdown(readme_release_body)
-required_readme_facts = (
-    "response-only",
-    "display-planner",
-    "controller feedback",
-    "seat isolation",
-    "locale-safe",
-    "Sunshine",
-    "Nix",
-    "ShellCheck",
-    "npm audit --audit-level=high",
-    "Polaris-arch-x86_64.pkg.tar.zst",
-    "Polaris-fedora44-x86_64.rpm",
-    "Polaris-ubuntu24.04-x86_64.deb",
-)
+required_readme_facts = required_release_facts
 for fact in required_readme_facts:
     if fact not in readme_release_prose:
-        print(f"README v1.3.3 summary is missing: {fact}", file=sys.stderr)
+        print(f"README v1.3.4 summary is missing: {fact}", file=sys.stderr)
         sys.exit(1)
 
 asset_phrase = (
     "`Polaris-arch-x86_64.pkg.tar.zst`, "
-    "`Polaris-fedora44-x86_64.rpm`, and "
+    "`Polaris-fedora44-x86_64.rpm`, "
+    "`Polaris-steamos3.8-x86_64.pkg.tar.zst`, and "
     "`Polaris-ubuntu24.04-x86_64.deb`"
 )
 for label, section in (
-    ("README v1.3.3 summary", readme_release_prose),
-    ("v1.3.3 changelog", current_release_prose),
+    ("README v1.3.4 summary", readme_release_prose),
+    ("v1.3.4 changelog", current_release_prose),
 ):
     if section.count(asset_phrase) != 1:
-        print(f"{label} must contain the exact visible three-asset phrase", file=sys.stderr)
+        print(f"{label} must contain the exact visible four-asset phrase", file=sys.stderr)
         sys.exit(1)
 
 expected_assets = Counter(
     {
         "Polaris-arch-x86_64.pkg.tar.zst": 1,
         "Polaris-fedora44-x86_64.rpm": 1,
+        "Polaris-steamos3.8-x86_64.pkg.tar.zst": 1,
         "Polaris-ubuntu24.04-x86_64.deb": 1,
     }
 )
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section in (
-    ("README v1.3.3 summary", readme_release_prose),
-    ("v1.3.3 changelog", current_release_prose),
+    ("README v1.3.4 summary", readme_release_prose),
+    ("v1.3.4 changelog", current_release_prose),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
     if actual_assets != expected_assets:

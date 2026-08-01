@@ -2,8 +2,9 @@
 
 Polaris is a Linux-first host today. The most validated install paths are the Fedora RPM and Arch
 package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). CachyOS and
-most pacman-compatible Arch derivatives should start with the Arch package path. Bazzite can use the
-Fedora 44 RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but both package paths
+most pacman-compatible Arch derivatives should start with the Arch package path. SteamOS 3.8 uses a
+dedicated package built against Valve's versioned repositories, not the rolling Arch asset. Bazzite can use the
+Fedora 44 RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but those package paths
 need broader real-hardware validation. openSUSE Tumbleweed is source-build supported with a dedicated
 [openSUSE guide](openSUSE.md); other distros remain source-build/community-validation oriented.
 
@@ -21,6 +22,22 @@ wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x8
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
 sudo -H polaris --setup-host
 polaris
+```
+
+SteamOS 3.8 installation must temporarily disable the read-only root and restore it before service startup:
+
+```bash
+wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst
+(
+set -e
+trap 'sudo steamos-readonly enable' EXIT
+sudo steamos-readonly disable || exit $?
+sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst || exit $?
+sudo -H polaris --setup-host || exit $?
+sudo steamos-readonly enable || exit $?
+trap - EXIT
+) &&
+systemctl --user enable --now polaris
 ```
 
 ```bash
@@ -42,7 +59,7 @@ systemctl --user enable --now polaris
 
 The web UI will be available at `https://localhost:47990`.
 
-See the [Bazzite install guide](bazzite.md), [Ubuntu install guide](ubuntu.md), and
+See the [SteamOS 3.8 install guide](steamos.md), [Bazzite install guide](bazzite.md), [Ubuntu install guide](ubuntu.md), and
 [openSUSE build guide](openSUSE.md) for caveats, fallback paths, and validation notes before using
 those less-turnkey paths.
 
@@ -53,6 +70,7 @@ those less-turnkey paths.
 | Fedora 44 | Published RPM asset | Most validated package path. |
 | Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
 | CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
+| SteamOS 3.8 x86_64 | Dedicated published `pkg.tar.zst` asset | Experimental Desktop Mode package and startup validation only; not a rolling Arch package or physical Steam Deck gameplay certification. |
 | Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage and growing AMD/Mesa VAAPI validation, Steam/Game Mode needs more reports. |
 | Ubuntu 24.04 | Published DEB asset | Experimental tester package; broader desktop/GPU coverage needed. |
 | openSUSE Tumbleweed | Source build | Dedicated guide and CI build coverage; no published release asset yet. |
