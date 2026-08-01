@@ -117,6 +117,24 @@ release_verify = re.search(
 )
 if not release_verify:
     raise AssertionError("missing release asset verification workflow step")
+release_verify_body = release_verify.group("body")
+supported_assets = re.findall(r'\. == "([^"]+)"', release_verify_body)
+expected_supported_assets = [
+    "Polaris-fedora44-x86_64.rpm",
+    "Polaris-ubuntu24.04-x86_64.deb",
+    "Polaris-arch-x86_64.pkg.tar.zst",
+    "Polaris-steamos3.8-x86_64.pkg.tar.zst",
+]
+if supported_assets != expected_supported_assets:
+    raise AssertionError(
+        f"release verification must select exactly {expected_supported_assets}, found {supported_assets}"
+    )
+legacy_prefixes = re.findall(r'startswith\("([^"]+)"\)', release_verify_body)
+expected_legacy_prefixes = ["Polaris-fedora42-", "Polaris-fedora43-"]
+if legacy_prefixes != expected_legacy_prefixes:
+    raise AssertionError(
+        f"release verification must count exactly {expected_legacy_prefixes}, found {legacy_prefixes}"
+    )
 release_verify_tokens = workflow_run_tokens(release_verify.group("body"))
 legacy_guard = [
     "if", "[", "${supported_count}", "-ne", "4", "]", "||",

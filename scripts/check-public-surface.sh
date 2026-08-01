@@ -62,7 +62,7 @@ if [[ -n "$path_hits" ]]; then
 fi
 
 content_hits="$(
-  git grep -nIE '(agent handoff|project memory anchor|VS Code sessions|(^|[^[:alnum:]_])(/home/[^/[:space:]]+|/Users/[^/[:space:]]+)|tinyurl\.com)' -- . ':(exclude)scripts/check-public-surface.sh' \
+  git grep -nIE '(agent handoff|project memory anchor|VS Code sessions|(^|[^[:alnum:]_])(/home/+[^/[:space:]]+|/Users/+[^/[:space:]]+)|tinyurl\.com)' -- . ':(exclude)scripts/check-public-surface.sh' \
     | filter_allowed_content_hits \
     || true
 )"
