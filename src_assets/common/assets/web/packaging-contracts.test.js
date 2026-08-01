@@ -14,6 +14,15 @@ const section = (source, start, end) => {
   return source.slice(startIndex, endIndex)
 }
 
+const yamlStepContaining = (source, marker) => {
+  const markerIndex = source.indexOf(marker)
+  expect(markerIndex, `missing YAML step marker: ${marker}`).toBeGreaterThanOrEqual(0)
+  const stepStart = source.lastIndexOf('\n      - ', markerIndex)
+  expect(stepStart, `missing YAML step start before: ${marker}`).toBeGreaterThanOrEqual(0)
+  const nextStep = source.indexOf('\n      - ', markerIndex + marker.length)
+  return source.slice(stepStart + 1, nextStep >= 0 ? nextStep : source.length)
+}
+
 describe('Linux packaging contracts', () => {
   it('keeps portal/PipeWire capture independent while gating Wayland helpers', () => {
     const cmake = readSource('cmake/compile_definitions/linux.cmake')
@@ -205,6 +214,13 @@ describe('Linux packaging contracts', () => {
     expect(steamOs).toContain('scripts/ci/run-steamos-build.sh')
     expect(steamOs).toContain('Polaris-steamos3.8-x86_64.pkg.tar.zst')
     expect(steamOs).not.toContain('packaging/linux/Arch/PKGBUILD')
+
+    const upload = yamlStepContaining(steamOs, 'name: Polaris-steamos3.8-package')
+    expect(upload).toContain('uses: actions/upload-artifact@')
+    expect(upload).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
+    expect(upload).toMatch(
+      /^\s+path:\s+(?:"[^"\n]*Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst"|'[^'\n]*Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst'|[^\s#\n]*Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst)\s*$/m,
+    )
   })
 
   it('requires signed SteamOS 3.8.1x package sources with a pinned Valve keyring', () => {
@@ -232,8 +248,27 @@ describe('Linux packaging contracts', () => {
     for (const source of [steamOs, bootstrap, buildScript]) {
       expect(source).not.toContain('packaging/linux/Arch/PKGBUILD')
     }
-    expect(steamOs).not.toMatch(/(?:path:|--volume\s+[^\n]*:?)\s*\/var\/cache\/pacman\/pkg/)
-    expect(bootstrap).not.toMatch(/\bmount\s+--r?bind[^\n]*\/var\/cache\/pacman\/pkg/)
+    expect(steamOs).not.toContain('/var/cache/pacman/pkg')
+    expect(bootstrap).not.toContain('/var/cache/pacman/pkg')
+
+    const logicalBootstrap = bootstrap.replace(/\\\r?\n\s*/g, ' ')
+    const pacstrapCommands = logicalBootstrap
+      .split('\n')
+      .filter((line) => /\bpacstrap\b/.test(line) && !/^\s*#/.test(line))
+    expect(pacstrapCommands.length, 'missing pacstrap command').toBeGreaterThan(0)
+    for (const command of pacstrapCommands) {
+      expect(command.trim().split(/\s+/), `pacstrap must not reuse a cache: ${command}`).not.toContain('-c')
+    }
+
+    const removeRoot = bootstrap.search(/^\s*rm -rf (?:-- )?"\$\{?STEAMOS_ROOT\}?"\s*$/m)
+    const recreateRoot = bootstrap.search(/^\s*mkdir -p (?:-- )?"\$\{?STEAMOS_ROOT\}?"\s*$/m)
+    const pacstrap = bootstrap.search(/^\s*pacstrap\b/m)
+    expect(removeRoot, 'SteamOS root must be deleted before every bootstrap').toBeGreaterThanOrEqual(0)
+    expect(recreateRoot, 'SteamOS root must be recreated after deletion').toBeGreaterThan(removeRoot)
+    expect(pacstrap, 'pacstrap must populate only the recreated SteamOS root').toBeGreaterThan(recreateRoot)
+
+    expect(bootstrap).toContain('packaging/linux/SteamOS/PKGBUILD')
+    expect(bootstrap).toContain('-DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON')
   })
 
   it('keeps the SteamOS package x86_64-only and CUDA-off', () => {
@@ -252,12 +287,24 @@ describe('Linux packaging contracts', () => {
     const needs = section(releaseAssets, '    needs:', '    if:')
 
     expect(needs).toContain('- steamos-build')
-    expect(releaseAssets).toMatch(
-      /- name: Download SteamOS 3\.8[^\n]*\n\s+uses: actions\/download-artifact@v8\n\s+with:\n\s+name: Polaris-steamos3\.8-package\n\s+path: release-assets\/raw\/steamos3\.8/,
+    const download = yamlStepContaining(releaseAssets, 'name: Polaris-steamos3.8-package')
+    expect(download).toContain('uses: actions/download-artifact@v8')
+    expect(download).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
+    expect(download).toMatch(/^\s+path: release-assets\/raw\/steamos3\.8\s*$/m)
+
+    const assembly = yamlStepContaining(
+      releaseAssets,
+      'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)',
     )
-    expect(releaseAssets).toMatch(
-      /\bcp\s+[^\n]+\s+"release-assets\/staged\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst"/,
-    )
+    expect(assembly).toContain('shopt -s nullglob')
+    expect(assembly).toContain('steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)')
+    expect(assembly).toContain('if [ "${#steamos_packages[@]}" -ne 1 ]; then')
+    const exactCopy = 'cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"'
+    const steamOsCopies = assembly
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => /^cp\b/.test(line) && line.includes('steamos3.8'))
+    expect(steamOsCopies).toEqual([exactCopy])
   })
 
   it('maps CI source prefixes and materializes package strings before path checks', () => {

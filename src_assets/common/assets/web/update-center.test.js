@@ -1,5 +1,8 @@
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
 import {
   buildManualInstallCommand,
   buildUpdateCenterState,
@@ -35,6 +38,90 @@ const release = {
   ],
 }
 
+const buildSteamOsState = () => buildUpdateCenterState({
+  currentVersion: '1.2.1',
+  latestRelease: release,
+  host: {
+    platform: 'linux',
+    distro: { id: 'steamos', id_like: 'arch', version_id: '3.8.16' },
+  },
+})
+
+const runWithFakeInstallCommands = (command, failSudo) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'polaris-steamos-update-'))
+  try {
+    const binDir = join(fixture, 'bin')
+    const commandLog = join(fixture, 'commands.log')
+    mkdirSync(binDir)
+
+    const commandLines = command.split('\n').map((line) => line.trim()).filter(Boolean)
+    const unsafeLines = commandLines.filter((line) => !(
+      /^(?:wget|sudo|systemctl)\b/.test(line)
+      || line === '('
+      || line === ')'
+      || line === ') &&'
+      || line === 'set -e'
+      || /^trap (?:'sudo steamos-readonly enable'|- EXIT)$/.test(line)
+    ))
+    expect(unsafeLines, 'generated fixture command must contain only mocked external commands and shell control').toEqual([])
+
+    writeFileSync(
+      join(binDir, 'wget'),
+      '#!/usr/bin/env bash\nprintf \'wget %s\\n\' "$*" >> "$POLARIS_COMMAND_LOG"\n',
+    )
+    writeFileSync(
+      join(binDir, 'sudo'),
+      `#!/usr/bin/env bash
+printf 'sudo %s\\n' "$*" >> "$POLARIS_COMMAND_LOG"
+if [[ "$POLARIS_FAIL_SUDO" == "pacman" && "$1" == "pacman" && "$2" == "-U" ]]; then
+  exit 41
+fi
+if [[ "$POLARIS_FAIL_SUDO" == "setup-host" && "$1" == "-H" && "$2" == "polaris" && "$3" == "--setup-host" ]]; then
+  exit 42
+fi
+exit 0
+`,
+    )
+    writeFileSync(
+      join(binDir, 'systemctl'),
+      '#!/usr/bin/env bash\nprintf \'systemctl %s\\n\' "$*" >> "$POLARIS_COMMAND_LOG"\n',
+    )
+    for (const name of ['wget', 'sudo', 'systemctl']) {
+      chmodSync(join(binDir, name), 0o755)
+    }
+
+    const result = spawnSync('bash', ['-c', command], {
+      cwd: fixture,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: fixture,
+        PATH: `${binDir}:${process.env.PATH || ''}`,
+        POLARIS_COMMAND_LOG: commandLog,
+        POLARIS_FAIL_SUDO: failSudo,
+      },
+    })
+    const commands = readFileSync(commandLog, 'utf8').trim().split('\n').filter(Boolean)
+    return { commands, result }
+  } finally {
+    rmSync(fixture, { force: true, recursive: true })
+  }
+}
+
+const expectFailureSafeSteamOsCommand = (failSudo, failedCommand) => {
+  const state = buildSteamOsState()
+  const { commands, result } = runWithFakeInstallCommands(state.installCommand, failSudo)
+  const disableReadOnly = commands.indexOf('sudo steamos-readonly disable')
+  const failure = commands.indexOf(failedCommand)
+  const restoreReadOnly = commands.indexOf('sudo steamos-readonly enable', failure + 1)
+
+  expect(disableReadOnly).toBeGreaterThanOrEqual(0)
+  expect(failure).toBeGreaterThan(disableReadOnly)
+  expect(restoreReadOnly).toBeGreaterThan(failure)
+  expect(result.status, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).not.toBe(0)
+  expect(commands.some((command) => command.startsWith('systemctl '))).toBe(false)
+}
+
 describe('Update Center release awareness', () => {
   it('detects a stable update and selects the Arch/CachyOS package', () => {
     const state = buildUpdateCenterState({
@@ -58,14 +145,7 @@ describe('Update Center release awareness', () => {
   })
 
   it('prefers the SteamOS 3.8 package before the Arch fallback and restores read-only mode', () => {
-    const state = buildUpdateCenterState({
-      currentVersion: '1.2.1',
-      latestRelease: release,
-      host: {
-        platform: 'linux',
-        distro: { id: 'steamos', id_like: 'arch', version_id: '3.8.16' },
-      },
-    })
+    const state = buildSteamOsState()
 
     expect(state.packageFamily).toBe('steamos')
     expect(state.packageLabel).toBe('SteamOS 3.8 package')
@@ -73,18 +153,40 @@ describe('Update Center release awareness', () => {
 
     const commandLines = state.installCommand.split('\n')
     const downloadPackage = commandLines.indexOf('wget https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    const subshellStart = commandLines.indexOf('(')
+    const strictMode = commandLines.indexOf('set -e')
     const disableReadOnly = commandLines.indexOf('sudo steamos-readonly disable')
+    const restoreTrap = commandLines.indexOf("trap 'sudo steamos-readonly enable' EXIT")
     const installPackage = commandLines.indexOf('sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst')
     const setupHost = commandLines.indexOf('sudo -H polaris --setup-host')
     const restoreReadOnly = commandLines.indexOf('sudo steamos-readonly enable')
+    const clearRestoreTrap = commandLines.indexOf('trap - EXIT')
+    const subshellEnd = commandLines.indexOf(') &&')
     const startService = commandLines.indexOf('systemctl --user enable --now polaris')
 
     expect(downloadPackage).toBeGreaterThanOrEqual(0)
+    expect(subshellStart).toBeGreaterThan(downloadPackage)
+    expect(strictMode).toBeGreaterThan(subshellStart)
     expect(disableReadOnly).toBeGreaterThan(downloadPackage)
+    expect(restoreTrap).toBeGreaterThan(disableReadOnly)
     expect(installPackage).toBeGreaterThan(disableReadOnly)
     expect(setupHost).toBeGreaterThan(installPackage)
     expect(restoreReadOnly).toBeGreaterThan(setupHost)
+    expect(clearRestoreTrap).toBeGreaterThan(restoreReadOnly)
+    expect(subshellEnd).toBeGreaterThan(clearRestoreTrap)
     expect(startService).toBeGreaterThan(restoreReadOnly)
+    expect(startService).toBeGreaterThan(subshellEnd)
+  })
+
+  it('restores SteamOS read-only mode and skips service startup when pacman fails', () => {
+    expectFailureSafeSteamOsCommand(
+      'pacman',
+      'sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst',
+    )
+  })
+
+  it('restores SteamOS read-only mode and skips service startup when host setup fails', () => {
+    expectFailureSafeSteamOsCommand('setup-host', 'sudo -H polaris --setup-host')
   })
 
   it('selects the matching Fedora package by host version', () => {
