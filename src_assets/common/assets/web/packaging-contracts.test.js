@@ -207,19 +207,41 @@ describe('Linux packaging contracts', () => {
     expect(steamOs).not.toContain('packaging/linux/Arch/PKGBUILD')
   })
 
-  it('requires signed SteamOS package sources with a pinned Valve keyring', () => {
+  it('requires signed SteamOS 3.8.1x package sources with a pinned Valve keyring', () => {
     const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+    const repoNames = [...bootstrap.matchAll(/^\[((?:jupiter|holo|core|extra)(?:-[^\]]+)?)\]$/gm)]
+      .map((match) => match[1])
 
     expect(bootstrap).toContain('SigLevel = Required DatabaseOptional')
     expect(bootstrap).toContain('LocalFileSigLevel = Required')
     expect(bootstrap).toContain('a5efa4f9c161ce9607fd9dfcccaf2a587baa9acd35eae04d3c01d967dddc9722')
+    expect(repoNames).toEqual([
+      'jupiter-3.8.1x',
+      'holo-3.8.1x',
+      'core-3.8.1x',
+      'extra-3.8.1x',
+    ])
+  })
+
+  it('keeps the SteamOS root isolated from generic Arch packaging and cross-series pacman caches', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
+    const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+    const buildScript = readSource('scripts/ci/build-steamos-package.sh')
+
+    for (const source of [steamOs, bootstrap, buildScript]) {
+      expect(source).not.toContain('packaging/linux/Arch/PKGBUILD')
+    }
+    expect(steamOs).not.toMatch(/(?:path:|--volume\s+[^\n]*:?)\s*\/var\/cache\/pacman\/pkg/)
+    expect(bootstrap).not.toMatch(/\bmount\s+--r?bind[^\n]*\/var\/cache\/pacman\/pkg/)
   })
 
   it('keeps the SteamOS package x86_64-only and CUDA-off', () => {
     const pkgbuild = readSource('packaging/linux/SteamOS/PKGBUILD')
 
     expect(pkgbuild).toContain("arch=('x86_64')")
-    expect(pkgbuild).toContain('-D POLARIS_ENABLE_CUDA=OFF')
+    expect(pkgbuild).toContain('-DPOLARIS_ENABLE_CUDA=OFF')
+    expect(pkgbuild).not.toContain('-D POLARIS_ENABLE_CUDA=OFF')
   })
 
   it('downloads and stages the SteamOS package in release assembly', () => {
@@ -231,9 +253,11 @@ describe('Linux packaging contracts', () => {
 
     expect(needs).toContain('- steamos-build')
     expect(releaseAssets).toMatch(
-      /- name: Download SteamOS 3\.8[^\n]*\n\s+uses: actions\/download-artifact@v8[\s\S]*?path: release-assets\/raw\/steamos3\.8/,
+      /- name: Download SteamOS 3\.8[^\n]*\n\s+uses: actions\/download-artifact@v8\n\s+with:\n\s+name: Polaris-steamos3\.8-package\n\s+path: release-assets\/raw\/steamos3\.8/,
     )
-    expect(releaseAssets).toContain('Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    expect(releaseAssets).toMatch(
+      /\bcp\s+[^\n]+\s+"release-assets\/staged\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst"/,
+    )
   })
 
   it('maps CI source prefixes and materializes package strings before path checks', () => {

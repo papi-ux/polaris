@@ -13,6 +13,11 @@ const release = {
   prerelease: false,
   assets: [
     {
+      name: 'Polaris-steamos3.8-x86_64.pkg.tar.zst',
+      browser_download_url: 'https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst',
+      digest: 'sha256:steamosdigest',
+    },
+    {
       name: 'Polaris-arch-x86_64.pkg.tar.zst',
       browser_download_url: 'https://example.test/Polaris-arch-x86_64.pkg.tar.zst',
       digest: 'sha256:archdigest',
@@ -50,6 +55,36 @@ describe('Update Center release awareness', () => {
     expect(state.installCommand).toContain('sudo -H polaris --setup-host')
     expect(state.installCommand).toContain('systemctl --user restart polaris')
     expect(state.installCommand).not.toMatch(/curl\s+[^\n|]+\|\s*sudo/i)
+  })
+
+  it('prefers the SteamOS 3.8 package before the Arch fallback and restores read-only mode', () => {
+    const state = buildUpdateCenterState({
+      currentVersion: '1.2.1',
+      latestRelease: release,
+      host: {
+        platform: 'linux',
+        distro: { id: 'steamos', id_like: 'arch', version_id: '3.8.16' },
+      },
+    })
+
+    expect(state.packageFamily).toBe('steamos')
+    expect(state.packageLabel).toBe('SteamOS 3.8 package')
+    expect(state.asset.name).toBe('Polaris-steamos3.8-x86_64.pkg.tar.zst')
+
+    const commandLines = state.installCommand.split('\n')
+    const downloadPackage = commandLines.indexOf('wget https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    const disableReadOnly = commandLines.indexOf('sudo steamos-readonly disable')
+    const installPackage = commandLines.indexOf('sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    const setupHost = commandLines.indexOf('sudo -H polaris --setup-host')
+    const restoreReadOnly = commandLines.indexOf('sudo steamos-readonly enable')
+    const startService = commandLines.indexOf('systemctl --user enable --now polaris')
+
+    expect(downloadPackage).toBeGreaterThanOrEqual(0)
+    expect(disableReadOnly).toBeGreaterThan(downloadPackage)
+    expect(installPackage).toBeGreaterThan(disableReadOnly)
+    expect(setupHost).toBeGreaterThan(installPackage)
+    expect(restoreReadOnly).toBeGreaterThan(setupHost)
+    expect(startService).toBeGreaterThan(restoreReadOnly)
   })
 
   it('selects the matching Fedora package by host version', () => {
