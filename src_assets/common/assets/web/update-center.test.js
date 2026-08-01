@@ -56,7 +56,7 @@ const runWithFakeInstallCommands = (command, failSudo) => {
 
     const commandLines = command.split('\n').map((line) => line.trim()).filter(Boolean)
     const allowedExternalCommands = [
-      /^wget https:\/\/example\.test\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst$/,
+      /^wget --output-document=\.\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst https:\/\/example\.test\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst &&$/,
       /^sudo steamos-readonly disable(?: \|\| exit \$\?)?$/,
       /^sudo pacman -U \.\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst \|\| exit \$\?$/,
       /^sudo -H polaris --setup-host \|\| exit \$\?$/,
@@ -79,7 +79,12 @@ const runWithFakeInstallCommands = (command, failSudo) => {
 
     writeFileSync(
       join(binDir, 'wget'),
-      '#!/usr/bin/env bash\nprintf \'wget %s\\n\' "$*" >> "$POLARIS_COMMAND_LOG"\n',
+      `#!/usr/bin/env bash
+printf 'wget %s\\n' "$*" >> "$POLARIS_COMMAND_LOG"
+if [[ "$POLARIS_FAIL_SUDO" == "download" ]]; then
+  exit 44
+fi
+`,
     )
     writeFileSync(
       join(binDir, 'sudo'),
@@ -171,7 +176,7 @@ describe('Update Center release awareness', () => {
 
     const commandLines = state.installCommand.split('\n')
     const expectedCommandLines = [
-      'wget https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst',
+      'wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst &&',
       '(',
       'set -e',
       "trap 'sudo steamos-readonly enable' EXIT",
@@ -183,7 +188,7 @@ describe('Update Center release awareness', () => {
       ') &&',
       'systemctl --user enable --now polaris',
     ]
-    const downloadPackage = commandLines.indexOf('wget https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    const downloadPackage = commandLines.indexOf('wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst &&')
     const subshellStart = commandLines.indexOf('(')
     const strictMode = commandLines.indexOf('set -e')
     const disableReadOnly = commandLines.indexOf('sudo steamos-readonly disable || exit $?')
@@ -217,6 +222,16 @@ describe('Update Center release awareness', () => {
     })
 
     expect(asset).toBeNull()
+  })
+
+  it('overwrites the exact SteamOS target and skips privileged work when download fails', () => {
+    const state = buildSteamOsState()
+    const { commands, result } = runWithFakeInstallCommands(state.installCommand, 'download')
+
+    expect(commands).toEqual([
+      'wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://example.test/Polaris-steamos3.8-x86_64.pkg.tar.zst',
+    ])
+    expect(result.status).not.toBe(0)
   })
 
   it('restores SteamOS read-only mode and skips service startup when pacman fails', () => {

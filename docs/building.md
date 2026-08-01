@@ -27,7 +27,7 @@ polaris
 SteamOS 3.8 installation must temporarily disable the read-only root and restore it before service startup:
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst
+wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst &&
 (
 set -e
 trap 'sudo steamos-readonly enable' EXIT

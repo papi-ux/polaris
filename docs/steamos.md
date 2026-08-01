@@ -17,7 +17,7 @@ SteamOS uses a read-only root by default. Polaris installation and `sudo -H pola
 Open a terminal in Desktop Mode and run:
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst
+wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst &&
 (
 set -e
 trap 'sudo steamos-readonly enable' EXIT

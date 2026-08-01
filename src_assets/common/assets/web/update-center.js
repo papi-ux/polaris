@@ -122,7 +122,9 @@ export function buildManualInstallCommand(asset, host = {}) {
   if (!isSafeAssetForFamily(asset, family)) return ''
   const fileName = asset.name
   const downloadUrl = asset.browser_download_url
-  const lines = [`wget ${downloadUrl}`]
+  const lines = family === 'steamos'
+    ? [`wget --output-document=./${fileName} ${downloadUrl} &&`]
+    : [`wget ${downloadUrl}`]
 
   if (family === 'steamos') {
     lines.push('(')

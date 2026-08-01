@@ -115,6 +115,7 @@ steamos_guide_facts=(
   "not built against rolling Arch Linux"
   "Desktop Mode only"
   "Polaris-steamos3.8-x86_64.pkg.tar.zst"
+  "wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst"
   "sudo steamos-readonly disable"
   "sudo -H polaris --setup-host"
   "sudo steamos-readonly enable"
