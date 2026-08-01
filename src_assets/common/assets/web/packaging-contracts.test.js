@@ -482,6 +482,7 @@ describe('Linux packaging contracts', () => {
     const requiredRootBindCommands = rootBindingValue ? [
       `mount --bind /workspace ${rootBindingValue}/mnt`,
       `mount --bind /output ${rootBindingValue}/opt`,
+      `mount --bind /etc/resolv.conf ${rootBindingValue}/etc/resolv.conf`,
     ] : []
     const requiredApiMountCommands = rootBindingValue
       ? ['/proc', '/sys', '/dev', '/run'].flatMap((apiPath) => [
@@ -693,6 +694,8 @@ describe('Linux packaging contracts', () => {
     expect(bootstrap).toContain('POLARIS_LOCAL_CANDIDATE_BUILD="${POLARIS_LOCAL_CANDIDATE_BUILD:-0}"')
     expect(bootstrap).toContain('chroot "$STEAMOS_ROOT" runuser --user builder --')
     expect(bootstrap).not.toContain('arch-chroot "$STEAMOS_ROOT"')
+    expect(bootstrap).toContain('mount --bind /etc/resolv.conf "$STEAMOS_ROOT/etc/resolv.conf"')
+    expect(bootstrap).toContain('umount "$STEAMOS_ROOT/etc/resolv.conf" 2>/dev/null || true')
     for (const apiPath of ['/proc', '/sys', '/dev', '/run']) {
       expect(bootstrap).toContain(`mount --rbind ${apiPath} "$STEAMOS_ROOT${apiPath}"`)
       expect(bootstrap).toContain(`mount --make-rslave "$STEAMOS_ROOT${apiPath}"`)

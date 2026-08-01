@@ -23,6 +23,7 @@ fi
 export POLARIS_LOCAL_CANDIDATE_BUILD
 
 cleanup() {
+  umount "$STEAMOS_ROOT/etc/resolv.conf" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/opt" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/mnt" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/run" 2>/dev/null || true
@@ -92,6 +93,7 @@ pacstrap -G -M -C /tmp/steamos-3.8.1x.conf "$STEAMOS_ROOT" \
 
 mount --bind /workspace "$STEAMOS_ROOT/mnt"
 mount --bind /output "$STEAMOS_ROOT/opt"
+mount --bind /etc/resolv.conf "$STEAMOS_ROOT/etc/resolv.conf"
 # arch-chroot enters a PID namespace after mounting procfs, which hides the
 # build process from /proc. Own the API mounts here and stay in this namespace.
 mount --rbind /proc "$STEAMOS_ROOT/proc"
