@@ -81,6 +81,7 @@
 #endif
 
 #ifdef __linux__
+  #include "platform/linux/executable_path.h"
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_runtime.h"
@@ -758,7 +759,11 @@ namespace confighttp {
     }
 
     bool synthesize_steam_cover_from_header(const fs::path &header_path, const fs::path &output_path) {
+#ifdef __linux__
+      const fs::path magick_path {platf::linux_util::find_executable_in_path("magick")};
+#else
       const auto magick_path = boost::process::v1::search_path("magick");
+#endif
       if (magick_path.empty()) {
         return false;
       }
