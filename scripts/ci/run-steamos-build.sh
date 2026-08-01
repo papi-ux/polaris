@@ -14,13 +14,15 @@ if [ ! -e /workspace/.git ] || [ ! -d /output ]; then
   exit 1
 fi
 
+STEAMOS_ROOT=/steamos-root
+
 cleanup() {
   umount -R "$STEAMOS_ROOT/opt" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/mnt" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-pacman -Sy --noconfirm arch-install-scripts curl
+pacman -Sy --noconfirm arch-install-scripts curl git
 pacman-key --init
 
 curl --fail --location --proto '=https' --tlsv1.2 \
@@ -69,7 +71,6 @@ if [ "$CHECKOUT_COMMIT" != "$POLARIS_BUILD_COMMIT" ]; then
   exit 1
 fi
 
-STEAMOS_ROOT=/steamos-root
 rm -rf -- "$STEAMOS_ROOT"
 install -d -m 0755 -- "$STEAMOS_ROOT"
 pacstrap -G -M -C /tmp/steamos-3.8.1x.conf "$STEAMOS_ROOT" \

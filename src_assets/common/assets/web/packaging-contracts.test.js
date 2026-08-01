@@ -419,6 +419,19 @@ describe('Linux packaging contracts', () => {
     ])
   })
 
+  it('installs outer-container Git and initializes cleanup state before either is used', () => {
+    const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+    const outerInstall = bootstrap.match(/^pacman -Sy --noconfirm ([^\n]+)$/m)?.[1].split(/\s+/) ?? []
+    const rootBinding = bootstrap.indexOf('STEAMOS_ROOT=/steamos-root')
+    const cleanupTrap = bootstrap.indexOf('trap cleanup EXIT')
+    const firstGitUse = bootstrap.search(/^git\s/m)
+
+    expect(outerInstall).toContain('git')
+    expect(bootstrap.indexOf('pacman -Sy --noconfirm')).toBeLessThan(firstGitUse)
+    expect(rootBinding).toBeGreaterThanOrEqual(0)
+    expect(rootBinding).toBeLessThan(cleanupTrap)
+  })
+
   it('keeps the SteamOS root isolated from generic Arch packaging and cross-series pacman caches', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
