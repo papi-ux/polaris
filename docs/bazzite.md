@@ -54,7 +54,7 @@ sudo rpm-ostree install -r "./${rpm_name}"
 After the reboot:
 
 ```bash
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 systemctl --user stop polaris 2>/dev/null || true
 sudo install -D -m 0755 "$(readlink -f "$(command -v polaris)")" /usr/local/bin/polaris-kms
 sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms
@@ -361,7 +361,7 @@ Please include these details when reporting Bazzite issues:
 - the `Build features: cuda=...` line
 - output of `getcap /usr/local/bin/polaris-kms`
 - output of `systemctl --user cat polaris`
-- whether `sudo polaris --setup-host` completed successfully
+- whether `sudo -H polaris --setup-host` completed successfully
 - whether `systemctl --user status polaris` is running
 - whether the web UI opens at `https://127.0.0.1:47990`
 - client used for pairing, such as Steam Deck Moonlight, Android Moonlight, or Nova

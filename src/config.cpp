@@ -1578,6 +1578,26 @@ namespace config {
     ::video::active_av1_mode = video.av1_mode;
   }
 
+  bool is_valid_command_prefix(std::string_view argument) {
+    if (argument.empty()) {
+      return true;
+    }
+    if (argument.front() == '-') {
+      if (argument.size() >= 2 && argument[1] == '-') {
+        return false;
+      }
+      return std::ranges::all_of(argument.substr(1), [](char flag) {
+        return "012p"sv.find(flag) != std::string_view::npos;
+      });
+    }
+    if (argument.find('=') == std::string_view::npos) {
+      return true;
+    }
+
+    const auto [_, parsed] = parse_option(argument.begin(), argument.end());
+    return parsed.has_value();
+  }
+
   int parse(int argc, char *argv[]) {
     std::unordered_map<std::string, std::string> cmd_vars;
     bool config_file_from_cli = false;

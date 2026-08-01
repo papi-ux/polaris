@@ -38,7 +38,7 @@ Usage:
 Steps:
   1) install distro deps          (01-install-deps.sh)
   2) build + install polaris      (02-build-polaris.sh)   [ --from-source ]
-  3) host udev/modules            (sudo polaris --setup-host)
+  3) host udev/modules            (sudo -H polaris --setup-host)
   4) gamescope_stream user stack  (03-install-gamescope-stack.sh)
   5) enable user services         (04-enable-services.sh)
 
@@ -93,7 +93,7 @@ log "running host setup (udev/modules) — may prompt for sudo"
 if [ "$(id -u)" -eq 0 ]; then
   "$POLARIS_BIN" --setup-host || warn "setup-host failed"
 else
-  sudo "$POLARIS_BIN" --setup-host || warn "setup-host failed (run later: sudo $POLARIS_BIN --setup-host)"
+  sudo -H "$POLARIS_BIN" --setup-host || warn "setup-host failed (run later: sudo -H $POLARIS_BIN --setup-host)"
 fi
 
 if [ "$SKIP_STACK" = 0 ] && [ "$LABWC_ONLY" = 0 ]; then

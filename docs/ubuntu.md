@@ -16,7 +16,7 @@ releases.
 ```bash
 wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
 sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
@@ -48,7 +48,7 @@ cmake -B build -G Ninja \
   -DCUDA_FAIL_ON_MISSING=OFF
 cmake --build build -j"$(nproc)"
 sudo cmake --install build
-sudo polaris --setup-host
+sudo -H polaris --setup-host
 polaris
 ```
 
@@ -66,7 +66,7 @@ systemctl --user enable --now polaris
 Only enable DRM/KMS capture if you specifically need it:
 
 ```bash
-sudo polaris --setup-host --enable-kms
+sudo -H polaris --setup-host --enable-kms
 ```
 
 The default compositor and portal paths do not require granting KMS capability.
@@ -95,7 +95,7 @@ Please include these details when reporting Ubuntu issues:
 - package install or source build
 - GPU model and driver stack
 - desktop environment and display server, such as GNOME Wayland or KDE Wayland
-- whether `sudo polaris --setup-host` completed successfully
+- whether `sudo -H polaris --setup-host` completed successfully
 - whether the web UI opens at `https://localhost:47990`
 - client used for pairing, such as Steam Deck Moonlight, Android Moonlight, or Nova
 - active capture path shown in the Polaris dashboard

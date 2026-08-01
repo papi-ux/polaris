@@ -161,9 +161,13 @@ namespace logging {
       deinit();
     }
 
-    // Check if the log file exists and handle backup
-    std::string backup_log_file = log_file + ".backup";
-    if (std::filesystem::exists(log_file)) {
+    // Check if the log file exists and handle backup. An empty path requests
+    // console-only logging for commands that must not initialize user state.
+    std::string backup_log_file;
+    if (!log_file.empty()) {
+      backup_log_file = log_file + ".backup";
+    }
+    if (!log_file.empty() && std::filesystem::exists(log_file)) {
       try {
         // If the backup file exists, remove it
         if (std::filesystem::exists(backup_log_file)) {
@@ -189,8 +193,10 @@ namespace logging {
     sink->locked_backend()->add_stream(stream);
 #endif
 
-    log_file_stream = boost::make_shared<std::ofstream>(log_file);
-    sink->locked_backend()->add_stream(log_file_stream);
+    if (!log_file.empty()) {
+      log_file_stream = boost::make_shared<std::ofstream>(log_file);
+      sink->locked_backend()->add_stream(log_file_stream);
+    }
     sink->set_filter(severity >= min_log_level);
     sink->set_formatter(&formatter);
 

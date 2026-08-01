@@ -375,5 +375,6 @@ namespace config {
   }
 
   int parse(int argc, char *argv[]);
+  bool is_valid_command_prefix(std::string_view argument);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
 }  // namespace config
