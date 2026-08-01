@@ -657,7 +657,10 @@ describe('Linux packaging contracts', () => {
 
     const exactStatus = 'git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none'
     expect(buildScript.split(exactStatus)).toHaveLength(3)
-    expect(buildScript).toContain("pacman -Qp --print-format '%n|%v|%a'")
+    expect(buildScript).not.toContain('--print-format')
+    expect(buildScript).toContain("sed -n 's/^pkgname = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
+    expect(buildScript).toContain("sed -n 's/^pkgver = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
+    expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("'polaris|1.3.4-1|x86_64'")
     expect(buildScript).toContain('PACKAGE_PATHS=(polaris-[0-9]*-x86_64.pkg.tar.zst)')
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')

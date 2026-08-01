@@ -48,7 +48,15 @@ if [ "${#PACKAGE_PATHS[@]}" -ne 1 ]; then
   exit 1
 fi
 PACKAGE_PATH="${PACKAGE_PATHS[0]}"
-PACKAGE_IDENTITY="$(pacman -Qp --print-format '%n|%v|%a' "$PACKAGE_PATH")"
+RECEIPT_ROOT="$BUILD_ROOT/package-receipt"
+rm -rf -- "$RECEIPT_ROOT"
+install -d -m 0755 -- "$RECEIPT_ROOT"
+bsdtar -xf "$PACKAGE_PATH" -C "$RECEIPT_ROOT"
+test -f "$RECEIPT_ROOT/.PKGINFO"
+PACKAGE_NAME="$(sed -n 's/^pkgname = //p' "$RECEIPT_ROOT/.PKGINFO")"
+PACKAGE_VERSION="$(sed -n 's/^pkgver = //p' "$RECEIPT_ROOT/.PKGINFO")"
+PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$RECEIPT_ROOT/.PKGINFO")"
+PACKAGE_IDENTITY="$PACKAGE_NAME|$PACKAGE_VERSION|$PACKAGE_ARCH"
 if [ "$PACKAGE_IDENTITY" != 'polaris|1.3.4-1|x86_64' ]; then
   printf 'unexpected SteamOS package identity: %s\n' "$PACKAGE_IDENTITY" >&2
   exit 1
@@ -73,11 +81,6 @@ pacman -Qlp "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-package-files.txt"
 sha256sum "$OUTPUT_ROOT/Polaris-steamos3.8-x86_64.pkg.tar.zst" \
   > "$OUTPUT_ROOT/steamos3.8-package-sha256.txt"
 
-RECEIPT_ROOT="$BUILD_ROOT/package-receipt"
-rm -rf -- "$RECEIPT_ROOT"
-install -d -m 0755 -- "$RECEIPT_ROOT"
-bsdtar -xf "$PACKAGE_PATH" -C "$RECEIPT_ROOT"
-test -f "$RECEIPT_ROOT/.PKGINFO"
 sed -n 's/^depend = //p' "$RECEIPT_ROOT/.PKGINFO" \
   > "$OUTPUT_ROOT/steamos3.8-package-dependencies.txt"
 test -s "$OUTPUT_ROOT/steamos3.8-package-dependencies.txt"
