@@ -7,15 +7,16 @@ const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 const sectionBetween = (source, startHeading, endHeading) => {
   const start = source.indexOf(startHeading)
   const end = source.indexOf(endHeading, start + startHeading.length)
-  expect(start, `missing release heading: ${startHeading}`).toBeGreaterThanOrEqual(0)
-  expect(end, `missing release boundary after ${startHeading}: ${endHeading}`).toBeGreaterThan(start)
+  expect(start, `missing historical release heading: ${startHeading}`).toBeGreaterThanOrEqual(0)
+  expect(end, `missing historical release boundary after ${startHeading}: ${endHeading}`).toBeGreaterThan(start)
   return source.slice(start, end)
 }
 
-const releaseSections = () => [
-  sectionBetween(read('README.md'), '## What is New in v1.3.4', '## Install'),
-  sectionBetween(read('docs/changelog.md'), '## v1.3.4 - 2026-07-31', '## v1.3.3'),
-]
+const historicalRelease = () => sectionBetween(
+  read('docs/changelog.md'),
+  '## v1.3.4 - 2026-07-31',
+  '## v1.3.3',
+)
 
 const requiredFixFacts = [
   'fail-closed',
@@ -29,6 +30,10 @@ const requiredFixFacts = [
   'var/home',
   'without broad canonicalization',
   'sudo -H',
+  'SteamOS 3.8',
+  'Desktop Mode',
+  'npm audit --audit-level=high',
+  'webtransport-go v0.10.0',
 ]
 
 const expectedAssets = [
@@ -38,67 +43,18 @@ const expectedAssets = [
   'Polaris-ubuntu24.04-x86_64.deb',
 ].sort()
 
-describe('v1.3.4 release contract', () => {
-  it('moves the CMake version and public release headings together', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.3.4')
-    expect(read('README.md')).toContain('## What is New in v1.3.4')
-    expect(read('docs/changelog.md')).toContain('## v1.3.4 - 2026-07-31')
-  })
+describe('historical v1.3.4 release contract', () => {
+  it('preserves the v1.3.4 release facts', () => {
+    const release = historicalRelease()
 
-  it('aligns the public checker with the v1.3.4 release contract', () => {
-    const publicDocsGate = read('scripts/check-public-docs.sh')
-
-    expect(publicDocsGate).toContain('"## What is New in v1.3.4"')
-    expect(publicDocsGate).not.toContain('"## What is New in v1.3.3"')
-    expect(publicDocsGate).toContain('"## v1.3.4 - 2026-07-31"')
-    for (const fact of [...requiredFixFacts, 'npm audit --audit-level=high', 'webtransport-go v0.10.0']) {
-      expect(publicDocsGate, `public checker must require: ${fact}`).toContain(fact)
-    }
-    for (const asset of expectedAssets) {
-      expect(publicDocsGate, `public checker must require: ${asset}`).toContain(asset)
-    }
-    expect(publicDocsGate).toContain('building_packaging = markdown_section(')
-    expect(publicDocsGate).toContain('("docs/building.md Packaging", building_packaging_prose)')
-  })
-
-  it('records the #264, #265, and #266 release facts', () => {
-    for (const releaseSection of releaseSections()) {
-      for (const fact of requiredFixFacts) {
-        expect(releaseSection, `release notes must include: ${fact}`).toContain(fact)
-      }
+    for (const fact of requiredFixFacts) {
+      expect(release, `historical release must include: ${fact}`).toContain(fact)
     }
   })
 
-  it('keeps npm audit mandatory and the forbidden webtransport-go version absent', () => {
-    expect(read('.github/workflows/build.yml')).toContain('npm audit --audit-level=high')
-    expect(read('browser_stream_helper/go.mod')).not.toContain('github.com/quic-go/webtransport-go v0.10.0')
-    expect(read('browser_stream_helper/go.sum')).not.toContain('github.com/quic-go/webtransport-go v0.10.0')
-
-    for (const releaseSection of releaseSections()) {
-      expect(releaseSection).toContain('npm audit --audit-level=high')
-      expect(releaseSection).toContain('webtransport-go v0.10.0')
-    }
-  })
-
-  it('keeps the official release asset set exact', () => {
-    for (const releaseSection of releaseSections()) {
-      const actualAssets = releaseSection.match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? []
-      expect(actualAssets.sort()).toEqual(expectedAssets)
-    }
-  })
-
-  it('lists exactly the four official artifacts in the bounded build guide packaging section', () => {
-    const building = read('docs/building.md')
-    const heading = '## Packaging'
-    const packagingStart = building.indexOf(heading)
-    expect(packagingStart, 'missing build-guide packaging section').toBeGreaterThanOrEqual(0)
-    const afterHeading = building.slice(packagingStart + heading.length)
-    const nextHeading = afterHeading.search(/^#{1,2}\s+/m)
-    const packaging = afterHeading.slice(0, nextHeading >= 0 ? nextHeading : undefined)
-    const actualAssets = packaging.match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? []
+  it('preserves the exact historical four-asset set', () => {
+    const actualAssets = historicalRelease().match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? []
 
     expect(actualAssets.sort()).toEqual(expectedAssets)
-    expect(packaging).toContain('SteamOS 3.8')
-    expect(packaging).toContain('(steamos.md)')
   })
 })

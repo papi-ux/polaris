@@ -369,9 +369,3 @@ Please include these details when reporting Bazzite issues:
 - requested client resolution, FPS, codec, and whether the web UI preview was open
 - whether headless mode and virtual display behavior worked after a reboot
 
-## Current Status
-
-Fedora 44 RPMs are release-tested in CI. Bazzite uses the Fedora 44 RPM through
-`rpm-ostree`; `bazzite-nvidia-open:stable`
-`44.20260430` has Desktop Mode service and port validation only. Game Mode still
-needs validation on a Bazzite image that exposes a real gamescope Steam session.
