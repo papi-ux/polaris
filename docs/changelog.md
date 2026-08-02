@@ -5,6 +5,29 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.5 - 2026-08-06
+
+Package-update safety, Linux host integration owned by the package, and library playtime and completion estimates.
+
+- Writes each mutable-distro download to the exact package filename with `wget --output-document`, preventing a pre-existing file from redirecting the new payload to `.1` or `.2` while a stale unsuffixed package is installed
+- Makes Fedora, Arch, and Ubuntu update commands short-circuit after download, package-install, `sudo -H polaris --setup-host`, or restart failures
+- Adds executable regression coverage for failed download, install, setup-host, and successful command paths across all three mutable package families
+- Documents the v1.3.4 bootstrap caveat and provides exact-output commands for the first upgrade to v1.3.5
+- Installs the udev rules and modules-load configuration as package files under `/usr/lib`, so the package manager owns them and removes them on uninstall
+- Retires an unmodified `/etc` copy from an older install that would otherwise shadow the packaged rules, and keeps an edited copy with a warning naming the file in effect
+- Lets `--setup-host` exit without root when the package already provides everything and the virtual input nodes are usable
+- Adds a `polaris-debug` package to the Arch and SteamOS builds so `coredumpctl info polaris` yields a real backtrace
+- Closes a `systemd-inhibit` process leaked on every session, and keeps a private session's virtual keyboard and mouse out of the desktop session logged in at the machine
+- Warns at startup when seat isolation is enabled and the account Polaris runs as is not in the `input` group, which otherwise leaves the isolated devices unopenable by Polaris and by the streamed game
+- Reports the playtime Steam and Lutris already record on disk
+- Serves completion estimates from a local dataset first, with `beat_times_lookup` controlling the How Long To Beat fallback
+- Adds a transactional custom artwork workflow with an authenticated resolver, bounded downloads, and atomic caching
+- Surfaces per-app environment variables in the web UI
+- Releases the host loopback when a session turns host audio off, instead of leaving an earlier session's loopback loaded for the life of the process
+- Applies the session's requested resolution and refresh when preparing the streaming display
+- Keeps `npm audit --audit-level=high` mandatory and clears the advisories that were failing every web build
+- Retains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+
 ## v1.3.4 - 2026-07-31
 
 Patch release adding a dedicated SteamOS 3.8 package lane and tightening Linux package, path, setup, and import safety.
