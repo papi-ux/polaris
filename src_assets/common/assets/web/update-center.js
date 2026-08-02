@@ -122,9 +122,7 @@ export function buildManualInstallCommand(asset, host = {}) {
   if (!isSafeAssetForFamily(asset, family)) return ''
   const fileName = asset.name
   const downloadUrl = asset.browser_download_url
-  const lines = family === 'steamos'
-    ? [`wget --output-document=./${fileName} ${downloadUrl} &&`]
-    : [`wget ${downloadUrl}`]
+  const lines = [`wget --output-document=./${fileName} ${downloadUrl} &&`]
 
   if (family === 'steamos') {
     lines.push('(')
@@ -141,16 +139,16 @@ export function buildManualInstallCommand(asset, host = {}) {
   }
 
   if (family === 'arch') {
-    lines.push(`sudo pacman -U ./${fileName}`)
+    lines.push(`sudo pacman -U ./${fileName} &&`)
   } else if (family === 'fedora') {
-    lines.push(`sudo dnf install "./${fileName}"`)
+    lines.push(`sudo dnf install "./${fileName}" &&`)
   } else if (family === 'ubuntu') {
-    lines.push(`sudo apt install ./${fileName}`)
+    lines.push(`sudo apt install ./${fileName} &&`)
   } else {
     return ''
   }
 
-  lines.push('sudo -H polaris --setup-host')
+  lines.push('sudo -H polaris --setup-host &&')
   lines.push('systemctl --user restart polaris')
   return lines.join('\n')
 }

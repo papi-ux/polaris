@@ -11,16 +11,16 @@ need broader real-hardware validation. openSUSE Tumbleweed is source-build suppo
 ## Release packages
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm
-sudo dnf install ./Polaris-fedora44-x86_64.rpm
-sudo -H polaris --setup-host
+wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm &&
+sudo dnf install ./Polaris-fedora44-x86_64.rpm &&
+sudo -H polaris --setup-host &&
 polaris
 ```
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
-sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
-sudo -H polaris --setup-host
+wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
+sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
+sudo -H polaris --setup-host &&
 polaris
 ```
 
@@ -41,15 +41,15 @@ systemctl --user enable --now polaris
 ```
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
-sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
-sudo -H polaris --setup-host
+wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb &&
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&
+sudo -H polaris --setup-host &&
 polaris
 ```
 
 ```bash
 rpm_name="Polaris-fedora44-x86_64.rpm"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
+wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
 sudo rpm-ostree install -r "./${rpm_name}"
 
 # After reboot:

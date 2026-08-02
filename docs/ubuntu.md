@@ -14,9 +14,9 @@ releases.
 ## Release Package
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb
-sudo apt install ./Polaris-ubuntu24.04-x86_64.deb
-sudo -H polaris --setup-host
+wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb &&
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&
+sudo -H polaris --setup-host &&
 polaris
 ```
 
