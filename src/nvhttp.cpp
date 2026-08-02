@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -37,6 +38,7 @@
 
 // lib includes (JSON for last-launched persistence)
 #include <nlohmann/json.hpp>
+#include <curl/curl.h>
 
 // lib includes
 #include <boost/asio/ip/network_v4.hpp>
@@ -52,6 +54,8 @@
 #include "config.h"
 #include "display_device.h"
 #include "file_handler.h"
+#include "game_artwork.h"
+#include "game_artwork_provider.h"
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -90,6 +94,120 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    struct artwork_curl_body_t {
+      std::vector<unsigned char> bytes;
+      std::uintmax_t maximum_bytes;
+    };
+
+    std::size_t artwork_curl_write(void *contents, std::size_t size, std::size_t count, void *userdata) {
+      auto &body = *static_cast<artwork_curl_body_t *>(userdata);
+      if (size != 0 && count > std::numeric_limits<std::size_t>::max() / size) return 0;
+      const auto byte_count = size * count;
+      if (byte_count > body.maximum_bytes || body.bytes.size() > body.maximum_bytes - byte_count) return 0;
+      const auto *begin = static_cast<const unsigned char *>(contents);
+      body.bytes.insert(body.bytes.end(), begin, begin + byte_count);
+      return byte_count;
+    }
+
+    bool artwork_url_starts_with(std::string_view url, std::string_view prefix) {
+      return url.size() >= prefix.size() && url.substr(0, prefix.size()) == prefix;
+    }
+
+    bool valid_artwork_transport_request(const game_artwork::providers::request_t &request) {
+      using game_artwork::provider_e;
+      using game_artwork::providers::operation_e;
+      if (!game_artwork::is_allowed_provider_url(request.provider, request.url)) return false;
+
+      if (request.provider == provider_e::steam) {
+        return request.operation == operation_e::download && !request.requires_authorization &&
+               artwork_url_starts_with(
+                 request.url,
+                 "https://cdn.cloudflare.steamstatic.com/steam/apps/"
+               );
+      }
+      if (request.operation == operation_e::search || request.operation == operation_e::list) {
+        return request.requires_authorization && artwork_url_starts_with(
+          request.url,
+          "https://www.steamgriddb.com/api/v2/"
+        );
+      }
+      return request.operation == operation_e::download && !request.requires_authorization &&
+             (artwork_url_starts_with(request.url, "https://cdn.steamgriddb.com/") ||
+              artwork_url_starts_with(request.url, "https://cdn2.steamgriddb.com/"));
+    }
+
+    bool nonblank_artwork_api_key(std::string_view key) {
+      return std::any_of(key.begin(), key.end(), [](unsigned char c) {
+        return std::isspace(c) == 0;
+      });
+    }
+
+    game_artwork::providers::transport_t make_artwork_transport(std::string api_key) {
+      return [api_key = std::move(api_key)](
+               const game_artwork::providers::request_t &request,
+               std::uintmax_t maximum_bytes
+             ) -> std::optional<game_artwork::providers::transport_response_t> {
+        if (!valid_artwork_transport_request(request) || maximum_bytes == 0 ||
+            (request.requires_authorization && !nonblank_artwork_api_key(api_key))) {
+          return std::nullopt;
+        }
+
+        CURL *curl = curl_easy_init();
+        if (!curl) return std::nullopt;
+        struct curl_slist *headers = nullptr;
+        if (request.requires_authorization) {
+          headers = curl_slist_append(headers, ("Authorization: Bearer " + api_key).c_str());
+          if (!headers) {
+            curl_easy_cleanup(curl);
+            return std::nullopt;
+          }
+        }
+
+        artwork_curl_body_t body {{}, maximum_bytes};
+        curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, artwork_curl_write);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 10000L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Polaris/1.0");
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+
+        const auto result = curl_easy_perform(curl);
+        long status_code = 0;
+        char *effective_url = nullptr;
+        if (result == CURLE_OK) {
+          curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status_code);
+          curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &effective_url);
+        }
+        const std::string final_url = effective_url == nullptr ? request.url : std::string(effective_url);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        if (result != CURLE_OK || status_code < 0 ||
+            status_code > std::numeric_limits<unsigned int>::max() ||
+            !game_artwork::is_allowed_provider_url(request.provider, final_url)) {
+          return std::nullopt;
+        }
+
+        return game_artwork::providers::transport_response_t {
+          static_cast<unsigned int>(status_code),
+          std::move(body.bytes),
+          final_url,
+        };
+      };
+    }
+
     bool ipv6_prefix_matches(const boost::asio::ip::address_v6 &client,
                              const boost::asio::ip::address_v6 &network,
                              unsigned short prefix) {
@@ -2645,6 +2763,33 @@ namespace nvhttp {
         "Steam Big Picture compatibility mode may also receive controller input." :
         "Direct launch avoids opening Steam Big Picture.";
       return contract;
+    }
+
+    fs::path legacy_covers_directory() {
+      const auto configured_parent = fs::path(config::sunshine.config_file).parent_path();
+      return (configured_parent.empty() ? platf::appdata() : configured_parent) / "covers";
+    }
+
+    std::vector<game_artwork::local_candidate_t> local_artwork_candidates(const proc::ctx_t &app) {
+      const auto candidate = game_artwork::select_legacy_poster(
+        legacy_covers_directory(),
+        app.uuid,
+        app.steam_appid,
+        fs::path(app.image_path)
+      );
+      if (!candidate) {
+        return {};
+      }
+      return {*candidate};
+    }
+
+    void promote_local_artwork_poster(const proc::ctx_t &app) {
+      const auto appdata = platf::appdata();
+      const auto candidates = local_artwork_candidates(app);
+      if (!candidates.empty() && game_artwork::needs_source_upgrade(
+            appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source)) {
+        (void) game_artwork::cache_local_poster(appdata, app.uuid, candidates.front());
+      }
     }
   }  // namespace
 
@@ -6399,6 +6544,8 @@ namespace nvhttp {
         game["installed"] = true;
         game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
+        promote_local_artwork_poster(app);
+        game["artwork"] = game_artwork::current_manifest(platf::appdata(), app.uuid);
         game["last_launched"] = app.last_launched;
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
@@ -6480,6 +6627,158 @@ namespace nvhttp {
       }
 
       response->write(SimpleWeb::StatusCode::client_error_not_found);
+    };
+
+    // Cached artwork assets. Only cache-owned files selected by game_artwork are served.
+    auto polarisGameArtwork = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      const auto asset_request = game_artwork::parse_asset_request_target(request->path);
+      if (!asset_request) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+
+      const auto apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+        return boost::iequals(candidate.uuid, asset_request->uuid);
+      });
+      if (app == apps.end()) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+
+      const auto appdata = platf::appdata();
+      const auto asset = game_artwork::find_cached_asset(appdata, app->uuid, asset_request->kind);
+      if (!asset) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+
+      std::ifstream input(asset->path, std::ios::binary);
+      if (!input.is_open()) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+
+      const auto manifest = game_artwork::current_manifest(appdata, app->uuid);
+      const auto revision = manifest.value("revision", std::string {});
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", asset->mime_type);
+      headers.emplace("X-Content-Type-Options", "nosniff");
+      headers.emplace("ETag", "\"" + revision + "\"");
+      headers.emplace("Cache-Control", "private, no-cache");
+      response->write(SimpleWeb::StatusCode::success_ok, input, headers);
+    };
+
+    // Explicit artwork resolution may use allowlisted remote providers. Library GETs remain local-only.
+    auto polarisResolveGameArtwork = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      const auto requested_uuid = game_artwork::parse_resolve_request_target(request->path);
+      if (!requested_uuid) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+
+      const auto apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+        return boost::iequals(candidate.uuid, *requested_uuid);
+      });
+      if (app == apps.end()) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+
+      const auto appdata = platf::appdata();
+      const auto api_key = config::sunshine.steamgriddb_api_key;
+      const auto transport = make_artwork_transport(api_key);
+      game_artwork::resolve_request_t resolve_request {
+        appdata,
+        app->uuid,
+        app->name,
+        app->steam_appid,
+        local_artwork_candidates(*app),
+        api_key,
+      };
+
+      // Promote existing host artwork before attempting either remote provider.
+      (void) game_artwork::resolve_missing_assets(resolve_request);
+
+      if (game_artwork::is_valid_steam_appid(app->steam_appid)) {
+        (void) game_artwork::providers::execute_download_plan(
+          appdata,
+          app->uuid,
+          game_artwork::providers::plan_steam_assets(app->steam_appid),
+          transport
+        );
+      }
+
+      const auto kind_is_missing = [&](game_artwork::kind_e kind) {
+        return !game_artwork::find_cached_asset(appdata, app->uuid, kind).has_value();
+      };
+      const bool any_kind_missing =
+        kind_is_missing(game_artwork::kind_e::poster) ||
+        kind_is_missing(game_artwork::kind_e::hero) ||
+        kind_is_missing(game_artwork::kind_e::logo) ||
+        kind_is_missing(game_artwork::kind_e::icon);
+
+      if (any_kind_missing && nonblank_artwork_api_key(api_key)) {
+        try {
+          const auto search_request = game_artwork::providers::plan_steamgriddb_search(app->name);
+          if (search_request) {
+            const auto search_response = transport(*search_request, game_artwork::maximum_asset_bytes);
+            if (search_response && search_response->status_code >= 200 && search_response->status_code < 300) {
+              const std::string search_body(search_response->body.begin(), search_response->body.end());
+              const auto game_id = game_artwork::providers::parse_steamgriddb_game_id(search_body);
+              if (game_id) {
+                std::vector<game_artwork::providers::request_t> downloads;
+                for (const auto &list_request : game_artwork::providers::plan_steamgriddb_assets(*game_id)) {
+                  if (!list_request.kind || !kind_is_missing(*list_request.kind)) continue;
+                  const auto list_response = transport(list_request, game_artwork::maximum_asset_bytes);
+                  if (!list_response || list_response->status_code < 200 || list_response->status_code >= 300) {
+                    continue;
+                  }
+                  const std::string list_body(list_response->body.begin(), list_response->body.end());
+                  for (const auto &candidate : game_artwork::providers::parse_steamgriddb_assets(
+                         *list_request.kind,
+                         list_body
+                       )) {
+                    downloads.push_back({
+                      game_artwork::provider_e::steamgriddb,
+                      game_artwork::providers::operation_e::download,
+                      candidate.kind,
+                      candidate.url,
+                      false,
+                    });
+                  }
+                }
+                (void) game_artwork::providers::execute_download_plan(
+                  appdata,
+                  app->uuid,
+                  downloads,
+                  transport
+                );
+              }
+            }
+          }
+        } catch (...) {
+          // Upstream and parsing failures preserve all previously valid cache entries.
+        }
+      }
+
+      const auto manifest = game_artwork::current_manifest(appdata, app->uuid);
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(manifest.dump(), headers);
     };
 
     // Game launch via Polaris API
@@ -7581,6 +7880,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/session/cursor$"]["POST"] = polarisSetCursorVisibility;
     https_server.resource["^/polaris/v1/games$"]["GET"] = polarisGames;
     https_server.resource["^/polaris/v1/games/.+/cover$"]["GET"] = polarisGameCover;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/[^/]+$"]["GET"] = polarisGameArtwork;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/resolve$"]["POST"] = polarisResolveGameArtwork;
     https_server.resource["^/polaris/v1/games/.+/mangohud$"]["POST"] = polarisToggleMangoHud;
     https_server.resource["^/polaris/v1/games/.+/steam-launch-mode$"]["POST"] = polarisSetSteamLaunchMode;
     https_server.resource["^/polaris/v1/session/launch$"]["POST"] = polarisLaunchGame;

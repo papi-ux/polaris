@@ -274,6 +274,26 @@ configure_polaris_test_object_library(test_polaris_main_objects
     ${TEST_MAIN_SOURCE}
 )
 
+# Pure artwork resolver coverage intentionally avoids POLARIS_EXTERNAL_LIBRARIES.
+# This target remains linkable when the full runtime's optional system libraries
+# are unavailable (for example, a missing static Boost.Filesystem archive).
+add_executable(test_game_artwork
+    ${CMAKE_SOURCE_DIR}/src/game_artwork.cpp
+    ${CMAKE_SOURCE_DIR}/src/game_artwork_provider.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork_provider.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork_executor.cpp
+)
+set_target_properties(test_game_artwork PROPERTIES
+    CXX_STANDARD 23
+    INTERPROCEDURAL_OPTIMIZATION OFF
+)
+target_link_libraries(test_game_artwork PRIVATE
+    gtest_main
+    nlohmann_json::nlohmann_json
+)
+add_test(NAME test_game_artwork COMMAND test_game_artwork)
+
 configure_polaris_test_target(${PROJECT_NAME}
     $<TARGET_OBJECTS:test_polaris_main_objects>
     ${TEST_SUPPORT_SOURCES}
