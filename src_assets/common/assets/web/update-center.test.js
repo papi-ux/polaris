@@ -38,6 +38,27 @@ const release = {
   ],
 }
 
+const mutablePackageCases = [
+  {
+    family: 'arch',
+    fileName: 'Polaris-arch-x86_64.pkg.tar.zst',
+    installLine: 'sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&',
+    installLog: 'sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst',
+  },
+  {
+    family: 'fedora',
+    fileName: 'Polaris-fedora44-x86_64.rpm',
+    installLine: 'sudo dnf install "./Polaris-fedora44-x86_64.rpm" &&',
+    installLog: 'sudo dnf install ./Polaris-fedora44-x86_64.rpm',
+  },
+  {
+    family: 'ubuntu',
+    fileName: 'Polaris-ubuntu24.04-x86_64.deb',
+    installLine: 'sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&',
+    installLog: 'sudo apt install ./Polaris-ubuntu24.04-x86_64.deb',
+  },
+]
+
 const buildSteamOsState = () => buildUpdateCenterState({
   currentVersion: '1.2.1',
   latestRelease: release,
@@ -131,6 +152,61 @@ exit 0
   }
 }
 
+const runWithFakeMutableInstallCommands = (command, failStep) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'polaris-mutable-update-'))
+  try {
+    const binDir = join(fixture, 'bin')
+    const commandLog = join(fixture, 'commands.log')
+    mkdirSync(binDir)
+
+    writeFileSync(
+      join(binDir, 'wget'),
+      `#!/usr/bin/env bash
+printf 'wget %s\\n' "$*" >> "$POLARIS_COMMAND_LOG"
+if [[ "$POLARIS_FAIL_STEP" == "download" ]]; then
+  exit 44
+fi
+`,
+    )
+    writeFileSync(
+      join(binDir, 'sudo'),
+      `#!/usr/bin/env bash
+printf 'sudo %s\\n' "$*" >> "$POLARIS_COMMAND_LOG"
+if [[ "$POLARIS_FAIL_STEP" == "install" && "$1" != "-H" ]]; then
+  exit 41
+fi
+if [[ "$POLARIS_FAIL_STEP" == "setup-host" && "$1" == "-H" && "$2" == "polaris" && "$3" == "--setup-host" ]]; then
+  exit 42
+fi
+exit 0
+`,
+    )
+    writeFileSync(
+      join(binDir, 'systemctl'),
+      '#!/usr/bin/env bash\nprintf \'systemctl %s\\n\' "$*" >> "$POLARIS_COMMAND_LOG"\n',
+    )
+    for (const name of ['wget', 'sudo', 'systemctl']) {
+      chmodSync(join(binDir, name), 0o755)
+    }
+
+    const result = spawnSync('bash', ['-c', command], {
+      cwd: fixture,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: fixture,
+        PATH: `${binDir}:${process.env.PATH || ''}`,
+        POLARIS_COMMAND_LOG: commandLog,
+        POLARIS_FAIL_STEP: failStep,
+      },
+    })
+    const commands = readFileSync(commandLog, 'utf8').trim().split('\n').filter(Boolean)
+    return { commands, result }
+  } finally {
+    rmSync(fixture, { force: true, recursive: true })
+  }
+}
+
 const expectFailureSafeSteamOsCommand = (failSudo, failedCommand) => {
   const state = buildSteamOsState()
   const { commands, result } = runWithFakeInstallCommands(state.installCommand, failSudo)
@@ -160,7 +236,7 @@ describe('Update Center release awareness', () => {
     expect(state.latestVersion).toBe('v1.2.2')
     expect(state.asset.name).toBe('Polaris-arch-x86_64.pkg.tar.zst')
     expect(state.packageLabel).toBe('Arch/CachyOS package')
-    expect(state.installCommand).toContain('wget https://example.test/Polaris-arch-x86_64.pkg.tar.zst')
+    expect(state.installCommand).toContain('wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://example.test/Polaris-arch-x86_64.pkg.tar.zst &&')
     expect(state.installCommand).toContain('sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst')
     expect(state.installCommand).toContain('sudo -H polaris --setup-host')
     expect(state.installCommand).toContain('systemctl --user restart polaris')
@@ -306,6 +382,60 @@ describe('Update Center release awareness', () => {
       'sudo dnf install "./Polaris-fedora44-x86_64.rpm"',
     )
   })
+
+  it.each(mutablePackageCases)(
+    'overwrites the exact $family package target and chains install side effects',
+    ({ family, fileName, installLine }) => {
+      const downloadUrl = `https://example.test/${fileName}`
+
+      expect(buildManualInstallCommand({
+        name: fileName,
+        browser_download_url: downloadUrl,
+        packageFamily: family,
+      }).split('\n')).toEqual([
+        `wget --output-document=./${fileName} ${downloadUrl} &&`,
+        installLine,
+        'sudo -H polaris --setup-host &&',
+        'systemctl --user restart polaris',
+      ])
+    },
+  )
+
+  it.each(mutablePackageCases)(
+    'stops $family update side effects after each failed command',
+    ({ family, fileName, installLog }) => {
+      const downloadUrl = `https://example.test/${fileName}`
+      const command = buildManualInstallCommand({
+        name: fileName,
+        browser_download_url: downloadUrl,
+        packageFamily: family,
+      })
+      const downloadLog = `wget --output-document=./${fileName} ${downloadUrl}`
+      const setupLog = 'sudo -H polaris --setup-host'
+      const expectedByFailure = {
+        download: [downloadLog],
+        install: [downloadLog, installLog],
+        'setup-host': [downloadLog, installLog, setupLog],
+      }
+
+      for (const [failStep, expectedCommands] of Object.entries(expectedByFailure)) {
+        const { commands, result } = runWithFakeMutableInstallCommands(command, failStep)
+
+        expect(result.status, `${family}/${failStep} stdout: ${result.stdout}\nstderr: ${result.stderr}`).not.toBe(0)
+        expect(commands).toEqual(expectedCommands)
+        expect(commands.some((entry) => entry.startsWith('systemctl '))).toBe(false)
+      }
+
+      const success = runWithFakeMutableInstallCommands(command, '')
+      expect(success.result.status, `${family}/success stderr: ${success.result.stderr}`).toBe(0)
+      expect(success.commands).toEqual([
+        downloadLog,
+        installLog,
+        setupLog,
+        'systemctl --user restart polaris',
+      ])
+    },
+  )
 
   it('selects the Ubuntu 24.04 package for Debian-family tester hosts', () => {
     const state = buildUpdateCenterState({

@@ -47,7 +47,7 @@ Install Polaris from the Fedora 44 release RPM:
 
 ```bash
 rpm_name="Polaris-fedora44-x86_64.rpm"
-wget "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
+wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
 sudo rpm-ostree install -r "./${rpm_name}"
 ```
 
@@ -248,7 +248,7 @@ newer local RPM over the existing layered Polaris package:
 
 ```bash
 rpm_name="Polaris-fedora44-x86_64.rpm"
-wget -O "${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}"
+wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
 sudo rpm-ostree install -r "./${rpm_name}"
 ```
 

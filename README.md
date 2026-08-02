@@ -61,18 +61,18 @@ AI Auto Quality is optional. If you enable it, Polaris uses the provider you con
 ### Fedora 44
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm
-sudo dnf install ./Polaris-fedora44-x86_64.rpm
-sudo -H polaris --setup-host
+wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm &&
+sudo dnf install ./Polaris-fedora44-x86_64.rpm &&
+sudo -H polaris --setup-host &&
 polaris
 ```
 
 ### Arch Linux / CachyOS
 
 ```bash
-wget https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst
-sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst
-sudo -H polaris --setup-host
+wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
+sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
+sudo -H polaris --setup-host &&
 polaris
 ```
 
