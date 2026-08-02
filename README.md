@@ -91,15 +91,17 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.3.3
+## What is New in v1.3.4
 
-Polaris v1.3.3 is a focused patch for clean configuration saves, controller isolation, Linux operator recovery, and Nix session reliability.
+Polaris v1.3.4 adds a dedicated SteamOS 3.8 package lane and tightens Linux package, setup, and import safety.
 
-- **Settings that save cleanly**: response-only runtime and stream-path metadata is stripped before configuration writes, while display-planner presets remain idempotent.
-- **Better controller boundaries**: preallocated gamepads rebind controller feedback correctly, and optional client-gamepad seat isolation keeps isolated virtual pads off the active desktop seat.
-- **More predictable Linux tools**: tray URL launching is locale-safe, failed Nix runtime publication cleans temporary authority files, and the composed idle/session applications stay ShellCheck-clean.
-- **Safer host recovery**: fallback planning remains stable and the Bazzite guidance includes explicit Sunshine restoration after testing Polaris.
-- **Hardened packages**: the official release remains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, and `Polaris-ubuntu24.04-x86_64.deb`, with Fedora 44 as the sole Fedora release lane and a permanent `npm audit --audit-level=high` gate.
+- **Package checks**: fail-closed packaged binary path validation now rejects invalid layouts, preserves source-prefix remapping, and records exact validation receipts.
+- **Secure Bazzite paths**: Bazzite provides secure support for the `/home` to `var/home` layout without broad canonicalization, keeping path validation narrow and explicit.
+- **Predictable host setup**: setup-host dispatch happens early and public instructions consistently use `sudo -H polaris --setup-host`.
+- **Reliable cover imports**: locale-safe ImageMagick discovery keeps Steam cover import working across localized tool output.
+- **Dedicated SteamOS support**: SteamOS 3.8 x86_64 receives a separate Valve-repository package and failure-safe Desktop Mode installation path. Physical Steam Deck gameplay and Game Mode are not certified by this release.
+- **Security gates**: `npm audit --audit-level=high` remains mandatory, and the forbidden `webtransport-go v0.10.0` dependency remains absent.
+- **Exact release set**: the official artifacts are `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb`.
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
@@ -111,6 +113,7 @@ Use the release package for your distro before considering source builds. Packag
 | Fedora 44 | `Polaris-fedora44-x86_64.rpm` from the latest release |
 | Arch Linux | `Polaris-arch-x86_64.pkg.tar.zst` from the latest release |
 | CachyOS / Arch derivatives | Start with the Arch package; source/local package fallback if a derivative drifts |
+| SteamOS 3.8 x86_64 | `Polaris-steamos3.8-x86_64.pkg.tar.zst`; Desktop Mode validation only, see [SteamOS guide](docs/steamos.md) |
 | Bazzite 44 | Layer the matching Fedora 44 RPM with `rpm-ostree`; see [Bazzite guide](docs/bazzite.md) |
 | Ubuntu 24.04 | `Polaris-ubuntu24.04-x86_64.deb` experimental tester path; see [Ubuntu guide](docs/ubuntu.md) |
 | openSUSE Tumbleweed | Source build; see [openSUSE guide](docs/openSUSE.md) |
@@ -129,6 +132,7 @@ Detailed source builds, local Arch package builds, distro dependency lists, open
 | Fedora 44 | Recommended | Official RPM asset and most validated release path |
 | Arch Linux | Recommended | Official package asset |
 | CachyOS / Arch derivatives | Expected via Arch package | Pacman-compatible derivatives should start here; report derivative-specific dependency/runtime gaps |
+| SteamOS 3.8 x86_64 | Experimental Desktop Mode package | Dedicated Valve-repository package; physical Steam Deck gameplay, Game Mode, suspend, and update persistence are not yet certified |
 | Bazzite | Experimental | Layer the Fedora RPM with `rpm-ostree`; Desktop Mode validated on NVIDIA with Headless Stream; real Steam/Game Mode needs more coverage |
 | Ubuntu 24.04 | Experimental tester path | DEB asset is available, but this path needs broader real-hardware validation |
 | openSUSE Tumbleweed | Source-build supported | Dedicated dependency/build guide and CI build coverage; no published release package asset yet |
@@ -336,6 +340,7 @@ Full config tables, AI provider examples, HDR notes, and credential recovery ste
 | [Building Polaris](docs/building.md) | Source builds, local packages, distro dependencies, Browser Stream build flags |
 | [openSUSE Build Guide](docs/openSUSE.md) | Tumbleweed dependency list, shared Boost notes, optional local RPM build |
 | [Troubleshooting](docs/troubleshooting.md) | Runtime logs, capture fallbacks, audio/session issues |
+| [SteamOS 3.8 Install Guide](docs/steamos.md) | Dedicated package, read-only root handling, Desktop Mode limits, rollback |
 | [Bazzite Install Guide](docs/bazzite.md) | Bazzite layering, validation status, rollback, Game Mode notes |
 | [Ubuntu Install Guide](docs/ubuntu.md) | Ubuntu DEB status, source fallback, validation notes |
 

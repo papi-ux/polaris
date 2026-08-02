@@ -118,6 +118,12 @@ add_dependencies(polaris web-ui)
 
 if(POLARIS_ENABLE_BROWSER_STREAM)
     find_program(GO_EXECUTABLE go REQUIRED)
+    set(BROWSER_STREAM_HELPER_BUILD_ARGUMENTS build -trimpath)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND BROWSER_STREAM_HELPER_BUILD_ARGUMENTS
+                -buildmode=pie
+                "-ldflags=-linkmode=external -extldflags=-Wl,-z,relro,-z,now")
+    endif()
     set(BROWSER_STREAM_HELPER_OUTPUT "${CMAKE_BINARY_DIR}/polaris-browser-stream-helper")
     file(GLOB_RECURSE BROWSER_STREAM_HELPER_SOURCE_FILES CONFIGURE_DEPENDS
             "${CMAKE_SOURCE_DIR}/browser_stream_helper/*.go"
@@ -127,7 +133,7 @@ if(POLARIS_ENABLE_BROWSER_STREAM)
             OUTPUT "${BROWSER_STREAM_HELPER_OUTPUT}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/browser_stream_helper"
             COMMENT "Building Browser Stream WebTransport helper"
-            COMMAND "${GO_EXECUTABLE}" build -trimpath -o "${BROWSER_STREAM_HELPER_OUTPUT}" .
+            COMMAND "${GO_EXECUTABLE}" ${BROWSER_STREAM_HELPER_BUILD_ARGUMENTS} -o "${BROWSER_STREAM_HELPER_OUTPUT}" .
             DEPENDS ${BROWSER_STREAM_HELPER_SOURCE_FILES}
             VERBATIM)
     add_custom_target(browser-stream-helper ALL DEPENDS "${BROWSER_STREAM_HELPER_OUTPUT}")

@@ -5,6 +5,19 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.4 - 2026-07-31
+
+Patch release adding a dedicated SteamOS 3.8 package lane and tightening Linux package, path, setup, and import safety.
+
+- Added fail-closed packaged binary path validation with explicit source-prefix remapping and retained validation receipts
+- Added secure Bazzite support for the `/home` to `var/home` layout without broad canonicalization
+- Dispatched setup-host early and standardized public host-integration commands on `sudo -H polaris --setup-host`
+- Made ImageMagick discovery locale-safe during Steam cover import
+- Added a dedicated SteamOS 3.8 x86_64 package built against Valve's versioned repositories, with failure-safe installation and Desktop Mode package and startup validation only
+- Kept physical Steam Deck gameplay, Game Mode, OLED 90 Hz, suspend and resume, and update persistence outside the certified support claim pending hardware evidence
+- Kept `npm audit --audit-level=high` mandatory and the forbidden `webtransport-go v0.10.0` dependency absent
+- Standardized the official release on exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb`
+
 ## v1.3.3 - 2026-07-30
 
 Patch release focused on configuration-save hygiene, controller boundaries, Linux recovery guidance, and Nix session reliability.

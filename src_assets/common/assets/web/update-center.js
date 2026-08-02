@@ -2,6 +2,7 @@ import PolarisVersion from './polaris_version'
 
 const PACKAGE_LABELS = {
   arch: 'Arch/CachyOS package',
+  steamos: 'SteamOS 3.8 package',
   fedora: 'Fedora RPM package',
   ubuntu: 'Ubuntu 24.04 DEB package',
 }
@@ -27,11 +28,17 @@ function hasToken(tokens, value) {
   return tokens.includes(value)
 }
 
+function isSteamOs38(host = {}) {
+  const versionId = normalizeToken(host.distro?.version_id)
+  return versionId === '3.8' || versionId.startsWith('3.8.')
+}
+
 export function inferPackageFamily(host = {}) {
   if (normalizeToken(host.platform) !== 'linux') return ''
-  if (host.package_family) return normalizeToken(host.package_family)
 
   const tokens = distroTokens(host)
+  if (hasToken(tokens, 'steamos')) return 'steamos'
+  if (host.package_family) return normalizeToken(host.package_family)
   if (hasToken(tokens, 'arch') || hasToken(tokens, 'cachyos') || hasToken(tokens, 'manjaro') || hasToken(tokens, 'endeavouros')) {
     return 'arch'
   }
@@ -45,10 +52,11 @@ export function inferPackageFamily(host = {}) {
 }
 
 function preferredAssetName(host = {}) {
-  if (host.recommended_asset_name) return host.recommended_asset_name
-
   const family = inferPackageFamily(host)
   const versionId = String(host.distro?.version_id || '').trim()
+  if (family === 'steamos' && isSteamOs38(host)) return 'Polaris-steamos3.8-x86_64.pkg.tar.zst'
+  if (family === 'steamos') return ''
+  if (host.recommended_asset_name) return host.recommended_asset_name
   if (family === 'arch') return 'Polaris-arch-x86_64.pkg.tar.zst'
   if (family === 'fedora' && versionId) return `Polaris-fedora${versionId}-x86_64.rpm`
   if (family === 'ubuntu' && versionId.startsWith('24.04')) return 'Polaris-ubuntu24.04-x86_64.deb'
@@ -56,29 +64,81 @@ function preferredAssetName(host = {}) {
 }
 
 export function selectReleaseAsset(release, host = {}) {
-  const assets = Array.isArray(release?.assets) ? release.assets : []
+  if (!release || !Array.isArray(release.assets)) return null
+
+  const assets = release.assets
+  const family = inferPackageFamily(host)
+  if (family === 'steamos') {
+    if (!isSteamOs38(host)) return null
+    return assets.find((asset) => asset.name === 'Polaris-steamos3.8-x86_64.pkg.tar.zst') || null
+  }
   const preferredName = preferredAssetName(host)
   if (preferredName) {
     const exact = assets.find((asset) => asset.name === preferredName)
-    if (exact) return { ...exact, packageFamily: inferPackageFamily(host) }
+    if (exact) return exact
   }
 
-  const family = inferPackageFamily(host)
   const fallback = assets.find((asset) => {
     if (family === 'arch') return /Polaris-arch-x86_64\.pkg\.tar\.zst$/.test(asset.name)
     if (family === 'fedora') return /Polaris-fedora\d+-x86_64\.rpm$/.test(asset.name)
     if (family === 'ubuntu') return /Polaris-ubuntu24\.04-x86_64\.deb$/.test(asset.name)
     return false
   })
-  return fallback ? { ...fallback, packageFamily: family } : null
+  return fallback || null
+}
+
+function isSafeAssetForFamily(asset, family) {
+  const fileName = String(asset?.name || '')
+  const rawUrl = String(asset?.browser_download_url || '')
+  const expectedName = family === 'steamos'
+    ? /^Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst$/
+    : family === 'arch'
+      ? /^Polaris-arch-x86_64\.pkg\.tar\.zst$/
+      : family === 'fedora'
+        ? /^Polaris-fedora\d+-x86_64\.rpm$/
+        : family === 'ubuntu'
+          ? /^Polaris-ubuntu24\.04-x86_64\.deb$/
+          : null
+  if (!expectedName?.test(fileName)) return false
+  if (!/^https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/[A-Za-z0-9._~%+/-]+$/.test(rawUrl)) return false
+
+  try {
+    const url = new URL(rawUrl)
+    return url.protocol === 'https:'
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash
+      && url.pathname.endsWith(`/${fileName}`)
+  } catch {
+    return false
+  }
 }
 
 export function buildManualInstallCommand(asset, host = {}) {
   if (!asset?.name || !asset?.browser_download_url) return ''
 
   const family = normalizeToken(asset.packageFamily || host.packageFamily || inferPackageFamily(host))
+  if (!isSafeAssetForFamily(asset, family)) return ''
   const fileName = asset.name
-  const lines = [`wget ${asset.browser_download_url}`]
+  const downloadUrl = asset.browser_download_url
+  const lines = family === 'steamos'
+    ? [`wget --output-document=./${fileName} ${downloadUrl} &&`]
+    : [`wget ${downloadUrl}`]
+
+  if (family === 'steamos') {
+    lines.push('(')
+    lines.push('set -e')
+    lines.push("trap 'sudo steamos-readonly enable' EXIT")
+    lines.push('sudo steamos-readonly disable || exit $?')
+    lines.push(`sudo pacman -U ./${fileName} || exit $?`)
+    lines.push('sudo -H polaris --setup-host || exit $?')
+    lines.push('sudo steamos-readonly enable || exit $?')
+    lines.push('trap - EXIT')
+    lines.push(') &&')
+    lines.push('systemctl --user enable --now polaris')
+    return lines.join('\n')
+  }
 
   if (family === 'arch') {
     lines.push(`sudo pacman -U ./${fileName}`)

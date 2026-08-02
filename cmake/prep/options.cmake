@@ -54,6 +54,8 @@ elseif(UNIX)  # Linux
             "Enable an AppImage build." OFF)
     option(POLARIS_CONFIGURE_PKGBUILD
             "Configure files required for AUR. Recommended to use with POLARIS_CONFIGURE_ONLY" OFF)
+    option(POLARIS_CONFIGURE_STEAMOS_PKGBUILD
+            "Configure SteamOS PKGBUILD. Recommended with POLARIS_CONFIGURE_ONLY" OFF)
 
     # Linux capture methods
     option(POLARIS_ENABLE_CUDA
