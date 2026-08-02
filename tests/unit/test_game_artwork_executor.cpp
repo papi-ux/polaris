@@ -40,6 +40,10 @@ namespace {
     return {0xff, 0xd8, 0xff, 0xe0, marker};
   }
 
+  std::vector<unsigned char> png(unsigned char marker = 0) {
+    return {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, marker};
+  }
+
   void write_jpeg(const fs::path &path, unsigned char marker) {
     fs::create_directories(path.parent_path());
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -196,6 +200,62 @@ TEST(GameArtworkDownloadExecutor, TriesFallbacksPerKindAndRejectsOversizedBodies
   ASSERT_NE(find_kind(assets, kind_e::hero), nullptr);
   EXPECT_EQ(find_kind(assets, kind_e::hero)->source, source_e::steamgriddb);
   EXPECT_EQ(find_kind(assets, kind_e::logo), nullptr);
+}
+
+TEST(GameArtworkDownloadExecutor, AtomicallyPublishesAndReplacesManualOverrideSource) {
+  temp_dir_t temp("manual-override");
+  const auto old_override = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, kind_e::poster, source_e::override, ".jpg");
+  const auto reusable_provider = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, kind_e::poster, source_e::steamgriddb, ".jpg");
+  ASSERT_TRUE(old_override.has_value());
+  ASSERT_TRUE(reusable_provider.has_value());
+  write_jpeg(*old_override, 1);
+  write_jpeg(*reusable_provider, 9);
+  const std::vector<request_t> plan {
+    {provider_e::steamgriddb, operation_e::download, kind_e::poster,
+     "https://cdn.steamgriddb.com/grid/selected.png", false},
+    {provider_e::steamgriddb, operation_e::download, kind_e::poster,
+     "https://cdn2.steamgriddb.com/grid/lower-ranked.png", false},
+  };
+  int published = 0;
+  int transport_calls = 0;
+  const game_artwork::providers::execution_options_t options {
+    .destination_source = source_e::override,
+    .force_replace = true,
+    .on_published = [&](const game_artwork::asset_t &) { ++published; },
+  };
+
+  auto assets = game_artwork::providers::execute_download_plan(
+    temp.path, GAME_UUID, plan,
+    [&](const request_t &request, std::uintmax_t) -> std::optional<transport_response_t> {
+      ++transport_calls;
+      return transport_response_t {200, png(2), request.url};
+    },
+    options);
+  EXPECT_EQ(transport_calls, 1);
+  EXPECT_EQ(published, 1);
+  const auto *selected = find_kind(assets, kind_e::poster);
+  ASSERT_NE(selected, nullptr);
+  EXPECT_EQ(selected->source, source_e::override);
+  EXPECT_EQ(selected->mime_type, "image/png");
+  EXPECT_EQ(selected->path.extension(), ".png");
+  EXPECT_FALSE(fs::exists(*old_override));
+  EXPECT_TRUE(fs::exists(*reusable_provider));
+
+  assets = game_artwork::providers::execute_download_plan(
+    temp.path, GAME_UUID, plan,
+    [&](const request_t &request, std::uintmax_t) -> std::optional<transport_response_t> {
+      ++transport_calls;
+      return transport_response_t {200, {'n', 'o'}, request.url};
+    },
+    options);
+  EXPECT_EQ(transport_calls, 3);
+  EXPECT_EQ(published, 1);
+  selected = find_kind(assets, kind_e::poster);
+  ASSERT_NE(selected, nullptr);
+  EXPECT_EQ(selected->source, source_e::override);
+  EXPECT_EQ(selected->mime_type, "image/png");
 }
 
 TEST(GameArtworkDownloadExecutor, RejectsInvalidUuidWithoutInvokingTransport) {

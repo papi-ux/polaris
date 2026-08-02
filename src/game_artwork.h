@@ -25,6 +25,7 @@ namespace game_artwork {
   };
 
   enum class source_e {
+    override,
     local,
     steam,
     steamgriddb,

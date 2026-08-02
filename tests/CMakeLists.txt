@@ -279,8 +279,12 @@ configure_polaris_test_object_library(test_polaris_main_objects
 # are unavailable (for example, a missing static Boost.Filesystem archive).
 add_executable(test_game_artwork
     ${CMAKE_SOURCE_DIR}/src/game_artwork.cpp
+    ${CMAKE_SOURCE_DIR}/src/game_artwork_override.cpp
+    ${CMAKE_SOURCE_DIR}/src/game_artwork_manual.cpp
     ${CMAKE_SOURCE_DIR}/src/game_artwork_provider.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork_override.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork_manual.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork_provider.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_artwork_executor.cpp
 )

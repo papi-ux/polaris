@@ -91,6 +91,27 @@ TEST(GameArtworkPaths, UsesDeterministicCachePathsWithoutAcceptingTraversal) {
     appdata, GAME_UUID, game_artwork::kind_e::poster, game_artwork::source_e::local, ".png/../../secret").has_value());
 }
 
+TEST(GameArtworkOverrideSource, OutranksAutomaticSourcesInCacheAndManifest) {
+  temp_dir_t temp("override-priority");
+  const auto manual = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, game_artwork::kind_e::poster, game_artwork::source_e::override, ".png");
+  const auto configured = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, game_artwork::kind_e::poster, game_artwork::source_e::local, ".jpg");
+  ASSERT_TRUE(manual.has_value());
+  ASSERT_TRUE(configured.has_value());
+  write_png(*manual, 1);
+  write_jpeg(*configured, 2);
+
+  const auto selected = game_artwork::find_cached_asset(temp.path, GAME_UUID, game_artwork::kind_e::poster);
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(selected->source, game_artwork::source_e::override);
+  EXPECT_FALSE(game_artwork::needs_source_upgrade(
+    temp.path, GAME_UUID, game_artwork::kind_e::poster, game_artwork::source_e::local));
+
+  const auto manifest = game_artwork::current_manifest(temp.path, GAME_UUID);
+  EXPECT_EQ(manifest["assets"]["poster"]["source"], "override");
+}
+
 TEST(GameArtworkAllowlist, RequiresHttpsAndExactProviderHosts) {
   using game_artwork::provider_e;
   EXPECT_TRUE(game_artwork::is_allowed_provider_url(

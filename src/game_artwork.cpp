@@ -36,6 +36,7 @@ namespace game_artwork {
     }
 
     std::optional<source_e> parse_source(std::string_view value) {
+      if (value == "override") return source_e::override;
       if (value == "local") return source_e::local;
       if (value == "steam") return source_e::steam;
       if (value == "steamgriddb") return source_e::steamgriddb;
@@ -45,16 +46,18 @@ namespace game_artwork {
 
     int source_priority(source_e source) {
       switch (source) {
-        case source_e::local:
+        case source_e::override:
           return 0;
-        case source_e::host:
+        case source_e::local:
           return 1;
-        case source_e::steam:
+        case source_e::host:
           return 2;
-        case source_e::steamgriddb:
+        case source_e::steam:
           return 3;
+        case source_e::steamgriddb:
+          return 4;
       }
-      return 4;
+      return 5;
     }
 
     int kind_priority(kind_e kind) {
@@ -198,6 +201,8 @@ namespace game_artwork {
 
   std::string_view source_name(source_e source) {
     switch (source) {
+      case source_e::override:
+        return "override";
       case source_e::local:
         return "local";
       case source_e::steam:

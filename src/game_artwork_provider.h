@@ -2,6 +2,7 @@
 
 #include "game_artwork.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -34,6 +35,16 @@ namespace game_artwork::providers {
     std::string url;
   };
 
+  /** Sanitized metadata safe to expose for a caller-selected provider match. */
+  struct match_candidate_t {
+    std::string provider;
+    std::string provider_game_id;
+    std::string title;
+    std::optional<std::string> steam_appid;
+    std::optional<unsigned int> release_year;
+    double confidence;
+  };
+
   struct transport_response_t {
     unsigned int status_code;
     std::vector<unsigned char> body;
@@ -47,6 +58,12 @@ namespace game_artwork::providers {
     std::uintmax_t maximum_bytes
   )>;
 
+  struct execution_options_t {
+    std::optional<source_e> destination_source;
+    bool force_replace = false;
+    std::function<void(const asset_t &)> on_published;
+  };
+
   /**
    * Execute allowlisted download requests with caller-injected I/O.
    *
@@ -59,7 +76,8 @@ namespace game_artwork::providers {
     const std::filesystem::path &appdata,
     std::string_view uuid,
     const std::vector<request_t> &requests,
-    const transport_t &transport
+    const transport_t &transport,
+    const execution_options_t &options = {}
   );
 
   /** Plan deterministic downloads from Steam's public app-art CDN. */
@@ -70,6 +88,16 @@ namespace game_artwork::providers {
 
   /** Parse a ranked SteamGridDB search response, returning the first valid ID. */
   std::optional<std::uint64_t> parse_steamgriddb_game_id(std::string_view response_body);
+
+  /**
+   * Parse ranked SteamGridDB search metadata into a bounded, sanitized type.
+   * Provider URLs, scores, credentials, and all other raw fields are discarded.
+   */
+  std::vector<match_candidate_t> parse_steamgriddb_match_candidates(
+    std::string_view query,
+    std::string_view response_body,
+    std::size_t maximum_candidates
+  );
 
   /** Plan one SteamGridDB metadata request per supported artwork kind. */
   std::vector<request_t> plan_steamgriddb_assets(std::uint64_t game_id);

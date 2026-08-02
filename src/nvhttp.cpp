@@ -7,6 +7,7 @@
 
 // standard includes
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cctype>
 #include <cmath>
@@ -55,6 +56,8 @@
 #include "display_device.h"
 #include "file_handler.h"
 #include "game_artwork.h"
+#include "game_artwork_manual.h"
+#include "game_artwork_override.h"
 #include "game_artwork_provider.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -140,6 +143,76 @@ namespace nvhttp {
       return std::any_of(key.begin(), key.end(), [](unsigned char c) {
         return std::isspace(c) == 0;
       });
+    }
+
+    constexpr std::uintmax_t artwork_metadata_bytes = 1024U * 1024U;
+
+    std::int64_t artwork_now_milliseconds() {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    game_artwork::manual::preview_cache_t &artwork_preview_cache() {
+      static game_artwork::manual::preview_cache_t cache;
+      return cache;
+    }
+
+    nlohmann::json current_artwork_manifest_unlocked(const std::filesystem::path &appdata, std::string_view uuid) {
+      auto manifest = game_artwork::current_manifest(appdata, uuid);
+      if (const auto metadata = game_artwork::load_artwork_override(appdata, uuid)) {
+        manifest = game_artwork::decorate_manifest_with_artwork_override(std::move(manifest), *metadata);
+      }
+      return manifest;
+    }
+
+    nlohmann::json current_artwork_manifest(const std::filesystem::path &appdata, std::string_view uuid) {
+      if (!game_artwork::recover_interrupted_artwork_override(appdata, uuid)) return nullptr;
+      auto lock = game_artwork::acquire_artwork_override_read_lock();
+      return current_artwork_manifest_unlocked(appdata, uuid);
+    }
+
+    struct artwork_staging_root_t {
+      explicit artwork_staging_root_t(std::filesystem::path value): path(std::move(value)) {}
+      artwork_staging_root_t(const artwork_staging_root_t &) = delete;
+      artwork_staging_root_t &operator=(const artwork_staging_root_t &) = delete;
+      artwork_staging_root_t(artwork_staging_root_t &&other) noexcept: path(std::move(other.path)) {
+        other.path.clear();
+      }
+      artwork_staging_root_t &operator=(artwork_staging_root_t &&) = delete;
+
+      std::filesystem::path path;
+      ~artwork_staging_root_t() {
+        if (path.empty()) return;
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+      }
+    };
+
+    std::optional<artwork_staging_root_t> create_artwork_staging_root(
+      const std::filesystem::path &appdata
+    ) {
+      for (int attempt = 0; attempt < 4; ++attempt) {
+        std::array<unsigned char, 16> random {};
+        if (RAND_bytes(random.data(), static_cast<int>(random.size())) != 1) return std::nullopt;
+        if (auto candidate = game_artwork::create_artwork_staging_directory(appdata, util::hex_vec(random))) {
+          return artwork_staging_root_t {std::move(*candidate)};
+        }
+      }
+      return std::nullopt;
+    }
+
+    std::optional<std::string> read_bounded_artwork_body(std::istream &input, std::size_t maximum_bytes) {
+      std::string body;
+      body.reserve(std::min<std::size_t>(maximum_bytes, 4096));
+      std::array<char, 1024> buffer {};
+      while (input.good()) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = input.gcount();
+        if (count <= 0) break;
+        if (body.size() > maximum_bytes - static_cast<std::size_t>(count)) return std::nullopt;
+        body.append(buffer.data(), static_cast<std::size_t>(count));
+      }
+      return body;
     }
 
     game_artwork::providers::transport_t make_artwork_transport(std::string api_key) {
@@ -4430,16 +4503,16 @@ namespace nvhttp {
     BOOST_LOG(debug) << "TUNNEL :: "sv << tunnel<T>::to_string;
 
     BOOST_LOG(debug) << "METHOD :: "sv << request->method;
-    BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
+    BOOST_LOG(debug) << "DESTINATION :: "sv << game_artwork::manual::request_log_path(request->path);
 
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      BOOST_LOG(debug) << name << " -- " << game_artwork::manual::request_log_value(name, val);
     }
 
     BOOST_LOG(debug) << " [--] "sv;
 
     for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      BOOST_LOG(debug) << name << " -- " << game_artwork::manual::request_log_value(name, val);
     }
 
     BOOST_LOG(debug) << " [--] "sv;
@@ -4449,20 +4522,14 @@ namespace nvhttp {
   void not_found(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
 
-    std::ostringstream query_string;
-    bool first = true;
-    for (const auto &[name, val] : request->parse_query_string()) {
-      if (!first) {
-        query_string << '&';
-      }
-      query_string << name << '=' << val;
-      first = false;
+    std::vector<std::pair<std::string, std::string>> query;
+    for (const auto &[name, value] : request->parse_query_string()) {
+      query.emplace_back(name, value);
     }
 
     BOOST_LOG(warning) << "nvhttp: 404 "sv
-                       << request->method << ' ' << request->path
-                       << (query_string.str().empty() ? "" : "?")
-                       << query_string.str();
+                       << request->method << ' '
+                       << game_artwork::manual::request_log_target(request->path, query);
 
     pt::ptree tree;
     tree.put("root.<xmlattr>.status_code", 404);
@@ -5909,6 +5976,9 @@ namespace nvhttp {
       features["ai_optimizer_control"] = true;
       features["adaptive_bitrate_control"] = true;
       features["game_library"] = true;
+      features["artwork_manifest_v1"] = true;
+      features["artwork_manual_match_v1"] = nonblank_artwork_api_key(
+        config::sunshine.steamgriddb_api_key);
       features["session_lifecycle"] = true;
       features["session_stop_v1"] = true;
       features["device_profiles"] = true;
@@ -6545,7 +6615,7 @@ namespace nvhttp {
         game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
         promote_local_artwork_poster(app);
-        game["artwork"] = game_artwork::current_manifest(platf::appdata(), app.uuid);
+        game["artwork"] = current_artwork_manifest(platf::appdata(), app.uuid);
         game["last_launched"] = app.last_launched;
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
@@ -6653,6 +6723,11 @@ namespace nvhttp {
       }
 
       const auto appdata = platf::appdata();
+      if (!game_artwork::recover_interrupted_artwork_override(appdata, app->uuid)) {
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
+        return;
+      }
+      auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
       const auto asset = game_artwork::find_cached_asset(appdata, app->uuid, asset_request->kind);
       if (!asset) {
         response->write(SimpleWeb::StatusCode::client_error_not_found);
@@ -6665,7 +6740,7 @@ namespace nvhttp {
         return;
       }
 
-      const auto manifest = game_artwork::current_manifest(appdata, app->uuid);
+      const auto manifest = current_artwork_manifest_unlocked(appdata, app->uuid);
       const auto revision = manifest.value("revision", std::string {});
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", asset->mime_type);
@@ -6775,9 +6850,293 @@ namespace nvhttp {
         }
       }
 
-      const auto manifest = game_artwork::current_manifest(appdata, app->uuid);
+      const auto manifest = current_artwork_manifest(appdata, app->uuid);
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
+      response->write(manifest.dump(), headers);
+    };
+
+    auto polarisSearchGameArtworkMatches = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+      const auto route = game_artwork::manual::parse_route_target(request->path);
+      if (!route || route->route != game_artwork::manual::route_e::search) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      const auto apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+        return boost::iequals(candidate.uuid, route->uuid);
+      });
+      if (app == apps.end()) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+      const auto api_key = config::sunshine.steamgriddb_api_key;
+      if (!nonblank_artwork_api_key(api_key)) {
+        response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+        return;
+      }
+      const auto args = request->parse_query_string();
+      const auto query_it = args.find("query");
+      const auto query = query_it == args.end()
+        ? std::optional<std::string> {}
+        : game_artwork::manual::sanitize_search_query(query_it->second);
+      if (!query) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      const auto transport = make_artwork_transport(api_key);
+      const auto search_request = game_artwork::providers::plan_steamgriddb_search(*query);
+      if (!search_request) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      try {
+        const auto search_response = transport(*search_request, artwork_metadata_bytes);
+        if (!search_response || search_response->status_code < 200 || search_response->status_code >= 300 ||
+            !game_artwork::is_allowed_provider_url(
+              game_artwork::provider_e::steamgriddb,
+              search_response->final_url.empty() ? search_request->url : search_response->final_url)) {
+          response->write(SimpleWeb::StatusCode::server_error_bad_gateway);
+          return;
+        }
+        const std::string search_body(search_response->body.begin(), search_response->body.end());
+        const auto candidates = game_artwork::providers::parse_steamgriddb_match_candidates(
+          *query, search_body, game_artwork::manual::maximum_candidate_count);
+        nlohmann::json matches = nlohmann::json::array();
+        for (const auto &candidate : candidates) {
+          nlohmann::json item {
+            {"provider", candidate.provider},
+            {"provider_game_id", candidate.provider_game_id},
+            {"title", candidate.title},
+            {"confidence", candidate.confidence},
+          };
+          if (candidate.steam_appid) item["steam_appid"] = *candidate.steam_appid;
+          if (candidate.release_year) item["release_year"] = *candidate.release_year;
+          try {
+            const auto id = std::stoull(candidate.provider_game_id);
+            const auto plans = game_artwork::providers::plan_steamgriddb_assets(id);
+            const auto poster = std::find_if(plans.begin(), plans.end(), [](const auto &plan) {
+              return plan.kind == game_artwork::kind_e::poster;
+            });
+            if (poster != plans.end()) {
+              const auto list_response = transport(*poster, artwork_metadata_bytes);
+              if (list_response && list_response->status_code >= 200 && list_response->status_code < 300) {
+                const std::string list_body(list_response->body.begin(), list_response->body.end());
+                const auto images = game_artwork::providers::parse_steamgriddb_assets(
+                  game_artwork::kind_e::poster, list_body);
+                if (!images.empty()) {
+                  const game_artwork::providers::request_t download {
+                    game_artwork::provider_e::steamgriddb,
+                    game_artwork::providers::operation_e::download,
+                    game_artwork::kind_e::poster,
+                    images.front().url,
+                    false,
+                  };
+                  const auto image = transport(download, game_artwork::manual::maximum_preview_bytes);
+                  const auto effective = image && !image->final_url.empty() ? image->final_url : download.url;
+                  if (image && image->status_code >= 200 && image->status_code < 300 &&
+                      game_artwork::is_allowed_provider_url(download.provider, effective)) {
+                    if (const auto preview = artwork_preview_cache().publish(
+                          app->uuid, game_artwork::kind_e::poster, image->body, artwork_now_milliseconds())) {
+                      item["preview"] = {{"poster", "/polaris/v1/games/" + app->uuid +
+                        "/artwork/candidate/" + preview->token + "/poster"}};
+                      item["preview_expires_at"] = preview->expires_at;
+                    }
+                  }
+                }
+              }
+            }
+          } catch (...) {
+            // A preview failure never removes an otherwise valid sanitized candidate.
+          }
+          matches.push_back(std::move(item));
+        }
+        nlohmann::json output {{"status", true}, {"candidates", std::move(matches)}};
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        headers.emplace("Cache-Control", "private, no-store");
+        response->write(output.dump(), headers);
+      } catch (...) {
+        response->write(SimpleWeb::StatusCode::server_error_bad_gateway);
+      }
+    };
+
+    auto polarisGameArtworkPreview = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+      const auto route = game_artwork::manual::parse_route_target(request->path);
+      if (!route || route->route != game_artwork::manual::route_e::preview || !route->kind) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      const auto apps = proc::proc.get_apps();
+      if (std::none_of(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+            return boost::iequals(candidate.uuid, route->uuid);
+          })) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+      const auto preview = artwork_preview_cache().lookup(
+        route->uuid, *route->token, *route->kind, artwork_now_milliseconds());
+      if (!preview) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", preview->mime_type);
+      headers.emplace("X-Content-Type-Options", "nosniff");
+      headers.emplace("Cache-Control", "private, no-store");
+      const std::string body(preview->body.begin(), preview->body.end());
+      response->write(SimpleWeb::StatusCode::success_ok, body, headers);
+    };
+
+    auto polarisApplyGameArtworkMatch = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+      const auto fail = [&](const SimpleWeb::StatusCode status, const std::string_view stage) {
+        BOOST_LOG(warning) << "Artwork manual match failed at stage=" << stage;
+        response->write(status);
+      };
+      const auto route = game_artwork::manual::parse_route_target(request->path);
+      if (!route || route->route != game_artwork::manual::route_e::apply) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      const auto apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+        return boost::iequals(candidate.uuid, route->uuid);
+      });
+      if (app == apps.end()) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+      const auto api_key = config::sunshine.steamgriddb_api_key;
+      if (!nonblank_artwork_api_key(api_key)) {
+        fail(SimpleWeb::StatusCode::server_error_service_unavailable, "configuration");
+        return;
+      }
+      const auto body = read_bounded_artwork_body(request->content, game_artwork::manual::maximum_match_body_bytes);
+      const auto selection = body ? game_artwork::manual::parse_match_selection(*body) : std::nullopt;
+      if (!selection) {
+        fail(SimpleWeb::StatusCode::client_error_bad_request, "request-validation");
+        return;
+      }
+      std::uint64_t provider_id = 0;
+      try {
+        provider_id = std::stoull(selection->provider_game_id);
+      } catch (...) {
+        fail(SimpleWeb::StatusCode::client_error_bad_request, "request-validation");
+        return;
+      }
+      const auto appdata = platf::appdata();
+      auto staging = create_artwork_staging_root(appdata);
+      if (!staging) {
+        fail(SimpleWeb::StatusCode::server_error_internal_server_error, "staging");
+        return;
+      }
+      const auto transport = make_artwork_transport(api_key);
+      std::vector<game_artwork::providers::request_t> downloads;
+      try {
+        for (const auto &list_request : game_artwork::providers::plan_steamgriddb_assets(provider_id)) {
+          if (!list_request.kind ||
+              std::find(selection->kinds.begin(), selection->kinds.end(), *list_request.kind) == selection->kinds.end()) continue;
+          const auto list_response = transport(list_request, artwork_metadata_bytes);
+          const auto effective = list_response && !list_response->final_url.empty()
+            ? list_response->final_url : list_request.url;
+          if (!list_response || list_response->status_code < 200 || list_response->status_code >= 300 ||
+              !game_artwork::is_allowed_provider_url(list_request.provider, effective)) continue;
+          const std::string list_body(list_response->body.begin(), list_response->body.end());
+          for (const auto &candidate : game_artwork::providers::parse_steamgriddb_assets(
+                 *list_request.kind, list_body)) {
+            downloads.push_back({
+              game_artwork::provider_e::steamgriddb,
+              game_artwork::providers::operation_e::download,
+              candidate.kind,
+              candidate.url,
+              false,
+            });
+          }
+        }
+      } catch (...) {
+        fail(SimpleWeb::StatusCode::server_error_bad_gateway, "provider-list");
+        return;
+      }
+      if (downloads.empty()) {
+        fail(SimpleWeb::StatusCode::server_error_bad_gateway, "provider-list");
+        return;
+      }
+      std::size_t published = 0;
+      const game_artwork::providers::execution_options_t options {
+        .destination_source = game_artwork::source_e::override,
+        .force_replace = true,
+        .on_published = [&](const game_artwork::asset_t &) { ++published; },
+      };
+      (void) game_artwork::providers::execute_download_plan(
+        staging->path, app->uuid, downloads, transport, options);
+      if (published == 0) {
+        fail(SimpleWeb::StatusCode::server_error_bad_gateway, "asset-download");
+        return;
+      }
+      game_artwork::artwork_override_t metadata {
+        app->uuid,
+        selection->provider,
+        selection->provider_game_id,
+        selection->title,
+        selection->steam_appid,
+        true,
+        artwork_now_milliseconds(),
+      };
+      if (!game_artwork::commit_staged_artwork_override(appdata, staging->path, metadata)) {
+        fail(SimpleWeb::StatusCode::server_error_internal_server_error, "commit");
+        return;
+      }
+      artwork_preview_cache().clear_game(app->uuid);
+      const auto manifest = current_artwork_manifest(appdata, app->uuid);
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "private, no-store");
+      response->write(manifest.dump(), headers);
+    };
+
+    auto polarisClearGameArtworkOverride = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+      const auto route = game_artwork::manual::parse_route_target(request->path);
+      if (!route || route->route != game_artwork::manual::route_e::clear) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      const auto apps = proc::proc.get_apps();
+      if (std::none_of(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+            return boost::iequals(candidate.uuid, route->uuid);
+          })) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+      const auto appdata = platf::appdata();
+      if (!game_artwork::clear_artwork_override(appdata, route->uuid)) {
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
+        return;
+      }
+      artwork_preview_cache().clear_game(route->uuid);
+      const auto manifest = current_artwork_manifest(appdata, route->uuid);
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "private, no-store");
       response->write(manifest.dump(), headers);
     };
 
@@ -7880,8 +8239,12 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/session/cursor$"]["POST"] = polarisSetCursorVisibility;
     https_server.resource["^/polaris/v1/games$"]["GET"] = polarisGames;
     https_server.resource["^/polaris/v1/games/.+/cover$"]["GET"] = polarisGameCover;
-    https_server.resource["^/polaris/v1/games/[^/]+/artwork/[^/]+$"]["GET"] = polarisGameArtwork;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/(poster|hero|logo|icon)$"]["GET"] = polarisGameArtwork;
     https_server.resource["^/polaris/v1/games/[^/]+/artwork/resolve$"]["POST"] = polarisResolveGameArtwork;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/candidates$"]["GET"] = polarisSearchGameArtworkMatches;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/candidate/[0-9a-f]{32}/(poster|hero|logo|icon)$"]["GET"] = polarisGameArtworkPreview;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/match$"]["POST"] = polarisApplyGameArtworkMatch;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/override$"]["DELETE"] = polarisClearGameArtworkOverride;
     https_server.resource["^/polaris/v1/games/.+/mangohud$"]["POST"] = polarisToggleMangoHud;
     https_server.resource["^/polaris/v1/games/.+/steam-launch-mode$"]["POST"] = polarisSetSteamLaunchMode;
     https_server.resource["^/polaris/v1/session/launch$"]["POST"] = polarisLaunchGame;

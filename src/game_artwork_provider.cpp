@@ -2,10 +2,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <system_error>
 #include <cctype>
 #include <unordered_set>
@@ -18,6 +20,8 @@ namespace game_artwork::providers {
       "https://cdn.cloudflare.steamstatic.com/steam/apps/";
     constexpr std::string_view steamgriddb_api_root =
       "https://www.steamgriddb.com/api/v2/";
+    constexpr std::size_t maximum_match_candidate_count = 10;
+    constexpr std::size_t maximum_match_title_bytes = 160;
 
     std::string_view trim_ascii_whitespace(std::string_view value) {
       while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
@@ -59,6 +63,116 @@ namespace game_artwork::providers {
              response["success"].get<bool>();
     }
 
+    std::optional<std::uint64_t> positive_json_integer(const json &value) {
+      if (value.is_number_unsigned()) {
+        const auto parsed = value.get<std::uint64_t>();
+        if (parsed != 0) return parsed;
+      } else if (value.is_number_integer()) {
+        const auto parsed = value.get<std::int64_t>();
+        if (parsed > 0) return static_cast<std::uint64_t>(parsed);
+      }
+      return std::nullopt;
+    }
+
+    std::optional<std::string> sanitized_match_title(const json &result) {
+      if (!result.contains("name") || !result["name"].is_string()) return std::nullopt;
+
+      const auto raw = result["name"].get<std::string>();
+      for (std::size_t index = 0; index < raw.size(); ++index) {
+        const auto byte = static_cast<unsigned char>(raw[index]);
+        if (byte < 0x20 || byte == 0x7F) return std::nullopt;
+        if (byte == 0xC2 && index + 1 < raw.size()) {
+          const auto next = static_cast<unsigned char>(raw[index + 1]);
+          if (next >= 0x80 && next <= 0x9F) return std::nullopt;
+        }
+      }
+      try {
+        static_cast<void>(json(raw).dump());
+      } catch (const json::exception &) {
+        return std::nullopt;
+      }
+
+      const auto trimmed = trim_ascii_whitespace(raw);
+      if (trimmed.empty() || trimmed.size() > maximum_match_title_bytes) return std::nullopt;
+      return std::string {trimmed};
+    }
+
+    std::string normalized_match_title(const std::string_view value) {
+      std::string normalized;
+      normalized.reserve(std::min(value.size(), maximum_match_title_bytes));
+      bool pending_separator = false;
+      std::size_t inspected = 0;
+      for (const unsigned char byte : value) {
+        if (inspected++ == maximum_match_title_bytes) break;
+
+        const bool ascii_digit = byte >= '0' && byte <= '9';
+        const bool ascii_letter = (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z');
+        if (ascii_digit || ascii_letter || byte >= 0x80) {
+          if (pending_separator && !normalized.empty()) normalized.push_back(' ');
+          normalized.push_back(
+            byte >= 'A' && byte <= 'Z' ? static_cast<char>(byte - 'A' + 'a') : static_cast<char>(byte)
+          );
+          pending_separator = false;
+        } else {
+          pending_separator = true;
+        }
+      }
+      return normalized;
+    }
+
+    double normalized_title_similarity(const std::string_view query, const std::string_view title) {
+      const auto left = normalized_match_title(query);
+      const auto right = normalized_match_title(title);
+      if (left.empty() || right.empty()) return 0.0;
+
+      std::vector<std::size_t> previous(right.size() + 1);
+      std::vector<std::size_t> current(right.size() + 1);
+      for (std::size_t column = 0; column <= right.size(); ++column) previous[column] = column;
+
+      for (std::size_t row = 1; row <= left.size(); ++row) {
+        current[0] = row;
+        for (std::size_t column = 1; column <= right.size(); ++column) {
+          const auto substitution_cost = left[row - 1] == right[column - 1] ? 0U : 1U;
+          current[column] = std::min({
+            previous[column] + 1,
+            current[column - 1] + 1,
+            previous[column - 1] + substitution_cost,
+          });
+        }
+        previous.swap(current);
+      }
+
+      const auto longest = std::max(left.size(), right.size());
+      return 1.0 - static_cast<double>(previous[right.size()]) / static_cast<double>(longest);
+    }
+
+    std::optional<std::string> sanitized_steam_appid(const json &result) {
+      if (!result.contains("steam_appid")) return std::nullopt;
+      const auto &value = result["steam_appid"];
+
+      std::string appid;
+      if (value.is_string()) {
+        appid = value.get<std::string>();
+      } else if (const auto parsed = positive_json_integer(value)) {
+        appid = std::to_string(*parsed);
+      } else {
+        return std::nullopt;
+      }
+
+      if (!is_valid_steam_appid(appid) ||
+          std::all_of(appid.begin(), appid.end(), [](const char digit) { return digit == '0'; })) {
+        return std::nullopt;
+      }
+      return appid;
+    }
+
+    std::optional<unsigned int> sanitized_release_year(const json &result) {
+      if (!result.contains("release_year")) return std::nullopt;
+      const auto year = positive_json_integer(result["release_year"]);
+      if (!year || *year < 1970 || *year > 2100) return std::nullopt;
+      return static_cast<unsigned int>(*year);
+    }
+
     request_t steamgriddb_request(operation_e operation, std::optional<kind_e> kind, std::string url) {
       return {
         provider_e::steamgriddb,
@@ -94,10 +208,12 @@ namespace game_artwork::providers {
       const std::filesystem::path &appdata,
       std::string_view uuid,
       const request_t &request,
-      const std::vector<unsigned char> &body
+      const std::vector<unsigned char> &body,
+      const execution_options_t &options
     ) {
       namespace fs = std::filesystem;
       if (!request.kind || body.empty() || body.size() > maximum_asset_bytes) return std::nullopt;
+      const auto destination_source = options.destination_source.value_or(source_for_provider(request.provider));
 
       const auto directory = cache_root(appdata) / std::string(uuid);
       std::error_code error;
@@ -107,7 +223,7 @@ namespace game_artwork::providers {
       static std::atomic_uint64_t sequence {0};
       temporary_file_t temporary {
         directory / ("." + std::string(kind_name(*request.kind)) + "." +
-                     std::string(source_name(source_for_provider(request.provider))) + "." +
+                     std::string(source_name(destination_source)) + "." +
                      std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) + ".tmp")
       };
       {
@@ -128,19 +244,27 @@ namespace game_artwork::providers {
         appdata,
         uuid,
         *request.kind,
-        source_for_provider(request.provider),
+        destination_source,
         extension
       );
       if (!destination) return std::nullopt;
 
       // A valid cache entry may have appeared while the transport was active.
       // Publish only when this provider still outranks the selected source.
-      if (!needs_source_upgrade(appdata, uuid, *request.kind, source_for_provider(request.provider))) return std::nullopt;
+      if (!options.force_replace && !needs_source_upgrade(appdata, uuid, *request.kind, destination_source)) {
+        return std::nullopt;
+      }
 
       fs::rename(temporary.path, *destination, error);
       if (error) return std::nullopt;
       temporary.path.clear();
-      return asset_t {*request.kind, source_for_provider(request.provider), *destination, *mime_type};
+      for (const auto suffix : std::array<std::string_view, 4> {".png", ".jpg", ".jpeg", ".webp"}) {
+        const auto stale = cache_asset_path(appdata, uuid, *request.kind, destination_source, suffix);
+        if (!stale || *stale == *destination) continue;
+        error.clear();
+        fs::remove(*stale, error);
+      }
+      return asset_t {*request.kind, destination_source, *destination, *mime_type};
     }
   }
 
@@ -148,15 +272,19 @@ namespace game_artwork::providers {
     const std::filesystem::path &appdata,
     const std::string_view uuid,
     const std::vector<request_t> &requests,
-    const transport_t &transport
+    const transport_t &transport,
+    const execution_options_t &options
   ) {
     if (!is_valid_uuid(uuid)) return {};
     if (!transport) return scan_cached_assets(appdata, uuid);
 
+    std::set<kind_e> published_kinds;
     for (const auto &request : requests) {
+      const auto output_source = options.destination_source.value_or(source_for_provider(request.provider));
       if (request.operation != operation_e::download || !request.kind ||
+          published_kinds.contains(*request.kind) ||
           !is_allowed_provider_url(request.provider, request.url) ||
-          !needs_source_upgrade(appdata, uuid, *request.kind, source_for_provider(request.provider))) {
+          (!options.force_replace && !needs_source_upgrade(appdata, uuid, *request.kind, output_source))) {
         continue;
       }
 
@@ -170,7 +298,10 @@ namespace game_artwork::providers {
         }
         const auto &effective_url = response->final_url.empty() ? request.url : response->final_url;
         if (!is_allowed_provider_url(request.provider, effective_url)) continue;
-        (void) commit_download(appdata, uuid, request, response->body);
+        if (const auto published = commit_download(appdata, uuid, request, response->body, options)) {
+          published_kinds.emplace(published->kind);
+          if (options.on_published) options.on_published(*published);
+        }
       } catch (...) {
         // The next kind/candidate must still be attempted. Any temporary file
         // created by commit_download is removed by its scope guard.
@@ -235,6 +366,42 @@ namespace game_artwork::providers {
     return std::nullopt;
   }
 
+  std::vector<match_candidate_t> parse_steamgriddb_match_candidates(
+    const std::string_view query,
+    const std::string_view response_body,
+    const std::size_t maximum_candidates
+  ) {
+    const auto bounded_maximum = std::min(maximum_candidates, maximum_match_candidate_count);
+    if (bounded_maximum == 0) return {};
+
+    const auto response = parse_response(response_body);
+    if (!is_success_response(response) || !response.contains("data") || !response["data"].is_array()) {
+      return {};
+    }
+
+    std::vector<match_candidate_t> candidates;
+    candidates.reserve(bounded_maximum);
+    std::unordered_set<std::uint64_t> seen_ids;
+    for (const auto &result : response["data"]) {
+      if (!result.is_object() || !result.contains("id")) continue;
+
+      const auto id = positive_json_integer(result["id"]);
+      const auto title = sanitized_match_title(result);
+      if (!id || !title || !seen_ids.emplace(*id).second) continue;
+
+      candidates.push_back({
+        "steamgriddb",
+        std::to_string(*id),
+        *title,
+        sanitized_steam_appid(result),
+        sanitized_release_year(result),
+        normalized_title_similarity(query, *title),
+      });
+      if (candidates.size() == bounded_maximum) break;
+    }
+    return candidates;
+  }
+
   std::vector<request_t> plan_steamgriddb_assets(const std::uint64_t game_id) {
     if (game_id == 0) {
       return {};
@@ -273,15 +440,19 @@ namespace game_artwork::providers {
     std::vector<candidate_t> candidates;
     std::unordered_set<std::string> seen;
     for (const auto &asset : response["data"]) {
-      if (!asset.is_object() || !asset.contains("url") || !asset["url"].is_string()) {
-        continue;
-      }
+      if (!asset.is_object()) continue;
 
-      const auto url = asset["url"].get<std::string>();
-      if (!is_allowed_provider_url(provider_e::steamgriddb, url) || !seen.emplace(url).second) {
-        continue;
+      std::optional<std::string> selected_url;
+      if (kind == kind_e::icon && asset.contains("thumb") && asset["thumb"].is_string()) {
+        const auto thumb = asset["thumb"].get<std::string>();
+        if (is_allowed_provider_url(provider_e::steamgriddb, thumb)) selected_url = thumb;
       }
-      candidates.push_back({kind, source_e::steamgriddb, url});
+      if (!selected_url && asset.contains("url") && asset["url"].is_string()) {
+        const auto url = asset["url"].get<std::string>();
+        if (is_allowed_provider_url(provider_e::steamgriddb, url)) selected_url = url;
+      }
+      if (!selected_url || !seen.emplace(*selected_url).second) continue;
+      candidates.push_back({kind, source_e::steamgriddb, *selected_url});
     }
     return candidates;
   }
