@@ -783,6 +783,17 @@
                 </InfoHint>
               </div>
               <input type="text" class="app-editor-input app-editor-input-mono" id="appCmd" v-model="editForm.cmd" />
+              <p data-command-environment-help class="mt-2 text-xs leading-5 text-storm">
+                The command must start with an executable. Put assignments such as
+                <code class="font-mono text-silver">DRI_PRIME=1</code> under
+                <button
+                  type="button"
+                  class="focus-ring rounded-sm font-medium text-ice underline decoration-ice/40 underline-offset-2 transition-colors hover:text-white"
+                  aria-controls="appStreamingTweaks"
+                  :aria-expanded="showTweaks"
+                  @click="showTweaks = true"
+                >Environment &amp; streaming tweaks</button> instead.
+              </p>
             </div>
 
             <Checkbox v-if="platform === 'windows'"
@@ -840,15 +851,15 @@
             </div>
           </details>
 
-          <details class="app-editor-inline-disclosure" :open="showTweaks">
+          <details id="appStreamingTweaks" class="app-editor-inline-disclosure" :open="showTweaks">
             <summary class="focus-ring" @click.prevent="showTweaks = !showTweaks">
-              <span>Streaming Tweaks</span>
+              <span>Environment &amp; streaming tweaks</span>
               <span class="control-chip">{{ editEnvVars.length + (editMangoHud ? 1 : 0) }}</span>
             </summary>
             <div v-if="showTweaks" class="app-editor-disclosure-body">
               <div class="settings-field-head">
                 <span class="settings-field-label">Environment variables</span>
-                <InfoHint size="sm" align="right" label="Streaming Tweaks">Environment variables, Proton settings, and per-game launch-time overrides.</InfoHint>
+                <InfoHint size="sm" align="right" label="Environment and streaming tweaks">Environment variables, Proton settings, and per-game launch-time overrides.</InfoHint>
               </div>
               <div v-for="(envVar, i) in editEnvVars" :key="i" class="app-editor-env-row">
                 <input type="text" v-model="envVar.key" placeholder="KEY" class="app-editor-input app-editor-input-mono" />
