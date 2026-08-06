@@ -376,6 +376,28 @@ namespace config {
     nvenc::nvenc_split_encode_mode split_encode_mode_from_view(const std::string_view &mode);
   }
 
+  /**
+   * @brief The Home emulation holds the Home button for this long.
+   *
+   * A `back_button_timeout` shorter than this produces an emulated press longer
+   * than the window that triggers it, which no one configures on purpose.
+   */
+  constexpr int back_button_emulated_press_ms = 100;
+
+  /**
+   * @brief Explain a `back_button_timeout` that makes Back/Select unusable.
+   *
+   * The value is milliseconds, so `2` means two milliseconds rather than two
+   * seconds: Back/Select is released by the emulation almost the instant it goes
+   * down, and every press turns into Home. It reads as a broken controller, not
+   * as a configuration mistake, and it cost a full evtest trace to diagnose the
+   * first time.
+   *
+   * @param timeout_ms Configured value in milliseconds.
+   * @return The warning, or empty when the value is disabled or plausible.
+   */
+  std::string back_button_timeout_warning(int timeout_ms);
+
   int parse(int argc, char *argv[]);
   bool is_valid_command_prefix(std::string_view argument);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
