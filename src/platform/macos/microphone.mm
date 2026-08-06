@@ -49,8 +49,9 @@ namespace platf {
       return 0;
     }
 
-    std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &sink) override {
+    std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &sink, bool host_audio) override {
       (void) sink;
+      (void) host_audio;
       auto mic = std::make_unique<av_mic_t>();
       const char *audio_sink = "";
 

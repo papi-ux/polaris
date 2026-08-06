@@ -761,8 +761,9 @@ namespace platf::audio {
       return std::nullopt;
     }
 
-    std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &sink) override {
+    std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &sink, bool host_audio) override {
       (void) sink;
+      (void) host_audio;
       auto mic = std::make_unique<mic_wasapi_t>();
 
       if (mic->init(sample_rate, frame_size, channels)) {
