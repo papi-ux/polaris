@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
@@ -48,6 +49,18 @@ namespace beat_times {
 
   /** @brief The dataset on disk, re-read when the file changes underneath. */
   const dataset_t &dataset();
+
+  /**
+   * @brief Tell this where its dataset lives and whether it may go looking.
+   *
+   * Taken as arguments rather than read from globals: where the file sits and who is
+   * allowed to fetch both belong to whoever starts the process, and a module that
+   * reaches for them cannot be linked into a unit test without dragging the whole
+   * configuration layer along.
+   *
+   * Until this is called nothing is served and nothing is requested.
+   */
+  void configure(std::filesystem::path dataset, bool lookups_enabled);
 
   /**
    * @brief Fold a title to what a fuzzy match can work with.

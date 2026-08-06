@@ -373,6 +373,10 @@ int main(int argc, char *argv[]) {
   task_pool.start(1);
 
   // Create signal handler after logging has been initialized
+  // Where the dataset lives and whether lookups are permitted are both this layer's
+  // to know; the module itself takes them as arguments so it stays linkable on its own.
+  beat_times::configure(platf::appdata() / "beat_times.json", config::sunshine.beat_times_lookup);
+
   // The beat-times worker holds a joinable thread; it has to be stopped before the
   // statics it touches are torn down.
   auto beat_times_guard = util::fail_guard([]() {
