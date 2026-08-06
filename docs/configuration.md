@@ -44,6 +44,9 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | `headless_mode` | `enabled` | Request a stream-only session instead of the visible desktop |
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
 | `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
+| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [stream paths](stream-paths.md) |
+| `linux_private_runtime` | `labwc` | Private compositor used by paths that host the session themselves: `labwc` or `gamescope`. Ignored on host paths |
+| `headless_swap_mode` | `privacy` | Headless Dongle path only: `privacy` makes the dongle primary and blanks the panel, `off` extends onto the dongle and leaves the panel primary |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
 | `headless_gamepad_isolation` | `enabled` | Hide host-connected gamepads from private headless streams; disable only when you intentionally want a wired host controller visible inside the stream |
 | `client_gamepad_seat_isolation` | `disabled` | Assign Polaris-created client gamepads to a dedicated Linux seat so other active-seat users do not receive automatic device ACLs |
@@ -57,6 +60,7 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | `enable_discovery` | `enabled` | Advertise Polaris over mDNS |
 | `stream_audio` | `enabled` | Capture and stream audio |
 | `steamgriddb_api_key` | key | Cover art lookups for non-Steam apps |
+| `beat_times_lookup` | `enabled` | Ask How Long To Beat about titles missing from the local completion-estimate dataset; disable to keep the host from making those requests |
 
 ### Linux client-gamepad access boundary
 

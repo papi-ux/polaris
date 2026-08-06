@@ -449,6 +449,7 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
     "recording_output_dir",
     "recording_replay_buffer",
     "recording_replay_buffer_minutes",
+    "headless_swap_primary",  // Deprecated boolean, read once to migrate old configs to headless_swap_mode
     "trusted_subnet_auto_pairing",  // Security opt-in is currently surfaced as inline copy rather than localized config docs
     "webrtc_browser_streaming",  // Deprecated alias for browser_streaming
   };
