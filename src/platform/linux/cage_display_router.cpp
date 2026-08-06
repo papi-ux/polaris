@@ -18,6 +18,7 @@
 
 #include "cage_display_router.h"
 #include "../../logging.h"
+#include "private_session_input.h"
 
 #include <algorithm>
 #include <atomic>
@@ -34,7 +35,9 @@
 #include <fcntl.h>
 #include <set>
 #include <signal.h>
+#include <poll.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sstream>
 #include <string>
 #include <sys/wait.h>
@@ -46,6 +49,18 @@ using namespace std::literals;
 namespace cage_display_router {
 
   static pid_t cage_pid = 0;
+
+  /**
+   * A pidfd for the compositor, opened at spawn.
+   *
+   * `kill(pid, 0)` cannot answer "is the compositor still running": it reports
+   * success for a zombie, and after the pid has been reaped and recycled it
+   * reports on whatever process inherited the number. Signalling a stale
+   * `-cage_pid` on that basis targets an unrelated process group. A pidfd refers
+   * to the process itself, so it stays correct across both.
+   */
+  static int cage_pidfd = -1;
+
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
   static std::string cage_x11_display;  // e.g., ":1"
   static std::atomic_bool headless_ram_capture_warning_logged {false};
@@ -88,6 +103,58 @@ namespace cage_display_router {
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------
+
+  /// Open a pidfd for the freshly spawned compositor, if the kernel allows it.
+  static void open_cage_pidfd(pid_t pid) {
+    if (cage_pidfd >= 0) {
+      close(cage_pidfd);
+      cage_pidfd = -1;
+    }
+
+    cage_pidfd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+    if (cage_pidfd < 0) {
+      BOOST_LOG(warning) << "labwc: pidfd_open failed for pid ["sv << pid << "]: "sv << strerror(errno)
+                         << "; falling back to pid-based liveness checks"sv;
+    }
+  }
+
+  static void close_cage_pidfd() {
+    if (cage_pidfd >= 0) {
+      close(cage_pidfd);
+      cage_pidfd = -1;
+    }
+  }
+
+  /**
+   * @brief Whether the compositor process is still alive.
+   *
+   * A pidfd becomes readable when the process it refers to exits, so POLLIN here
+   * means "already gone" and is immune to pid reuse. Without a pidfd this falls
+   * back to signal 0, which is all the older path ever had.
+   */
+  static bool cage_process_alive() {
+    if (cage_pid <= 0) {
+      return false;
+    }
+
+    if (cage_pidfd < 0) {
+      return kill(cage_pid, 0) == 0;
+    }
+
+    pollfd descriptor {cage_pidfd, POLLIN, 0};
+    while (true) {
+      const auto ready = poll(&descriptor, 1, 0);
+      if (ready < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        // An unusable pidfd should not be read as "the compositor is gone":
+        // that would let stop() signal a process group it no longer owns.
+        return kill(cage_pid, 0) == 0;
+      }
+      return ready == 0;
+    }
+  }
 
   static std::string exec_capture(const std::string &cmd) {
     FILE *pipe = popen(cmd.c_str(), "r");
@@ -687,6 +754,21 @@ namespace cage_display_router {
 
     // Config directory for kiosk-mode rc.xml (no decorations, maximize all)
     std::string config_dir = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/.config/labwc-polaris";
+
+    // Generate that rc.xml before launching. Besides the kiosk presentation, it
+    // tells labwc to ignore the host's physical input devices, so a private
+    // session running alongside a live desktop session does not consume the
+    // keyboard and mouse the user at the machine is typing on.
+    {
+      std::string rc_status;
+      const bool generated = platf::private_session_input::ensure_generated_rc_xml(
+        config_dir,
+        platf::private_session_input::enumerate_host_input_devices(),
+        rc_status
+      );
+      BOOST_LOG(generated ? info : warning) << "labwc: "sv << rc_status;
+    }
+
     const std::string mode = format_wlr_custom_mode(width, height, refresh_hz);
 
     // Build startup command: set resolution then run the game
@@ -806,6 +888,7 @@ namespace cage_display_router {
       _exit(errno == ENOENT ? 127 : 126);
     } else if (pid > 0) {
       cage_pid = pid;
+      open_cage_pidfd(pid);
       // Restore MangoHud in parent (was cleared to prevent labwc crash)
       if (!saved_mangohud.empty()) setenv("MANGOHUD", saved_mangohud.c_str(), 1);
       if (!saved_mangohud_dlsym.empty()) setenv("MANGOHUD_DLSYM", saved_mangohud_dlsym.c_str(), 1);
@@ -886,6 +969,27 @@ namespace cage_display_router {
     if (cage_pid <= 0) {
       return;
     }
+
+    // The compositor may already have exited on its own — the user can quit it
+    // from inside the session. Reap it and stop there. Signalling -cage_pid at
+    // this point would either do nothing or, once the pid has been recycled,
+    // land on an unrelated process group.
+    if (!cage_process_alive()) {
+      BOOST_LOG(info) << "labwc: Already exited (pid="sv << cage_pid << "); reaping session state"sv;
+      (void) waitpid(cage_pid, nullptr, WNOHANG);
+      close_cage_pidfd();
+      cage_pid = 0;
+      cage_wayland_socket.clear();
+      cage_x11_display.clear();
+      cage_runtime_state = {
+        .requested_headless = false,
+        .effective_headless = false,
+        .gpu_native_override_active = false,
+        .backend_name = "labwc",
+      };
+      return;
+    }
+
     BOOST_LOG(info) << "labwc: Stopping (pid="sv << cage_pid << ")"sv;
 
     // Terminate process group so cage and its children all die
@@ -896,12 +1000,12 @@ namespace cage_display_router {
     for (int i = 0; i < 30; ++i) {
       pid_t ret = waitpid(cage_pid, nullptr, WNOHANG);
       if (ret > 0) break;
-      if (kill(cage_pid, 0) != 0) break;  // process gone
+      if (!cage_process_alive()) break;  // process gone
       std::this_thread::sleep_for(100ms);
     }
 
     // Force kill if still alive
-    if (kill(cage_pid, 0) == 0) {
+    if (cage_process_alive()) {
       BOOST_LOG(warning) << "labwc: Did not exit gracefully, sending SIGKILL"sv;
       kill(-cage_pid, SIGKILL);
       kill(cage_pid, SIGKILL);
@@ -909,6 +1013,7 @@ namespace cage_display_router {
     }
 
     BOOST_LOG(info) << "labwc: Stopped"sv;
+    close_cage_pidfd();
     cage_pid = 0;
     cage_wayland_socket.clear();
     cage_x11_display.clear();
@@ -925,6 +1030,7 @@ namespace cage_display_router {
       (void) waitpid(cage_pid, nullptr, WNOHANG);
     }
     BOOST_LOG(info) << "labwc: Cleared router state after exact-generation pidfd cleanup"sv;
+    close_cage_pidfd();
     cage_pid = 0;
     cage_wayland_socket.clear();
     cage_x11_display.clear();
@@ -944,8 +1050,7 @@ namespace cage_display_router {
 #endif
 
   bool is_running() {
-    if (cage_pid <= 0) return false;
-    return kill(cage_pid, 0) == 0;
+    return cage_process_alive();
   }
 
   bool is_healthy() {

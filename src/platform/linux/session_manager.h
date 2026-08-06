@@ -17,6 +17,7 @@
 
 #ifdef POLARIS_TESTS
   #include <functional>
+  #include <sys/types.h>
 #endif
 #include <string>
 #include <vector>
@@ -82,14 +83,21 @@ namespace session_manager {
   void stop_edit_mode_watchdog();
 
   /**
-   * @brief Inhibit the screen saver and idle lock via D-Bus.
-   * Prevents the lock screen from activating during an active streaming session.
-   * @return true if inhibition was successful
+   * @brief Inhibit the screen saver and idle lock.
+   *
+   * Prefers the session bus ScreenSaver.Inhibit call. Where that is unavailable
+   * — headless and gamescope user sessions usually have no ScreenSaver service —
+   * it falls back to a systemd-inhibit child anchored to a pipe Polaris holds
+   * open, so the inhibitor is released even if Polaris is killed.
+   *
+   * @return true if either inhibitor was established
    */
   bool inhibit_lock();
 
   /**
    * @brief Release the lock screen inhibitor.
+   *
+   * Safe to call when no inhibitor is held.
    */
   void release_lock();
 
@@ -111,6 +119,12 @@ namespace session_manager {
     std::function<bool(const std::string &)> run_hook
   );
   void reset_command_hooks_for_tests();
+
+  /// @return true while the anchored idle inhibitor child is held.
+  bool inhibitor_held_for_tests();
+
+  /// @return pid of the anchored idle inhibitor child, or -1 when none is held.
+  pid_t inhibitor_pid_for_tests();
 #endif
 
 }  // namespace session_manager

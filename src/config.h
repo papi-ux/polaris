@@ -261,6 +261,7 @@ namespace config {
     bool ds5_inputtino_randomize_mac;
     bool headless_gamepad_isolation;
     bool client_gamepad_seat_isolation;
+    bool client_keyboard_mouse_seat_isolation;
 
     bool keyboard;
     bool mouse;

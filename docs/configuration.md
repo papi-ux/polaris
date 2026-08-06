@@ -47,6 +47,7 @@ Stream when you want a stream-only runtime that leaves the host desktop layout a
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
 | `headless_gamepad_isolation` | `enabled` | Hide host-connected gamepads from private headless streams; disable only when you intentionally want a wired host controller visible inside the stream |
 | `client_gamepad_seat_isolation` | `disabled` | Assign Polaris-created client gamepads to a dedicated Linux seat so other active-seat users do not receive automatic device ACLs |
+| `client_keyboard_mouse_seat_isolation` | `disabled` | Assign the virtual keyboard, mouse, touch and pen Polaris creates for clients to a dedicated Linux seat, so a client streaming a private session does not also type and click into the desktop session logged in at the machine |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
@@ -81,6 +82,38 @@ open the virtual controller. For concurrent gaming, run Polaris under a dedicate
 do not add local desktop users to `input`. Strong same-UID isolation requires a privileged broker,
 container/security-domain boundary, or equivalent system-level policy; a per-session Web toggle
 cannot provide it safely.
+
+### Linux host and private session input isolation
+
+Polaris can run a private stream session while somebody is using the desktop session logged in at
+the machine. Two separate leaks have to be closed for that to work, and they are closed by different
+mechanisms because the two directions are not symmetric.
+
+**Client input reaching the host desktop.** The virtual keyboard and mouse Polaris creates are
+kernel input devices, so a desktop session at `seat0` receives them along with everything else on
+that seat: the client types into the stream and into the desktop at the same time. Enabling
+`client_keyboard_mouse_seat_isolation` marks those devices for the bundled udev rules to assign to
+the `seat-polaris` seat, which stops logind from handing them to the seat0 session. Device names are
+unchanged, so a host compositor already configured to ignore them by name keeps working. This is the
+same Unix-user boundary described above: same-account processes and members of `input` are not
+isolated.
+
+Host compositors that do not go through logind can ignore the devices by name instead. In sway:
+
+```
+input 48879:57005:Polaris_Keyboard_passthrough events disabled
+input 48879:57005:Polaris_Mouse_passthrough events disabled
+input 48879:57005:Polaris_Mouse_passthrough_(absolute) events disabled
+```
+
+**Host devices reaching the private session.** The reverse leak appears when the private compositor
+opens the seat's physical devices: the keyboard and mouse on the desk then drive the streamed
+session. Polaris generates the private session's `~/.config/labwc-polaris/rc.xml` with a
+`<libinput>` block that sets `sendEventsMode` to `no` for every physical device it finds, leaving its
+own virtual devices enabled. This needs no configuration and applies to every private session.
+
+Writing your own `rc.xml` there takes over completely: a file without Polaris' generated marker
+comment is never overwritten, and Polaris then stops managing input isolation for that session.
 
 ## Linux HDR and Main10
 

@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <format>
 #include <iostream>
+#include <mutex>
+#include <string>
 #include <thread>
 
 // local includes
@@ -80,6 +82,29 @@ namespace {
     return true;
   }
 
+  /**
+   * @brief Check whether a distribution package already provides a host asset.
+   *
+   * Packages install the udev rules and the modules-load configuration to their
+   * live system paths, which makes them package-manager owned and removable on
+   * uninstall. When the packaged copy is already current there is nothing for
+   * `--setup-host` to write, and writing a second copy into /etc would shadow
+   * the packaged one with a file that no uninstall ever removes.
+   */
+  bool host_asset_provided_by_package(const fs::path &source, const fs::path &packaged_target, std::string_view label) {
+    if (packaged_target.empty() || !fs::exists(packaged_target)) {
+      return false;
+    }
+
+    const auto packaged = file_handler::read_file(packaged_target.c_str());
+    if (packaged.empty() || packaged != file_handler::read_file(source.c_str())) {
+      return false;
+    }
+
+    BOOST_LOG(info) << "Linux host setup: "sv << label << " is provided by the package at ["sv << packaged_target << "]; nothing to install"sv;
+    return true;
+  }
+
   bool install_host_asset(const fs::path &source, const fs::path &target, std::string_view label) {
     const auto contents = file_handler::read_file(source.c_str());
     if (contents.empty()) {
@@ -138,8 +163,10 @@ namespace {
       << std::endl
       << "  Applies Linux host integration explicitly instead of relying on package scripts."sv << std::endl
       << "  Steps:"sv << std::endl
-      << "    - install Polaris udev rules into /etc/udev/rules.d"sv << std::endl
-      << "    - install Polaris modules-load config into /etc/modules-load.d"sv << std::endl
+      << "    - install Polaris udev rules into /etc/udev/rules.d, unless the package already"sv << std::endl
+      << "      provides them at "sv << POLARIS_UDEV_RULES_DIR << std::endl
+      << "    - install Polaris modules-load config into /etc/modules-load.d, unless the package"sv << std::endl
+      << "      already provides it at "sv << POLARIS_MODULES_LOAD_DIR << std::endl
       << "    - reload udev and trigger /dev/uinput and /dev/uhid"sv << std::endl
       << "    - load uinput and uhid now via modprobe"sv << std::endl
       << "    - optionally apply cap_sys_admin for DRM/KMS capture"sv << std::endl
@@ -219,9 +246,15 @@ namespace args {
     const auto udev_source = resolve_bundled_host_asset("udev/rules.d/60-polaris.rules");
     const auto modules_source = resolve_bundled_host_asset("modules-load.d/60-polaris.conf");
 
+    const auto udev_packaged = fs::path(POLARIS_UDEV_RULES_DIR) / "60-polaris.rules";
+    const auto modules_packaged = fs::path(POLARIS_MODULES_LOAD_DIR) / "60-polaris.conf";
+    const bool udev_from_package = host_asset_provided_by_package(udev_source, udev_packaged, "udev rules");
+    const bool modules_from_package = host_asset_provided_by_package(modules_source, modules_packaged, "modules-load config");
+
     if (geteuid() != 0) {
       std::cout
-        << "Polaris host setup requires root because it writes /etc and reloads udev."sv << std::endl
+        << "Polaris host setup requires root because it loads kernel modules, reloads udev"sv << std::endl
+        << "and, on installs the package manager does not own, writes /etc."sv << std::endl
         << "Run:"sv << std::endl
         << "  sudo -H "sv << exe_path->string() << " --setup-host"sv;
       if (enable_kms) {
@@ -232,8 +265,12 @@ namespace args {
     }
 
     bool ok = true;
-    ok &= install_host_asset(udev_source, "/etc/udev/rules.d/60-polaris.rules", "udev rules");
-    ok &= install_host_asset(modules_source, "/etc/modules-load.d/60-polaris.conf", "modules-load config");
+    if (!udev_from_package) {
+      ok &= install_host_asset(udev_source, "/etc/udev/rules.d/60-polaris.rules", "udev rules");
+    }
+    if (!modules_from_package) {
+      ok &= install_host_asset(modules_source, "/etc/modules-load.d/60-polaris.conf", "modules-load config");
+    }
     ok &= run_host_command("reload udev rules", "udevadm control --reload-rules", false);
     ok &= run_host_command("trigger /dev/uinput permissions", "udevadm trigger --property-match=DEVNAME=/dev/uinput", false);
     ok &= run_host_command("trigger /dev/uhid permissions", "udevadm trigger --property-match=DEVNAME=/dev/uhid", false);
@@ -252,7 +289,13 @@ namespace args {
     }
 
     std::cout
-      << "Linux host setup complete."sv << std::endl
+      << "Linux host setup complete."sv << std::endl;
+    if (udev_from_package && modules_from_package) {
+      std::cout
+        << "The udev rules and modules-load configuration came from the package, so nothing was written to /etc."sv << std::endl
+        << "Everything this step applied is also applied automatically at boot; it is only needed to avoid a reboot after install."sv << std::endl;
+    }
+    std::cout
       << "Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation."sv << std::endl
       << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl;
     return 0;
@@ -274,7 +317,34 @@ namespace lifetime {
   char **argv;
   std::atomic_int desired_exit_code;
 
-  void exit_sunshine(int exit_code, bool async) {
+  namespace {
+    std::mutex shutdown_reason_mutex;
+    std::string recorded_shutdown_reason;
+  }  // namespace
+
+  void note_shutdown_reason(std::string_view reason) {
+    if (reason.empty()) {
+      return;
+    }
+
+    std::lock_guard lock {shutdown_reason_mutex};
+    if (!recorded_shutdown_reason.empty()) {
+      BOOST_LOG(debug) << "Additional shutdown request ["sv << reason << "] after ["sv << recorded_shutdown_reason << ']';
+      return;
+    }
+
+    recorded_shutdown_reason = reason;
+    BOOST_LOG(info) << "Shutdown requested: "sv << reason;
+  }
+
+  std::string shutdown_reason() {
+    std::lock_guard lock {shutdown_reason_mutex};
+    return recorded_shutdown_reason.empty() ? std::string {"unspecified"} : recorded_shutdown_reason;
+  }
+
+  void exit_sunshine(int exit_code, bool async, std::string_view reason) {
+    note_shutdown_reason(reason);
+
     // Store the exit code of the first exit_sunshine() call
     int zero = 0;
     desired_exit_code.compare_exchange_strong(zero, exit_code);

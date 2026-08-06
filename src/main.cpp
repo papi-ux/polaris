@@ -118,7 +118,7 @@ LRESULT CALLBACK SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
       {
         // Terminate ourselves with a blocking exit call
         std::cout << "Received WM_ENDSESSION"sv << std::endl;
-        lifetime::exit_sunshine(0, false);
+        lifetime::exit_sunshine(0, false, "Windows session ending (WM_ENDSESSION)");
         return 0;
       }
     default:
@@ -129,7 +129,7 @@ LRESULT CALLBACK SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 WINAPI BOOL ConsoleCtrlHandler(DWORD type) {
   if (type == CTRL_CLOSE_EVENT) {
     BOOST_LOG(info) << "Console closed handler called";
-    lifetime::exit_sunshine(0, false);
+    lifetime::exit_sunshine(0, false, "console window closed");
   }
   return FALSE;
 }
@@ -158,7 +158,7 @@ void mainThreadLoop(const std::shared_ptr<safe::event_t<bool>> &shutdown_event) 
   BOOST_LOG(info) << "Starting main loop"sv;
   while (true) {
     if (shutdown_event->peek()) {
-      BOOST_LOG(info) << "Shutdown event detected, breaking main loop"sv;
+      BOOST_LOG(info) << "Shutdown event detected, breaking main loop: "sv << lifetime::shutdown_reason();
       if (tray_is_enabled && config::sunshine.system_tray) {
         system_tray::end_tray();
       }
@@ -381,7 +381,10 @@ int main(int argc, char *argv[]) {
 
   auto shutdown_event = mail::man->event<bool>(mail::shutdown);
   on_signal(SIGINT, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
-    BOOST_LOG(info) << "Interrupt handler called"sv;
+    // A SIGINT that did not come from exit_sunshine() has no recorded reason
+    // yet; first reason wins, so this only fills in the external case.
+    lifetime::note_shutdown_reason("SIGINT received");
+    BOOST_LOG(info) << "Interrupt handler called: "sv << lifetime::shutdown_reason();
 
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
@@ -398,7 +401,8 @@ int main(int argc, char *argv[]) {
   });
 
   on_signal(SIGTERM, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
-    BOOST_LOG(info) << "Terminate handler called"sv;
+    lifetime::note_shutdown_reason("SIGTERM received");
+    BOOST_LOG(info) << "Terminate handler called: "sv << lifetime::shutdown_reason();
 
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;

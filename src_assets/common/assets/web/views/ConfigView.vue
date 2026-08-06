@@ -343,6 +343,7 @@ const tabs = ref([
       "ds5_inputtino_randomize_mac": "enabled",
       "headless_gamepad_isolation": "enabled",
       "client_gamepad_seat_isolation": "disabled",
+      "client_keyboard_mouse_seat_isolation": "disabled",
       "back_button_timeout": -1,
       "keyboard": "enabled",
       "key_repeat_delay": 500,

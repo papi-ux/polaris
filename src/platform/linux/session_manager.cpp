@@ -22,9 +22,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #ifdef POLARIS_TESTS
   #include <functional>
 #endif
@@ -33,6 +36,10 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace std::literals;
 
@@ -80,6 +87,120 @@ namespace session_manager {
     }
 #endif
     return std::system(cmd.c_str()) == 0;
+  }
+
+  // ---------------------------------------------------------------------
+  // systemd-inhibit fallback
+  //
+  // The inhibitor used to be spawned as `systemd-inhibit ... sleep infinity &`
+  // through a shell, with nothing tracking the child. Every session leaked one,
+  // whether it ended cleanly or Polaris crashed, and the leaked inhibitor kept
+  // blocking idle and suspend for the rest of the boot.
+  //
+  // The child now holds the read end of a pipe as its stdin and runs `cat`
+  // instead of `sleep`. Releasing the inhibitor is closing the write end:
+  // `cat` reads EOF and exits, taking systemd-inhibit with it. Because the
+  // kernel closes the write end whenever Polaris dies, that release also happens
+  // on SIGKILL and on a segfault — no supervision required.
+  // ---------------------------------------------------------------------
+
+  static pid_t g_inhibitor_pid = -1;
+  static int g_inhibitor_anchor_fd = -1;
+
+  static void reap_inhibitor(pid_t pid) {
+    // `cat` exits as soon as it sees EOF, so a short poll normally suffices.
+    for (int i = 0; i < 20; ++i) {
+      const auto reaped = waitpid(pid, nullptr, WNOHANG);
+      if (reaped == pid || (reaped < 0 && errno != EINTR)) {
+        return;
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+
+    BOOST_LOG(warning) << "session_manager: idle inhibitor ["sv << pid << "] ignored EOF; terminating it"sv;
+    kill(pid, SIGTERM);
+    waitpid(pid, nullptr, 0);
+  }
+
+  static bool start_systemd_inhibitor() {
+    if (g_inhibitor_anchor_fd >= 0) {
+      BOOST_LOG(debug) << "session_manager: idle inhibitor already held"sv;
+      return true;
+    }
+
+    int fds[2] = {-1, -1};
+    if (pipe2(fds, O_CLOEXEC) != 0) {
+      BOOST_LOG(warning) << "session_manager: could not create idle inhibitor pipe: "sv << strerror(errno);
+      return false;
+    }
+
+    const auto pid = fork();
+    if (pid < 0) {
+      BOOST_LOG(warning) << "session_manager: could not fork idle inhibitor: "sv << strerror(errno);
+      close(fds[0]);
+      close(fds[1]);
+      return false;
+    }
+
+    if (pid == 0) {
+      // dup2 clears O_CLOEXEC on the copy, so the read end survives the exec as
+      // stdin while the write end does not follow us into the child.
+      if (dup2(fds[0], STDIN_FILENO) < 0) {
+        _exit(127);
+      }
+      close(fds[0]);
+      close(fds[1]);
+
+      const int devnull = open("/dev/null", O_WRONLY);
+      if (devnull >= 0) {
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        close(devnull);
+      }
+
+#ifdef POLARIS_TESTS
+      // Tests exercise the anchoring mechanics, not logind. Run the same
+      // EOF-terminated child without requiring systemd on the test host.
+      execlp("cat", "cat", static_cast<char *>(nullptr));
+#else
+      execlp(
+        "systemd-inhibit",
+        "systemd-inhibit",
+        "--what=idle:sleep",
+        "--who=polaris",
+        "--why=Game streaming active",
+        "--mode=block",
+        "cat",
+        static_cast<char *>(nullptr)
+      );
+#endif
+      _exit(127);
+    }
+
+    close(fds[0]);
+    g_inhibitor_anchor_fd = fds[1];
+    g_inhibitor_pid = pid;
+
+    BOOST_LOG(info) << "session_manager: idle inhibitor held by pid ["sv << pid
+                    << "]; it is released automatically if Polaris exits"sv;
+    return true;
+  }
+
+  static void stop_systemd_inhibitor() {
+    if (g_inhibitor_anchor_fd < 0) {
+      return;
+    }
+
+    const auto pid = g_inhibitor_pid;
+    close(g_inhibitor_anchor_fd);
+    g_inhibitor_anchor_fd = -1;
+    g_inhibitor_pid = -1;
+
+    if (pid > 0) {
+      reap_inhibitor(pid);
+    }
+
+    BOOST_LOG(info) << "session_manager: idle inhibitor released"sv;
   }
 
   static std::string shell_quote(std::string_view value) {
@@ -462,11 +583,7 @@ namespace session_manager {
     // systemd-inhibit is the normal path there — do not warn as if streaming is broken.
     BOOST_LOG(info) << "session_manager: ScreenSaver.Inhibit unavailable; using systemd-inhibit fallback"sv;
 
-    // Fallback: use systemd-inhibit style via loginctl
-    run("systemd-inhibit --what=idle:sleep --who=polaris "
-        "--why='Game streaming active' --mode=block sleep infinity &");
-
-    return false;
+    return start_systemd_inhibitor();
   }
 
   void release_lock() {
@@ -480,6 +597,8 @@ namespace session_manager {
                       << screensaver_cookie << ")"sv;
       screensaver_cookie = 0;
     }
+
+    stop_systemd_inhibitor();
   }
 
   bool is_screen_locked() {
@@ -535,6 +654,14 @@ namespace session_manager {
   void reset_command_hooks_for_tests() {
     g_exec_hook = nullptr;
     g_run_hook = nullptr;
+  }
+
+  bool inhibitor_held_for_tests() {
+    return g_inhibitor_anchor_fd >= 0;
+  }
+
+  pid_t inhibitor_pid_for_tests() {
+    return g_inhibitor_pid;
   }
 #endif
 

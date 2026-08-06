@@ -43,6 +43,7 @@
 #include "confighttp_validation.h"
 #include "crypto.h"
 #include "display_device.h"
+#include "entry_handler.h"
 #include "file_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -3956,11 +3957,11 @@ namespace confighttp {
 
 #ifdef _WIN32
     if (GetConsoleWindow() == NULL) {
-      lifetime::exit_sunshine(ERROR_SHUTDOWN_IN_PROGRESS, true);
+      lifetime::exit_sunshine(ERROR_SHUTDOWN_IN_PROGRESS, true, "quit requested from the web UI");
     } else
 #endif
     {
-      lifetime::exit_sunshine(0, true);
+      lifetime::exit_sunshine(0, true, "quit requested from the web UI");
     }
     // If exit fails, write a response after 5 seconds.
     launch_background_task([response] {
@@ -5831,6 +5832,7 @@ namespace confighttp {
         if (shutdown_event->peek())
           return;
         BOOST_LOG(fatal) << "Couldn't start Configuration HTTPS server on port ["sv << port_https << "]: "sv << err.what();
+        lifetime::note_shutdown_reason("Configuration HTTPS server could not bind its port");
         shutdown_event->raise(true);
         return;
       }

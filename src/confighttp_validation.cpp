@@ -105,6 +105,7 @@ namespace confighttp::validation {
       "cert"sv,
       "color_range"sv,
       "client_gamepad_seat_isolation"sv,
+      "client_keyboard_mouse_seat_isolation"sv,
       "controller"sv,
       "credentials_file"sv,
       "dd_config_revert_delay"sv,

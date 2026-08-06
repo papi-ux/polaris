@@ -6,6 +6,7 @@
 
 // standard includes
 #include <atomic>
+#include <string>
 #include <string_view>
 
 // local includes
@@ -92,11 +93,30 @@ namespace lifetime {
   extern std::atomic_int desired_exit_code;
 
   /**
+   * @brief Record why Polaris is shutting down.
+   *
+   * The first reason recorded wins, matching how the first exit code wins, so
+   * the cause survives the cascade of secondary shutdowns that follows it. Call
+   * this before raising the global shutdown event directly; exit_sunshine()
+   * records the reason itself.
+   *
+   * @param reason Short description of what asked for shutdown.
+   */
+  void note_shutdown_reason(std::string_view reason);
+
+  /**
+   * @brief Get the recorded shutdown reason.
+   * @return The first recorded reason, or "unspecified" when nothing recorded one.
+   */
+  std::string shutdown_reason();
+
+  /**
    * @brief Terminates Sunshine gracefully with the provided exit code.
    * @param exit_code The exit code to return from main().
    * @param async Specifies whether our termination will be non-blocking.
+   * @param reason Short description of what asked for shutdown, for the log.
    */
-  void exit_sunshine(int exit_code, bool async);
+  void exit_sunshine(int exit_code, bool async, std::string_view reason = "unspecified");
 
   /**
    * @brief Breaks into the debugger or terminates Sunshine if no debugger is attached.

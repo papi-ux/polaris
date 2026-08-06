@@ -1,11 +1,17 @@
 print_host_setup_hint() {
   cat <<'EOF'
-Polaris host integration is now explicit instead of automatic.
+Polaris installs its udev rules and modules-load configuration as package files:
+  /usr/lib/udev/rules.d/60-polaris.rules
+  /usr/lib/modules-load.d/60-polaris.conf
 
-Run after install if you want virtual input and controller support:
-  sudo -H polaris --setup-host
+pacman owns both, applies them via the systemd udev-reload hook, and removes them
+on uninstall. Virtual input and controller support works after the next reboot
+with no further steps.
 
-Only add KMS capability if you plan to use DRM/KMS capture:
+To use it without rebooting first, load the modules once:
+  sudo modprobe uinput uhid
+
+Only DRM/KMS capture still needs an explicit privileged step:
   sudo -H polaris --setup-host --enable-kms
 
 Optional background autostart:

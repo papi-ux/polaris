@@ -2,10 +2,25 @@
 
 install(DIRECTORY "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/"
         DESTINATION "${POLARIS_ASSETS_DIR}")
+
+# The bundled copies under ${POLARIS_ASSETS_DIR} are what `--setup-host` installs
+# from when Polaris runs portable or from an AppImage, and what a build directory
+# run reads. Distribution packages additionally install them to their live system
+# paths below, so the package manager owns the files and removes them on uninstall.
 install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.rules"
         DESTINATION "${POLARIS_ASSETS_DIR}/udev/rules.d")
 install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.conf"
         DESTINATION "${POLARIS_ASSETS_DIR}/modules-load.d")
+
+# Host integration files at their live paths, for everything that is not an
+# AppImage. An AppImage cannot own paths outside its mount, so it keeps relying
+# on `polaris --setup-host` to place these under /etc.
+if(NOT ${POLARIS_BUILD_APPIMAGE})
+    install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.rules"
+            DESTINATION "${POLARIS_UDEV_RULES_DIR}")
+    install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.conf"
+            DESTINATION "${POLARIS_MODULES_LOAD_DIR}")
+endif()
 
 # copy assets (excluding shaders) to build directory, for running without install
 file(COPY "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/"

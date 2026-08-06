@@ -11,6 +11,9 @@ url=@PROJECT_HOMEPAGE_URL@
 license=('GPL-3.0-only')
 install=polaris.install
 
+# Split a polaris-debug package so crash reports from this build are debuggable.
+options=('debug' 'strip')
+
 depends=(
   'avahi'
   'boost-libs'
@@ -150,4 +153,6 @@ package() {
   DESTDIR="$pkgdir" cmake --install build
   test -x "$pkgdir/usr/bin/polaris-$pkgver"
   test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"
+  test -f "$pkgdir/usr/lib/udev/rules.d/60-polaris.rules"
+  test -f "$pkgdir/usr/lib/modules-load.d/60-polaris.conf"
 }

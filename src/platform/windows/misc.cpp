@@ -1283,7 +1283,7 @@ namespace platf {
     }
 
     // We use an async exit call here because we can't block the HTTP thread or we'll hang shutdown.
-    lifetime::exit_sunshine(0, true);
+    lifetime::exit_sunshine(0, true, "restart requested");
   }
 
   int set_env(const std::string &name, const std::string &value) {
