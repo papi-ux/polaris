@@ -50,6 +50,37 @@ namespace beat_times {
   const dataset_t &dataset();
 
   /**
+   * @brief Fold a title to what a fuzzy match can work with.
+   *
+   * Unlike normalise_name this keeps word boundaries, because the distance between two
+   * titles is only meaningful while the words are still separable.
+   */
+  std::string match_key(std::string_view name);
+
+  /** @brief Edit distance, for choosing between candidates that all nearly match. */
+  int edit_distance(std::string_view left, std::string_view right);
+
+  /**
+   * @brief Whether a candidate is close enough to be believed.
+   *
+   * A confident wrong number is worse than none, so a near miss is rejected rather than
+   * rounded up to a match.
+   */
+  bool is_acceptable_match(std::string_view query, std::string_view candidate, int distance);
+
+  /**
+   * @brief Ask the network about a title, some time soon, once.
+   *
+   * Returns immediately. The answer lands in the dataset file and is served by the next
+   * request that asks for it; nothing waits on the network while a library is being
+   * serialised.
+   */
+  void request_lookup(const std::string &steam_appid, const std::string &name);
+
+  /** @brief Stop the background worker. Safe to call when it never started. */
+  void shutdown();
+
+  /**
    * @brief The estimate for a game, preferring the id over the name.
    *
    * A Steam app id is the same answer every time; a title is a guess that happens to be

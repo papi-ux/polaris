@@ -11,6 +11,7 @@
 #include <optional>
 
 // local includes
+#include "beat_times.h"
 #include "client_profiles.h"
 #include "confighttp.h"
 #include "display_device.h"
@@ -372,6 +373,12 @@ int main(int argc, char *argv[]) {
   task_pool.start(1);
 
   // Create signal handler after logging has been initialized
+  // The beat-times worker holds a joinable thread; it has to be stopped before the
+  // statics it touches are torn down.
+  auto beat_times_guard = util::fail_guard([]() {
+    beat_times::shutdown();
+  });
+
   auto shutdown_event = mail::man->event<bool>(mail::shutdown);
   on_signal(SIGINT, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
     BOOST_LOG(info) << "Interrupt handler called"sv;
