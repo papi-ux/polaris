@@ -591,6 +591,10 @@ namespace cage_display_router {
     return mode;
   }
 
+  bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type) {
+    return hwdevice_type == platf::mem_type_e::cuda;
+  }
+
   bool should_attempt_headless_extcopy_dmabuf(
     const platf::runtime_state_t &runtime_state,
     platf::mem_type_e hwdevice_type
@@ -604,7 +608,14 @@ namespace cage_display_router {
       return false;
     }
 
-    return hwdevice_type == platf::mem_type_e::cuda;
+    return gpu_native_dmabuf_is_safe(hwdevice_type);
+  }
+
+  bool should_attempt_gpu_native_cage_capture(
+    const platf::runtime_state_t &runtime_state,
+    platf::mem_type_e hwdevice_type
+  ) {
+    return runtime_state.gpu_native_override_active && gpu_native_dmabuf_is_safe(hwdevice_type);
   }
 
   bool should_disable_headless_extcopy_after_conversion_failure(

@@ -50,8 +50,12 @@ namespace display_topology {
 
   /**
    * @brief Enable streaming output / optional privacy swap before capture.
+   *
+   * @param width Requested stream width in pixels (advisory).
+   * @param height Requested stream height in pixels (advisory).
+   * @param refresh_hz Requested stream refresh in Hz (advisory).
    */
-  void prepare_for_stream();
+  void prepare_for_stream(int width, int height, int refresh_hz);
 
   /**
    * @brief Restore primary display layout after the stream ends.

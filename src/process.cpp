@@ -4594,8 +4594,8 @@ namespace proc {
 
   namespace linux_display {
     // Thin wrappers — topology lives in display_topology for path plugins.
-    void enable_streaming_display() {
-      display_topology::prepare_for_stream();
+    void enable_streaming_display(int width, int height, int refresh_hz) {
+      display_topology::prepare_for_stream(width, height, refresh_hz);
     }
 
     void disable_streaming_display() {
@@ -5602,7 +5602,14 @@ namespace proc {
 #ifdef __linux__
     // Enable streaming display BEFORE encoder probe so HDMI-A-1 is available
     if (config::video.linux_display.auto_manage_displays) {
-      linux_display::enable_streaming_display();
+      int target_fps = launch_session->fps ? launch_session->fps : 60000;
+      if (target_fps >= 1000) {
+        target_fps /= 1000;
+      }
+      if (config::video.double_refreshrate) {
+        target_fps *= 2;
+      }
+      linux_display::enable_streaming_display(render_width, render_height, target_fps);
     }
 #endif
 
@@ -6202,6 +6209,26 @@ namespace proc {
     };
 
     auto resolve_windowed_gpu_native_fallback = [&]() -> bool {
+      // The override trades true headless away to keep GPU-native capture, so
+      // it is worth nothing to an encoder Polaris will not import GPU frames
+      // from: the session would give up headless and then fall back to RAM
+      // anyway. Probing it is worse than pointless — the probe drives the same
+      // conversion path that crashes these stacks, in this process.
+      //
+      // An unresolved encoder reports `unknown` rather than a safe answer, and
+      // refusing on that would take the override away from stacks that are
+      // fine, so only a known-unsafe type is refused here. The capture-time
+      // gate covers the rest, by which point the encoder is always chosen.
+      const auto encoder_mem_type = video::active_encoder_mem_type();
+      if (encoder_mem_type != platf::mem_type_e::unknown &&
+          !stream_runtime::labwc::gpu_native_dmabuf_is_safe(encoder_mem_type)) {
+        stream_stats::update_gpu_native_probe_attempt("windowed", "ineligible", "policy", "vaapi_gpu_native_dmabuf_disabled_for_stability");
+        BOOST_LOG(info) << "session_manager: Skipping the windowed GPU-native fallback for encoder ["
+                        << (video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name())
+                        << "] because its GPU-native DMA-BUF path is disabled for stability; staying headless"sv;
+        return false;
+      }
+
       if (cached_windowed_gpu_native_probe_result == std::optional<bool> {true}) {
         stream_stats::update_gpu_native_probe_attempt("windowed", "succeeded", {}, {}, true);
         BOOST_LOG(info) << "session_manager: Reusing cached windowed_dmabuf_override probe result"sv;

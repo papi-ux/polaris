@@ -87,7 +87,11 @@ namespace stream_runtime {
       bool prefer_gpu_native_capture,
       bool encoder_requires_gpu_native_capture
     );
-    bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state);
+    bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type);
+    bool should_attempt_gpu_native_cage_capture(
+      const platf::runtime_state_t &runtime_state,
+      platf::mem_type_e hwdevice_type
+    );
     bool should_attempt_headless_extcopy_dmabuf(
       const platf::runtime_state_t &runtime_state,
       platf::mem_type_e hwdevice_type

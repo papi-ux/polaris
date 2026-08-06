@@ -83,8 +83,15 @@ namespace stream_runtime {
       return requested_headless && prefer_gpu_native_capture && encoder_requires_gpu_native_capture;
     }
 
-    bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state) {
-      return runtime_state.gpu_native_override_active;
+    bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type) {
+      return cage_display_router::gpu_native_dmabuf_is_safe(hwdevice_type);
+    }
+
+    bool should_attempt_gpu_native_cage_capture(
+      const platf::runtime_state_t &runtime_state,
+      platf::mem_type_e hwdevice_type
+    ) {
+      return cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state, hwdevice_type);
     }
 
     bool should_attempt_headless_extcopy_dmabuf(
