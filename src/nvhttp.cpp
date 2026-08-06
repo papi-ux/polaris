@@ -64,6 +64,7 @@
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "beat_times.h"
 #include "game_library_scanner.h"
 #include "platform/common.h"
 #include "process.h"
@@ -2802,6 +2803,39 @@ namespace nvhttp {
                       << format_watch_profile(*owner_profile);
 
       return std::nullopt;
+    }
+
+    /**
+     * @brief How long the dataset says this game takes to finish, when it knows.
+     *
+     * Local file only: How Long To Beat gates its API behind a fingerprint check and
+     * rotates the endpoint deliberately, so a distributed product cannot depend on it
+     * without breaking for every install at once.
+     */
+    std::optional<nlohmann::json> beat_time_for_app(const proc::ctx_t &app) {
+      const auto estimate = beat_times::lookup(beat_times::dataset(), app.steam_appid, app.name);
+      if (!estimate) {
+        return std::nullopt;
+      }
+
+      nlohmann::json beat;
+      beat["matched_name"] = estimate->matched_name;
+      beat["cached_at"] = beat_times::dataset().generated_at;
+      if (estimate->main_seconds > 0) {
+        beat["main_seconds"] = estimate->main_seconds;
+      }
+      if (estimate->extras_seconds > 0) {
+        beat["extras_seconds"] = estimate->extras_seconds;
+      }
+      if (estimate->completionist_seconds > 0) {
+        beat["completionist_seconds"] = estimate->completionist_seconds;
+      }
+      // Without a page the estimate is something to read, not somewhere to go, and it
+      // drops out of the focus lane rather than offering a link to nowhere.
+      if (!estimate->url.empty()) {
+        beat["url"] = estimate->url;
+      }
+      return beat;
     }
 
     /**
@@ -6649,6 +6683,9 @@ namespace nvhttp {
         game["last_launched"] = app.last_launched;
         if (const auto play_time = play_time_for_app(app)) {
           game["play_time"] = *play_time;
+        }
+        if (const auto beat_time = beat_time_for_app(app)) {
+          game["beat_time"] = *beat_time;
         }
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
