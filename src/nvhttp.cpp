@@ -6044,6 +6044,16 @@ namespace nvhttp {
       features["ai_optimizer_control"] = true;
       features["adaptive_bitrate_control"] = true;
       features["game_library"] = true;
+      // Declared so a client can light up the UI conditionally instead of
+      // guessing from the presence of a field. Both landed in v1.3.5 and are
+      // served on the game object as `play_time` and `beat_time`.
+      features["library_playtime_v1"] = true;
+      // The estimate itself comes from the bundled dataset and is always
+      // served; `beat_times_lookup` only decides whether unknown titles are
+      // resolved over the network, so it is reported separately rather than
+      // making the feature look absent.
+      features["library_beat_times_v1"] = true;
+      features["library_beat_times_lookup"] = config::sunshine.beat_times_lookup;
       features["artwork_manifest_v1"] = true;
       features["artwork_manual_match_v1"] = nonblank_artwork_api_key(
         config::sunshine.steamgriddb_api_key);

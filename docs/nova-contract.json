@@ -1,0 +1,76 @@
+{
+  "$comment": [
+    "Fields Polaris serves to Nova, per response object.",
+    "",
+    "Nova and Polaris ship from separate repositories on separate schedules, and both",
+    "sides address these fields by string literal. Nothing in either build can see the",
+    "other, so a rename on one side degrades silently: a reader falls back to its",
+    "default and the feature quietly stops working rather than failing.",
+    "",
+    "This manifest is the shared record. tests/integration/test_nova_contract.cpp keeps",
+    "Polaris honest about it, and scripts/check-nova-contract.py diffs it against a Nova",
+    "checkout. Adding a field to a response means adding it here in the same commit.",
+    "",
+    "Drift found when this manifest was introduced, on 2026-08-06, is recorded under",
+    "known_drift so it is tracked rather than rediscovered."
+  ],
+  "version": 1,
+  "objects": {
+    "game": {
+      "$comment": "Emitted per app by the game library endpoint.",
+      "fields": [
+        "app_id",
+        "artwork",
+        "beat_time",
+        "category",
+        "cover_url",
+        "genres",
+        "hdr_supported",
+        "id",
+        "installed",
+        "last_launched",
+        "launch_mode",
+        "mangohud",
+        "name",
+        "play_time",
+        "source",
+        "steam_appid",
+        "steam_launch"
+      ],
+      "optional": [
+        "beat_time",
+        "play_time"
+      ],
+      "nova_reader": {
+        "$comment": "Nova unpacks nested launch_mode/mode objects in the same file, so the receiver variable is what scopes this to the game object itself.",
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "receiver": "json"
+      }
+    }
+  },
+  "known_drift": {
+    "$comment": [
+      "Recorded 2026-08-06. Neither direction crashes: Nova defaults missing fields, and",
+      "Polaris does not care what goes unread. Both cost real behaviour anyway."
+    ],
+    "nova_reads_polaris_never_sends": {
+      "$comment": "Nova's PolarisGameJsonAdapter falls back for each of these, so the UI is permanently degraded rather than broken.",
+      "game": [
+        "launcher_source",
+        "launcher_detail",
+        "platform",
+        "runtime",
+        "platform_label",
+        "runtime_label"
+      ]
+    },
+    "polaris_sends_nova_never_reads": {
+      "$comment": "Shipped by Polaris v1.3.5 and invisible in Nova until it reads them.",
+      "game": [
+        "artwork",
+        "beat_time",
+        "play_time"
+      ]
+    }
+  }
+}
