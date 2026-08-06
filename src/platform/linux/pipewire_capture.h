@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <pipewire/pipewire.h>
+#include <spa/param/video/raw.h>
 #include <spa/utils/hook.h>
 
 #include "src/platform/common.h"
@@ -121,8 +122,8 @@ namespace pipewire_capture {
     std::size_t destination_stride
   );
 
-  platf::frame_metadata_t cpu_frame_metadata();
-  platf::frame_metadata_t dmabuf_frame_metadata(std::string render_node);
+  platf::frame_metadata_t cpu_frame_metadata(std::uint32_t spa_format = SPA_VIDEO_FORMAT_BGRx);
+  platf::frame_metadata_t dmabuf_frame_metadata(std::string render_node, std::uint32_t spa_format = SPA_VIDEO_FORMAT_BGRx);
   bool frame_requires_cpu_copy(const platf::frame_metadata_t &metadata);
 
   /**

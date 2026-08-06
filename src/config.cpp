@@ -674,6 +674,7 @@ namespace config {
     true,  // ds5_inputtino_randomize_mac
     true,  // headless_gamepad_isolation
     false,  // client_gamepad_seat_isolation
+    false,  // client_keyboard_mouse_seat_isolation
 
     true,  // keyboard enabled
     true,  // mouse enabled
@@ -1466,6 +1467,7 @@ namespace config {
     bool_f(vars, "ds5_inputtino_randomize_mac", input.ds5_inputtino_randomize_mac);
     bool_f(vars, "headless_gamepad_isolation", input.headless_gamepad_isolation);
     bool_f(vars, "client_gamepad_seat_isolation", input.client_gamepad_seat_isolation);
+    bool_f(vars, "client_keyboard_mouse_seat_isolation", input.client_keyboard_mouse_seat_isolation);
 
     bool_f(vars, "mouse", input.mouse);
     bool_f(vars, "mouse_cursor_visible", input.mouse_cursor_visible);

@@ -4,8 +4,15 @@ print_steamos_setup_hint() {
     'Steam Game Mode host operation is not yet certified.' \
     'SteamOS updates can remove packages installed on the root filesystem.' \
     '' \
-    'Configure host integration after installation:' \
-    '  sudo -H polaris --setup-host' \
+    'The udev rules and modules-load configuration are package files:' \
+    '  /usr/lib/udev/rules.d/60-polaris.rules' \
+    '  /usr/lib/modules-load.d/60-polaris.conf' \
+    'Virtual input works after the next reboot with no further steps. To use it' \
+    'without rebooting first, load the modules once:' \
+    '  sudo modprobe uinput uhid' \
+    '' \
+    'Only DRM/KMS capture still needs a privileged step:' \
+    '  sudo -H polaris --setup-host --enable-kms' \
     '' \
     'Optional user-service autostart:' \
     '  systemctl --user enable --now polaris'

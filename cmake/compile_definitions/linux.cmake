@@ -16,6 +16,35 @@ if(${POLARIS_BUILD_APPIMAGE})
     string(REPLACE "${CMAKE_INSTALL_PREFIX}" ".${CMAKE_INSTALL_PREFIX}" POLARIS_ASSETS_DIR_DEF ${POLARIS_ASSETS_DIR})
 endif()
 
+# Host integration files. Distribution packages install these to their live
+# system paths so the package manager owns them; `--setup-host` then only has to
+# apply them at runtime instead of copying anything into /etc. AppImage and
+# portable builds have no package manager to own the files, so they keep the
+# /etc install path.
+find_package(Udev)
+if(UDEV_FOUND AND UDEV_RULES_INSTALL_DIR)
+    set(POLARIS_UDEV_RULES_DIR "${UDEV_RULES_INSTALL_DIR}" CACHE PATH
+            "Directory holding Polaris' vendor udev rules")
+else()
+    set(POLARIS_UDEV_RULES_DIR "${CMAKE_INSTALL_PREFIX}/lib/udev/rules.d" CACHE PATH
+            "Directory holding Polaris' vendor udev rules")
+endif()
+
+find_package(Systemd)
+if(SYSTEMD_FOUND AND SYSTEMD_MODULES_LOAD_DIR)
+    set(POLARIS_MODULES_LOAD_DIR "${SYSTEMD_MODULES_LOAD_DIR}" CACHE PATH
+            "Directory holding Polaris' modules-load configuration")
+else()
+    set(POLARIS_MODULES_LOAD_DIR "${CMAKE_INSTALL_PREFIX}/lib/modules-load.d" CACHE PATH
+            "Directory holding Polaris' modules-load configuration")
+endif()
+
+message(STATUS "Polaris udev rules directory: ${POLARIS_UDEV_RULES_DIR}")
+message(STATUS "Polaris modules-load directory: ${POLARIS_MODULES_LOAD_DIR}")
+
+list(APPEND POLARIS_DEFINITIONS POLARIS_UDEV_RULES_DIR="${POLARIS_UDEV_RULES_DIR}")
+list(APPEND POLARIS_DEFINITIONS POLARIS_MODULES_LOAD_DIR="${POLARIS_MODULES_LOAD_DIR}")
+
 # cuda
 set(CUDA_FOUND OFF)
 set(POLARIS_CUDA_DISABLED_ON_NVIDIA_DETECTED OFF)
@@ -378,6 +407,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/virtual_display.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_input.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.h"

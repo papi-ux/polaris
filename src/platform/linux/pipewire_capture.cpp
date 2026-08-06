@@ -419,7 +419,7 @@ namespace pipewire_capture {
     return platf::frame_format_e::bgra8;
   }
 
-  platf::frame_metadata_t cpu_frame_metadata(std::uint32_t spa_format = SPA_VIDEO_FORMAT_BGRx) {
+  platf::frame_metadata_t cpu_frame_metadata(std::uint32_t spa_format) {
     return {
       .transport = platf::frame_transport_e::shm,
       .residency = platf::frame_residency_e::cpu,
@@ -427,7 +427,7 @@ namespace pipewire_capture {
     };
   }
 
-  platf::frame_metadata_t dmabuf_frame_metadata(std::string render_node, std::uint32_t spa_format = SPA_VIDEO_FORMAT_BGRx) {
+  platf::frame_metadata_t dmabuf_frame_metadata(std::string render_node, std::uint32_t spa_format) {
     return {
       .transport = platf::frame_transport_e::dmabuf,
       .residency = platf::frame_residency_e::gpu,

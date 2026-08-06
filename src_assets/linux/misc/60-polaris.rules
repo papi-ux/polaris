@@ -22,3 +22,12 @@ SUBSYSTEMS=="input", ATTRS{name}=="Polaris gamepad (virtual) motion sensors", EN
 # remains explicit: same-UID processes and members of input are not isolated.
 KERNEL=="hidraw*", ATTRS{phys}=="polaris/client-gamepad-seat-isolated/*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
 SUBSYSTEMS=="input", ATTRS{phys}=="polaris/client-gamepad-seat-isolated/*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+
+# Marker emitted for the virtual keyboard, mouse, touch and pen when
+# client_keyboard_mouse_seat_isolation is enabled. Without it, a client typing
+# into a private stream session also types into the desktop session logged in at
+# the machine, because logind grants that session an ACL for every seat0 device.
+# The device names are unchanged, so a host compositor configured to ignore them
+# by name keeps working either way.
+KERNEL=="hidraw*", ATTRS{phys}=="polaris/client-input-seat-isolated/*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+SUBSYSTEMS=="input", ATTRS{phys}=="polaris/client-input-seat-isolated/*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"

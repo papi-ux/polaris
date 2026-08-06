@@ -17,6 +17,11 @@ url=@PROJECT_HOMEPAGE_URL@
 license=('GPL-3.0-only')
 install=polaris.install
 
+# 'debug' splits a polaris-debug package carrying the detached debuginfo and the
+# matching sources. Crash reports from released builds are otherwise unusable:
+# the stripped binary gives gdb and coredumpctl no symbols to work with.
+options=('debug' 'strip')
+
 depends=(
   'avahi'
   'boost-libs'
@@ -244,4 +249,10 @@ check() {
 
 package() {
     DESTDIR="$pkgdir" cmake --install build
+
+    # Host integration files have to be package-owned. When they regress back to
+    # /usr/share only, uninstall leaves files behind and users are pushed into a
+    # privileged setup step that should not be necessary.
+    test -f "$pkgdir/usr/lib/udev/rules.d/60-polaris.rules"
+    test -f "$pkgdir/usr/lib/modules-load.d/60-polaris.conf"
 }

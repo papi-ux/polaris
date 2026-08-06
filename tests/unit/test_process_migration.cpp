@@ -3,11 +3,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <thread>
 #include <src/adaptive_bitrate.h>
 #include <src/ai_optimizer.h>
 #include <src/file_handler.h>
@@ -195,6 +199,33 @@ namespace {
     return out.str();
   }
 
+  /**
+   * @brief Collapse whitespace runs so a call's arguments can be matched without
+   *        pinning its indentation.
+   *
+   * These contract tests assert which arguments a call is given, not how the
+   * call is wrapped. Matching raw source text makes them fail on reformatting or
+   * on the extra indent that comes from nesting the call one block deeper, which
+   * says nothing about the contract.
+   */
+  std::string collapse_whitespace(std::string_view source) {
+    std::string collapsed;
+    collapsed.reserve(source.size());
+    bool in_space = false;
+    for (const char ch : source) {
+      if (std::isspace(static_cast<unsigned char>(ch))) {
+        in_space = true;
+        continue;
+      }
+      if (in_space && !collapsed.empty()) {
+        collapsed.push_back(' ');
+      }
+      in_space = false;
+      collapsed.push_back(ch);
+    }
+    return collapsed;
+  }
+
 }  // namespace
 
 TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRouted) {
@@ -275,26 +306,17 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   EXPECT_EQ(stop_handler.find("request_active_session_shutdown"), std::string::npos);
   EXPECT_EQ(cancel_handler.find("session_token_matches_request"), std::string::npos);
   EXPECT_EQ(cancel_handler.find("request_active_session_shutdown"), std::string::npos);
+  // The paired certificate is the owner identity, so an owner cancel must not be
+  // held to a sessiontoken match — clients routinely send a stale one. Everyone
+  // else still needs the token to match when they supplied one.
   EXPECT_NE(
-    cancel_handler.find(
-      "request_session_shutdown(\n"
-      "      named_cert_p->uuid,\n"
-      "      session_token,\n"
-      "      true,\n"
-      "      !session_token.empty()\n"
-      "    )"
-    ),
+    collapse_whitespace(cancel_handler)
+      .find("request_session_shutdown( named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner )"),
     std::string::npos
   );
   EXPECT_NE(
-    stop_handler.find(
-      "request_session_shutdown(\n"
-      "        named_cert_p->uuid,\n"
-      "        expected_token,\n"
-      "        can_launch,\n"
-      "        true\n"
-      "      )"
-    ),
+    collapse_whitespace(stop_handler)
+      .find("request_session_shutdown( named_cert_p->uuid, expected_token, can_launch, true )"),
     std::string::npos
   );
 }
@@ -2044,7 +2066,7 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownSelectsTopLevelLau
 #endif
 }
 
-TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownRejectsMixedOwnedAndUnownedSteam) {
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownTerminatesOnlyTheExactGenerationSteam) {
 #ifdef __linux__
   linux_cage_compositor_guard_t config_guard;
   const std::string token = "mixed-production-wiring-generation";
@@ -2096,17 +2118,30 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownRejectsMixedOwnedA
   ASSERT_TRUE(wait_for_steam_like(owned, true));
   ASSERT_TRUE(wait_for_steam_like(unowned, false));
 
+  // Desktop Steam still running does not block the teardown: exact-generation
+  // ownership exists precisely so the session-owned client can be terminated
+  // while the user's own Steam is left alone. The call still reports false,
+  // because survivor cleanup stops as soon as it sees a client it does not own,
+  // and the caller falls back to cage cleanup.
   EXPECT_FALSE(proc::terminate_session_owned_steam_before_cage_stop_for_tests(
     steam_app, true, token
   ));
+
   int owned_status = 0;
-  const auto owned_wait = owned_guard.wait(&owned_status, WNOHANG);
-  EXPECT_EQ(owned_wait, 0)
-    << "mixed ownership must preserve the exact-generation Steam process";
+  pid_t owned_wait = 0;
+  for (int attempt = 0; attempt < 40 && owned_wait == 0; ++attempt) {
+    owned_wait = owned_guard.wait(&owned_status, WNOHANG);
+    if (owned_wait == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  EXPECT_EQ(owned_wait, owned)
+    << "the exact-generation Steam process must be terminated even under mixed ownership";
+
   int unowned_status = 0;
   const auto unowned_wait = unowned_guard.wait(&unowned_status, WNOHANG);
   EXPECT_EQ(unowned_wait, 0)
-    << "mixed ownership must preserve the unowned Steam process";
+    << "the unowned desktop Steam process must never be terminated";
 
 #else
   GTEST_SKIP() << "Linux-only mixed private/desktop Steam ownership";
@@ -2478,7 +2513,20 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_LT(detach_legacy_group, clear_legacy_child);
   EXPECT_LT(clear_legacy_child, immutable_undo_guard);
   EXPECT_LT(immutable_undo_guard, finish_generation);
-  EXPECT_EQ(terminate.find("exact_generation_cleanup_complete"), std::string::npos)
+  // terminate_impl may narrow captured completeness as later teardown stages
+  // report, but it must never widen it: assigning a literal, or anything that is
+  // not the flag ANDed with a fresh result, would let an incomplete generation
+  // present itself as clean.
+  for (std::size_t pos = terminate.find("_exact_generation_cleanup_complete =");
+       pos != std::string::npos;
+       pos = terminate.find("_exact_generation_cleanup_complete =", pos + 1)) {
+    const auto statement_end = terminate.find(';', pos);
+    ASSERT_NE(statement_end, std::string::npos);
+    const auto assignment = collapse_whitespace(terminate.substr(pos, statement_end - pos));
+    EXPECT_TRUE(assignment.starts_with("_exact_generation_cleanup_complete = _exact_generation_cleanup_complete &&"))
+      << "terminate_impl must only narrow captured completeness, found: " << assignment;
+  }
+  EXPECT_EQ(terminate.find("_exact_generation_cleanup_complete = true"), std::string::npos)
     << "terminate_impl must not be able to replace captured completeness with a literal";
 
   const auto generation_cleanup_start = source.find("void proc_t::terminate_isolated_session_generation()");
@@ -2499,7 +2547,9 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
     "const bool isolated_cleanup_complete = terminate_isolated_session_processes("
   );
   const auto cleanup_success_gate = generation_cleanup.find("isolated_session_cleanup_resets_router(");
-  const auto reset_cage = generation_cleanup.find("cage_display_router::reset_after_external_stop()");
+  // The router reset goes through the labwc stream-runtime facade rather than
+  // naming cage_display_router directly.
+  const auto reset_cage = generation_cleanup.find("stream_runtime::labwc::reset_after_external_stop()");
   const auto retain_generation = generation_cleanup.find(
     "retaining immutable cage generation because exact-generation cleanup was incomplete"
   );
@@ -3426,7 +3476,9 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   EXPECT_EQ((*lib_app)["steam-appid"], "1888160");
   ASSERT_TRUE((*lib_app).contains("detached"));
   ASSERT_EQ((*lib_app)["detached"].size(), 1);
-  EXPECT_EQ((*lib_app)["detached"][0], "setsid steam steam://rungameid/1888160");
+  // No setsid: the prefix is carried over from the command being replaced, and
+  // the polaris-gamescope-session wrapper this fixture unwraps has none.
+  EXPECT_EQ((*lib_app)["detached"][0], "steam steam://rungameid/1888160");
   EXPECT_TRUE((*lib_app).value("cmd", "").empty() || (*lib_app)["cmd"] == "");
 
   const auto bp_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {
@@ -3444,7 +3496,7 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   EXPECT_EQ(lib_ctx->steam_appid, "1888160");
   EXPECT_EQ(lib_ctx->source, "steam");
   ASSERT_EQ(lib_ctx->detached.size(), 1);
-  EXPECT_EQ(lib_ctx->detached.front(), "setsid steam steam://rungameid/1888160");
+  EXPECT_EQ(lib_ctx->detached.front(), "steam steam://rungameid/1888160");
   EXPECT_TRUE(lib_ctx->cmd.empty());
   // No polaris-gamescope-session left in prep for library game.
   EXPECT_TRUE(std::none_of(lib_ctx->prep_cmds.begin(), lib_ctx->prep_cmds.end(), [](const auto &cmd) {

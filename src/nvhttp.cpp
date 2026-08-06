@@ -54,6 +54,7 @@
 // local includes
 #include "config.h"
 #include "display_device.h"
+#include "entry_handler.h"
 #include "file_handler.h"
 #include "game_artwork.h"
 #include "game_artwork_manual.h"
@@ -8345,6 +8346,7 @@ namespace nvhttp {
         }
 
         BOOST_LOG(fatal) << "Couldn't start http server on ports ["sv << port_https << ", "sv << port_https << "]: "sv << err.what();
+        lifetime::note_shutdown_reason("client-facing http server could not bind its ports");
         shutdown_event->raise(true);
         return;
       }

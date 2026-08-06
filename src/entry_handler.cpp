@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <format>
 #include <iostream>
+#include <string>
 #include <thread>
 
 // local includes
@@ -80,6 +81,66 @@ namespace {
     return true;
   }
 
+  /**
+   * @brief Check whether a distribution package already provides a host asset.
+   *
+   * Packages install the udev rules and the modules-load configuration to their
+   * live system paths, which makes them package-manager owned and removable on
+   * uninstall. When the packaged copy is already current there is nothing for
+   * `--setup-host` to write, and writing a second copy into /etc would shadow
+   * the packaged one with a file that no uninstall ever removes.
+   */
+  bool host_asset_provided_by_package(const fs::path &source, const fs::path &packaged_target, std::string_view label) {
+    if (packaged_target.empty() || !fs::exists(packaged_target)) {
+      return false;
+    }
+
+    const auto packaged = file_handler::read_file(packaged_target.c_str());
+    if (packaged.empty() || packaged != file_handler::read_file(source.c_str())) {
+      return false;
+    }
+
+    BOOST_LOG(info) << "Linux host setup: "sv << label << " is provided by the package at ["sv << packaged_target << "]; nothing to install"sv;
+    return true;
+  }
+
+  /**
+   * @brief Retire a copy an earlier Polaris wrote into /etc.
+   *
+   * /etc wins over the vendor directory, so a copy left by an older install
+   * shadows the packaged file — every later fix to the rules would be installed
+   * and then ignored. A copy that still matches what Polaris ships is Polaris'
+   * own leftover and is removed; anything else is a local edit and is kept, with
+   * a warning that it is the file in effect.
+   */
+  void retire_shadowing_etc_asset(const fs::path &etc_target, const fs::path &packaged_source, std::string_view label) {
+    std::error_code ec;
+    if (!fs::exists(etc_target, ec)) {
+      return;
+    }
+
+    if (file_handler::read_file(etc_target.c_str()) != file_handler::read_file(packaged_source.c_str())) {
+      // Either a local edit worth keeping or a copy from an older Polaris. The
+      // two are indistinguishable from content alone, and deleting somebody's
+      // edit is worse than leaving a stale file, so this only reports it — with
+      // the command to run, because the shadowed file is the packaged one.
+      BOOST_LOG(warning) << "Linux host setup: ["sv << etc_target << "] differs from the "sv << label
+                         << " this Polaris ships and overrides it. If you did not edit it yourself it is "sv
+                         << "a copy from an older install; remove it with [sudo rm "sv << etc_target
+                         << "] so the packaged file applies."sv;
+      return;
+    }
+
+    if (fs::remove(etc_target, ec) && !ec) {
+      BOOST_LOG(info) << "Linux host setup: removed the superseded "sv << label << " copy at ["sv << etc_target
+                      << "]; the packaged file applies from now on"sv;
+      return;
+    }
+
+    BOOST_LOG(warning) << "Linux host setup: could not remove the superseded "sv << label << " copy at ["sv
+                       << etc_target << "]: "sv << ec.message();
+  }
+
   bool install_host_asset(const fs::path &source, const fs::path &target, std::string_view label) {
     const auto contents = file_handler::read_file(source.c_str());
     if (contents.empty()) {
@@ -138,8 +199,11 @@ namespace {
       << std::endl
       << "  Applies Linux host integration explicitly instead of relying on package scripts."sv << std::endl
       << "  Steps:"sv << std::endl
-      << "    - install Polaris udev rules into /etc/udev/rules.d"sv << std::endl
-      << "    - install Polaris modules-load config into /etc/modules-load.d"sv << std::endl
+      << "    - install Polaris udev rules into /etc/udev/rules.d, unless the package already"sv << std::endl
+      << "      provides them at "sv << POLARIS_UDEV_RULES_DIR << std::endl
+      << "    - install Polaris modules-load config into /etc/modules-load.d, unless the package"sv << std::endl
+      << "      already provides it at "sv << POLARIS_MODULES_LOAD_DIR << std::endl
+      << "    - remove an /etc copy left by an older Polaris that now shadows the packaged file"sv << std::endl
       << "    - reload udev and trigger /dev/uinput and /dev/uhid"sv << std::endl
       << "    - load uinput and uhid now via modprobe"sv << std::endl
       << "    - optionally apply cap_sys_admin for DRM/KMS capture"sv << std::endl
@@ -219,9 +283,32 @@ namespace args {
     const auto udev_source = resolve_bundled_host_asset("udev/rules.d/60-polaris.rules");
     const auto modules_source = resolve_bundled_host_asset("modules-load.d/60-polaris.conf");
 
+    const auto udev_packaged = fs::path(POLARIS_UDEV_RULES_DIR) / "60-polaris.rules";
+    const auto modules_packaged = fs::path(POLARIS_MODULES_LOAD_DIR) / "60-polaris.conf";
+    const bool udev_from_package = host_asset_provided_by_package(udev_source, udev_packaged, "udev rules");
+    const bool modules_from_package = host_asset_provided_by_package(modules_source, modules_packaged, "modules-load config");
+
+    // After a packaged install and a reboot there is nothing privileged left to
+    // do, and asking for sudo to discover that is exactly the friction this
+    // command should not have. Only claim it when the virtual input nodes are
+    // actually usable, which is the thing the whole step exists to arrange.
+    const bool etc_copies_absent = !fs::exists("/etc/udev/rules.d/60-polaris.rules") &&
+                                   !fs::exists("/etc/modules-load.d/60-polaris.conf");
+    const bool input_nodes_ready = access("/dev/uinput", R_OK | W_OK) == 0 &&
+                                   access("/dev/uhid", R_OK | W_OK) == 0;
+    if (!enable_kms && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
+      std::cout
+        << "Linux host setup: nothing to do."sv << std::endl
+        << "The package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
+        << "and /dev/uhid are already usable by this account. Re-run with --enable-kms only if you"sv << std::endl
+        << "need DRM/KMS capture."sv << std::endl;
+      return 0;
+    }
+
     if (geteuid() != 0) {
       std::cout
-        << "Polaris host setup requires root because it writes /etc and reloads udev."sv << std::endl
+        << "Polaris host setup requires root because it loads kernel modules, reloads udev"sv << std::endl
+        << "and, on installs the package manager does not own, writes /etc."sv << std::endl
         << "Run:"sv << std::endl
         << "  sudo -H "sv << exe_path->string() << " --setup-host"sv;
       if (enable_kms) {
@@ -232,8 +319,16 @@ namespace args {
     }
 
     bool ok = true;
-    ok &= install_host_asset(udev_source, "/etc/udev/rules.d/60-polaris.rules", "udev rules");
-    ok &= install_host_asset(modules_source, "/etc/modules-load.d/60-polaris.conf", "modules-load config");
+    if (udev_from_package) {
+      retire_shadowing_etc_asset("/etc/udev/rules.d/60-polaris.rules", udev_source, "udev rules");
+    } else {
+      ok &= install_host_asset(udev_source, "/etc/udev/rules.d/60-polaris.rules", "udev rules");
+    }
+    if (modules_from_package) {
+      retire_shadowing_etc_asset("/etc/modules-load.d/60-polaris.conf", modules_source, "modules-load config");
+    } else {
+      ok &= install_host_asset(modules_source, "/etc/modules-load.d/60-polaris.conf", "modules-load config");
+    }
     ok &= run_host_command("reload udev rules", "udevadm control --reload-rules", false);
     ok &= run_host_command("trigger /dev/uinput permissions", "udevadm trigger --property-match=DEVNAME=/dev/uinput", false);
     ok &= run_host_command("trigger /dev/uhid permissions", "udevadm trigger --property-match=DEVNAME=/dev/uhid", false);
@@ -252,7 +347,13 @@ namespace args {
     }
 
     std::cout
-      << "Linux host setup complete."sv << std::endl
+      << "Linux host setup complete."sv << std::endl;
+    if (udev_from_package && modules_from_package) {
+      std::cout
+        << "The udev rules and modules-load configuration came from the package, so nothing was written to /etc."sv << std::endl
+        << "Everything this step applied is also applied automatically at boot; it is only needed to avoid a reboot after install."sv << std::endl;
+    }
+    std::cout
       << "Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation."sv << std::endl
       << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl;
     return 0;
@@ -274,7 +375,35 @@ namespace lifetime {
   char **argv;
   std::atomic_int desired_exit_code;
 
-  void exit_sunshine(int exit_code, bool async) {
+  namespace {
+    // Recorded from signal handlers, so this holds the caller's string rather
+    // than a copy: taking a lock or allocating there is not async-signal-safe.
+    // Every reason is a literal, which is why the parameter is a const char *.
+    std::atomic<const char *> recorded_shutdown_reason {nullptr};
+  }  // namespace
+
+  void note_shutdown_reason(const char *reason) {
+    if (reason == nullptr || *reason == '\0') {
+      return;
+    }
+
+    const char *unset = nullptr;
+    if (!recorded_shutdown_reason.compare_exchange_strong(unset, reason)) {
+      BOOST_LOG(debug) << "Additional shutdown request ["sv << reason << "] after ["sv << unset << ']';
+      return;
+    }
+
+    BOOST_LOG(info) << "Shutdown requested: "sv << reason;
+  }
+
+  const char *shutdown_reason() {
+    const char *reason = recorded_shutdown_reason.load();
+    return reason == nullptr ? "unspecified" : reason;
+  }
+
+  void exit_sunshine(int exit_code, bool async, const char *reason) {
+    note_shutdown_reason(reason);
+
     // Store the exit code of the first exit_sunshine() call
     int zero = 0;
     desired_exit_code.compare_exchange_strong(zero, exit_code);

@@ -234,6 +234,14 @@ const config = ref(props.config)
                 v-model="config.native_pen_touch"
                 default="true"
       ></Checkbox>
+
+      <Checkbox v-if="platform === 'linux'"
+                class="mb-3"
+                id="client_keyboard_mouse_seat_isolation"
+                locale-prefix="config"
+                v-model="config.client_keyboard_mouse_seat_isolation"
+                default="false"
+      ></Checkbox>
     </section>
 
     <section class="settings-section settings-section-compact">

@@ -1,8 +1,20 @@
 #!/bin/sh
 
-echo "Polaris no longer mutates Linux host setup automatically during package install."
-echo "Run one of the following commands explicitly after install:"
-echo "  sudo -H polaris --setup-host"
-echo "  sudo -H polaris --setup-host --enable-kms   # only if you need DRM/KMS capture"
+# The udev rules and modules-load configuration are package files now, installed
+# to their live system paths, so the package manager owns them and removes them
+# on uninstall. Reloading udev is the only thing left worth doing here, and it is
+# advisory: the rules also apply on their own at the next boot.
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --property-match=DEVNAME=/dev/uinput >/dev/null 2>&1 || true
+    udevadm trigger --property-match=DEVNAME=/dev/uhid >/dev/null 2>&1 || true
+fi
+
+echo "Polaris udev rules and modules-load configuration were installed as package files."
+echo "Virtual input and controller support works after the next reboot with no further steps."
+echo "To use it without rebooting first, load the modules once:"
+echo "  sudo modprobe uinput uhid"
+echo "Only DRM/KMS capture still needs an explicit privileged step:"
+echo "  sudo -H polaris --setup-host --enable-kms"
 echo "Optional background autostart remains available via:"
 echo "  systemctl --user enable --now polaris"

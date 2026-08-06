@@ -13,6 +13,7 @@
 #include <libevdev/libevdev.h>
 
 // local includes
+#include "input_seat_isolation.h"
 #include "inputtino_wayland_virtual_input.h"
 #include "src/config.h"
 #include "src/logging.h"
@@ -47,6 +48,10 @@ namespace platf {
           .vendor_id = 0xBEEF,
           .product_id = 0xDEAD,
           .version = 0x111,
+          .device_phys = input_isolation::client_input_phys_marker(
+            config::input.client_keyboard_mouse_seat_isolation,
+            "mouse"
+          ),
         }));
         if (!*mouse) {
           BOOST_LOG(warning) << "Unable to create virtual mouse: " << mouse->getErrorMessage();
@@ -62,6 +67,10 @@ namespace platf {
           .vendor_id = 0xBEEF,
           .product_id = 0xDEAD,
           .version = 0x111,
+          .device_phys = input_isolation::client_input_phys_marker(
+            config::input.client_keyboard_mouse_seat_isolation,
+            "keyboard"
+          ),
         }));
         if (!*keyboard) {
           BOOST_LOG(warning) << "Unable to create virtual keyboard: " << keyboard->getErrorMessage();
@@ -90,12 +99,20 @@ namespace platf {
           .vendor_id = 0xBEEF,
           .product_id = 0xDEAD,
           .version = 0x111,
+          .device_phys = input_isolation::client_input_phys_marker(
+            config::input.client_keyboard_mouse_seat_isolation,
+            "touch"
+          ),
         })),
         pen(inputtino::PenTablet::create({
           .name = "Pen passthrough",
           .vendor_id = 0xBEEF,
           .product_id = 0xDEAD,
           .version = 0x111,
+          .device_phys = input_isolation::client_input_phys_marker(
+            config::input.client_keyboard_mouse_seat_isolation,
+            "pen"
+          ),
         })) {
       global = (input_raw_t *) input.get();
       if (!touch) {

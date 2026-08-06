@@ -140,6 +140,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_portal_grab_policy.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_input.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
 )
@@ -199,6 +200,7 @@ set(TEST_VIDEO_SOURCES
 # Using configure_file ensures files are copied when they change between builds
 set(INTEGRATION_TEST_FILES
     "src/config.cpp"
+    "src/confighttp_validation.cpp"
     "src_assets/common/assets/web/views/ConfigView.vue"
     "docs/configuration.md"
     "src_assets/common/assets/web/public/assets/locale/en.json"

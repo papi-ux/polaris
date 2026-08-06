@@ -340,6 +340,24 @@ function handleSteamGridDbKeyInput() {
         <div class="text-xs text-storm mt-1">Enables cover art search for non-Steam games. Get a free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" class="text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
       </div>
     </section>
+
+    <section class="settings-section settings-section-compact">
+      <div class="settings-section-header">
+        <div class="section-kicker">Metadata</div>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">Completion estimates</h3>
+          <InfoHint size="sm" label="Completion estimate guidance">
+            Polaris reads completion times from a local dataset. When a title is missing from it, it can ask How Long To Beat once per title, or leave the estimate blank.
+          </InfoHint>
+        </div>
+      </div>
+      <Checkbox class="mt-1"
+                id="beat_times_lookup"
+                locale-prefix="config"
+                v-model="config.beat_times_lookup"
+                default="true"
+      ></Checkbox>
+    </section>
   </div>
 </template>
 

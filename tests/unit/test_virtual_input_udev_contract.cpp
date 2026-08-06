@@ -169,6 +169,63 @@ TEST(VirtualInputUdevContract, SeatIsolationIsOptInForBackwardCompatibility) {
   EXPECT_TRUE(contains(inputs_tab, "default=\"false\""));
 }
 
+TEST(VirtualInputUdevContract, IsolatedKeyboardAndMouseUseDedicatedSeatWithoutLocalSeatAcl) {
+  const auto rules = read_source_file("src_assets/linux/misc/60-polaris.rules");
+  const auto creator = read_source_file("src/platform/linux/input/inputtino_common.h");
+  const auto marker = read_source_file("src/platform/linux/input/input_seat_isolation.h");
+  ASSERT_FALSE(rules.empty());
+  ASSERT_FALSE(creator.empty());
+  ASSERT_FALSE(marker.empty());
+
+  const auto marker_rules = rules_for_name(rules, "polaris/client-input-seat-isolated");
+  ASSERT_EQ(2U, marker_rules.size());
+  EXPECT_TRUE(contains(marker_rules[0], "KERNEL==\"hidraw*\""));
+  EXPECT_TRUE(contains(marker_rules[1], "SUBSYSTEMS==\"input\""));
+
+  for (const auto &rule : marker_rules) {
+    EXPECT_TRUE(contains(rule, "ATTRS{phys}==\"polaris/client-input-seat-isolated/*\""));
+    EXPECT_TRUE(contains(rule, "ENV{ID_SEAT}=\"seat-polaris\""));
+    EXPECT_TRUE(contains(rule, "GROUP=\"input\""));
+    EXPECT_TRUE(contains(rule, "MODE=\"0660\""));
+    // uaccess would hand the device straight back to the seat0 session and undo
+    // the isolation this marker exists to provide.
+    EXPECT_FALSE(contains(rule, "TAG+=\"uaccess\""));
+  }
+
+  EXPECT_TRUE(contains(marker, "polaris/client-input-seat-isolated/"));
+  for (const auto device : {"\"mouse\"", "\"keyboard\"", "\"touch\"", "\"pen\""}) {
+    SCOPED_TRACE(device);
+    EXPECT_TRUE(contains(creator, device));
+  }
+  EXPECT_TRUE(contains(creator, "client_keyboard_mouse_seat_isolation"));
+}
+
+TEST(VirtualInputUdevContract, KeyboardMouseSeatIsolationIsAnExplicitOptInLinuxOption) {
+  const std::vector<std::string_view> files {
+    "src/config.h",
+    "src/config.cpp",
+    "src/confighttp_validation.cpp",
+    "src/platform/linux/input/inputtino_common.h",
+    "src_assets/common/assets/web/views/ConfigView.vue",
+    "src_assets/common/assets/web/configs/tabs/Inputs.vue",
+    "src_assets/common/assets/web/public/assets/locale/en.json",
+    "docs/configuration.md",
+  };
+
+  for (const auto file : files) {
+    SCOPED_TRACE(file);
+    const auto source = read_source_file(file);
+    ASSERT_FALSE(source.empty());
+    EXPECT_TRUE(contains(source, "client_keyboard_mouse_seat_isolation"));
+  }
+
+  EXPECT_TRUE(contains(read_source_file("src/config.cpp"), "false,  // client_keyboard_mouse_seat_isolation"));
+  EXPECT_TRUE(contains(
+    read_source_file("src_assets/common/assets/web/views/ConfigView.vue"),
+    "\"client_keyboard_mouse_seat_isolation\": \"disabled\""
+  ));
+}
+
 TEST(VirtualInputUdevContract, IsolatedGamepadsUseDedicatedSeatWithoutLocalSeatAcl) {
   const auto rules = read_source_file("src_assets/linux/misc/60-polaris.rules");
   ASSERT_FALSE(rules.empty());

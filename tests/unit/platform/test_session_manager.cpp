@@ -8,6 +8,8 @@
   #include <src/platform/linux/session_manager.h>
 
   #include <algorithm>
+  #include <cerrno>
+  #include <csignal>
   #include <cstdlib>
   #include <string>
   #include <string_view>
@@ -192,6 +194,37 @@ TEST(SessionManagerUnlockTests, MissingSessionIdUsesAllSessionsLoginctlFallback)
 
   EXPECT_FALSE(harness.locked);
   EXPECT_TRUE(harness.ran("loginctl unlock-sessions"));
+}
+
+TEST(SessionManagerInhibitorTests, FallbackInhibitorIsHeldAndReleasedInsteadOfLeaking) {
+  SessionManagerCommandHarness harness;
+
+  // The harness answers ScreenSaver.Inhibit with an empty cookie, which is what
+  // a headless or gamescope session looks like, so the fallback path runs.
+  ASSERT_TRUE(session_manager::inhibit_lock());
+  ASSERT_TRUE(session_manager::inhibitor_held_for_tests());
+
+  const auto pid = session_manager::inhibitor_pid_for_tests();
+  ASSERT_GT(pid, 0);
+  EXPECT_EQ(0, kill(pid, 0)) << "inhibitor child should be running";
+
+  session_manager::release_lock();
+
+  EXPECT_FALSE(session_manager::inhibitor_held_for_tests());
+  EXPECT_EQ(-1, session_manager::inhibitor_pid_for_tests());
+  // Closing the anchor has to actually end the child. The previous
+  // implementation left `systemd-inhibit ... sleep infinity` running for the
+  // rest of the boot, on clean exits as well as crashes.
+  EXPECT_EQ(-1, kill(pid, 0));
+  EXPECT_EQ(ESRCH, errno);
+}
+
+TEST(SessionManagerInhibitorTests, ReleasingWithoutAnInhibitorIsHarmless) {
+  SessionManagerCommandHarness harness;
+
+  ASSERT_FALSE(session_manager::inhibitor_held_for_tests());
+  session_manager::release_lock();
+  EXPECT_FALSE(session_manager::inhibitor_held_for_tests());
 }
 
 TEST(SessionManagerUnlockTests, StillLockedAfterAllAttemptsReturnsFalse) {
