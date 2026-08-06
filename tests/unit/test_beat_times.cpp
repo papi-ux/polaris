@@ -87,3 +87,42 @@ TEST(BeatTimesTests, SurvivesEmptyAndMalformedPayloads) {
   EXPECT_TRUE(beat_times::parse(R"json({"games":"not an array"})json").by_name.empty());
   EXPECT_TRUE(beat_times::parse(R"json([1,2,3])json").by_name.empty());
 }
+
+TEST(BeatTimesTests, MatchKeyKeepsWordBoundariesThatDistanceNeeds) {
+  // normalise_name strips everything, which is right for a dictionary key and wrong for
+  // a distance: "slaythespire" and "slaythespireii" are closer than the titles are.
+  EXPECT_EQ(beat_times::match_key("Slay the Spire: II"), "slay the spire ii");
+  EXPECT_EQ(beat_times::match_key("  Control -- Ultimate  Edition "), "control ultimate edition");
+  EXPECT_EQ(beat_times::match_key("???"), "");
+}
+
+TEST(BeatTimesTests, EditDistanceCountsTheUsualEdits) {
+  EXPECT_EQ(beat_times::edit_distance("control", "control"), 0);
+  EXPECT_EQ(beat_times::edit_distance("", "control"), 7);
+  EXPECT_EQ(beat_times::edit_distance("control", ""), 7);
+  EXPECT_EQ(beat_times::edit_distance("kitten", "sitting"), 3);
+}
+
+TEST(BeatTimesTests, AcceptsAnEditionSuffixEitherWayButNotADifferentGame) {
+  const auto accepts = [](std::string_view a, std::string_view b) {
+    return beat_times::is_acceptable_match(a, b, beat_times::edit_distance(a, b));
+  };
+
+  const auto control = beat_times::match_key("Control");
+  const auto edition = beat_times::match_key("Control Ultimate Edition");
+  const auto subtitle = beat_times::match_key("Control: The Foundation");
+
+  // A launcher name and a catalogue name disagree in both directions, so both are fine.
+  EXPECT_TRUE(accepts(control, edition));
+  EXPECT_TRUE(accepts(edition, control));
+  EXPECT_TRUE(accepts(control, subtitle));
+
+  // These really are in the results for "Control". Neither is the game.
+  EXPECT_FALSE(accepts(control, beat_times::match_key("Air Control")));
+  EXPECT_FALSE(accepts(control, beat_times::match_key("3-D Ultra Radio Control Racers Deluxe")));
+}
+
+TEST(BeatTimesTests, RejectsEmptyEitherSide) {
+  EXPECT_FALSE(beat_times::is_acceptable_match("", "control", 7));
+  EXPECT_FALSE(beat_times::is_acceptable_match("control", "", 7));
+}

@@ -2815,6 +2815,9 @@ namespace nvhttp {
     std::optional<nlohmann::json> beat_time_for_app(const proc::ctx_t &app) {
       const auto estimate = beat_times::lookup(beat_times::dataset(), app.steam_appid, app.name);
       if (!estimate) {
+        // Ask about it once, in the background. This request is already being answered
+        // and nineteen games would be nineteen round trips; the next one serves it.
+        beat_times::request_lookup(app.steam_appid, app.name);
         return std::nullopt;
       }
 
