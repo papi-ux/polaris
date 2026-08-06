@@ -4,6 +4,7 @@
  */
 #include "beat_times.h"
 
+#include "config.h"
 #include "logging.h"
 #include "platform/common.h"
 
@@ -177,7 +178,9 @@ namespace beat_times {
         }
 
         estimate_t estimate;
-        estimate.matched_name = entry.value("name", "");
+        const auto queried_name = entry.value("name", "");
+        // matched_name falls back to name so a hand-written file needs only the one.
+        estimate.matched_name = entry.value("matched_name", queried_name);
         estimate.url = entry.value("url", "");
         estimate.main_seconds = seconds_field(entry, "main_seconds");
         estimate.extras_seconds = seconds_field(entry, "extras_seconds");
@@ -193,11 +196,15 @@ namespace beat_times {
           data.by_steam_appid.emplace(appid, estimate);
         }
 
-        const auto key = normalise_name(estimate.matched_name);
-        if (!key.empty()) {
-          // First spelling wins: a later duplicate is ambiguous, and guessing between
-          // two rows is how a wrong number gets presented as a fact.
-          data.by_name.emplace(key, estimate);
+        // Indexed under both spellings, because the launcher and the catalogue are
+        // each the name some future lookup will arrive with. First one wins: a later
+        // duplicate is ambiguous, and guessing between two rows is how a wrong number
+        // gets presented as a fact.
+        for (const auto &spelling : {queried_name, estimate.matched_name}) {
+          const auto key = normalise_name(spelling);
+          if (!key.empty()) {
+            data.by_name.emplace(key, estimate);
+          }
         }
       }
     } catch (...) {
@@ -464,7 +471,7 @@ namespace beat_times {
     }
 
     /** Fold one answer into the dataset file, keeping everything already there. */
-    void remember(const std::string &steam_appid, const estimate_t &estimate) {
+    void remember(const std::string &steam_appid, const std::string &queried_name, const estimate_t &estimate) {
       const auto path = dataset_path();
       nlohmann::json document {{"version", 1}, {"games", nlohmann::json::array()}};
 
@@ -485,7 +492,10 @@ namespace beat_times {
       existing.close();
 
       nlohmann::json entry {
-        {"name", estimate.matched_name},
+        // The name asked about, so the next lookup finds it; the name found, so a
+        // reader can see what it actually matched.
+        {"name", queried_name},
+        {"matched_name", estimate.matched_name},
         {"main_seconds", estimate.main_seconds},
         {"extras_seconds", estimate.extras_seconds},
         {"completionist_seconds", estimate.completionist_seconds},
@@ -503,7 +513,7 @@ namespace beat_times {
         const auto same_id = !steam_appid.empty() &&
                              existing_entry.value("steam_appid", "") == steam_appid;
         const auto same_name = match_key(existing_entry.value("name", "")) ==
-                               match_key(estimate.matched_name);
+                               match_key(queried_name);
         if (same_id || same_name) {
           existing_entry = entry;
           replaced = true;
@@ -559,7 +569,7 @@ namespace beat_times {
         if (const auto estimate = fetch_estimate(job.second)) {
           BOOST_LOG(info) << "Beat times: resolved '"sv << job.second << "' to '"sv
                           << estimate->matched_name << "'"sv;
-          remember(job.first, *estimate);
+          remember(job.first, job.second, *estimate);
         }
 
         // Their rate limit is undocumented, so the pace is deliberately unhurried; this
@@ -572,6 +582,11 @@ namespace beat_times {
 
   void request_lookup(const std::string &steam_appid, const std::string &name) {
     if (name.empty()) {
+      return;
+    }
+    // A host that should not be talking to the internet on someone's behalf says so
+    // here, and keeps whatever the dataset already holds.
+    if (!config::sunshine.beat_times_lookup) {
       return;
     }
 
