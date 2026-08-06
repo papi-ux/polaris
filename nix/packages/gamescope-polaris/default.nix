@@ -11,8 +11,8 @@
 }:
 
 let
-  # Master tip 2026-07-27.
-  gamescopeRev = "8c676c399c761e4540587f61004c957993d12fea";
+  # Master tip 2026-08-01.
+  gamescopeRev = "ff6b924fd0634a51d0fb3755c56c01dca1daadc1";
 
   # Master switched glm/stb from system headers to meson wrap-git subprojects.
   # Vendoring keeps wrap_mode=nodownload happy in the nix sandbox.
@@ -31,14 +31,14 @@ let
 in
 (gamescope.override { enableWsi = true; }).overrideAttrs (old: {
   pname = "gamescope-polaris";
-  version = "0-unstable-2026-07-27";
+  version = "0-unstable-2026-08-01";
 
   src = fetchFromGitHub {
     owner = "ValveSoftware";
     repo = "gamescope";
     rev = gamescopeRev;
     fetchSubmodules = true;
-    hash = "sha256-l8jHeCGbm8yiw4GuOterWc53Lnv7bjK7Y9qPlzj7Ojk=";
+    hash = "sha256-WkaTWBZuUR/EPMb7btuqIgK2M8HivEYBWLwrMDsxVwY=";
   };
 
   # Keep only nixpkgs packaging patches that still apply on master.
@@ -59,9 +59,6 @@ in
       ../../patches/gamescope/03-pipewire-prefer-dmabuf.patch
       # Screenshot SDR/HDR LUTs on PW paint (locked to EOTF).
       ../../patches/gamescope/04-pipewire-color-mgmt.patch
-      # ValveSoftware/gamescope#2271 (supersedes #2094): bSampled + XRGB→XBGR.
-      # DROP when #2271 merges. Grep: POLARIS-UPSTREAM-REMOVE.*2271
-      ../../patches/gamescope/05-pipewire-rgb10-capture-format-2271.patch
       # ValveSoftware/gamescope#2217: headless prefers discrete GPU if unpinned.
       # DROP when #2217 merges. Grep: POLARIS-UPSTREAM-REMOVE.*2217
       ../../patches/gamescope/06-prefer-discrete-gpu-2217.patch
@@ -92,6 +89,6 @@ in
   meta = old.meta // {
     description = "${
       old.meta.description or "gamescope"
-    } (polaris HDR PW stack; #2270/#2271/#2217; master ${lib.substring 0 7 gamescopeRev})";
+    } (polaris HDR PW stack; #2270/#2217; master ${lib.substring 0 7 gamescopeRev})";
   };
 })

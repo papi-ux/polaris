@@ -215,8 +215,10 @@ polaris_wayland_lock_is_stable() {
   [ "$fd_identity" = "$path_identity" ]
 }
 
-# Fail closed if an older producer still holds an unlinked lock inode with the
-# same pathname. An unlocked replacement lock cannot serialize with it.
+# Fail closed only if an older producer still holds an unlinked lock inode
+# with the same pathname. Unreadable/racy FDs (pipes, gone PIDs) are not
+# evidence of a deleted holder — treating them as fail-closed left orphan
+# gamescope-* sockets forever and stuck polaris in start-pre.
 polaris_wayland_lock_has_no_deleted_holder() {
   local lock="$1" owner proc_root process process_owner fd target seen=0
   owner="$(stat -Lc '%u' "$lock" 2>/dev/null)" || return 1
@@ -225,12 +227,13 @@ polaris_wayland_lock_has_no_deleted_holder() {
   for process in "$proc_root"/[0-9]*; do
     [ -d "$process" ] || continue
     seen=1
-    process_owner="$(stat -Lc '%u' "$process" 2>/dev/null)" || return 1
+    process_owner="$(stat -Lc '%u' "$process" 2>/dev/null)" || continue
     [ "$process_owner" = "$owner" ] || continue
-    [ -d "$process/fd" ] || return 1
+    [ -d "$process/fd" ] || continue
     for fd in "$process"/fd/*; do
       [ -e "$fd" ] || [ -L "$fd" ] || continue
-      target="$(readlink "$fd" 2>/dev/null)" || return 1
+      # skip unreadable FDs; only a real "path (deleted)" target blocks reclaim
+      target="$(readlink "$fd" 2>/dev/null)" || continue
       [ "$target" != "$lock (deleted)" ] || return 1
     done
   done
@@ -301,12 +304,22 @@ polaris_xwayland_pid() {
   [ "${executable##*/}" = Xwayland ]
 }
 
-# Xwayland ownership is exact-generation ancestry only. Service cgroups are
-# scheduling containers shared by old and new compositor generations and are
-# never authorization for DISPLAY routing.
+# Xwayland ownership: PPID ancestry when still under gamescope, else the
+# compositor's private session/pgid after reparent-to-systemd (common once
+# Xwayland daemonizes). Never use user service cgroups — those are shared.
 polaris_pid_related_to_root() {
-  local pid="$1" root="$2"
-  [ "$pid" != "$root" ] && polaris_pid_is_descendant "$pid" "$root"
+  local pid="$1" root="$2" root_sid root_pgid
+  [ "$pid" != "$root" ] || return 1
+  polaris_pid_is_descendant "$pid" "$root" && return 0
+  # gamescope is session leader (sid == pgid == pid). Reparented Xwayland keeps
+  # that sid/pgid; require the leader still owns the private session.
+  polaris_process_fields "$root" || return 1
+  root_sid="$POLARIS_PROCESS_SESSION_ID"
+  root_pgid="$POLARIS_PROCESS_PGID"
+  [ "$root_sid" = "$root" ] && [ "$root_pgid" = "$root" ] || return 1
+  polaris_process_fields "$pid" || return 1
+  [ "$POLARIS_PROCESS_SESSION_ID" = "$root_sid" ] \
+    && [ "$POLARIS_PROCESS_PGID" = "$root_pgid" ]
 }
 
 polaris_unique_unix_socket_inode() {

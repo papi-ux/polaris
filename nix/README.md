@@ -98,7 +98,6 @@ See [`nix/patches/gamescope/README.md`](./patches/gamescope/README.md).
 | Patch | Upstream |
 |-------|----------|
 | 01 | [#2270](https://github.com/ValveSoftware/gamescope/pull/2270) xBGR_210LE |
-| 05 | [#2271](https://github.com/ValveSoftware/gamescope/pull/2271) RGB10 capture |
 | 06 | [#2217](https://github.com/ValveSoftware/gamescope/pull/2217) discrete GPU |
 | 07 | companion to #2270 (`EOTF_PQ` in `paint_pipewire`) |
 

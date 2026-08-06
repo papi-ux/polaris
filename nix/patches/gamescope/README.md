@@ -8,7 +8,6 @@ Applied in order by `nix/packages/gamescope-polaris/default.nix`.
 | 02 | `02-headless-hdr-colorimetry.patch` | Headless real SDR vs HDR EDID/expose | Upstream headless HDR API |
 | 03 | `03-pipewire-prefer-dmabuf.patch` | Prefer `SPA_DATA_DmaBuf` when allowed | Upstream if accepted |
 | 04 | `04-pipewire-color-mgmt.patch` | `paint_pipewire` screenshot SDR/HDR LUTs | Companion to #2270 |
-| **05** | `05-pipewire-rgb10-capture-format-2271.patch` | Black PW frames + R/B swap (NVIDIA) | **[#2271](https://github.com/ValveSoftware/gamescope/pull/2271)** merges |
 | **06** | `06-prefer-discrete-gpu-2217.patch` | Headless prefers discrete GPU if unpinned | **[#2217](https://github.com/ValveSoftware/gamescope/pull/2217)** merges |
 | **07** | `07-paint-pipewire-eotf-pq.patch` | `EOTF_PQ` when HDR on + SDR-on-HDR defaults | Companion to **#2270** paint path |
 
@@ -29,10 +28,6 @@ Vendored from https://github.com/ValveSoftware/gamescope/pull/2270 with
    `flSDROnHDRBrightness=203`)
 
 (Raw composite / no-LUT experiment removed — no video for client.)
-
-## 05 = #2271
-
-Not covered by 01/07. Drop when #2271 merges.
 
 ## 06 = #2217
 
