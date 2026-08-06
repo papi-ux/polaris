@@ -930,8 +930,21 @@ namespace platf {
 
       // Games play into sink-sunshine-* for stream capture; system default stays
       // Easy Effects. Without loopback the host is silent after the game leaves UI.
-      void ensure_local_loopback(const std::string &capture_sink) {
-        if (local_loopback_module != PA_INVALID_INDEX || capture_sink.empty()) {
+      void ensure_local_loopback(const std::string &capture_sink, bool host_audio) {
+        if (capture_sink.empty()) {
+          return;
+        }
+
+        if (!host_audio) {
+          if (local_loopback_module != PA_INVALID_INDEX) {
+            unload_local_loopback();
+          } else {
+            BOOST_LOG(debug) << "Linux audio isolation: local monitor loopback already absent; host audio is disabled"sv;
+          }
+          return;
+        }
+
+        if (local_loopback_module != PA_INVALID_INDEX) {
           return;
         }
         if (capture_sink.rfind("sink-sunshine-", 0) != 0) {
@@ -1353,7 +1366,7 @@ namespace platf {
         }
       }
 
-      std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &selected_sink) override {
+      std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &selected_sink, bool host_audio) override {
         // Sink choice priority:
         // 1. Selected session sink
         // 2. Config sink
@@ -1377,7 +1390,7 @@ namespace platf {
 
         // Stream capture sink is a null sink — without loopback the host is silent
         // after the game leaves Steam UI / Easy Effects.
-        ensure_local_loopback(sink_name);
+        ensure_local_loopback(sink_name, host_audio);
 
 #ifdef POLARIS_BUILD_PIPEWIRE
         // If PipeWire is available, try native capture first

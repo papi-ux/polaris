@@ -675,7 +675,14 @@ namespace platf {
   public:
     virtual int set_sink(const std::string &sink) = 0;
 
-    virtual std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, const std::string &sink) = 0;
+    virtual std::unique_ptr<mic_t> microphone(
+      const std::uint8_t *mapping,
+      int channels,
+      std::uint32_t sample_rate,
+      std::uint32_t frame_size,
+      const std::string &sink,
+      bool host_audio = true
+    ) = 0;
 
     virtual void route_process_audio_to_sink(const std::string &sink) {
     }
