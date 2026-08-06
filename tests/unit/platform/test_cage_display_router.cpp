@@ -95,6 +95,89 @@ TEST(CageDisplayRouterPolicyTests, WindowedOverrideDoesNotAttemptHeadlessExtcopy
   ));
 }
 
+TEST(CageDisplayRouterPolicyTests, WindowedOverrideRefusesGpuNativeCaptureForVaapi) {
+  // The crash in #212 and #279: the override put VAAPI on the DMA-BUF path the
+  // headless branch was already refusing for the same encoder, and the
+  // conversion segfaulted at stream start.
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_FALSE(cage_display_router::should_attempt_gpu_native_cage_capture(
+    runtime_state,
+    platf::mem_type_e::vaapi
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, WindowedOverrideAttemptsGpuNativeCaptureForCuda) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_gpu_native_cage_capture(
+    runtime_state,
+    platf::mem_type_e::cuda
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, GpuNativeCaptureNeedsTheOverrideRegardlessOfEncoder) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_FALSE(cage_display_router::should_attempt_gpu_native_cage_capture(
+    runtime_state,
+    platf::mem_type_e::cuda
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, BothGpuNativeRoutesShareOneStabilityPolicy) {
+  // Keeping the two routes' policies independent is what let a VAAPI host
+  // crash through one while the other was refusing the same buffers, so this
+  // pins them to the same answer rather than to a literal.
+  for (const auto hwdevice_type : {
+         platf::mem_type_e::cuda,
+         platf::mem_type_e::vaapi,
+         platf::mem_type_e::system,
+         platf::mem_type_e::unknown,
+       }) {
+    const platf::runtime_state_t headless {
+      .requested_headless = true,
+      .effective_headless = true,
+      .gpu_native_override_active = false,
+      .backend_name = "labwc",
+    };
+    const platf::runtime_state_t overridden {
+      .requested_headless = true,
+      .effective_headless = false,
+      .gpu_native_override_active = true,
+      .backend_name = "labwc",
+    };
+
+    EXPECT_EQ(
+      cage_display_router::should_attempt_headless_extcopy_dmabuf(headless, hwdevice_type),
+      cage_display_router::should_attempt_gpu_native_cage_capture(overridden, hwdevice_type)
+    ) << "hwdevice_type=" << static_cast<int>(hwdevice_type);
+  }
+}
+
+TEST(CageDisplayRouterPolicyTests, OnlyCudaHasASafeGpuNativeDmabufPath) {
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::cuda));
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::vaapi));
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::system));
+  // An encoder that has not resolved yet must not read as safe.
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::unknown));
+}
+
 TEST(CageDisplayRouterPolicyTests, HeadlessDmabufGpuConversionFailureDisablesExtcopyFallback) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,

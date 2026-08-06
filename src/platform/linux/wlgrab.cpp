@@ -685,7 +685,7 @@ namespace platf {
         config::video.linux_display.use_cage_compositor &&
         stream_runtime::labwc::is_running()) {
       auto runtime_state = stream_runtime::labwc::runtime_state();
-      if (stream_runtime::labwc::should_attempt_gpu_native_cage_capture(runtime_state)) {
+      if (stream_runtime::labwc::should_attempt_gpu_native_cage_capture(runtime_state, hwdevice_type)) {
         static bool logged_windowed_gpu_native_attempt = false;
         if (!logged_windowed_gpu_native_attempt) {
           BOOST_LOG(info)
@@ -693,6 +693,19 @@ namespace platf {
           logged_windowed_gpu_native_attempt = true;
         }
         prefer_linear_dmabuf = true;
+      } else if (runtime_state.gpu_native_override_active) {
+        // The override is active but this encoder's GPU-native path is not one
+        // Polaris will import from. Falling back to RAM capture here is the
+        // difference between a slower stream and a SIGSEGV at stream start.
+        prefer_ram_capture = true;
+        stream_stats::update_gpu_native_probe_attempt("windowed", "ineligible", "policy", "vaapi_gpu_native_dmabuf_disabled_for_stability");
+        stream_stats::update_gpu_native_probe_selection("windowed_shm", "windowed_shm");
+        static bool logged_windowed_gpu_native_refusal = false;
+        if (!logged_windowed_gpu_native_refusal) {
+          BOOST_LOG(warning)
+            << "wlr: Using RAM capture path for the windowed labwc override because GPU-native DMA-BUF is disabled for VAAPI stability"sv;
+          logged_windowed_gpu_native_refusal = true;
+        }
       } else if (stream_runtime::labwc::should_report_headless_ram_capture_fallback(runtime_state)) {
         prefer_ram_capture = true;
         using_headless_ram_capture = true;
