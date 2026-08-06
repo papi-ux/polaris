@@ -67,6 +67,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
     ${CMAKE_SOURCE_DIR}/src/web_session_store.cpp
+    ${CMAKE_SOURCE_DIR}/src/beat_times.cpp
     ${CMAKE_SOURCE_DIR}/src/game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
@@ -100,6 +101,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_private_state_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_web_session_store.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_beat_times.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
