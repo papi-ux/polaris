@@ -4,9 +4,7 @@
  */
 #include "beat_times.h"
 
-#include "config.h"
 #include "logging.h"
-#include "platform/common.h"
 
 #include <algorithm>
 #include <atomic>
@@ -25,12 +23,25 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+// The logging macros take sv literals, which config.h used to bring in transitively.
+using namespace std::literals::string_view_literals;
+
 namespace beat_times {
 
   namespace {
 
+    std::mutex settings_guard;
+    std::filesystem::path configured_dataset;
+    bool lookups_allowed = false;
+
     std::filesystem::path dataset_path() {
-      return platf::appdata() / "beat_times.json";
+      const std::lock_guard<std::mutex> lock {settings_guard};
+      return configured_dataset;
+    }
+
+    bool lookups_enabled() {
+      const std::lock_guard<std::mutex> lock {settings_guard};
+      return lookups_allowed;
     }
 
     constexpr const char *HLTB_ORIGIN = "https://howlongtobeat.com";
@@ -214,6 +225,12 @@ namespace beat_times {
     return data;
   }
 
+  void configure(std::filesystem::path dataset, bool lookups_enabled) {
+    const std::lock_guard<std::mutex> lock {settings_guard};
+    configured_dataset = std::move(dataset);
+    lookups_allowed = lookups_enabled;
+  }
+
   const dataset_t &dataset() {
     static std::mutex guard;
     static dataset_t cached;
@@ -224,6 +241,9 @@ namespace beat_times {
 
     std::error_code ec;
     const auto path = dataset_path();
+    if (path.empty()) {
+      return cached;
+    }
     const auto stamp = std::filesystem::last_write_time(path, ec);
     if (ec) {
       // No dataset is a normal state, not a failure: the gauge simply has no estimates.
@@ -585,8 +605,8 @@ namespace beat_times {
       return;
     }
     // A host that should not be talking to the internet on someone's behalf says so
-    // here, and keeps whatever the dataset already holds.
-    if (!config::sunshine.beat_times_lookup) {
+    // here, and keeps whatever the dataset already holds. Unconfigured means no.
+    if (!lookups_enabled()) {
       return;
     }
 
