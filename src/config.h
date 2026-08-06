@@ -347,6 +347,7 @@ namespace config {
     bool notify_pre_releases;
     bool legacy_ordering;
     bool system_tray;
+    bool beat_times_lookup;  // resolve unknown titles against How Long To Beat
     std::vector<prep_cmd_t> prep_cmds;
     std::vector<prep_cmd_t> state_cmds;
     std::vector<server_cmd_t> server_cmds;

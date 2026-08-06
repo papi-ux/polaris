@@ -709,6 +709,7 @@ namespace config {
     false,  // notify_pre_releases
     false,  // legacy_ordering
     true,  // system_tray
+    true,  // beat_times_lookup
     {},  // prep commands
     {},  // state commands
     {},  // server commands
@@ -1478,6 +1479,7 @@ namespace config {
     bool_f(vars, "enable_input_only_mode", input.enable_input_only_mode);
 
     bool_f(vars, "system_tray", sunshine.system_tray);
+    bool_f(vars, "beat_times_lookup", sunshine.beat_times_lookup);
     bool_f(vars, "hide_tray_controls", sunshine.hide_tray_controls);
     bool_f(vars, "enable_pairing", sunshine.enable_pairing);
     bool_f(vars, "enable_discovery", sunshine.enable_discovery);

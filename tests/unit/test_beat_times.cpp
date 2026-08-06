@@ -126,3 +126,28 @@ TEST(BeatTimesTests, RejectsEmptyEitherSide) {
   EXPECT_FALSE(beat_times::is_acceptable_match("", "control", 7));
   EXPECT_FALSE(beat_times::is_acceptable_match("control", "", 7));
 }
+
+TEST(BeatTimesTests, FindsAnEntryUnderEitherSpelling) {
+  // What a launcher calls it and what a catalogue calls it are both names some future
+  // lookup will arrive with, so the entry answers to both.
+  const auto data = beat_times::parse(R"json({
+    "games": [{
+      "name": "Slay the Spire 2",
+      "matched_name": "Slay the Spire II",
+      "main_seconds": 90000
+    }]
+  })json");
+
+  ASSERT_TRUE(beat_times::lookup(data, "", "Slay the Spire 2").has_value());
+  ASSERT_TRUE(beat_times::lookup(data, "", "Slay the Spire II").has_value());
+
+  // The one shown is the catalogue's, because that is the one worth checking.
+  EXPECT_EQ(beat_times::lookup(data, "", "Slay the Spire 2")->matched_name, "Slay the Spire II");
+}
+
+TEST(BeatTimesTests, AHandWrittenEntryNeedsOnlyAName) {
+  const auto data = beat_times::parse(R"json({"games":[{"name":"Control","main_seconds":42166}]})json");
+  const auto found = beat_times::lookup(data, "", "Control");
+  ASSERT_TRUE(found.has_value());
+  EXPECT_EQ(found->matched_name, "Control");
+}
