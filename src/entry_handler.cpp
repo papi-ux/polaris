@@ -120,8 +120,14 @@ namespace {
     }
 
     if (file_handler::read_file(etc_target.c_str()) != file_handler::read_file(packaged_source.c_str())) {
-      BOOST_LOG(warning) << "Linux host setup: keeping the local "sv << label << " at ["sv << etc_target
-                         << "]; it differs from the packaged file and overrides it"sv;
+      // Either a local edit worth keeping or a copy from an older Polaris. The
+      // two are indistinguishable from content alone, and deleting somebody's
+      // edit is worse than leaving a stale file, so this only reports it — with
+      // the command to run, because the shadowed file is the packaged one.
+      BOOST_LOG(warning) << "Linux host setup: ["sv << etc_target << "] differs from the "sv << label
+                         << " this Polaris ships and overrides it. If you did not edit it yourself it is "sv
+                         << "a copy from an older install; remove it with [sudo rm "sv << etc_target
+                         << "] so the packaged file applies."sv;
       return;
     }
 
@@ -281,6 +287,23 @@ namespace args {
     const auto modules_packaged = fs::path(POLARIS_MODULES_LOAD_DIR) / "60-polaris.conf";
     const bool udev_from_package = host_asset_provided_by_package(udev_source, udev_packaged, "udev rules");
     const bool modules_from_package = host_asset_provided_by_package(modules_source, modules_packaged, "modules-load config");
+
+    // After a packaged install and a reboot there is nothing privileged left to
+    // do, and asking for sudo to discover that is exactly the friction this
+    // command should not have. Only claim it when the virtual input nodes are
+    // actually usable, which is the thing the whole step exists to arrange.
+    const bool etc_copies_absent = !fs::exists("/etc/udev/rules.d/60-polaris.rules") &&
+                                   !fs::exists("/etc/modules-load.d/60-polaris.conf");
+    const bool input_nodes_ready = access("/dev/uinput", R_OK | W_OK) == 0 &&
+                                   access("/dev/uhid", R_OK | W_OK) == 0;
+    if (!enable_kms && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
+      std::cout
+        << "Linux host setup: nothing to do."sv << std::endl
+        << "The package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
+        << "and /dev/uhid are already usable by this account. Re-run with --enable-kms only if you"sv << std::endl
+        << "need DRM/KMS capture."sv << std::endl;
+      return 0;
+    }
 
     if (geteuid() != 0) {
       std::cout
