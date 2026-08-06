@@ -83,16 +83,38 @@ Those paths are the most sensitive to early helper-process crashes.
 
 ## Input does not work
 
-Reload udev rules or reboot after install. If the problem persists, ensure your user has access to
-the input stack expected by your distro setup.
+The udev rules and modules-load configuration ship as package files, so virtual input works after
+the next reboot with nothing else to run. To use it without rebooting first, load the modules once:
 
-Example:
+```bash
+sudo modprobe uinput uhid
+```
+
+If the problem persists, ensure your user has access to the input stack expected by your distro
+setup:
 
 ```bash
 sudo usermod -aG input "$USER"
 ```
 
 Then sign out and back in.
+
+If Polaris was installed before the rules became package files, an older copy may still sit in
+`/etc/udev/rules.d/60-polaris.rules`. `/etc` overrides the packaged file, so that copy would keep
+shadowing later fixes. Running host setup once removes it when it is Polaris' own leftover, and
+leaves it alone with a warning when you have edited it:
+
+```bash
+sudo -H polaris --setup-host
+```
+
+## Client input also types into the host desktop
+
+A private stream session and the desktop session logged in at the machine both see the virtual
+keyboard and mouse Polaris creates, so a client's typing reaches both. Enable
+`client_keyboard_mouse_seat_isolation` to assign those devices to a dedicated seat, or ignore them
+by name in your desktop compositor. See
+[host and private session input isolation](configuration.md#linux-host-and-private-session-input-isolation).
 
 ## Local desktop audio is captured during a headless stream
 
@@ -231,3 +253,16 @@ When reporting a bug:
 
 If the UI is unavailable, the main host config lives in `~/.config/polaris` and the service logs
 can be captured with your systemd user journal.
+
+### Reporting a crash
+
+Released builds are stripped, so a backtrace needs the matching debug package. On Arch:
+
+```bash
+sudo pacman -S polaris-debug
+coredumpctl info polaris
+```
+
+`coredumpctl` prints a symbolised backtrace for the most recent crash. Include it verbatim, along
+with the Polaris log lines from the same session — the shutdown line names what asked Polaris to
+stop, which distinguishes a crash from an ordinary exit.

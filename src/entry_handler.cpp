@@ -8,7 +8,6 @@
 #include <filesystem>
 #include <format>
 #include <iostream>
-#include <mutex>
 #include <string>
 #include <thread>
 
@@ -105,6 +104,37 @@ namespace {
     return true;
   }
 
+  /**
+   * @brief Retire a copy an earlier Polaris wrote into /etc.
+   *
+   * /etc wins over the vendor directory, so a copy left by an older install
+   * shadows the packaged file — every later fix to the rules would be installed
+   * and then ignored. A copy that still matches what Polaris ships is Polaris'
+   * own leftover and is removed; anything else is a local edit and is kept, with
+   * a warning that it is the file in effect.
+   */
+  void retire_shadowing_etc_asset(const fs::path &etc_target, const fs::path &packaged_source, std::string_view label) {
+    std::error_code ec;
+    if (!fs::exists(etc_target, ec)) {
+      return;
+    }
+
+    if (file_handler::read_file(etc_target.c_str()) != file_handler::read_file(packaged_source.c_str())) {
+      BOOST_LOG(warning) << "Linux host setup: keeping the local "sv << label << " at ["sv << etc_target
+                         << "]; it differs from the packaged file and overrides it"sv;
+      return;
+    }
+
+    if (fs::remove(etc_target, ec) && !ec) {
+      BOOST_LOG(info) << "Linux host setup: removed the superseded "sv << label << " copy at ["sv << etc_target
+                      << "]; the packaged file applies from now on"sv;
+      return;
+    }
+
+    BOOST_LOG(warning) << "Linux host setup: could not remove the superseded "sv << label << " copy at ["sv
+                       << etc_target << "]: "sv << ec.message();
+  }
+
   bool install_host_asset(const fs::path &source, const fs::path &target, std::string_view label) {
     const auto contents = file_handler::read_file(source.c_str());
     if (contents.empty()) {
@@ -167,6 +197,7 @@ namespace {
       << "      provides them at "sv << POLARIS_UDEV_RULES_DIR << std::endl
       << "    - install Polaris modules-load config into /etc/modules-load.d, unless the package"sv << std::endl
       << "      already provides it at "sv << POLARIS_MODULES_LOAD_DIR << std::endl
+      << "    - remove an /etc copy left by an older Polaris that now shadows the packaged file"sv << std::endl
       << "    - reload udev and trigger /dev/uinput and /dev/uhid"sv << std::endl
       << "    - load uinput and uhid now via modprobe"sv << std::endl
       << "    - optionally apply cap_sys_admin for DRM/KMS capture"sv << std::endl
@@ -265,10 +296,14 @@ namespace args {
     }
 
     bool ok = true;
-    if (!udev_from_package) {
+    if (udev_from_package) {
+      retire_shadowing_etc_asset("/etc/udev/rules.d/60-polaris.rules", udev_source, "udev rules");
+    } else {
       ok &= install_host_asset(udev_source, "/etc/udev/rules.d/60-polaris.rules", "udev rules");
     }
-    if (!modules_from_package) {
+    if (modules_from_package) {
+      retire_shadowing_etc_asset("/etc/modules-load.d/60-polaris.conf", modules_source, "modules-load config");
+    } else {
       ok &= install_host_asset(modules_source, "/etc/modules-load.d/60-polaris.conf", "modules-load config");
     }
     ok &= run_host_command("reload udev rules", "udevadm control --reload-rules", false);
@@ -318,31 +353,32 @@ namespace lifetime {
   std::atomic_int desired_exit_code;
 
   namespace {
-    std::mutex shutdown_reason_mutex;
-    std::string recorded_shutdown_reason;
+    // Recorded from signal handlers, so this holds the caller's string rather
+    // than a copy: taking a lock or allocating there is not async-signal-safe.
+    // Every reason is a literal, which is why the parameter is a const char *.
+    std::atomic<const char *> recorded_shutdown_reason {nullptr};
   }  // namespace
 
-  void note_shutdown_reason(std::string_view reason) {
-    if (reason.empty()) {
+  void note_shutdown_reason(const char *reason) {
+    if (reason == nullptr || *reason == '\0') {
       return;
     }
 
-    std::lock_guard lock {shutdown_reason_mutex};
-    if (!recorded_shutdown_reason.empty()) {
-      BOOST_LOG(debug) << "Additional shutdown request ["sv << reason << "] after ["sv << recorded_shutdown_reason << ']';
+    const char *unset = nullptr;
+    if (!recorded_shutdown_reason.compare_exchange_strong(unset, reason)) {
+      BOOST_LOG(debug) << "Additional shutdown request ["sv << reason << "] after ["sv << unset << ']';
       return;
     }
 
-    recorded_shutdown_reason = reason;
     BOOST_LOG(info) << "Shutdown requested: "sv << reason;
   }
 
-  std::string shutdown_reason() {
-    std::lock_guard lock {shutdown_reason_mutex};
-    return recorded_shutdown_reason.empty() ? std::string {"unspecified"} : recorded_shutdown_reason;
+  const char *shutdown_reason() {
+    const char *reason = recorded_shutdown_reason.load();
+    return reason == nullptr ? "unspecified" : reason;
   }
 
-  void exit_sunshine(int exit_code, bool async, std::string_view reason) {
+  void exit_sunshine(int exit_code, bool async, const char *reason) {
     note_shutdown_reason(reason);
 
     // Store the exit code of the first exit_sunshine() call

@@ -706,7 +706,9 @@ namespace cage_display_router {
       return true;
     }
 
-    // Reset stale state
+    // Reset stale state. The pidfd of a compositor that died without going
+    // through stop() is still open here; every session would otherwise leak one.
+    close_cage_pidfd();
     cage_pid = 0;
     cage_wayland_socket.clear();
     cage_x11_display.clear();

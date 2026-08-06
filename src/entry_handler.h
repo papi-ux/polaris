@@ -58,8 +58,9 @@ namespace args {
 #ifdef __linux__
   /**
    * @brief Apply optional Linux host integration steps.
-   * Installs Polaris udev and modules-load files into /etc, reloads udev,
-   * loads required kernel modules, and can optionally grant KMS capability.
+   * Reloads udev, loads the required kernel modules, and can optionally grant
+   * KMS capability. Distribution packages own the udev and modules-load files,
+   * so those are only installed into /etc when the package did not provide them.
    * @param name The name of the program.
    * @param argc The number of arguments.
    * @param argv The arguments.
@@ -100,23 +101,26 @@ namespace lifetime {
    * this before raising the global shutdown event directly; exit_sunshine()
    * records the reason itself.
    *
-   * @param reason Short description of what asked for shutdown.
+   * @param reason Short description of what asked for shutdown. Must have static
+   *               storage duration: signal handlers read it back, so it is kept
+   *               by pointer rather than copied.
    */
-  void note_shutdown_reason(std::string_view reason);
+  void note_shutdown_reason(const char *reason);
 
   /**
    * @brief Get the recorded shutdown reason.
    * @return The first recorded reason, or "unspecified" when nothing recorded one.
    */
-  std::string shutdown_reason();
+  const char *shutdown_reason();
 
   /**
    * @brief Terminates Sunshine gracefully with the provided exit code.
    * @param exit_code The exit code to return from main().
    * @param async Specifies whether our termination will be non-blocking.
    * @param reason Short description of what asked for shutdown, for the log.
+   *               Must have static storage duration, see note_shutdown_reason().
    */
-  void exit_sunshine(int exit_code, bool async, std::string_view reason = "unspecified");
+  void exit_sunshine(int exit_code, bool async, const char *reason = "unspecified");
 
   /**
    * @brief Breaks into the debugger or terminates Sunshine if no debugger is attached.

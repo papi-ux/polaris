@@ -14,9 +14,23 @@ To use it without rebooting first, load the modules once:
 Only DRM/KMS capture still needs an explicit privileged step:
   sudo -H polaris --setup-host --enable-kms
 
+If Polaris crashes, install polaris-debug and report the backtrace:
+  coredumpctl info polaris
+
 Optional background autostart:
   systemctl --user enable --now polaris
 EOF
+}
+
+print_upgrade_hint() {
+  if [ -f /etc/udev/rules.d/60-polaris.rules ]; then
+    cat <<'EOF'
+
+An older Polaris left /etc/udev/rules.d/60-polaris.rules behind. /etc overrides the
+packaged rules, so run host setup once to retire it:
+  sudo -H polaris --setup-host
+EOF
+  fi
 }
 
 post_install() {
@@ -25,4 +39,5 @@ post_install() {
 
 post_upgrade() {
   print_host_setup_hint
+  print_upgrade_hint
 }

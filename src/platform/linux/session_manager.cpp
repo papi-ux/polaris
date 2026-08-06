@@ -158,6 +158,14 @@ namespace session_manager {
         close(devnull);
       }
 
+      // Polaris' listening sockets are not CLOEXEC, and this child outlives
+      // every session. Holding a copy of them would keep the ports bound after
+      // Polaris exits, so nothing but the anchor and /dev/null goes through.
+      const int max_fd = static_cast<int>(sysconf(_SC_OPEN_MAX));
+      for (int fd = STDERR_FILENO + 1; fd < (max_fd > 0 ? max_fd : 1024); ++fd) {
+        close(fd);
+      }
+
 #ifdef POLARIS_TESTS
       // Tests exercise the anchoring mechanics, not logind. Run the same
       // EOF-terminated child without requiring systemd on the test host.
@@ -178,6 +186,19 @@ namespace session_manager {
     }
 
     close(fds[0]);
+
+    // A host without systemd-inhibit fails in the child, after the fork. Report
+    // that rather than logging an inhibitor Polaris does not actually hold.
+    std::this_thread::sleep_for(50ms);
+    int child_status = 0;
+    if (waitpid(pid, &child_status, WNOHANG) == pid) {
+      close(fds[1]);
+      BOOST_LOG(warning) << "session_manager: idle inhibitor exited immediately (status "sv
+                         << child_status << "); is systemd-inhibit installed? "sv
+                         << "The session continues without an idle inhibitor."sv;
+      return false;
+    }
+
     g_inhibitor_anchor_fd = fds[1];
     g_inhibitor_pid = pid;
 
