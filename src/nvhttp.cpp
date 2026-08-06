@@ -2813,12 +2813,42 @@ namespace nvhttp {
      * rotates the endpoint deliberately, so a distributed product cannot depend on it
      * without breaking for every install at once.
      */
-    std::optional<nlohmann::json> beat_time_for_app(const proc::ctx_t &app) {
-      const auto estimate = beat_times::lookup(beat_times::dataset(), app.steam_appid, app.name);
+    /**
+     * @brief The title someone has told us this entry actually is, if they have.
+     *
+     * Only a manual match counts. An automatic one is the same guess the estimate would
+     * make on its own, so treating it as authority would just launder a guess into a fact.
+     */
+    std::string curated_title(const nlohmann::json &artwork) {
+      if (!artwork.is_object()) {
+        return {};
+      }
+      const auto match = artwork.find("match");
+      if (match == artwork.end() || !match->is_object() || !match->value("manual", false)) {
+        return {};
+      }
+      return match->value("title", "");
+    }
+
+    std::optional<nlohmann::json> beat_time_for_app(const proc::ctx_t &app, const nlohmann::json &artwork) {
+      const auto &data = beat_times::dataset();
+      const auto curated = curated_title(artwork);
+
+      // A curated identity outranks the app id. The id is what made a wrong estimate
+      // confident, so a correction the id overrules is not a correction.
+      std::optional<beat_times::estimate_t> estimate;
+      if (!curated.empty()) {
+        estimate = beat_times::lookup(data, "", curated);
+      }
+      if (!estimate) {
+        estimate = beat_times::lookup(data, app.steam_appid, app.name);
+      }
+
       if (!estimate) {
         // Ask about it once, in the background. This request is already being answered
-        // and nineteen games would be nineteen round trips; the next one serves it.
-        beat_times::request_lookup(app.steam_appid, app.name);
+        // and nineteen games would be nineteen round trips; the next one serves it. The
+        // id still travels, so the answer replaces the wrong entry instead of joining it.
+        beat_times::request_lookup(app.steam_appid, curated.empty() ? app.name : curated);
         return std::nullopt;
       }
 
@@ -6708,7 +6738,7 @@ namespace nvhttp {
         if (const auto play_time = play_time_for_app(app)) {
           game["play_time"] = *play_time;
         }
-        if (const auto beat_time = beat_time_for_app(app)) {
+        if (const auto beat_time = beat_time_for_app(app, game["artwork"])) {
           game["beat_time"] = *beat_time;
         }
         game["launch_mode"] = launch_mode_contract_for_app(app);
