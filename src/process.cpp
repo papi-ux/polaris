@@ -6209,26 +6209,6 @@ namespace proc {
     };
 
     auto resolve_windowed_gpu_native_fallback = [&]() -> bool {
-      // The override trades true headless away to keep GPU-native capture, so
-      // it is worth nothing to an encoder Polaris will not import GPU frames
-      // from: the session would give up headless and then fall back to RAM
-      // anyway. Probing it is worse than pointless — the probe drives the same
-      // conversion path that crashes these stacks, in this process.
-      //
-      // An unresolved encoder reports `unknown` rather than a safe answer, and
-      // refusing on that would take the override away from stacks that are
-      // fine, so only a known-unsafe type is refused here. The capture-time
-      // gate covers the rest, by which point the encoder is always chosen.
-      const auto encoder_mem_type = video::active_encoder_mem_type();
-      if (encoder_mem_type != platf::mem_type_e::unknown &&
-          !stream_runtime::labwc::gpu_native_dmabuf_is_safe(encoder_mem_type)) {
-        stream_stats::update_gpu_native_probe_attempt("windowed", "ineligible", "policy", "vaapi_gpu_native_dmabuf_disabled_for_stability");
-        BOOST_LOG(info) << "session_manager: Skipping the windowed GPU-native fallback for encoder ["
-                        << (video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name())
-                        << "] because its GPU-native DMA-BUF path is disabled for stability; staying headless"sv;
-        return false;
-      }
-
       if (cached_windowed_gpu_native_probe_result == std::optional<bool> {true}) {
         stream_stats::update_gpu_native_probe_attempt("windowed", "succeeded", {}, {}, true);
         BOOST_LOG(info) << "session_manager: Reusing cached windowed_dmabuf_override probe result"sv;

@@ -113,11 +113,9 @@ namespace cage_display_router {
    * @brief Returns whether an encoder memory type has a known-safe GPU-native
    *        DMA-BUF import/convert path.
    *
-   * This is the stability policy behind every GPU-native capture route, and it
-   * belongs in one place: it used to be applied only to the true-headless
-   * extcopy path, so a VAAPI host that took the windowed GPU-native override
-   * reached the same conversion boundary the headless path was refusing, and
-   * segfaulted at stream start.
+   * Applies to the true-headless ext-image-copy-capture route only. The
+   * windowed override deliberately does not use it: that path contains failure
+   * adaptively instead, so a fixed conversion path stays reachable there.
    */
   bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type);
 
@@ -138,14 +136,12 @@ namespace cage_display_router {
    * @brief Returns whether a windowed GPU-native override should actually take
    *        the DMA-BUF capture path.
    *
-   * The override exists to keep GPU-native capture when true-headless cannot
-   * provide it, so it is worth nothing to an encoder whose GPU-native path is
-   * unsafe: the session gives up true headless and then crashes anyway.
+   * Containment here is adaptive rather than a blanket refusal by encoder type:
+   * a conversion that failed once in this process retires the path, and the
+   * surface-lifetime fix in vaapi.cpp is what makes it viable in the first
+   * place. Refusing VAAPI outright would keep that fix from ever running.
    */
-  bool should_attempt_gpu_native_cage_capture(
-    const platf::runtime_state_t &runtime_state,
-    platf::mem_type_e hwdevice_type
-  );
+  bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state);
 
   /**
    * @brief Returns whether a live frame conversion failure should disable the
