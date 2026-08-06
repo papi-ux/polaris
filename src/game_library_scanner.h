@@ -4,7 +4,9 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,6 +20,18 @@ namespace game_library {
     std::string runner;
     std::string command;
     std::string image_path;
+    int64_t playtime_seconds = 0;  // as Lutris reports it; 0 when it does not
+  };
+
+  /**
+   * @brief How long a launcher says one of its games has been played.
+   *
+   * Minutes rather than seconds because that is the coarser of the two units the
+   * launchers use, and rounding up to it loses nothing anyone reads.
+   */
+  struct playtime_t {
+    int64_t minutes = 0;      // total, as the owning launcher counts it
+    int64_t last_played = 0;  // unix seconds; 0 when the launcher does not say
   };
 
   bool is_lutris_slug_safe(const std::string &slug);
@@ -30,5 +44,27 @@ namespace game_library {
   std::vector<lutris_game_t> scan_lutris_games(const std::filesystem::path &games_dir);
   std::vector<lutris_game_t> scan_lutris_games(const std::vector<std::filesystem::path> &games_dirs);
   std::vector<lutris_game_t> scan_lutris_library(const std::vector<std::filesystem::path> &games_dirs);
+
+  /**
+   * @brief Steam app id to playtime, read from one localconfig.vdf payload.
+   *
+   * Keyed by app id as a string, because that is how Steam writes it and how the app
+   * catalogue already carries it.
+   */
+  std::map<std::string, playtime_t> parse_steam_playtime_vdf(std::string_view vdf_payload);
+
+  /** @brief Every localconfig.vdf belonging to a Steam user under the given roots. */
+  std::vector<std::filesystem::path> steam_localconfig_paths(const std::vector<std::filesystem::path> &roots);
+
+  /** @brief Where Steam keeps its data, for each home directory we know about. */
+  std::vector<std::filesystem::path> steam_data_roots(const std::vector<std::filesystem::path> &home_roots);
+
+  /**
+   * @brief Steam playtime for every locally known game, cached briefly.
+   *
+   * A library listing serialises every game in one pass, so this is read once for the
+   * request rather than once per game. Playtime that is half a minute stale is still true.
+   */
+  std::map<std::string, playtime_t> steam_playtime_index();
 
 }  // namespace game_library

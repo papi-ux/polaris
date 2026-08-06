@@ -153,3 +153,148 @@ TEST(GameLibraryScannerTests, IncludesAccountHomeWhenRuntimeHomeIsProfile) {
   EXPECT_EQ(roots[0], std::filesystem::path("/tmp/agent-profile-home"));
   EXPECT_EQ(roots[1], std::filesystem::path("/tmp/account-home"));
 }
+
+namespace {
+  // Trimmed from a real localconfig.vdf: the apps block sits five levels down, and the
+  // profile around it carries keys that look just like the ones we want.
+  constexpr const char *kLocalConfig = R"vdf(
+"UserLocalConfigStore"
+{
+  "friends"
+  {
+    "PersonaName"  "papi"
+  }
+  "Software"
+  {
+    "Valve"
+    {
+      "Steam"
+      {
+        "apps"
+        {
+          "10"
+          {
+            "LastPlayed"  "86400"
+            "Playtime"    "16"
+          }
+          "440"
+          {
+            "LastPlayed"  "1311404400"
+            "Playtime"    "1684"
+          }
+          "620"
+          {
+            "LastPlayed"  "1500000000"
+            "Playtime"    "0"
+          }
+        }
+      }
+    }
+  }
+}
+)vdf";
+}  // namespace
+
+TEST(SteamPlaytimeTests, ReadsMinutesAndLastPlayedForEachApp) {
+  const auto playtime = game_library::parse_steam_playtime_vdf(kLocalConfig);
+
+  ASSERT_EQ(playtime.count("440"), 1u);
+  EXPECT_EQ(playtime.at("440").minutes, 1684);
+  EXPECT_EQ(playtime.at("440").last_played, 1311404400);
+
+  ASSERT_EQ(playtime.count("10"), 1u);
+  EXPECT_EQ(playtime.at("10").minutes, 16);
+}
+
+TEST(SteamPlaytimeTests, DropsAppsThatWereLaunchedButNeverPlayed) {
+  const auto playtime = game_library::parse_steam_playtime_vdf(kLocalConfig);
+
+  // 620 has a LastPlayed but no minutes, which says nothing worth showing.
+  EXPECT_EQ(playtime.count("620"), 0u);
+}
+
+TEST(SteamPlaytimeTests, IgnoresKeysOutsideTheAppsBlock) {
+  // The same key name, at the same depth, under a different owner.
+  constexpr const char *decoy = R"vdf(
+"UserLocalConfigStore"
+{
+  "Software"
+  {
+    "Valve"
+    {
+      "Steam"
+      {
+        "somethingelse"
+        {
+          "999"
+          {
+            "Playtime"  "99999"
+          }
+        }
+      }
+    }
+  }
+}
+)vdf";
+
+  EXPECT_TRUE(game_library::parse_steam_playtime_vdf(decoy).empty());
+}
+
+TEST(SteamPlaytimeTests, SurvivesEmptyAndMalformedPayloads) {
+  EXPECT_TRUE(game_library::parse_steam_playtime_vdf("").empty());
+  EXPECT_TRUE(game_library::parse_steam_playtime_vdf("not a vdf at all").empty());
+
+  // A value Steam wrote in a shape we do not understand must not cost the others.
+  constexpr const char *mixed = R"vdf(
+"UserLocalConfigStore"
+{
+  "Software"
+  {
+    "Valve"
+    {
+      "Steam"
+      {
+        "apps"
+        {
+          "1"
+          {
+            "Playtime"  "not-a-number"
+          }
+          "2"
+          {
+            "Playtime"  "42"
+          }
+        }
+      }
+    }
+  }
+}
+)vdf";
+
+  const auto playtime = game_library::parse_steam_playtime_vdf(mixed);
+  EXPECT_EQ(playtime.count("1"), 0u);
+  ASSERT_EQ(playtime.count("2"), 1u);
+  EXPECT_EQ(playtime.at("2").minutes, 42);
+}
+
+TEST(SteamPlaytimeTests, FindsLocalconfigForEveryUserUnderARoot) {
+  const auto root = lutris_test_root("steam_userdata");
+  const auto user = root / "userdata" / "11324806" / "config";
+  std::filesystem::create_directories(user);
+  write_text(user / "localconfig.vdf", kLocalConfig);
+
+  // A user directory without the file must not be reported.
+  std::filesystem::create_directories(root / "userdata" / "999" / "config");
+
+  const auto found = game_library::steam_localconfig_paths({root});
+  ASSERT_EQ(found.size(), 1u);
+  EXPECT_EQ(found.front(), user / "localconfig.vdf");
+}
+
+TEST(LutrisLibraryScannerTests, CarriesPlaytimeSecondsFromTheListingJson) {
+  const auto games = game_library::parse_lutris_list_games_json(
+    R"json([{"name":"3DMark","slug":"3dmark","runner":"steam","playtimeSeconds":73.152428}])json");
+
+  ASSERT_EQ(games.size(), 1u);
+  EXPECT_EQ(games.front().playtime_seconds, 73);
+}

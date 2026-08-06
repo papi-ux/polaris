@@ -7,10 +7,14 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
+#include <mutex>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <utility>
 
@@ -259,6 +263,187 @@ namespace game_library {
     return {};
   }
 
+  std::vector<std::filesystem::path> steam_data_roots(const std::vector<std::filesystem::path> &home_roots) {
+    std::vector<std::filesystem::path> roots;
+    const auto add = [&roots](std::filesystem::path candidate) {
+      if (std::find(roots.begin(), roots.end(), candidate) == roots.end()) {
+        roots.push_back(std::move(candidate));
+      }
+    };
+    for (const auto &home : home_roots) {
+      if (home.empty()) {
+        continue;
+      }
+      add(home / ".steam" / "steam");
+      add(home / ".local" / "share" / "Steam");
+      add(home / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam");
+    }
+    return roots;
+  }
+
+  std::map<std::string, playtime_t> steam_playtime_index() {
+    static std::mutex guard;
+    static std::map<std::string, playtime_t> cached;
+    static std::chrono::steady_clock::time_point read_at {};
+
+    const std::lock_guard<std::mutex> lock {guard};
+    const auto now = std::chrono::steady_clock::now();
+    if (read_at != std::chrono::steady_clock::time_point {} && now - read_at < std::chrono::seconds(30)) {
+      return cached;
+    }
+
+    std::map<std::string, playtime_t> fresh;
+    for (const auto &path : steam_localconfig_paths(steam_data_roots(library_home_roots()))) {
+      std::ifstream file(path);
+      if (!file.is_open()) {
+        continue;
+      }
+      const std::string payload {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+      for (auto &[app_id, played] : parse_steam_playtime_vdf(payload)) {
+        // One machine can hold several Steam accounts; the one that played most is the
+        // one whose number means anything to whoever is looking at the library.
+        auto &slot = fresh[app_id];
+        if (played.minutes > slot.minutes) {
+          slot = played;
+        }
+      }
+    }
+
+    cached = std::move(fresh);
+    read_at = now;
+    return cached;
+  }
+
+  std::map<std::string, playtime_t> parse_steam_playtime_vdf(std::string_view vdf_payload) {
+    std::map<std::string, playtime_t> playtime;
+    if (vdf_payload.empty()) {
+      return playtime;
+    }
+
+    // The block a key sits in is what makes it meaningful here: localconfig.vdf holds a
+    // whole user profile, and "apps" is only one branch of it.
+    std::vector<std::string> section;
+    std::string pending_section;
+    std::istringstream stream {std::string(vdf_payload)};
+    std::string line;
+
+    const auto quoted = [](const std::string &text, std::size_t from, std::string &out) -> std::size_t {
+      const auto open = text.find('"', from);
+      if (open == std::string::npos) {
+        return std::string::npos;
+      }
+      const auto close = text.find('"', open + 1);
+      if (close == std::string::npos) {
+        return std::string::npos;
+      }
+      out = text.substr(open + 1, close - open - 1);
+      return close + 1;
+    };
+
+    while (std::getline(stream, line)) {
+      const auto begin = line.find_first_not_of(" \t\r");
+      if (begin == std::string::npos) {
+        continue;
+      }
+      line = line.substr(begin);
+      while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+        line.pop_back();
+      }
+
+      if (line == "{") {
+        section.push_back(pending_section);
+        pending_section.clear();
+        continue;
+      }
+      if (line == "}") {
+        if (!section.empty()) {
+          section.pop_back();
+        }
+        continue;
+      }
+      if (line.empty() || line[0] != '"') {
+        continue;
+      }
+
+      std::string key;
+      const auto after_key = quoted(line, 0, key);
+      if (after_key == std::string::npos) {
+        continue;
+      }
+
+      std::string value;
+      if (quoted(line, after_key, value) == std::string::npos) {
+        // A bare quoted token opens the block named on the next line.
+        pending_section = key;
+        continue;
+      }
+
+      // Inside "apps" the enclosing section is the app id itself.
+      if (section.size() < 2 || section.back().empty()) {
+        continue;
+      }
+      const auto &owner = section[section.size() - 2];
+      if (owner != "apps") {
+        continue;
+      }
+      const auto &app_id = section.back();
+      if (app_id.find_first_not_of("0123456789") != std::string::npos) {
+        continue;
+      }
+
+      try {
+        if (key == "Playtime") {
+          playtime[app_id].minutes = std::stoll(value);
+        } else if (key == "LastPlayed") {
+          playtime[app_id].last_played = std::stoll(value);
+        }
+      } catch (...) {
+        // A field Steam wrote in a shape we do not understand is not a reason to lose
+        // every other game's playtime.
+        continue;
+      }
+    }
+
+    // An entry that only ever recorded a launch, never a minute, says nothing worth
+    // showing, so it does not travel.
+    for (auto it = playtime.begin(); it != playtime.end();) {
+      it = it->second.minutes > 0 ? std::next(it) : playtime.erase(it);
+    }
+    return playtime;
+  }
+
+  std::vector<std::filesystem::path> steam_localconfig_paths(const std::vector<std::filesystem::path> &roots) {
+    std::vector<std::filesystem::path> found;
+    for (const auto &root : roots) {
+      // A fresh code per query: one shared across the walk stays set after the first
+      // user directory that has no localconfig, and silently swallows every later one.
+      std::error_code root_ec;
+      const auto userdata = root / "userdata";
+      if (!std::filesystem::is_directory(userdata, root_ec) || root_ec) {
+        continue;
+      }
+
+      std::error_code walk_ec;
+      std::filesystem::directory_iterator users(userdata, walk_ec);
+      if (walk_ec) {
+        continue;
+      }
+
+      for (const auto &user : users) {
+        std::error_code entry_ec;
+        if (!user.is_directory(entry_ec) || entry_ec) {
+          continue;
+        }
+        auto candidate = user.path() / "config" / "localconfig.vdf";
+        std::error_code file_ec;
+        if (std::filesystem::is_regular_file(candidate, file_ec) && !file_ec) {
+          found.push_back(std::move(candidate));
+        }
+      }
+    }
+    return found;
+  }
+
   std::vector<lutris_game_t> parse_lutris_list_games_json(std::string_view json_payload) {
     std::vector<lutris_game_t> games;
     if (json_payload.empty()) {
@@ -290,6 +475,9 @@ namespace game_library {
           .image_path = entry.contains("coverPath") && entry["coverPath"].is_string() ?
             supported_image_path_or_empty(entry["coverPath"].get<std::string>()) :
             "",
+          .playtime_seconds = entry.contains("playtimeSeconds") && entry["playtimeSeconds"].is_number() ?
+            static_cast<int64_t>(entry["playtimeSeconds"].get<double>()) :
+            0,
         });
       }
     } catch (...) {
