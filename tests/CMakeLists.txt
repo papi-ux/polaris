@@ -200,6 +200,7 @@ set(TEST_VIDEO_SOURCES
 # Using configure_file ensures files are copied when they change between builds
 set(INTEGRATION_TEST_FILES
     "src/config.cpp"
+    "src/confighttp_validation.cpp"
     "src_assets/common/assets/web/views/ConfigView.vue"
     "docs/configuration.md"
     "src_assets/common/assets/web/public/assets/locale/en.json"

@@ -70,6 +70,32 @@ protected:
     return options;
   }
 
+  // Extract the config keys the HTTP API is willing to accept
+  static std::set<std::string, std::less<>> extractApiAllowedConfigKeys() {
+    std::set<std::string, std::less<>> keys;
+    const std::string content = file_handler::read_file("src/confighttp_validation.cpp");
+
+    const size_t arrayStart = content.find("allowed_config_keys {");
+    if (arrayStart == std::string::npos) {
+      return keys;
+    }
+
+    const size_t arrayEnd = content.find("};", arrayStart);
+    if (arrayEnd == std::string::npos) {
+      return keys;
+    }
+
+    const std::string arrayBody = content.substr(arrayStart, arrayEnd - arrayStart);
+    const std::regex keyPattern(R"DELIM("([^"]+)"sv)DELIM");
+    std::sregex_iterator iter(arrayBody.begin(), arrayBody.end(), keyPattern);
+
+    for (const std::sregex_iterator end; iter != end; ++iter) {
+      keys.insert((*iter)[1].str());
+    }
+
+    return keys;
+  }
+
   // Helper function to find brace boundaries
   static size_t findClosingBrace(const std::string &content, const size_t start) {
     size_t pos = start + 1;
@@ -469,6 +495,32 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
     std::string errorMsg = "Config options missing from files:\n";
     for (const auto &missing : missingFromFiles) {
       errorMsg += std::format("  {}\n", missing);
+    }
+    FAIL() << errorMsg;
+  }
+}
+
+TEST_F(ConfigConsistencyTest, AllConfigOptionsAreAcceptedByTheConfigApi) {
+  const auto cppOptions = extractConfigCppOptions();
+  const auto allowedKeys = extractApiAllowedConfigKeys();
+
+  ASSERT_FALSE(cppOptions.empty());
+  ASSERT_FALSE(allowedKeys.empty());
+
+  // The API allow-list rejects the whole payload on an unknown key, so a config
+  // option missing from it cannot be saved at all — including alongside the
+  // options the user did mean to change.
+  std::vector<std::string> rejected;
+  for (const auto &option : cppOptions) {
+    if (!allowedKeys.contains(option)) {
+      rejected.push_back(option);
+    }
+  }
+
+  if (!rejected.empty()) {
+    std::string errorMsg = "Config options the config API would reject:\n";
+    for (const auto &option : rejected) {
+      errorMsg += std::format("  allowed_config_keys missing: {}\n", option);
     }
     FAIL() << errorMsg;
   }
