@@ -321,6 +321,41 @@ namespace display_topology {
     return std::system(cmd.c_str());
   }
 
+
+  std::string format_output_mode_arg(int width, int height, int refresh_hz) {
+    if (width <= 0 || height <= 0) {
+      return {};
+    }
+
+    if (refresh_hz <= 0) {
+      return std::to_string(width) + "x" + std::to_string(height);
+    }
+
+    return std::to_string(width) + "x" + std::to_string(height) + "@" + std::to_string(refresh_hz) + "Hz";
+  }
+
+  bool apply_requested_display_mode(const std::string &output_name, int width, int height, int refresh_hz) {
+    if (output_name.empty()) {
+      return false;
+    }
+
+    const auto mode_arg = format_output_mode_arg(width, height, refresh_hz);
+    if (mode_arg.empty()) {
+      return false;
+    }
+
+    const int rc = run_kscreen("output." + output_name + ".mode." + mode_arg);
+    if (rc != 0) {
+      BOOST_LOG(warning) << "display_topology: failed to request mode ["sv << mode_arg
+                         << "] on output ["sv << output_name << "] code="sv << rc;
+      return false;
+    }
+
+    BOOST_LOG(info) << "display_topology: requested mode ["sv << mode_arg << "] on output ["
+                   << output_name << "]"sv;
+    return true;
+  }
+
   /**
    * @brief Poll sysfs connector state with short backoff until predicate or timeout.
    * Replaces fixed sleep_for chains after kscreen-doctor (P1).
@@ -369,7 +404,7 @@ namespace display_topology {
     return false;
   }
 
-  void prepare_for_stream() {
+  void prepare_for_stream(int width, int height, int refresh_hz) {
     if (config::video.linux_display.stream_mode == "headless_dongle" ||
         config::video.linux_display.stream_mode.empty()) {
       ensure_dongle_outputs_configured();
@@ -399,6 +434,9 @@ namespace display_topology {
     }
     // Was fixed 1500ms sleep; poll enabled state with same overall budget.
     wait_output_state(cfg.streaming_output, true, std::chrono::milliseconds(1500), "enable_streaming");
+    if (width > 0 && height > 0) {
+      apply_requested_display_mode(cfg.streaming_output, width, height, refresh_hz);
+    }
 
     const bool portal_capture = config::video.capture.empty() ||
                                 config::video.capture == "auto" ||

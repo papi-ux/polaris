@@ -4594,8 +4594,8 @@ namespace proc {
 
   namespace linux_display {
     // Thin wrappers — topology lives in display_topology for path plugins.
-    void enable_streaming_display() {
-      display_topology::prepare_for_stream();
+    void enable_streaming_display(int width, int height, int refresh_hz) {
+      display_topology::prepare_for_stream(width, height, refresh_hz);
     }
 
     void disable_streaming_display() {
@@ -5602,7 +5602,14 @@ namespace proc {
 #ifdef __linux__
     // Enable streaming display BEFORE encoder probe so HDMI-A-1 is available
     if (config::video.linux_display.auto_manage_displays) {
-      linux_display::enable_streaming_display();
+      int target_fps = launch_session->fps ? launch_session->fps : 60000;
+      if (target_fps >= 1000) {
+        target_fps /= 1000;
+      }
+      if (config::video.double_refreshrate) {
+        target_fps *= 2;
+      }
+      linux_display::enable_streaming_display(render_width, render_height, target_fps);
     }
 #endif
 
