@@ -58,7 +58,14 @@ namespace {
     const auto phys = lowercase(device.phys);
     const auto uniq = lowercase(device.uniq);
 
-    return starts_with(phys, xbox_private_prefix) ||
+    // With seat isolation enabled the phys attribute carries the marker instead
+    // of the per-pad MAC, so a classifier that only knew the MAC prefixes would
+    // have to fall back to the device name — and mistaking one of Polaris' own
+    // pads for a host controller means hiding it from the game it was created
+    // for.
+    return starts_with(phys, seat_isolated_phys_prefix) ||
+           starts_with(uniq, seat_isolated_phys_prefix) ||
+           starts_with(phys, xbox_private_prefix) ||
            starts_with(uniq, xbox_private_prefix) ||
            starts_with(phys, switch_private_prefix) ||
            starts_with(uniq, switch_private_prefix) ||

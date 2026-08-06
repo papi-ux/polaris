@@ -46,6 +46,7 @@
 // local includes
 #include "executable_path.h"
 #include "graphics.h"
+#include "input/input_group_access.h"
 #include "misc.h"
 #include "src/config.h"
 #include "src/entry_handler.h"
@@ -1277,6 +1278,12 @@ std::string get_local_ip_for_gateway() {
     // enable low latency mode for AMD
     // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039
     set_env("AMD_DEBUG", "lowlatencyenc");
+
+    // Seat isolation trades the logind ACL for group ownership, so an account
+    // outside `input` loses access to its own virtual devices. Report it here
+    // rather than leaving it to be inferred from a controller that never
+    // appears.
+    input_access::warn_if_seat_isolation_lacks_input_group();
 
     // These are allowed to fail.
     gbm::init();

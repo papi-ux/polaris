@@ -21,6 +21,9 @@
 #include "logging.h"
 #include "network.h"
 #include "platform/common.h"
+#ifdef __linux__
+  #include "platform/linux/input/input_group_access.h"
+#endif
 
 extern "C" {
 #ifdef __linux__
@@ -206,6 +209,7 @@ namespace {
       << "    - remove an /etc copy left by an older Polaris that now shadows the packaged file"sv << std::endl
       << "    - reload udev and trigger /dev/uinput and /dev/uhid"sv << std::endl
       << "    - load uinput and uhid now via modprobe"sv << std::endl
+      << "    - report whether the calling account is in the input group, which seat isolation needs"sv << std::endl
       << "    - optionally apply cap_sys_admin for DRM/KMS capture"sv << std::endl
       << std::endl
       << "  Options:"sv << std::endl
@@ -296,12 +300,22 @@ namespace args {
                                    !fs::exists("/etc/modules-load.d/60-polaris.conf");
     const bool input_nodes_ready = access("/dev/uinput", R_OK | W_OK) == 0 &&
                                    access("/dev/uhid", R_OK | W_OK) == 0;
+    // Membership is not something host setup can arrange — usermod would have to
+    // pick a target account, and this command deliberately never guesses which
+    // account streams. It reports it so a user preparing the host learns it here
+    // rather than from a controller that silently never appears.
+    const auto input_group_advice = platf::input_access::setup_host_input_group_advice();
+
     if (!enable_kms && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
       std::cout
         << "Linux host setup: nothing to do."sv << std::endl
         << "The package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
         << "and /dev/uhid are already usable by this account. Re-run with --enable-kms only if you"sv << std::endl
         << "need DRM/KMS capture."sv << std::endl;
+      if (!input_group_advice.empty()) {
+        std::cout << std::endl
+                  << input_group_advice << std::endl;
+      }
       return 0;
     }
 
@@ -356,6 +370,10 @@ namespace args {
     std::cout
       << "Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation."sv << std::endl
       << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl;
+    if (!input_group_advice.empty()) {
+      std::cout << std::endl
+                << input_group_advice << std::endl;
+    }
     return 0;
   }
 #endif

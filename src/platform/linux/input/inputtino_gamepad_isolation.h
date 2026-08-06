@@ -76,8 +76,11 @@ namespace platf::gamepad::isolation {
     }
   };
 
+  /// Marker written to the device's phys attribute; matched by 60-polaris.rules.
+  constexpr std::string_view seat_isolated_phys_prefix = "polaris/client-gamepad-seat-isolated/";
+
   inline std::string client_gamepad_phys_marker(bool enabled, int index) {
-    return enabled ? "polaris/client-gamepad-seat-isolated/" + std::to_string(index) : "";
+    return enabled ? std::string {seat_isolated_phys_prefix} + std::to_string(index) : "";
   }
 
   inline std::string client_gamepad_device_name(bool enabled, std::string_view legacy_name, std::string_view isolated_name) {
