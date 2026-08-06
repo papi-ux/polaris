@@ -2805,22 +2805,32 @@ namespace nvhttp {
     }
 
     /**
-     * @brief Minutes this game has been played, as the launcher that owns it counts them.
+     * @brief How long the owning launcher says this game has been played.
+     *
+     * Nothing when no launcher owns the answer, rather than zero. A game nobody has
+     * played and a game nothing can speak for are different things: one should read
+     * "Not started", the other should draw no gauge at all, and a zero cannot say which.
      *
      * Steam only for now. Lutris reports the same figure in the listing the scanner
      * already reads, but reaching it means spawning the lutris CLI, which does not belong
-     * in the path that serialises a library.
-     *
-     * Zero means no local source claims otherwise, which is also what a game nobody has
-     * played looks like. The two are not worth telling apart: neither has a duration to show.
+     * in the path that answers a library request.
      */
-    int64_t playtime_minutes_for_app(const proc::ctx_t &app) {
+    std::optional<nlohmann::json> play_time_for_app(const proc::ctx_t &app) {
       if (app.steam_appid.empty()) {
-        return 0;
+        return std::nullopt;
       }
-      const auto index = game_library::steam_playtime_index();
-      const auto found = index.find(app.steam_appid);
-      return found == index.end() ? 0 : found->second.minutes;
+
+      const auto snapshot = game_library::steam_playtime_snapshot();
+      const auto found = snapshot.by_app_id.find(app.steam_appid);
+      if (found == snapshot.by_app_id.end()) {
+        return std::nullopt;
+      }
+
+      return nlohmann::json {
+        {"seconds", found->second.minutes * 60},  // normalised, so Lutris seconds can join later
+        {"source", "steam"},
+        {"read_at", snapshot.read_at},
+      };
     }
 
     nlohmann::json launch_mode_contract_for_app(const proc::ctx_t &app) {
@@ -6637,7 +6647,9 @@ namespace nvhttp {
         promote_local_artwork_poster(app);
         game["artwork"] = current_artwork_manifest(platf::appdata(), app.uuid);
         game["last_launched"] = app.last_launched;
-        game["playtime_minutes"] = playtime_minutes_for_app(app);
+        if (const auto play_time = play_time_for_app(app)) {
+          game["play_time"] = *play_time;
+        }
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
 

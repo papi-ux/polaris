@@ -281,9 +281,9 @@ namespace game_library {
     return roots;
   }
 
-  std::map<std::string, playtime_t> steam_playtime_index() {
+  playtime_snapshot_t steam_playtime_snapshot() {
     static std::mutex guard;
-    static std::map<std::string, playtime_t> cached;
+    static playtime_snapshot_t cached;
     static std::chrono::steady_clock::time_point read_at {};
 
     const std::lock_guard<std::mutex> lock {guard};
@@ -309,7 +309,11 @@ namespace game_library {
       }
     }
 
-    cached = std::move(fresh);
+    cached.by_app_id = std::move(fresh);
+    cached.read_at = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch()
+    )
+                       .count();
     read_at = now;
     return cached;
   }

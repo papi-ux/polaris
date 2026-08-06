@@ -59,12 +59,18 @@ namespace game_library {
   /** @brief Where Steam keeps its data, for each home directory we know about. */
   std::vector<std::filesystem::path> steam_data_roots(const std::vector<std::filesystem::path> &home_roots);
 
+  /** @brief What the launcher files said, and when we last looked. */
+  struct playtime_snapshot_t {
+    std::map<std::string, playtime_t> by_app_id;
+    int64_t read_at = 0;  // unix seconds; localconfig.vdf lags Steam cloud, so this is worth saying
+  };
+
   /**
    * @brief Steam playtime for every locally known game, cached briefly.
    *
    * A library listing serialises every game in one pass, so this is read once for the
    * request rather than once per game. Playtime that is half a minute stale is still true.
    */
-  std::map<std::string, playtime_t> steam_playtime_index();
+  playtime_snapshot_t steam_playtime_snapshot();
 
 }  // namespace game_library
