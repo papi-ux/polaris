@@ -130,6 +130,29 @@ TEST(GamepadIsolationTests, PrivateInputtinoPhysOrUniqClassifiesAsPolarisVirtual
             )));
 }
 
+TEST(GamepadIsolationTests, SeatIsolationPhysMarkerClassifiesAsPolarisVirtual) {
+  // Seat isolation replaces the per-pad MAC in phys with the marker the udev
+  // rules match on. The name is the only other hook, and a kernel driver that
+  // renames the node would leave Polaris hiding its own pad from the game.
+  EXPECT_EQ(device_classification_e::polaris_virtual,
+            classify_device(gamepad(
+              "DualSense Wireless Controller",
+              std::optional<uint16_t> {0x054c},
+              std::optional<uint16_t> {0x0ce6},
+              platf::gamepad::isolation::client_gamepad_phys_marker(true, 0),
+              ""
+            )));
+
+  EXPECT_EQ(device_classification_e::polaris_virtual,
+            classify_device(gamepad(
+              "renamed by some driver",
+              std::optional<uint16_t> {0x045e},
+              std::optional<uint16_t> {0x02ea},
+              platf::gamepad::isolation::client_gamepad_phys_marker(true, 3),
+              ""
+            )));
+}
+
 TEST(GamepadIsolationTests, PhysicalControllerWithVirtualVidPidRemainsHostVisible) {
   const auto physical_xbox = gamepad(
     "Microsoft X-Box One pad",

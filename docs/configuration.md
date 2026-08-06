@@ -80,6 +80,28 @@ dedicated device names and marker. Existing virtual controller nodes keep their 
 until recreated; stop active streams and restart Polaris after host setup. AppImage users should
 re-run the AppImage install action for the same reason.
 
+The `input` group requirement is not optional and there is no fallback: the isolated nodes are
+deliberately denied the logind ACL, so an account outside the group cannot open the devices Polaris
+just created, and neither can the streamed game. Polaris logs an `input_access:` warning at startup
+when seat isolation is enabled and the account it runs as is not a member, and `--setup-host` reports
+the same thing. Add the account with `sudo usermod -aG input <user>` and log out and back in;
+membership only applies to new sessions.
+
+#### Verifying that isolation is applied
+
+Check the device, not the seat list:
+
+```bash
+udevadm info -q property -n /dev/input/eventN | grep ID_SEAT
+```
+
+`ID_SEAT=seat-polaris` means the rules applied and the device is isolated.
+
+`loginctl list-seats` will keep showing only `seat0`, and that is expected — it is not a sign that
+isolation failed. logind only materializes a seat that owns a device tagged `master-of-seat`, which
+in practice means a graphics device. `seat-polaris` exists purely as a udev property that keeps
+logind from handing the device to the seat0 session, so it never becomes a seat logind lists.
+
 This is a Unix-user boundary, not a same-account process sandbox. Local users who are deliberately
 members of `input`, and local applications running under the same Unix account as Polaris, can still
 open the virtual controller. For concurrent gaming, run Polaris under a dedicated Unix account and
