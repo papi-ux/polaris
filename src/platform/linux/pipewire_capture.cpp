@@ -36,6 +36,12 @@
   #define SPA_ID_INVALID ((uint32_t) 0xffffffff)
 #endif
 
+// Older spa headers (Ubuntu CI / pre-PipeWire PQ enum) lack ST 2084.
+// Numeric value is stable in spa/param/video/color.h (after BT2020_10).
+#ifndef SPA_VIDEO_TRANSFER_SMPTE2084
+  #define SPA_VIDEO_TRANSFER_SMPTE2084 14
+#endif
+
 #include "src/logging.h"
 
 using namespace std::literals;

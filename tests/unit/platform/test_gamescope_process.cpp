@@ -45,7 +45,9 @@ namespace {
       std::uint64_t start_time,
       const std::vector<std::string> &argv,
       const std::vector<std::uint64_t> &socket_inodes = {},
-      const fs::path &executable_override = {}
+      const fs::path &executable_override = {},
+      int pgid = -1,
+      int session = -1
     ) {
       const auto dir = proc / std::to_string(pid);
       fs::remove_all(dir);
@@ -54,11 +56,20 @@ namespace {
                               argv.empty() ? fs::path {"/usr/bin/process"} : fs::path {argv.front()};
       fs::create_symlink(executable, dir / "exe");
 
+      // gamescope_process rejects pgid/session <= 1 (init / kthreadd). Default to a
+      // setsid()-style identity so ownership validation matches real gamescope.
+      if (pgid <= 1) {
+        pgid = pid;
+      }
+      if (session <= 1) {
+        session = pid;
+      }
+
       std::ofstream stat(dir / "stat");
       stat << pid << " (" << (argv.empty() ? "process" : fs::path(argv.front()).filename().string())
-           << ") S " << ppid;
-      // Fields 5..21 are irrelevant here; starttime is field 22.
-      for (int field = 5; field <= 21; ++field) {
+           << ") S " << ppid << ' ' << pgid << ' ' << session;
+      // Fields 7..21 are irrelevant here; starttime is field 22.
+      for (int field = 7; field <= 21; ++field) {
         stat << " 0";
       }
       stat << ' ' << start_time << '\n';
