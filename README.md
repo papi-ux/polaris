@@ -91,17 +91,13 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.3.6
+## What is New in v1.3.7
 
-Polaris v1.3.6 makes the Nova client work against a Polaris host in places it never has, corrects host setup advice that could not succeed on ostree systems, and hardens the gamescope session and its HDR capture.
+Polaris v1.3.7 fixes a use-after-free in VAAPI DMA-BUF capture that AMD hosts have been running into, and puts the nix packaging under CI for the first time.
 
-- **Input group advice that works on Bazzite**: on ostree hosts the `input` group lives in `/usr/lib/group`, so `usermod -aG input` finds no group to add anyone to. Polaris now prints `ujust add-user-to-input-group` there, and the equivalent steps on an ostree host without `ujust`.
-- **Nova library artwork update works at all**: the resolve endpoint now reports what it did, which Nova requires. Without it the client reported the host as unsupported against every build that has ever shipped.
-- **Library entries carry platform and runtime**: derived from the Lutris runner recorded at import, and served only where the runner determines them — no badge beats a wrong badge.
-- **Corrected completion estimates stay corrected**: a manual artwork match decides which game an estimate is for, and no longer falls back to the Steam app id that made the wrong estimate confident.
-- **Gamescope sessions recover**: teardown and reconnect survive a dead nested marker, a non-leader attach, and an incomplete attach generation that used to refuse every later launch until Polaris restarted.
-- **HDR capture follows the encode**: 10-bit PQ only when gamescope is in HDR mode and the client asked for HDR, 8-bit when the stream is SDR, so PQ capture cannot feed an SDR encoder.
-- **Stream audio follows the session**: the stream sink is claimed as the session default while streaming, and only the session that took that claim releases it.
+- **VAAPI capture no longer frees a surface it is still reading**: a use-after-free in the VRAM converter, which destroyed its imported DMA-BUF surface before importing the replacement while a conversion in flight could still be holding it. Imports now live in a buffer-keyed cache, so a newly captured frame cannot pull the surface out from under an active conversion.
+- **This was reachable, not theoretical**: the VAAPI refusal in earlier releases only gated the gamescope windowed override. DRM/KMS capture and the non-cage wlroots VRAM path build the converter directly, so AMD hosts on those paths were running the unfixed version.
+- **Nix packaging is built and checked**: the vendored gamescope patch stacks are verified on every push, and CI builds the patched compositor, so a stack that cannot apply — or that applies without taking effect — fails before it reaches a host.
 - **Security gate**: `npm audit --audit-level=high` remains mandatory.
 - **Exact release set**: the official artifacts are `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb`.
 See the [changelog](docs/changelog.md) for the full release history.

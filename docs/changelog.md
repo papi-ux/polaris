@@ -5,6 +5,17 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.7 - 2026-08-07
+
+A use-after-free in VAAPI DMA-BUF capture that AMD hosts on DRM/KMS have been running, and CI that finally builds the nix packaging it patches.
+
+- Fixes a use-after-free at the VAAPI DMA-BUF import boundary: the VRAM converter destroyed its imported surface before importing the replacement, while an in-flight conversion could still be using it. Reachable on DRM/KMS capture and the non-cage wlroots VRAM path, which is what AMD hosts have been running
+- Fails closed on an invalid surface or texture selection rather than converting it, and closes duplicated DMA-BUF descriptors once ownership transfers
+- Keeps the gamescope-polaris patch stack and the packaged compositor in step, so the `+polhdr2` stamp a session negotiates against is one a build proved
+- Checks the vendored patch stacks on every push and builds the nix packages in CI, so a patch that cannot apply fails there rather than on a host
+- Keeps `npm audit --audit-level=high` mandatory
+- Retains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+
 ## v1.3.6 - 2026-08-07
 
 Client-facing fixes for Nova, host setup advice that works on ostree systems, and gamescope session and HDR capture hardening.
