@@ -114,8 +114,9 @@ TEST(NovaContractTests, KnownDriftStaysRecordedUntilItIsFixed) {
   ASSERT_TRUE(drift.contains("nova_reads_polaris_never_sends"));
   ASSERT_TRUE(drift.contains("polaris_sends_nova_never_reads"));
 
-  // The fields Polaris serves that Nova ignores must at least be fields Polaris
-  // really serves, or the record is describing something that no longer exists.
+  // A field recorded as served-but-unread must at least still be served, or the
+  // record describes something that no longer exists. The list is empty today:
+  // Nova reads everything Polaris serves on the game object.
   const auto emitted = emitted_game_fields();
   for (const auto &field : drift["polaris_sends_nova_never_reads"]["game"]) {
     const auto name = field.get<std::string>();
@@ -124,4 +125,12 @@ TEST(NovaContractTests, KnownDriftStaysRecordedUntilItIsFixed) {
       << "known_drift claims Polaris serves [" << name << "] but it is no longer emitted; "
       << "update docs/nova-contract.json";
   }
+
+  // Scope is what made the first version of this record wrong, twice over, so it
+  // is pinned rather than left to whoever edits the manifest next.
+  const auto &reader = manifest["objects"]["game"]["nova_reader"];
+  EXPECT_TRUE(reader.contains("function"))
+    << "nova_reader must name the function to scope reads to; Nova gives four "
+       "functions in that file a parameter called `json`, so receiver scoping "
+       "silently mixes artwork fields into the game set";
 }

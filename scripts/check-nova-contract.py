@@ -30,16 +30,29 @@ from pathlib import Path
 ACCESSORS = "optString|optBoolean|optInt|optLong|optDouble|optJSONObject|optJSONArray|getString|getBoolean|getInt|getLong"
 
 
-def reads_for_receiver(source: str, receiver: str) -> set[str]:
-    """Keys read from one JSON object.
+def function_body(source: str, name: str) -> str:
+    """The body of one Kotlin function, up to the next declaration at its level.
 
-    Scoping to the receiver matters more than it looks. Nova's game adapter also
-    unpacks nested objects — launch_mode and its mode entry — from the same file,
-    and a file-wide scan reports their fields as game fields Polaris fails to
-    serve. That is a false alarm that would train everyone to ignore this tool.
+    Scope has to be the function, and getting this wrong has already produced two
+    rounds of false findings. A file-wide scan reports the nested launch_mode and
+    mode fields as game fields. Scoping by receiver name is no better here,
+    because PolarisGameJsonAdapter.kt gives four different functions a parameter
+    called `json` — so artwork manifest and asset fields land in the game set and
+    the tool reports drift that does not exist.
     """
-    pattern = re.compile(rf'\b{re.escape(receiver)}\.(?:{ACCESSORS})\(\s*"([a-zA-Z_0-9]+)"')
-    return set(pattern.findall(source))
+    start = re.search(rf'^\s*(?:internal |private |public )?fun {re.escape(name)}\(', source, re.M)
+    if not start:
+        raise SystemExit(f"function not found: {name}")
+    rest = source[start.end():]
+    nxt = re.search(r'^\s*(?:internal |private |public )?fun \w+\(', rest, re.M)
+    return rest[: nxt.start()] if nxt else rest
+
+
+def reads_for_object(source: str, reader: dict) -> set[str]:
+    """Keys read for one contract object."""
+    body = function_body(source, reader["function"])
+    pattern = re.compile(rf'\b{re.escape(reader["receiver"])}\.(?:{ACCESSORS})\(\s*"([a-zA-Z_0-9]+)"')
+    return set(pattern.findall(body))
 
 
 def polaris_manifest(repo: Path) -> dict:
@@ -51,7 +64,7 @@ def nova_reads(nova: Path, reader: dict) -> set[str]:
     path = nova / reader["file"]
     if not path.is_file():
         raise SystemExit(f"not found: {path}\nIs --nova pointing at a Nova checkout?")
-    return reads_for_receiver(path.read_text(), reader["receiver"])
+    return reads_for_object(path.read_text(), reader)
 
 
 def main() -> int:
