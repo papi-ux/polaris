@@ -192,7 +192,8 @@ TEST(SessionStopContractTests, PipeWireReconnectRetiresOldGenerationBeforePublis
   ASSERT_FALSE(portal.empty());
   ASSERT_FALSE(pipewire.empty());
 
-  const auto ensure = portal.find("ensure_global_capture(int width");
+  // Signature may be split across lines; match the declarator only.
+  const auto ensure = portal.find("ensure_global_capture(");
   const auto ensure_end = portal.find("// -----------------------------------------------------------------------", ensure);
   ASSERT_NE(ensure, std::string::npos);
   ASSERT_NE(ensure_end, std::string::npos);
