@@ -51,7 +51,12 @@ def function_body(source: str, name: str) -> str:
 def reads_for_object(source: str, reader: dict) -> set[str]:
     """Keys read for one contract object."""
     body = function_body(source, reader["function"])
-    pattern = re.compile(rf'\b{re.escape(reader["receiver"])}\.(?:{ACCESSORS})\(\s*"([a-zA-Z_0-9]+)"')
+    # `?.` as well as `.`: Nova reaches nullable sub-objects with the safe-call
+    # operator, and requiring a bare dot silently reports every one of their
+    # fields as unread.
+    pattern = re.compile(
+        rf'\b{re.escape(reader["receiver"])}\??\.(?:{ACCESSORS})\(\s*"([a-zA-Z_0-9]+)"'
+    )
     return set(pattern.findall(body))
 
 
@@ -74,40 +79,51 @@ def main() -> int:
     args = parser.parse_args()
 
     manifest = polaris_manifest(args.polaris)
-    game = manifest["objects"]["game"]
-    served = set(game["fields"])
-    read = nova_reads(args.nova, game["nova_reader"])
-
     drift = manifest.get("known_drift", {})
-    known_missing = set(drift.get("nova_reads_polaris_never_sends", {}).get("game", []))
-    known_unread = set(drift.get("polaris_sends_nova_never_reads", {}).get("game", []))
+    known_missing = drift.get("nova_reads_polaris_never_sends", {})
+    known_unread = drift.get("polaris_sends_nova_never_reads", {})
 
-    # Nova asks, Polaris never answers. Nova defaults these, so the symptom is a
-    # blank or "unknown" in the UI rather than an error.
-    missing = read - served
-    # Polaris answers, Nova never asks. The feature ships and stays invisible.
-    unread = served - read
+    sources: dict[Path, str] = {}
+    new_findings = 0
 
-    new_missing = sorted(missing - known_missing)
-    new_unread = sorted(unread - known_unread)
-    fixed = sorted((known_missing - missing) | (known_unread - unread))
+    for name, obj in manifest["objects"].items():
+        reader = obj["nova_reader"]
+        path = args.nova / reader["file"]
+        if not path.is_file():
+            raise SystemExit(f"not found: {path}\nIs --nova pointing at a Nova checkout?")
+        if path not in sources:
+            sources[path] = path.read_text()
 
-    print(f"game object: Polaris serves {len(served)}, Nova reads {len(read)}")
+        served = set(obj["fields"])
+        read = reads_for_object(sources[path], reader)
 
-    for field in new_missing:
-        print(f"  DRIFT  Nova reads [{field}] that Polaris never serves")
-    for field in new_unread:
-        print(f"  DRIFT  Polaris serves [{field}] that Nova never reads")
-    for field in fixed:
-        print(f"  FIXED  [{field}] is no longer drifting; remove it from known_drift")
+        # Not every served field has to be consumed. A host may publish diagnostics a
+        # client has no use for, so only fields absent from informational_ok count.
+        informational = set(obj.get("informational_ok", []))
 
-    if not (new_missing or new_unread or fixed):
-        print("  no new drift")
+        missing = read - served
+        unread = served - read - informational
 
-    if missing & known_missing or unread & known_unread:
-        print(f"\n{len(missing & known_missing) + len(unread & known_unread)} known drift field(s) still outstanding")
+        fresh_missing = sorted(missing - set(known_missing.get(name, [])))
+        fresh_unread = sorted(unread - set(known_unread.get(name, [])))
+        outstanding = len(missing & set(known_missing.get(name, []))) + len(
+            unread & set(known_unread.get(name, []))
+        )
 
-    return 1 if (new_missing or new_unread) else 0
+        status = "drift" if (fresh_missing or fresh_unread) else "ok"
+        print(f"{name}: Polaris serves {len(served)}, Nova reads {len(read)} [{status}]")
+        for field in fresh_missing:
+            print(f"    DRIFT  Nova reads [{field}] that Polaris never serves")
+        for field in fresh_unread:
+            print(f"    DRIFT  Polaris serves [{field}] that Nova never reads")
+        if outstanding:
+            print(f"    {outstanding} known drift field(s) still outstanding")
+
+        new_findings += len(fresh_missing) + len(fresh_unread)
+
+    print()
+    print("no new drift" if not new_findings else f"{new_findings} new drift field(s)")
+    return 1 if new_findings else 0
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ extern "C" {
 #include "misc.h"
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/stream_stats.h"
 #include "src/platform/common.h"
 #include "src/utility.h"
 #include "src/video.h"
@@ -535,7 +536,12 @@ namespace va {
       return -1;
     }
 
-    BOOST_LOG(info) << "vaapi vendor: "sv << vaQueryVendorString(display.get());
+    // Publish it as well as logging it. Nova asks for this on every session and a
+    // crash report that names the driver generation is worth more than one that
+    // makes the reader guess from a GPU model.
+    const auto *vendor = vaQueryVendorString(display.get());
+    BOOST_LOG(info) << "vaapi vendor: "sv << vendor;
+    stream_stats::update_vaapi_vendor(vendor ? vendor : "");
 
     *hw_device_buf = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VAAPI);
     auto ctx = (AVHWDeviceContext *) (*hw_device_buf)->data;
