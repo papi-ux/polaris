@@ -29,6 +29,8 @@ namespace stream_runtime::gamescope_process {
     struct process_t {
       int pid = 0;
       int ppid = 0;
+      int pgid = 0;
+      int session = 0;
       std::uint64_t start_time = 0;
       fs::path executable;
       std::vector<std::string> argv;
@@ -186,8 +188,11 @@ namespace stream_runtime::gamescope_process {
         return std::nullopt;
       }
       const auto ppid = parse_integer<int>(fields[1]);
+      const auto pgid = parse_integer<int>(fields[2]);
+      const auto session = parse_integer<int>(fields[3]);
       const auto start_time = parse_integer<std::uint64_t>(fields[19]);
-      if (!ppid || !start_time || *start_time == 0) {
+      if (!ppid || !pgid || !session || !start_time || *start_time == 0 ||
+          *pgid <= 1 || *session <= 1) {
         return std::nullopt;
       }
 
@@ -228,6 +233,8 @@ namespace stream_runtime::gamescope_process {
       return process_t {
         .pid = pid,
         .ppid = *ppid,
+        .pgid = *pgid,
+        .session = *session,
         .start_time = *start_time,
         .executable = executable,
         .argv = std::move(argv),
@@ -392,7 +399,24 @@ namespace stream_runtime::gamescope_process {
       int root,
       const std::map<int, process_t> &processes
     ) {
-      return pid != root && is_descendant_of(pid, root, processes);
+      if (pid == root) {
+        return false;
+      }
+      if (is_descendant_of(pid, root, processes)) {
+        return true;
+      }
+      // gamescope calls setsid() then starts Xwayland. On current builds
+      // Xwayland may double-fork and reparent to PID 1 while staying in
+      // gamescope's session and process group — PPID ancestry alone fails.
+      const auto root_it = processes.find(root);
+      const auto pid_it = processes.find(pid);
+      if (root_it == processes.end() || pid_it == processes.end()) {
+        return false;
+      }
+      return root_it->second.session == root &&
+             root_it->second.pgid == root &&
+             pid_it->second.session == root &&
+             pid_it->second.pgid == root;
     }
 
     std::optional<std::uint64_t> inode_for_path(

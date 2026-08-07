@@ -23,6 +23,7 @@
 #include <spa/buffer/meta.h>
 #include <pipewire/pipewire.h>
 #include <spa/debug/types.h>
+#include <spa/param/video/color.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/video/format.h>
 #include <spa/param/video/raw.h>
@@ -64,6 +65,7 @@ namespace pipewire_capture {
 
     bool supported_bgra_source(std::uint32_t spa_format) {
       return spa_format == SPA_VIDEO_FORMAT_xBGR_210LE ||
+             spa_format == SPA_VIDEO_FORMAT_xRGB_210LE ||
              spa_format == SPA_VIDEO_FORMAT_BGRx ||
              spa_format == SPA_VIDEO_FORMAT_BGRA ||
              spa_format == SPA_VIDEO_FORMAT_RGBx ||
@@ -78,15 +80,21 @@ namespace pipewire_capture {
       return std::find(modifiers.begin(), modifiers.end(), modifier) != modifiers.end();
     }
 
-    // xBGR_210LE first: gamescope HDR advertises it; prefer over BGRx so stream
-    // is not 8-bit DmaBuf → P010 upconvert (washed HDR).
-    constexpr std::array<std::uint32_t, 5> packed_spa_formats {
+    // 10-bit first when both are offered. For true HDR capture (prefer_hdr_formats)
+    // only the 10-bit entries are advertised — see connect path.
+    constexpr std::array<std::uint32_t, 6> packed_spa_formats {
       SPA_VIDEO_FORMAT_xBGR_210LE,
+      SPA_VIDEO_FORMAT_xRGB_210LE,
       SPA_VIDEO_FORMAT_BGRx,
       SPA_VIDEO_FORMAT_BGRA,
       SPA_VIDEO_FORMAT_RGBx,
       SPA_VIDEO_FORMAT_RGBA,
     };
+
+    bool spa_format_is_hdr_rgb10(std::uint32_t spa_format) {
+      return spa_format == SPA_VIDEO_FORMAT_xBGR_210LE ||
+             spa_format == SPA_VIDEO_FORMAT_xRGB_210LE;
+    }
 
     using egl_query_formats_fn = EGLBoolean (*)(EGLDisplay, EGLint, EGLint *, EGLint *);
     using egl_query_modifiers_fn = EGLBoolean (*)(EGLDisplay, EGLint, EGLint, EGLuint64KHR *, EGLBoolean *, EGLint *);
@@ -96,6 +104,8 @@ namespace pipewire_capture {
     switch (spa_format) {
       case SPA_VIDEO_FORMAT_xBGR_210LE:
         return DRM_FORMAT_XBGR2101010;
+      case SPA_VIDEO_FORMAT_xRGB_210LE:
+        return DRM_FORMAT_XRGB2101010;
       case SPA_VIDEO_FORMAT_BGRx:
         return DRM_FORMAT_XRGB8888;
       case SPA_VIDEO_FORMAT_BGRA:
@@ -413,7 +423,8 @@ namespace pipewire_capture {
 
   platf::frame_format_e spa_to_frame_format(std::uint32_t spa_format) {
     // p010 = 10-bit class source for stats (no dedicated rgb10 enum).
-    if (spa_format == SPA_VIDEO_FORMAT_xBGR_210LE) {
+    if (spa_format == SPA_VIDEO_FORMAT_xBGR_210LE ||
+        spa_format == SPA_VIDEO_FORMAT_xRGB_210LE) {
       return platf::frame_format_e::p010;
     }
     return platf::frame_format_e::bgra8;
@@ -563,40 +574,83 @@ namespace pipewire_capture {
     params_storage.reserve(options_.dmabuf_formats.size() + 1);
     params.reserve(options_.dmabuf_formats.size() + 1);
 
+    // gamescope HDR pods carry MANDATORY BT.2020 + SMPTE ST.2084.
+    // Without matching props the intersection skips 10-bit and falls to BGRx
+    // (gamescope lists 8-bit first among producer formats).
+    auto push_format_pod = [&](std::uint32_t spa_format, std::optional<std::uint64_t> modifier) {
+      params_storage.emplace_back(1024);
+      spa_pod_builder pb = SPA_POD_BUILDER_INIT(
+        params_storage.back().data(),
+        static_cast<std::uint32_t>(params_storage.back().size())
+      );
+      spa_pod_frame frame {};
+      spa_pod_builder_push_object(&pb, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+      spa_pod_builder_add(&pb,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_Id(spa_format),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size),
+        0);
+      if (modifier) {
+        spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+        spa_pod_builder_long(&pb, static_cast<std::int64_t>(*modifier));
+      }
+      if (spa_format_is_hdr_rgb10(spa_format)) {
+        spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_PROP_FLAG_MANDATORY);
+        spa_pod_builder_id(&pb, SPA_VIDEO_COLOR_PRIMARIES_BT2020);
+        spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_transferFunction, SPA_POD_PROP_FLAG_MANDATORY);
+        spa_pod_builder_id(&pb, SPA_VIDEO_TRANSFER_SMPTE2084);
+      }
+      params.push_back(reinterpret_cast<const spa_pod *>(spa_pod_builder_pop(&pb, &frame)));
+    };
+
     if (options_.may_use_dmabuf) {
       for (const auto &format : options_.dmabuf_formats) {
-        params_storage.emplace_back(1024);
-        spa_pod_builder pb = SPA_POD_BUILDER_INIT(params_storage.back().data(), static_cast<std::uint32_t>(params_storage.back().size()));
-        spa_pod_frame frame {};
-        spa_pod_builder_push_object(&pb, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
-        spa_pod_builder_add(&pb,
-          SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-          SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-          SPA_FORMAT_VIDEO_format, SPA_POD_Id(format.spa_format),
-          SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size),
-          0);
-        spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
-        spa_pod_builder_long(&pb, static_cast<std::int64_t>(format.modifier));
-        params.push_back(reinterpret_cast<const spa_pod *>(spa_pod_builder_pop(&pb, &frame)));
+        if (options_.prefer_hdr_formats && !spa_format_is_hdr_rgb10(format.spa_format)) {
+          continue;
+        }
+        if (options_.prefer_sdr_formats && spa_format_is_hdr_rgb10(format.spa_format)) {
+          continue;
+        }
+        push_format_pod(format.spa_format, format.modifier);
       }
     }
 
-    params_storage.emplace_back(1024);
-    spa_pod_builder mem_pb = SPA_POD_BUILDER_INIT(params_storage.back().data(), static_cast<std::uint32_t>(params_storage.back().size()));
-    const auto *memptr_fmt_param = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
-      &mem_pb,
-      SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-      SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-      SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-      SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(6,
-        SPA_VIDEO_FORMAT_xBGR_210LE,
-        SPA_VIDEO_FORMAT_xBGR_210LE,
-        SPA_VIDEO_FORMAT_BGRx,
-        SPA_VIDEO_FORMAT_BGRA,
-        SPA_VIDEO_FORMAT_RGBx,
-        SPA_VIDEO_FORMAT_RGBA),
-      SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size)));
-    params.push_back(memptr_fmt_param);
+    // MemPtr/MemFd fallback pods. Prefer exclusive sets so gamescope cannot fixate
+    // the wrong depth: HDR stream → 10-bit only; SDR stream → 8-bit only.
+    if (options_.prefer_hdr_formats) {
+      push_format_pod(SPA_VIDEO_FORMAT_xBGR_210LE, std::nullopt);
+      push_format_pod(SPA_VIDEO_FORMAT_xRGB_210LE, std::nullopt);
+      BOOST_LOG(info) << "portal: PipeWire EnumFormat prefer_hdr — only 10-bit PQ/BT.2020 pods (no BGRx)"sv;
+    }
+    else if (options_.prefer_sdr_formats) {
+      push_format_pod(SPA_VIDEO_FORMAT_BGRx, std::nullopt);
+      push_format_pod(SPA_VIDEO_FORMAT_BGRA, std::nullopt);
+      push_format_pod(SPA_VIDEO_FORMAT_RGBx, std::nullopt);
+      push_format_pod(SPA_VIDEO_FORMAT_RGBA, std::nullopt);
+      BOOST_LOG(info) << "portal: PipeWire EnumFormat prefer_sdr — only 8-bit pods (no xBGR_210LE)"sv;
+    }
+    else {
+      params_storage.emplace_back(1024);
+      spa_pod_builder mem_pb = SPA_POD_BUILDER_INIT(
+        params_storage.back().data(),
+        static_cast<std::uint32_t>(params_storage.back().size())
+      );
+      const auto *memptr_fmt_param = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
+        &mem_pb,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(6,
+          SPA_VIDEO_FORMAT_xBGR_210LE,
+          SPA_VIDEO_FORMAT_xBGR_210LE,
+          SPA_VIDEO_FORMAT_BGRx,
+          SPA_VIDEO_FORMAT_BGRA,
+          SPA_VIDEO_FORMAT_RGBx,
+          SPA_VIDEO_FORMAT_RGBA),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size)));
+      params.push_back(memptr_fmt_param);
+    }
 
     static const pw_stream_events events = {
       .version = PW_VERSION_STREAM_EVENTS,

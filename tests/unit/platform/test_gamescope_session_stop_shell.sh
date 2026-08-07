@@ -105,17 +105,27 @@ fi
 ! grep -Eq 'unmask|start polaris-gamescope-idle|restart polaris-portal|busctl' "$actions" ||
   fail "stop failure advanced idle/portal handoff"
 
-# An unclassified nested launch is never converted into orphan-socket cleanup:
-# without an exact marker, recovery authority is incomplete and the claim stays.
+# Dead/invalid nested marker may only advance when sockets are orphan/absent.
+# Live foreign ownership (reclaim fails) keeps the durable claim.
 reset_state
-if NESTED_VALID=0 RECLAIM_OK=1 run_stop >/dev/null 2>&1; then
-  fail "unclassified nested launch returned success"
+if NESTED_VALID=0 RECLAIM_OK=0 run_stop >/dev/null 2>&1; then
+  fail "foreign-owned nested sockets returned success"
 fi
 [ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = 1 ] ||
-  fail "unclassified launch advanced its recovery claim"
-! grep -qx 'reclaim' "$actions" || fail "unclassified launch attempted orphan reclaim"
+  fail "foreign ownership advanced its recovery claim"
+grep -qx 'reclaim' "$actions" || fail "invalid marker did not attempt orphan reclaim"
 ! grep -Eq 'unmask|start polaris-gamescope-idle|restart polaris-portal|busctl' "$actions" ||
-  fail "unclassified launch advanced idle/portal handoff"
+  fail "foreign ownership advanced idle/portal handoff"
+
+# Dead nested + reclaimable sockets: advance through restore-idle handoff.
+reset_state
+: >"$actions"
+NESTED_VALID=0 RECLAIM_OK=1 STOP_OK=0 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
+  PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "dead nested with orphan reclaim failed"
+[ ! -e "$work/run/polaris-gamescope-wsi-nested" ] || fail "dead nested handoff retained claim"
+grep -qx 'reclaim' "$actions" || fail "dead nested did not reclaim orphan sockets"
+! grep -qx 'stop-nested' "$actions" || fail "dead nested attempted exact stop-nested"
+grep -qx 'unmask-idle' "$actions" || fail "dead nested did not unmask idle"
 
 # A failed idle handoff retains restore-idle state for a safe retry.
 reset_state
@@ -258,9 +268,11 @@ if POLARIS_SESSION_INSTANCE_ID= NESTED_VALID=1 IDLE_VALID=0 run_stop >/dev/null 
 fi
 [ -e "$work/run/polaris-gamescope-session-id" ] || fail "ambiguous nested failure cleared credential"
 
-grep -Fq 'if [ -e "$session_state_file" ] || [ -s "$session_id_file" ]; then' "$script" ||
+grep -Fq 'if [ -e "$session_state_file" ] || [ -s "$session_id_file" ] || [ -f "$rt/polaris-gamescope-wsi-nested" ]; then' "$script" ||
   fail "start does not recover every atomic or legacy credential before replacement"
-grep -Fq "POLARIS_SESSION_INSTANCE_ID='' \"\$0\" stop || exit 1" "$script" ||
+grep -Fq 'stop recovery failed — forcing clean slate' "$script" ||
+  fail "start does not fail-open when prior stop recovery fails"
+grep -Fq "POLARIS_SESSION_INSTANCE_ID='' bash \"\$0\" stop" "$script" ||
   fail "start does not route persisted attach/nested recovery through credentialed stop"
 transition_line="$(grep -nF 'publish_nested_claim transition absent' "$script" | head -n1 | cut -d: -f1)"
 mask_line="$(grep -nF 'polaris_mask_idle_unit_runtime' "$script" | tail -n1 | cut -d: -f1)"

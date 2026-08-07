@@ -224,14 +224,33 @@ case "${1:-}" in
       echo "polaris-gamescope-session: missing immutable session credential" >&2
       exit 1
     }
-    if [ -e "$session_state_file" ] || [ -s "$session_id_file" ]; then
+    if [ -e "$session_state_file" ] || [ -s "$session_id_file" ] || [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
       echo "polaris-gamescope-session: complete prior session recovery before new launch" >&2
-      POLARIS_SESSION_INSTANCE_ID='' "$0" stop || exit 1
+      # Re-exec via bash so a non-executable script path still works when $0 is the .sh file.
+      if ! POLARIS_SESSION_INSTANCE_ID='' bash "$0" stop; then
+        echo "polaris-gamescope-session: stop recovery failed — forcing clean slate" >&2
+        if polaris_validate_marker "$marker" 2>/dev/null; then
+          polaris_stop_marked_gamescope "$marker" "$POLARIS_MARKER_ROLE" "$rt" 2>/dev/null || true
+        fi
+        polaris_reclaim_orphan_gamescope_sockets "$rt" 2>/dev/null || true
+        rm -f -- \
+          "$marker" \
+          "$rt/polaris-gamescope.env" \
+          "$rt/polaris-gamescope-force" \
+          "$rt/polaris-gamescope-wsi-nested" \
+          "$session_state_file" \
+          "$session_id_file" \
+          "$session_mode_file" \
+          "$rt/polaris-gamescope-appid" \
+          "$rt/polaris-gamescope-audio-sink" \
+          "$rt"/polaris-gamescope-steam-wsi*.log \
+          "$rt"/gamescope-0 "$rt"/gamescope-0.lock \
+          "$rt"/gamescope-0-ei "$rt"/gamescope-0-ei.lock \
+          "$rt"/gamescope-1 "$rt"/gamescope-1.lock \
+          "$rt"/gamescope-1-ei "$rt"/gamescope-1-ei.lock
+      fi
       POLARIS_SESSION_INSTANCE_ID="$requested_session_id"
       export POLARIS_SESSION_INSTANCE_ID
-    elif [ -f "$rt/polaris-gamescope-wsi-nested" ]; then
-      echo "polaris-gamescope-session: recovery claim lacks its immutable session credential" >&2
-      exit 1
     fi
     # Soft env hint for nested games (PULSE_SINK / PIPEWIRE_NODE).
     # Polaris itself picks the capture sink: EasyEffects when it is the
@@ -625,69 +644,51 @@ case "${1:-}" in
     fi
     ;;
   wait)
+    # Hold the Moonlight session open until Polaris SIGTERMs this process
+    # (process-group kill on disconnect / app stop). Do NOT exit early on
+    # Steam probe failures — that raced portal attach and tore nested
+    # gamescope down within ~50ms (Response code 2).
     load_session_instance_id || {
       echo "polaris-gamescope-session: missing or mismatched session credential during wait" >&2
       exit 1
     }
-    for _ in $(seq 1 60); do
-      if session_steam_alive; then
-        break
+    appid=""
+    if [ -f "$rt/polaris-gamescope-appid" ]; then
+      appid="$(tr -d '[:space:]' <"$rt/polaris-gamescope-appid" || true)"
+    fi
+    echo "polaris-gamescope-session: wait holding stream (appid=${appid:-none}, credential=$POLARIS_SESSION_INSTANCE_ID)" >&2
+    trap 'echo "polaris-gamescope-session: wait got signal — releasing" >&2; exit 0' TERM INT
+    seen=0
+    gone=0
+    while :; do
+      if [ -n "$appid" ] && steam_app_game_alive "$appid"; then
+        if [ "$seen" = 0 ]; then
+          echo "polaris-gamescope-session: game process for appid=$appid seen" >&2
+        fi
+        seen=1
+        gone=0
+      elif [ "$seen" = 1 ]; then
+        gone=$((gone + 1))
+        # ~15s debounce: launchers/anti-cheat may respawn; Steam may be slow.
+        if [ "$gone" -ge 30 ]; then
+          echo "polaris-gamescope-session: game appid=$appid exited — releasing wait (end stream)" >&2
+          kill_session_steam 2>/dev/null || true
+          exit 0
+        fi
       fi
-      steam_rc=$?
-      [ "$steam_rc" -eq 1 ] || exit 1
-      sleep 0.5
-    done
-    appid="$(tr -d '[:space:]' <"$rt/polaris-gamescope-appid" 2>/dev/null || true)"
-    if [ -n "$appid" ]; then
-      # Direct library launch: end stream when the game exits, not when
-      # the user leaves Big Picture. gamepadui keeps Steam alive after
-      # the title quits → without this, Moonlight stays on BP forever.
-      echo "polaris-gamescope-session: wait appid=$appid (exit-on-game-close)" >&2
-      seen=0
-      gone=0
-      while :; do
-        if session_steam_alive; then
+      # Nested compositor gone after marker published → release.
+      if [ -f "$marker" ]; then
+        if polaris_validate_marker "$marker" nested; then
           :
         else
-          steam_rc=$?
-          if [ "$steam_rc" -eq 1 ]; then
-            # Steam already gone (user quit BP / crash).
-            break
-          fi
-          exit 1
-        fi
-        if steam_app_game_alive "$appid"; then
-          if [ "$seen" = 0 ]; then
-            echo "polaris-gamescope-session: game process for appid=$appid seen" >&2
-          fi
-          seen=1
-          gone=0
-        elif [ "$seen" = 1 ]; then
-          gone=$((gone + 1))
-          # ~3s debounce: launchers/anti-cheat may respawn once.
-          if [ "$gone" -ge 6 ]; then
-            echo "polaris-gamescope-session: game appid=$appid exited — shutting down Steam (end stream)" >&2
-            kill_session_steam
-            break
+          if [ ! -e "$rt/gamescope-0" ]; then
+            echo "polaris-gamescope-session: nested gamescope gone — releasing wait" >&2
+            exit 0
           fi
         fi
-        sleep 0.5
-      done
-    else
-      # Big Picture / no appid: stream lives until Steam exits.
-      gone=0
-      while :; do
-        if session_steam_alive; then
-          gone=0
-        else
-          steam_rc=$?
-          [ "$steam_rc" -eq 1 ] || exit 1
-          gone=$((gone + 1))
-          [ "$gone" -ge 6 ] && break
-        fi
-        sleep 0.5
-      done
-    fi
+      fi
+      sleep 0.5
+    done
     ;;
   stop)
     load_session_instance_id || {
@@ -750,8 +751,15 @@ case "${1:-}" in
               exit 1
             fi
           else
-            echo "polaris-gamescope-session: nested launch lacks a valid exact marker; retaining recovery claim" >&2
-            exit 1
+            # Nested generation already dead (host hang dump, gamescope crash, or
+            # kill raced marker validation). Only advance when sockets are absent
+            # or reclaimable — live foreign ownership must keep the durable claim
+            # so we never steal another compositor's gamescope-0.
+            if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+              echo "polaris-gamescope-session: nested launch lacks a valid exact marker; retaining recovery claim" >&2
+              exit 1
+            fi
+            echo "polaris-gamescope-session: nested marker invalid/dead; sockets orphan or absent — restoring idle" >&2
           fi
           if ! kill_session_steam || ! session_steam_absent; then
             echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
