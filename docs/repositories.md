@@ -15,9 +15,9 @@ package, not a different one.
 ## Fedora
 
 ```bash
-sudo rpm --import https://papi-ux.github.io/polaris/repo/polaris.gpg
+sudo rpm --import https://papi-ux.com/polaris/repo/polaris.gpg
 sudo curl --location --output /etc/yum.repos.d/polaris.repo \
-  https://papi-ux.github.io/polaris/repo/fedora/polaris.repo
+  https://papi-ux.com/polaris/repo/fedora/polaris.repo
 sudo dnf install polaris
 sudo -H polaris --setup-host
 systemctl --user restart polaris
@@ -30,9 +30,9 @@ After that, `sudo dnf upgrade` carries Polaris with everything else.
 The same repository works, layered rather than installed:
 
 ```bash
-sudo rpm --import https://papi-ux.github.io/polaris/repo/polaris.gpg
+sudo rpm --import https://papi-ux.com/polaris/repo/polaris.gpg
 sudo curl --location --output /etc/yum.repos.d/polaris.repo \
-  https://papi-ux.github.io/polaris/repo/fedora/polaris.repo
+  https://papi-ux.com/polaris/repo/fedora/polaris.repo
 rpm-ostree install polaris
 systemctl reboot
 ```
@@ -55,7 +55,7 @@ Then append to `/etc/pacman.conf`:
 ```ini
 [polaris]
 SigLevel = Required DatabaseRequired
-Server = https://papi-ux.github.io/polaris/repo/arch/$arch
+Server = https://papi-ux.com/polaris/repo/arch/$arch
 ```
 
 ```bash
