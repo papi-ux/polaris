@@ -6685,7 +6685,6 @@ namespace nvhttp {
         game["id"] = app.uuid;
         game["app_id"] = app.id;
         game["name"] = app.name;
-        game["source"] = app.steam_appid.empty() ? "other" : "steam";
         game["steam_appid"] = app.steam_appid;
         game["category"] = app.game_category;
         game["source"] = app.source;
