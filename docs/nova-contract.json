@@ -42,35 +42,41 @@
         "play_time"
       ],
       "nova_reader": {
-        "$comment": "Nova unpacks nested launch_mode/mode objects in the same file, so the receiver variable is what scopes this to the game object itself.",
+        "$comment": [
+          "Scoped to the function, not the file and not the receiver variable.",
+          "PolarisGameJsonAdapter.kt defines fromJson, parseArtworkManifest, finiteDouble and",
+          "parseArtworkAsset, and all four name their parameter `json`. Scoping by receiver",
+          "therefore reports artwork-manifest fields as game fields, which is how an earlier",
+          "version of this manifest recorded drift that did not exist."
+        ],
         "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
         "receiver": "json"
       }
     }
   },
   "known_drift": {
     "$comment": [
-      "Recorded 2026-08-06. Neither direction crashes: Nova defaults missing fields, and",
-      "Polaris does not care what goes unread. Both cost real behaviour anyway."
+      "Corrected 2026-08-07. The first version of this file was written against the",
+      "working tree of a Nova checkout that was 295 commits divergent from origin/master,",
+      "and scoped reads by receiver name rather than by function. Both errors inflated it.",
+      "Verified against origin/master with function scoping, Nova reads every field Polaris",
+      "serves; only the reverse direction drifts."
     ],
     "nova_reads_polaris_never_sends": {
-      "$comment": "Nova's PolarisGameJsonAdapter falls back for each of these, so the UI is permanently degraded rather than broken.",
+      "$comment": "Nova defaults each of these, so platform and runtime resolve to \"unknown\" and the labels to empty strings rather than failing.",
       "game": [
         "launcher_source",
         "launcher_detail",
         "platform",
-        "runtime",
         "platform_label",
+        "runtime",
         "runtime_label"
       ]
     },
     "polaris_sends_nova_never_reads": {
-      "$comment": "Shipped by Polaris v1.3.5 and invisible in Nova until it reads them.",
-      "game": [
-        "artwork",
-        "beat_time",
-        "play_time"
-      ]
+      "$comment": "None. Nova's game adapter on origin/master reads every field Polaris serves, including play_time, beat_time and artwork.",
+      "game": []
     }
   }
 }

@@ -20,7 +20,7 @@ Package-update safety, Linux host integration owned by the package, and library 
 - Closes a `systemd-inhibit` process leaked on every session, and keeps a private session's virtual keyboard and mouse out of the desktop session logged in at the machine
 - Warns at startup when seat isolation is enabled and the account Polaris runs as is not in the `input` group, which otherwise leaves the isolated devices unopenable by Polaris and by the streamed game
 - Warns when `back_button_timeout` is shorter than the 100ms Home press it emulates, since the setting is milliseconds and a value like `2` turns nearly every Back/Select press into Home
-- Reports the playtime Steam and Lutris already record on disk, and serves completion estimates from a local dataset first, with `beat_times_lookup` controlling the How Long To Beat fallback; both are host-side and announced through `/polaris/v1/capabilities`, and Nova does not display them yet
+- Reports the playtime Steam and Lutris already record on disk, and serves completion estimates from a local dataset first, with `beat_times_lookup` controlling the How Long To Beat fallback; both are announced through `/polaris/v1/capabilities` so clients can adopt them explicitly
 - Adds a transactional custom artwork workflow with an authenticated resolver, bounded downloads, and atomic caching
 - Surfaces per-app environment variables in the web UI
 - Releases the host loopback when a session turns host audio off, instead of leaving an earlier session's loopback loaded for the life of the process
