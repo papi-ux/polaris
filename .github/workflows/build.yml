@@ -616,7 +616,7 @@ jobs:
           if-no-files-found: warn
 
   fedora-rpm-build:
-    name: Fedora ${{ matrix.fedora }} RPM build (${{ matrix.cc }})
+    name: Fedora ${{ matrix.fedora }} RPM build
     needs: web-checks
     runs-on: ubuntu-24.04
     container:
@@ -628,10 +628,6 @@ jobs:
           - fedora: '44'
             cc: gcc-15
             cxx: g++-15
-            boost_static: OFF
-          - fedora: '44'
-            cc: clang
-            cxx: clang++
             boost_static: OFF
     env:
       CCACHE_DIR: /github/home/.cache/ccache
@@ -673,9 +669,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /github/home/.cache/ccache
-          key: polaris-fedora-${{ matrix.fedora }}-${{ matrix.cc }}-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          key: polaris-fedora-${{ matrix.fedora }}-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
           restore-keys: |
-            polaris-fedora-${{ matrix.fedora }}-${{ matrix.cc }}-ccache-
+            polaris-fedora-${{ matrix.fedora }}-ccache-
 
       - name: Cache npm downloads
         uses: actions/cache@v6
@@ -698,7 +694,7 @@ jobs:
       - name: Install CI helper packages
         run: |
           for attempt in 1 2 3; do
-            dnf install -y ccache clang golang ninja-build patch python3 && exit 0
+            dnf install -y ccache golang ninja-build patch python3 && exit 0
             echo "dnf helper package install failed on attempt ${attempt}" >&2
             dnf clean expire-cache || true
             sleep $((attempt * 10))
@@ -887,7 +883,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## Fedora ${{ matrix.fedora }} RPM validation (${{ matrix.cc }})"
+            echo "## Fedora ${{ matrix.fedora }} RPM validation"
             echo
             echo "- Spec dependency source: \`packaging/linux/fedora/Polaris.spec\`"
             echo "- Build tree directory: \`build/\`"
@@ -899,7 +895,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fedora-${{ matrix.fedora }}-${{ matrix.cc }}-rpm-artifacts
+          name: fedora-${{ matrix.fedora }}-rpm-artifacts
           path: |
             build/cpack_artifacts/*.rpm
             build/cpack_artifacts/*.src.rpm
@@ -909,7 +905,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fedora-${{ matrix.fedora }}-${{ matrix.cc }}-rpm-metadata
+          name: fedora-${{ matrix.fedora }}-rpm-metadata
           path: |
             build/cpack_artifacts/package-*.txt
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/SPECS/*.spec
