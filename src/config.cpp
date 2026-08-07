@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -131,6 +132,31 @@ namespace config {
     }
 
   }  // namespace nv
+
+  std::string back_button_timeout_warning(int timeout_ms) {
+    // Negative disables the emulation entirely, which is the default and the
+    // documented way to turn it off.
+    if (timeout_ms < 0 || timeout_ms >= back_button_emulated_press_ms) {
+      return {};
+    }
+
+    std::ostringstream advice;
+    advice << "config: back_button_timeout is "sv << timeout_ms
+           << " milliseconds, which is shorter than the "sv << back_button_emulated_press_ms
+           << "ms Home press it emulates. Back/Select will be released and turned into Home on "sv
+           << "essentially every press, so the button will look broken rather than misconfigured."sv;
+
+    // The overwhelmingly likely cause is seconds entered where milliseconds
+    // were meant, and naming the exact replacement value is cheaper than
+    // leaving somebody to work it out from an evtest trace.
+    if (timeout_ms > 0) {
+      advice << " If you meant "sv << timeout_ms << " second"sv << (timeout_ms == 1 ? "" : "s")
+             << ", use "sv << timeout_ms * 1000 << '.';
+    }
+
+    advice << " Use -1 to disable Home emulation."sv;
+    return advice.str();
+  }
 
   namespace amd {
 #if !defined(_WIN32) || defined(DOXYGEN)
@@ -1445,6 +1471,9 @@ namespace config {
 
     if (to > std::numeric_limits<int>::min()) {
       input.back_button_timeout = std::chrono::milliseconds {to};
+      if (const auto advice = back_button_timeout_warning(to); !advice.empty()) {
+        BOOST_LOG(warning) << advice;
+      }
     }
 
     double repeat_frequency {0};
