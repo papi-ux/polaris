@@ -54,6 +54,7 @@
 // local includes
 #include "config.h"
 #include "display_device.h"
+#include "display_planner.h"
 #include "entry_handler.h"
 #include "file_handler.h"
 #include "game_artwork.h"
@@ -2928,6 +2929,148 @@ namespace nvhttp {
         "Steam Big Picture compatibility mode may also receive controller input." :
         "Direct launch avoids opening Steam Big Picture.";
       return contract;
+    }
+
+    std::optional<double> refresh_rate_hz_value(const display_device::FloatingPoint &value) {
+      return std::visit(
+        [](const auto &refresh_rate) -> std::optional<double> {
+          using value_t = std::decay_t<decltype(refresh_rate)>;
+          if constexpr (std::is_same_v<value_t, display_device::Rational>) {
+            if (refresh_rate.m_denominator == 0) {
+              return std::nullopt;
+            }
+
+            return static_cast<double>(refresh_rate.m_numerator) /
+                   static_cast<double>(refresh_rate.m_denominator);
+          } else {
+            return refresh_rate;
+          }
+        },
+        value
+      );
+    }
+
+    // The active display's mode, preferring the configured output, then the
+    // primary display, then any active one. Unlike the launch-rate hint this
+    // wants the panel a session would actually cover, so the first matching
+    // display wins rather than the fastest.
+    std::optional<display_planner::mode_t> active_output_display_mode_hint() {
+      const auto configured_display_name = display_device::map_output_name(config::video.output_name);
+      std::optional<display_planner::mode_t> primary_mode;
+      std::optional<display_planner::mode_t> any_active_mode;
+
+      for (const auto &device : display_device::enumerate_devices()) {
+        if (!device.m_info) {
+          continue;
+        }
+
+        const auto refresh_rate_hz = refresh_rate_hz_value(device.m_info->m_refresh_rate);
+        if (!refresh_rate_hz || *refresh_rate_hz <= 0 ||
+            device.m_info->m_resolution.m_width == 0 || device.m_info->m_resolution.m_height == 0) {
+          continue;
+        }
+
+        const display_planner::mode_t mode {
+          static_cast<double>(device.m_info->m_resolution.m_width),
+          static_cast<double>(device.m_info->m_resolution.m_height),
+          *refresh_rate_hz,
+        };
+
+        const bool matches_configured_output = !configured_display_name.empty() &&
+                                               (device.m_display_name == configured_display_name ||
+                                                device.m_device_id == config::video.output_name);
+        if (matches_configured_output) {
+          return mode;
+        }
+
+        if (device.m_info->m_primary && !primary_mode) {
+          primary_mode = mode;
+        }
+        if (!any_active_mode) {
+          any_active_mode = mode;
+        }
+      }
+
+      return primary_mode ? primary_mode : any_active_mode;
+    }
+
+    struct planner_source_t {
+      display_planner::mode_t mode;
+      bool available;
+    };
+
+    // The same source the web planner plans from: the fallback display mode,
+    // with a live display filling in only when that field was blanked. Both
+    // surfaces must plan from the same numbers, or a mode picked in Nova and
+    // a mode picked in the web UI would disagree about what Balanced means.
+    planner_source_t display_planner_source() {
+      if (const auto configured = display_planner::parse_display_mode(config::video.fallback_mode)) {
+        return {*configured, true};
+      }
+      if (const auto live = active_output_display_mode_hint()) {
+        return {*live, true};
+      }
+      return {{1920, 1080, 60}, false};
+    }
+
+    nlohmann::json planner_number_json(double value) {
+      // Integral values travel as integers, the way the JS planner emits them.
+      if (value == std::floor(value) && std::fabs(value) < 9.0e15) {
+        return static_cast<long long>(value);
+      }
+      return value;
+    }
+
+    nlohmann::json display_planner_scale_option_json(const display_planner::scale_option_t &option) {
+      nlohmann::json scale_option;
+      scale_option["scale_factor"] = planner_number_json(option.scale_factor);
+      scale_option["label"] = option.label;
+      scale_option["target_mode"] = option.target_mode;
+      scale_option["safe"] = option.safe;
+      return scale_option;
+    }
+
+    nlohmann::json display_planner_choice_json(const display_planner::choice_t &planned) {
+      nlohmann::json choice;
+      choice["id"] = planned.id;
+      choice["title"] = planned.title;
+      choice["intent"] = planned.intent;
+      choice["target_mode"] = planned.target_mode;
+      choice["badge"] = planned.badge;
+      choice["reason"] = planned.reason;
+      choice["advanced"] = planned.advanced;
+      choice["custom"] = planned.custom;
+      choice["safe"] = planned.safe;
+      choice["hidden"] = planned.hidden;
+      choice["scale_factor"] = planner_number_json(planned.scale_factor);
+      choice["aspect_ratio"] = planned.aspect_ratio;
+      return choice;
+    }
+
+    nlohmann::json display_planner_contract_json() {
+      const auto source = display_planner_source();
+      const auto plan = display_planner::build_resolution_planner(source.mode);
+
+      auto choices = nlohmann::json::array();
+      for (const auto &planned : plan.choices) {
+        choices.push_back(display_planner_choice_json(planned));
+      }
+      auto advanced_scale_factors = nlohmann::json::array();
+      for (const auto &option : plan.advanced_scale_factors) {
+        advanced_scale_factors.push_back(display_planner_scale_option_json(option));
+      }
+
+      nlohmann::json planner;
+      planner["available"] = source.available;
+      planner["source_mode"] = plan.source_mode;
+      planner["source_aspect_ratio"] = plan.source_aspect_ratio;
+      planner["source_fps"] = planner_number_json(plan.source.fps);
+      planner["recommended_id"] = plan.recommended_id;
+      planner["recommended_title"] = plan.recommended_title;
+      planner["recommended_mode"] = plan.recommended_mode;
+      planner["choices"] = std::move(choices);
+      planner["advanced_scale_factors"] = std::move(advanced_scale_factors);
+      return planner;
     }
 
     fs::path legacy_covers_directory() {
@@ -6078,6 +6221,10 @@ namespace nvhttp {
       // making the feature look absent.
       features["library_beat_times_v1"] = true;
       features["library_beat_times_lookup"] = config::sunshine.beat_times_lookup;
+      // Served per game as `display_planner`, computed from the host's
+      // fallback display mode. Announced so a client can build its resolution
+      // UI against the capability rather than sniffing the first game object.
+      features["display_planner_v1"] = true;
       features["artwork_manifest_v1"] = true;
       features["artwork_manual_match_v1"] = nonblank_artwork_api_key(
         config::sunshine.steamgriddb_api_key);
@@ -6664,6 +6811,9 @@ namespace nvhttp {
         return;
       }
       const auto advertised_codec_support = advertised_codec_support_for_http(true);
+      // Per-host, not per-game: every game plans from the same host display,
+      // so the planner is computed once and attached to each game unchanged.
+      const auto display_planner_contract = display_planner_contract_json();
 
       // Parse query params
       auto query = request->parse_query_string();
@@ -6736,6 +6886,7 @@ namespace nvhttp {
         }
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
+        game["display_planner"] = display_planner_contract;
 
         nlohmann::json genre_arr = nlohmann::json::array();
         for (const auto &g : app.genres) genre_arr.push_back(g);
