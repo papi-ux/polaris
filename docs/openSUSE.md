@@ -4,7 +4,7 @@ Polaris has no prebuilt openSUSE package yet, but it builds cleanly from source 
 **openSUSE Tumbleweed** (x86_64). This guide covers the dependencies, the build, and
 a few openSUSE-specific gotchas. A CI workflow that builds an installable RPM in an
 `opensuse/tumbleweed` container lives at
-[`.github/workflows/opensuse-build.yml`](../.github/workflows/opensuse-build.yml).
+[`.github/workflows/opensuse-build.yml`](https://github.com/papi-ux/polaris/blob/master/.github/workflows/opensuse-build.yml).
 
 > Tested on Tumbleweed with an AMD GPU (VAAPI encode). NVIDIA hosts should add the
 > CUDA toolkit and build with `-DPOLARIS_ENABLE_CUDA=ON`.
