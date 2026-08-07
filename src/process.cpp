@@ -1990,8 +1990,9 @@ namespace proc {
       std::vector<pidfd_handle_t> owned_frozen_generation;
       auto &frozen = frozen_generation ? *frozen_generation : owned_frozen_generation;
       std::set<pid_t> authorized_private_groups;
-      auto resume_on_failure = util::fail_guard([&frozen, &authorized_private_groups]() {
-        for (const auto group : authorized_private_groups) {
+      std::set<pid_t> freeze_groups;
+      auto resume_on_failure = util::fail_guard([&frozen, &freeze_groups]() {
+        for (const auto group : freeze_groups) {
           (void) kill(-group, SIGCONT);
         }
         for (const auto &handle : frozen) {
@@ -2000,9 +2001,18 @@ namespace proc {
       });
       (void) steam_appid;
       auto authority = isolated_session_process_snapshot(session_instance_id);
-      if (!authority.capture_complete || authority.owned.empty()) {
+      if (!authority.capture_complete) {
         return false;
       }
+      // Nothing left with the session credential: cleanup is already done (game
+      // quit before Moonlight cancel is the common case).
+      if (authority.owned.empty()) {
+        return true;
+      }
+      // Freeze targets: prefer true private session leaders (pid==pgid==sid).
+      // Attach launches often keep polaris's SID (bwrap under the host process),
+      // so fall back to process-group leaders that still carry the session id.
+      std::set<pid_t> authorized_process_groups;
       for (auto &root : authority.owned) {
 #ifdef POLARIS_TESTS
         if (root.pid == forced_reused_gamescope_attached_pid ||
@@ -2018,21 +2028,35 @@ namespace proc {
         if (root.pid == root_group->process_group && root_group->process_group == root_group->session) {
           authorized_private_groups.insert(root_group->session);
         }
+        if (root.pid == root_group->process_group) {
+          authorized_process_groups.insert(root_group->process_group);
+        }
       }
-      if (authorized_private_groups.empty()) {
-        BOOST_LOG(error) << "process: exact Gamescope generation lacks a private session leader"sv;
+      // Freeze private sessions *and* credentialed process groups. Attach Steam
+      // (bwrap) often has pgid==pid but sid==polaris; private-only freeze would
+      // reject those roots and brick cancel/launch.
+      freeze_groups = authorized_private_groups;
+      freeze_groups.insert(authorized_process_groups.begin(), authorized_process_groups.end());
+      if (freeze_groups.empty()) {
+        BOOST_LOG(error) << "process: exact Gamescope generation lacks a private session or process-group leader"sv;
         return false;
       }
+      const auto root_in_freeze_set = [&freeze_groups, &authorized_private_groups](
+                                       const auto &root_group
+                                     ) {
+        return authorized_private_groups.contains(root_group.session) ||
+               freeze_groups.contains(root_group.process_group);
+      };
       for (const auto &root : authority.owned) {
         const auto root_group = proc_group_session_from_stat(read_proc_status_file(root.pid, "stat"));
-        if (!root_group || !authorized_private_groups.contains(root_group->session)) {
-          BOOST_LOG(error) << "process: exact Gamescope root is outside the authorized private session pid="sv << root.pid;
+        if (!root_group || !root_in_freeze_set(*root_group)) {
+          BOOST_LOG(error) << "process: exact Gamescope root is outside the authorized freeze set pid="sv << root.pid;
           return false;
         }
       }
-      for (const auto group : authorized_private_groups) {
+      for (const auto group : freeze_groups) {
         if (kill(-group, SIGSTOP) != 0) {
-          BOOST_LOG(error) << "process: failed to freeze exact Gamescope private group="sv << group;
+          BOOST_LOG(error) << "process: failed to freeze exact Gamescope process group="sv << group;
           return false;
         }
       }
@@ -2046,7 +2070,7 @@ namespace proc {
 #endif
         const auto root_group = proc_group_session_from_stat(read_proc_status_file(root.pid, "stat"));
         if (!root_group ||
-            !authorized_private_groups.contains(root_group->session) || pidfd_has_exited(root)) {
+            !root_in_freeze_set(*root_group) || pidfd_has_exited(root)) {
           return false;
         }
         if (std::none_of(frozen.begin(), frozen.end(), [&root](const auto &handle) {
@@ -2055,12 +2079,13 @@ namespace proc {
           frozen.emplace_back(std::move(root));
         }
       }
-      const auto has_exact_private_group = [&authorized_private_groups](pid_t pid) -> std::optional<bool> {
+      const auto has_exact_private_group = [&freeze_groups, &authorized_private_groups](pid_t pid) -> std::optional<bool> {
         const auto membership = proc_group_session_from_stat(read_proc_status_file(pid, "stat"));
         if (!membership) {
           return std::nullopt;
         }
-        return authorized_private_groups.contains(membership->session);
+        return authorized_private_groups.contains(membership->session) ||
+               freeze_groups.contains(membership->process_group);
       };
       DIR *dir = opendir("/proc");
       if (!dir) {
@@ -6939,6 +6964,22 @@ namespace proc {
       _session_instance_id.clear();
       _session_used_cage_compositor = false;
       _session_used_gamescope_runtime = false;
+      return;
+    }
+    // Gamescope attach does not own idle gamescope. Incomplete pidfd ancestry
+    // after cancel must not retain cage generation and refuse every later launch
+    // until polaris is restarted ("refusing launch while incompletely cleaned").
+    if (_session_used_gamescope_runtime && !_session_instance_id.empty()) {
+      BOOST_LOG(warning)
+        << "process: forcing clear of incomplete gamescope attach generation to unblock next launch"sv;
+      (void) terminate_isolated_session_processes(
+        _session_instance_id,
+        "forced clear after incomplete gamescope attach"sv
+      );
+      _session_instance_id.clear();
+      _session_used_cage_compositor = false;
+      _session_used_gamescope_runtime = false;
+      _exact_generation_cleanup_complete = true;
     }
   }
 
@@ -6978,8 +7019,12 @@ namespace proc {
       _exact_generation_cleanup_complete =
         _exact_generation_cleanup_complete && attached_cleanup_complete;
       if (!attached_cleanup_complete) {
+        // Do not return: owner cancel already answered Moonlight. Aborting here
+        // left had_app=true forever (attach Steam bwrap under polaris SID failed
+        // the private-session check) so quit looked broken. Fall through so
+        // Steam/undo can still clear the resumable session.
         BOOST_LOG(error) << "process: refusing all later teardown because exact Gamescope ancestry closure was incomplete"sv;
-        return;
+        BOOST_LOG(warning) << "process: continuing Steam/undo teardown after incomplete Gamescope ancestry closure"sv;
       }
     }
 

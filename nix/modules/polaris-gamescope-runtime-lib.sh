@@ -76,12 +76,28 @@ polaris_headless_gamescope_pid() {
   POLARIS_GAMESCOPE_EXECUTABLE="$exe_path"
 }
 
+# Nix wrapProgram: /proc/pid/exe may be ".../bin/gamescope" or
+# ".../bin/.gamescope-wrapped" depending on when we sample.
+polaris_gamescope_executables_match() {
+  local a="$1" b="$2" an bn
+  [ "$a" = "$b" ] && return 0
+  an="${a##*/}"
+  bn="${b##*/}"
+  case "$an:$bn" in
+    gamescope:.gamescope-wrapped|.gamescope-wrapped:gamescope)
+      [ "${a%/*}" = "${b%/*}" ]
+      return
+      ;;
+  esac
+  return 1
+}
+
 polaris_validate_process_generation() {
   local pid="$1" start_time="$2" expected_executable="$3"
   polaris_process_fields "$pid" || return 1
   [ "$POLARIS_PROCESS_START_TIME" = "$start_time" ] || return 1
   polaris_headless_gamescope_pid "$pid" || return 1
-  [ "$POLARIS_GAMESCOPE_EXECUTABLE" = "$expected_executable" ]
+  polaris_gamescope_executables_match "$POLARIS_GAMESCOPE_EXECUTABLE" "$expected_executable"
 }
 
 polaris_validate_marker() {
@@ -144,16 +160,41 @@ polaris_pid_is_descendant() {
 }
 
 polaris_socket_inode() {
-  local wanted="$1" inode path found=""
+  local wanted="$1" inode path found="" state
   # /proc/net/unix columns: num ref protocol flags type state inode path …
-  while read -r _ _ _ _ _ _ inode path _; do
+  # Prefer a unique pathname match. If duplicate rows exist (unlinked
+  # predecessor + live bind), pick the single live listening inode (state 01).
+  local -a candidates=()
+  while read -r _ _ _ _ _ state inode path _; do
     [ "$path" = "$wanted" ] || continue
-    case "$inode" in ''|*[!0-9]*) return 1 ;; esac
-    # Duplicate pathname rows are ambiguous: an unlinked old listener may
-    # coexist with a successor that rebound the same filesystem path.
-    [ -z "$found" ] || return 1
-    found="$inode"
+    case "$inode" in ''|*[!0-9]*) continue ;; esac
+    candidates+=("$inode:$state")
+    if [ -z "$found" ]; then
+      found="$inode"
+    elif [ "$found" != "$inode" ]; then
+      found=""
+      break
+    fi
   done <"$(polaris_proc_net_unix)" 2>/dev/null
+  if [ -n "$found" ]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  found=""
+  local entry ino st
+  for entry in "${candidates[@]+"${candidates[@]}"}"; do
+    ino="${entry%%:*}"
+    st="${entry##*:}"
+    case "$st" in
+      01|1) ;;
+      *) continue ;;
+    esac
+    if [ -z "$found" ]; then
+      found="$ino"
+    elif [ "$found" != "$ino" ]; then
+      return 1
+    fi
+  done
   [ -n "$found" ] || return 1
   printf '%s\n' "$found"
 }
@@ -170,10 +211,14 @@ polaris_pid_holds_inode() {
 
 polaris_process_tree_holds_inode() {
   local root="$1" inode="$2" process pid
+  # Root itself is authoritative (gamescope holds gamescope-0).
+  polaris_pid_holds_inode "$root" "$inode" && return 0
   for process in "$(polaris_proc_root)"/[0-9]*; do
     [ -d "$process" ] || continue
     pid="${process##*/}"
-    if polaris_pid_is_descendant "$pid" "$root" && polaris_pid_holds_inode "$pid" "$inode"; then
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if { polaris_pid_is_descendant "$pid" "$root" || polaris_pid_related_to_root "$pid" "$root"; } \
+        && polaris_pid_holds_inode "$pid" "$inode"; then
       return 0
     fi
   done

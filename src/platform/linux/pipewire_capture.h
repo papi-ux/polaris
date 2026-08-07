@@ -56,6 +56,12 @@ namespace pipewire_capture {
     std::vector<dmabuf_format_modifier_t> dmabuf_formats;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
     bool may_use_dmabuf = false;
+    // Exclusive 10-bit PQ EnumFormat (no BGRx). Only when gamescope force is on
+    // *and* the client stream will encode HDR (dynamicRange > 0).
+    bool prefer_hdr_formats = false;
+    // Exclusive 8-bit EnumFormat (no xBGR_210LE). When the stream encodes SDR,
+    // mixed offers still prefer 10-bit first and produce PQ→SDR red wash.
+    bool prefer_sdr_formats = false;
   };
 
   struct egl_dmabuf_format_t {

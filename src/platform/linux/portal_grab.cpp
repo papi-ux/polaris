@@ -82,12 +82,18 @@ namespace portal {
     int requested_height = 0;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
     std::string adapter;
+    // Last EnumFormat preference: prefer_hdr (force ∧ dynamicRange>0) or
+    // prefer_sdr (dynamicRange<=0). Reuse only when both match.
+    bool prefer_hdr = false;
+    bool prefer_sdr = false;
 
     void clear_meta() {
       requested_width = 0;
       requested_height = 0;
       mem_type = platf::mem_type_e::system;
       adapter.clear();
+      prefer_hdr = false;
+      prefer_sdr = false;
     }
 
     void reset_all() {
@@ -135,26 +141,84 @@ namespace portal {
     }
   }
 
+  // Session prep writes $XDG_RUNTIME_DIR/polaris-gamescope-force (1 when enable_hdr /
+  // gamescope --hdr-enabled). Gamescope may present PQ; capture still needs a
+  // separate check that this stream will *encode* HDR.
+  static bool portal_force_hdr_enabled() {
+    const char *rt = std::getenv("XDG_RUNTIME_DIR");
+    if (!rt || !*rt) {
+      return false;
+    }
+    std::ifstream f(std::string(rt) + "/polaris-gamescope-force");
+    std::string line;
+    if (!f || !std::getline(f, line)) {
+      return false;
+    }
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+      line.pop_back();
+    }
+    return line == "1" || line == "true";
+  }
+
+  // Exclusive 10-bit PQ EnumFormat only when gamescope is in HDR mode *and* the
+  // client stream will encode HDR (dynamicRange > 0). Host KDE ScreenCast is
+  // 8-bit-only; never restrict EnumFormat to PQ outside gamescope_stream.
+  static bool portal_prefer_hdr_formats(int client_dynamic_range) {
+    if (client_dynamic_range <= 0 || !portal_force_hdr_enabled()) {
+      return false;
+    }
+    const auto &mode = config::video.linux_display.stream_mode;
+    return mode.empty() || mode == "gamescope_stream";
+  }
+
+  // Exclusive 8-bit EnumFormat when the stream encodes SDR. Mixed offers still
+  // list 10-bit first; gamescope then delivers PQ into an SDR encoder (red wash).
+  static bool portal_prefer_sdr_formats(int client_dynamic_range) {
+    return client_dynamic_range <= 0;
+  }
+
   // Local-graph PW capture (gamescopegrab / kwingrab): remote_fd=-1, no portal session.
   static std::shared_ptr<pipewire_capture::capture_t> start_local_pw_capture(
     std::uint32_t node_id,
     std::uint64_t node_serial,
     int width,
     int height,
-    platf::mem_type_e mem_type
+    platf::mem_type_e mem_type,
+    int client_dynamic_range
   ) {
     const auto encoder_render_node = pipewire_capture::canonical_render_node(config::video.adapter_name);
     std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
     bool may_use_dmabuf = false;
+    const bool prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range);
+    const bool prefer_sdr = portal_prefer_sdr_formats(client_dynamic_range);
     if (encoder_render_node) {
-      const auto egl_formats = pipewire_capture::query_egl_dmabuf_import_formats(*encoder_render_node);
-      std::vector<std::uint64_t> mods;
-      for (const auto &f : egl_formats) {
-        for (auto m : f.modifiers) {
-          mods.push_back(m);
+      // LINEAR always for gamescope (only allocates LINEAR on PW node).
+      dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats({DRM_FORMAT_MOD_LINEAR});
+      // Ensure 10-bit LINEAR is present for HDR streams even if EGL skipped it.
+      if (!prefer_sdr) {
+        const bool has_xb30 = std::any_of(dmabuf_formats.begin(), dmabuf_formats.end(), [](const auto &f) {
+          return f.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE && f.modifier == DRM_FORMAT_MOD_LINEAR;
+        });
+        if (!has_xb30) {
+          dmabuf_formats.insert(dmabuf_formats.begin(), {
+            .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
+            .drm_fourcc = DRM_FORMAT_XBGR2101010,
+            .modifier = DRM_FORMAT_MOD_LINEAR,
+          });
         }
       }
-      dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats(std::move(mods));
+      if (prefer_hdr) {
+        std::erase_if(dmabuf_formats, [](const auto &format) {
+          return format.spa_format != SPA_VIDEO_FORMAT_xBGR_210LE &&
+                 format.spa_format != SPA_VIDEO_FORMAT_xRGB_210LE;
+        });
+      }
+      else if (prefer_sdr) {
+        std::erase_if(dmabuf_formats, [](const auto &format) {
+          return format.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE ||
+                 format.spa_format == SPA_VIDEO_FORMAT_xRGB_210LE;
+        });
+      }
       may_use_dmabuf = !dmabuf_formats.empty();
     }
     auto local = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {
@@ -167,6 +231,8 @@ namespace portal {
       .dmabuf_formats = std::move(dmabuf_formats),
       .mem_type = mem_type,
       .may_use_dmabuf = may_use_dmabuf,
+      .prefer_hdr_formats = prefer_hdr,
+      .prefer_sdr_formats = prefer_sdr,
     });
     if (!local->start()) {
       return nullptr;
@@ -298,7 +364,12 @@ namespace portal {
     return ensure_session_unlocked();
   }
 
-  static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(int width, int height, platf::mem_type_e mem_type) {
+  static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(
+    int width,
+    int height,
+    platf::mem_type_e mem_type,
+    int client_dynamic_range
+  ) {
     // Only one configuration transition may retire/publish a capture generation.
     std::lock_guard transition_lock(g_capture_transition_mu);
     auto start = session_media::begin_start();
@@ -306,6 +377,8 @@ namespace portal {
     // Lock contract (SB-2 + S4 single mutex):
     // 1) Under g_media_mu: ensure session + start PipeWire (no dual-mutex nesting).
     // 2) Wait for negotiation OUTSIDE the lock so release_global_capture can progress.
+    const bool want_prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range);
+    const bool want_prefer_sdr = portal_prefer_sdr_formats(client_dynamic_range);
     std::shared_ptr<pipewire_capture::capture_t> capture;
     {
       std::unique_lock lock(g_media_mu);
@@ -315,7 +388,9 @@ namespace portal {
         const auto compatible = g_media.requested_width == width &&
                                 g_media.requested_height == height &&
                                 g_media.mem_type == mem_type &&
-                                g_media.adapter == requested_adapter;
+                                g_media.adapter == requested_adapter &&
+                                g_media.prefer_hdr == want_prefer_hdr &&
+                                g_media.prefer_sdr == want_prefer_sdr;
         if (compatible) {
           return g_media.capture;
         }
@@ -369,7 +444,7 @@ namespace portal {
           config::video.linux_display.private_runtime == "gamescope") {
         if (auto gs = pipewire_capture::find_gamescope_video_source()) {
           if (auto local = start_local_pw_capture(
-                gs->node_id, gs->object_serial, width, height, mem_type)) {
+                gs->node_id, gs->object_serial, width, height, mem_type, client_dynamic_range)) {
             BOOST_LOG(info) << "portal: gamescopegrab local Video/Source node="sv << gs->node_id
                             << " name="sv << gs->node_name << " (no private ScreenCast)"sv;
             g_media.kwin.reset();
@@ -378,6 +453,8 @@ namespace portal {
             g_media.requested_height = height;
             g_media.mem_type = mem_type;
             g_media.adapter = requested_adapter;
+            g_media.prefer_hdr = want_prefer_hdr;
+            g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
             // Skip portal session setup; negotiation wait continues below.
           }
@@ -410,7 +487,8 @@ namespace portal {
                 src.object_serial,
                 width > 0 ? width : src.width,
                 height > 0 ? height : src.height,
-                mem_type)) {
+                mem_type,
+                client_dynamic_range)) {
             BOOST_LOG(info) << "portal: kwingrab local PW node="sv << src.node_id
                             << " output="sv << src.output_name
                             << " (no xdg-desktop-portal picker)"sv;
@@ -421,6 +499,8 @@ namespace portal {
             g_media.requested_height = height;
             g_media.mem_type = mem_type;
             g_media.adapter = requested_adapter;
+            g_media.prefer_hdr = want_prefer_hdr;
+            g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
           }
           else {
@@ -472,7 +552,8 @@ namespace portal {
             std::erase_if(dmabuf_formats, [](const auto &format) {
               return format.spa_format != SPA_VIDEO_FORMAT_BGRx &&
                      format.spa_format != SPA_VIDEO_FORMAT_BGRA &&
-                     format.spa_format != SPA_VIDEO_FORMAT_xBGR_210LE;
+                     format.spa_format != SPA_VIDEO_FORMAT_xBGR_210LE &&
+                     format.spa_format != SPA_VIDEO_FORMAT_xRGB_210LE;
             });
           } else {
             const auto egl_formats = pipewire_capture::query_egl_dmabuf_import_formats(*encoder_render_node);
@@ -488,15 +569,29 @@ namespace portal {
             dmabuf_formats = pipewire_capture::filter_importable_dmabuf_formats(portal_formats, egl_formats);
           }
           // gamescope HDR offers xBGR_210LE LINEAR; EGL/list filters may omit it.
-          // Always ensure LINEAR 10-bit is offered so force-HDR can negotiate spa 81.
-          const bool has_xb30_linear = std::any_of(dmabuf_formats.begin(), dmabuf_formats.end(), [](const auto &f) {
-            return f.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE && f.modifier == DRM_FORMAT_MOD_LINEAR;
-          });
-          if (!has_xb30_linear) {
-            dmabuf_formats.insert(dmabuf_formats.begin(), {
-              .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
-              .drm_fourcc = DRM_FORMAT_XBGR2101010,
-              .modifier = DRM_FORMAT_MOD_LINEAR,
+          // Ensure LINEAR 10-bit for HDR streams so force-HDR can negotiate spa 81.
+          if (!want_prefer_sdr) {
+            const bool has_xb30_linear = std::any_of(dmabuf_formats.begin(), dmabuf_formats.end(), [](const auto &f) {
+              return f.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE && f.modifier == DRM_FORMAT_MOD_LINEAR;
+            });
+            if (!has_xb30_linear) {
+              dmabuf_formats.insert(dmabuf_formats.begin(), {
+                .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
+                .drm_fourcc = DRM_FORMAT_XBGR2101010,
+                .modifier = DRM_FORMAT_MOD_LINEAR,
+              });
+            }
+          }
+          if (want_prefer_hdr) {
+            std::erase_if(dmabuf_formats, [](const auto &format) {
+              return format.spa_format != SPA_VIDEO_FORMAT_xBGR_210LE &&
+                     format.spa_format != SPA_VIDEO_FORMAT_xRGB_210LE;
+            });
+          }
+          else if (want_prefer_sdr) {
+            std::erase_if(dmabuf_formats, [](const auto &format) {
+              return format.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE ||
+                     format.spa_format == SPA_VIDEO_FORMAT_xRGB_210LE;
             });
           }
           const pipewire_capture::dmabuf_eligibility_t eligibility {
@@ -515,6 +610,10 @@ namespace portal {
         BOOST_LOG(info) << "portal: dmabuf_eligibility"
                         << " may_use="sv << (may_use_dmabuf ? "true"sv : "false"sv)
                         << " formats="sv << dmabuf_formats.size()
+                        << " prefer_hdr="sv << (want_prefer_hdr ? "true"sv : "false"sv)
+                        << " prefer_sdr="sv << (want_prefer_sdr ? "true"sv : "false"sv)
+                        << " force_hdr="sv << (portal_force_hdr_enabled() ? "true"sv : "false"sv)
+                        << " client_dynamic_range="sv << client_dynamic_range
                         << " capture_node="sv << session->capture_render_node.value_or("none")
                         << " encoder_node="sv << encoder_render_node.value_or("none")
                         << " mem_type="sv << static_cast<int>(mem_type);
@@ -529,6 +628,8 @@ namespace portal {
           .dmabuf_formats = std::move(dmabuf_formats),
           .mem_type = mem_type,
           .may_use_dmabuf = may_use_dmabuf,
+          .prefer_hdr_formats = want_prefer_hdr,
+          .prefer_sdr_formats = want_prefer_sdr,
         });
         if (!new_capture->start()) {
           BOOST_LOG(warning) << "portal: Failed to start PipeWire capture; invalidating portal session"sv;
@@ -541,6 +642,8 @@ namespace portal {
         g_media.requested_height = height;
         g_media.mem_type = mem_type;
         g_media.adapter = requested_adapter;
+        g_media.prefer_hdr = want_prefer_hdr;
+        g_media.prefer_sdr = want_prefer_sdr;
         g_media.capture = new_capture;
         capture = g_media.capture;
       }  // portal ScreenCast path
@@ -586,6 +689,8 @@ namespace portal {
     int requested_height = 0;
     int cfg_width = 0;
     int cfg_height = 0;
+    // Client stream dynamicRange (0 = SDR encode, 1 = 10-bit / HDR candidate).
+    int client_dynamic_range = 0;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
     bool pipewire_dmabuf_negotiated = false;
     // SPA_VIDEO_FORMAT_* from PipeWire negotiate; 0 = unknown / not yet negotiated.
@@ -599,11 +704,13 @@ namespace portal {
       requested_height = config.height;
       cfg_width = requested_width;
       cfg_height = requested_height;
+      client_dynamic_range = config.dynamicRange;
       mem_type = hwdevice_type;
 
       if (!probe_only) {
         BOOST_LOG(info) << "portal: Initializing capture "sv
-                        << cfg_width << "x"sv << cfg_height;
+                        << cfg_width << "x"sv << cfg_height
+                        << " client_dynamic_range="sv << client_dynamic_range;
 
         // If cage/labwc compositor is configured (windowed or headless), skip portal entirely.
         // Direct wlr-screencopy will be used in capture() instead.
@@ -618,7 +725,7 @@ namespace portal {
           }
 
 
-          auto cap = ensure_global_capture(requested_width, requested_height, mem_type);
+          auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range);
           if (!cap) {
             return -1;
           }
@@ -654,42 +761,20 @@ namespace portal {
       return 0;
     }
 
-    // Session prep writes $XDG_RUNTIME_DIR/polaris-gamescope-force (1 when client HDR).
-    // Only private gamescope portal can produce real 10-bit HDR frames. Host KDE
-    // ScreenCast is 8-bit BGRx/MemFd today — claiming HDR PQ with those pixels
-    // yields the dark/red "HDR garbage" look. Keep host portal honest as SDR.
-    static bool portal_on_private_bus() {
-      const char *addr = std::getenv("POLARIS_PORTAL_DBUS_ADDRESS");
-      return addr && *addr;
-    }
-
-    static bool portal_force_hdr_enabled() {
-      if (!portal_on_private_bus()) {
-        return false;
-      }
-      const char *rt = std::getenv("XDG_RUNTIME_DIR");
-      if (!rt || !*rt) {
-        return false;
-      }
-      std::ifstream f(std::string(rt) + "/polaris-gamescope-force");
-      std::string line;
-      if (!f || !std::getline(f, line)) {
-        return false;
-      }
-      while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
-        line.pop_back();
-      }
-      return line == "1" || line == "true";
-    }
-
     // True only when client wants HDR *and* capture is (or may still become) 10-bit.
     // Negotiated BGRx/8-bit + HDR PQ signaling is the washed-red path.
     bool capture_is_10bit_hdr() const {
-      // SPA_VIDEO_FORMAT_xBGR_210LE — value is stable in spa/param/video/raw.h
-      return capture_spa_format == SPA_VIDEO_FORMAT_xBGR_210LE;
+      return capture_spa_format == SPA_VIDEO_FORMAT_xBGR_210LE ||
+             capture_spa_format == SPA_VIDEO_FORMAT_xRGB_210LE;
     }
 
     bool is_hdr() override {
+      // Stream must request HDR encode; force/gamescope alone is not enough.
+      if (client_dynamic_range <= 0) {
+        return false;
+      }
+      // Force file + prefer_hdr EnumFormat. Host KDE portal never negotiates
+      // 10-bit so is_hdr stays false after Format lands on BGRx.
       if (!portal_force_hdr_enabled()) {
         return false;
       }
@@ -699,7 +784,7 @@ namespace portal {
       }
       if (!capture_is_10bit_hdr()) {
         BOOST_LOG(warning) << "portal: is_hdr=false — negotiated spa_format="sv << capture_spa_format
-                           << " is not xBGR_210LE (8-bit BGRx + PQ would wash colors)"sv;
+                           << " is not xBGR/xRGB_210LE (8-bit BGRx + PQ would wash colors)"sv;
         return false;
       }
       return true;
@@ -766,7 +851,7 @@ namespace portal {
       }
 
 
-      auto cap = ensure_global_capture(requested_width, requested_height, mem_type);
+      auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
         return platf::capture_e::reinit;

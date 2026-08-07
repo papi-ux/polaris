@@ -91,6 +91,13 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   EXPECT_NE(grab.find("Wait outside g_media_mu"), std::string::npos);
   EXPECT_NE(grab.find("pipewire_capture::capture_t"), std::string::npos);
   EXPECT_NE(grab.find("polaris-gamescope-force"), std::string::npos);
+  // Hybrid guards: exclusive PQ when force ∧ dynamicRange>0; exclusive 8-bit when SDR.
+  EXPECT_NE(grab.find("portal_prefer_hdr_formats"), std::string::npos);
+  EXPECT_NE(grab.find("portal_prefer_sdr_formats"), std::string::npos);
+  EXPECT_NE(grab.find("client_dynamic_range"), std::string::npos);
+  EXPECT_NE(grab.find("portal_force_hdr_enabled()"), std::string::npos);
+  EXPECT_NE(grab.find("gamescope_stream"), std::string::npos);
+  EXPECT_NE(grab.find("prefer_sdr_formats"), std::string::npos);
 
   // Self-deadlock guard: ensure_global_capture must not call locking
   // ensure_global_session() under g_media_mu (only ensure_session_unlocked).
