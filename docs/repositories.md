@@ -46,8 +46,8 @@ Seat isolation still needs the input group, which on ostree hosts lives in
 ## Arch and CachyOS
 
 ```bash
-sudo pacman-key --recv-keys <KEY-ID> --keyserver keyserver.ubuntu.com
-sudo pacman-key --lsign-key <KEY-ID>
+curl -fsSL https://repo.papi-ux.com/polaris.gpg | sudo pacman-key --add -
+sudo pacman-key --lsign-key 58017EDFFA9F803E07ED26F835F13F14FAAD15CC
 ```
 
 Then append to `/etc/pacman.conf`:
@@ -94,56 +94,19 @@ installing an older release package by hand from the
 
 ---
 
-## Maintaining the repository
+## Where this is published from
 
-`.github/workflows/package-repos.yml` runs when a release is published, and can
-be run by hand against any existing tag.
+The repositories are built and served by
+[papi-ux/packages](https://github.com/papi-ux/packages), not from this
+repository.
 
-### One-time setup
+That is not organisational tidiness. GitHub reserves
+`<user-domain>/<repo-name>` for any repository with a Pages site, so publishing
+from here took over `papi-ux.com/polaris/` — a real page on the docs site — and
+replaced it with a redirect to the repository. A custom domain does not avoid
+the collision, only changes what it returns. A repository whose name collides
+with nothing does avoid it.
 
-The signing key must be RSA. `rpmsign` exits 0 on an Ed25519 key and silently
-signs nothing — `scripts/build-package-repos.sh` verifies the signature after
-signing for exactly that reason, so a wrong key type fails the build rather than
-publishing an unsigned package.
-
-```bash
-gpg --batch --gen-key <<'EOF'
-%no-protection
-Key-Type: RSA
-Key-Length: 4096
-Name-Real: Polaris
-Name-Email: papi@papi-ux.com
-Expire-Date: 0
-%commit
-EOF
-
-gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10; exit}'   # the key id
-gpg --armor --export-secret-keys <KEY-ID>                           # the secret
-```
-
-Set two repository secrets:
-
-| Secret | Value |
-|---|---|
-| `POLARIS_REPO_GPG_KEY_ID` | the key fingerprint |
-| `POLARIS_REPO_GPG_PRIVATE_KEY` | the armored secret key |
-
-Then set Pages to deploy from GitHub Actions in the repository settings, and
-publish the public key somewhere clients can reach it — the workflow serves it
-at `repo/polaris.gpg`, and uploading it to a keyserver makes the `pacman-key
---recv-keys` flow above work.
-
-Back the secret key up somewhere that is not this repository. Losing it means
-every host that trusts it has to be re-pointed at a new one.
-
-### Checking the layout locally
-
-`scripts/build-package-repos.sh` runs without a key, which assembles the
-repositories unsigned so the layout can be inspected:
-
-```bash
-scripts/build-package-repos.sh --only fedora --assets ./assets --version 1.3.7 --output ./repo
-```
-
-Each ecosystem needs its own toolchain — `createrepo_c` and `rpmsign` on Fedora,
-`repo-add` on Arch — so run each `--only` in the matching container.
+Signing keys, the publishing schedule, and the tooling are documented there. The
+key fingerprint is `58017EDFFA9F803E07ED26F835F13F14FAAD15CC`, and the repository serves its own public key at
+[repo.papi-ux.com/polaris.gpg](https://repo.papi-ux.com/polaris.gpg).
