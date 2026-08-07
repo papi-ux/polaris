@@ -337,6 +337,11 @@ Full config tables, AI provider examples, HDR notes, and credential recovery ste
 
 | Guide | Use it for |
 |---|---|
+| [Quick Start](docs/quickstart.md) | Package install, web console account, first stream, verifying the runtime path |
+| [Support and Compatibility](docs/compatibility.md) | Per-distro and per-GPU status, feature status, best-tested setup, known limitations |
+| [FAQ](docs/faq.md) | Hardware requirements, Moonlight clients, coexisting with Sunshine, HDR, AI questions |
+| [Fedora 44 Install Guide](docs/fedora.md) | RPM install, host setup, autostart, upgrade and uninstall |
+| [Arch Linux and CachyOS Install Guide](docs/arch.md) | Arch package install, derivative notes, upgrade and uninstall, debug package |
 | [Runtime and Streaming Model](docs/runtime.md) | Headless Stream, capture/encoder paths, Browser Stream, session lifecycle, HDR/Main10 behavior |
 | [Configuration](docs/configuration.md) | Config file paths, common options, AI provider settings, credential reset |
 | [Building Polaris](docs/building.md) | Source builds, local packages, distro dependencies, Browser Stream build flags |
