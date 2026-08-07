@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-BASE_URL_DEFAULT='https://papi-ux.com/polaris/repo'
+BASE_URL_DEFAULT='https://repo.papi-ux.com'
 
 only=''
 assets_dir=''
