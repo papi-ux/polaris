@@ -130,6 +130,7 @@ endif()
 set(TEST_AUDIT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_config_consistency.cpp
     ${CMAKE_SOURCE_DIR}/tests/integration/test_locale_consistency.cpp
+    ${CMAKE_SOURCE_DIR}/tests/integration/test_nova_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_input_udev_contract.cpp
 )
 
