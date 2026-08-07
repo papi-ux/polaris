@@ -342,6 +342,31 @@ namespace proc {
     return _state == state_e::stopping || _stop_waiting || _launch_to_stop_handoff;
   }
 
+  launcher_identity_t launcher_identity_from_lutris_runner(const std::string &runner) {
+    auto normalized = boost::to_lower_copy(boost::trim_copy(runner));
+
+    // Lutris runner ids, mapped only where the runner determines the answer.
+    // The steam runner can launch native or Proton titles alike, so it names a
+    // runtime but no platform; anything unrecognized stays empty because a
+    // wrong badge in a client library is worse than a missing one.
+    if (normalized == "wine") {
+      return {"windows", "wine"};
+    }
+    if (normalized == "proton") {
+      return {"windows", "proton"};
+    }
+    if (normalized == "umu") {
+      return {"windows", "umu"};
+    }
+    if (normalized == "linux") {
+      return {"linux", "native"};
+    }
+    if (normalized == "steam") {
+      return {"", "steam"};
+    }
+    return {"", ""};
+  }
+
   std::string normalize_steam_launch_mode(std::string mode) {
     boost::trim(mode);
     boost::to_lower(mode);
@@ -8370,6 +8395,7 @@ namespace proc {
           ctx.steam_launch_mode = proc::normalize_steam_launch_mode(app_node.value("steam-launch-mode", "direct"));
           ctx.game_category = app_node.value("game-category", "");
           ctx.source = app_node.value("source", ctx.steam_appid.empty() ? "manual" : "steam");
+          ctx.lutris_runner = app_node.value("lutris-runner", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {
             for (const auto &g : app_node["genres"]) {

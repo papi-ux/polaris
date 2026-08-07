@@ -6695,6 +6695,16 @@ namespace nvhttp {
         promote_local_artwork_poster(app);
         game["artwork"] = current_artwork_manifest(platf::appdata(), app.uuid);
         game["last_launched"] = app.last_launched;
+        // Platform and runtime only where the stored Lutris runner determines
+        // them; Nova renders nothing for a missing value, and no badge beats a
+        // wrong one for Steam or manual entries whose runtime is not recorded.
+        if (const auto identity = proc::launcher_identity_from_lutris_runner(app.lutris_runner);
+            !identity.runtime.empty()) {
+          if (!identity.platform.empty()) {
+            game["platform"] = identity.platform;
+          }
+          game["runtime"] = identity.runtime;
+        }
         if (const auto play_time = play_time_for_app(app)) {
           game["play_time"] = *play_time;
         }
