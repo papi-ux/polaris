@@ -13,13 +13,29 @@ Polaris HDR capture patch surface for gamescope PipeWire streaming.
 | 03 | `03-pipewire-prefer-dmabuf.patch` | Advertise DmaBuf\|MemFd\|MemPtr | Portal path no longer needs multi-type |
 | **06** | `06-prefer-discrete-gpu-2217.patch` | Headless prefers discrete GPU if unpinned | **[#2217](https://github.com/ValveSoftware/gamescope/pull/2217)** merges |
 
-## Superseded (removed from package)
+## Superseded (kept in `archive/`)
+
+Retired patches move to `archive/`; they are history, not candidates. A patch
+sitting next to the live ones without being applied reads as live, so
+`scripts/check-nix-patches.py` treats that as an error.
 
 | Old | Why gone |
 |-----|----------|
 | `01-pipewire-xbgr-210le-2270.patch` | Superseded by **10** (full 10-bit PQ offer + paint) |
 | `04-pipewire-color-mgmt.patch` | Folded into **10** paint path |
 | `07-paint-pipewire-eotf-pq.patch` | Folded into **10** |
+
+## Checking the stack
+
+```bash
+scripts/check-nix-patches.py          # hunk headers, declarations — instant
+scripts/check-nix-patches.py --apply  # + apply to the pinned gamescope rev
+```
+
+The order above is the order `default.nix` declares, and the order matters:
+`patchPhase` stops at the first failure, so a patch that does not apply takes
+every patch after it with it. `patch -p1` is what the check and the build both
+use — `git apply` refuses the line offsets a drifted upstream produces.
 
 ## Capability stamp
 

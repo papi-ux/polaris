@@ -1,0 +1,144 @@
+name: Nix
+
+# nix/ was the one directory here that no job looked at. A change under it could
+# reach master with every check green and nothing having read it — which is how a
+# patch whose hunk header miscounted its own body by one line collected nine
+# passing checks while breaking the whole gamescope stack.
+#
+# Three tiers, by what a change can actually break:
+#   patch-stacks  needs no nix at all and runs in about a second, so it is also
+#                 wired into Public Hygiene and runs on every push.
+#   eval / build  install nix; scoped to changes that can reach them.
+#   polaris-stream  the CUDA build, far too heavy for every push: manual, plus a
+#                 weekly run so npm and source drift surfaces on its own.
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'nix/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'scripts/check-nix-patches.py'
+      - '.github/workflows/nix.yml'
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'nix/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'scripts/check-nix-patches.py'
+      - '.github/workflows/nix.yml'
+  schedule:
+    # Weekly, so a stale npmDepsHash or a moved upstream is found by CI rather
+    # than by the next person who tries to build the flake.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    accept-flake-config = false
+
+jobs:
+  patch-stacks:
+    name: Patch stacks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check vendored patches against their pinned upstream sources
+        run: python3 scripts/check-nix-patches.py --apply
+
+  eval:
+    name: Flake eval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix
+        # The upstream installer rather than a third-party action, because every
+        # other workflow here uses GitHub-owned actions only and this is four
+        # lines. Single-user: there is no daemon to wait on and the runner is
+        # thrown away after the job.
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://nixos.org/nix/install -o "$RUNNER_TEMP/install-nix.sh"
+          sh "$RUNNER_TEMP/install-nix.sh" --no-daemon --no-channel-add
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+      - name: Check flake outputs
+        # Current system only. --all-systems would also evaluate the aarch64
+        # packages, and this flake turns CUDA on for every system, so that would
+        # report a red for a platform nobody here builds for.
+        run: nix flake check --print-build-logs
+
+      - name: Evaluate every package
+        # flake check proves the outputs are well formed; this proves each one
+        # still reaches a derivation, and names the package that stopped.
+        run: |
+          for package in gamescope-polaris gamescope-hdr xdg-desktop-portal-gamescope polaris-stream default; do
+            printf '%s -> ' "$package"
+            nix eval --raw ".#packages.x86_64-linux.$package.drvPath"
+            printf '\n'
+          done
+
+  build:
+    name: Build gamescope-polaris
+    needs: eval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://nixos.org/nix/install -o "$RUNNER_TEMP/install-nix.sh"
+          sh "$RUNNER_TEMP/install-nix.sh" --no-daemon --no-channel-add
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+      - name: Build the patched compositor and the portal backend
+        # This is the job the patch stack was always missing. gamescope-polaris
+        # carries a doInstallCheck that greps --version for the +polhdr stamp
+        # patch 12 adds, so a stack that applies but does not take fails here
+        # rather than on someone's desktop. It can only run in a build, and
+        # until now nothing built it.
+        run: nix build --print-build-logs .#gamescope-polaris .#xdg-desktop-portal-gamescope
+
+      - name: Report the capability stamp
+        # Log only — the assertion already ran inside the derivation. Worth
+        # printing so the stamp a session negotiates against is visible here.
+        run: ./result/bin/gamescope --version || true
+
+  polaris-stream:
+    name: Build polaris-stream
+    # CUDA toolkit, the npm dependency set and the whole C++ tree: an hour or
+    # more, and none of it is reached by a change to a gamescope patch. Manual
+    # and weekly rather than per-push.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free runner disk space
+        # A CUDA-enabled closure does not fit next to the runner's preinstalled
+        # toolchains. Nothing removed here is used by a nix build.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h /
+
+      - name: Install Nix
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://nixos.org/nix/install -o "$RUNNER_TEMP/install-nix.sh"
+          sh "$RUNNER_TEMP/install-nix.sh" --no-daemon --no-channel-add
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+      - name: Build polaris-stream
+        # npmDepsHash pins the npm dependency set by content, so this is also
+        # what catches package-lock.json moving without the flake following.
+        run: nix build --print-build-logs .#polaris-stream

@@ -22,3 +22,9 @@ jobs:
 
       - name: Check release package dependency contracts
         run: python3 scripts/check-release-package-dependencies.py
+
+      # The offline half only: hunk headers and patch declarations, no network
+      # and no nix. It costs a second, so it runs on everything rather than only
+      # on the pull requests that happen to touch nix/.
+      - name: Check vendored nix patch stacks
+        run: python3 scripts/check-nix-patches.py
