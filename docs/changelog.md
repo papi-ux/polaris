@@ -5,6 +5,21 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.6 - 2026-08-07
+
+Client-facing fixes for Nova, host setup advice that works on ostree systems, and gamescope session and HDR capture hardening.
+
+- Prints the input-group command that works on ostree hosts, where the group lives in `/usr/lib/group` and `usermod -aG input` cannot find it; Bazzite gets `ujust add-user-to-input-group`
+- Reports what the artwork resolve endpoint actually did, which Nova requires and no shipped build had ever sent, so library artwork update reported the host as unsupported
+- Serves `platform` and `runtime` on library entries from the Lutris runner recorded at import, and only where the runner determines them
+- Lets a manual artwork match decide which game a completion estimate is for, without falling back to the Steam app id that made the wrong estimate confident
+- Records the fields Polaris serves to Nova in `docs/nova-contract.json`, derived from the source that serves them, and serves `vaapi_vendor` so a crash report names the driver generation
+- Recovers gamescope session teardown from a dead nested marker, a non-leader attach, and an incomplete attach generation that refused later launches until restart
+- Negotiates PipeWire capture formats against what the stream encodes, so 10-bit PQ cannot feed an SDR encode
+- Claims the stream sink as the session default while streaming, and releases that claim only from the session that took it
+- Keeps `npm audit --audit-level=high` mandatory
+- Retains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+
 ## v1.3.5 - 2026-08-06
 
 Package-update safety, Linux host integration owned by the package, and library playtime and completion estimates.

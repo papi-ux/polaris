@@ -614,7 +614,7 @@ contributing = strip_html_comments(
 readme = strip_html_comments(Path("README.md").read_text(encoding="utf-8"))
 changelog = strip_html_comments(Path("docs/changelog.md").read_text(encoding="utf-8"))
 release_notes = strip_html_comments(
-    Path("docs/release-notes/v1.3.5.md").read_text(encoding="utf-8")
+    Path("docs/release-notes/v1.3.6.md").read_text(encoding="utf-8")
 )
 
 
@@ -1245,18 +1245,17 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
 
 current_release = markdown_section(
     changelog,
+    "## v1.3.6 - 2026-08-07",
     "## v1.3.5 - 2026-08-06",
-    "## v1.3.4 - 2026-07-31",
 )
 current_release_prose = rendered_markdown(current_release)
 required_release_facts = (
-    "v1.3.4",
-    "exact package filename",
-    "wget --output-document",
-    ".1",
-    ".2",
-    "short-circuit",
-    "sudo -H",
+    "ostree",
+    "usermod",
+    "ujust add-user-to-input-group",
+    "/usr/lib/group",
+    "platform",
+    "runtime",
     "npm audit --audit-level=high",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
@@ -1265,19 +1264,19 @@ required_release_facts = (
 )
 for fact in required_release_facts:
     if fact not in current_release_prose:
-        print(f"v1.3.5 changelog is missing final release fact: {fact}", file=sys.stderr)
+        print(f"v1.3.6 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
 readme_release_body = markdown_section(
     readme,
-    "## What is New in v1.3.5",
+    "## What is New in v1.3.6",
     "## Install",
 )
 readme_release_prose = rendered_markdown(readme_release_body)
 required_readme_facts = required_release_facts
 for fact in required_readme_facts:
     if fact not in readme_release_prose:
-        print(f"README v1.3.5 summary is missing: {fact}", file=sys.stderr)
+        print(f"README v1.3.6 summary is missing: {fact}", file=sys.stderr)
         sys.exit(1)
 
 asset_phrase = (
@@ -1287,8 +1286,8 @@ asset_phrase = (
     "`Polaris-ubuntu24.04-x86_64.deb`"
 )
 for label, section in (
-    ("README v1.3.5 summary", readme_release_prose),
-    ("v1.3.5 changelog", current_release_prose),
+    ("README v1.3.6 summary", readme_release_prose),
+    ("v1.3.6 changelog", current_release_prose),
 ):
     if section.count(asset_phrase) != 1:
         print(f"{label} must contain the exact visible four-asset phrase", file=sys.stderr)
@@ -1307,8 +1306,8 @@ building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section in (
     ("docs/building.md Packaging", building_packaging_prose),
-    ("README v1.3.5 summary", readme_release_prose),
-    ("v1.3.5 changelog", current_release_prose),
+    ("README v1.3.6 summary", readme_release_prose),
+    ("v1.3.6 changelog", current_release_prose),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
     if actual_assets != expected_assets:
@@ -1320,26 +1319,26 @@ for label, section in (
         sys.exit(1)
 
 release_notes_facts = (
-    "v1.3.4",
-    "exact package filename",
-    ".1",
-    ".2",
-    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.3.5/Polaris-fedora44-x86_64.rpm &&",
+    "v1.3.5",
+    "ostree",
+    "ujust add-user-to-input-group",
+    "/etc",
+    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.3.6/Polaris-fedora44-x86_64.rpm &&",
     "sudo dnf install \"./Polaris-fedora44-x86_64.rpm\" &&",
-    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.3.5/Polaris-arch-x86_64.pkg.tar.zst &&",
+    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.3.6/Polaris-arch-x86_64.pkg.tar.zst &&",
     "sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&",
-    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.3.5/Polaris-ubuntu24.04-x86_64.deb &&",
+    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.3.6/Polaris-ubuntu24.04-x86_64.deb &&",
     "sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&",
 )
 for fact in release_notes_facts:
     if fact not in release_notes:
-        print(f"v1.3.5 release notes are missing bootstrap fact: {fact}", file=sys.stderr)
+        print(f"v1.3.6 release notes are missing bootstrap fact: {fact}", file=sys.stderr)
         sys.exit(1)
 if release_notes.count("sudo -H polaris --setup-host &&") != 3:
-    print("v1.3.5 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
+    print("v1.3.6 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("systemctl --user restart polaris") != 3:
-    print("v1.3.5 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
+    print("v1.3.6 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
 
 if "bash scripts/check-public-docs.sh" not in contributing:

@@ -91,18 +91,17 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.3.5
+## What is New in v1.3.6
 
-Polaris v1.3.5 makes manual package updates deterministic, hands the Linux host integration files to the package that owns them, and teaches the library what your launchers already know.
+Polaris v1.3.6 makes the Nova client work against a Polaris host in places it never has, corrects host setup advice that could not succeed on ostree systems, and hardens the gamescope session and its HDR capture.
 
-- **Exact download targets**: Update Center now writes every mutable-distro download to the exact package filename with `wget --output-document`, so an existing file cannot redirect the new payload to `.1` or `.2` while the package manager reads stale bytes.
-- **Failure-safe command chains**: Fedora, Arch, and Ubuntu update commands short-circuit after a failed download, package installation, `sudo -H polaris --setup-host`, or service restart instead of continuing with later side effects.
-- **Host files owned by the package**: udev rules and modules-load configuration install to `/usr/lib`, so uninstalling Polaris removes them. An unmodified `/etc` copy from an older install is retired, because it would otherwise shadow every future fix to the rules. `--setup-host` no longer asks for root when there is nothing privileged left to do.
-- **`polaris-debug` package**: Arch and SteamOS builds ship debug symbols separately, so `coredumpctl info polaris` gives a real backtrace instead of `no debugging symbols`.
-- **Seat isolation tells you what it needs**: enabling client gamepad or keyboard/mouse seat isolation without being in the `input` group now warns at startup, rather than presenting as a controller that never appears.
-- **Playtime and completion estimates**: the library reports the hours Steam and Lutris already record, and serves completion estimates from a local dataset before reaching for How Long To Beat.
-- **Host audio released properly**: turning host audio off in a session now unloads the loopback an earlier session created, instead of playing through the host speakers for the life of the process.
-- **v1.3.4 bootstrap guidance**: the command generator bundled with v1.3.4 predates this fix, so use the exact-output commands in Quick Start or the [v1.3.5 release notes](docs/release-notes/v1.3.5.md) for the first upgrade.
+- **Input group advice that works on Bazzite**: on ostree hosts the `input` group lives in `/usr/lib/group`, so `usermod -aG input` finds no group to add anyone to. Polaris now prints `ujust add-user-to-input-group` there, and the equivalent steps on an ostree host without `ujust`.
+- **Nova library artwork update works at all**: the resolve endpoint now reports what it did, which Nova requires. Without it the client reported the host as unsupported against every build that has ever shipped.
+- **Library entries carry platform and runtime**: derived from the Lutris runner recorded at import, and served only where the runner determines them — no badge beats a wrong badge.
+- **Corrected completion estimates stay corrected**: a manual artwork match decides which game an estimate is for, and no longer falls back to the Steam app id that made the wrong estimate confident.
+- **Gamescope sessions recover**: teardown and reconnect survive a dead nested marker, a non-leader attach, and an incomplete attach generation that used to refuse every later launch until Polaris restarted.
+- **HDR capture follows the encode**: 10-bit PQ only when gamescope is in HDR mode and the client asked for HDR, 8-bit when the stream is SDR, so PQ capture cannot feed an SDR encoder.
+- **Stream audio follows the session**: the stream sink is claimed as the session default while streaming, and only the session that took that claim releases it.
 - **Security gate**: `npm audit --audit-level=high` remains mandatory.
 - **Exact release set**: the official artifacts are `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb`.
 See the [changelog](docs/changelog.md) for the full release history.
