@@ -96,6 +96,34 @@ TEST(InputGroupAccessTests, TheWarningSaysWhatActuallyBreaks) {
   EXPECT_TRUE(contains(warning, "streamed game will not see them"));
 }
 
+TEST(InputGroupAccessTests, AnOstreeHostIsToldTheCommandThatActuallyWorks) {
+  using platf::input_access::input_group_remedy_command;
+
+  // On ostree images the input group is defined in /usr/lib/group, not
+  // /etc/group, so `usermod -aG input` fails outright — the database it writes
+  // has no such group. Reported from Bazzite in #274, where following our
+  // advice accomplished nothing at all.
+  const auto ublue = input_group_remedy_command("papi", true, true);
+  EXPECT_EQ("ujust add-user-to-input-group", ublue);
+
+  // Without ujust, the same two steps by hand: copy the group definition
+  // across first, then the usermod that can now find it.
+  const auto manual = input_group_remedy_command("papi", true, false);
+  EXPECT_NE(manual.find("/usr/lib/group"), std::string::npos);
+  EXPECT_NE(manual.find("/etc/group"), std::string::npos);
+  EXPECT_NE(manual.find("usermod -aG input papi"), std::string::npos);
+}
+
+TEST(InputGroupAccessTests, AnOrdinaryHostStillGetsPlainUsermod) {
+  using platf::input_access::input_group_remedy_command;
+
+  const auto command = input_group_remedy_command("papi", false, false);
+  EXPECT_EQ("sudo usermod -aG input papi", command);
+
+  // ujust being present does not make a non-ostree host use it.
+  EXPECT_EQ("sudo usermod -aG input papi", input_group_remedy_command("papi", false, true));
+}
+
 TEST(InputGroupAccessTests, SetupHostReportsOnTheAccountThatInvokedSudo) {
   using platf::input_access::setup_host_target_user;
 

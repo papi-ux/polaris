@@ -97,6 +97,28 @@ echo evdi | sudo tee /etc/modules-load.d/evdi.conf
 echo 'options evdi initial_device_count=1' | sudo tee /etc/modprobe.d/evdi-polaris.conf
 ```
 
+## Controller and Input Group
+
+Seat isolation (`client_gamepad_seat_isolation`, `client_keyboard_mouse_seat_isolation`)
+needs the account Polaris runs as to be in the `input` group. Polaris warns at startup when
+it is not.
+
+**`sudo usermod -aG input $USER` does not work on Bazzite.** The `input` group is defined in
+`/usr/lib/group` rather than `/etc/group`, so `usermod` cannot find a group to add anyone to.
+Use the Universal Blue recipe, which copies the definition across first:
+
+```bash
+ujust add-user-to-input-group
+```
+
+Then sign out and back in — group membership only applies to new sessions.
+
+```bash
+id -nG | tr ' ' '\n' | grep -qx input && echo "in the input group" || echo "not in it"
+```
+
+Thanks to [@SVelothi](https://github.com/papi-ux/polaris/issues/274) for finding this.
+
 ## Why rpm-ostree Layering
 
 Polaris needs host-level integration: the binary, web assets, desktop metadata,

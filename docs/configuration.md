@@ -86,7 +86,9 @@ deliberately denied the logind ACL, so an account outside the group cannot open 
 just created, and neither can the streamed game. Polaris logs an `input_access:` warning at startup
 when seat isolation is enabled and the account it runs as is not a member, and `--setup-host` reports
 the same thing. Add the account with `sudo usermod -aG input <user>` and log out and back in;
-membership only applies to new sessions.
+membership only applies to new sessions. On ostree hosts such as Bazzite the group is defined
+in `/usr/lib/group` and `usermod` cannot see it, so use `ujust add-user-to-input-group`
+instead. The startup warning prints whichever command applies.
 
 #### Verifying that isolation is applied
 

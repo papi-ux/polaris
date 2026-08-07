@@ -4,10 +4,12 @@
  */
 #include "input_group_access.h"
 #include "src/config.h"
+#include "src/platform/linux/executable_path.h"
 #include "src/logging.h"
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <grp.h>
 #include <mutex>
 #include <optional>
@@ -102,12 +104,42 @@ namespace platf::input_access {
     return {};
   }
 
-  std::string input_group_remedy_command(std::string_view user) {
-    std::string command = "sudo usermod -aG ";
+  bool host_is_ostree_booted() {
+    std::error_code ec;
+    return std::filesystem::exists("/run/ostree-booted", ec);
+  }
+
+  bool host_has_ujust() {
+    return !platf::linux_util::find_executable_in_path("ujust").empty();
+  }
+
+  std::string input_group_remedy_command(std::string_view user, bool ostree_host, bool has_ujust) {
+    if (!ostree_host) {
+      std::string command = "sudo usermod -aG ";
+      command += input_group;
+      command += ' ';
+      command += user;
+      return command;
+    }
+
+    // Universal Blue ships a recipe that copies the group definition out of
+    // /usr/lib/group into /etc/group before running usermod, which is the step
+    // that makes it work at all. Reported from Bazzite in #274, where plain
+    // usermod silently accomplishes nothing.
+    if (has_ujust) {
+      return "ujust add-user-to-input-group";
+    }
+
+    // The same two steps by hand, for an ostree host without ujust.
+    std::string command = "sudo bash -c 'grep ^input: /usr/lib/group >> /etc/group' && sudo usermod -aG ";
     command += input_group;
     command += ' ';
     command += user;
     return command;
+  }
+
+  std::string input_group_remedy_command(std::string_view user) {
+    return input_group_remedy_command(user, host_is_ostree_booted(), host_has_ujust());
   }
 
   std::string seat_isolation_access_warning(
