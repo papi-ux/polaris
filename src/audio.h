@@ -88,6 +88,14 @@ namespace audio {
     std::unique_ptr<platf::audio_control_t> control;
 
     bool restore_sink;
+    /**
+     * @brief Whether this session is the one holding a default-sink claim.
+     *
+     * Separate from restore_sink, which only means "something needs undoing at
+     * stop". Releasing a refcounted claim this session never took would
+     * decrement a claim another session still holds.
+     */
+    bool claimed_default;
     platf::sink_t sink;
   };
 
@@ -102,11 +110,31 @@ namespace audio {
 
   bool sink_is_virtual(const audio_ctx_t &ctx, const std::string &sink);
 
-  // EasyEffects / JamesDSP style sinks pin streams via WirePlumber target.object;
-  // virtual-sink re-pin never sticks (silent stream after game audio reinit).
+  // EasyEffects / JamesDSP style sinks pin streams via WirePlumber target.object.
+  // Used for diagnostics only — stream isolation claims a virtual sink as default
+  // instead of capturing the processing graph or re-pinning sink-inputs.
   bool host_sink_is_processing(const std::string &sink_name);
 
+  // Legacy re-pin path (disabled when claim is active). Prefer should_claim_default_sink.
   bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio);
+
+  // Claim the stream capture sink as the session default so
+  // WirePlumber follows it. Disabled with POLARIS_STREAM_SINK=0.
+  bool stream_sink_claim_enabled();
+  bool should_claim_default_sink(const audio_ctx_t &ctx, const std::string &sink, bool host_audio);
+
+  /**
+   * @brief Whether this session may release the refcounted default-sink claim.
+   *
+   * The claim is refcounted on the shared audio control, so a session that never
+   * took one must not release one: the decrement would come out of a claim
+   * another session still holds, and on the last decrement it would restore the
+   * host default underneath a stream still running.
+   *
+   * `restore_sink` cannot answer this. It means "something needs undoing at
+   * stop", and the legacy set_sink path sets it too without ever claiming.
+   */
+  bool owns_default_sink_claim(const audio_ctx_t &ctx);
 
   /**
    * @brief Get the reference to the audio context.

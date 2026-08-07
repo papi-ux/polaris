@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -1446,6 +1447,65 @@ namespace platf {
 
         return 0;
       }
+
+      // Refcounted default-sink claim (Pulse/WirePlumber default for the stream session).
+      // WirePlumber honors pa_context_set_default_sink for follow-default linking.
+      int claim_default_sink(const std::string &sink) override {
+        if (sink.empty()) {
+          return -1;
+        }
+        std::lock_guard lock {claim_mu};
+        const bool first = claim_holders == 0;
+        if (first) {
+          auto prev = get_default_sink_name();
+          // Never restore a ghost stream sink left by a crash.
+          if (prev.find("sink-sunshine") != std::string::npos || prev.find("polaris-speaker") != std::string::npos) {
+            claim_restore.clear();
+          }
+          else {
+            claim_restore = std::move(prev);
+          }
+        }
+        // Latest claim wins routing even when other sessions hold a claim.
+        if (set_sink(sink) != 0) {
+          if (first) {
+            claim_restore.clear();
+          }
+          return -1;
+        }
+        ++claim_holders;
+        claimed_sink = sink;
+        BOOST_LOG(info) << "Linux audio: claimed default sink ["sv << sink
+                        << "] holders="sv << claim_holders << " restore=["sv
+                        << (claim_restore.empty() ? "<none>" : claim_restore) << "]"sv;
+        return 0;
+      }
+
+      int release_default_sink() override {
+        std::lock_guard lock {claim_mu};
+        if (claim_holders == 0) {
+          return -1;  // no claim on this control — caller may fall back
+        }
+        --claim_holders;
+        if (claim_holders > 0) {
+          BOOST_LOG(info) << "Linux audio: release claim holders remaining="sv << claim_holders;
+          return 0;
+        }
+        const auto restore = std::move(claim_restore);
+        claim_restore.clear();
+        claimed_sink.clear();
+        if (restore.empty()) {
+          BOOST_LOG(info) << "Linux audio: last claim released — no pre-claim default to restore"sv;
+          return 0;
+        }
+        BOOST_LOG(info) << "Linux audio: restoring default sink ["sv << restore << "]"sv;
+        return set_sink(restore);
+      }
+
+      std::mutex claim_mu;
+      unsigned claim_holders = 0;
+      std::string claim_restore;
+      std::string claimed_sink;
 
       ~server_t() override {
         if (mainloop_started) {

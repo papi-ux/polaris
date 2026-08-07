@@ -688,6 +688,24 @@ namespace platf {
     }
 
     /**
+     * @brief Claim `sink` as the system default for the stream session (refcounted).
+     * @return 0 on success, non-zero if the claim could not be applied (capture may continue).
+     */
+    virtual int claim_default_sink(const std::string &sink) {
+      return set_sink(sink);
+    }
+
+    /**
+     * @brief Release one claim; last holder restores the pre-claim default.
+     * @return 0 when a claim was released successfully, non-zero if no claim
+     *         exists or restore failed. Default is "not implemented" (-1) so
+     *         stop_audio_control() falls back to set_sink host restore.
+     */
+    virtual int release_default_sink() {
+      return -1;
+    }
+
+    /**
      * @brief Check if the audio sink is available in the system.
      * @param sink Sink to be checked.
      * @returns True if available, false otherwise.
