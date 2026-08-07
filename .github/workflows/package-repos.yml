@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Install repository tools
-        run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-sign gnupg2 git tar
+        run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-sign gnupg2 git tar gh
 
       - uses: actions/checkout@v7
 
