@@ -100,12 +100,30 @@ sudo usermod -aG input "$USER"
 Then sign out and back in.
 
 If Polaris was installed before the rules became package files, an older copy may still sit in
-`/etc/udev/rules.d/60-polaris.rules`. `/etc` overrides the packaged file, so that copy would keep
-shadowing later fixes. Running host setup once removes it when it is Polaris' own leftover, and
-leaves it alone with a warning when you have edited it:
+`/etc/udev/rules.d/60-polaris.rules`. `/etc` overrides the packaged file, so that copy keeps
+shadowing later fixes — including the seat isolation rules, which then never apply no matter what
+the configuration says.
 
 ```bash
 sudo -H polaris --setup-host
+```
+
+Host setup removes that copy only when its contents still match the file this Polaris ships. An
+older version's copy does not match — that is what upgrading changed — so it is **kept**, with a
+warning naming the file, because nothing can tell it apart from a copy you edited yourself. Upgrading
+is therefore the case most likely to leave a shadowing file behind.
+
+If you did not edit it, remove it and reload:
+
+```bash
+sudo rm /etc/udev/rules.d/60-polaris.rules
+sudo udevadm control --reload-rules
+```
+
+Then confirm the packaged rules are the ones in effect:
+
+```bash
+grep -c seat-isolated /usr/lib/udev/rules.d/60-polaris.rules
 ```
 
 ## Client input also types into the host desktop

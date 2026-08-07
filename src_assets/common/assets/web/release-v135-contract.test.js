@@ -105,7 +105,12 @@ describe('v1.3.5 release contract', () => {
       browser_download_url: `https://github.com/papi-ux/polaris/releases/download/v1.3.5/${name}`,
       packageFamily,
     }))
-    const documentedCommands = [...releaseNotes.matchAll(/```bash\n([\s\S]*?)\n```/g)].map((match) => match[1])
+    // Install blocks only. The property under test is that the documented install
+    // commands match what the Update Center generates; treating every bash block as
+    // an install command also forbids the notes from showing any other example.
+    const documentedCommands = [...releaseNotes.matchAll(/```bash\n([\s\S]*?)\n```/g)]
+      .map((match) => match[1])
+      .filter((block) => block.includes('wget --output-document='))
 
     for (const fact of ['v1.3.4', '.1', '.2', 'exact package filename']) {
       expect(releaseNotes).toContain(fact)
