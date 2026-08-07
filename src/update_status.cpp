@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -127,6 +128,91 @@ namespace update_status {
     return {};
   }
 
+  bool repository_section_enabled(std::string_view ini_contents) {
+    // dnf and pacman configuration are both ini, and both treat a section with
+    // no `enabled` key as enabled, so absence has to mean yes rather than no.
+    bool in_polaris = false;
+    bool found = false;
+    bool enabled = true;
+
+    std::istringstream stream {std::string(ini_contents)};
+    std::string line;
+    while (std::getline(stream, line)) {
+      const auto text = trim(line);
+      if (text.empty() || text.front() == '#') {
+        continue;
+      }
+
+      if (text.front() == '[') {
+        in_polaris = text == "[polaris]";
+        if (in_polaris) {
+          found = true;
+          enabled = true;
+        }
+        continue;
+      }
+
+      if (!in_polaris) {
+        continue;
+      }
+
+      const auto separator = text.find('=');
+      if (separator == std::string::npos) {
+        continue;
+      }
+
+      if (trim(text.substr(0, separator)) == "enabled") {
+        const auto value = lower_copy(trim(text.substr(separator + 1)));
+        enabled = value == "1" || value == "true" || value == "yes";
+      }
+    }
+
+    return found && enabled;
+  }
+
+  bool host_repository_configured(const distro_info_t &distro) {
+#ifdef __linux__
+    const auto family = package_family(distro);
+
+    std::string path;
+    if (family == "fedora") {
+      path = "/etc/yum.repos.d/polaris.repo";
+    } else if (family == "arch") {
+      path = "/etc/pacman.conf";
+    } else {
+      return false;
+    }
+
+    std::ifstream file(path);
+    if (!file.is_open()) {
+      return false;
+    }
+
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return repository_section_enabled(buffer.str());
+#else
+    (void) distro;
+    return false;
+#endif
+  }
+
+  std::string repository_upgrade_command(const distro_info_t &distro, bool ostree_host) {
+    const auto family = package_family(distro);
+    if (family == "fedora") {
+      // On an ostree host dnf is not the thing that changes the system, and
+      // telling a Bazzite user to run `dnf upgrade` is the same shape of wrong
+      // answer as telling them to run `usermod -aG input`.
+      return ostree_host ? "rpm-ostree upgrade" : "sudo dnf upgrade polaris";
+    }
+
+    if (family == "arch") {
+      return "sudo pacman -Syu polaris";
+    }
+
+    return {};
+  }
+
   std::string recommended_release_asset(const distro_info_t &distro) {
     const auto family = package_family(distro);
     if (family == "arch") {
@@ -158,11 +244,21 @@ namespace update_status {
 
   nlohmann::json host_update_status() {
     const auto distro = detect_host_distro();
+
+    std::error_code ec;
+    const bool ostree_host = std::filesystem::exists("/run/ostree-booted", ec);
+    const bool repository = host_repository_configured(distro);
+    const auto upgrade_command = repository ? repository_upgrade_command(distro, ostree_host) : std::string {};
+
     return {
       {"status", true},
       {"platform", POLARIS_PLATFORM},
       {"version", PROJECT_VERSION},
-      {"manual_install_only", true},
+      // A host with the repository configured is no longer on the download-a-
+      // file path, so this stops claiming otherwise.
+      {"manual_install_only", !repository},
+      {"repository_configured", repository},
+      {"repository_upgrade_command", upgrade_command},
       {"auto_install_supported", false},
       {"auto_install_enabled", false},
       {"distro", distro_json(distro)},
