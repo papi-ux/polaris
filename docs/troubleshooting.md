@@ -99,6 +99,17 @@ sudo usermod -aG input "$USER"
 
 Then sign out and back in.
 
+On an ostree host — Bazzite, Bluefin, Silverblue and relatives — that command does nothing
+useful: the `input` group lives in `/usr/lib/group` rather than `/etc/group`, so `usermod`
+finds no group to add anyone to. Universal Blue images ship a recipe that copies the
+definition across first:
+
+```bash
+ujust add-user-to-input-group
+```
+
+Polaris detects this and prints whichever command applies to your host.
+
 If Polaris was installed before the rules became package files, an older copy may still sit in
 `/etc/udev/rules.d/60-polaris.rules`. `/etc` overrides the packaged file, so that copy keeps
 shadowing later fixes — including the seat isolation rules, which then never apply no matter what

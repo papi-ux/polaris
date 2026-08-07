@@ -51,7 +51,30 @@ namespace platf::input_access {
   /// Name the devices the enabled options apply to, for the message.
   std::string isolated_device_summary(const seat_isolation_options_t &options);
 
-  /// The command that adds an account to the group.
+  /**
+   * @brief Whether the host boots an ostree image, where usermod is not enough.
+   *
+   * On ostree systems the `input` group is defined in /usr/lib/group rather than
+   * /etc/group, so `usermod -aG input` fails outright: the group database it
+   * writes has no such group to add anyone to.
+   */
+  bool host_is_ostree_booted();
+
+  /// Whether Universal Blue's `ujust` recipe runner is on PATH.
+  bool host_has_ujust();
+
+  /**
+   * @brief The command that adds an account to the group.
+   *
+   * Pure, so the ostree variants can be tested without an ostree host.
+   *
+   * @param user Account to add.
+   * @param ostree_host Whether the group lives in /usr/lib/group.
+   * @param has_ujust Whether Universal Blue's `ujust` is available.
+   */
+  std::string input_group_remedy_command(std::string_view user, bool ostree_host, bool has_ujust);
+
+  /// The remedy for this host, detected.
   std::string input_group_remedy_command(std::string_view user);
 
   /**
