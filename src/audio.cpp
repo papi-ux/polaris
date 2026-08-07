@@ -218,6 +218,7 @@ namespace audio {
         }
         else {
           ref->restore_sink = true;
+          ref->claimed_default = true;
         }
       }
       else if (route_without_default) {
@@ -492,8 +493,9 @@ namespace audio {
 
     ctx.sink_flag = std::make_unique<std::atomic_bool>(false);
 
-    // The default sink has not been replaced yet.
+    // The default sink has not been replaced yet, and no claim is held.
     ctx.restore_sink = false;
+    ctx.claimed_default = false;
 
     if (!(ctx.control = platf::audio_control())) {
       return 0;
@@ -512,16 +514,24 @@ namespace audio {
     return 0;
   }
 
+  bool owns_default_sink_claim(const audio_ctx_t &ctx) {
+    return ctx.claimed_default && ctx.control != nullptr;
+  }
+
   void stop_audio_control(audio_ctx_t &ctx) {
     // restore audio-sink if applicable
     if (!ctx.restore_sink || !ctx.control) {
       return;
     }
 
-    // Prefer refcounted claim release (restores pre-claim default, skips ghosts).
-    // release_default_sink() returns 0 only when a real claim was released;
-    // the base no-op returns -1 so legacy set_sink restore still runs (Windows).
-    if (ctx.control->release_default_sink() == 0) {
+    // Only a session that took a claim may release one. The claim is refcounted
+    // across sessions on the shared control, so releasing one this session never
+    // took would decrement a claim another session still holds — and on the last
+    // decrement, restore the host default underneath a stream still running.
+    //
+    // release_default_sink() returns 0 only when a real claim was released; the
+    // base no-op returns -1 so the legacy set_sink restore still runs (Windows).
+    if (owns_default_sink_claim(ctx) && ctx.control->release_default_sink() == 0) {
       return;
     }
 

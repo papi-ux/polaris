@@ -81,6 +81,26 @@ TEST_P(AudioTest, TestEncode) {
   capture.join();
 }
 
+namespace {
+  struct fake_audio_control_t: platf::audio_control_t {
+    int set_sink(const std::string &) override {
+      return 0;
+    }
+
+    std::unique_ptr<platf::mic_t> microphone(const std::uint8_t *, int, std::uint32_t, std::uint32_t, const std::string &, bool) override {
+      return nullptr;
+    }
+
+    bool is_sink_available(const std::string &) override {
+      return true;
+    }
+
+    std::optional<platf::sink_t> sink_info() override {
+      return std::nullopt;
+    }
+  };
+}  // namespace
+
 TEST(AudioSinkSelectionTest, SelectsVirtualSinkWhenHostAudioIsDisabled) {
   auto old_sink = config::audio.sink;
   config::audio.sink.clear();
@@ -169,6 +189,41 @@ TEST(AudioSinkSelectionTest, ExplicitVirtualSinkIsEnforcedAndClaimed) {
 #endif
 
   config::audio.sink = old_sink;
+}
+
+TEST(AudioSinkClaimOwnershipTest, OnlyASessionThatClaimedMayReleaseTheClaim) {
+  // The claim is refcounted across sessions on one shared control. A session
+  // that took the legacy set_sink path also sets restore_sink, so keying the
+  // release off restore_sink would let it decrement a claim it never took —
+  // and on the last decrement, restore the host default underneath a stream
+  // that is still running.
+  auto ctx = make_sink_context();
+  ctx.control = std::make_unique<fake_audio_control_t>();
+
+  ctx.restore_sink = false;
+  ctx.claimed_default = false;
+  EXPECT_FALSE(audio::owns_default_sink_claim(ctx));
+
+  // Legacy path: something to undo at stop, but no claim was taken.
+  ctx.restore_sink = true;
+  ctx.claimed_default = false;
+  EXPECT_FALSE(audio::owns_default_sink_claim(ctx));
+
+  // Claim path.
+  ctx.restore_sink = true;
+  ctx.claimed_default = true;
+  EXPECT_TRUE(audio::owns_default_sink_claim(ctx));
+}
+
+TEST(AudioSinkClaimOwnershipTest, AClaimWithoutAControlIsNotOwned) {
+  // stop runs after the control is gone on some teardown paths; dereferencing
+  // it to release would be worse than skipping the restore.
+  auto ctx = make_sink_context();
+  ctx.control.reset();
+  ctx.restore_sink = true;
+  ctx.claimed_default = true;
+
+  EXPECT_FALSE(audio::owns_default_sink_claim(ctx));
 }
 
 TEST(AudioCaptureBufferDiagnosticsTest, KeepsSixtyMillisecondsOfStereoJitterForFiveMsPackets) {

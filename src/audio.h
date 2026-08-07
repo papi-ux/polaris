@@ -88,6 +88,14 @@ namespace audio {
     std::unique_ptr<platf::audio_control_t> control;
 
     bool restore_sink;
+    /**
+     * @brief Whether this session is the one holding a default-sink claim.
+     *
+     * Separate from restore_sink, which only means "something needs undoing at
+     * stop". Releasing a refcounted claim this session never took would
+     * decrement a claim another session still holds.
+     */
+    bool claimed_default;
     platf::sink_t sink;
   };
 
@@ -114,6 +122,19 @@ namespace audio {
   // WirePlumber follows it. Disabled with POLARIS_STREAM_SINK=0.
   bool stream_sink_claim_enabled();
   bool should_claim_default_sink(const audio_ctx_t &ctx, const std::string &sink, bool host_audio);
+
+  /**
+   * @brief Whether this session may release the refcounted default-sink claim.
+   *
+   * The claim is refcounted on the shared audio control, so a session that never
+   * took one must not release one: the decrement would come out of a claim
+   * another session still holds, and on the last decrement it would restore the
+   * host default underneath a stream still running.
+   *
+   * `restore_sink` cannot answer this. It means "something needs undoing at
+   * stop", and the legacy set_sink path sets it too without ever claiming.
+   */
+  bool owns_default_sink_claim(const audio_ctx_t &ctx);
 
   /**
    * @brief Get the reference to the audio context.
