@@ -91,16 +91,19 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.3.4
+## What is New in v1.3.5
 
-Polaris v1.3.4 adds a dedicated SteamOS 3.8 package lane and tightens Linux package, setup, and import safety.
+Polaris v1.3.5 makes manual package updates deterministic, hands the Linux host integration files to the package that owns them, and teaches the library what your launchers already know.
 
-- **Package checks**: fail-closed packaged binary path validation now rejects invalid layouts, preserves source-prefix remapping, and records exact validation receipts.
-- **Secure Bazzite paths**: Bazzite provides secure support for the `/home` to `var/home` layout without broad canonicalization, keeping path validation narrow and explicit.
-- **Predictable host setup**: setup-host dispatch happens early and public instructions consistently use `sudo -H polaris --setup-host`.
-- **Reliable cover imports**: locale-safe ImageMagick discovery keeps Steam cover import working across localized tool output.
-- **Dedicated SteamOS support**: SteamOS 3.8 x86_64 receives a separate Valve-repository package and failure-safe Desktop Mode installation path. Physical Steam Deck gameplay and Game Mode are not certified by this release.
-- **Security gates**: `npm audit --audit-level=high` remains mandatory, and the forbidden `webtransport-go v0.10.0` dependency remains absent.
+- **Exact download targets**: Update Center now writes every mutable-distro download to the exact package filename with `wget --output-document`, so an existing file cannot redirect the new payload to `.1` or `.2` while the package manager reads stale bytes.
+- **Failure-safe command chains**: Fedora, Arch, and Ubuntu update commands short-circuit after a failed download, package installation, `sudo -H polaris --setup-host`, or service restart instead of continuing with later side effects.
+- **Host files owned by the package**: udev rules and modules-load configuration install to `/usr/lib`, so uninstalling Polaris removes them. An unmodified `/etc` copy from an older install is retired, because it would otherwise shadow every future fix to the rules. `--setup-host` no longer asks for root when there is nothing privileged left to do.
+- **`polaris-debug` package**: Arch and SteamOS builds ship debug symbols separately, so `coredumpctl info polaris` gives a real backtrace instead of `no debugging symbols`.
+- **Seat isolation tells you what it needs**: enabling client gamepad or keyboard/mouse seat isolation without being in the `input` group now warns at startup, rather than presenting as a controller that never appears.
+- **Playtime and completion estimates**: the library reports the hours Steam and Lutris already record, and serves completion estimates from a local dataset before reaching for How Long To Beat. Shown in the Polaris web console; Nova display support is still to come.
+- **Host audio released properly**: turning host audio off in a session now unloads the loopback an earlier session created, instead of playing through the host speakers for the life of the process.
+- **v1.3.4 bootstrap guidance**: the command generator bundled with v1.3.4 predates this fix, so use the exact-output commands in Quick Start or the [v1.3.5 release notes](docs/release-notes/v1.3.5.md) for the first upgrade.
+- **Security gate**: `npm audit --audit-level=high` remains mandatory.
 - **Exact release set**: the official artifacts are `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb`.
 See the [changelog](docs/changelog.md) for the full release history.
 
@@ -453,6 +456,15 @@ Great bug reports save everyone time. When reporting a Polaris host issue, inclu
 - Encoder path and whether Headless Stream is enabled.
 - Relevant logs from `journalctl --user -u polaris` around the failed launch or stream.
 - Screenshots or recordings for UI/video/input issues. Redact hostnames, tokens, LAN-only URLs, and pairing material if needed.
+
+If Polaris **crashed** rather than failed cleanly, a backtrace is worth more than everything above
+combined. Released builds are stripped, so install the matching debug package first — see
+[reporting a crash](docs/troubleshooting.md#reporting-a-crash):
+
+```bash
+sudo pacman -S polaris-debug   # Arch and SteamOS
+coredumpctl info polaris
+```
 
 If you are comparing clients, say whether the same host/app works differently in Nova and in a standard Moonlight client. That comparison is extremely useful for separating host bugs from client UI bugs.
 

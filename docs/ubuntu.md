@@ -55,6 +55,22 @@ polaris
 Use `-DPOLARIS_ENABLE_CUDA=ON` only when the CUDA toolkit is installed and you specifically want a
 CUDA-enabled local build.
 
+## Update
+
+Download the newer `.deb` to the exact filename and repeat the failure-safe chain. Writing to the
+exact name matters: an existing file otherwise becomes `Polaris-ubuntu24.04-x86_64.deb.1` while
+`apt` installs the stale original.
+
+```bash
+wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb &&
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&
+sudo -H polaris --setup-host &&
+systemctl --user restart polaris
+```
+
+`--setup-host` exits without asking for root when the package already provides the udev rules and
+modules-load configuration and the virtual input nodes are usable.
+
 ## Optional Setup
 
 Enable the user service if you want Polaris to start in the background:
