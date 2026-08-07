@@ -93,6 +93,7 @@ namespace stream_stats {
     platf::frame_format_e capture_format = platf::frame_format_e::unknown;
     std::string capture_device;
     std::string wayland_main_device;
+    std::string vaapi_vendor;  ///< VA-API vendor string, e.g. the Mesa driver and its generation.
     gpu_native_probe_t gpu_native_probe;
     std::string encode_target_device;
     platf::frame_residency_e encode_target_residency = platf::frame_residency_e::unknown;
@@ -346,6 +347,17 @@ namespace stream_stats {
    * @param device Render-node path, or empty when the compositor did not advertise one.
    */
   void update_wayland_main_device(const std::string &device);
+
+  /**
+   * @brief Record the VA-API vendor string reported by the driver.
+   *
+   * Nova reads `vaapi_vendor` from the Linux GPU profile and has never received
+   * it. The string names the driver and its generation, which is what separates
+   * one radeonsi generation from another in a crash report.
+   *
+   * @param vendor Vendor string from vaQueryVendorString, or empty when unknown.
+   */
+  void update_vaapi_vendor(const std::string &vendor);
 
   /** @brief Reset GPU-native probe telemetry for a new cage launch decision. */
   void reset_gpu_native_probe(bool requested, bool reset_capture_identity = false);

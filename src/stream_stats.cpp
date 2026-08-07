@@ -325,6 +325,7 @@ namespace stream_stats {
       {"adapter_pairing_status", adapter_pairing_status},
       {"adapter_pairing_device", adapter_pairing_device},
       {"adapter_pairing_device_source", adapter_pairing_device_source},
+      {"vaapi_vendor", stats.vaapi_vendor},
       {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
       {"gpu_native_requested", gpu_native_requested},
       {"gpu_native_attempted", stats.gpu_native_probe.headless_extcopy.attempted || stats.gpu_native_probe.windowed.attempted || (gpu_native_requested && capture_metadata_reported)},
@@ -962,6 +963,11 @@ namespace stream_stats {
   void update_wayland_main_device(const std::string &device) {
     std::lock_guard<std::mutex> lock(stats_mutex);
     current_stats.wayland_main_device = device;
+  }
+
+  void update_vaapi_vendor(const std::string &vendor) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.vaapi_vendor = vendor;
   }
 
   void reset_gpu_native_probe(bool requested, bool reset_capture_identity) {

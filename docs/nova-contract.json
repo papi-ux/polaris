@@ -52,6 +52,183 @@
         "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
         "function": "fromJson",
         "receiver": "json"
+      },
+      "required_by_nova": {
+        "$comment": "Fields Nova reads. Anything else Polaris serves here is informational.",
+        "note": "Nova reads every field this object serves."
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "variable": "game",
+        "style": "subscript"
+      }
+    },
+    "launch_mode": {
+      "$comment": "Nested under game, built by build_launch_mode_contract. Aligned in both directions. An earlier revision recorded drift here because the field list was extracted from the thin launch_mode_contract_for_app wrapper, and the range ran on into steam_launch_contract_for_app and reported that object's fields instead.",
+      "fields": [
+        "allowed_modes",
+        "mode_reason",
+        "preferred_mode",
+        "recommended_mode"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
+        "receiver": "modeJson"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "build_launch_mode_contract",
+        "variable": "launch_mode",
+        "style": "subscript"
+      }
+    },
+    "steam_launch": {
+      "$comment": "Nested under game. The reference case: identical shape to launch_mode and currently aligned in both directions.",
+      "fields": [
+        "allowed_modes",
+        "available",
+        "mode",
+        "mode_reason",
+        "recommended_mode"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
+        "receiver": "launchJson"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "steam_launch_contract_for_app",
+        "variable": "contract",
+        "style": "subscript"
+      }
+    },
+    "session_capture": {
+      "$comment": [
+        "The `capture` object of /polaris/v1/session/status.",
+        "Most of this is diagnostic and going unread is not a defect. The exceptions are",
+        "called out in informational_ok below."
+      ],
+      "fields": [
+        "backend",
+        "cpu_copy",
+        "cross_gpu_dmabuf_risk",
+        "device",
+        "effective_headless",
+        "encoder_adapter",
+        "format",
+        "gpu_native",
+        "gpu_native_override_active",
+        "path",
+        "reason",
+        "reason_message",
+        "requested_headless",
+        "residency",
+        "resolution",
+        "transport"
+      ],
+      "informational_ok": [
+        "backend",
+        "cpu_copy",
+        "device",
+        "effective_headless",
+        "encoder_adapter",
+        "reason_message",
+        "requested_headless",
+        "resolution",
+        "cross_gpu_dmabuf_risk",
+        "gpu_native",
+        "gpu_native_override_active"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseSessionStatusResponse",
+        "receiver": "capture"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "variable": "capture_info",
+        "style": "subscript"
+      }
+    },
+    "session_encoder": {
+      "$comment": "The `encoder` object of /polaris/v1/session/status.",
+      "fields": [
+        "active_backend",
+        "bitrate_kbps",
+        "codec",
+        "encode_target_fps",
+        "fps",
+        "optimization_cache_status",
+        "optimization_confidence",
+        "optimization_normalization_reason",
+        "optimization_reasoning",
+        "optimization_source",
+        "pacing_policy",
+        "recommendation_version",
+        "requested_client_fps",
+        "session_target_fps",
+        "target_device",
+        "target_format",
+        "target_residency"
+      ],
+      "informational_ok": [
+        "active_backend"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseSessionStatusResponse",
+        "receiver": "encoder"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "variable": "encoder",
+        "style": "subscript"
+      }
+    },
+    "linux_gpu_profile": {
+      "$comment": [
+        "The `linux_gpu_profile` object of /polaris/v1/session/status.",
+        "This is where Nova gets its authoritative GPU-native answer, not from the capture",
+        "object, which is why capture.gpu_native and capture.cross_gpu_dmabuf_risk going",
+        "unread is redundancy rather than a gap."
+      ],
+      "fields": [
+        "adapter_matches_capture_device",
+        "adapter_matches_wayland_main_device",
+        "adapter_pairing_device",
+        "adapter_pairing_device_source",
+        "adapter_pairing_status",
+        "capture_device",
+        "configuration_warnings",
+        "cross_gpu_dmabuf_risk",
+        "encoder_adapter",
+        "encoder_api",
+        "gpu_native_attempted",
+        "gpu_native_requested",
+        "gpu_native_succeeded",
+        "vaapi_vendor",
+        "wayland_main_device"
+      ],
+      "informational_ok": [
+        "adapter_matches_wayland_main_device",
+        "adapter_pairing_device",
+        "adapter_pairing_device_source",
+        "adapter_pairing_status",
+        "configuration_warnings",
+        "wayland_main_device"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseLinuxGpuProfile",
+        "receiver": "json"
+      },
+      "polaris_emitter": {
+        "file": "src/stream_stats.cpp",
+        "function": "linux_gpu_profile_json",
+        "declaration": "nlohmann::json profile = {",
+        "style": "initializer_list"
       }
     }
   },
@@ -76,7 +253,21 @@
     },
     "polaris_sends_nova_never_reads": {
       "$comment": "None. Nova's game adapter on origin/master reads every field Polaris serves, including play_time, beat_time and artwork.",
-      "game": []
+      "game": [],
+      "session_capture": []
+    },
+    "$detail": {
+      "session_capture": [
+        "Corrected. Nova reads gpu_native_succeeded and cross_gpu_dmabuf_risk from the",
+        "linux_gpu_profile object instead, so the same fields on capture are redundant rather",
+        "than missed. An earlier revision recorded them as drift because linux_gpu_profile was",
+        "not modelled at all."
+      ],
+      "linux_gpu_profile": [
+        "Resolved. Nova read vaapi_vendor and Polaris never served it; vaapi.cpp logged the",
+        "string at encoder creation without publishing it. It is now recorded in stats and",
+        "served in this object, which is what names the driver generation in a crash report."
+      ]
     }
   }
 }
