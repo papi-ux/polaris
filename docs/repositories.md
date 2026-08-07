@@ -25,6 +25,15 @@ systemctl --user restart polaris
 
 After that, `sudo dnf upgrade` carries Polaris with everything else.
 
+The first `dnf` command against the repository asks you to accept the signing
+key, showing fingerprint `58017EDFFA9F803E07ED26F835F13F14FAAD15CC`. That is
+expected: `rpm --import` populates rpm's keyring, and dnf keeps its own record
+of which repositories it trusts. Accepting once is enough.
+
+It also means the first non-interactive use finds nothing rather than failing —
+a script on a fresh host should run `sudo dnf -y makecache` before relying on
+the repository.
+
 ## Bazzite and other ostree hosts
 
 The same repository works, layered rather than installed:
@@ -88,9 +97,17 @@ a rebuild would ship a binary that CI never tested, and the Fedora packaging
 pulls a CUDA toolkit over the network at build time, which no sandboxed rebuild
 service permits.
 
-The repository currently carries the latest release only. Rolling back means
-installing an older release package by hand from the
-[releases page](https://github.com/papi-ux/polaris/releases).
+The repository currently carries the latest stable release only. Prereleases are
+never published to it. Rolling back means installing an older release package by
+hand from the [releases page](https://github.com/papi-ux/polaris/releases).
+
+Publishing runs on a schedule, so there is a short window after a release where
+the repository still serves the previous version and `dnf upgrade` correctly
+reports nothing to do. What it currently serves is not a guess:
+
+```bash
+curl -fsS https://repo.papi-ux.com/PUBLISHED_TAG
+```
 
 ---
 
