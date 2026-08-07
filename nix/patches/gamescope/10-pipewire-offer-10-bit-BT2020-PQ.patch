@@ -1,0 +1,260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Enrico=20B=C3=BChler?= <enrico.buehler@unom.io>
+Date: Tue, 28 Jul 2026 13:53:41 +0200
+Subject: [PATCH] pipewire: offer 10-bit BT.2020 PQ capture formats (HDR
+ streams)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+gamescope's built-in PipeWire node has always been SDR: build_format_params()
+offers BGRx and NV12 only, and paint_pipewire() hardcodes a Gamma-2.2 composite
+with the SDR screenshot LUT set, so an HDR game reaches every consumer already
+tone-mapped down. Screen-capture consumers that CAN carry HDR — Steam Remote
+Play (#2126), other remote-play hosts — have no way to ask for it.
+
+Offer SPA xRGB_210LE / xBGR_210LE alongside the existing formats, carrying
+MANDATORY SMPTE ST.2084 (PQ) + BT.2020 colorimetry properties, and map them to
+DRM_FORMAT_XRGB2101010 / XBGR2101010 — the same 10-bit capture texture the HDR
+AVIF screenshot path already allocates. When such a format is negotiated,
+paint_pipewire() switches to g_ScreenshotColorMgmtLutsHDR and EOTF_PQ: exactly
+the bHDRScreenshot branch, which is a fixed BT.2020+PQ target whose LUT set is
+built unconditionally for every input EOTF, so SDR content lands in the PQ
+container at --hdr-sdr-content-nits and HDR content passes through.
+
+The new formats are listed last, so every consumer that negotiates the 8-bit
+stream today keeps negotiating it bit-for-bit; the MANDATORY colorimetry props
+mean a consumer cannot land on 10-bit without agreeing to PQ/BT.2020. Unlike
+bHDRScreenshot the switch does not depend on the focused app being HDR — a
+stream's colorimetry is fixed for the life of the negotiation and must not
+follow what the app happens to render.
+
+Works on the headless backend as well as a real connector: no HDR display is
+involved anywhere in the LUT set.
+---
+ src/pipewire.cpp     | 114 +++++++++++++++++++++++++++++++++----------
+ src/steamcompmgr.cpp |  21 ++++++--
+ 2 files changed, 106 insertions(+), 29 deletions(-)
+
+diff --git a/src/pipewire.cpp b/src/pipewire.cpp
+index 76b3ea8..7beffa8 100644
+--- a/src/pipewire.cpp
++++ b/src/pipewire.cpp
+@@ -18,6 +18,40 @@
+ 
+ static LogScope pwr_log("pipewire");
+ 
++// 10-bit HDR capture.
++//
++// The packed 10-bit RGB SPA formats (xRGB_210LE / xBGR_210LE) predate PipeWire 1.0; the guard
++// only exists so this file still compiles against an ancient libspa, in which case the stream
++// offers exactly the 8-bit formats it always did.
++#if PW_CHECK_VERSION(1, 0, 0)
++#define GAMESCOPE_PIPEWIRE_HDR 1
++#else
++#define GAMESCOPE_PIPEWIRE_HDR 0
++#endif
++
++#if GAMESCOPE_PIPEWIRE_HDR
++// The colorimetry VALUES, spelled out rather than taken from the enums, because the headers that
++// name them are much newer than the ones that name the formats above: SPA grew
++// BT2020_10 / SMPTE2084 / ARIB_STD_B67 as one block, and a libspa without it stops at ADOBERGB —
++// PipeWire 1.4.11 (Fedora 43 / Bazzite) does exactly that, so `SPA_VIDEO_TRANSFER_SMPTE2084`
++// fails to compile there even though the library parses the value perfectly well.
++//
++// Spelling them out is safe because the enum is WIRE ABI, not a private detail: SPA mirrors
++// GStreamer's GstVideoTransferFunction / GstVideoColorPrimaries, where these landed together, so
++// the numbers are identical on every implementation that has them at all. On one that does not,
++// a consumer simply fails to intersect this pod and negotiates 8-bit — the same outcome as not
++// offering HDR. (HDR consumers need the same 14-format offer set for the same reason.)
++static constexpr uint32_t kSpaVideoTransferSmpte2084 = 14;
++static constexpr uint32_t kSpaVideoColorPrimariesBt2020 = 7;
++#endif
++
++#if GAMESCOPE_PIPEWIRE_HDR
++static bool is_hdr_video_format(uint32_t format)
++{
++	return format == SPA_VIDEO_FORMAT_xRGB_210LE || format == SPA_VIDEO_FORMAT_xBGR_210LE;
++}
++#endif
++
+ static struct pipewire_state pipewire_state = { .stream_node_id = SPA_ID_INVALID };
+ static int nudgePipe[2] = { -1, -1 };
+ 
+@@ -94,6 +128,37 @@ static void calculate_capture_size()
+ 	s_nCaptureHeight = SPA_ROUND_UP_N(s_nCaptureHeight, kCaptureAlign);
+ }
+ 
++// The colorimetry properties that go with `format`, appended into an already-open EnumFormat
++// object. NV12 keeps offering the BT.601/BT.709 matrix+range choice it always did; the 10-bit
++// packed-RGB formats carry a FIXED, MANDATORY BT.2020 + SMPTE ST.2084 (PQ) description, because
++// that is exactly what paint_pipewire() encodes into them (the HDR screenshot LUT set — a fixed
++// PQ container, independent of what the focused app renders). MANDATORY means a consumer that
++// does not speak PQ/BT.2020 cannot land on these formats by accident: it fails to intersect this
++// pod and falls back to the 8-bit ones listed before it.
++static void add_format_color_params(struct spa_pod_builder *builder, spa_video_format format)
++{
++	if (format == SPA_VIDEO_FORMAT_NV12) {
++		spa_pod_builder_add(builder,
++			SPA_FORMAT_VIDEO_colorMatrix, SPA_POD_CHOICE_ENUM_Id(3,
++							SPA_VIDEO_COLOR_MATRIX_BT601,
++							SPA_VIDEO_COLOR_MATRIX_BT601,
++							SPA_VIDEO_COLOR_MATRIX_BT709),
++			SPA_FORMAT_VIDEO_colorRange, SPA_POD_CHOICE_ENUM_Id(3,
++							SPA_VIDEO_COLOR_RANGE_16_235,
++							SPA_VIDEO_COLOR_RANGE_16_235,
++							SPA_VIDEO_COLOR_RANGE_0_255),
++			0);
++	}
++#if GAMESCOPE_PIPEWIRE_HDR
++	else if (is_hdr_video_format(format)) {
++		spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_transferFunction, SPA_POD_PROP_FLAG_MANDATORY);
++		spa_pod_builder_id(builder, kSpaVideoTransferSmpte2084);
++		spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_PROP_FLAG_MANDATORY);
++		spa_pod_builder_id(builder, kSpaVideoColorPrimariesBt2020);
++	}
++#endif
++}
++
+ static void build_format_params(struct spa_pod_builder *builder, spa_video_format format, std::vector<const struct spa_pod *> &params) {
+ 	struct spa_rectangle size = SPA_RECTANGLE(s_nCaptureWidth, s_nCaptureHeight);
+ 	struct spa_rectangle min_requested_size = { 0, 0 };
+@@ -112,18 +177,7 @@ static void build_format_params(struct spa_pod_builder *builder, spa_video_forma
+ 		SPA_FORMAT_VIDEO_requested_size, SPA_POD_CHOICE_RANGE_Rectangle( &min_requested_size, &min_requested_size, &max_requested_size ),
+ 		SPA_FORMAT_VIDEO_gamescope_focus_appid, SPA_POD_CHOICE_RANGE_Long( 0ll, INT64_MIN, INT64_MAX ),
+ 		0);
+-	if (format == SPA_VIDEO_FORMAT_NV12) {
+-		spa_pod_builder_add(builder,
+-			SPA_FORMAT_VIDEO_colorMatrix, SPA_POD_CHOICE_ENUM_Id(3,
+-							SPA_VIDEO_COLOR_MATRIX_BT601,
+-							SPA_VIDEO_COLOR_MATRIX_BT601,
+-							SPA_VIDEO_COLOR_MATRIX_BT709),
+-			SPA_FORMAT_VIDEO_colorRange, SPA_POD_CHOICE_ENUM_Id(3,
+-							SPA_VIDEO_COLOR_RANGE_16_235,
+-							SPA_VIDEO_COLOR_RANGE_16_235,
+-							SPA_VIDEO_COLOR_RANGE_0_255),
+-			0);
+-	}
++	add_format_color_params(builder, format);
+ 	spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+ 	spa_pod_builder_push_choice(builder, &choice_frame, SPA_CHOICE_Enum, 0);
+ 	spa_pod_builder_long(builder, modifier); // default
+@@ -141,18 +195,7 @@ static void build_format_params(struct spa_pod_builder *builder, spa_video_forma
+ 		SPA_FORMAT_VIDEO_requested_size, SPA_POD_CHOICE_RANGE_Rectangle( &min_requested_size, &min_requested_size, &max_requested_size ),
+ 		SPA_FORMAT_VIDEO_gamescope_focus_appid, SPA_POD_CHOICE_RANGE_Long( 0ll, INT64_MIN, INT64_MAX ),
+ 		0);
+-	if (format == SPA_VIDEO_FORMAT_NV12) {
+-		spa_pod_builder_add(builder,
+-			SPA_FORMAT_VIDEO_colorMatrix, SPA_POD_CHOICE_ENUM_Id(3,
+-							SPA_VIDEO_COLOR_MATRIX_BT601,
+-							SPA_VIDEO_COLOR_MATRIX_BT601,
+-							SPA_VIDEO_COLOR_MATRIX_BT709),
+-			SPA_FORMAT_VIDEO_colorRange, SPA_POD_CHOICE_ENUM_Id(3,
+-							SPA_VIDEO_COLOR_RANGE_16_235,
+-							SPA_VIDEO_COLOR_RANGE_16_235,
+-							SPA_VIDEO_COLOR_RANGE_0_255),
+-			0);
+-	}
++	add_format_color_params(builder, format);
+ 	params.push_back((const struct spa_pod *) spa_pod_builder_pop(builder, &obj_frame));
+ 
+ //	for (auto& param : params)
+@@ -166,6 +209,14 @@ static std::vector<const struct spa_pod *> build_format_params(struct spa_pod_bu
+ 
+ 	build_format_params(builder, SPA_VIDEO_FORMAT_BGRx, params);
+ 	build_format_params(builder, SPA_VIDEO_FORMAT_NV12, params);
++#if GAMESCOPE_PIPEWIRE_HDR
++	// Listed LAST, on purpose: PipeWire intersects in offer order, so every consumer that
++	// negotiates today's 8-bit stream keeps negotiating it bit-for-bit. Only a consumer that
++	// asks for a 10-bit format by name — and accepts the MANDATORY BT.2020 + PQ colorimetry
++	// above — ever reaches these.
++	build_format_params(builder, SPA_VIDEO_FORMAT_xRGB_210LE, params);
++	build_format_params(builder, SPA_VIDEO_FORMAT_xBGR_210LE, params);
++#endif
+ 
+ 	return params;
+ }
+@@ -288,7 +339,7 @@ static void dispatch_nudge(struct pipewire_state *state, int fd)
+ 	if (s_nCaptureWidth != state->video_info.size.width || s_nCaptureHeight != state->video_info.size.height) {
+ 		pwr_log.debugf("renegotiating stream params (size: %dx%d)", s_nCaptureWidth, s_nCaptureHeight);
+ 
+-		uint8_t buf[4096];
++		uint8_t buf[8192];
+ 		struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+ 		std::vector<const struct spa_pod *> format_params = build_format_params(&builder);
+ 		int ret = pw_stream_update_params(state->stream, format_params.data(), format_params.size());
+@@ -412,6 +463,12 @@ static void stream_handle_param_changed(void *data, uint32_t id, const struct sp
+ 		state->video_info.size.width, state->video_info.size.height,
+ 		s_nRequestedWidth, s_nRequestedHeight,
+ 		state->video_info.format, state->shm_stride, shm_size, state->dmabuf);
++
++#if GAMESCOPE_PIPEWIRE_HDR
++	if (is_hdr_video_format(state->video_info.format)) {
++		pwr_log.infof("negotiated a 10-bit stream — the composite is encoded as BT.2020 + PQ (HDR10)");
++	}
++#endif
+ }
+ 
+ static void randname(char *buf)
+@@ -450,6 +507,11 @@ uint32_t spa_format_to_drm(uint32_t spa_format)
+ 	switch (spa_format)
+ 	{
+ 		case SPA_VIDEO_FORMAT_NV12: return DRM_FORMAT_NV12;
++#if GAMESCOPE_PIPEWIRE_HDR
++		// Same texture machinery the HDR AVIF screenshot path already uses.
++		case SPA_VIDEO_FORMAT_xRGB_210LE: return DRM_FORMAT_XRGB2101010;
++		case SPA_VIDEO_FORMAT_xBGR_210LE: return DRM_FORMAT_XBGR2101010;
++#endif
+ 		default:
+ 		case SPA_VIDEO_FORMAT_BGR: return DRM_FORMAT_XRGB8888;
+ 	}
+@@ -715,7 +777,7 @@ bool init_pipewire(void)
+ 	s_nOutputHeight = g_nOutputHeight;
+ 	calculate_capture_size();
+ 
+-	uint8_t buf[4096];
++	uint8_t buf[8192];
+ 	struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+ 	std::vector<const struct spa_pod *> format_params = build_format_params(&builder);
+ 
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index ecb3808..b01a784 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -2335,17 +2335,33 @@ static void paint_pipewire()
+ 	if ( !s_pPipewireBuffer || !s_pPipewireBuffer->texture )
+ 		return;
+ 
++	// The negotiated stream format decides the composite's colorimetry. A 10-bit target (the
++	// xRGB_210LE / xBGR_210LE offer, whose SPA props say BT.2020 + PQ) gets the same fixed
++	// BT.2020/PQ container the HDR AVIF screenshot path uses; everything else keeps the SDR
++	// Gamma-2.2 composite it always had.
++	//
++	// Deliberately NOT conditional on the focused app being HDR, unlike bHDRScreenshot: the
++	// stream's colorimetry is fixed for the lifetime of the negotiation, so it must not follow
++	// what the app happens to render. g_ScreenshotColorMgmtLutsHDR is built for EVERY input EOTF
++	// (see update_screenshot_color_mgmt), so SDR content lands in the PQ container at
++	// --hdr-sdr-content-nits, HDR content passes through, and mixed scenes composite correctly.
++	const uint32_t uStreamDrmFormat = s_pPipewireBuffer->texture->drmFormat();
++	const bool bHDRStream = uStreamDrmFormat == DRM_FORMAT_XRGB2101010 ||
++	                        uStreamDrmFormat == DRM_FORMAT_XBGR2101010;
++
+ 	struct FrameInfo_t frameInfo = {};
+ 	frameInfo.applyOutputColorMgmt = true;
+-	frameInfo.outputEncodingEOTF   = EOTF_Gamma22;
++	frameInfo.outputEncodingEOTF   = bHDRStream ? EOTF_PQ : EOTF_Gamma22;
+ 	frameInfo.allowVRR             = false;
+ 	frameInfo.bFadingOut           = false;
+ 
+ 	// Apply screenshot-style color management.
++	// bHDRStream is fixed for the frame; bind luts once outside the EOTF loop.
++	auto& luts = bHDRStream ? g_ScreenshotColorMgmtLutsHDR : g_ScreenshotColorMgmtLuts;
+ 	for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
+ 	{
+-		frameInfo.lut3D[nInputEOTF]     = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut3d;
+-		frameInfo.shaperLut[nInputEOTF] = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut1d;
++		frameInfo.lut3D[nInputEOTF]     = luts[nInputEOTF].vk_lut3d;
++		frameInfo.shaperLut[nInputEOTF] = luts[nInputEOTF].vk_lut1d;
+ 	}
+ 
+ 	const uint64_t ulFocusAppId = s_pPipewireBuffer->gamescope_info.focus_appid;

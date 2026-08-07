@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Enrico=20B=C3=BChler?= <enrico.buehler@unom.io>
+Date: Tue, 28 Jul 2026 15:41:45 +0200
+Subject: [PATCH] pipewire: optionally composite the cursor into the capture
+ stream
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+gamescope's PipeWire node has never carried the pointer: it lives on a hardware
+plane for scanout, and `paint_pipewire()` composites a separate, reduced frame
+that never includes it. That is the right default — a remote-play consumer that
+draws its own cursor would end up with two — but it leaves a consumer with no
+cursor of its own nothing to fall back to, because the node is all it gets.
+Such a consumer has to reconstruct the pointer out of band (XFixes plus a
+host-side blend), which forces a full-frame colour-conversion pass it would
+otherwise not need.
+
+Add `--pipewire-composite-cursor` (convar `pipewire_composite_cursor`, off by
+default) to paint it in, using the same guards and the same MouseCursor::paint
+call the scanout composite uses. It scales correctly for free: paint_pipewire
+has already set currentOutputWidth/Height to the capture size, which is what
+MouseCursor::paint scales against.
+
+The repaint test grows the cursor's state alongside the commit ids. A
+pointer-only move produces no new commit, so without it the composited cursor
+would freeze on a static screen while the real one moved — and a cursor that
+became hidden would never be erased. `undirty()` runs before the test, exactly
+as the scanout path does, so the test and the paint agree on
+`ShouldDrawCursor()`.
+
+The cursor is taken from the global focus rather than the stream's: the pointer
+is one device with one position whatever the stream shows, and the
+focus-appid branch hands back a plain focus_t, which carries no cursor.
+---
+ src/main.cpp         |  2 ++
+ src/steamcompmgr.cpp | 63 +++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 9fc54f0..1eb35b3 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -141,6 +141,7 @@ const struct option *gamescope_options = (struct option[]){
+ 
+ 	{ "disable-color-management", no_argument, nullptr, 0 },
+ 	{ "sdr-gamut-wideness", required_argument, nullptr, 0 },
++	{ "pipewire-composite-cursor", no_argument, nullptr, 0 },
+ 	{ "hdr-enabled", no_argument, nullptr, 0 },
+ 	{ "hdr-sdr-content-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-enabled", no_argument, nullptr, 0 },
+@@ -205,6 +206,7 @@ const char usage[] =
+ 	"  --force-windows-fullscreen     force windows inside of gamescope to be the size of the nested display (fullscreen)\n"
+ 	"  --cursor-scale-height          if specified, sets a base output height to linearly scale the cursor against.\n"
+ 	"  --virtual-connector-strategy   Specifies how we should make virtual connectors.\n"
++	"  --pipewire-composite-cursor    composite the cursor into the PipeWire capture stream (off by default: the node has never carried it, and a consumer that draws its own would get two)\n"
+ 	"  --hdr-enabled                  enable HDR output (needs Gamescope WSI layer enabled for support from clients)\n"
+ 	"                                 If this is not set, and there is a HDR client, it will be tonemapped SDR.\n"
+ 	"  --sdr-gamut-wideness           Set the 'wideness' of the gamut for SDR comment. 0 - 1.\n"
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 01b2abf..5c65420 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -2316,6 +2316,13 @@ static void update_touch_scaling( const struct FrameInfo_t *frameInfo )
+ }
+ 
+ #if HAVE_PIPEWIRE
++// Declared here rather than beside the other `cv_paint_*_plane` knobs, which sit BELOW
++// paint_pipewire and so are not in scope for it.
++gamescope::ConVar<bool> cv_pipewire_composite_cursor{ "pipewire_composite_cursor", false,
++	"Composite the cursor into the PipeWire capture stream (--pipewire-composite-cursor). Off by "
++	"default: the node has never carried the pointer, and a consumer that draws its own would get "
++	"two." };
++
+ static void paint_pipewire()
+ {
+ 	static struct pipewire_buffer *s_pPipewireBuffer = nullptr;
+@@ -2402,16 +2409,48 @@ static void paint_pipewire()
+ 	// If the commits are the same as they were last time, don't repaint and don't push a new buffer on the stream.
+ 	static uint64_t s_ulLastFocusCommitId = 0;
+ 	static uint64_t s_ulLastOverrideCommitId = 0;
++	static bool s_bLastCursorDrawn = false;
++	static int s_nLastCursorX = 0;
++	static int s_nLastCursorY = 0;
+ 
+ 	uint64_t ulFocusCommitId = window_last_done_commit_id( pFocus->focusWindow );
+ 	uint64_t ulOverrideCommitId = window_last_done_commit_id( pFocus->overrideWindow );
+ 
++	// With the cursor composited in, the pointer becomes part of what this stream shows — so its
++	// state has to join the repaint test, or it would freeze on a static screen while the real
++	// one moves (and a hidden cursor would never be erased). `undirty()` first, exactly as the
++	// scanout composite does: it refreshes the texture and the grabbed/hidden state that
++	// `ShouldDrawCursor()` reads, so both the test and the paint below see the same answer.
++	//
++	// The cursor comes from the GLOBAL focus, not `pFocus`: the pointer is one device with one
++	// position whatever this stream is showing, and the focus-appid branch above hands back a
++	// plain `focus_t`, which carries no cursor at all.
++	global_focus_t *pGlobalFocus = cv_pipewire_composite_cursor ? GetCurrentFocus() : nullptr;
++	MouseCursor *pCursor = pGlobalFocus ? pGlobalFocus->cursor : nullptr;
++	bool bDrawCursor = false;
++	int nCursorX = 0, nCursorY = 0;
++	if ( pCursor )
++	{
++		pCursor->undirty();
++		bDrawCursor = ShouldDrawCursor();
++		if ( bDrawCursor )
++		{
++			nCursorX = pCursor->x();
++			nCursorY = pCursor->y();
++		}
++	}
++
+ 	if ( ulFocusCommitId == s_ulLastFocusCommitId &&
+-	     ulOverrideCommitId == s_ulLastOverrideCommitId )
++	     ulOverrideCommitId == s_ulLastOverrideCommitId &&
++	     bDrawCursor == s_bLastCursorDrawn &&
++	     nCursorX == s_nLastCursorX && nCursorY == s_nLastCursorY )
+ 		return;
+ 
+ 	s_ulLastFocusCommitId = ulFocusCommitId;
+ 	s_ulLastOverrideCommitId = ulOverrideCommitId;
++	s_bLastCursorDrawn = bDrawCursor;
++	s_nLastCursorX = nCursorX;
++	s_nLastCursorY = nCursorY;
+ 
+ 	uint32_t uWidth = s_pPipewireBuffer->texture->width();
+ 	uint32_t uHeight = s_pPipewireBuffer->texture->height();
+@@ -2436,6 +2475,22 @@ static void paint_pipewire()
+ 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 )  );
+ 	}
+ 
++	// The cursor, when this stream was asked for it. gamescope keeps the pointer OUT of the
++	// PipeWire node by default — it lives on a hardware plane for scanout, and a remote-play
++	// consumer that draws its own would end up with two — so a consumer that has no cursor of
++	// its own (and no way to obtain one, because this node is all it gets) has to ask for it.
++	//
++	// Painted at THIS stream's scale: `currentOutputWidth/Height` were set to the capture size
++	// above, which is exactly what MouseCursor::paint scales against. Already `undirty()`ed by
++	// the repaint test.
++	if ( bDrawCursor )
++	{
++		pCursor->paint(
++			pFocus->focusWindow,
++			pFocus->focusWindow == pFocus->overrideWindow ? nullptr : pFocus->overrideWindow,
++			&frameInfo );
++	}
++
+ 	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
+ 		? vulkan_acquire_capture_texture( uWidth, uHeight, false, DRM_FORMAT_XRGB2101010 )
+ 		: gamescope::Rc<CVulkanTexture>{ s_pPipewireBuffer->texture };
+@@ -8397,6 +8452,12 @@ steamcompmgr_main(int argc, char **argv)
+ 					g_FadeOutDuration = atoi(optarg);
+ 				} else if (strcmp(opt_name, "force-windows-fullscreen") == 0) {
+ 					bForceWindowsFullscreen = true;
++				} else if (strcmp(opt_name, "pipewire-composite-cursor") == 0) {
++#if HAVE_PIPEWIRE
++					cv_pipewire_composite_cursor = true;
++#else
++					fprintf( stderr, "gamescope: --pipewire-composite-cursor ignored (built without PipeWire)\n" );
++#endif
+ 				} else if (strcmp(opt_name, "hdr-enabled") == 0 || strcmp(opt_name, "hdr-enable") == 0) {
+ 					cv_hdr_enabled = true;
+ 				} else if (strcmp(opt_name, "hdr-debug-force-support") == 0) {
