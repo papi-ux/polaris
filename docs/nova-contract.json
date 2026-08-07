@@ -24,6 +24,7 @@
         "beat_time",
         "category",
         "cover_url",
+        "display_planner",
         "genres",
         "hdr_supported",
         "id",
@@ -59,7 +60,7 @@
       },
       "required_by_nova": {
         "$comment": "Fields Nova reads. Anything else Polaris serves here is informational.",
-        "note": "Nova reads every field this object serves."
+        "note": "Nova reads every field this object serves except display_planner, which is served ahead of its consumer; see known_drift."
       },
       "polaris_emitter": {
         "file": "src/nvhttp.cpp",
@@ -105,6 +106,89 @@
         "file": "src/nvhttp.cpp",
         "function": "steam_launch_contract_for_app",
         "variable": "contract",
+        "style": "subscript"
+      }
+    },
+    "display_planner": {
+      "$comment": [
+        "Nested under game. Per-host, computed once per request from the same fallback",
+        "display mode the web planner plans from, and attached to every game unchanged.",
+        "Served ahead of its Nova consumer: the shared kotlinx model already decodes it",
+        "(PolarisGame.DisplayPlannerContract) and its contract test pins the 2560x1600x90",
+        "fixture, but the app's org.json adapter does not read it yet, so every field",
+        "below is also recorded under known_drift until Nova's Resolution row lands.",
+        "The nova_reader receiver names the wiring that adapter is expected to use.",
+        "Unlike the web planner, `hidden` here means unsafe and nothing else; the",
+        "advanced flag is its own axis so a client can offer its own advanced toggle."
+      ],
+      "fields": [
+        "advanced_scale_factors",
+        "available",
+        "choices",
+        "recommended_id",
+        "recommended_mode",
+        "recommended_title",
+        "source_aspect_ratio",
+        "source_fps",
+        "source_mode"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
+        "receiver": "plannerJson"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "display_planner_contract_json",
+        "variable": "planner",
+        "style": "subscript"
+      }
+    },
+    "display_planner_choice": {
+      "$comment": "One entry of display_planner.choices: a preset of the ported web planner.",
+      "fields": [
+        "advanced",
+        "aspect_ratio",
+        "badge",
+        "custom",
+        "hidden",
+        "id",
+        "intent",
+        "reason",
+        "safe",
+        "scale_factor",
+        "target_mode",
+        "title"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
+        "receiver": "choiceJson"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "display_planner_choice_json",
+        "variable": "choice",
+        "style": "subscript"
+      }
+    },
+    "display_planner_scale_choice": {
+      "$comment": "One entry of display_planner.advanced_scale_factors.",
+      "fields": [
+        "label",
+        "safe",
+        "scale_factor",
+        "target_mode"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
+        "receiver": "scaleJson"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "display_planner_scale_option_json",
+        "variable": "scale_option",
         "style": "subscript"
       }
     },
@@ -254,9 +338,49 @@
       ]
     },
     "polaris_sends_nova_never_reads": {
-      "$comment": "None. Nova's game adapter on origin/master reads every field Polaris serves, including play_time, beat_time and artwork.",
-      "game": [],
-      "session_capture": []
+      "$comment": [
+        "Before 2026-08-07 this was empty: Nova's game adapter read every field Polaris",
+        "served. display_planner inverted that on purpose — Polaris now serves the planner",
+        "the shared kotlinx model was already prepared to decode, and the app adapter wires",
+        "it when the Resolution row lands. The Nova commit that does so prunes these",
+        "entries and, if its receiver names differ from the nova_reader records above,",
+        "corrects those in the same change."
+      ],
+      "game": [
+        "display_planner"
+      ],
+      "session_capture": [],
+      "display_planner": [
+        "advanced_scale_factors",
+        "available",
+        "choices",
+        "recommended_id",
+        "recommended_mode",
+        "recommended_title",
+        "source_aspect_ratio",
+        "source_fps",
+        "source_mode"
+      ],
+      "display_planner_choice": [
+        "advanced",
+        "aspect_ratio",
+        "badge",
+        "custom",
+        "hidden",
+        "id",
+        "intent",
+        "reason",
+        "safe",
+        "scale_factor",
+        "target_mode",
+        "title"
+      ],
+      "display_planner_scale_choice": [
+        "label",
+        "safe",
+        "scale_factor",
+        "target_mode"
+      ]
     },
     "$detail": {
       "session_capture": [
