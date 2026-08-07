@@ -81,6 +81,34 @@ TEST(BeatTimesTests, FallsBackToTheTitleWhenThereIsNoAppId) {
   EXPECT_FALSE(beat_times::lookup(data, "999999", "").has_value());
 }
 
+TEST(BeatTimesTests, ACuratedTitleDecidesInsteadOfTheAppId) {
+  const auto data = beat_times::parse(kDataset);
+
+  // Same inputs as PrefersTheAppIdOverTheTitle, where the id wins. Once somebody has
+  // said which game this is, it does not.
+  const auto found = beat_times::lookup_for_identity(data, "Slay the Spire II", "870780", "Control Ultimate Edition");
+  ASSERT_TRUE(found.has_value());
+  EXPECT_EQ(found->main_seconds, 90000);
+}
+
+TEST(BeatTimesTests, ACuratedTitleTheDatasetLacksAnswersWithNothing) {
+  const auto data = beat_times::parse(kDataset);
+
+  // The case a correction is most likely made for: the curated title is not catalogued
+  // yet. Falling back to the id here would serve the estimate the correction rejected,
+  // and the caller would never ask about the curated title at all, so the correction
+  // could never take effect.
+  EXPECT_FALSE(beat_times::lookup_for_identity(data, "Some Game Nobody Catalogued", "870780", "Control Ultimate Edition").has_value());
+}
+
+TEST(BeatTimesTests, WithoutACuratedTitleIdentityLookupIsTheOrdinaryOne) {
+  const auto data = beat_times::parse(kDataset);
+
+  const auto found = beat_times::lookup_for_identity(data, "", "870780", "Slay the Spire II");
+  ASSERT_TRUE(found.has_value());
+  EXPECT_EQ(found->matched_name, "Control Ultimate Edition");
+}
+
 TEST(BeatTimesTests, SurvivesEmptyAndMalformedPayloads) {
   EXPECT_TRUE(beat_times::parse("").by_name.empty());
   EXPECT_TRUE(beat_times::parse("not json").by_name.empty());

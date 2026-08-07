@@ -293,6 +293,16 @@ namespace beat_times {
     return by_name->second;
   }
 
+  std::optional<estimate_t> lookup_for_identity(const dataset_t &data,
+                                                std::string_view curated_title,
+                                                std::string_view steam_appid,
+                                                std::string_view name) {
+    if (!curated_title.empty()) {
+      return lookup(data, "", curated_title);
+    }
+    return lookup(data, steam_appid, name);
+  }
+
   std::string match_key(std::string_view name) {
     std::string folded;
     folded.reserve(name.size());

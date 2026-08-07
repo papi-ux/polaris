@@ -2834,15 +2834,9 @@ namespace nvhttp {
       const auto &data = beat_times::dataset();
       const auto curated = curated_title(artwork);
 
-      // A curated identity outranks the app id. The id is what made a wrong estimate
-      // confident, so a correction the id overrules is not a correction.
-      std::optional<beat_times::estimate_t> estimate;
-      if (!curated.empty()) {
-        estimate = beat_times::lookup(data, "", curated);
-      }
-      if (!estimate) {
-        estimate = beat_times::lookup(data, app.steam_appid, app.name);
-      }
+      // A curated identity outranks the app id, and never falls back to it — see
+      // lookup_for_identity for why a fallback would undo the correction.
+      const auto estimate = beat_times::lookup_for_identity(data, curated, app.steam_appid, app.name);
 
       if (!estimate) {
         // Ask about it once, in the background. This request is already being answered

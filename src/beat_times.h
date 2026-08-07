@@ -101,4 +101,21 @@ namespace beat_times {
    */
   std::optional<estimate_t> lookup(const dataset_t &data, std::string_view steam_appid, std::string_view name);
 
+  /**
+   * @brief The estimate for a game somebody has told us the identity of.
+   *
+   * A curated title is a correction, and the app id is usually what made the wrong
+   * estimate confident in the first place, so a curated entry never falls back to it:
+   * it answers with its own title or answers with nothing. Falling back would serve the
+   * exact estimate the correction rejected, and it would do so most often when the
+   * curated title is one the dataset does not carry yet — which is the case somebody is
+   * most likely correcting.
+   *
+   * @param curated_title Title from a manual match, or empty when there is none.
+   */
+  std::optional<estimate_t> lookup_for_identity(const dataset_t &data,
+                                                std::string_view curated_title,
+                                                std::string_view steam_appid,
+                                                std::string_view name);
+
 }  // namespace beat_times
