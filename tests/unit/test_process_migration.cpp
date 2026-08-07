@@ -1410,7 +1410,11 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupRejectsUnownedSameAppPro
     usleep(10000);
   }
   ASSERT_TRUE(observed);
-  EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
+  // Nothing carries the current session credential: cleanup is already done
+  // (game quit before cancel). That is success — do not fail closed and brick
+  // later teardown. Foreign generations that only share AppId / attach env must
+  // still be left alone.
+  EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
   EXPECT_EQ(kill(child, 0), 0) << "other-generation gamescope client was signalled";
 }
 
