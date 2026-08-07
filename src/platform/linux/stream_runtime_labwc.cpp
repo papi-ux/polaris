@@ -87,11 +87,8 @@ namespace stream_runtime {
       return cage_display_router::gpu_native_dmabuf_is_safe(hwdevice_type);
     }
 
-    bool should_attempt_gpu_native_cage_capture(
-      const platf::runtime_state_t &runtime_state,
-      platf::mem_type_e hwdevice_type
-    ) {
-      return cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state, hwdevice_type);
+    bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state) {
+      return cage_display_router::should_attempt_gpu_native_cage_capture(runtime_state);
     }
 
     bool should_attempt_headless_extcopy_dmabuf(
@@ -106,6 +103,16 @@ namespace stream_runtime {
       const platf::frame_metadata_t &source_metadata
     ) {
       return cage_display_router::should_disable_headless_extcopy_after_conversion_failure(
+        runtime_state,
+        source_metadata
+      );
+    }
+
+    bool should_disable_windowed_gpu_native_after_conversion_failure(
+      const platf::runtime_state_t &runtime_state,
+      const platf::frame_metadata_t &source_metadata
+    ) {
+      return cage_display_router::should_disable_windowed_gpu_native_after_conversion_failure(
         runtime_state,
         source_metadata
       );

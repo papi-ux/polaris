@@ -611,11 +611,21 @@ namespace cage_display_router {
     return gpu_native_dmabuf_is_safe(hwdevice_type);
   }
 
-  bool should_attempt_gpu_native_cage_capture(
-    const platf::runtime_state_t &runtime_state,
-    platf::mem_type_e hwdevice_type
-  ) {
-    return runtime_state.gpu_native_override_active && gpu_native_dmabuf_is_safe(hwdevice_type);
+  bool should_attempt_gpu_native_cage_capture(const platf::runtime_state_t &runtime_state) {
+    if (!runtime_state.gpu_native_override_active) {
+      return false;
+    }
+
+    // A conversion that already failed once in this process is not retried.
+    // This is adaptive containment rather than a blanket refusal: it keeps the
+    // GPU-native path available to encoders that can actually use it, and
+    // retires it for the ones that cannot, per process.
+    if (auto cached_result = cached_windowed_gpu_native_probe_result();
+        cached_result && !*cached_result) {
+      return false;
+    }
+
+    return true;
   }
 
   bool should_disable_headless_extcopy_after_conversion_failure(
@@ -624,6 +634,15 @@ namespace cage_display_router {
   ) {
     return runtime_state.effective_headless &&
            !runtime_state.gpu_native_override_active &&
+           source_metadata.transport == platf::frame_transport_e::dmabuf &&
+           source_metadata.residency == platf::frame_residency_e::gpu;
+  }
+
+  bool should_disable_windowed_gpu_native_after_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    const platf::frame_metadata_t &source_metadata
+  ) {
+    return runtime_state.gpu_native_override_active &&
            source_metadata.transport == platf::frame_transport_e::dmabuf &&
            source_metadata.residency == platf::frame_residency_e::gpu;
   }
