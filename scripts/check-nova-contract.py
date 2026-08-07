@@ -57,7 +57,14 @@ def reads_for_object(source: str, reader: dict) -> set[str]:
     pattern = re.compile(
         rf'\b{re.escape(reader["receiver"])}\??\.(?:{ACCESSORS})\(\s*"([a-zA-Z_0-9]+)"'
     )
-    return set(pattern.findall(body))
+    # PolarisGameJsonAdapter routes every double through its finiteDouble
+    # helper, so optDouble never appears against the receiver and the accessor
+    # scan above reports those fields as unread. The helper call still names
+    # the receiver and the literal key, so count it as the read it is.
+    helper = re.compile(
+        rf'\bfiniteDouble\(\s*{re.escape(reader["receiver"])}\s*,\s*"([a-zA-Z_0-9]+)"'
+    )
+    return set(pattern.findall(body)) | set(helper.findall(body))
 
 
 def polaris_manifest(repo: Path) -> dict:

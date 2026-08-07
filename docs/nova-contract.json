@@ -60,7 +60,7 @@
       },
       "required_by_nova": {
         "$comment": "Fields Nova reads. Anything else Polaris serves here is informational.",
-        "note": "Nova reads every field this object serves except display_planner, which is served ahead of its consumer; see known_drift."
+        "note": "Nova reads every field this object serves."
       },
       "polaris_emitter": {
         "file": "src/nvhttp.cpp",
@@ -113,11 +113,9 @@
       "$comment": [
         "Nested under game. Per-host, computed once per request from the same fallback",
         "display mode the web planner plans from, and attached to every game unchanged.",
-        "Served ahead of its Nova consumer: the shared kotlinx model already decodes it",
-        "(PolarisGame.DisplayPlannerContract) and its contract test pins the 2560x1600x90",
-        "fixture, but the app's org.json adapter does not read it yet, so every field",
-        "below is also recorded under known_drift until Nova's Resolution row lands.",
-        "The nova_reader receiver names the wiring that adapter is expected to use.",
+        "Nova's adapter reads it since papi-ux/nova#197, and Play Setup's Resolution row",
+        "gates on `available`. The shared model's contract test pins the 2560x1600x90",
+        "fixture on the Nova side; tests/unit/test_display_planner.cpp pins it here.",
         "Unlike the web planner, `hidden` here means unsafe and nothing else; the",
         "advanced flag is its own axis so a client can offer its own advanced toggle."
       ],
@@ -134,7 +132,7 @@
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
-        "function": "fromJson",
+        "function": "parseDisplayPlanner",
         "receiver": "plannerJson"
       },
       "polaris_emitter": {
@@ -162,7 +160,7 @@
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
-        "function": "fromJson",
+        "function": "parseDisplayPlannerChoices",
         "receiver": "choiceJson"
       },
       "polaris_emitter": {
@@ -182,7 +180,7 @@
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
-        "function": "fromJson",
+        "function": "parseDisplayPlannerScaleChoices",
         "receiver": "scaleJson"
       },
       "polaris_emitter": {
@@ -339,48 +337,12 @@
     },
     "polaris_sends_nova_never_reads": {
       "$comment": [
-        "Before 2026-08-07 this was empty: Nova's game adapter read every field Polaris",
-        "served. display_planner inverted that on purpose — Polaris now serves the planner",
-        "the shared kotlinx model was already prepared to decode, and the app adapter wires",
-        "it when the Resolution row lands. The Nova commit that does so prunes these",
-        "entries and, if its receiver names differ from the nova_reader records above,",
-        "corrects those in the same change."
+        "None. display_planner sat here for the day it was served ahead of its consumer;",
+        "papi-ux/nova#197 wired the adapter and the records moved back out, with the",
+        "nova_reader entries above repointed at the functions that now read it."
       ],
-      "game": [
-        "display_planner"
-      ],
-      "session_capture": [],
-      "display_planner": [
-        "advanced_scale_factors",
-        "available",
-        "choices",
-        "recommended_id",
-        "recommended_mode",
-        "recommended_title",
-        "source_aspect_ratio",
-        "source_fps",
-        "source_mode"
-      ],
-      "display_planner_choice": [
-        "advanced",
-        "aspect_ratio",
-        "badge",
-        "custom",
-        "hidden",
-        "id",
-        "intent",
-        "reason",
-        "safe",
-        "scale_factor",
-        "target_mode",
-        "title"
-      ],
-      "display_planner_scale_choice": [
-        "label",
-        "safe",
-        "scale_factor",
-        "target_mode"
-      ]
+      "game": [],
+      "session_capture": []
     },
     "$detail": {
       "session_capture": [
