@@ -17,6 +17,19 @@ No hybrid “nvidia pin” rewrite of conf.
 - `gamescope-polaris` — Valve gamescope + HDR PW patches (`gamescope-hdr` alias)
 - `xdg-desktop-portal-gamescope` — private ScreenCast backend
 
+## CI coverage
+
+`.github/workflows/nix.yml`, scoped by cost:
+
+| Runs | Covers |
+|------|--------|
+| every push (Public Hygiene) | hunk headers and patch declarations, offline |
+| changes under `nix/` or `flake.*` | the patch stacks against their pinned sources; `nix flake check`; every package evaluates |
+| the same, then | `nix build` of `gamescope-polaris` and the portal — the only place the `+polhdr` install check can run |
+| manual and weekly | `nix build` of `polaris-stream`, which is what catches a stale `npmDepsHash` |
+
+Not covered: the home-manager module, and evaluation for `aarch64-linux`.
+
 ## hjem / home-manager example
 
 Wire the flake overlay for packages, then enable the per-user module. A separate
