@@ -234,10 +234,8 @@ case "${1:-}" in
       exit 1
     fi
     # Soft env hint for nested games (PULSE_SINK / PIPEWIRE_NODE).
-    # Polaris itself picks the capture sink: EasyEffects when it is the
-    # host default (FMOD target.object sticks there); otherwise virtual
-    # sink-sunshine-*. Do NOT re-pin streams here — that thrash fought
-    # WirePlumber and killed main-menu audio.
+    # Polaris claims sink-sunshine-* as the session default (stream capture);
+    # do not point children at EasyEffects and do not re-pin sink-inputs here.
     audio_cfg="${POLARIS_CLIENT_AUDIO_CONFIGURATION:-}"
     # Quoted names: shellcheck SC2100 treats unquoted *51 as arithmetic.
     audio_sink="sink-sunshine-surround51"
@@ -273,7 +271,6 @@ case "${1:-}" in
           >/dev/null 2>&1 || true
       fi
     }
-    # Virtual sinks for non-EE isolation (Polaris also creates them).
     ensure_null_sink "sink-sunshine-stereo" \
       "front-left,front-right" \
       "Polaris-stereo"
@@ -285,18 +282,8 @@ case "${1:-}" in
       "Polaris-7.1"
     ensure_null_sink "$audio_sink" "$audio_map" "$audio_desc"
 
-    # Prefer host processing sink for child env when EE/JamesDSP is default
-    # (matches Polaris capture; avoids PULSE_SINK pointing at empty null).
-    host_default="$(pactl get-default-sink 2>/dev/null || true)"
-    case "$host_default" in
-      *easyeffects*|*EasyEffects*|*jamesdsp*|*JamesDSP*|*pulseeffects*|*PulseEffects*)
-        audio_sink="$host_default"
-        echo "polaris-gamescope-session: host default is processing sink [$host_default] — child env uses it" >&2
-        ;;
-    esac
-
     printf '%s\n' "$audio_sink" >"$rt/polaris-gamescope-audio-sink"
-    echo "polaris-gamescope-session: audio env sink=$audio_sink (no re-pin; EasyEffects left running)" >&2
+    echo "polaris-gamescope-session: audio env sink=$audio_sink (host claims default; soft PULSE_SINK hint only)" >&2
 
     # True SDR when POLARIS_CLIENT_HDR is false: force file 0 + no --hdr-enabled.
     # Hybrid (HDR gamescope + SDR encode) is the iPhone chroma disaster; polaris 06 also syncs force.

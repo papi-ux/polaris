@@ -91,7 +91,8 @@ TEST(AudioSinkSelectionTest, SelectsVirtualSinkWhenHostAudioIsDisabled) {
   EXPECT_EQ(sink, "sink-sunshine-stereo");
   EXPECT_TRUE(audio::sink_is_virtual(ctx, sink));
 #ifdef __linux__
-  EXPECT_TRUE(audio::should_route_session_sink_without_default(ctx, sink, false));
+  EXPECT_TRUE(audio::should_claim_default_sink(ctx, sink, false));
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
 #else
   EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
 #endif
@@ -109,11 +110,12 @@ TEST(AudioSinkSelectionTest, SelectsHostSinkWhenHostAudioIsEnabled) {
   EXPECT_EQ(sink, "alsa_output.host");
   EXPECT_FALSE(audio::sink_is_virtual(ctx, sink));
   EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, true));
+  EXPECT_FALSE(audio::should_claim_default_sink(ctx, sink, true));
 
   config::audio.sink = old_sink;
 }
 
-TEST(AudioSinkSelectionTest, CapturesEasyEffectsInsteadOfVirtualIsolation) {
+TEST(AudioSinkSelectionTest, PrefersVirtualStreamSinkOverEasyEffectsDefault) {
   auto old_sink = config::audio.sink;
   config::audio.sink.clear();
   auto ctx = make_sink_context();
@@ -121,10 +123,13 @@ TEST(AudioSinkSelectionTest, CapturesEasyEffectsInsteadOfVirtualIsolation) {
 
   const auto sink = audio::select_sink_name(ctx, 6, false);
 
-  EXPECT_EQ(sink, "easyeffects_sink");
+  EXPECT_EQ(sink, "sink-sunshine-surround51");
   EXPECT_TRUE(audio::host_sink_is_processing(ctx.sink.host));
-  EXPECT_FALSE(audio::sink_is_virtual(ctx, sink));
+  EXPECT_TRUE(audio::sink_is_virtual(ctx, sink));
+#ifdef __linux__
+  EXPECT_TRUE(audio::should_claim_default_sink(ctx, sink, false));
   EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
+#endif
 
   config::audio.sink = old_sink;
 }
@@ -140,8 +145,8 @@ TEST(AudioSinkSelectionTest, ExplicitConfiguredSinkIsEnforced) {
   EXPECT_EQ(sink, "alsa_output.configured");
   EXPECT_FALSE(audio::sink_is_virtual(ctx, sink));
 #ifdef __linux__
-  // Still pin session apps to that sink without clobbering the host default.
-  EXPECT_TRUE(audio::should_route_session_sink_without_default(ctx, sink, false));
+  EXPECT_TRUE(audio::should_claim_default_sink(ctx, sink, false));
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
 #else
   EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
 #endif
@@ -149,7 +154,7 @@ TEST(AudioSinkSelectionTest, ExplicitConfiguredSinkIsEnforced) {
   config::audio.sink = old_sink;
 }
 
-TEST(AudioSinkSelectionTest, ExplicitVirtualSinkIsEnforcedAndRouted) {
+TEST(AudioSinkSelectionTest, ExplicitVirtualSinkIsEnforcedAndClaimed) {
   auto old_sink = config::audio.sink;
   config::audio.sink = "sink-sunshine-surround51";
   auto ctx = make_sink_context();
@@ -159,7 +164,8 @@ TEST(AudioSinkSelectionTest, ExplicitVirtualSinkIsEnforcedAndRouted) {
   EXPECT_EQ(sink, "sink-sunshine-surround51");
   EXPECT_TRUE(audio::sink_is_virtual(ctx, sink));
 #ifdef __linux__
-  EXPECT_TRUE(audio::should_route_session_sink_without_default(ctx, sink, false));
+  EXPECT_TRUE(audio::should_claim_default_sink(ctx, sink, false));
+  EXPECT_FALSE(audio::should_route_session_sink_without_default(ctx, sink, false));
 #endif
 
   config::audio.sink = old_sink;

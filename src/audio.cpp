@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <cstdlib>
 #include <thread>
 
 // lib includes
@@ -200,17 +201,30 @@ namespace audio {
 
     const bool host_audio = config.flags[config_t::HOST_AUDIO];
     const auto sink = select_sink_name(*ref.get(), stream.channelCount, host_audio);
-    const bool route_without_default = should_route_session_sink_without_default(*ref.get(), sink, host_audio);
+    const bool claim_default = should_claim_default_sink(*ref.get(), sink, host_audio);
+    // Re-pin is a legacy escape only when claim is disabled (POLARIS_STREAM_SINK=0).
+    const bool route_without_default =
+      !claim_default && should_route_session_sink_without_default(*ref.get(), sink, host_audio);
 
     BOOST_LOG(info) << "Selected audio sink: "sv << sink;
 
-    // Only the first to start a session may change the default sink
+    // Only the first session may claim/change the default sink (refcounted under the control).
     if (!ref->sink_flag->exchange(true, std::memory_order_acquire)) {
-      // If the selected sink is different than the current one, change sinks.
-      ref->restore_sink = !route_without_default && ref->sink.host != sink;
-      if (route_without_default) {
-        BOOST_LOG(info) << "Linux audio isolation: capturing virtual sink without changing the user's default sink"sv;
-      } else if (ref->restore_sink) {
+      if (claim_default) {
+        BOOST_LOG(info) << "Linux audio: claiming default sink ["sv << sink
+                        << "] for stream session (WirePlumber follow-default)"sv;
+        if (control->claim_default_sink(sink) != 0) {
+          BOOST_LOG(warning) << "Linux audio: could not claim default sink; capture continues, apps may stay on host output"sv;
+        }
+        else {
+          ref->restore_sink = true;
+        }
+      }
+      else if (route_without_default) {
+        BOOST_LOG(info) << "Linux audio isolation: capturing virtual sink without changing the user's default sink (legacy re-pin)"sv;
+      }
+      else if (ref->sink.host != sink) {
+        ref->restore_sink = true;
         if (control->set_sink(sink)) {
           return;
         }
@@ -246,8 +260,7 @@ namespace audio {
     auto next_audio_route_check = std::chrono::steady_clock::now();
 
     while (!shutdown_event->peek()) {
-      // Re-pin session streams that left the capture sink (EE reclaim); 3s poll,
-      // platform side enforces 10s cooldown per sink-input (no 1Hz crackle thrash).
+      // Legacy re-pin only when claim is disabled. Prefer default-sink claim.
       if (route_without_default && std::chrono::steady_clock::now() >= next_audio_route_check) {
         control->route_process_audio_to_sink(sink);
         next_audio_route_check = std::chrono::steady_clock::now() + 3s;
@@ -336,21 +349,14 @@ namespace audio {
   std::string select_sink_name(const audio_ctx_t &ctx, int channels, bool host_audio) {
     // Order of priority:
     // 1. Explicit audio_sink from web UI / conf — always enforced when set
-    // 2. Host processing sink (EasyEffects etc.) when host_audio is off — games
-    //    rebind there after menu reinit; virtual isolation + re-pin loses
-    // 3. Virtual sink by channel count when host_audio is off, OR host default
-    //    is an unusable placeholder (XLRDock null, "do not use")
-    // 4. Host/default sink (only if usable)
+    // 2. Virtual stream sink by channel count when isolating (host_audio off) or
+    //    host default is unusable — claim becomes the session default
+    // 3. Host/default sink (only if usable)
+    // Never prefer EasyEffects/JamesDSP as the capture target: claim the virtual
+    // sink so WirePlumber moves streams instead of fighting target.object.
     if (!config::audio.sink.empty()) {
       BOOST_LOG(info) << "Linux audio: using configured audio_sink ["sv << config::audio.sink << "]"sv;
       return config::audio.sink;
-    }
-
-    if (!host_audio && host_sink_is_processing(ctx.sink.host)) {
-      BOOST_LOG(info) << "Linux audio: host default ["sv << ctx.sink.host
-                      << "] is a processing sink; capturing it instead of virtual isolation "
-                         "(FMOD/EasyEffects target.object cannot be overridden by re-pin)"sv;
-      return ctx.sink.host;
     }
 
     const bool prefer_virtual =
@@ -359,7 +365,12 @@ namespace audio {
     if (prefer_virtual) {
       auto virtual_sink = select_virtual_sink_for_channels(ctx, channels);
       if (!virtual_sink.empty()) {
-        if (host_audio && host_sink_is_unusable_for_stream(ctx.sink.host)) {
+        if (!host_audio && host_sink_is_processing(ctx.sink.host)) {
+          BOOST_LOG(info) << "Linux audio: host default ["sv << ctx.sink.host
+                          << "] is a processing sink; using virtual stream sink ["sv
+                          << virtual_sink << "] (will claim as session default)"sv;
+        }
+        else if (host_audio && host_sink_is_unusable_for_stream(ctx.sink.host)) {
           BOOST_LOG(info) << "Linux audio: host default ["sv << ctx.sink.host
                           << "] is unusable for stream capture; using virtual sink ["sv
                           << virtual_sink << "]"sv;
@@ -382,17 +393,63 @@ namespace audio {
             sink == ctx.sink.null->surround71);
   }
 
+  bool stream_sink_claim_enabled() {
+#ifdef __linux__
+    if (const char *env = std::getenv("POLARIS_STREAM_SINK")) {
+      const std::string_view v {env};
+      if (v == "0" || v == "false" || v == "no" || v == "off") {
+        return false;
+      }
+    }
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  bool should_claim_default_sink(const audio_ctx_t &ctx, const std::string &sink, bool host_audio) {
+#ifdef __linux__
+    if (!stream_sink_claim_enabled() || sink.empty()) {
+      return false;
+    }
+    // Never claim a processing graph as the "stream" sink.
+    if (host_sink_is_processing(sink)) {
+      return false;
+    }
+    // Isolate onto virtual/null stream sinks, or an explicit configured sink
+    // that is not already the host default.
+    if (sink_is_virtual(ctx, sink)) {
+      return true;
+    }
+    if (!config::audio.sink.empty() && sink == config::audio.sink && sink != ctx.sink.host) {
+      return true;
+    }
+    // host_audio off but no virtual sinks: still claim if we selected something
+    // other than the current host default so apps follow capture.
+    if (!host_audio && sink != ctx.sink.host) {
+      return true;
+    }
+    return false;
+#else
+    (void) ctx;
+    (void) sink;
+    (void) host_audio;
+    return false;
+#endif
+  }
+
   bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio) {
 #ifdef __linux__
     if (sink.empty()) {
       return false;
     }
-    // Never thrash re-pin against EasyEffects — capture host instead (select_sink_name).
+    // Claim path replaces re-pin. Keep re-pin only as an explicit legacy mode.
+    if (should_claim_default_sink(ctx, sink, host_audio)) {
+      return false;
+    }
     if (host_sink_is_processing(ctx.sink.host) || host_sink_is_processing(sink)) {
       return false;
     }
-    // Pin session apps to the capture sink when isolating (host_audio off) or when
-    // we were forced onto a virtual sink because the host default is unusable.
     if (!host_audio) {
       return true;
     }
@@ -457,14 +514,22 @@ namespace audio {
 
   void stop_audio_control(audio_ctx_t &ctx) {
     // restore audio-sink if applicable
-    if (!ctx.restore_sink) {
+    if (!ctx.restore_sink || !ctx.control) {
       return;
     }
 
-    // Change back to the host sink, unless there was none
+    // Prefer refcounted claim release (restores pre-claim default, skips ghosts).
+    // release_default_sink() returns 0 only when a real claim was released;
+    // the base no-op returns -1 so legacy set_sink restore still runs (Windows).
+    if (ctx.control->release_default_sink() == 0) {
+      return;
+    }
+
+    // Fallback: host sink from context, unless it is a stale stream sink name.
     const std::string &sink = ctx.sink.host.empty() ? config::audio.sink : ctx.sink.host;
-    if (!sink.empty()) {
-      // Best effort, it's allowed to fail
+    if (!sink.empty() && !host_sink_is_processing(sink) &&
+        sink.find("sink-sunshine") == std::string::npos &&
+        sink.find("polaris-speaker") == std::string::npos) {
       ctx.control->set_sink(sink);
     }
   }

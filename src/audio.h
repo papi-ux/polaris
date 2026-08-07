@@ -102,11 +102,18 @@ namespace audio {
 
   bool sink_is_virtual(const audio_ctx_t &ctx, const std::string &sink);
 
-  // EasyEffects / JamesDSP style sinks pin streams via WirePlumber target.object;
-  // virtual-sink re-pin never sticks (silent stream after game audio reinit).
+  // EasyEffects / JamesDSP style sinks pin streams via WirePlumber target.object.
+  // Used for diagnostics only — stream isolation claims a virtual sink as default
+  // instead of capturing the processing graph or re-pinning sink-inputs.
   bool host_sink_is_processing(const std::string &sink_name);
 
+  // Legacy re-pin path (disabled when claim is active). Prefer should_claim_default_sink.
   bool should_route_session_sink_without_default(const audio_ctx_t &ctx, const std::string &sink, bool host_audio);
+
+  // Claim the stream capture sink as the session default so
+  // WirePlumber follows it. Disabled with POLARIS_STREAM_SINK=0.
+  bool stream_sink_claim_enabled();
+  bool should_claim_default_sink(const audio_ctx_t &ctx, const std::string &sink, bool host_audio);
 
   /**
    * @brief Get the reference to the audio context.
