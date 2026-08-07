@@ -52,19 +52,16 @@ in
       lib.hasInfix "shaders-path" s || lib.hasInfix "gamescopereaper" s
     ) (old.patches or [ ]))
     ++ [
-      # ValveSoftware/gamescope#2270 — SPA xBGR_210LE + HDR metadata + renegotiate.
-      # DROP when #2270 merges. Grep: POLARIS-UPSTREAM-REMOVE.*2270
-      ../../patches/gamescope/01-pipewire-xbgr-210le-2270.patch
+      # HDR capture stack (format negotiation + optional cursor + stamp).
+      # DROP 10/11 when equivalent upstream lands; stamp is Polaris-only.
+      ../../patches/gamescope/10-pipewire-offer-10-bit-BT2020-PQ.patch
+      ../../patches/gamescope/11-pipewire-composite-cursor.patch
+      ../../patches/gamescope/12-polaris-stamp-version-polhdrN.patch
+      # Polaris-only keepers until proven redundant with 10:
       ../../patches/gamescope/02-headless-hdr-colorimetry.patch
       ../../patches/gamescope/03-pipewire-prefer-dmabuf.patch
-      # Screenshot SDR/HDR LUTs on PW paint (locked to EOTF).
-      ../../patches/gamescope/04-pipewire-color-mgmt.patch
       # ValveSoftware/gamescope#2217: headless prefers discrete GPU if unpinned.
-      # DROP when #2217 merges. Grep: POLARIS-UPSTREAM-REMOVE.*2217
       ../../patches/gamescope/06-prefer-discrete-gpu-2217.patch
-      # Companion to #2270: paint_pipewire EOTF_PQ + SDR-on-HDR screenshot defaults.
-      # DROP when upstream paint matches SPA HDR metadata. Grep: companion to.*2270
-      ../../patches/gamescope/07-paint-pipewire-eotf-pq.patch
     ];
 
   # Master dropped glm_include_dir / stb_include_dir meson options.
@@ -86,9 +83,30 @@ in
       cp -f subprojects/packagefiles/stb/meson.build subprojects/stb/meson.build
     '';
 
+  # Capability stamp from patch 12 — fail the build if patches did not apply.
+  doInstallCheck = true;
+  installCheckPhase = ''
+    runHook preInstallCheck
+    # wrapProgram may hide --version on the outer wrapper; try both.
+    # Ignore --version exit status: only the version string matters, and pipefail
+    # would fail the check if gamescope exits non-zero after printing it.
+    ver_out="$("$out/bin/gamescope" --version 2>&1 || true)"
+    if ! printf '%s\n' "$ver_out" | grep -q '+polhdr'; then
+      if [ -x "$out/bin/.gamescope-wrapped" ]; then
+        ver_out="$("$out/bin/.gamescope-wrapped" --version 2>&1 || true)"
+      fi
+      if ! printf '%s\n' "$ver_out" | grep -q '+polhdr'; then
+        echo "gamescope-polaris: +polhdr marker missing from --version" >&2
+        printf '%s\n' "$ver_out" || true
+        exit 1
+      fi
+    fi
+    runHook postInstallCheck
+  '';
+
   meta = old.meta // {
     description = "${
       old.meta.description or "gamescope"
-    } (polaris HDR PW stack; #2270/#2217; master ${lib.substring 0 7 gamescopeRev})";
+    } (polaris HDR PW +polhdr2; #2217; master ${lib.substring 0 7 gamescopeRev})";
   };
 })

@@ -1,0 +1,22 @@
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index ff9ae1f..a66e886 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -2341,11 +2341,14 @@ static void paint_pipewire()
+ 	frameInfo.allowVRR             = false;
+ 	frameInfo.bFadingOut           = false;
+ 
+-	// Apply screenshot-style color management.
++	// POLARIS-UPSTREAM-REMOVE: companion to ValveSoftware/gamescope#2270
++	// Screenshot SDR/HDR LUT sets locked to outputEncodingEOTF (restored — raw
++	// composite with applyOutputColorMgmt=false produced no video for client).
++	const auto &pipewireLuts = g_bOutputHDREnabled ? g_ScreenshotColorMgmtLutsHDR : g_ScreenshotColorMgmtLuts;
+ 	for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
+ 	{
+-		frameInfo.lut3D[nInputEOTF]     = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut3d;
+-		frameInfo.shaperLut[nInputEOTF] = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut1d;
++		frameInfo.lut3D[nInputEOTF]     = pipewireLuts[nInputEOTF].vk_lut3d;
++		frameInfo.shaperLut[nInputEOTF] = pipewireLuts[nInputEOTF].vk_lut1d;
+ 	}
+ 
+ 	const uint64_t ulFocusAppId = s_pPipewireBuffer->gamescope_info.focus_appid;

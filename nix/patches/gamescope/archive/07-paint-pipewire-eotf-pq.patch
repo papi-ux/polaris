@@ -1,0 +1,26 @@
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+--- a/src/steamcompmgr.cpp	2026-07-29 02:57:21.511111321 +0200
++++ b/src/steamcompmgr.cpp
+@@ -314,6 +314,10 @@
+ static const gamescope_color_mgmt_t k_ScreenshotColorMgmtHDR =
+ {
+ 	.enabled = true,
++	// POLARIS-UPSTREAM-REMOVE: companion to ValveSoftware/gamescope#2270
++	// BT.2408 reference white; no gamut widen — polaris session defaults.
++	.sdrGamutWideness = 0,
++	.flSDROnHDRBrightness = 203.f,
+ 	.displayColorimetry = displaycolorimetry_2020,
+ 	.displayEOTF = EOTF_PQ,
+ 	.outputEncodingColorimetry = displaycolorimetry_2020,
+@@ -2337,7 +2341,10 @@
+ 
+ 	struct FrameInfo_t frameInfo = {};
+ 	frameInfo.applyOutputColorMgmt = true;
+-	frameInfo.outputEncodingEOTF   = EOTF_Gamma22;
++	// POLARIS-UPSTREAM-REMOVE: companion to ValveSoftware/gamescope#2270
++	// SPA advertises BT.2020/PQ for xBGR_210LE when HDR is on; paint must match
++	// or remote clients get washed hybrid PQ+SDR (Gamma22 encode + HDR metadata).
++	frameInfo.outputEncodingEOTF   = g_bOutputHDREnabled ? EOTF_PQ : EOTF_Gamma22;
+ 	frameInfo.allowVRR             = false;
+ 	frameInfo.bFadingOut           = false;
+ 

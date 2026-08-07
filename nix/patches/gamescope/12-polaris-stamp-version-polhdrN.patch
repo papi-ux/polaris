@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Enrico=20B=C3=BChler?= <enrico.buehler@unom.io>
+Date: Tue, 28 Jul 2026 15:42:01 +0200
+Subject: [PATCH] polaris: stamp the version banner with +polhdrN
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+polaris decides a session's shape before the virtual display exists — the
+bit depth in the Welcome (irrevocable; a PQ stream on an 8-bit encoder is a
+hard error), and whether it must composite the cursor host-side before the
+encoder is even opened. Both answers therefore have to be static properties of
+the resolved binary rather than something negotiated later.
+
+The number is a monotonic patch-set revision, so one probe answers both:
+  +polhdr1  10-bit BT.2020/PQ capture formats
+  +polhdr2  …and --pipewire-composite-cursor
+
+NOT for upstream: drop this once the functional patches land there and plain
+version floors answer the same questions.
+---
+ src/meson.build | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/meson.build b/src/meson.build
+index 662f752..af48d01 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -177,7 +177,12 @@ compiler_version = cc.version()
+ 
+ vcs_tag_cmd = ['git', 'describe', '--always', '--tags', '--dirty=+']
+ vcs_tag = run_command(vcs_tag_cmd, check: false).stdout().strip()
+-version_tag = vcs_tag + ' (' + compiler_name + ' ' + compiler_version + ')'
++# polaris carries patches on top of upstream; stamp the banner so a host can probe what this
++# binary can do from `gamescope --version` alone, before it has to commit a session to it (the
++# polaris/1 Welcome is irrevocable). The number is a monotonic PATCH-SET revision:
++#   +polhdr1 — 10-bit BT.2020/PQ capture formats on the PipeWire node
++#   +polhdr2 — …and `--pipewire-composite-cursor`
++version_tag = vcs_tag + '+polhdr2' + ' (' + compiler_name + ' ' + compiler_version + ')'
+ 
+ gamescope_version_conf = configuration_data()
+ gamescope_version_conf.set('VCS_TAG', version_tag)
