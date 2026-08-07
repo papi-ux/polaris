@@ -32,14 +32,18 @@
         "launch_mode",
         "mangohud",
         "name",
+        "platform",
         "play_time",
+        "runtime",
         "source",
         "steam_appid",
         "steam_launch"
       ],
       "optional": [
         "beat_time",
-        "play_time"
+        "platform",
+        "play_time",
+        "runtime"
       ],
       "nova_reader": {
         "$comment": [
@@ -245,9 +249,7 @@
       "game": [
         "launcher_source",
         "launcher_detail",
-        "platform",
         "platform_label",
-        "runtime",
         "runtime_label"
       ]
     },
@@ -267,6 +269,15 @@
         "Resolved. Nova read vaapi_vendor and Polaris never served it; vaapi.cpp logged the",
         "string at encoder creation without publishing it. It is now recorded in stats and",
         "served in this object, which is what names the driver generation in a crash report."
+      ],
+      "game": [
+        "platform and runtime are now served, derived from the Lutris runner persisted at",
+        "import; they are omitted for apps whose runtime is not recorded, which Nova renders",
+        "as no badge. The remaining four are deliberate: launcher_source falls back to source",
+        "in Nova and would only matter if Polaris distinguished imported-from vs launched-via;",
+        "launcher_detail has no host-side value to serve; platform_label and runtime_label",
+        "exist so a server can label a value the client cannot map, and every value served",
+        "today is one Nova already maps."
       ]
     }
   }

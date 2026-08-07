@@ -369,6 +369,7 @@ namespace proc {
     std::string steam_launch_mode = std::string {STEAM_LAUNCH_MODE_DIRECT};
     std::string game_category;  // "fast_action", "cinematic", "desktop", "vr", or ""
     std::string source;         // "steam", "lutris", "heroic", or "manual"
+    std::string lutris_runner;  // Lutris runner id persisted at import ("wine", "linux", ...), or ""
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
@@ -384,6 +385,20 @@ namespace proc {
     int  scale_factor;
     std::chrono::seconds exit_timeout;
   };
+
+  /**
+   * @brief Platform and runtime derived from a Lutris runner id.
+   *
+   * Nova composes its library metadata line from these ("Lutris · Windows ·
+   * Wine") and renders nothing for an empty value, so unknown stays empty
+   * rather than guessed: a wrong label is worse than no label.
+   */
+  struct launcher_identity_t {
+    std::string platform;  ///< "linux", "windows", or "" when unknown.
+    std::string runtime;   ///< "native", "wine", "proton", "steam", "umu", or "".
+  };
+
+  launcher_identity_t launcher_identity_from_lutris_runner(const std::string &runner);
 
   enum class session_stop_outcome_t {
     allowed,
