@@ -6884,11 +6884,22 @@ namespace nvhttp {
       const auto kind_is_missing = [&](game_artwork::kind_e kind) {
         return !game_artwork::find_cached_asset(appdata, app->uuid, kind).has_value();
       };
-      const bool any_kind_missing =
-        kind_is_missing(game_artwork::kind_e::poster) ||
-        kind_is_missing(game_artwork::kind_e::hero) ||
-        kind_is_missing(game_artwork::kind_e::logo) ||
-        kind_is_missing(game_artwork::kind_e::icon);
+      static constexpr std::array<game_artwork::kind_e, 4> resolvable_kinds {
+        game_artwork::kind_e::poster,
+        game_artwork::kind_e::hero,
+        game_artwork::kind_e::logo,
+        game_artwork::kind_e::icon,
+      };
+      // Whatever is still missing once local promotion and the free Steam assets have run is
+      // exactly the set this request goes on to ask a remote provider for, so it is also what
+      // the response reports as requested.
+      std::vector<game_artwork::kind_e> requested_kinds;
+      for (const auto kind : resolvable_kinds) {
+        if (kind_is_missing(kind)) {
+          requested_kinds.push_back(kind);
+        }
+      }
+      const bool any_kind_missing = !requested_kinds.empty();
 
       if (any_kind_missing && nonblank_artwork_api_key(api_key)) {
         try {
@@ -6934,7 +6945,35 @@ namespace nvhttp {
         }
       }
 
-      const auto manifest = current_artwork_manifest(appdata, app->uuid);
+      auto manifest = current_artwork_manifest(appdata, app->uuid);
+
+      // Clients cannot tell a successful no-op from a silent failure by diffing a manifest,
+      // so the response says what this call actually did. Nova refuses a resolve response
+      // without this block, which is why its library artwork update reported the server as
+      // unsupported against every build that has ever shipped.
+      std::vector<game_artwork::kind_e> remaining_kinds;
+      for (const auto kind : requested_kinds) {
+        if (kind_is_missing(kind)) {
+          remaining_kinds.push_back(kind);
+        }
+      }
+
+      auto &resolution = manifest["resolution"];
+      resolution["status"] =
+        requested_kinds.empty() ? "healthy" :
+        remaining_kinds.empty() ? "updated" :
+                                  "partial_failure";
+      // custom_preserved is the client's call: it knows about studio-protected artwork that
+      // the host has no record of.
+      resolution["requested_kinds"] = nlohmann::json::array();
+      for (const auto kind : requested_kinds) {
+        resolution["requested_kinds"].push_back(std::string(game_artwork::kind_name(kind)));
+      }
+      resolution["remaining_kinds"] = nlohmann::json::array();
+      for (const auto kind : remaining_kinds) {
+        resolution["remaining_kinds"].push_back(std::string(game_artwork::kind_name(kind)));
+      }
+
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
       response->write(manifest.dump(), headers);
