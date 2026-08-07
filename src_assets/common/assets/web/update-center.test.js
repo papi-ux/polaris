@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildManualInstallCommand,
+  buildRepositoryUpgradeCommand,
   buildUpdateCenterState,
   selectReleaseAsset,
 } from './update-center.js'
@@ -520,5 +521,70 @@ describe('Update Center release awareness', () => {
     expect(state.asset).toBeNull()
     expect(state.installCommand).toBe('')
     expect(state.canCopyInstallCommand).toBe(false)
+  })
+})
+
+describe('repository upgrades', () => {
+  const repositoryHost = {
+    platform: 'linux',
+    distro: { id: 'fedora', version_id: '44' },
+    repository_configured: true,
+    repository_upgrade_command: 'sudo dnf upgrade polaris',
+  }
+
+  it('offers nothing when the host has no repository configured', () => {
+    expect(buildRepositoryUpgradeCommand({ ...repositoryHost, repository_configured: false })).toBe('')
+  })
+
+  it('does not invent a command the host did not send', () => {
+    // A host that reports a repository but no command is one whose family we do
+    // not serve. Guessing `dnf upgrade` there would be advice that cannot work.
+    expect(buildRepositoryUpgradeCommand({ ...repositoryHost, repository_upgrade_command: '' })).toBe('')
+  })
+
+  it('uses the command the host sent rather than rebuilding it', () => {
+    const ostree = { ...repositoryHost, repository_upgrade_command: 'rpm-ostree upgrade' }
+
+    expect(buildRepositoryUpgradeCommand(ostree)).toContain('rpm-ostree upgrade')
+    expect(buildRepositoryUpgradeCommand(ostree)).not.toContain('dnf')
+  })
+
+  it('restarts Polaris after upgrading, like the download path does', () => {
+    expect(buildRepositoryUpgradeCommand(repositoryHost)).toContain('systemctl --user restart polaris')
+  })
+
+  it('prefers the repository command over the download command', () => {
+    const state = buildUpdateCenterState({
+      currentVersion: '1.3.6',
+      latestRelease: {
+        tag_name: 'v1.3.7',
+        html_url: 'https://example.invalid/release',
+        assets: [{
+          name: 'Polaris-fedora44-x86_64.rpm',
+          browser_download_url: 'https://example.invalid/Polaris-fedora44-x86_64.rpm',
+        }],
+      },
+      host: repositoryHost,
+    })
+
+    expect(state.installCommand).toContain('sudo dnf upgrade polaris')
+    expect(state.installCommand).not.toContain('wget')
+  })
+
+  it('still serves the download command to a host without the repository', () => {
+    const state = buildUpdateCenterState({
+      currentVersion: '1.3.6',
+      latestRelease: {
+        tag_name: 'v1.3.7',
+        html_url: 'https://example.invalid/release',
+        assets: [{
+          name: 'Polaris-fedora44-x86_64.rpm',
+          browser_download_url: 'https://example.invalid/Polaris-fedora44-x86_64.rpm',
+        }],
+      },
+      host: { ...repositoryHost, repository_configured: false },
+    })
+
+    expect(state.installCommand).toContain('wget --output-document=')
   })
 })

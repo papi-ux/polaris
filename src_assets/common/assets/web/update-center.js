@@ -154,6 +154,20 @@ export function buildManualInstallCommand(asset, host = {}) {
 }
 
 
+export function buildRepositoryUpgradeCommand(host = {}) {
+  if (!host.repository_configured) return ''
+
+  // The command comes from the host rather than being rebuilt here. Only the
+  // host knows whether this is an ostree image, where dnf is not the thing that
+  // changes the system and `dnf upgrade` is the same shape of wrong answer as
+  // `usermod -aG input` was on Bazzite.
+  const command = String(host.repository_upgrade_command || '').trim()
+  if (!command) return ''
+
+  return `${command} &&\nsystemctl --user restart polaris`
+}
+
+
 function buildActionMetadata(status, asset, installCommand, releaseUrl) {
   if (status === 'update_available') {
     if (installCommand) {
@@ -293,7 +307,13 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
 
   const asset = selectReleaseAsset(candidateRelease, host)
   const packageFamily = normalizeToken(asset?.packageFamily || inferPackageFamily(host))
-  const installCommand = asset ? buildManualInstallCommand(asset, { ...host, packageFamily }) : ''
+  // A configured repository wins over the download command: it upgrades the
+  // same package with one line and no exact filename to get wrong. The download
+  // path stays for hosts without the repository, which is still every host that
+  // has not opted in.
+  const repositoryCommand = buildRepositoryUpgradeCommand(host)
+  const installCommand = repositoryCommand ||
+    (asset ? buildManualInstallCommand(asset, { ...host, packageFamily }) : '')
   const releaseUrl = candidateRelease.html_url || ''
   const action = buildActionMetadata(status, asset, installCommand, releaseUrl)
 
