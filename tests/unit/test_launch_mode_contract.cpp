@@ -51,3 +51,35 @@ TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHo
   EXPECT_EQ(contract.at("preferred_mode"), "host_virtual_display");
   EXPECT_EQ(contract.at("recommended_mode"), "host_virtual_display");
 }
+
+#ifdef __linux__
+  #include <src/platform/linux/stream_display_policy.h>
+
+// The client-settings POST validator used to hardcode four ids while
+// allowed_modes advertised the full registry, so gamescope_stream and
+// headless_dongle were advertised and then rejected with 400. The validator now
+// delegates to stream_display_policy::selection_valid - the same check
+// apply_selection itself runs - and this pins that they can never disagree.
+TEST(LaunchModeContractTests, EveryAdvertisedModeVerdictMatchesTheValidator) {
+  for (const bool virtual_display_available : {false, true}) {
+    for (const auto &option : stream_display_policy::mode_options(virtual_display_available)) {
+      std::string error;
+      const bool valid = stream_display_policy::selection_valid(option.value, error);
+      if (option.available) {
+        EXPECT_TRUE(valid) << option.value << ": advertised available but rejected: " << error;
+      } else {
+        EXPECT_FALSE(valid) << option.value << ": advertised unavailable but accepted";
+        EXPECT_FALSE(error.empty()) << option.value << ": rejection must carry the host's reason";
+      }
+    }
+  }
+}
+
+TEST(LaunchModeContractTests, ReservedAndUnknownIdsAreRejectedWithGuidance) {
+  for (const auto *id : {"family_isolated", "headless_evdi", "not_a_mode"}) {
+    std::string error;
+    EXPECT_FALSE(stream_display_policy::selection_valid(id, error)) << id;
+    EXPECT_NE(error.find("known stream path id"), std::string::npos) << id;
+  }
+}
+#endif

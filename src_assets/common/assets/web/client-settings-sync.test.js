@@ -45,6 +45,7 @@ describe('client settings sync helpers', () => {
     expect(streamDisplayModeAvailable('family_isolated')).toBe(false)
     expect(streamDisplayModeAvailable('headless_evdi')).toBe(false)
     expect(labelForStreamDisplayMode('gamescope_stream')).toBe('Gamescope Stream')
+    expect(labelForStreamDisplayMode('headless_dongle')).toBe('Headless Dongle')
 
     const labwc = applyStreamDisplayModeToConfig({}, 'headless_stream')
     expect(labwc.linux_stream_mode).toBe('headless_stream')

@@ -344,6 +344,42 @@
         "variable": "output",
         "style": "subscript"
       }
+    },
+    "client_settings_mode_option": {
+      "$comment": [
+        "One entry of capabilities.modes in GET /polaris/v1/client-settings - the",
+        "host-authoritative launch-mode catalog (per-mode availability, server",
+        "labels, disable reasons, and the private/host grouping). Guarded because",
+        "the client-settings surface carried the picker feed with zero drift",
+        "protection (roadmap item: server-authoritative mode pickers). The POST",
+        "validator accepts exactly the ids this catalog can advertise as",
+        "available - stream_display_policy::selection_valid is the shared truth.",
+        "group/unavailable_reason and the runtime/capture/topology vocabulary",
+        "ship ahead of their Nova consumer - see known_drift."
+      ],
+      "fields": [
+        "available",
+        "capture",
+        "group",
+        "label",
+        "reason",
+        "restart_required",
+        "runtime",
+        "topology",
+        "unavailable_reason",
+        "value"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseModeOptions",
+        "receiver": "mode"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "stream_display_mode_options_json",
+        "style": "initializer_list",
+        "declaration": "modes.push_back({"
+      }
     }
   },
   "known_drift": {
@@ -370,7 +406,14 @@
         "nova_reader entries above repointed at the functions that now read it."
       ],
       "game": [],
-      "session_capture": []
+      "session_capture": [],
+      "client_settings_mode_option": [
+        "capture",
+        "group",
+        "runtime",
+        "topology",
+        "unavailable_reason"
+      ]
     },
     "$detail": {
       "session_capture": [

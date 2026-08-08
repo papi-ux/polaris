@@ -1267,13 +1267,21 @@ namespace nvhttp {
              "host_virtual_display"s,
              "windowed_stream"s
            }) {
+        const bool available = selection != "host_virtual_display" || host_virtual_display_available();
+        const bool private_group = selection == "headless_stream" || selection == "windowed_stream";
         modes.push_back({
+          // Same shape as the Linux branch so clients parse one contract;
+          // the runtime/capture/topology vocabulary is Linux-only and empty here.
           {"value", selection},
           {"label", stream_display_mode_label_for_selection(selection)},
-          {"available", selection != "host_virtual_display" || host_virtual_display_available()},
-          {"unavailable_reason", ""},
+          {"available", available},
+          {"unavailable_reason", available ? "" : "Host virtual display is not available on this host."},
           {"restart_required", true},
-          {"reason", stream_display_mode_reason_for_selection(selection)}
+          {"reason", stream_display_mode_reason_for_selection(selection)},
+          {"group", private_group ? "private" : "host"},
+          {"runtime", ""},
+          {"capture", ""},
+          {"topology", ""},
         });
       }
 #endif
@@ -6687,6 +6695,17 @@ namespace nvhttp {
 
             std::string error;
             stream_display_mode = body["stream_display_mode"].get<std::string>();
+#ifdef __linux__
+            // Delegate to the policy layer's own validity check so this
+            // validator can never reject a mode the same response's
+            // allowed_modes/capabilities just advertised (it used to hardcode
+            // four ids and 400 gamescope_stream/headless_dongle). The error is
+            // the host's real reason for registered-but-unavailable modes.
+            if (!stream_display_policy::selection_valid(*stream_display_mode, error)) {
+              write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+#else
             if (*stream_display_mode != "headless_stream" &&
                 *stream_display_mode != "desktop_display" &&
                 *stream_display_mode != "host_virtual_display" &&
@@ -6695,6 +6714,7 @@ namespace nvhttp {
               write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
+#endif
           }
 
           std::string display_mode = named_cert_p->display_mode;
