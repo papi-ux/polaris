@@ -777,61 +777,196 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
   stream_stats::update_stream_active(false);
 }
 
-// The T0-T2 rings are global and never reset (unlike the hot-field atomics
-// above, which update_stream_active(false) can't touch either, but those are
-// tested via exact-delta instead). Other tests, and potentially a live
-// route, may have already pushed samples before this one runs, so a
-// before/after delta on p50/p99 wouldn't be reliable - percentiles aren't
-// additive. Instead this flood-fills the ring past its fixed capacity with
-// one known value, which deterministically leaves the entire ring holding
-// only that value regardless of prior state.
-TEST(StreamStatsSessionTimingTests, RecordFrameTimingFloodFillProducesKnownPercentiles) {
+// P0-3A: T0-T2 timing state is now per-session, keyed by device_uuid, with
+// real start/stop lifecycle primitives (mirroring add_client()/remove_client()
+// in stream.cpp). That gives every test below a genuinely clean, isolated
+// slate via a unique uuid + start_session_timing() - no more need to
+// flood-fill past a shared ring's capacity to drown out other tests' state.
+
+TEST(StreamStatsSessionTimingTests, RecordFrameTimingReportsExactPercentilesForAFreshSession) {
   using namespace std::chrono;
+  const std::string uuid = "test-uuid-fresh-session";
   const auto t0 = steady_clock::now();
   const auto t1 = t0 + milliseconds(3);
   const auto t2 = t1 + milliseconds(2);
 
-  for (int i = 0; i < 600; ++i) {
-    stream_stats::record_frame_timing(t0, t1, t2);
+  stream_stats::start_session_timing(uuid);
+  for (int i = 0; i < 10; ++i) {
+    stream_stats::record_frame_timing(uuid, t0, t1, t2);
   }
 
-  const auto timing = stream_stats::get_session_timing();
+  const auto timing = stream_stats::get_session_timing(uuid);
+
+  EXPECT_TRUE(timing.session_active);
+  EXPECT_TRUE(timing.ring_complete);
+  EXPECT_NE(timing.epoch_start_ns, 0u);
 
   EXPECT_DOUBLE_EQ(timing.capture_to_encode.p50_ms, 3.0);
   EXPECT_DOUBLE_EQ(timing.capture_to_encode.p99_ms, 3.0);
-  EXPECT_EQ(timing.capture_to_encode.sample_count, 512);
+  EXPECT_EQ(timing.capture_to_encode.sample_count, 10);
 
   EXPECT_DOUBLE_EQ(timing.encode_to_send.p50_ms, 2.0);
-  EXPECT_DOUBLE_EQ(timing.encode_to_send.p99_ms, 2.0);
-  EXPECT_EQ(timing.encode_to_send.sample_count, 512);
+  EXPECT_EQ(timing.encode_to_send.sample_count, 10);
 
   EXPECT_DOUBLE_EQ(timing.capture_to_send.p50_ms, 5.0);
-  EXPECT_DOUBLE_EQ(timing.capture_to_send.p99_ms, 5.0);
-  EXPECT_EQ(timing.capture_to_send.sample_count, 512);
+  EXPECT_EQ(timing.capture_to_send.sample_count, 10);
+
+  stream_stats::stop_session_timing(uuid);
 }
 
-// Mixing two distinct flood-filled values should keep p50 and p99 both
-// within the [min, max] of what was actually pushed - this doesn't assume a
-// specific interpolation method or ordering, just that percentiles can't
-// invent values outside the observed range.
+TEST(StreamStatsSessionTimingTests, SessionWithNoRecordedFramesReportsActiveButEmpty) {
+  const std::string uuid = "test-uuid-active-empty";
+
+  stream_stats::start_session_timing(uuid);
+  const auto timing = stream_stats::get_session_timing(uuid);
+
+  EXPECT_TRUE(timing.session_active);
+  EXPECT_EQ(timing.capture_to_encode.sample_count, 0);
+  EXPECT_EQ(timing.encode_to_send.sample_count, 0);
+  EXPECT_EQ(timing.capture_to_send.sample_count, 0);
+
+  stream_stats::stop_session_timing(uuid);
+}
+
+TEST(StreamStatsSessionTimingTests, RecordFrameTimingIsANoOpForASessionThatWasNeverStarted) {
+  using namespace std::chrono;
+  const std::string uuid = "test-uuid-never-started";
+  const auto t0 = steady_clock::now();
+
+  // No start_session_timing() call - there is nowhere safe to attribute
+  // this sample, so it must be silently dropped rather than crash or
+  // fabricate a phantom session.
+  stream_stats::record_frame_timing(uuid, t0, t0, t0);
+
+  const auto timing = stream_stats::get_session_timing(uuid);
+  EXPECT_FALSE(timing.session_active);
+  EXPECT_EQ(timing.capture_to_encode.sample_count, 0);
+}
+
+// The fix this whole slice is about: two concurrent sessions (Polaris runs
+// one independent encoder per client, default max_sessions 2) must not see
+// each other's frame timings.
+TEST(StreamStatsSessionTimingTests, TwoConcurrentSessionsDoNotShareTimingState) {
+  using namespace std::chrono;
+  const std::string uuid_a = "test-uuid-concurrent-a";
+  const std::string uuid_b = "test-uuid-concurrent-b";
+  const auto t0 = steady_clock::now();
+  const auto fast = t0 + milliseconds(1);
+  const auto slow = t0 + milliseconds(11);
+
+  stream_stats::start_session_timing(uuid_a);
+  stream_stats::start_session_timing(uuid_b);
+
+  for (int i = 0; i < 5; ++i) {
+    stream_stats::record_frame_timing(uuid_a, t0, t0, fast);
+    stream_stats::record_frame_timing(uuid_b, t0, t0, slow);
+  }
+
+  const auto timing_a = stream_stats::get_session_timing(uuid_a);
+  const auto timing_b = stream_stats::get_session_timing(uuid_b);
+
+  EXPECT_DOUBLE_EQ(timing_a.capture_to_send.p50_ms, 1.0);
+  EXPECT_EQ(timing_a.capture_to_send.sample_count, 5);
+
+  EXPECT_DOUBLE_EQ(timing_b.capture_to_send.p50_ms, 11.0);
+  EXPECT_EQ(timing_b.capture_to_send.sample_count, 5);
+
+  stream_stats::stop_session_timing(uuid_a);
+  stream_stats::stop_session_timing(uuid_b);
+}
+
+TEST(StreamStatsSessionTimingTests, StopSessionTimingDiscardsState) {
+  using namespace std::chrono;
+  const std::string uuid = "test-uuid-stop-discards";
+  const auto t0 = steady_clock::now();
+
+  stream_stats::start_session_timing(uuid);
+  stream_stats::record_frame_timing(uuid, t0, t0, t0 + std::chrono::milliseconds(4));
+  ASSERT_TRUE(stream_stats::get_session_timing(uuid).session_active);
+
+  stream_stats::stop_session_timing(uuid);
+
+  EXPECT_FALSE(stream_stats::get_session_timing(uuid).session_active);
+}
+
+TEST(StreamStatsSessionTimingTests, RestartingASessionGetsAFreshEpochAndDiscardsOldSamples) {
+  using namespace std::chrono;
+  const std::string uuid = "test-uuid-reconnect";
+  const auto t0 = steady_clock::now();
+
+  stream_stats::start_session_timing(uuid);
+  stream_stats::record_frame_timing(uuid, t0, t0, t0 + milliseconds(4));
+  const auto first_epoch = stream_stats::get_session_timing(uuid);
+  ASSERT_EQ(first_epoch.capture_to_send.sample_count, 1);
+  stream_stats::stop_session_timing(uuid);
+
+  // Same device reconnecting - same uuid, new session.
+  stream_stats::start_session_timing(uuid);
+  const auto second_epoch = stream_stats::get_session_timing(uuid);
+
+  EXPECT_TRUE(second_epoch.session_active);
+  EXPECT_NE(second_epoch.epoch_start_ns, first_epoch.epoch_start_ns);
+  EXPECT_EQ(second_epoch.capture_to_send.sample_count, 0);
+
+  stream_stats::stop_session_timing(uuid);
+}
+
+// Mixing two distinct values should keep p50 and p99 both within the
+// [min, max] of what was actually pushed - this doesn't assume a specific
+// interpolation method or ordering, just that percentiles can't invent
+// values outside the observed range.
 TEST(StreamStatsSessionTimingTests, RecordFrameTimingMixedValuesStayWithinObservedRange) {
   using namespace std::chrono;
+  const std::string uuid = "test-uuid-mixed-values";
   const auto t0 = steady_clock::now();
   const auto fast_t2 = t0 + milliseconds(1);
   const auto slow_t2 = t0 + milliseconds(9);
 
+  stream_stats::start_session_timing(uuid);
   for (int i = 0; i < 300; ++i) {
-    stream_stats::record_frame_timing(t0, t0, fast_t2);
+    stream_stats::record_frame_timing(uuid, t0, t0, fast_t2);
   }
   for (int i = 0; i < 300; ++i) {
-    stream_stats::record_frame_timing(t0, t0, slow_t2);
+    stream_stats::record_frame_timing(uuid, t0, t0, slow_t2);
   }
 
-  const auto timing = stream_stats::get_session_timing();
+  const auto timing = stream_stats::get_session_timing(uuid);
 
   EXPECT_GE(timing.capture_to_send.p50_ms, 1.0);
   EXPECT_LE(timing.capture_to_send.p50_ms, 9.0);
   EXPECT_GE(timing.capture_to_send.p99_ms, 1.0);
   EXPECT_LE(timing.capture_to_send.p99_ms, 9.0);
-  EXPECT_EQ(timing.capture_to_send.sample_count, 512);
+  EXPECT_EQ(timing.capture_to_send.sample_count, 600);
+
+  stream_stats::stop_session_timing(uuid);
+}
+
+// The ring capacity (16384, matching FRAME_TIMING_RING_CAPACITY in
+// stream_stats.cpp - not visible here, it's file-local, so this hardcodes
+// the same number the implementation does) is sized for a full 120 s/120 fps
+// bench run, but must still degrade honestly if exceeded: oldest samples
+// evicted, ring_complete flips false, sample_count caps at capacity rather
+// than over-reporting.
+TEST(StreamStatsSessionTimingTests, RingWrapsAndReportsIncompleteOnceCapacityIsExceeded) {
+  using namespace std::chrono;
+  const std::string uuid = "test-uuid-ring-wrap";
+  const auto t0 = steady_clock::now();
+  const auto t2 = t0 + milliseconds(7);
+  constexpr int kRingCapacity = 16384;
+
+  stream_stats::start_session_timing(uuid);
+  for (int i = 0; i < kRingCapacity + 100; ++i) {
+    stream_stats::record_frame_timing(uuid, t0, t0, t2);
+  }
+
+  const auto timing = stream_stats::get_session_timing(uuid);
+
+  EXPECT_FALSE(timing.ring_complete);
+  EXPECT_EQ(timing.capture_to_send.sample_count, kRingCapacity);
+  // Every pushed sample was identical, so even after wrapping the
+  // percentiles are still exactly known.
+  EXPECT_DOUBLE_EQ(timing.capture_to_send.p50_ms, 7.0);
+  EXPECT_DOUBLE_EQ(timing.capture_to_send.p99_ms, 7.0);
+
+  stream_stats::stop_session_timing(uuid);
 }

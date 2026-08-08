@@ -436,34 +436,99 @@ namespace stream_stats {
   };
 
   /**
-   * @brief Host-side T0-T2 glass-to-glass stage timing, always on.
+   * @brief Host-side T0-T2 stage timing for one active streaming session.
    *
-   * T0 = capture frame available, T1 = encoder finished this frame,
-   * T2 = this frame's packet handed to the NIC (post-pacer). See the
-   * Nordstern roadmap's canonical stage vocabulary.
+   * T0 = capture frame available, T1 = encoder finished this frame, T2 =
+   * this frame's packet handed off to the send thread's packetization path.
+   * T2 is captured before FEC encoding, header/encryption work, the pacing
+   * sleep, and the actual sendmsg() calls - it is deliberately not called
+   * "handed to the NIC" or "kernel accept", both of which would overclaim
+   * what's actually measured. See the Nordstern roadmap's canonical stage
+   * vocabulary and its 2026-08-08 review for this naming correction.
+   *
+   * Genuinely per-session, not host-wide: Polaris runs one independent
+   * encoder per connected client (config::stream.max_sessions, default 2),
+   * so T1/T2 legitimately differ session to session even for two sessions'
+   * frames captured at the same instant (T0 can coincide; T1/T2 generally
+   * won't). Each session's rings are private to it - see
+   * start_session_timing()/stop_session_timing().
+   *
+   * Deliberately out of scope: joining this session's T0-T2 with its
+   * client-side T3/T4 samples (Nova's sampled logcat) into a per-frame
+   * total, and any cross-clock (host/client) stitching. Both were assessed
+   * as materially larger undertakings than what this endpoint needs to be
+   * honest about today; this response reports only its own stage marginals.
    */
   struct session_timing_t {
     frame_timing_percentiles_t capture_to_encode;  ///< T0 -> T1
     frame_timing_percentiles_t encode_to_send;  ///< T1 -> T2
     frame_timing_percentiles_t capture_to_send;  ///< T0 -> T2
+
+    /**
+     * Opaque, same-process-only marker of which "epoch" (continuous span
+     * between start_session_timing() and stop_session_timing()) produced
+     * this snapshot. A steady_clock::now().time_since_epoch() count in
+     * nanoseconds - not a wall-clock timestamp, not meaningful across a
+     * host restart. Two reads with the same value are from the same
+     * uninterrupted session; a changed value means the session was torn
+     * down and restarted (e.g. a reconnect) between reads.
+     */
+    std::uint64_t epoch_start_ns = 0;
+
+    /// Whether the queried device_uuid currently has any timing state at
+    /// all. False (with all percentiles empty) means no session is active
+    /// for that device right now - distinct from an active session that
+    /// simply hasn't recorded a frame yet.
+    bool session_active = false;
+
+    /// True until this session's rings wrap. False means the ring evicted
+    /// its oldest samples to make room for newer ones, so the percentiles
+    /// above reflect only the most recent capacity's worth of frames, not
+    /// every frame since epoch_start_ns.
+    bool ring_complete = false;
   };
 
   /**
-   * @brief Record one frame's T0/T1/T2 timestamps into the always-on session
-   * timing histograms. Wire-format telemetry (frame_processing_latency) is
-   * untouched by this - this is purely an additional, out-of-band record.
+   * @brief Start (or restart, on reconnect) per-session T0-T2 timing state
+   * for one device. Call once the session is admitted, alongside
+   * add_client(). An existing entry for the same uuid is discarded and
+   * replaced with a fresh, empty one - this is how a reconnecting device
+   * gets a clean epoch rather than inheriting its previous session's tail.
+   * @param device_uuid The connecting device's paired UUID (session_t::device_uuid).
+   */
+  void start_session_timing(const std::string &device_uuid);
+
+  /**
+   * @brief Stop and discard per-session T0-T2 timing state for one device.
+   * Call once the session has fully ended, alongside remove_client().
+   * @param device_uuid The device UUID passed to the matching start_session_timing().
+   */
+  void stop_session_timing(const std::string &device_uuid);
+
+  /**
+   * @brief Record one frame's T0/T1/T2 timestamps into device_uuid's
+   * session timing histograms. Wire-format telemetry
+   * (frame_processing_latency) is untouched by this - this is purely an
+   * additional, out-of-band record. A no-op if device_uuid has no active
+   * timing state (e.g. a few packets still in flight right as a session
+   * tears down) - there is nowhere safe to attribute the sample.
+   * @param device_uuid The frame's owning session (session_t::device_uuid).
    * @param capture_time T0.
    * @param encode_done_time T1.
    * @param send_time T2.
    */
-  void record_frame_timing(std::chrono::steady_clock::time_point capture_time,
+  void record_frame_timing(const std::string &device_uuid,
+                           std::chrono::steady_clock::time_point capture_time,
                            std::chrono::steady_clock::time_point encode_done_time,
                            std::chrono::steady_clock::time_point send_time);
 
   /**
-   * @brief Get a snapshot of the current session timing percentiles.
+   * @brief Get a snapshot of device_uuid's own current session timing
+   * percentiles. session_active is false (and all percentiles are empty)
+   * if device_uuid has no active timing state right now.
+   * @param device_uuid The caller's own device UUID (from its verified cert).
    */
-  session_timing_t get_session_timing();
+  session_timing_t get_session_timing(const std::string &device_uuid);
 
   /**
    * @brief Get the number of active client sessions.
