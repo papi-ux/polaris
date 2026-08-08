@@ -36,6 +36,7 @@
 #include <set>
 #include <signal.h>
 #include <poll.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sstream>
@@ -60,10 +61,15 @@ namespace cage_display_router {
    */
   static int cage_pidfd = -1;
 
-  // The direct child tracked by cage_pid is a tiny supervisor. The actual
-  // compositor runs in its own process group beneath that supervisor so a
-  // compositor-initiated exit cannot orphan its startup client and cleanup
-  // never needs to guess whether a recycled PGID still belongs to Polaris.
+#if defined(POLARIS_TESTS)
+  static bool force_cage_pidfd_open_failure = false;
+#endif
+
+  // The direct child tracked by cage_pid is a tiny supervisor and the immutable
+  // leader of the private labwc session/process group. The compositor and every
+  // startup descendant stay inside that anchored group, so a compositor-driven
+  // exit cannot orphan its startup client and parent fallback never has to guess
+  // whether a recycled PGID still belongs to Polaris.
   static volatile sig_atomic_t supervised_runtime_pid = 0;
   static volatile sig_atomic_t supervisor_stop_requested = 0;
 
@@ -117,6 +123,12 @@ namespace cage_display_router {
       cage_pidfd = -1;
     }
 
+#if defined(POLARIS_TESTS)
+    if (force_cage_pidfd_open_failure) {
+      return;
+    }
+#endif
+
     cage_pidfd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
     if (cage_pidfd < 0) {
       BOOST_LOG(warning) << "labwc: pidfd_open failed for pid ["sv << pid << "]: "sv << strerror(errno)
@@ -135,7 +147,6 @@ namespace cage_display_router {
     supervisor_stop_requested = 1;
     const auto runtime_pid = static_cast<pid_t>(supervised_runtime_pid);
     if (runtime_pid > 0) {
-      (void) kill(-runtime_pid, signal_number);
       (void) kill(runtime_pid, signal_number);
     }
   }
@@ -168,14 +179,13 @@ namespace cage_display_router {
   }
 
   /**
-   * Keep a stable direct child alive around the actual compositor generation.
+   * Keep a stable direct child alive as the private session/process-group anchor.
    *
    * labwc is free to exit from its own menu while its startup client remains
-   * alive. The supervisor observes that exit without reaping the labwc leader,
-   * drains the immutable labwc process group while the zombie still prevents
-   * PGID reuse, then reaps it and exits. Explicit Polaris teardown reaches the
-   * same path by signalling the supervisor, whose handler forwards to the
-   * runtime group.
+   * alive. The supervisor subreaps that runtime tree, drains the anchored group,
+   * and exits cleanly once no private descendants remain. If a descendant ignores
+   * graceful teardown, the final group SIGKILL includes the supervisor itself;
+   * the parent still owns and pidfd-tracks that immutable group leader.
    */
   [[noreturn]] static void supervise_labwc(
     const std::string &labwc_path,
@@ -184,6 +194,10 @@ namespace cage_display_router {
   ) {
     supervised_runtime_pid = 0;
     supervisor_stop_requested = 0;
+
+    if (setsid() < 0 || prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) {
+      _exit(126);
+    }
 
     sigset_t forwarded_signals {};
     sigset_t previous_mask {};
@@ -206,10 +220,6 @@ namespace cage_display_router {
       restore_default_signal_handler(SIGHUP);
       restore_default_signal_handler(SIGCHLD);
       (void) sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
-
-      if (setsid() < 0) {
-        _exit(126);
-      }
 
       execl(labwc_path.c_str(), "labwc",
         "-C", config_dir.c_str(),
@@ -241,37 +251,59 @@ namespace cage_display_router {
     }
 
     if (!observed_exit && !supervisor_stop_requested) {
-      // Without either an unreaped direct child or an explicit stop request,
-      // there is no immutable ownership proof for a negative-PGID signal.
       supervised_runtime_pid = 0;
       _exit(127);
     }
 
-    // A normally exited runtime is left unreaped until the whole private group
-    // is drained, so runtime_pid cannot be recycled underneath -runtime_pid.
-    // On explicit stop, the direct child is still unreaped by construction.
-    (void) kill(-runtime_pid, SIGTERM);
+    // Ignore graceful signals while the supervisor broadcasts them to its own
+    // private group. Every labwc descendant inherits this anchored PGID.
+    install_signal_handler(SIGTERM, SIG_IGN);
+    install_signal_handler(SIGINT, SIG_IGN);
+    install_signal_handler(SIGHUP, SIG_IGN);
+    (void) kill(-getpgrp(), SIGTERM);
     (void) kill(runtime_pid, SIGTERM);
-    sleep_without_losing_interrupt_time(500ms);
-    (void) kill(-runtime_pid, SIGKILL);
-    (void) kill(runtime_pid, SIGKILL);
 
     int runtime_status = 0;
-    pid_t reaped_pid = -1;
-    do {
-      reaped_pid = waitpid(runtime_pid, &runtime_status, 0);
-    } while (reaped_pid < 0 && errno == EINTR);
-    supervised_runtime_pid = 0;
+    bool runtime_reaped = false;
+    const auto deadline = std::chrono::steady_clock::now() + 500ms;
+    while (std::chrono::steady_clock::now() < deadline) {
+      bool live_children = false;
+      while (true) {
+        int child_status = 0;
+        const auto child_pid = waitpid(-1, &child_status, WNOHANG);
+        if (child_pid > 0) {
+          if (child_pid == runtime_pid) {
+            runtime_status = child_status;
+            runtime_reaped = true;
+          }
+          continue;
+        }
+        if (child_pid == 0) {
+          live_children = true;
+        } else if (errno == EINTR) {
+          continue;
+        } else if (errno != ECHILD) {
+          live_children = true;
+        }
+        break;
+      }
 
-    if (reaped_pid != runtime_pid) {
-      _exit(127);
+      if (!live_children) {
+        supervised_runtime_pid = 0;
+        if (runtime_reaped && WIFEXITED(runtime_status)) {
+          _exit(WEXITSTATUS(runtime_status));
+        }
+        if (runtime_reaped && WIFSIGNALED(runtime_status)) {
+          _exit(128 + WTERMSIG(runtime_status));
+        }
+        _exit(127);
+      }
+      sleep_without_losing_interrupt_time(25ms);
     }
-    if (WIFEXITED(runtime_status)) {
-      _exit(WEXITSTATUS(runtime_status));
-    }
-    if (WIFSIGNALED(runtime_status)) {
-      _exit(128 + WTERMSIG(runtime_status));
-    }
+
+    // The supervisor is the live, unreaped group leader. Killing its group is
+    // therefore generation-safe and cannot land on a recycled PGID.
+    (void) kill(-getpgrp(), SIGKILL);
     _exit(127);
   }
 
@@ -322,6 +354,22 @@ namespace cage_display_router {
     }
 
     return kill(cage_pid, signal_number) == 0 || errno == ESRCH;
+  }
+
+  static bool force_kill_cage_group() {
+    // Freeze the pidfd-bound group leader before addressing -cage_pid. While the
+    // supervisor is stopped and unreaped, its PGID cannot be recycled between
+    // the ownership check and the group SIGKILL.
+    if (!signal_cage_supervisor(SIGSTOP)) {
+      return false;
+    }
+    if (!cage_process_alive()) {
+      return true;
+    }
+
+    const bool group_signalled = kill(-cage_pid, SIGKILL) == 0 || errno == ESRCH;
+    const bool supervisor_signalled = signal_cage_supervisor(SIGKILL);
+    return group_signalled && supervisor_signalled;
   }
 
   static std::string exec_capture(const std::string &cmd) {
@@ -886,6 +934,14 @@ namespace cage_display_router {
   std::string labwc_process_environment_value_for_tests(bool headless, std::string_view key) {
     return labwc_process_environment_value(headless, key);
   }
+
+  void force_cage_pidfd_open_failure_for_tests(bool force_failure) {
+    force_cage_pidfd_open_failure = force_failure;
+  }
+
+  bool cage_pidfd_available_for_tests() {
+    return cage_pidfd >= 0;
+  }
 #endif
 
   // -----------------------------------------------------------------------
@@ -908,7 +964,7 @@ namespace cage_display_router {
       return true;
     }
 
-    // Reset stale state. The pidfd of a compositor that died without going
+    // Reset stale state. The pidfd of a supervisor that died without going
     // through stop() is still open here; every session would otherwise leak one.
     close_cage_pidfd();
     cage_pid = 0;
@@ -1035,10 +1091,9 @@ namespace cage_display_router {
 
     pid_t pid = fork();
     if (pid == 0) {
-      // Child: become the stable supervisor for one private labwc generation.
-      // The compositor itself is forked below into a separate session/process
-      // group, so a menu-driven compositor exit cannot leave its clients behind
-      // or make Polaris signal a stale group.
+      // Child: become the stable session/process-group supervisor for one
+      // private labwc generation. The compositor is forked beneath this anchor,
+      // so menu-driven exit cannot leave its clients unowned.
       if (!session_instance_id.empty()) {
         setenv("POLARIS_SESSION_INSTANCE_ID", session_instance_id.c_str(), 1);
       } else {
@@ -1197,19 +1252,30 @@ namespace cage_display_router {
     // group and forwards graceful teardown without any raw PGID guesswork.
     (void) signal_cage_supervisor(SIGTERM);
 
-    // Poll for exit up to 3 seconds
+    // Poll for exit up to 3 seconds. Once waitpid() reaps this generation (or
+    // reports ECHILD because another synchronized reaper already did), never
+    // consult the numeric PID again: without pidfd support it is recyclable.
+    bool supervisor_reaped = false;
     for (int i = 0; i < 30; ++i) {
-      pid_t ret = waitpid(cage_pid, nullptr, WNOHANG);
-      if (ret > 0) break;
+      const pid_t ret = waitpid(cage_pid, nullptr, WNOHANG);
+      if (ret == cage_pid || (ret < 0 && errno == ECHILD)) {
+        supervisor_reaped = true;
+        break;
+      }
       if (!cage_process_alive()) break;  // process gone
       std::this_thread::sleep_for(100ms);
     }
 
-    // Force kill if still alive
-    if (cage_process_alive()) {
-      BOOST_LOG(warning) << "labwc: Supervisor did not exit gracefully, sending SIGKILL"sv;
-      (void) signal_cage_supervisor(SIGKILL);
-      waitpid(cage_pid, nullptr, WNOHANG);
+    // Force kill only while the original supervisor remains unreaped.
+    if (!supervisor_reaped && cage_process_alive()) {
+      BOOST_LOG(warning) << "labwc: Supervisor did not exit gracefully, killing its private group"sv;
+      if (force_kill_cage_group()) {
+        while (waitpid(cage_pid, nullptr, 0) < 0 && errno == EINTR) {
+        }
+      } else {
+        BOOST_LOG(error) << "labwc: Could not prove ownership for forced private-group cleanup; retaining router state"sv;
+        return;
+      }
     }
 
     BOOST_LOG(info) << "labwc: Stopped"sv;

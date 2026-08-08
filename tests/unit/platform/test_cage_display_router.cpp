@@ -95,13 +95,14 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
     bool had_pid_file;
     bool had_compositor_pid_file;
     fs::path root;
-    std::vector<pid_t> workers;
+    std::vector<pid_t> cleanup_pids;
 
     ~cleanup_t() {
+      cage_display_router::force_cage_pidfd_open_failure_for_tests(false);
       cage_display_router::stop();
-      for (const auto worker : workers) {
-        if (worker > 0 && kill(worker, 0) == 0) {
-          (void) kill(worker, SIGKILL);
+      for (const auto process_pid : cleanup_pids) {
+        if (process_pid > 0 && kill(process_pid, 0) == 0) {
+          (void) kill(process_pid, SIGKILL);
         }
       }
       config::video.linux_display = linux_display;
@@ -140,6 +141,12 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
     .had_pid_file = pid_file_env != nullptr,
     .had_compositor_pid_file = compositor_pid_file_env != nullptr,
     .root = fs::temp_directory_path() / ("polaris-cage-external-exit-" + std::to_string(getpid())),
+  };
+  auto remove_cleanup_pid = [&](pid_t pid) {
+    const auto position = std::find(cleanup.cleanup_pids.begin(), cleanup.cleanup_pids.end(), pid);
+    if (position != cleanup.cleanup_pids.end()) {
+      cleanup.cleanup_pids.erase(position);
+    }
   };
 
   const auto bin_dir = cleanup.root / "bin";
@@ -236,11 +243,13 @@ exit 0
     const auto compositor_pid = wait_for_pid_file(compositor_pid_file);
     ASSERT_GT(compositor_pid, 0);
     EXPECT_NE(router_pid, compositor_pid);
-    EXPECT_EQ(getpgid(compositor_pid), compositor_pid);
+    EXPECT_EQ(getpgid(router_pid), router_pid);
+    EXPECT_EQ(getpgid(compositor_pid), router_pid);
+    EXPECT_EQ(getsid(compositor_pid), router_pid);
     EXPECT_NE(getpgid(compositor_pid), getpgrp());
     const auto worker = wait_for_pid_file(pid_file);
     ASSERT_GT(worker, 0);
-    cleanup.workers.push_back(worker);
+    cleanup.cleanup_pids.push_back(worker);
 
     ASSERT_EQ(kill(compositor_pid, SIGTERM), 0);
     ASSERT_TRUE(wait_for_router_exit(std::chrono::seconds(3)));
@@ -250,7 +259,7 @@ exit 0
     EXPECT_TRUE(worker_exited)
       << "cycle " << cycle << " leaked private worker pid " << worker;
     if (worker_exited) {
-      cleanup.workers.pop_back();
+      remove_cleanup_pid(worker);
     }
   }
 
@@ -272,7 +281,7 @@ exit 0
   ASSERT_GT(stopped_compositor_pid, 0);
   const auto stopped_worker_pid = wait_for_pid_file(pid_file);
   ASSERT_GT(stopped_worker_pid, 0);
-  cleanup.workers.push_back(stopped_worker_pid);
+  cleanup.cleanup_pids.push_back(stopped_worker_pid);
 
   ASSERT_EQ(kill(stopped_compositor_pid, SIGSTOP), 0);
   cage_display_router::stop();
@@ -280,7 +289,94 @@ exit 0
   EXPECT_TRUE(stopped_worker_exited)
     << "explicit stop leaked private worker pid " << stopped_worker_pid;
   if (stopped_worker_exited) {
-    cleanup.workers.pop_back();
+    remove_cleanup_pid(stopped_worker_pid);
+  }
+
+  // If the supervisor itself is wedged, the parent fallback must still own an
+  // immutable handle to the separate runtime group. Killing only the frozen
+  // supervisor would strand both labwc and its placeholder.
+  fs::remove(pid_file, ec);
+  fs::remove(compositor_pid_file, ec);
+  ASSERT_TRUE(cage_display_router::start(
+    1280,
+    720,
+    60,
+    "",
+    false,
+    false,
+    "supervisor-hard-stop"
+  ));
+  const auto frozen_supervisor_pid = cage_display_router::get_pid();
+  ASSERT_GT(frozen_supervisor_pid, 0);
+  const auto frozen_compositor_pid = wait_for_pid_file(compositor_pid_file);
+  ASSERT_GT(frozen_compositor_pid, 0);
+  const auto frozen_worker_pid = wait_for_pid_file(pid_file);
+  ASSERT_GT(frozen_worker_pid, 0);
+  cleanup.cleanup_pids.push_back(frozen_compositor_pid);
+  cleanup.cleanup_pids.push_back(frozen_worker_pid);
+
+  ASSERT_EQ(kill(frozen_supervisor_pid, SIGSTOP), 0);
+  cage_display_router::stop();
+  const bool frozen_supervisor_exited = wait_for_process_exit(frozen_supervisor_pid, std::chrono::seconds(2));
+  const bool frozen_worker_exited = wait_for_process_exit(frozen_worker_pid, std::chrono::seconds(2));
+  const bool frozen_compositor_exited = wait_for_process_exit(frozen_compositor_pid, std::chrono::seconds(2));
+  EXPECT_TRUE(frozen_supervisor_exited)
+    << "hard supervisor stop did not reap supervisor pid " << frozen_supervisor_pid;
+  EXPECT_TRUE(frozen_worker_exited)
+    << "hard supervisor stop leaked private worker pid " << frozen_worker_pid;
+  EXPECT_TRUE(frozen_compositor_exited)
+    << "hard supervisor stop leaked compositor pid " << frozen_compositor_pid;
+  if (frozen_worker_exited) {
+    remove_cleanup_pid(frozen_worker_pid);
+  }
+  if (frozen_compositor_exited) {
+    remove_cleanup_pid(frozen_compositor_pid);
+  }
+
+  // Exercise the older-kernel fallback where pidfd_open() is unavailable. The
+  // supervisor exits first and is then reaped by stop(); after that successful
+  // waitpid(), no raw liveness or group signal may consult its numeric PID.
+  cage_display_router::force_cage_pidfd_open_failure_for_tests(true);
+  fs::remove(pid_file, ec);
+  fs::remove(compositor_pid_file, ec);
+  ASSERT_TRUE(cage_display_router::start(
+    1280,
+    720,
+    60,
+    "",
+    false,
+    false,
+    "pidfd-unavailable-external-exit"
+  ));
+  EXPECT_FALSE(cage_display_router::cage_pidfd_available_for_tests());
+  const auto no_pidfd_supervisor_pid = cage_display_router::get_pid();
+  ASSERT_GT(no_pidfd_supervisor_pid, 0);
+  const auto no_pidfd_compositor_pid = wait_for_pid_file(compositor_pid_file);
+  ASSERT_GT(no_pidfd_compositor_pid, 0);
+  const auto no_pidfd_worker_pid = wait_for_pid_file(pid_file);
+  ASSERT_GT(no_pidfd_worker_pid, 0);
+  cleanup.cleanup_pids.push_back(no_pidfd_compositor_pid);
+  cleanup.cleanup_pids.push_back(no_pidfd_worker_pid);
+
+  ASSERT_EQ(kill(no_pidfd_compositor_pid, SIGTERM), 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(750));
+  cage_display_router::stop();
+  cage_display_router::force_cage_pidfd_open_failure_for_tests(false);
+
+  const bool no_pidfd_supervisor_exited = wait_for_process_exit(no_pidfd_supervisor_pid, std::chrono::seconds(2));
+  const bool no_pidfd_compositor_exited = wait_for_process_exit(no_pidfd_compositor_pid, std::chrono::seconds(2));
+  const bool no_pidfd_worker_exited = wait_for_process_exit(no_pidfd_worker_pid, std::chrono::seconds(2));
+  EXPECT_TRUE(no_pidfd_supervisor_exited)
+    << "pidfd-unavailable stop did not reap supervisor pid " << no_pidfd_supervisor_pid;
+  EXPECT_TRUE(no_pidfd_compositor_exited)
+    << "pidfd-unavailable stop leaked compositor pid " << no_pidfd_compositor_pid;
+  EXPECT_TRUE(no_pidfd_worker_exited)
+    << "pidfd-unavailable stop leaked worker pid " << no_pidfd_worker_pid;
+  if (no_pidfd_compositor_exited) {
+    remove_cleanup_pid(no_pidfd_compositor_pid);
+  }
+  if (no_pidfd_worker_exited) {
+    remove_cleanup_pid(no_pidfd_worker_pid);
   }
 }
 

@@ -60,7 +60,7 @@ namespace cage_display_router {
 
   /**
    * @brief Stop the owned labwc supervisor and all private runtime processes.
-   * Sends SIGTERM, waits up to 3s, then SIGKILLs the supervisor if needed.
+   * Sends SIGTERM, waits up to 3s, then kills the anchored private group if needed.
    */
   void stop();
 
@@ -74,6 +74,8 @@ namespace cage_display_router {
 
 #if defined(POLARIS_TESTS)
   void reset_after_external_stop_for_tests(pid_t pid);
+  void force_cage_pidfd_open_failure_for_tests(bool force_failure);
+  bool cage_pidfd_available_for_tests();
 #endif
 
   /**
