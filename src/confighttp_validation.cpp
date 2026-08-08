@@ -101,6 +101,7 @@ namespace confighttp::validation {
       "av1_mode"sv,
       "back_button_timeout"sv,
       "beat_times_lookup"sv,
+      "benchmark_mode_enabled"sv,
       "browser_streaming"sv,
       "capture"sv,
       "cert"sv,
