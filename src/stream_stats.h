@@ -562,6 +562,38 @@ namespace stream_stats {
    */
   session_timing_t get_session_timing(const std::string &device_uuid);
 
+  /**
+   * @brief The identity of one session, as tracked by
+   * start_session_timing()/stop_session_timing().
+   */
+  struct active_session_identity_t {
+    std::string device_uuid;
+    std::uint64_t session_generation = 0;
+  };
+
+  /**
+   * @brief Look up the identity of the lone active session, for a caller
+   * that needs to know which session to act on without already knowing
+   * its device_uuid - unlike get_session_timing(), which requires already
+   * knowing it. The P0-5 benchmark control surface's create route is the
+   * motivating caller: a harness's create-and-arm request
+   * (measurement-spec-v1.md 6.4) names no device_uuid at all, since the
+   * harness isn't the streaming client itself - it arms a run for
+   * whichever single session happens to be active.
+   *
+   * Returns std::nullopt for zero or more than one active session. This
+   * is purely a lookup, not a validation step in its own right -
+   * create_benchmark_run's own "exactly one active stream session"
+   * precondition (checked via active_client_count()) is the actual gate;
+   * a caller of this function still needs that same precondition to have
+   * already been satisfied for the identity returned here to be
+   * meaningful, since a session could in principle end between this call
+   * and whatever uses its result.
+   *
+   * @return The active session's identity, or std::nullopt.
+   */
+  std::optional<active_session_identity_t> get_single_active_session_identity();
+
   // ---------------------------------------------------------------------
   // P0-5 benchmark-run-capture engine (measurement-spec-v1.md 6.4-6.5).
   // Gate-authoritative, bounded-duration raw sample capture for an armed
