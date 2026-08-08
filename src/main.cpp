@@ -23,6 +23,7 @@
 #include "nvhttp.h"
 #include "process.h"
 #include "stream_recorder.h"
+#include "stream_stats.h"
 #include "system_tray.h"
 #include "upnp.h"
 #include "uuid.h"
@@ -250,6 +251,14 @@ int main(int argc, char *argv[]) {
 
   // Initialize stream recorder from config
   stream_recorder::load_config();
+
+  // P0-5 benchmark run-capture's control plane (measurement-spec-v1.md 6.4)
+  // is disabled by default; this is the one-time, startup-only read of
+  // that gate. Every engine precondition and the control-surface auth
+  // gate check stream_stats::benchmark_control_plane_enabled() themselves,
+  // not config::sunshine.benchmark_mode_enabled directly, so this is the
+  // only place the two are ever connected.
+  stream_stats::set_benchmark_control_plane_enabled(config::sunshine.benchmark_mode_enabled);
 
   if (!config::sunshine.cmd.name.empty()) {
     auto fn = cmd_to_func.find(config::sunshine.cmd.name);
