@@ -106,11 +106,11 @@ jobs:
             -DCUDA_FAIL_ON_MISSING=OFF
 
       - name: Build sanitizer unit tests
-        run: cmake --build build-sanitize --target test_polaris test_polaris_config test_polaris_http test_polaris_steam_shutdown -j"$(nproc)"
+        run: cmake --build build-sanitize --target test_polaris test_polaris_config test_polaris_http test_polaris_steam_shutdown test_polaris_stream -j"$(nproc)"
 
       - name: Run sanitizer and gamescope ownership tests
         run: |
-          ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_http|test_polaris_steam_shutdown|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell)$'
+          ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_http|test_polaris_steam_shutdown|test_polaris_stream|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell)$'
           build-sanitize/tests/test_polaris_config --gtest_filter='ProcessRuntimeConfigTests.GamescopeAttached*'
 
   arch-build:

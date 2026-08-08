@@ -1056,6 +1056,7 @@ namespace stream {
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
+      stream_stats::record_idr_request();
       session->video.idr_events->raise(true);
     });
 
@@ -1069,6 +1070,7 @@ namespace stream {
         << "firstFrame [" << firstFrame << ']' << std::endl
         << "lastFrame [" << lastFrame << ']';
 
+      stream_stats::record_invalidate_ref_frames_request();
       session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
     });
 
