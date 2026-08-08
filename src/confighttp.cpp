@@ -1348,7 +1348,14 @@ namespace confighttp {
    *  - an authenticated confighttp Web UI session or API key (authenticate() -
    *    deliberately NOT authenticatePolarisSession(), which also accepts any
    *    verified streaming-client cert; the spec is explicit that "viewer/
-   *    watch certificates cannot activate or retrieve a benchmark run").
+   *    watch certificates cannot activate or retrieve a benchmark run");
+   *  - a CSRF token, but only for the session-cookie half of authenticate()'s
+   *    two paths - a Bearer API key is never auto-attached to a request by a
+   *    browser the way a cookie is, so it needs no CSRF defense, and a pure
+   *    script/CLI harness using it has no CSRF token to send in the first
+   *    place. Every other mutating confighttp route defends the cookie path
+   *    with the same withCsrf() wrapper; this route can't just reuse that
+   *    wrapper unconditionally without also breaking Bearer-token callers.
    *
    * Deliberately does NOT check stream_stats::benchmark_control_plane_enabled() -
    * every engine function (create/start/stop/get/delete_benchmark_run)
@@ -1383,6 +1390,27 @@ namespace confighttp {
 
     if (!authenticate(response, request, /*needsRedirect=*/false)) {
       BOOST_LOG(warning) << "Benchmark control: ["sv << address << "] -- unauthorized"sv;
+      return false;
+    }
+
+    // Detected by header presence, not re-validation - authenticate() has
+    // already succeeded overall by this point, and a real Bearer token is
+    // the only way that's true when this header is present (a garbage
+    // Authorization header would have made authenticate() fall through to
+    // the cookie check, and fail if that also failed).
+    const bool used_bearer_token_auth = request->header.find("authorization") != request->header.end();
+    if (!used_bearer_token_auth && !validateCsrf(request)) {
+      BOOST_LOG(warning) << "Benchmark control: ["sv << address << "] -- invalid CSRF token"sv;
+      // Inlined rather than calling forbidden() - that helper is defined
+      // later in this file, after this function.
+      constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::client_error_forbidden;
+      nlohmann::json tree;
+      tree["status_code"] = static_cast<int>(code);
+      tree["status"] = false;
+      tree["error"] = "Invalid CSRF token";
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(code, tree.dump(), headers);
       return false;
     }
 
@@ -1478,6 +1506,123 @@ namespace confighttp {
     return true;
 
     return true;
+  }
+
+  namespace {
+    // Every outcome create_benchmark_run() can report - see its declaration
+    // in stream_stats.h for what each one means. Kept as a plain string
+    // (not an HTTP status code) so a harness can always parse a reliable
+    // JSON body rather than branch on a status code fragmented across many
+    // loosely-related meanings; the spec doesn't mandate specific codes
+    // either. rejected_caller_not_authorized_as_harness can't actually
+    // reach here - authorizeBenchmarkHarnessRequest() already gated on it
+    // before this route calls create_benchmark_run() - but is named anyway
+    // so this switch stays exhaustive against the real enum.
+    std::string_view to_string(stream_stats::benchmark_run_create_result_e result) {
+      switch (result) {
+        case stream_stats::benchmark_run_create_result_e::created:
+          return "created"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_control_plane_not_enabled:
+          return "rejected_control_plane_not_enabled"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_caller_not_authorized_as_harness:
+          return "rejected_caller_not_authorized_as_harness"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_not_exactly_one_active_session:
+          return "rejected_not_exactly_one_active_session"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run:
+          return "rejected_session_already_has_an_active_run"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_duration_out_of_range:
+          return "rejected_duration_out_of_range"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_duration_tolerance_out_of_range:
+          return "rejected_duration_tolerance_out_of_range"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_drain_grace_out_of_range:
+          return "rejected_drain_grace_out_of_range"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_target_fps_out_of_range:
+          return "rejected_target_fps_out_of_range"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_nominal_sample_budget_too_small:
+          return "rejected_nominal_sample_budget_too_small"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_capacity_below_nominal_budget:
+          return "rejected_capacity_below_nominal_budget"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_capacity_exceeds_maximum:
+          return "rejected_capacity_exceeds_maximum"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_run_id_already_used:
+          return "rejected_run_id_already_used"sv;
+        case stream_stats::benchmark_run_create_result_e::rejected_invalid_manifest_sha256_format:
+          return "rejected_invalid_manifest_sha256_format"sv;
+      }
+      return "unknown"sv;
+    }
+  }  // namespace
+
+  /**
+   * @brief Create and arm a benchmark run (measurement-spec-v1.md 6.4's
+   * POST /polaris/v1/session/timing/runs). The request body carries no
+   * device_uuid - the harness isn't the streaming client itself, so this
+   * arms a run for whichever single session happens to be active right
+   * now (get_single_active_session_identity()), the same session
+   * create_benchmark_run's own "exactly one active stream session"
+   * precondition is about.
+   *
+   * Always responds 200 with a JSON body naming the outcome in `result`
+   * (see to_string() above), whether created or rejected - a 400 is
+   * reserved for requests this route itself can't even parse (bad JSON,
+   * wrong content type, missing run_id), not for any precondition
+   * create_benchmark_run itself evaluates.
+   *
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void createBenchmarkRun(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authorizeBenchmarkHarnessRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+
+    try {
+      nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+
+      stream_stats::benchmark_run_create_request_t create_request;
+      create_request.run_id = inputTree.value("run_id", std::string {});
+      create_request.manifest_sha256 = inputTree.value("manifest_sha256", std::string {});
+      create_request.label = inputTree.value("label", std::string {});
+      create_request.workload_id = inputTree.value("workload_id", std::string {});
+      create_request.expected_duration_s = inputTree.value("expected_duration_s", 0);
+      create_request.duration_tolerance_ms = inputTree.value("duration_tolerance_ms", 0);
+      create_request.drain_grace_ms = inputTree.value("drain_grace_ms", 0);
+      create_request.target_fps = inputTree.value("target_fps", 0);
+      create_request.sample_capacity_frames = inputTree.value("sample_capacity_frames", std::size_t {0});
+
+      if (create_request.run_id.empty()) {
+        bad_request(response, request, "Missing required field: run_id");
+        return;
+      }
+
+      const auto session_identity = stream_stats::get_single_active_session_identity();
+      if (!session_identity) {
+        nlohmann::json outputTree;
+        outputTree["status"] = false;
+        outputTree["run_id"] = create_request.run_id;
+        outputTree["result"] = to_string(stream_stats::benchmark_run_create_result_e::rejected_not_exactly_one_active_session);
+        send_response(response, outputTree);
+        return;
+      }
+
+      const auto result = stream_stats::create_benchmark_run(
+        create_request, session_identity->device_uuid, session_identity->session_generation, true);
+
+      nlohmann::json outputTree;
+      outputTree["status"] = result == stream_stats::benchmark_run_create_result_e::created;
+      outputTree["run_id"] = create_request.run_id;
+      outputTree["result"] = to_string(result);
+      send_response(response, outputTree);
+    }
+    catch (std::exception &e) {
+      BOOST_LOG(warning) << "CreateBenchmarkRun: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
   }
 
   /**
@@ -5777,6 +5922,15 @@ namespace confighttp {
     server.resource["^/api/apps/reorder$"]["POST"] = withCsrf(reorderApps);
     server.resource["^/api/apps/delete$"]["POST"] = withCsrf(deleteApp);
     server.resource["^/api/apps/launch$"]["POST"] = withCsrf(launchApp);
+
+    // P0-5 benchmark control surface (measurement-spec-v1.md 6.4). Deliberately
+    // not under /api/ - these are harness-facing, not Web UI-facing. Not
+    // wrapped in withCsrf() like the routes above - authorizeBenchmarkHarnessRequest()
+    // is the real gate, and it already enforces the same CSRF check withCsrf()
+    // would, but only for the cookie half of its two accepted auth methods
+    // (see that function's own doc comment for why a Bearer-token caller is
+    // exempt).
+    server.resource["^/polaris/v1/session/timing/runs$"]["POST"] = createBenchmarkRun;
     server.resource["^/api/apps/close$"]["POST"] = withCsrf(closeApp);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);

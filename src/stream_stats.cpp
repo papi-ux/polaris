@@ -1320,6 +1320,14 @@ namespace stream_stats {
     return result;
   }
 
+  std::optional<active_session_identity_t> get_single_active_session_identity() {
+    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    if (session_timings.size() != 1) {
+      return std::nullopt;
+    }
+    return active_session_identity_t {session_timings.front().device_uuid, session_timings.front().session_generation};
+  }
+
   // ---------------------------------------------------------------------
   // P0-5 benchmark-run-capture engine, piece 1: boundary classification and
   // bounded per-stage capture. See the section comment in stream_stats.h.
