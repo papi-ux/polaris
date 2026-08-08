@@ -405,6 +405,119 @@ jobs:
             build/dev.polaris-stream.app.Polaris.terminal.desktop
           if-no-files-found: warn
 
+  fedora-clang-build:
+    name: Fedora 44 Clang compile check
+    needs: web-checks
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    env:
+      CCACHE_DIR: /github/home/.cache/ccache
+      CCACHE_COMPILERCHECK: content
+      NPM_CONFIG_CACHE: /github/home/.npm
+      CC: clang
+      CXX: clang++
+
+    steps:
+      - name: Bootstrap Fedora container
+        run: |
+          for attempt in 1 2 3; do
+            dnf install -y dnf-plugins-core git && exit 0
+            echo "dnf bootstrap failed on attempt ${attempt}" >&2
+            dnf clean expire-cache || true
+            sleep $((attempt * 10))
+          done
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+
+      - name: Initialize submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          for attempt in 1 2 3 4 5; do
+            git submodule sync --recursive
+            if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
+              exit 0
+            fi
+            echo "submodule update failed on attempt ${attempt}" >&2
+            git submodule deinit --force --all || true
+            sleep $((attempt * 15))
+          done
+          exit 1
+
+      - name: Cache C++ compiler outputs
+        uses: actions/cache@v6
+        with:
+          path: /github/home/.cache/ccache
+          key: polaris-fedora-44-clang-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          restore-keys: |
+            polaris-fedora-44-clang-ccache-
+
+      - name: Cache npm downloads
+        uses: actions/cache@v6
+        with:
+          path: /github/home/.npm
+          key: polaris-fedora-44-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            polaris-fedora-44-npm-
+
+      - name: Install Fedora build dependencies
+        run: |
+          for attempt in 1 2 3; do
+            dnf builddep -y packaging/linux/fedora/Polaris.spec && exit 0
+            echo "dnf builddep failed on attempt ${attempt}" >&2
+            dnf clean expire-cache || true
+            sleep $((attempt * 10))
+          done
+          exit 1
+
+      - name: Install CI helper packages
+        run: |
+          for attempt in 1 2 3; do
+            dnf install -y ccache clang golang ninja-build patch python3 && exit 0
+            echo "dnf helper package install failed on attempt ${attempt}" >&2
+            dnf clean expire-cache || true
+            sleep $((attempt * 10))
+          done
+          exit 1
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DBUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_C_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
+            "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
+            -DBOOST_USE_STATIC=OFF \
+            -DPOLARIS_ASSETS_DIR=share/polaris \
+            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
+            -DPOLARIS_ENABLE_BROWSER_STREAM=ON \
+            -DPOLARIS_ENABLE_CUDA=OFF \
+            -DCUDA_FAIL_ON_MISSING=OFF
+
+      - name: Download prebuilt web UI bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui-build
+          path: .
+
+      - name: Prepare prebuilt web UI bundle
+        run: |
+          mkdir -p build/assets build/CMakeFiles node_modules
+          tar -xzf web-ui-build.tar.gz -C build/assets
+          touch node_modules/.polaris-web-ui-npm.stamp build/CMakeFiles/web-ui-build.stamp
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run fast C++ tests
+        run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
+
   steamos-build:
     name: SteamOS 3.8 build
     needs: web-checks
