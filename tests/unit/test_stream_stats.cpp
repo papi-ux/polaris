@@ -319,7 +319,7 @@ TEST(StreamStatsHdrStateTests, LabelsTrueHdrAndPlainSdrWithoutDowngrade) {
 
 TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {
   LinuxDisplayConfigGuard guard;
-  config::video.adapter_name = "/dev/dri/renderD128";
+  config::video.adapter_name = "/dev/null";
   config::video.linux_display.use_cage_compositor = true;
   config::video.linux_display.prefer_gpu_native_capture = true;
 
@@ -328,7 +328,7 @@ TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {
   stats.capture_transport = platf::frame_transport_e::shm;
   stats.capture_residency = platf::frame_residency_e::cpu;
   stats.capture_format = platf::frame_format_e::bgra8;
-  stats.capture_device = "/dev/dri/renderD128";
+  stats.capture_device = "/dev/null";
   stats.encode_target_device = "vaapi";
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.encode_target_format = platf::frame_format_e::nv12;
@@ -342,8 +342,8 @@ TEST(StreamStatsCapturePathTests, ExplainsGpuNativeShmFallback) {
   ASSERT_TRUE(json.contains("linux_gpu_profile"));
   const auto &profile = json.at("linux_gpu_profile");
   EXPECT_EQ(profile.at("encoder_api"), "vaapi");
-  EXPECT_EQ(profile.at("encoder_adapter"), "/dev/dri/renderD128");
-  EXPECT_EQ(profile.at("capture_device"), "/dev/dri/renderD128");
+  EXPECT_EQ(profile.at("encoder_adapter"), "/dev/null");
+  EXPECT_EQ(profile.at("capture_device"), "/dev/null");
   EXPECT_TRUE(profile.at("adapter_matches_capture_device"));
   EXPECT_TRUE(profile.at("gpu_native_requested"));
   EXPECT_FALSE(profile.at("gpu_native_succeeded"));
