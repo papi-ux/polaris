@@ -863,6 +863,150 @@ namespace stream_stats {
     bool caller_is_authorized_harness);
 
   /**
+   * @brief Outcome of start_benchmark_run().
+   */
+  enum class benchmark_run_start_result_e {
+    started,
+    rejected_control_plane_not_enabled,
+    rejected_caller_not_authorized_as_harness,
+    rejected_run_not_found,
+    rejected_wrong_session,
+    rejected_run_not_in_armed_state,
+    rejected_population_changed_since_arm,
+    rejected_session_no_longer_active
+  };
+
+  /**
+   * @brief Transition an armed run to active, starting its measurement
+   * window. Every access to a run (this function and stop/get/delete
+   * below) first reconciles its state with reality via an internal lazy
+   * transition check - measurement-spec-v1.md 6.4's active->draining and
+   * draining->frozen deadlines, and the abort triggers (session ended,
+   * session generation changed, population changed) for a run already in
+   * its measurement window - since there is no background timer driving
+   * these; whichever caller happens to touch a run next is what notices.
+   * That reconciliation runs regardless of whether this call's own
+   * preconditions below end up rejecting it, so a stale run's state never
+   * depends on who last happened to ask about it.
+   *
+   * device_uuid/session_generation are a sanity/integrity check, not the
+   * authorization mechanism (that is caller_is_authorized_harness, same
+   * as create_benchmark_run) - the harness is expected to pass the
+   * identity of the session it is benchmarking, and this rejects a
+   * mismatch against what the run recorded at arm time, catching a stale
+   * run_id or a harness bookkeeping bug rather than silently starting the
+   * wrong run.
+   *
+   * rejected_population_changed_since_arm covers a gap the abort-trigger
+   * machinery above doesn't: that machinery only watches already-active or
+   * -draining runs, so a population change that happens while still
+   * *armed* (before start) needs its own check here, before the
+   * measurement window - and the abort semantics that assume one - even
+   * begins.
+   *
+   * @param run_id The run to start.
+   * @param device_uuid The session being benchmarked (session_t::device_uuid).
+   * @param session_generation That session's generation (session_t::session_generation).
+   * @param caller_is_authorized_harness See create_benchmark_run's parameter of the same name.
+   */
+  benchmark_run_start_result_e start_benchmark_run(
+    const std::string &run_id,
+    const std::string &device_uuid,
+    std::uint64_t session_generation,
+    bool caller_is_authorized_harness);
+
+  /**
+   * @brief Outcome of stop_benchmark_run().
+   */
+  enum class benchmark_run_stop_result_e {
+    stopped,
+    stopped_early_and_aborted,
+    rejected_control_plane_not_enabled,
+    rejected_caller_not_authorized_as_harness,
+    rejected_run_not_found,
+    rejected_wrong_session,
+    rejected_not_currently_active
+  };
+
+  /**
+   * @brief Explicitly stop an active run. measurement-spec-v1.md 6.4: "An
+   * explicit stop before the lower bound aborts the run; it cannot freeze
+   * a short run as valid merely because percentile sample floors were
+   * met." The lower bound is expected_duration_ns - duration_tolerance_ns;
+   * stopping at or after it transitions to draining (a normal stop, same
+   * as the automatic lazy transition at the declared deadline would have
+   * done); stopping before it aborts with stopped_before_duration_lower_bound.
+   *
+   * Calling this on a run that is not (after the same lazy reconciliation
+   * start_benchmark_run runs) currently active - already draining, frozen,
+   * aborted, still armed, or unknown - is rejected rather than treated as
+   * a no-op success, so a duplicate stop is visible as such to the caller.
+   *
+   * @param run_id The run to stop.
+   * @param device_uuid The session being benchmarked - see start_benchmark_run.
+   * @param session_generation That session's generation - see start_benchmark_run.
+   * @param caller_is_authorized_harness See create_benchmark_run's parameter of the same name.
+   */
+  benchmark_run_stop_result_e stop_benchmark_run(
+    const std::string &run_id,
+    const std::string &device_uuid,
+    std::uint64_t session_generation,
+    bool caller_is_authorized_harness);
+
+  /**
+   * @brief Outcome of get_benchmark_run().
+   */
+  enum class benchmark_run_get_result_e {
+    found,
+    rejected_control_plane_not_enabled,
+    rejected_caller_not_authorized_as_harness,
+    rejected_run_not_found
+  };
+
+  /**
+   * @brief Look up a run by ID, applying the same lazy state reconciliation
+   * described on start_benchmark_run first, then invoke fn with the
+   * up-to-date run while still holding the storage lock - the same
+   * locked-visitor contract as with_benchmark_run (piece 2), reused here
+   * rather than copying a potentially large run (up to 65,536 samples per
+   * stage) out on every read. fn must not call back into any
+   * stream_stats function that takes benchmark_run_mutex.
+   *
+   * Unlike start/stop, this takes no device_uuid/session_generation - the
+   * harness reads any run by its ID directly, not scoped to "the session
+   * it currently owns."
+   *
+   * @param run_id The run to look up.
+   * @param caller_is_authorized_harness See create_benchmark_run's parameter of the same name.
+   * @param fn Invoked with the run if found.
+   */
+  benchmark_run_get_result_e get_benchmark_run(
+    const std::string &run_id,
+    bool caller_is_authorized_harness,
+    const std::function<void(benchmark_run_t &)> &fn);
+
+  /**
+   * @brief Outcome of delete_benchmark_run().
+   */
+  enum class benchmark_run_delete_result_e {
+    deleted,
+    rejected_control_plane_not_enabled,
+    rejected_caller_not_authorized_as_harness,
+    rejected_run_not_found
+  };
+
+  /**
+   * @brief Delete a run's storage immediately, regardless of its current
+   * state (measurement-spec-v1.md 6.4: "DELETE releases payload storage
+   * immediately") - unlike expire, this leaves no tombstone at all.
+   * @param run_id The run to delete.
+   * @param caller_is_authorized_harness See create_benchmark_run's parameter of the same name.
+   */
+  benchmark_run_delete_result_e delete_benchmark_run(
+    const std::string &run_id,
+    bool caller_is_authorized_harness);
+
+  /**
    * @brief Get the number of active client sessions.
    * @return Count of active clients.
    */
