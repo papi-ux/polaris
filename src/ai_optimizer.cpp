@@ -11,6 +11,7 @@
 #include "stream_stats.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -20,6 +21,7 @@
 #include <iterator>
 #include <mutex>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <atomic>
 #include <unordered_map>
@@ -79,6 +81,7 @@ namespace ai_optimizer {
     std::string base_url;
     std::string device_name;
     std::string app_name;
+    std::string mode;
     device_db::optimization_t optimization;
     int64_t timestamp;  // Unix epoch seconds
   };
@@ -231,17 +234,42 @@ namespace ai_optimizer {
                                const std::string &model,
                                const std::string &base_url,
                                const std::string &device,
-                               const std::string &app) {
+                               const std::string &app,
+                               const std::string &mode = "") {
+    // The trailing mode dimension defaults empty, which IS the legacy bucket:
+    // requests that never name a mode keep hitting the entries they always had.
     return std::to_string(OPTIMIZATION_SCHEMA_VERSION) + "\t" +
-      provider + "\t" + model + "\t" + base_url + "\t" + canonical_device_name(device) + "\t" + app;
+      provider + "\t" + model + "\t" + base_url + "\t" + canonical_device_name(device) + "\t" + app + "\t" + mode;
   }
 
-  static std::string current_cache_key(const std::string &device, const std::string &app) {
-    return cache_key(cfg.provider, cfg.model, cfg.base_url, device, app);
+  static std::string current_cache_key(const std::string &device, const std::string &app, const std::string &mode = "") {
+    return cache_key(cfg.provider, cfg.model, cfg.base_url, device, app, mode);
   }
 
-  static std::string current_cache_key(const config_t &active_cfg, const std::string &device, const std::string &app) {
-    return cache_key(active_cfg.provider, active_cfg.model, active_cfg.base_url, device, app);
+  std::string normalize_stream_mode(const std::string &mode) {
+    auto key = mode;
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char ch) { return std::tolower(ch); });
+    // Mirrors stream_path's registry ids; local so this file stays platform-neutral.
+    static const std::array<std::string_view, 6> known {
+      "headless_stream", "windowed_stream", "host_virtual_display",
+      "desktop_display", "gamescope_stream", "headless_dongle"
+    };
+    for (const auto &id : known) {
+      if (key == id) {
+        return key;
+      }
+    }
+    return "";
+  }
+
+  std::string cache_key_for_tests(
+      const std::string &provider, const std::string &model, const std::string &base_url,
+      const std::string &device, const std::string &app, const std::string &mode) {
+    return cache_key(provider, model, base_url, device, app, mode);
+  }
+
+  static std::string current_cache_key(const config_t &active_cfg, const std::string &device, const std::string &app, const std::string &mode = "") {
+    return cache_key(active_cfg.provider, active_cfg.model, active_cfg.base_url, device, app, mode);
   }
 
   static std::string join_url(const std::string &base_url, const std::string &path) {
@@ -1131,6 +1159,7 @@ namespace ai_optimizer {
         entry.base_url = normalize_base_url(entry.provider, val.value("base_url", ""));
         entry.device_name = val.value("device_name", "");
         entry.app_name = val.value("app_name", "");
+        entry.mode = val.value("mode", "");
 
         if (entry.optimization.recommendation_version != OPTIMIZATION_SCHEMA_VERSION) {
           continue;
@@ -1163,6 +1192,7 @@ namespace ai_optimizer {
         if (val.contains("target_bitrate_kbps")) o.target_bitrate_kbps = val["target_bitrate_kbps"].get<int>();
         if (val.contains("nvenc_tune")) o.nvenc_tune = val["nvenc_tune"].get<int>();
         if (val.contains("preferred_codec")) o.preferred_codec = val["preferred_codec"].get<std::string>();
+        if (val.contains("ai_recommended_mode")) o.recommended_mode = val["ai_recommended_mode"].get<std::string>();
         o.reasoning = val.value("reasoning", "");
         o.cache_status = val.value("cache_status", "hit");
         o.confidence = val.value("confidence", "");
@@ -1171,7 +1201,7 @@ namespace ai_optimizer {
         o.generated_at = val.value("generated_at", entry.timestamp);
         o.expires_at = val.value("expires_at", 0);
         o.source = "ai_cached";
-        auto normalized_key = cache_key(entry.provider, entry.model, entry.base_url, entry.device_name, entry.app_name);
+        auto normalized_key = cache_key(entry.provider, entry.model, entry.base_url, entry.device_name, entry.app_name, entry.mode);
         auto existing = cache.find(normalized_key);
         if (existing == cache.end() || entry.timestamp >= existing->second.timestamp) {
           cache[normalized_key] = entry;
@@ -1195,6 +1225,7 @@ namespace ai_optimizer {
       val["base_url"] = entry.base_url;
       val["device_name"] = entry.device_name;
       val["app_name"] = entry.app_name;
+      val["mode"] = entry.mode;
       auto &o = entry.optimization;
       if (o.display_mode) val["display_mode"] = *o.display_mode;
       if (o.color_range) val["color_range"] = *o.color_range;
@@ -1203,6 +1234,7 @@ namespace ai_optimizer {
       if (o.target_bitrate_kbps) val["target_bitrate_kbps"] = *o.target_bitrate_kbps;
       if (o.nvenc_tune) val["nvenc_tune"] = *o.nvenc_tune;
       if (o.preferred_codec) val["preferred_codec"] = *o.preferred_codec;
+      if (o.recommended_mode) val["ai_recommended_mode"] = *o.recommended_mode;
       val["reasoning"] = o.reasoning;
       val["cache_status"] = o.cache_status;
       val["confidence"] = o.confidence;
@@ -1482,7 +1514,7 @@ namespace ai_optimizer {
 
     optimization.expires_at = now + static_cast<std::int64_t>(
       effective_ttl_hours(
-        {active_cfg.provider, active_cfg.model, active_cfg.base_url, device_name, app_name, optimization, now},
+        {active_cfg.provider, active_cfg.model, active_cfg.base_url, device_name, app_name, std::string {}, optimization, now},
         active_cfg.cache_ttl_hours
       ) * 3600LL
     );
@@ -1600,7 +1632,8 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
-      const std::optional<session_history_t> &history = std::nullopt) {
+      const std::optional<session_history_t> &history = std::nullopt,
+      const std::string &mode = "") {
     auto device_info = device_db::get_device(device_name);
     auto device_baseline = fallback_optimization_for_device(device_name, app_name);
     std::string device_desc = device_info
@@ -1614,6 +1647,10 @@ namespace ai_optimizer {
       if (!hint.empty()) {
         category_line = "Game category: " + hint + "\n";
       }
+    }
+
+    if (!mode.empty()) {
+      category_line += "Streaming display mode for this session: " + mode + "\n";
     }
 
     std::string history_line;
@@ -1762,6 +1799,12 @@ namespace ai_optimizer {
     if (result_json.contains("target_bitrate_kbps")) opt.target_bitrate_kbps = result_json["target_bitrate_kbps"].get<int>();
     if (result_json.contains("nvenc_tune")) opt.nvenc_tune = result_json["nvenc_tune"].get<int>();
     if (result_json.contains("preferred_codec")) opt.preferred_codec = result_json["preferred_codec"].get<std::string>();
+    if (result_json.contains("recommended_mode")) {
+      const auto suggested = normalize_stream_mode(result_json["recommended_mode"].get<std::string>());
+      if (!suggested.empty()) {
+        opt.recommended_mode = suggested;
+      }
+    }
     opt.reasoning = result_json.value("reasoning", "AI-optimized");
     opt.source = "ai_live";
     opt.recommendation_version = OPTIMIZATION_SCHEMA_VERSION;
@@ -1899,9 +1942,10 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
-      const std::optional<session_history_t> &history = std::nullopt) {
+      const std::optional<session_history_t> &history = std::nullopt,
+      const std::string &mode = "") {
 
-    std::string prompt = build_user_prompt(device_name, app_name, gpu_info, game_category, history);
+    std::string prompt = build_user_prompt(device_name, app_name, gpu_info, game_category, history, mode);
     std::string system = build_system_prompt();
     const std::string home = getenv("HOME") ? getenv("HOME") : "/home";
     const auto claude_bin = resolve_existing_binary(
@@ -1976,7 +2020,8 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
-      const std::optional<session_history_t> &history = std::nullopt) {
+      const std::optional<session_history_t> &history = std::nullopt,
+      const std::string &mode = "") {
 
     const std::string home = getenv("HOME") ? getenv("HOME") : "/home";
     const auto codex_bin = resolve_existing_binary(
@@ -1992,7 +2037,7 @@ namespace ai_optimizer {
     {
       std::ofstream pf(prompt_file);
       pf << build_system_prompt() << "\n\n"
-         << build_user_prompt(device_name, app_name, gpu_info, game_category, history) << "\n\n"
+         << build_user_prompt(device_name, app_name, gpu_info, game_category, history, mode) << "\n\n"
          << "Return only the JSON object in the requested schema.";
     }
 
@@ -2052,14 +2097,15 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
-      const std::optional<session_history_t> &history = std::nullopt) {
+      const std::optional<session_history_t> &history = std::nullopt,
+      const std::string &mode = "") {
 
     nlohmann::json request_body;
     request_body["model"] = active_cfg.model;
     request_body["max_tokens"] = 256;
     request_body["temperature"] = 0;
     request_body["messages"] = nlohmann::json::array({
-      {{"role", "user"}, {"content", build_user_prompt(device_name, app_name, gpu_info, game_category, history)}}
+      {{"role", "user"}, {"content", build_user_prompt(device_name, app_name, gpu_info, game_category, history, mode)}}
     });
     request_body["system"] = build_system_prompt();
 
@@ -2104,7 +2150,8 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
-      const std::optional<session_history_t> &history = std::nullopt) {
+      const std::optional<session_history_t> &history = std::nullopt,
+      const std::string &mode = "") {
 
     nlohmann::json request_body;
     request_body["model"] = active_cfg.model;
@@ -2112,7 +2159,7 @@ namespace ai_optimizer {
     request_body["max_tokens"] = 256;
     request_body["messages"] = nlohmann::json::array({
       {{"role", "system"}, {"content", build_system_prompt()}},
-      {{"role", "user"}, {"content", build_user_prompt(device_name, app_name, gpu_info, game_category, history)}}
+      {{"role", "user"}, {"content", build_user_prompt(device_name, app_name, gpu_info, game_category, history, mode)}}
     });
     request_body["response_format"] = optimization_response_format();
 
@@ -2154,32 +2201,35 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category = "",
-      const std::optional<session_history_t> &history = std::nullopt) {
+      const std::optional<session_history_t> &history = std::nullopt,
+      const std::string &mode = "") {
     if (active_cfg.provider == PROVIDER_ANTHROPIC) {
       if (active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
-        return call_anthropic_cli(active_cfg, device_name, app_name, gpu_info, game_category, history);
+        return call_anthropic_cli(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
       }
-      return call_anthropic_api(active_cfg, device_name, app_name, gpu_info, game_category, history);
+      return call_anthropic_api(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
     }
 
     if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
-      return call_openai_codex_cli(active_cfg, device_name, app_name, gpu_info, game_category, history);
+      return call_openai_codex_cli(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
     }
 
-    return call_openai_compatible_api(active_cfg, device_name, app_name, gpu_info, game_category, history);
+    return call_openai_compatible_api(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
   }
 
   static void store_cache_entry(const config_t &active_cfg,
                                 const std::string &device_name,
                                 const std::string &app_name,
-                                const device_db::optimization_t &optimization) {
+                                const device_db::optimization_t &optimization,
+                                const std::string &mode = "") {
     std::lock_guard<std::mutex> lock(cache_mutex);
-    cache[current_cache_key(active_cfg, device_name, app_name)] = {
+    cache[current_cache_key(active_cfg, device_name, app_name, mode)] = {
       active_cfg.provider,
       active_cfg.model,
       active_cfg.base_url,
       canonical_device_name(device_name),
       app_name,
+      mode,
       optimization,
       unix_time_now()
     };
@@ -2192,8 +2242,9 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category,
-      const std::optional<session_history_t> &history) {
-    const auto key = current_cache_key(active_cfg, device_name, app_name);
+      const std::optional<session_history_t> &history,
+      const std::string &mode) {
+    const auto key = current_cache_key(active_cfg, device_name, app_name, mode);
 
     {
       std::lock_guard<std::mutex> lock(inflight_mutex);
@@ -2212,10 +2263,10 @@ namespace ai_optimizer {
       ++in_flight_requests;
     }
 
-    std::thread([promise, key, active_cfg, device_name, app_name, gpu_info, game_category, history]() {
+    std::thread([promise, key, active_cfg, device_name, app_name, gpu_info, game_category, history, mode]() {
       const auto started_at = std::chrono::steady_clock::now();
       try {
-        auto result = call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history);
+        auto result = call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
         auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - started_at).count();
 
@@ -2230,7 +2281,7 @@ namespace ai_optimizer {
             false
           );
           update_provider_runtime_status(true, static_cast<long>(latency_ms));
-          store_cache_entry(active_cfg, device_name, app_name, normalized);
+          store_cache_entry(active_cfg, device_name, app_name, normalized, mode);
           promise->set_value(normalized);
         } else {
           update_provider_runtime_status(false, static_cast<long>(latency_ms), "Provider returned no optimization result");
@@ -2460,8 +2511,9 @@ namespace ai_optimizer {
   }
 
   std::optional<device_db::optimization_t> get_cached(
-      const std::string &device_name, const std::string &app_name) {
-    const auto key = current_cache_key(device_name, app_name);
+      const std::string &device_name, const std::string &app_name,
+      const std::string &mode) {
+    const auto key = current_cache_key(device_name, app_name, mode);
     std::optional<cache_entry_t> entry;
     {
       std::lock_guard<std::mutex> lock(cache_mutex);
@@ -2811,10 +2863,11 @@ namespace ai_optimizer {
                      const std::string &app_name,
                      const std::string &gpu_info,
                      const std::string &game_category,
-                     const std::optional<session_history_t> &history) {
+                     const std::optional<session_history_t> &history,
+                     const std::string &mode) {
     if (!is_enabled()) return;
     auto active_cfg = cfg;
-    (void)get_or_start_request(active_cfg, device_name, app_name, gpu_info, game_category, history);
+    (void)get_or_start_request(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
   }
 
   std::optional<device_db::optimization_t> request_sync(
@@ -2822,10 +2875,11 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category,
-      const std::optional<session_history_t> &history) {
+      const std::optional<session_history_t> &history,
+      const std::string &mode) {
     if (!is_enabled()) return std::nullopt;
     auto active_cfg = cfg;
-    auto future = get_or_start_request(active_cfg, device_name, app_name, gpu_info, game_category, history);
+    auto future = get_or_start_request(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
     return future.get();
   }
 
@@ -2835,13 +2889,14 @@ namespace ai_optimizer {
       const std::string &app_name,
       const std::string &gpu_info,
       const std::string &game_category,
-      const std::optional<session_history_t> &history) {
+      const std::optional<session_history_t> &history,
+      const std::string &mode) {
     auto active_cfg = resolved_config(config);
     if (!is_config_enabled(active_cfg)) {
       return std::nullopt;
     }
     const auto started_at = std::chrono::steady_clock::now();
-    auto result = call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history);
+    auto result = call_provider(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
     const auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - started_at).count();
     if (!result) {
@@ -3032,6 +3087,7 @@ namespace ai_optimizer {
       if (o.target_bitrate_kbps) val["target_bitrate_kbps"] = *o.target_bitrate_kbps;
       if (o.nvenc_tune) val["nvenc_tune"] = *o.nvenc_tune;
       if (o.preferred_codec) val["preferred_codec"] = *o.preferred_codec;
+      if (o.recommended_mode) val["ai_recommended_mode"] = *o.recommended_mode;
       val["reasoning"] = o.reasoning;
       val["cache_status"] = "hit";
       val["confidence"] = o.confidence;
