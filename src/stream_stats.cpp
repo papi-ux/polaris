@@ -279,6 +279,7 @@ namespace stream_stats {
     j["runtime_requested_headless"] = runtime_requested_headless;
     j["runtime_effective_headless"] = runtime_effective_headless;
     j["runtime_gpu_native_override_active"] = runtime_gpu_native_override_active;
+    j["runtime_display_warning"] = runtime_display_warning;
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
     j["capture_format"] = platf::from_frame_format(capture_format);
@@ -1118,6 +1119,11 @@ namespace stream_stats {
     current_stats.runtime_requested_headless = state.requested_headless;
     current_stats.runtime_effective_headless = state.effective_headless;
     current_stats.runtime_gpu_native_override_active = state.gpu_native_override_active;
+  }
+
+  void update_runtime_display_warning(const std::string &warning) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.runtime_display_warning = warning;
   }
 
   void update_capture_metadata(const platf::frame_metadata_t &metadata) {
