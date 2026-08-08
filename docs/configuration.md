@@ -32,10 +32,21 @@ These are the settings behind the recommended Headless Stream mode on a Linux ho
 
 Headless Stream starts apps inside Polaris' private labwc compositor. It is intentionally isolated
 from your normal KDE, GNOME, or wlroots desktop, so the built-in Desktop entry can be empty if no
-desktop shell or app is launched inside that runtime.
+desktop shell or app is launched inside that runtime — right-clicking that empty screen opens the
+generated session menu, which says exactly this.
 
 Use Desktop Display mode when you want to stream the visible host desktop session. Use Headless
 Stream when you want a stream-only runtime that leaves the host desktop layout alone.
+
+| I want | Set `linux_stream_mode` to |
+| --- | --- |
+| My real desktop, at host resolution | `desktop_display` (Mirror Desktop) |
+| An extra display, sized to the client | `host_virtual_display` |
+| An isolated game-only session, desktop untouched | `headless_stream` / `windowed_stream` |
+
+Two client-facing notes: Moonlight-protocol clients can request the mirror for a single launch with
+`mirrorDesktop=1` on `/launch` (no host reconfiguration), and `headless_mode = enabled` *without*
+`linux_use_cage_compositor` derives `host_virtual_display`, not a headless session.
 
 ## Common options
 
