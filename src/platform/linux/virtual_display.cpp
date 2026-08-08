@@ -511,6 +511,36 @@ namespace virtual_display {
     }
 
     /**
+     * @brief Check whether an evdi DRM card already exists.
+     */
+    static bool evdi_card_exists() {
+      try {
+        for (const auto &entry : fs::directory_iterator("/sys/class/drm/")) {
+          std::string name = entry.path().filename().string();
+          if (name.find("card") == 0 && name.find('-') == std::string::npos) {
+            auto driver_path = entry.path() / "device" / "driver";
+            if (fs::exists(driver_path) &&
+                fs::read_symlink(driver_path).filename().string() == "evdi") {
+              return true;
+            }
+          }
+        }
+      } catch (...) {}
+      return false;
+    }
+
+    /**
+     * @brief Check whether this process could actually obtain an EVDI device.
+     *
+     * Module + library presence is not enough: without a pre-created evdi card
+     * (modprobe initial_device_count=N) creating one requires write access to
+     * /sys/devices/evdi/add, which an unprivileged Polaris does not have.
+     */
+    static bool can_create() {
+      return evdi_card_exists() || access("/sys/devices/evdi/add", W_OK) == 0;
+    }
+
+    /**
      * @brief Find the output name for a newly created EVDI device.
      *
      * After EVDI creates a new card, the DRM subsystem assigns it a connector
@@ -804,12 +834,31 @@ namespace virtual_display {
         return "sway";
       }
 
-      // Check for KDE/KWin on Wayland
+      // Session-manager variables survive into environments the compositor
+      // sockets' variables do not (e.g. systemd user services).
       const char *desktop = std::getenv("XDG_CURRENT_DESKTOP");
-      if (desktop && std::string(desktop).find("KDE") != std::string::npos) {
+      const char *session_desktop = std::getenv("XDG_SESSION_DESKTOP");
+      const auto env_contains = [](const char *value, std::string_view needle) {
+        return value && std::string_view(value).find(needle) != std::string_view::npos;
+      };
+      if (env_contains(desktop, "Hyprland") || env_contains(session_desktop, "Hyprland")) {
+        return "hyprland";
+      }
+      if (env_contains(desktop, "sway") || env_contains(session_desktop, "sway")) {
+        return "sway";
+      }
+
+      // Check for KDE/KWin on Wayland
+      if (env_contains(desktop, "KDE")) {
         if (std::getenv("WAYLAND_DISPLAY")) {
           return "kwin";
         }
+      }
+
+      // A systemd user service under Hyprland may carry none of the variables
+      // above; hyprctl can still reach the compositor through XDG_RUNTIME_DIR.
+      if (exec_cmd_rc("hyprctl -j version >/dev/null 2>&1") == 0) {
+        return "hyprland";
       }
 
       return {};
@@ -838,8 +887,10 @@ namespace virtual_display {
         return false;
       }
 
-      // Check for wlr-randr as a generic wlroots tool
-      return exec_cmd_rc("which wlr-randr >/dev/null 2>&1") == 0;
+      // No supported compositor identified. wlr-randr alone cannot create an
+      // output (create() refuses the generic branch), so reporting available
+      // here would advertise a display that can never appear.
+      return false;
     }
 
     /**
@@ -1071,9 +1122,11 @@ namespace virtual_display {
 
     backend_e backend = backend_e::NONE;
 
-    // Priority 1: EVDI — creates true virtual connectors
+    // Priority 1: EVDI — creates true virtual connectors. Module + library
+    // presence alone is not enough to advertise it: creation must actually be
+    // possible, or the mode is offered and then silently fails at launch.
     if (evdi::is_module_loaded() || evdi::load_module()) {
-      if (evdi::load_library()) {
+      if (evdi::load_library() && evdi::can_create()) {
         backend = backend_e::EVDI;
       }
     }
@@ -1110,6 +1163,36 @@ namespace virtual_display {
   bool is_available() {
     const auto backend = detect_backend();
     return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
+  }
+
+  std::string unavailable_reason_for(backend_e backend, bool evdi_blocked, bool streaming_output_configured) {
+    switch (backend) {
+      case backend_e::EVDI:
+      case backend_e::WAYLAND_WLR:
+        return {};
+      case backend_e::KSCREEN_DOCTOR:
+        if (streaming_output_configured) {
+          return {};
+        }
+        return "kscreen-doctor backend needs linux_streaming_output set to the output it may reconfigure.";
+      case backend_e::NONE:
+      default:
+        if (evdi_blocked) {
+          return "EVDI module is loaded but no device can be created: no evdi card exists and "
+                 "/sys/devices/evdi/add is not writable by Polaris. Load evdi with "
+                 "initial_device_count=1 or grant write access.";
+        }
+        return "No virtual display backend is available on this host (EVDI not usable, no "
+               "supported Wayland compositor, kscreen-doctor not configured).";
+    }
+  }
+
+  std::string unavailable_reason() {
+    const auto backend = detect_backend();
+    // Probe without side effects: report the module as blocked only when it is
+    // already loaded and usable but a device still cannot be obtained.
+    const bool evdi_blocked = evdi::is_module_loaded() && evdi::load_library() && !evdi::can_create();
+    return unavailable_reason_for(backend, evdi_blocked, !config::video.linux_display.streaming_output.empty());
   }
 
   bool cleanup_stale() {
