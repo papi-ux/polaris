@@ -462,6 +462,13 @@ namespace stream {
     std::string device_name;
     std::string device_uuid;
     std::string session_token;
+
+    // Process-lifetime-monotonic, assigned fresh in alloc() for every
+    // session_t - unlike device_uuid, never repeats across a reconnect.
+    // stream_stats uses this to reject a stale write/stop that arrives
+    // after this uuid's slot has already been handed to a newer session.
+    std::uint64_t session_generation = 0;
+
     bool watch_only;
     int requested_fps = 0;
     int session_target_fps = 0;
@@ -1522,7 +1529,7 @@ namespace stream {
         frame_processing_latency_logger.collect_and_log(latency / 10.);
 
         if (packet->encode_done_timestamp) {
-          stream_stats::record_frame_timing(session->device_uuid, *packet->frame_timestamp, *packet->encode_done_timestamp, t2_send_time);
+          stream_stats::record_frame_timing(session->device_uuid, session->session_generation, *packet->frame_timestamp, *packet->encode_done_timestamp, t2_send_time);
         }
       } else {
         frame_header.frame_processing_latency = 0;
@@ -2081,6 +2088,10 @@ namespace stream {
   namespace session {
     std::atomic_uint running_sessions;
 
+    // Source of session_t::session_generation. Starts at 1 so 0 stays
+    // available as an obviously-invalid/unset sentinel.
+    std::atomic<std::uint64_t> next_session_generation {1};
+
     unsigned active_count() {
       return running_sessions.load(std::memory_order_relaxed);
     }
@@ -2240,7 +2251,7 @@ namespace stream {
 
       // Remove this client from multi-client stats
       stream_stats::remove_client(session.control.expected_peer_address);
-      stream_stats::stop_session_timing(session.device_uuid);
+      stream_stats::stop_session_timing(session.device_uuid, session.session_generation);
 
       // If this is the last session, invoke the platform callbacks
       auto remaining = --running_sessions;
@@ -2335,7 +2346,7 @@ namespace stream {
 
       // Track this client in multi-client stats
       stream_stats::add_client(addr_string, session.device_name);
-      stream_stats::start_session_timing(session.device_uuid);
+      stream_stats::start_session_timing(session.device_uuid, session.session_generation);
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
         session.session_target_fps > 0 ? static_cast<double>(session.session_target_fps) / 1000.0 : 0.0,
@@ -2417,6 +2428,7 @@ namespace stream {
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
       session->session_token = launch_session.session_token;
+      session->session_generation = next_session_generation.fetch_add(1, std::memory_order_relaxed);
       session->requested_fps = launch_session.requested_fps;
       session->session_target_fps = launch_session.fps;
       session->pacing_policy = launch_session.pacing_policy;

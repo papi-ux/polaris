@@ -433,6 +433,11 @@ namespace stream_stats {
     double p50_ms = 0;
     double p99_ms = 0;
     int sample_count = 0;
+
+    /// Samples rejected for a non-monotonic or negative stage duration
+    /// (e.g. a corrupted or misordered timestamp pair). Counted, not
+    /// silently dropped - and never folded into p50_ms/p99_ms/sample_count.
+    int invalid_count = 0;
   };
 
   /**
@@ -465,15 +470,18 @@ namespace stream_stats {
     frame_timing_percentiles_t capture_to_send;  ///< T0 -> T2
 
     /**
-     * Opaque, same-process-only marker of which "epoch" (continuous span
-     * between start_session_timing() and stop_session_timing()) produced
-     * this snapshot. A steady_clock::now().time_since_epoch() count in
-     * nanoseconds - not a wall-clock timestamp, not meaningful across a
-     * host restart. Two reads with the same value are from the same
-     * uninterrupted session; a changed value means the session was torn
-     * down and restarted (e.g. a reconnect) between reads.
+     * The session_t generation that produced this snapshot - a
+     * process-lifetime-monotonic counter assigned once per session_t
+     * allocation (session_t::session_generation), not per device. Two
+     * sessions from the same reconnecting device get different
+     * generations even though they share the same device_uuid, which is
+     * what lets record_frame_timing()/stop_session_timing() reject a
+     * write or stop from a session that already lost ownership of its
+     * uuid slot to a newer generation, instead of corrupting or
+     * prematurely discarding the new one. A changed value between two
+     * reads means the session was torn down and restarted between them.
      */
-    std::uint64_t epoch_start_ns = 0;
+    std::uint64_t session_generation = 0;
 
     /// Whether the queried device_uuid currently has any timing state at
     /// all. False (with all percentiles empty) means no session is active
@@ -484,7 +492,7 @@ namespace stream_stats {
     /// True until this session's rings wrap. False means the ring evicted
     /// its oldest samples to make room for newer ones, so the percentiles
     /// above reflect only the most recent capacity's worth of frames, not
-    /// every frame since epoch_start_ns.
+    /// every frame since this generation started.
     bool ring_complete = false;
   };
 
@@ -493,31 +501,45 @@ namespace stream_stats {
    * for one device. Call once the session is admitted, alongside
    * add_client(). An existing entry for the same uuid is discarded and
    * replaced with a fresh, empty one - this is how a reconnecting device
-   * gets a clean epoch rather than inheriting its previous session's tail.
+   * gets a clean generation rather than inheriting its previous session's
+   * tail.
    * @param device_uuid The connecting device's paired UUID (session_t::device_uuid).
+   * @param session_generation The new session_t's own generation (session_t::session_generation).
    */
-  void start_session_timing(const std::string &device_uuid);
+  void start_session_timing(const std::string &device_uuid, std::uint64_t session_generation);
 
   /**
-   * @brief Stop and discard per-session T0-T2 timing state for one device.
-   * Call once the session has fully ended, alongside remove_client().
+   * @brief Stop and discard per-session T0-T2 timing state for one device -
+   * but only if session_generation still matches the currently-registered
+   * generation for that uuid. A stop from a generation that already lost
+   * its uuid slot to a newer session (e.g. a fast reconnect racing this
+   * session's own teardown) is a safe no-op, so it cannot discard the
+   * newer session's state.
    * @param device_uuid The device UUID passed to the matching start_session_timing().
+   * @param session_generation The generation passed to that same start_session_timing() call.
    */
-  void stop_session_timing(const std::string &device_uuid);
+  void stop_session_timing(const std::string &device_uuid, std::uint64_t session_generation);
 
   /**
    * @brief Record one frame's T0/T1/T2 timestamps into device_uuid's
    * session timing histograms. Wire-format telemetry
    * (frame_processing_latency) is untouched by this - this is purely an
    * additional, out-of-band record. A no-op if device_uuid has no active
-   * timing state (e.g. a few packets still in flight right as a session
-   * tears down) - there is nowhere safe to attribute the sample.
+   * timing state, or if session_generation no longer matches the
+   * currently-registered generation (a stale write from a session that
+   * already retired and lost its uuid slot to a newer one - e.g. packets
+   * still draining through the send thread right as a fast reconnect
+   * hands the same uuid to a new session). Per-stage durations that come
+   * out negative or non-monotonic are rejected and counted rather than
+   * silently corrupting the percentiles.
    * @param device_uuid The frame's owning session (session_t::device_uuid).
+   * @param session_generation The frame's owning session's generation (session_t::session_generation).
    * @param capture_time T0.
    * @param encode_done_time T1.
    * @param send_time T2.
    */
   void record_frame_timing(const std::string &device_uuid,
+                           std::uint64_t session_generation,
                            std::chrono::steady_clock::time_point capture_time,
                            std::chrono::steady_clock::time_point encode_done_time,
                            std::chrono::steady_clock::time_point send_time);

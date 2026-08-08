@@ -333,9 +333,9 @@
         "capture_to_encode",
         "capture_to_send",
         "encode_to_send",
-        "epoch_start_ns",
         "ring_complete",
         "session_active",
+        "session_generation",
         "stage_vocabulary"
       ],
       "polaris_emitter": {

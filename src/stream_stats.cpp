@@ -191,6 +191,12 @@ namespace stream_stats {
       std::size_t next_index = 0;
       std::size_t filled = 0;
 
+      // Rejected (negative/non-monotonic) samples for this stage - see
+      // record_frame_timing()'s validation. Counted here rather than in
+      // session_timing_state_t so each of the three stages tracks its own
+      // rejection count independently.
+      int invalid_count = 0;
+
       void push(double value_ms) {
         samples_ms[next_index] = value_ms;
         next_index = (next_index + 1) % FRAME_TIMING_RING_CAPACITY;
@@ -199,7 +205,7 @@ namespace stream_stats {
 
       frame_timing_percentiles_t percentiles() const {
         if (filled == 0) {
-          return {};
+          return {0, 0, 0, invalid_count};
         }
         std::vector<double> sorted(samples_ms.begin(), samples_ms.begin() + static_cast<long>(filled));
         std::sort(sorted.begin(), sorted.end());
@@ -207,7 +213,7 @@ namespace stream_stats {
           auto idx = static_cast<std::size_t>(p * static_cast<double>(sorted.size() - 1));
           return sorted[idx];
         };
-        return {pick(0.50), pick(0.99), static_cast<int>(filled)};
+        return {pick(0.50), pick(0.99), static_cast<int>(filled), invalid_count};
       }
     };
 
@@ -217,10 +223,17 @@ namespace stream_stats {
     // hashed lookup without being any slower at this size.
     struct session_timing_state_t {
       std::string device_uuid;
+
+      // Matches the owning session_t::session_generation. A reconnecting
+      // device reuses device_uuid but gets a new generation, which is what
+      // lets record_frame_timing()/stop_session_timing() tell a stale
+      // write/stop (from a session that already lost its uuid slot) apart
+      // from a legitimate one.
+      std::uint64_t session_generation = 0;
+
       timing_ring_t capture_to_encode_ring;
       timing_ring_t encode_to_send_ring;
       timing_ring_t capture_to_send_ring;
-      std::chrono::steady_clock::time_point epoch_start;
     };
 
     std::mutex frame_timing_mutex;
@@ -1210,7 +1223,7 @@ namespace stream_stats {
     bucket.total_us.clear();
   }
 
-  void start_session_timing(const std::string &device_uuid) {
+  void start_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
@@ -1219,34 +1232,42 @@ namespace stream_stats {
 
     session_timing_state_t state;
     state.device_uuid = device_uuid;
-    state.epoch_start = std::chrono::steady_clock::now();
+    state.session_generation = session_generation;
     session_timings.push_back(std::move(state));
   }
 
-  void stop_session_timing(const std::string &device_uuid) {
+  void stop_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
-        [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; }),
+        [&device_uuid, session_generation](const session_timing_state_t &s) {
+          return s.device_uuid == device_uuid && s.session_generation == session_generation;
+        }),
       session_timings.end());
   }
 
   void record_frame_timing(const std::string &device_uuid,
+                           std::uint64_t session_generation,
                            std::chrono::steady_clock::time_point capture_time,
                            std::chrono::steady_clock::time_point encode_done_time,
                            std::chrono::steady_clock::time_point send_time) {
-    auto to_ms = [](std::chrono::steady_clock::duration d) {
-      return std::chrono::duration<double, std::milli>(d).count();
-    };
-
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     auto *state = find_session_timing_locked(device_uuid);
-    if (!state) {
+    if (!state || state->session_generation != session_generation) {
       return;
     }
-    state->capture_to_encode_ring.push(to_ms(encode_done_time - capture_time));
-    state->encode_to_send_ring.push(to_ms(send_time - encode_done_time));
-    state->capture_to_send_ring.push(to_ms(send_time - capture_time));
+
+    auto record_stage = [](timing_ring_t &ring, std::chrono::steady_clock::duration d) {
+      if (d < std::chrono::steady_clock::duration::zero()) {
+        ring.invalid_count++;
+        return;
+      }
+      ring.push(std::chrono::duration<double, std::milli>(d).count());
+    };
+
+    record_stage(state->capture_to_encode_ring, encode_done_time - capture_time);
+    record_stage(state->encode_to_send_ring, send_time - encode_done_time);
+    record_stage(state->capture_to_send_ring, send_time - capture_time);
   }
 
   session_timing_t get_session_timing(const std::string &device_uuid) {
@@ -1261,8 +1282,7 @@ namespace stream_stats {
       state->encode_to_send_ring.percentiles(),
       state->capture_to_send_ring.percentiles()
     };
-    result.epoch_start_ns = static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(state->epoch_start.time_since_epoch()).count());
+    result.session_generation = state->session_generation;
     result.session_active = true;
     result.ring_complete = state->capture_to_encode_ring.filled < FRAME_TIMING_RING_CAPACITY;
     return result;
