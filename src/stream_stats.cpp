@@ -1365,6 +1365,123 @@ namespace stream_stats {
     return classification;
   }
 
+  namespace {
+    constexpr std::size_t MAX_TERMINAL_BENCHMARK_RUNS = 4;
+    constexpr auto BENCHMARK_RUN_TTL = std::chrono::minutes(30);
+
+    bool is_terminal_benchmark_run(const benchmark_run_t &run) {
+      return run.state == benchmark_run_state_e::frozen || run.state == benchmark_run_state_e::aborted;
+    }
+
+    void clear_benchmark_run_payload(benchmark_run_t &run) {
+      auto clear_stage = [](benchmark_stage_capture_t &stage) {
+        stage.start_offset_us.clear();
+        stage.start_offset_us.shrink_to_fit();
+        stage.end_offset_us.clear();
+        stage.end_offset_us.shrink_to_fit();
+        stage.duration_us.clear();
+        stage.duration_us.shrink_to_fit();
+      };
+      clear_stage(run.capture_to_encode);
+      clear_stage(run.encode_to_send_release);
+      clear_stage(run.capture_to_send_release);
+    }
+
+    // Caller must hold benchmark_run_mutex.
+    void expire_benchmark_run_locked(benchmark_run_t &run) {
+      run.state = benchmark_run_state_e::expired;
+      clear_benchmark_run_payload(run);
+    }
+
+    // Caller must hold benchmark_run_mutex. Repeatedly expires the oldest
+    // (by frozen_monotonic) terminal run until at most
+    // MAX_TERMINAL_BENCHMARK_RUNS remain - measurement-spec-v1.md 6.4:
+    // "when a fifth retained payload would be created, the oldest
+    // non-active payload expires before the new payload is accepted."
+    void enforce_terminal_retention_locked(std::vector<benchmark_run_t> &runs) {
+      for (;;) {
+        benchmark_run_t *oldest = nullptr;
+        std::size_t terminal_count = 0;
+
+        for (auto &run : runs) {
+          if (!is_terminal_benchmark_run(run)) {
+            continue;
+          }
+          terminal_count++;
+          if (!oldest ||
+              !oldest->frozen_monotonic ||
+              (run.frozen_monotonic && *run.frozen_monotonic < *oldest->frozen_monotonic)) {
+            oldest = &run;
+          }
+        }
+
+        if (terminal_count <= MAX_TERMINAL_BENCHMARK_RUNS || !oldest) {
+          break;
+        }
+        expire_benchmark_run_locked(*oldest);
+      }
+    }
+  }  // namespace
+
+  static std::mutex benchmark_run_mutex;
+  static std::vector<benchmark_run_t> benchmark_runs;
+
+  const std::string &process_instance_id() {
+    static const std::string id = [] {
+      const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+      return "polaris-" + std::to_string(ns);
+    }();
+    return id;
+  }
+
+  void insert_benchmark_run(benchmark_run_t run) {
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+    benchmark_runs.push_back(std::move(run));
+    enforce_terminal_retention_locked(benchmark_runs);
+  }
+
+  bool with_benchmark_run(const std::string &run_id, const std::function<void(benchmark_run_t &)> &fn) {
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+    auto it = std::find_if(benchmark_runs.begin(), benchmark_runs.end(),
+      [&run_id](const benchmark_run_t &r) { return r.run_id == run_id; });
+    if (it == benchmark_runs.end()) {
+      return false;
+    }
+    fn(*it);
+    return true;
+  }
+
+  void erase_benchmark_run(const std::string &run_id) {
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+    benchmark_runs.erase(
+      std::remove_if(benchmark_runs.begin(), benchmark_runs.end(),
+        [&run_id](const benchmark_run_t &r) { return r.run_id == run_id; }),
+      benchmark_runs.end());
+  }
+
+  void expire_benchmark_run(const std::string &run_id) {
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+    auto it = std::find_if(benchmark_runs.begin(), benchmark_runs.end(),
+      [&run_id](const benchmark_run_t &r) { return r.run_id == run_id; });
+    if (it != benchmark_runs.end()) {
+      expire_benchmark_run_locked(*it);
+    }
+  }
+
+  void expire_stale_benchmark_runs() {
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto &run : benchmark_runs) {
+      if (!is_terminal_benchmark_run(run) || !run.frozen_monotonic) {
+        continue;
+      }
+      if (now - *run.frozen_monotonic > BENCHMARK_RUN_TTL) {
+        expire_benchmark_run_locked(run);
+      }
+    }
+  }
+
   int active_client_count() {
     std::lock_guard<std::mutex> lock(stats_mutex);
     return static_cast<int>(current_stats.clients.size());

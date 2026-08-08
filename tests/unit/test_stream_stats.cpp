@@ -1252,3 +1252,208 @@ TEST(BenchmarkStageCaptureTests, MultipleAcceptedObservationsStayInInsertionOrde
   EXPECT_EQ(stage.duration_us[1], 8u);
   EXPECT_EQ(stage.duration_us[2], 3u);
 }
+
+// P0-5 benchmark-run-capture engine, piece 2: benchmark_run_t and its
+// process-wide storage/retention. Storage is global (not session-keyed),
+// so - like ClientPopulationRevisionTests - these use unique run_ids per
+// test rather than relying on execution order or isolation between tests.
+
+TEST(BenchmarkRunTests, ConstructorForwardsCapacityToAllThreeStages) {
+  stream_stats::benchmark_run_t run(42);
+
+  EXPECT_EQ(run.sample_capacity, 42u);
+  EXPECT_EQ(run.capture_to_encode.capacity, 42u);
+  EXPECT_EQ(run.encode_to_send_release.capacity, 42u);
+  EXPECT_EQ(run.capture_to_send_release.capacity, 42u);
+  EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::armed)
+    << "a freshly constructed run defaults to armed";
+}
+
+TEST(BenchmarkRunTests, ProcessInstanceIdIsNonEmptyAndStable) {
+  const auto &first = stream_stats::process_instance_id();
+  const auto &second = stream_stats::process_instance_id();
+
+  EXPECT_FALSE(first.empty());
+  EXPECT_EQ(&first, &second) << "must be the same stable value, not regenerated per call";
+}
+
+TEST(BenchmarkRunStorageTests, WithBenchmarkRunFindsAnInsertedRunByItsId) {
+  stream_stats::benchmark_run_t run(10);
+  run.run_id = "test-run-find-me";
+  run.label = "find-me-label";
+  stream_stats::insert_benchmark_run(std::move(run));
+
+  bool visited = false;
+  const bool found = stream_stats::with_benchmark_run("test-run-find-me", [&](stream_stats::benchmark_run_t &r) {
+    visited = true;
+    EXPECT_EQ(r.label, "find-me-label");
+  });
+
+  EXPECT_TRUE(found);
+  EXPECT_TRUE(visited);
+
+  stream_stats::erase_benchmark_run("test-run-find-me");
+}
+
+TEST(BenchmarkRunStorageTests, WithBenchmarkRunReturnsFalseForAnUnknownId) {
+  bool visited = false;
+  const bool found = stream_stats::with_benchmark_run("test-run-does-not-exist", [&](stream_stats::benchmark_run_t &) {
+    visited = true;
+  });
+
+  EXPECT_FALSE(found);
+  EXPECT_FALSE(visited);
+}
+
+TEST(BenchmarkRunStorageTests, WithBenchmarkRunMutationsPersist) {
+  stream_stats::benchmark_run_t run(10);
+  run.run_id = "test-run-mutate";
+  stream_stats::insert_benchmark_run(std::move(run));
+
+  stream_stats::with_benchmark_run("test-run-mutate", [](stream_stats::benchmark_run_t &r) {
+    r.state = stream_stats::benchmark_run_state_e::active;
+  });
+
+  bool state_is_active = false;
+  stream_stats::with_benchmark_run("test-run-mutate", [&](stream_stats::benchmark_run_t &r) {
+    state_is_active = (r.state == stream_stats::benchmark_run_state_e::active);
+  });
+  EXPECT_TRUE(state_is_active);
+
+  stream_stats::erase_benchmark_run("test-run-mutate");
+}
+
+TEST(BenchmarkRunStorageTests, EraseBenchmarkRunRemovesOnlyTheNamedRun) {
+  stream_stats::benchmark_run_t run_a(10);
+  run_a.run_id = "test-run-erase-a";
+  stream_stats::insert_benchmark_run(std::move(run_a));
+
+  stream_stats::benchmark_run_t run_b(10);
+  run_b.run_id = "test-run-erase-b";
+  stream_stats::insert_benchmark_run(std::move(run_b));
+
+  stream_stats::erase_benchmark_run("test-run-erase-a");
+
+  EXPECT_FALSE(stream_stats::with_benchmark_run("test-run-erase-a", [](stream_stats::benchmark_run_t &) {}));
+  EXPECT_TRUE(stream_stats::with_benchmark_run("test-run-erase-b", [](stream_stats::benchmark_run_t &) {}));
+
+  stream_stats::erase_benchmark_run("test-run-erase-b");
+}
+
+TEST(BenchmarkRunStorageTests, ExpireBenchmarkRunClearsPayloadButKeepsTombstoneMetadata) {
+  stream_stats::benchmark_run_t run(10);
+  run.run_id = "test-run-expire";
+  run.label = "expire-me-label";
+  run.capture_to_encode.record(0, 5, 1000);
+  ASSERT_EQ(run.capture_to_encode.accepted_count, 1u);
+  stream_stats::insert_benchmark_run(std::move(run));
+
+  stream_stats::expire_benchmark_run("test-run-expire");
+
+  bool visited = false;
+  stream_stats::with_benchmark_run("test-run-expire", [&](stream_stats::benchmark_run_t &r) {
+    visited = true;
+    EXPECT_EQ(r.state, stream_stats::benchmark_run_state_e::expired);
+    EXPECT_EQ(r.label, "expire-me-label") << "lightweight metadata survives as the tombstone";
+    EXPECT_TRUE(r.capture_to_encode.start_offset_us.empty()) << "the heavy payload must be cleared";
+    // The accepted_count itself is retained - it's a small integer, part
+    // of the "bounded tombstone metadata needed to explain the missing
+    // payload", not the payload itself.
+    EXPECT_EQ(r.capture_to_encode.accepted_count, 1u);
+  });
+  EXPECT_TRUE(visited);
+
+  stream_stats::erase_benchmark_run("test-run-expire");
+}
+
+TEST(BenchmarkRunStorageTests, ExpireBenchmarkRunIsANoOpForAnUnknownId) {
+  // Must not crash or throw.
+  stream_stats::expire_benchmark_run("test-run-expire-unknown-id");
+}
+
+TEST(BenchmarkRunRetentionTests, InsertingAFifthTerminalRunExpiresTheOldestOne) {
+  using namespace std::chrono;
+  const auto base = steady_clock::now();
+
+  for (int i = 0; i < 5; ++i) {
+    stream_stats::benchmark_run_t run(10);
+    run.run_id = "test-run-retention-" + std::to_string(i);
+    run.state = stream_stats::benchmark_run_state_e::frozen;
+    run.frozen_monotonic = base + seconds(i);  // run 0 is oldest, run 4 is newest.
+    stream_stats::insert_benchmark_run(std::move(run));
+  }
+
+  // The oldest of the 5 terminal runs must have been evicted (expired) once
+  // the 5th was inserted - but expiry leaves a tombstone, so it must still
+  // be findable, just no longer frozen.
+  bool oldest_visited = false;
+  ASSERT_TRUE(stream_stats::with_benchmark_run("test-run-retention-0", [&](stream_stats::benchmark_run_t &r) {
+    oldest_visited = true;
+    EXPECT_EQ(r.state, stream_stats::benchmark_run_state_e::expired);
+  })) << "the tombstone must still be findable after eviction";
+  EXPECT_TRUE(oldest_visited);
+
+  for (int i = 1; i < 5; ++i) {
+    EXPECT_TRUE(stream_stats::with_benchmark_run("test-run-retention-" + std::to_string(i), [](stream_stats::benchmark_run_t &r) {
+      EXPECT_EQ(r.state, stream_stats::benchmark_run_state_e::frozen) << "the 4 newer runs must be untouched";
+    }));
+  }
+
+  for (int i = 0; i < 5; ++i) {
+    stream_stats::erase_benchmark_run("test-run-retention-" + std::to_string(i));
+  }
+}
+
+TEST(BenchmarkRunRetentionTests, NonTerminalRunsAreNeverEvictedByTheTerminalRetentionLimit) {
+  using namespace std::chrono;
+  const auto base = steady_clock::now();
+
+  // 5 non-terminal (active) runs - the 4-payload cap only applies to
+  // frozen/aborted runs, so none of these should ever be touched by
+  // insert-time retention.
+  for (int i = 0; i < 5; ++i) {
+    stream_stats::benchmark_run_t run(10);
+    run.run_id = "test-run-non-terminal-" + std::to_string(i);
+    run.state = stream_stats::benchmark_run_state_e::active;
+    run.frozen_monotonic = base + seconds(i);  // Set anyway, to prove state (not timestamp presence) gates eviction.
+    stream_stats::insert_benchmark_run(std::move(run));
+  }
+
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_TRUE(stream_stats::with_benchmark_run("test-run-non-terminal-" + std::to_string(i), [](stream_stats::benchmark_run_t &r) {
+      EXPECT_EQ(r.state, stream_stats::benchmark_run_state_e::active);
+    }));
+  }
+
+  for (int i = 0; i < 5; ++i) {
+    stream_stats::erase_benchmark_run("test-run-non-terminal-" + std::to_string(i));
+  }
+}
+
+TEST(BenchmarkRunRetentionTests, ExpireStaleBenchmarkRunsExpiresOnlyRunsPastTheTtl) {
+  using namespace std::chrono;
+
+  stream_stats::benchmark_run_t stale_run(10);
+  stale_run.run_id = "test-run-stale";
+  stale_run.state = stream_stats::benchmark_run_state_e::aborted;
+  stale_run.frozen_monotonic = steady_clock::now() - minutes(31);
+  stream_stats::insert_benchmark_run(std::move(stale_run));
+
+  stream_stats::benchmark_run_t fresh_run(10);
+  fresh_run.run_id = "test-run-fresh";
+  fresh_run.state = stream_stats::benchmark_run_state_e::frozen;
+  fresh_run.frozen_monotonic = steady_clock::now();
+  stream_stats::insert_benchmark_run(std::move(fresh_run));
+
+  stream_stats::expire_stale_benchmark_runs();
+
+  stream_stats::with_benchmark_run("test-run-stale", [](stream_stats::benchmark_run_t &r) {
+    EXPECT_EQ(r.state, stream_stats::benchmark_run_state_e::expired);
+  });
+  stream_stats::with_benchmark_run("test-run-fresh", [](stream_stats::benchmark_run_t &r) {
+    EXPECT_EQ(r.state, stream_stats::benchmark_run_state_e::frozen) << "well within the 30-minute TTL, must not expire";
+  });
+
+  stream_stats::erase_benchmark_run("test-run-stale");
+  stream_stats::erase_benchmark_run("test-run-fresh");
+}

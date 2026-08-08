@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -671,6 +672,113 @@ namespace stream_stats {
      */
     boundary_classification_e record(std::int64_t a_offset_us, std::int64_t b_offset_us, std::int64_t window_end_us);
   };
+
+  /**
+   * @brief One gate-authoritative benchmark run (measurement-spec-v1.md 6.4).
+   * Not constructible without a sample capacity - the three stage captures
+   * need it at construction, and there is no meaningful "run" without one.
+   * Everything else is set by the caller after construction (matching
+   * session_timing_state_t's own pattern above) - this piece provides the
+   * struct and its storage; piece 3 (create_benchmark_run) owns validating
+   * and populating one.
+   */
+  struct benchmark_run_t {
+    std::string run_id;
+    benchmark_run_state_e state = benchmark_run_state_e::armed;
+    benchmark_abort_reason_e abort_reason = benchmark_abort_reason_e::none;
+
+    std::string owning_device_uuid;
+    std::uint64_t owning_session_generation = 0;
+
+    std::string manifest_sha256;
+    std::string label;
+    std::string workload_id;
+
+    std::chrono::nanoseconds expected_duration_ns {0};
+    std::chrono::nanoseconds duration_tolerance_ns {0};
+    std::chrono::nanoseconds drain_grace_ns {0};
+    int target_fps = 0;
+    std::size_t sample_capacity = 0;
+
+    std::chrono::steady_clock::time_point armed_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> started_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> stopped_monotonic;
+
+    /// Set when this run becomes immutable, whether by reaching frozen
+    /// normally or by aborting - measurement-spec-v1.md 6.4 only names one
+    /// "frozen_monotonic_ns" output field, used as the terminal-payload
+    /// timestamp either way. Also this run's retention age for eviction/TTL.
+    std::optional<std::chrono::steady_clock::time_point> frozen_monotonic;
+
+    std::uint64_t client_population_revision_at_arm = 0;
+    std::uint64_t client_population_revision_at_freeze = 0;
+
+    benchmark_stage_capture_t capture_to_encode;
+    benchmark_stage_capture_t encode_to_send_release;
+    benchmark_stage_capture_t capture_to_send_release;
+
+    explicit benchmark_run_t(std::size_t sample_capacity_in):
+        sample_capacity(sample_capacity_in),
+        capture_to_encode(sample_capacity_in),
+        encode_to_send_release(sample_capacity_in),
+        capture_to_send_release(sample_capacity_in) {
+    }
+  };
+
+  /**
+   * @brief A process-lifetime-stable identifier, generated on first use.
+   * Doesn't need global uniqueness (nothing compares it across machines) -
+   * only needs to change across a Polaris restart, so a benchmark run's
+   * frozen output can't be mistaken for one produced by a different process
+   * instance.
+   */
+  const std::string &process_instance_id();
+
+  /**
+   * @brief Insert a fully-constructed benchmark run into process-wide
+   * storage. Does not validate uniqueness or any create-and-arm
+   * precondition - that is piece 3 (create_benchmark_run)'s job; this is
+   * the storage primitive it will call after validating. Enforces the
+   * terminal-payload retention limit (measurement-spec-v1.md 6.4: at most
+   * 4 frozen/aborted payloads per process instance) by expiring the oldest
+   * terminal run first if this insert would exceed it.
+   */
+  void insert_benchmark_run(benchmark_run_t run);
+
+  /**
+   * @brief Look up a run by ID and, while still holding the storage lock,
+   * invoke fn on it. This is the only safe way to read or mutate a
+   * benchmark_run_t's fields from outside this file: insert_benchmark_run()
+   * can reallocate the underlying storage, and erase_benchmark_run() can
+   * shift it, so a raw pointer/reference returned across a call boundary
+   * could dangle. Not for the hot path - piece 5's record_benchmark_sample()
+   * will be its own dedicated, allocation-free function instead of using
+   * this generic std::function-based visitor.
+   * @return false (fn not invoked) if no run with that ID exists.
+   */
+  bool with_benchmark_run(const std::string &run_id, const std::function<void(benchmark_run_t &)> &fn);
+
+  /**
+   * @brief Immediately release a run's storage (measurement-spec-v1.md 6.4:
+   * "DELETE releases payload storage immediately").
+   */
+  void erase_benchmark_run(const std::string &run_id);
+
+  /**
+   * @brief Clear a run's heavy payload (the three stage captures' sample
+   * arrays) and mark it expired, leaving only the bounded tombstone
+   * metadata (run_id, state, timestamps, abort_reason, counts) that
+   * measurement-spec-v1.md 6.4 requires survive expiry. A no-op if run_id
+   * doesn't exist.
+   */
+  void expire_benchmark_run(const std::string &run_id);
+
+  /**
+   * @brief Expire every frozen/aborted run whose frozen_monotonic is older
+   * than the 30-minute TTL (measurement-spec-v1.md 6.4). Intended to be
+   * called lazily (e.g. from a future get_benchmark_run()), not on a timer.
+   */
+  void expire_stale_benchmark_runs();
 
   /**
    * @brief Get the number of active client sessions.
