@@ -781,6 +781,88 @@ namespace stream_stats {
   void expire_stale_benchmark_runs();
 
   /**
+   * @brief Whether the host-local benchmark control plane is enabled
+   * (measurement-spec-v1.md 6.4: "disabled by default... must require an
+   * explicit benchmark-mode enable at process start"). Defaults to false.
+   * No production caller flips this on yet - that's the network-facing
+   * control-surface increment's job (config-driven, at process start).
+   * Exposed as a plain setter rather than a "for tests" one because that
+   * future increment will most likely just call this same setter itself
+   * once it reads its config, not reimplement the flag.
+   */
+  bool benchmark_control_plane_enabled();
+  void set_benchmark_control_plane_enabled(bool enabled);
+
+  /**
+   * @brief A validated create-and-arm request for one benchmark run
+   * (measurement-spec-v1.md 6.4's create-and-arm JSON, minus run_id which
+   * create_benchmark_run takes separately since it's also the storage key).
+   */
+  struct benchmark_run_create_request_t {
+    std::string run_id;
+    std::string manifest_sha256;
+    std::string label;
+    std::string workload_id;
+    int expected_duration_s = 0;
+    int duration_tolerance_ms = 0;
+    int drain_grace_ms = 0;
+    int target_fps = 0;
+    std::size_t sample_capacity_frames = 0;
+  };
+
+  /**
+   * @brief Why create_benchmark_run() accepted or rejected a request. Every
+   * rejected value names exactly one precondition from measurement-spec-v1.md
+   * 6.4's create-and-arm list.
+   */
+  enum class benchmark_run_create_result_e {
+    created,
+    rejected_control_plane_not_enabled,
+    rejected_caller_not_authorized_as_harness,
+    rejected_not_exactly_one_active_session,
+    rejected_session_already_has_an_active_run,
+    rejected_duration_out_of_range,
+    rejected_duration_tolerance_out_of_range,
+    rejected_drain_grace_out_of_range,
+    rejected_target_fps_out_of_range,
+    rejected_nominal_sample_budget_too_small,
+    rejected_capacity_below_nominal_budget,
+    rejected_capacity_exceeds_maximum,
+    rejected_run_id_already_used,
+    rejected_invalid_manifest_sha256_format
+  };
+
+  /**
+   * @brief Validate a create-and-arm request against every precondition in
+   * measurement-spec-v1.md 6.4 that this engine can check on its own, and
+   * if all pass, construct and insert the armed run.
+   *
+   * Deliberately NOT checked here (documented gap, matching this engine's
+   * established pattern of naming what it doesn't yet do rather than
+   * silently skipping it): "duration, tolerance, drain grace, target fps,
+   * capacity, and workload exactly match the frozen manifest" - that
+   * requires the manifest file infrastructure a later piece (the
+   * evidence/manifest writer and validator) owns. This function only
+   * validates manifest_sha256's *format* (64 lowercase hex chars), not its
+   * content against anything.
+   *
+   * @param request The request to validate and, if valid, arm.
+   * @param device_uuid The calling session's device UUID (session_t::device_uuid).
+   * @param session_generation The calling session's generation (session_t::session_generation).
+   * @param caller_is_authorized_harness Whether the caller has been
+   * authenticated as the local benchmark harness specifically - not merely
+   * as an ordinary paired client. The actual authorization decision
+   * (loopback/management-source policy, rate limits, audit logging) is the
+   * network-facing control-surface increment's job; this function only
+   * enforces the precondition given whatever the caller asserts.
+   */
+  benchmark_run_create_result_e create_benchmark_run(
+    const benchmark_run_create_request_t &request,
+    const std::string &device_uuid,
+    std::uint64_t session_generation,
+    bool caller_is_authorized_harness);
+
+  /**
    * @brief Get the number of active client sessions.
    * @return Count of active clients.
    */

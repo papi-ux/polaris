@@ -1457,3 +1457,276 @@ TEST(BenchmarkRunRetentionTests, ExpireStaleBenchmarkRunsExpiresOnlyRunsPastTheT
   stream_stats::erase_benchmark_run("test-run-stale");
   stream_stats::erase_benchmark_run("test-run-fresh");
 }
+
+// P0-5 benchmark-run-capture engine, piece 3: create_benchmark_run() and its
+// create-and-arm preconditions (measurement-spec-v1.md 6.4). Each rejection
+// test perturbs exactly one field away from a known-valid baseline request
+// so it exercises exactly the precondition it names. Not tested here:
+// rejected_nominal_sample_budget_too_small - unreachable given the duration
+// (>=60s) and target_fps (>=30) floors already enforced above it, since
+// 60*30 = 1800 is always >= the 1000-frame floor. Kept in the engine as a
+// direct, defensive expression of the spec's own precondition rather than
+// an assumption the range floors can never change independently.
+
+namespace {
+  // RAII: pins the control-plane flag to a known state for one test and
+  // restores whatever it was before, so an early ASSERT failure (which
+  // skips the rest of the test body) can't leak enabled/disabled state
+  // into a later test.
+  struct BenchmarkControlPlaneGuard {
+    explicit BenchmarkControlPlaneGuard(bool enabled):
+        previous(stream_stats::benchmark_control_plane_enabled()) {
+      stream_stats::set_benchmark_control_plane_enabled(enabled);
+    }
+    ~BenchmarkControlPlaneGuard() {
+      stream_stats::set_benchmark_control_plane_enabled(previous);
+    }
+    bool previous;
+  };
+
+  // Matches measurement-spec-v1.md 6.4's create-and-arm example exactly
+  // (120s / 250ms / 2000ms / 120fps / 32768 frames), so nominal_sample_budget
+  // (120 * 120 = 14400) sits comfortably inside the valid capacity range.
+  stream_stats::benchmark_run_create_request_t make_valid_create_request(const std::string &run_id) {
+    stream_stats::benchmark_run_create_request_t request;
+    request.run_id = run_id;
+    request.manifest_sha256 = std::string(64, 'a');
+    request.label = "P0-7-synthetic-A-pair-03";
+    request.workload_id = "synthetic-frame-counter-v1";
+    request.expected_duration_s = 120;
+    request.duration_tolerance_ms = 250;
+    request.drain_grace_ms = 2000;
+    request.target_fps = 120;
+    request.sample_capacity_frames = 32768;
+    return request;
+  }
+}  // namespace
+
+TEST(BenchmarkRunCreateTests, RejectsWhenControlPlaneIsNotEnabled) {
+  BenchmarkControlPlaneGuard guard(false);
+  stream_stats::add_client("203.0.113.20", "create-test-control-plane-disabled");
+
+  const auto result = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-control-plane-disabled"),
+    "device-control-plane-disabled", 1, true);
+
+  EXPECT_EQ(result, stream_stats::benchmark_run_create_result_e::rejected_control_plane_not_enabled);
+  stream_stats::remove_client("203.0.113.20");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsWhenCallerIsNotAuthorizedAsHarness) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.21", "create-test-unauthorized");
+
+  const auto result = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-unauthorized"),
+    "device-unauthorized", 1, false);
+
+  EXPECT_EQ(result, stream_stats::benchmark_run_create_result_e::rejected_caller_not_authorized_as_harness);
+  stream_stats::remove_client("203.0.113.21");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsWhenNoActiveSession) {
+  BenchmarkControlPlaneGuard guard(true);
+
+  const auto result = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-zero-sessions"),
+    "device-zero-sessions", 1, true);
+
+  EXPECT_EQ(result, stream_stats::benchmark_run_create_result_e::rejected_not_exactly_one_active_session);
+}
+
+TEST(BenchmarkRunCreateTests, RejectsWhenMultipleActiveSessions) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.22", "create-test-multi-session-a");
+  stream_stats::add_client("203.0.113.23", "create-test-multi-session-b");
+
+  const auto result = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-multi-session"),
+    "device-multi-session", 1, true);
+
+  EXPECT_EQ(result, stream_stats::benchmark_run_create_result_e::rejected_not_exactly_one_active_session);
+  stream_stats::remove_client("203.0.113.22");
+  stream_stats::remove_client("203.0.113.23");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsDurationOutOfRange) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.24", "create-test-duration-range");
+
+  auto too_short = make_valid_create_request("create-test-duration-too-short");
+  too_short.expected_duration_s = 59;
+  EXPECT_EQ(stream_stats::create_benchmark_run(too_short, "device-duration-too-short", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_duration_out_of_range);
+
+  auto too_long = make_valid_create_request("create-test-duration-too-long");
+  too_long.expected_duration_s = 181;
+  EXPECT_EQ(stream_stats::create_benchmark_run(too_long, "device-duration-too-long", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_duration_out_of_range);
+
+  stream_stats::remove_client("203.0.113.24");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsDurationToleranceOutOfRange) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.25", "create-test-tolerance-range");
+
+  auto negative = make_valid_create_request("create-test-tolerance-negative");
+  negative.duration_tolerance_ms = -1;
+  EXPECT_EQ(stream_stats::create_benchmark_run(negative, "device-tolerance-negative", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_duration_tolerance_out_of_range);
+
+  auto too_large = make_valid_create_request("create-test-tolerance-too-large");
+  too_large.duration_tolerance_ms = 1001;
+  EXPECT_EQ(stream_stats::create_benchmark_run(too_large, "device-tolerance-too-large", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_duration_tolerance_out_of_range);
+
+  stream_stats::remove_client("203.0.113.25");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsDrainGraceOutOfRange) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.26", "create-test-drain-grace-range");
+
+  auto too_small = make_valid_create_request("create-test-drain-grace-too-small");
+  too_small.drain_grace_ms = 0;
+  EXPECT_EQ(stream_stats::create_benchmark_run(too_small, "device-drain-grace-too-small", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_drain_grace_out_of_range);
+
+  auto too_large = make_valid_create_request("create-test-drain-grace-too-large");
+  too_large.drain_grace_ms = 5001;
+  EXPECT_EQ(stream_stats::create_benchmark_run(too_large, "device-drain-grace-too-large", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_drain_grace_out_of_range);
+
+  stream_stats::remove_client("203.0.113.26");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsTargetFpsOutOfRange) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.27", "create-test-fps-range");
+
+  auto too_low = make_valid_create_request("create-test-fps-too-low");
+  too_low.target_fps = 29;
+  EXPECT_EQ(stream_stats::create_benchmark_run(too_low, "device-fps-too-low", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_target_fps_out_of_range);
+
+  auto too_high = make_valid_create_request("create-test-fps-too-high");
+  too_high.target_fps = 241;
+  EXPECT_EQ(stream_stats::create_benchmark_run(too_high, "device-fps-too-high", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_target_fps_out_of_range);
+
+  stream_stats::remove_client("203.0.113.27");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsCapacityBelowNominalBudget) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.28", "create-test-capacity-below-nominal");
+
+  auto request = make_valid_create_request("create-test-capacity-below-nominal");
+  request.sample_capacity_frames = (120 * 120) - 1;  // nominal budget minus one frame.
+  const auto result = stream_stats::create_benchmark_run(request, "device-capacity-below-nominal", 1, true);
+
+  EXPECT_EQ(result, stream_stats::benchmark_run_create_result_e::rejected_capacity_below_nominal_budget);
+  stream_stats::remove_client("203.0.113.28");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsCapacityAboveMaximum) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.29", "create-test-capacity-above-maximum");
+
+  auto request = make_valid_create_request("create-test-capacity-above-maximum");
+  request.sample_capacity_frames = 65537;
+  const auto result = stream_stats::create_benchmark_run(request, "device-capacity-above-maximum", 1, true);
+
+  EXPECT_EQ(result, stream_stats::benchmark_run_create_result_e::rejected_capacity_exceeds_maximum);
+  stream_stats::remove_client("203.0.113.29");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsInvalidManifestSha256Format) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.30", "create-test-manifest-format");
+
+  auto wrong_length = make_valid_create_request("create-test-manifest-wrong-length");
+  wrong_length.manifest_sha256 = "abc123";
+  EXPECT_EQ(stream_stats::create_benchmark_run(wrong_length, "device-manifest-wrong-length", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_invalid_manifest_sha256_format);
+
+  auto uppercase = make_valid_create_request("create-test-manifest-uppercase");
+  uppercase.manifest_sha256 = std::string(64, 'A');
+  EXPECT_EQ(stream_stats::create_benchmark_run(uppercase, "device-manifest-uppercase", 1, true),
+            stream_stats::benchmark_run_create_result_e::rejected_invalid_manifest_sha256_format);
+
+  stream_stats::remove_client("203.0.113.30");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsWhenSessionAlreadyHasAnActiveRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.31", "create-test-session-already-active");
+
+  const auto first = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-session-already-active-first"),
+    "device-session-already-active", 1, true);
+  ASSERT_EQ(first, stream_stats::benchmark_run_create_result_e::created);
+
+  const auto second = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-session-already-active-second"),
+    "device-session-already-active", 1, true);
+  EXPECT_EQ(second, stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+
+  stream_stats::remove_client("203.0.113.31");
+}
+
+TEST(BenchmarkRunCreateTests, RejectsRunIdAlreadyUsed) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.32", "create-test-run-id-reused");
+
+  const auto first = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-run-id-reused"),
+    "device-run-id-reused-first", 1, true);
+  ASSERT_EQ(first, stream_stats::benchmark_run_create_result_e::created);
+
+  // Different device_uuid, so the session-already-has-an-active-run
+  // precondition (scoped to owning_device_uuid) doesn't fire first - this
+  // isolates the run_id collision specifically.
+  const auto second = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-run-id-reused"),
+    "device-run-id-reused-second", 1, true);
+  EXPECT_EQ(second, stream_stats::benchmark_run_create_result_e::rejected_run_id_already_used);
+
+  stream_stats::remove_client("203.0.113.32");
+}
+
+TEST(BenchmarkRunCreateTests, CreatesAndArmsWhenAllPreconditionsPass) {
+  BenchmarkControlPlaneGuard guard(true);
+  stream_stats::add_client("203.0.113.33", "create-test-happy-path");
+
+  const auto revision_at_arm = stream_stats::client_population_revision();
+  const auto before = std::chrono::steady_clock::now();
+  const auto result = stream_stats::create_benchmark_run(
+    make_valid_create_request("create-test-happy-path"),
+    "device-happy-path", 7, true);
+  const auto after = std::chrono::steady_clock::now();
+
+  ASSERT_EQ(result, stream_stats::benchmark_run_create_result_e::created);
+
+  const bool found = stream_stats::with_benchmark_run("create-test-happy-path",
+    [&](stream_stats::benchmark_run_t &run) {
+      EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::armed);
+      EXPECT_EQ(run.owning_device_uuid, "device-happy-path");
+      EXPECT_EQ(run.owning_session_generation, 7u);
+      EXPECT_EQ(run.manifest_sha256, std::string(64, 'a'));
+      EXPECT_EQ(run.label, "P0-7-synthetic-A-pair-03");
+      EXPECT_EQ(run.workload_id, "synthetic-frame-counter-v1");
+      EXPECT_EQ(run.target_fps, 120);
+      EXPECT_EQ(run.sample_capacity, 32768u);
+      EXPECT_EQ(run.expected_duration_ns, std::chrono::seconds(120));
+      EXPECT_EQ(run.duration_tolerance_ns, std::chrono::milliseconds(250));
+      EXPECT_EQ(run.drain_grace_ns, std::chrono::milliseconds(2000));
+      EXPECT_EQ(run.client_population_revision_at_arm, revision_at_arm);
+      EXPECT_GE(run.armed_monotonic, before);
+      EXPECT_LE(run.armed_monotonic, after);
+    });
+  EXPECT_TRUE(found);
+
+  stream_stats::remove_client("203.0.113.33");
+}
