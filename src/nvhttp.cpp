@@ -738,7 +738,8 @@ namespace nvhttp {
         return nlohmann::json {
           {"p50_ms", p.p50_ms},
           {"p99_ms", p.p99_ms},
-          {"sample_count", p.sample_count}
+          {"sample_count", p.sample_count},
+          {"invalid_count", p.invalid_count}
         };
       };
 
@@ -748,7 +749,7 @@ namespace nvhttp {
       output["capture_to_send"] = percentile_json(timing.capture_to_send);
       output["stage_vocabulary"] = "T0=capture frame available, T1=encoder finished this frame, T2=packet handed off to send-thread packetization (before FEC/encrypt/pace/sendmsg)";
       output["session_active"] = timing.session_active;
-      output["epoch_start_ns"] = timing.epoch_start_ns;
+      output["session_generation"] = timing.session_generation;
       output["ring_complete"] = timing.ring_complete;
       return output;
     }
