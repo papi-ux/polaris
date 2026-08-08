@@ -427,6 +427,45 @@ namespace stream_stats {
   void update_capture_profile(const capture_profile_sample_t &sample);
 
   /**
+   * @brief p50/p99 over a rolling window of recent samples for one pipeline stage.
+   */
+  struct frame_timing_percentiles_t {
+    double p50_ms = 0;
+    double p99_ms = 0;
+    int sample_count = 0;
+  };
+
+  /**
+   * @brief Host-side T0-T2 glass-to-glass stage timing, always on.
+   *
+   * T0 = capture frame available, T1 = encoder finished this frame,
+   * T2 = this frame's packet handed to the NIC (post-pacer). See the
+   * Nordstern roadmap's canonical stage vocabulary.
+   */
+  struct session_timing_t {
+    frame_timing_percentiles_t capture_to_encode;  ///< T0 -> T1
+    frame_timing_percentiles_t encode_to_send;  ///< T1 -> T2
+    frame_timing_percentiles_t capture_to_send;  ///< T0 -> T2
+  };
+
+  /**
+   * @brief Record one frame's T0/T1/T2 timestamps into the always-on session
+   * timing histograms. Wire-format telemetry (frame_processing_latency) is
+   * untouched by this - this is purely an additional, out-of-band record.
+   * @param capture_time T0.
+   * @param encode_done_time T1.
+   * @param send_time T2.
+   */
+  void record_frame_timing(std::chrono::steady_clock::time_point capture_time,
+                           std::chrono::steady_clock::time_point encode_done_time,
+                           std::chrono::steady_clock::time_point send_time);
+
+  /**
+   * @brief Get a snapshot of the current session timing percentiles.
+   */
+  session_timing_t get_session_timing();
+
+  /**
    * @brief Get the number of active client sessions.
    * @return Count of active clients.
    */

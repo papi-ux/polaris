@@ -316,6 +316,27 @@
         "declaration": "nlohmann::json profile = {",
         "style": "initializer_list"
       }
+    },
+    "session_timing": {
+      "$comment": [
+        "The response of GET /polaris/v1/session/timing (Nordstern P0-3). Host-side",
+        "T0-T2 stage timing, always on. No nova_reader yet: this shipped ahead of any",
+        "consumer, same situation display_planner was in before papi-ux/nova#197 - see",
+        "known_drift.polaris_sends_nova_never_reads for that precedent. Add nova_reader",
+        "here once a Nova build actually reads this endpoint."
+      ],
+      "fields": [
+        "capture_to_encode",
+        "capture_to_send",
+        "encode_to_send",
+        "stage_vocabulary"
+      ],
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "build_session_timing_json",
+        "variable": "output",
+        "style": "subscript"
+      }
     }
   },
   "known_drift": {

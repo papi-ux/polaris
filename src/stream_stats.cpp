@@ -172,6 +172,47 @@ namespace stream_stats {
       auto pos = static_cast<std::size_t>(percentile * static_cast<double>(values.size() - 1));
       return values[pos];
     }
+
+    // P0-3 T0-T2 stage timing: unlike capture_profile_buckets above (which
+    // fills, logs, and clears - fine for periodic logging), this backs an
+    // HTTP-queryable endpoint, so a true ring buffer is used instead of a
+    // tumbling window - there is no "just cleared, empty" moment a query can
+    // land on. One dedicated mutex, separate from stats_mutex: the only
+    // writer is the single video send thread (at most ~120 Hz), the only
+    // readers are occasional HTTP handlers, and coupling this to the
+    // already-de-contended stats_mutex would reintroduce exactly the kind of
+    // cross-concern contention P0-2 removed.
+    constexpr std::size_t FRAME_TIMING_RING_CAPACITY = 512;
+
+    struct timing_ring_t {
+      std::array<double, FRAME_TIMING_RING_CAPACITY> samples_ms {};
+      std::size_t next_index = 0;
+      std::size_t filled = 0;
+
+      void push(double value_ms) {
+        samples_ms[next_index] = value_ms;
+        next_index = (next_index + 1) % FRAME_TIMING_RING_CAPACITY;
+        filled = std::min(filled + 1, FRAME_TIMING_RING_CAPACITY);
+      }
+
+      frame_timing_percentiles_t percentiles() const {
+        if (filled == 0) {
+          return {};
+        }
+        std::vector<double> sorted(samples_ms.begin(), samples_ms.begin() + static_cast<long>(filled));
+        std::sort(sorted.begin(), sorted.end());
+        auto pick = [&](double p) {
+          auto idx = static_cast<std::size_t>(p * static_cast<double>(sorted.size() - 1));
+          return sorted[idx];
+        };
+        return {pick(0.50), pick(0.99), static_cast<int>(filled)};
+      }
+    };
+
+    std::mutex frame_timing_mutex;
+    timing_ring_t capture_to_encode_ring;
+    timing_ring_t encode_to_send_ring;
+    timing_ring_t capture_to_send_ring;
   }  // namespace
 
   std::string stats_t::to_json() const {
@@ -1148,6 +1189,28 @@ namespace stream_stats {
     bucket.dispatch_us.clear();
     bucket.ingest_us.clear();
     bucket.total_us.clear();
+  }
+
+  void record_frame_timing(std::chrono::steady_clock::time_point capture_time,
+                           std::chrono::steady_clock::time_point encode_done_time,
+                           std::chrono::steady_clock::time_point send_time) {
+    auto to_ms = [](std::chrono::steady_clock::duration d) {
+      return std::chrono::duration<double, std::milli>(d).count();
+    };
+
+    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    capture_to_encode_ring.push(to_ms(encode_done_time - capture_time));
+    encode_to_send_ring.push(to_ms(send_time - encode_done_time));
+    capture_to_send_ring.push(to_ms(send_time - capture_time));
+  }
+
+  session_timing_t get_session_timing() {
+    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    return {
+      capture_to_encode_ring.percentiles(),
+      encode_to_send_ring.percentiles(),
+      capture_to_send_ring.percentiles()
+    };
   }
 
   int active_client_count() {

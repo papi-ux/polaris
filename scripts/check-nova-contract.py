@@ -94,7 +94,15 @@ def main() -> int:
     new_findings = 0
 
     for name, obj in manifest["objects"].items():
-        reader = obj["nova_reader"]
+        reader = obj.get("nova_reader")
+        if reader is None:
+            # Shipped ahead of any Nova consumer (display_planner did this
+            # before papi-ux/nova#197; session_timing does it now). Nothing to
+            # diff against yet, so report it and move on rather than treating
+            # absence as an error.
+            served = set(obj["fields"])
+            print(f"{name}: Polaris serves {len(served)}, no Nova reader yet [not yet consumed]")
+            continue
         path = args.nova / reader["file"]
         if not path.is_file():
             raise SystemExit(f"not found: {path}\nIs --nova pointing at a Nova checkout?")

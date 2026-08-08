@@ -727,6 +727,28 @@ namespace nvhttp {
 #endif
     }
 
+    // P0-3: host-side T0-T2 glass-to-glass stage timing. A named function,
+    // not built inline in the route lambda below, so nova-contract.json's
+    // extractor (tests/integration/test_nova_contract.cpp) can scope to it
+    // the same way it already scopes to build_launch_mode_contract - the
+    // extractor matches named function signatures, not lambda bodies.
+    nlohmann::json build_session_timing_json(const stream_stats::session_timing_t &timing) {
+      auto percentile_json = [](const stream_stats::frame_timing_percentiles_t &p) {
+        return nlohmann::json {
+          {"p50_ms", p.p50_ms},
+          {"p99_ms", p.p99_ms},
+          {"sample_count", p.sample_count}
+        };
+      };
+
+      nlohmann::json output;
+      output["capture_to_encode"] = percentile_json(timing.capture_to_encode);
+      output["encode_to_send"] = percentile_json(timing.encode_to_send);
+      output["capture_to_send"] = percentile_json(timing.capture_to_send);
+      output["stage_vocabulary"] = "T0=capture frame available, T1=encoder finished this frame, T2=packet handed to NIC (post-pacer)";
+      return output;
+    }
+
     nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
                                               std::string_view app_name,
                                               bool virtual_display_available,
@@ -6285,6 +6307,24 @@ namespace nvhttp {
       response->write(output.dump(), headers);
     };
 
+    // Wire format (frame_processing_latency) is untouched by this - a new,
+    // out-of-band read-only diagnostics route, not a protocol change.
+    auto polarisSessionTiming = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      const auto output = build_session_timing_json(stream_stats::get_session_timing());
+
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(output.dump(), headers);
+    };
+
     auto polarisSessionStatus = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
 
@@ -8535,6 +8575,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;
     https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/client-settings$"]["POST"] = polarisClientSettings;
