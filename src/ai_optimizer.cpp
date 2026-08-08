@@ -1622,6 +1622,9 @@ namespace ai_optimizer {
       "nvenc_tune: 1=quality (slow/cinematic games), 2=low-latency (action), 3=ultra-low-latency (competitive/VR). "
       "color_range: 0=client decides, 1=limited/MPEG, 2=full/JPEG. "
       "preferred_codec: 'hevc' for most devices (better quality/bitrate), 'h264' for legacy/low-power devices, 'av1' for newest devices with AV1 decode. "
+      "recommended_mode: optional advisory. ONLY when the user prompt names the session's streaming display mode and a different one of "
+      "headless_stream, windowed_stream, host_virtual_display, desktop_display, gamescope_stream, headless_dongle "
+      "would clearly improve this game's session, name it here; otherwise omit it or return null. The host treats it as a suggestion only. "
       "If previous session data shows packet loss >2% or latency >30ms, reduce bitrate. "
       "If previous session scored A, keep current settings. If B/C, adjust. "
       "If confirmed or repeated previous session feedback scored D/F, significantly reduce quality; low-confidence soft-end observations should be treated as watch signals only.";
@@ -1799,7 +1802,7 @@ namespace ai_optimizer {
     if (result_json.contains("target_bitrate_kbps")) opt.target_bitrate_kbps = result_json["target_bitrate_kbps"].get<int>();
     if (result_json.contains("nvenc_tune")) opt.nvenc_tune = result_json["nvenc_tune"].get<int>();
     if (result_json.contains("preferred_codec")) opt.preferred_codec = result_json["preferred_codec"].get<std::string>();
-    if (result_json.contains("recommended_mode")) {
+    if (result_json.contains("recommended_mode") && result_json["recommended_mode"].is_string()) {
       const auto suggested = normalize_stream_mode(result_json["recommended_mode"].get<std::string>());
       if (!suggested.empty()) {
         opt.recommended_mode = suggested;
@@ -1826,6 +1829,9 @@ namespace ai_optimizer {
       {"target_bitrate_kbps", {{"type", "integer"}, {"minimum", 1000}, {"maximum", 200000}}},
       {"nvenc_tune", {{"type", "integer"}, {"enum", nlohmann::json::array({1, 2, 3})}}},
       {"preferred_codec", {{"type", "string"}, {"enum", nlohmann::json::array({"h264", "hevc", "av1"})}}},
+      // Strict structured outputs require every property listed in required, so
+      // this advisory field expresses "no suggestion" as null rather than absence.
+      {"recommended_mode", {{"type", nlohmann::json::array({"string", "null"})}, {"description", "One of the six Polaris stream path ids, only when a different mode would clearly improve this session; null otherwise."}}},
       {"reasoning", {{"type", "string"}}},
     };
     schema["required"] = nlohmann::json::array({
@@ -1836,6 +1842,7 @@ namespace ai_optimizer {
       "target_bitrate_kbps",
       "nvenc_tune",
       "preferred_codec",
+      "recommended_mode",
       "reasoning"
     });
 
