@@ -777,11 +777,19 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
   stream_stats::update_stream_active(false);
 }
 
-// P0-3A: T0-T2 timing state is now per-session, keyed by device_uuid, with
-// real start/stop lifecycle primitives (mirroring add_client()/remove_client()
-// in stream.cpp). That gives every test below a genuinely clean, isolated
-// slate via a unique uuid + start_session_timing() - no more need to
-// flood-fill past a shared ring's capacity to drown out other tests' state.
+// P0-3A: T0-T2 timing state is per-session, keyed by device_uuid plus a
+// session_generation (measurement-spec-v1.md's ownership model - a
+// process-lifetime-monotonic counter, distinct from device_uuid, assigned
+// fresh to every session_t including a reconnecting device that reuses its
+// uuid). start_session_timing()/stop_session_timing() mirror
+// add_client()/remove_client() in stream.cpp. Real lifecycle primitives give
+// every test below a genuinely clean, isolated slate via a unique uuid - no
+// need to flood-fill past a shared ring's capacity to drown out other
+// tests' state. Generation numbers in these tests are arbitrary opaque
+// values chosen for readability, not the real global counter in stream.cpp
+// (start_session_timing()/record_frame_timing() take whatever the caller
+// hands them - stream.cpp's session_t::session_generation is just one
+// caller).
 
 TEST(StreamStatsSessionTimingTests, RecordFrameTimingReportsExactPercentilesForAFreshSession) {
   using namespace std::chrono;
@@ -790,20 +798,21 @@ TEST(StreamStatsSessionTimingTests, RecordFrameTimingReportsExactPercentilesForA
   const auto t1 = t0 + milliseconds(3);
   const auto t2 = t1 + milliseconds(2);
 
-  stream_stats::start_session_timing(uuid);
+  stream_stats::start_session_timing(uuid, 1);
   for (int i = 0; i < 10; ++i) {
-    stream_stats::record_frame_timing(uuid, t0, t1, t2);
+    stream_stats::record_frame_timing(uuid, 1, t0, t1, t2);
   }
 
   const auto timing = stream_stats::get_session_timing(uuid);
 
   EXPECT_TRUE(timing.session_active);
   EXPECT_TRUE(timing.ring_complete);
-  EXPECT_NE(timing.epoch_start_ns, 0u);
+  EXPECT_EQ(timing.session_generation, 1u);
 
   EXPECT_DOUBLE_EQ(timing.capture_to_encode.p50_ms, 3.0);
   EXPECT_DOUBLE_EQ(timing.capture_to_encode.p99_ms, 3.0);
   EXPECT_EQ(timing.capture_to_encode.sample_count, 10);
+  EXPECT_EQ(timing.capture_to_encode.invalid_count, 0);
 
   EXPECT_DOUBLE_EQ(timing.encode_to_send.p50_ms, 2.0);
   EXPECT_EQ(timing.encode_to_send.sample_count, 10);
@@ -811,13 +820,13 @@ TEST(StreamStatsSessionTimingTests, RecordFrameTimingReportsExactPercentilesForA
   EXPECT_DOUBLE_EQ(timing.capture_to_send.p50_ms, 5.0);
   EXPECT_EQ(timing.capture_to_send.sample_count, 10);
 
-  stream_stats::stop_session_timing(uuid);
+  stream_stats::stop_session_timing(uuid, 1);
 }
 
 TEST(StreamStatsSessionTimingTests, SessionWithNoRecordedFramesReportsActiveButEmpty) {
   const std::string uuid = "test-uuid-active-empty";
 
-  stream_stats::start_session_timing(uuid);
+  stream_stats::start_session_timing(uuid, 1);
   const auto timing = stream_stats::get_session_timing(uuid);
 
   EXPECT_TRUE(timing.session_active);
@@ -825,7 +834,7 @@ TEST(StreamStatsSessionTimingTests, SessionWithNoRecordedFramesReportsActiveButE
   EXPECT_EQ(timing.encode_to_send.sample_count, 0);
   EXPECT_EQ(timing.capture_to_send.sample_count, 0);
 
-  stream_stats::stop_session_timing(uuid);
+  stream_stats::stop_session_timing(uuid, 1);
 }
 
 TEST(StreamStatsSessionTimingTests, RecordFrameTimingIsANoOpForASessionThatWasNeverStarted) {
@@ -836,7 +845,7 @@ TEST(StreamStatsSessionTimingTests, RecordFrameTimingIsANoOpForASessionThatWasNe
   // No start_session_timing() call - there is nowhere safe to attribute
   // this sample, so it must be silently dropped rather than crash or
   // fabricate a phantom session.
-  stream_stats::record_frame_timing(uuid, t0, t0, t0);
+  stream_stats::record_frame_timing(uuid, 1, t0, t0, t0);
 
   const auto timing = stream_stats::get_session_timing(uuid);
   EXPECT_FALSE(timing.session_active);
@@ -845,7 +854,11 @@ TEST(StreamStatsSessionTimingTests, RecordFrameTimingIsANoOpForASessionThatWasNe
 
 // The fix this whole slice is about: two concurrent sessions (Polaris runs
 // one independent encoder per client, default max_sessions 2) must not see
-// each other's frame timings.
+// each other's frame timings. Different uuids here also stands in for
+// measurement-spec-v1.md's "two sessions share one source IP" case
+// (§15.1.3): stream_stats never sees an IP at all, only device_uuid, so
+// nothing about a shared source address could make two distinct uuids
+// collide in the first place.
 TEST(StreamStatsSessionTimingTests, TwoConcurrentSessionsDoNotShareTimingState) {
   using namespace std::chrono;
   const std::string uuid_a = "test-uuid-concurrent-a";
@@ -854,12 +867,12 @@ TEST(StreamStatsSessionTimingTests, TwoConcurrentSessionsDoNotShareTimingState) 
   const auto fast = t0 + milliseconds(1);
   const auto slow = t0 + milliseconds(11);
 
-  stream_stats::start_session_timing(uuid_a);
-  stream_stats::start_session_timing(uuid_b);
+  stream_stats::start_session_timing(uuid_a, 1);
+  stream_stats::start_session_timing(uuid_b, 2);
 
   for (int i = 0; i < 5; ++i) {
-    stream_stats::record_frame_timing(uuid_a, t0, t0, fast);
-    stream_stats::record_frame_timing(uuid_b, t0, t0, slow);
+    stream_stats::record_frame_timing(uuid_a, 1, t0, t0, fast);
+    stream_stats::record_frame_timing(uuid_b, 2, t0, t0, slow);
   }
 
   const auto timing_a = stream_stats::get_session_timing(uuid_a);
@@ -871,8 +884,8 @@ TEST(StreamStatsSessionTimingTests, TwoConcurrentSessionsDoNotShareTimingState) 
   EXPECT_DOUBLE_EQ(timing_b.capture_to_send.p50_ms, 11.0);
   EXPECT_EQ(timing_b.capture_to_send.sample_count, 5);
 
-  stream_stats::stop_session_timing(uuid_a);
-  stream_stats::stop_session_timing(uuid_b);
+  stream_stats::stop_session_timing(uuid_a, 1);
+  stream_stats::stop_session_timing(uuid_b, 2);
 }
 
 TEST(StreamStatsSessionTimingTests, StopSessionTimingDiscardsState) {
@@ -880,35 +893,119 @@ TEST(StreamStatsSessionTimingTests, StopSessionTimingDiscardsState) {
   const std::string uuid = "test-uuid-stop-discards";
   const auto t0 = steady_clock::now();
 
-  stream_stats::start_session_timing(uuid);
-  stream_stats::record_frame_timing(uuid, t0, t0, t0 + std::chrono::milliseconds(4));
+  stream_stats::start_session_timing(uuid, 1);
+  stream_stats::record_frame_timing(uuid, 1, t0, t0, t0 + std::chrono::milliseconds(4));
   ASSERT_TRUE(stream_stats::get_session_timing(uuid).session_active);
 
-  stream_stats::stop_session_timing(uuid);
+  stream_stats::stop_session_timing(uuid, 1);
 
   EXPECT_FALSE(stream_stats::get_session_timing(uuid).session_active);
 }
 
-TEST(StreamStatsSessionTimingTests, RestartingASessionGetsAFreshEpochAndDiscardsOldSamples) {
+TEST(StreamStatsSessionTimingTests, RestartingASessionGetsAFreshGenerationAndDiscardsOldSamples) {
   using namespace std::chrono;
   const std::string uuid = "test-uuid-reconnect";
   const auto t0 = steady_clock::now();
 
-  stream_stats::start_session_timing(uuid);
-  stream_stats::record_frame_timing(uuid, t0, t0, t0 + milliseconds(4));
-  const auto first_epoch = stream_stats::get_session_timing(uuid);
-  ASSERT_EQ(first_epoch.capture_to_send.sample_count, 1);
-  stream_stats::stop_session_timing(uuid);
+  stream_stats::start_session_timing(uuid, 1);
+  stream_stats::record_frame_timing(uuid, 1, t0, t0, t0 + milliseconds(4));
+  const auto first = stream_stats::get_session_timing(uuid);
+  ASSERT_EQ(first.capture_to_send.sample_count, 1);
+  stream_stats::stop_session_timing(uuid, 1);
 
-  // Same device reconnecting - same uuid, new session.
-  stream_stats::start_session_timing(uuid);
-  const auto second_epoch = stream_stats::get_session_timing(uuid);
+  // Same device reconnecting - same uuid, new (higher) generation, matching
+  // stream.cpp's next_session_generation: it only ever increases.
+  stream_stats::start_session_timing(uuid, 2);
+  const auto second = stream_stats::get_session_timing(uuid);
 
-  EXPECT_TRUE(second_epoch.session_active);
-  EXPECT_NE(second_epoch.epoch_start_ns, first_epoch.epoch_start_ns);
-  EXPECT_EQ(second_epoch.capture_to_send.sample_count, 0);
+  EXPECT_TRUE(second.session_active);
+  EXPECT_GT(second.session_generation, first.session_generation);
+  EXPECT_EQ(second.capture_to_send.sample_count, 0);
 
-  stream_stats::stop_session_timing(uuid);
+  stream_stats::stop_session_timing(uuid, 2);
+}
+
+// measurement-spec-v1.md §6.1/§15.1.2: "Old queued work drains after A
+// retires. It cannot mutate B." The video send thread reads a packet's
+// owning session_t (and hence its device_uuid/session_generation) from a
+// queue that can still hold a few of session A's already-encoded packets
+// at the exact moment A retires and a fast reconnect hands the same
+// device_uuid to session B. Without the generation check, those stale
+// writes would land in B's fresh state under A's old device_uuid.
+TEST(StreamStatsSessionTimingTests, StaleGenerationWriteIsRejectedAfterANewerSessionTakesTheUuid) {
+  using namespace std::chrono;
+  const std::string uuid = "test-uuid-stale-write";
+  const auto t0 = steady_clock::now();
+
+  stream_stats::start_session_timing(uuid, 1);
+  stream_stats::stop_session_timing(uuid, 1);  // Session A retires...
+  stream_stats::start_session_timing(uuid, 2);  // ...B immediately reconnects.
+
+  // A late-arriving packet from the drained queue, still carrying A's old
+  // generation.
+  stream_stats::record_frame_timing(uuid, 1, t0, t0, t0 + milliseconds(4));
+
+  const auto timing = stream_stats::get_session_timing(uuid);
+  EXPECT_EQ(timing.session_generation, 2u);
+  EXPECT_EQ(timing.capture_to_send.sample_count, 0)
+    << "session A's stale write must not appear in session B's data";
+
+  stream_stats::stop_session_timing(uuid, 2);
+}
+
+// The other half of the same race: a stop() call for a retired generation
+// must not discard a newer session's state, even though it targets the
+// same device_uuid.
+TEST(StreamStatsSessionTimingTests, StaleGenerationStopDoesNotDiscardANewerSessionsState) {
+  using namespace std::chrono;
+  const std::string uuid = "test-uuid-stale-stop";
+  const auto t0 = steady_clock::now();
+
+  stream_stats::start_session_timing(uuid, 1);
+  stream_stats::start_session_timing(uuid, 2);  // B has already taken over.
+  stream_stats::record_frame_timing(uuid, 2, t0, t0, t0 + milliseconds(4));
+
+  // A's teardown path calls stop_session_timing() after B already exists.
+  stream_stats::stop_session_timing(uuid, 1);
+
+  const auto timing = stream_stats::get_session_timing(uuid);
+  EXPECT_TRUE(timing.session_active) << "B's session must survive A's stale stop";
+  EXPECT_EQ(timing.session_generation, 2u);
+  EXPECT_EQ(timing.capture_to_send.sample_count, 1);
+
+  stream_stats::stop_session_timing(uuid, 2);
+}
+
+// measurement-spec-v1.md §15.1.8: negative or non-monotonic durations
+// (a corrupted or misordered timestamp pair) must be rejected and counted,
+// never pushed into the percentile ring.
+TEST(StreamStatsSessionTimingTests, NegativeOrNonMonotonicDurationsAreRejectedAndCounted) {
+  using namespace std::chrono;
+  const std::string uuid = "test-uuid-invalid-durations";
+  const auto t0 = steady_clock::now();
+
+  stream_stats::start_session_timing(uuid, 1);
+
+  // encode_done_time before capture_time: capture_to_encode and
+  // capture_to_send both go negative; encode_to_send stays valid (positive).
+  stream_stats::record_frame_timing(uuid, 1, t0, t0 - milliseconds(1), t0 + milliseconds(5));
+  // A fully valid sample too, to prove valid and invalid samples don't
+  // interfere with each other's bookkeeping.
+  stream_stats::record_frame_timing(uuid, 1, t0, t0 + milliseconds(2), t0 + milliseconds(5));
+
+  const auto timing = stream_stats::get_session_timing(uuid);
+
+  EXPECT_EQ(timing.capture_to_encode.invalid_count, 1);
+  EXPECT_EQ(timing.capture_to_encode.sample_count, 1);
+
+  EXPECT_EQ(timing.capture_to_send.invalid_count, 0)
+    << "t0 -> t2 stayed monotonic in both samples even though t0 -> t1 didn't";
+  EXPECT_EQ(timing.capture_to_send.sample_count, 2);
+
+  EXPECT_EQ(timing.encode_to_send.invalid_count, 0);
+  EXPECT_EQ(timing.encode_to_send.sample_count, 2);
+
+  stream_stats::stop_session_timing(uuid, 1);
 }
 
 // Mixing two distinct values should keep p50 and p99 both within the
@@ -922,12 +1019,12 @@ TEST(StreamStatsSessionTimingTests, RecordFrameTimingMixedValuesStayWithinObserv
   const auto fast_t2 = t0 + milliseconds(1);
   const auto slow_t2 = t0 + milliseconds(9);
 
-  stream_stats::start_session_timing(uuid);
+  stream_stats::start_session_timing(uuid, 1);
   for (int i = 0; i < 300; ++i) {
-    stream_stats::record_frame_timing(uuid, t0, t0, fast_t2);
+    stream_stats::record_frame_timing(uuid, 1, t0, t0, fast_t2);
   }
   for (int i = 0; i < 300; ++i) {
-    stream_stats::record_frame_timing(uuid, t0, t0, slow_t2);
+    stream_stats::record_frame_timing(uuid, 1, t0, t0, slow_t2);
   }
 
   const auto timing = stream_stats::get_session_timing(uuid);
@@ -938,7 +1035,7 @@ TEST(StreamStatsSessionTimingTests, RecordFrameTimingMixedValuesStayWithinObserv
   EXPECT_LE(timing.capture_to_send.p99_ms, 9.0);
   EXPECT_EQ(timing.capture_to_send.sample_count, 600);
 
-  stream_stats::stop_session_timing(uuid);
+  stream_stats::stop_session_timing(uuid, 1);
 }
 
 // The ring capacity (16384, matching FRAME_TIMING_RING_CAPACITY in
@@ -954,9 +1051,9 @@ TEST(StreamStatsSessionTimingTests, RingWrapsAndReportsIncompleteOnceCapacityIsE
   const auto t2 = t0 + milliseconds(7);
   constexpr int kRingCapacity = 16384;
 
-  stream_stats::start_session_timing(uuid);
+  stream_stats::start_session_timing(uuid, 1);
   for (int i = 0; i < kRingCapacity + 100; ++i) {
-    stream_stats::record_frame_timing(uuid, t0, t0, t2);
+    stream_stats::record_frame_timing(uuid, 1, t0, t0, t2);
   }
 
   const auto timing = stream_stats::get_session_timing(uuid);
@@ -968,5 +1065,5 @@ TEST(StreamStatsSessionTimingTests, RingWrapsAndReportsIncompleteOnceCapacityIsE
   EXPECT_DOUBLE_EQ(timing.capture_to_send.p50_ms, 7.0);
   EXPECT_DOUBLE_EQ(timing.capture_to_send.p99_ms, 7.0);
 
-  stream_stats::stop_session_timing(uuid);
+  stream_stats::stop_session_timing(uuid, 1);
 }
