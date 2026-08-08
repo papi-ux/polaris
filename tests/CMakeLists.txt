@@ -63,6 +63,7 @@ set(TEST_MAIN_SOURCE
 
 set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
+    ${CMAKE_SOURCE_DIR}/src/confighttp_benchmark_auth.cpp
     ${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
@@ -96,6 +97,7 @@ set(TEST_AUDIT_SUPPORT_SOURCES
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_benchmark_auth.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_client_settings_advertisement.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_browser_stream_protocol.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp

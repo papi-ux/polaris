@@ -40,6 +40,7 @@
 #include "adaptive_bitrate.h"
 #include "browser_stream.h"
 #include "confighttp.h"
+#include "confighttp_benchmark_auth.h"
 #include "confighttp_validation.h"
 #include "crypto.h"
 #include "display_device.h"
@@ -1322,6 +1323,71 @@ namespace confighttp {
       return true;
     }
     return authenticate(response, request, needsRedirect);
+  }
+
+  namespace {
+    // 20 requests per 10s per IP (~2/sec average) - generous enough for a
+    // harness polling GET .../runs/{run_id} every 1-2s during a run, while
+    // still bounding a runaway/malicious loop. Not spec-mandated (measurement-
+    // spec-v1.md 6.4 only requires *some* rate limit exists), chosen as a
+    // reasonable default.
+    confighttp::benchmark_auth::rate_limiter_t &benchmark_control_rate_limiter() {
+      static confighttp::benchmark_auth::rate_limiter_t limiter(20, std::chrono::seconds(10));
+      return limiter;
+    }
+  }  // namespace
+
+  /**
+   * @brief Authorize an incoming request as the local benchmark harness for
+   * the P0-5 control surface (measurement-spec-v1.md 6.4). Every layer the
+   * spec requires beyond ordinary paired-client pairing:
+   *  - loopback/origin policy (checkIPOrigin, same as the rest of the Web UI);
+   *  - a dedicated per-IP request rate limit (separate from login's, whose
+   *    escalating-lockout shape fits failed-password attempts, not the
+   *    steady polling a benchmark harness does while a run is active);
+   *  - an authenticated confighttp Web UI session or API key (authenticate() -
+   *    deliberately NOT authenticatePolarisSession(), which also accepts any
+   *    verified streaming-client cert; the spec is explicit that "viewer/
+   *    watch certificates cannot activate or retrieve a benchmark run").
+   *
+   * Deliberately does NOT check stream_stats::benchmark_control_plane_enabled() -
+   * every engine function (create/start/stop/get/delete_benchmark_run)
+   * already checks that itself and reports a specific rejection reason, so
+   * this gate's job is purely "is this caller even allowed to attempt a
+   * benchmark control operation," not "is benchmarking itself turned on."
+   *
+   * Writes an appropriate error response and returns false on any failure;
+   * callers must return immediately without writing anything further.
+   */
+  bool authorizeBenchmarkHarnessRequest(resp_https_t response, req_https_t request) {
+    if (!checkIPOrigin(response, request)) {
+      return false;
+    }
+
+    auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    auto &limiter = benchmark_control_rate_limiter();
+    const auto now = std::chrono::steady_clock::now();
+
+    const bool rate_limited = limiter.is_rate_limited(address, now);
+    limiter.record_request(address, now);
+    if (rate_limited) {
+      BOOST_LOG(warning) << "Benchmark control: ["sv << address << "] -- rate limited"sv;
+      nlohmann::json tree;
+      tree["status"] = false;
+      tree["error"] = "Too many requests. Please try again later.";
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(SimpleWeb::StatusCode::client_error_too_many_requests, tree.dump(), headers);
+      return false;
+    }
+
+    if (!authenticate(response, request, /*needsRedirect=*/false)) {
+      BOOST_LOG(warning) << "Benchmark control: ["sv << address << "] -- unauthorized"sv;
+      return false;
+    }
+
+    BOOST_LOG(info) << "Benchmark control: ["sv << address << "] -- authorized"sv;
+    return true;
   }
 
   /**
