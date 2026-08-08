@@ -3191,6 +3191,11 @@ namespace nvhttp {
       context.set_options(boost::asio::ssl::context::no_tlsv1_1);
       context.use_certificate_chain_file(certification_file);
       context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
+      // A server that requests client certificates must also set a session id
+      // context, or OpenSSL rejects TLS session resumption with a fatal
+      // internal_error alert (SSL_R_SESSION_ID_CONTEXT_UNINITIALIZED).
+      static constexpr unsigned char session_id_context[] = "polaris";
+      SSL_CTX_set_session_id_context(context.native_handle(), session_id_context, sizeof(session_id_context) - 1);
     }
 
     std::function<bool(std::shared_ptr<Request>, SSL*)> verify;
