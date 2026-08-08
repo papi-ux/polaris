@@ -552,6 +552,126 @@ namespace stream_stats {
    */
   session_timing_t get_session_timing(const std::string &device_uuid);
 
+  // ---------------------------------------------------------------------
+  // P0-5 benchmark-run-capture engine (measurement-spec-v1.md 6.4-6.5).
+  // Gate-authoritative, bounded-duration raw sample capture for an armed
+  // benchmark run - distinct from the always-on rolling diagnostics above.
+  // Built incrementally, one reviewable piece at a time: this piece is
+  // pure, state-machine-free logic (boundary classification + bounded
+  // per-stage storage) that a later piece builds the run lifecycle
+  // (armed/active/draining/frozen/aborted/expired) on top of. Nothing
+  // here is reachable yet - no run can be armed, so none of this executes
+  // in production until the remaining pieces land.
+  // ---------------------------------------------------------------------
+
+  /**
+   * @brief Lifecycle state of one benchmark run (measurement-spec-v1.md 6.4).
+   */
+  enum class benchmark_run_state_e {
+    armed,
+    active,
+    draining,
+    frozen,
+    aborted,
+    expired
+  };
+
+  /**
+   * @brief Why a benchmark run aborted. none for a run that hasn't (or
+   * didn't) abort.
+   */
+  enum class benchmark_abort_reason_e {
+    none,
+    session_ended,
+    session_generation_changed,
+    client_population_revision_changed,
+    sample_capacity_exceeded,
+    invalid_stage_duration,
+    stopped_before_duration_lower_bound,
+    explicit_harness_abort,
+    internal_telemetry_failure
+  };
+
+  /**
+   * @brief Outcome of classifying one stage observation against a
+   * benchmark run's half-open active window [S, E) (measurement-spec-v1.md
+   * 6.5).
+   */
+  enum class boundary_classification_e {
+    accepted,
+    excluded_before_window,
+    excluded_after_window,
+    ignored_post_window,
+    invalid_non_monotonic
+  };
+
+  /**
+   * @brief Classify one stage observation's endpoints against a run's
+   * active window, per measurement-spec-v1.md 6.5's 5-step rule, applied
+   * in this order:
+   *   1. a < 0 (before S)              -> excluded_before_window
+   *   2. else a >= window_end_us (>=E) -> ignored_post_window
+   *   3. else b >= window_end_us       -> excluded_after_window
+   *   4. else a <= b                   -> accepted
+   *   5. else (a > b)                  -> invalid_non_monotonic
+   * a_offset_us/b_offset_us are already relative to S (the run's active
+   * start) - a negative value means "before S".
+   * @param a_offset_us The stage's first endpoint, in microseconds since S.
+   * @param b_offset_us The stage's second endpoint, in microseconds since S.
+   * @param window_end_us The window's end (E - S), in microseconds.
+   */
+  boundary_classification_e classify_boundary(std::int64_t a_offset_us, std::int64_t b_offset_us, std::int64_t window_end_us);
+
+  /**
+   * @brief Bounded raw-sample capture for one pipeline stage within one
+   * benchmark run. Preallocated at construction (arm time) to a fixed
+   * capacity; record() performs no allocation, matching the hot-path
+   * contract in measurement-spec-v1.md 6.4.
+   *
+   * started_in_window_without_terminal_count is intentionally always 0 in
+   * this implementation. Polaris's send thread only calls record() once
+   * both of a stage's endpoints are already known - T0/T1/T2 all arrive
+   * bundled on packet_raw_t by the time record_frame_timing() (P0-3/P0-3A)
+   * or its benchmark-capture counterpart is called - so there is no
+   * "endpoint a registered, waiting for b" gap the way the general spec
+   * model assumes. A frame that gets T0/T1 but is dropped before ever
+   * reaching the send thread currently produces no record() call at all,
+   * rather than counting as an unresolved in-window sample. That is a
+   * known, documented gap relative to the full spec model, not silent
+   * data loss within what this capture does observe.
+   */
+  struct benchmark_stage_capture_t {
+    std::size_t capacity = 0;
+    std::vector<std::uint32_t> start_offset_us;
+    std::vector<std::uint32_t> end_offset_us;
+    std::vector<std::uint32_t> duration_us;
+
+    std::size_t accepted_count = 0;
+    std::size_t excluded_started_before_window = 0;
+    std::size_t excluded_completed_after_window = 0;
+    std::size_t started_in_window_without_terminal_count = 0;
+    std::size_t overflow_count = 0;
+    std::size_t invalid_count = 0;
+
+    /**
+     * @param sample_capacity Reserved size of the three parallel arrays -
+     * the run's declared per-stage frame budget. Zero is a valid, harmless
+     * default (every observation simply overflows).
+     */
+    explicit benchmark_stage_capture_t(std::size_t sample_capacity = 0);
+
+    /**
+     * @brief Classify and, if accepted, record one observation. An
+     * accepted observation that would exceed capacity is counted in
+     * overflow_count instead of being stored.
+     * @param a_offset_us The stage's first endpoint, in microseconds since S.
+     * @param b_offset_us The stage's second endpoint, in microseconds since S.
+     * @param window_end_us The window's end (E - S), in microseconds.
+     * @return The classification this observation received.
+     */
+    boundary_classification_e record(std::int64_t a_offset_us, std::int64_t b_offset_us, std::int64_t window_end_us);
+  };
+
   /**
    * @brief Get the number of active client sessions.
    * @return Count of active clients.

@@ -1307,6 +1307,64 @@ namespace stream_stats {
     return result;
   }
 
+  // ---------------------------------------------------------------------
+  // P0-5 benchmark-run-capture engine, piece 1: boundary classification and
+  // bounded per-stage capture. See the section comment in stream_stats.h.
+  // ---------------------------------------------------------------------
+
+  boundary_classification_e classify_boundary(std::int64_t a_offset_us, std::int64_t b_offset_us, std::int64_t window_end_us) {
+    if (a_offset_us < 0) {
+      return boundary_classification_e::excluded_before_window;
+    }
+    if (a_offset_us >= window_end_us) {
+      return boundary_classification_e::ignored_post_window;
+    }
+    if (b_offset_us >= window_end_us) {
+      return boundary_classification_e::excluded_after_window;
+    }
+    if (a_offset_us <= b_offset_us) {
+      return boundary_classification_e::accepted;
+    }
+    return boundary_classification_e::invalid_non_monotonic;
+  }
+
+  benchmark_stage_capture_t::benchmark_stage_capture_t(std::size_t sample_capacity):
+      capacity(sample_capacity) {
+    start_offset_us.reserve(capacity);
+    end_offset_us.reserve(capacity);
+    duration_us.reserve(capacity);
+  }
+
+  boundary_classification_e benchmark_stage_capture_t::record(std::int64_t a_offset_us, std::int64_t b_offset_us, std::int64_t window_end_us) {
+    const auto classification = classify_boundary(a_offset_us, b_offset_us, window_end_us);
+    switch (classification) {
+      case boundary_classification_e::excluded_before_window:
+        excluded_started_before_window++;
+        break;
+      case boundary_classification_e::excluded_after_window:
+        excluded_completed_after_window++;
+        break;
+      case boundary_classification_e::ignored_post_window:
+        // No state created - matches 6.5's "do not create run-owned
+        // in-flight state" for this case.
+        break;
+      case boundary_classification_e::invalid_non_monotonic:
+        invalid_count++;
+        break;
+      case boundary_classification_e::accepted:
+        if (accepted_count >= capacity) {
+          overflow_count++;
+          break;
+        }
+        start_offset_us.push_back(static_cast<std::uint32_t>(a_offset_us));
+        end_offset_us.push_back(static_cast<std::uint32_t>(b_offset_us));
+        duration_us.push_back(static_cast<std::uint32_t>(b_offset_us - a_offset_us));
+        accepted_count++;
+        break;
+    }
+    return classification;
+  }
+
   int active_client_count() {
     std::lock_guard<std::mutex> lock(stats_mutex);
     return static_cast<int>(current_stats.clients.size());
