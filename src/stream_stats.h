@@ -147,6 +147,13 @@ namespace stream_stats {
     bool input_haptics_supported = false;
     std::string input_haptics_detail;
 
+    // Recovery telemetry: real client-observed events, not modeled/estimated.
+    // idr_requests_total counts IDX_REQUEST_IDR_FRAME (full keyframe resets);
+    // invalidate_ref_frames_requests_total counts IDX_INVALIDATE_REF_FRAMES
+    // (partial recovery via reference-frame invalidation, no full IDR needed).
+    uint64_t idr_requests_total = 0;
+    uint64_t invalidate_ref_frames_requests_total = 0;
+
     // Multi-client
     std::vector<client_stats_t> clients;
 
@@ -424,6 +431,17 @@ namespace stream_stats {
    * @return Count of active clients.
    */
   int active_client_count();
+
+  /**
+   * @brief Record a client-requested full IDR (keyframe) frame reset.
+   */
+  void record_idr_request();
+
+  /**
+   * @brief Record a client-requested partial reference-frame invalidation
+   * (recovery without a full IDR).
+   */
+  void record_invalidate_ref_frames_request();
 
   /**
    * @brief Get a snapshot of the current stats.

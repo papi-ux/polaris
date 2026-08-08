@@ -660,3 +660,73 @@ TEST(StreamStatsDoctorTests, CaptureMissingNeedsTelemetryBeforeTuning) {
   EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Start stream");
   EXPECT_TRUE(doctor.at("redaction").at("applied"));
 }
+
+// The tests below exercise the global stats_t singleton (update_*() /
+// get_current()) rather than locally-constructed stats_t values, unlike
+// every test above. That is deliberate here: these are exactly the
+// functions P0-2 changed from mutex-guarded fields to atomics, so the thing
+// worth verifying is the plumbing between them, not pure-function behavior.
+// Counters are asserted by delta, not absolute value, so run order and any
+// other test's use of the singleton cannot make these flaky.
+
+TEST(StreamStatsRecoveryCounterTests, RecordIdrRequestIncrementsByExactlyOnePerCall) {
+  const auto before = stream_stats::get_current().idr_requests_total;
+
+  stream_stats::record_idr_request();
+  stream_stats::record_idr_request();
+  stream_stats::record_idr_request();
+
+  const auto after = stream_stats::get_current().idr_requests_total;
+  EXPECT_EQ(after - before, 3u);
+}
+
+TEST(StreamStatsRecoveryCounterTests, RecordInvalidateRefFramesRequestIncrementsByExactlyOnePerCall) {
+  const auto before = stream_stats::get_current().invalidate_ref_frames_requests_total;
+
+  stream_stats::record_invalidate_ref_frames_request();
+
+  const auto after = stream_stats::get_current().invalidate_ref_frames_requests_total;
+  EXPECT_EQ(after - before, 1u);
+}
+
+TEST(StreamStatsHotFieldTests, UpdateVideoStatsIsVisibleThroughGetCurrent) {
+  stream_stats::update_video_stats(87.5, 24000, 3.25, "hevc", 2560, 1440);
+
+  const auto stats = stream_stats::get_current();
+
+  EXPECT_DOUBLE_EQ(stats.fps, 87.5);
+  EXPECT_EQ(stats.bitrate_kbps, 24000);
+  EXPECT_DOUBLE_EQ(stats.encode_time_ms, 3.25);
+  EXPECT_EQ(stats.codec, "hevc");
+  EXPECT_EQ(stats.width, 2560);
+  EXPECT_EQ(stats.height, 1440);
+
+  // Reset so this test's values do not leak into any later use of the
+  // singleton - mirrors what a real stream end already does.
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, UpdateFrameDeliveryIsVisibleThroughGetCurrent) {
+  stream_stats::update_frame_delivery(0.02, 0.01, 6.5, 1.2);
+
+  const auto stats = stream_stats::get_current();
+
+  EXPECT_DOUBLE_EQ(stats.duplicate_frame_ratio, 0.02);
+  EXPECT_DOUBLE_EQ(stats.dropped_frame_ratio, 0.01);
+  EXPECT_DOUBLE_EQ(stats.avg_frame_age_ms, 6.5);
+  EXPECT_DOUBLE_EQ(stats.frame_jitter_ms, 1.2);
+
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
+  stream_stats::update_network_stats(11.5, 0.4, 123456789ull);
+
+  const auto stats = stream_stats::get_current();
+
+  EXPECT_DOUBLE_EQ(stats.latency_ms, 11.5);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.4);
+  EXPECT_EQ(stats.bytes_sent, 123456789ull);
+
+  stream_stats::update_stream_active(false);
+}

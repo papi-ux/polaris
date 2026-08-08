@@ -42,6 +42,74 @@ namespace stream_stats {
   static std::mutex stats_mutex;
   static stats_t current_stats;
 
+  namespace {
+    // Hot-path telemetry: written and read without stats_mutex so the
+    // encode-loop and network-report call sites - and their get_current()
+    // readers - can never be stalled by a slow or cold-path stats_mutex
+    // holder (HDR renegotiation, GPU-native probing, client add/remove).
+    // Each field is independent last-value telemetry, not a transaction
+    // across fields, so relaxed ordering is sufficient - this matches the
+    // snapshot semantics get_current() already had under the old single
+    // mutex, which never guaranteed cross-field consistency either.
+    std::atomic<double> hot_fps {0.0};
+    std::atomic<int> hot_bitrate_kbps {0};
+    std::atomic<double> hot_encode_time_ms {0.0};
+    std::atomic<int> hot_codec_id {-1};  // -1=unset, 0=h264, 1=hevc, 2=av1
+    std::atomic<int> hot_width {0};
+    std::atomic<int> hot_height {0};
+    std::atomic<double> hot_duplicate_frame_ratio {0.0};
+    std::atomic<double> hot_dropped_frame_ratio {0.0};
+    std::atomic<double> hot_avg_frame_age_ms {0.0};
+    std::atomic<double> hot_frame_jitter_ms {0.0};
+    std::atomic<double> hot_latency_ms {0.0};
+    std::atomic<double> hot_packet_loss {0.0};
+    std::atomic<uint64_t> hot_bytes_sent {0};
+
+    // Recovery counters: monotonic for the life of the process, matching
+    // the roadmap's P0-2 ask; a per-session view is a get_current() delta.
+    std::atomic<uint64_t> hot_idr_requests_total {0};
+    std::atomic<uint64_t> hot_invalidate_ref_frames_requests_total {0};
+
+    // codec is a 3-value string in practice (h264/hevc/av1); storing it as
+    // the same small int id callers already derive it from (see
+    // stream_recorder.cpp's identical convention) keeps the hot write path
+    // lock-free without inventing a new scheme.
+    int codec_to_id(const std::string &codec) {
+      if (codec == "av1") return 2;
+      if (codec == "hevc") return 1;
+      if (codec == "h264") return 0;
+      return -1;
+    }
+
+    std::string codec_from_id(int id) {
+      switch (id) {
+        case 0: return "h264";
+        case 1: return "hevc";
+        case 2: return "av1";
+        default: return {};
+      }
+    }
+
+    void reset_hot_fields() {
+      hot_fps.store(0.0, std::memory_order_relaxed);
+      hot_bitrate_kbps.store(0, std::memory_order_relaxed);
+      hot_encode_time_ms.store(0.0, std::memory_order_relaxed);
+      hot_codec_id.store(-1, std::memory_order_relaxed);
+      hot_width.store(0, std::memory_order_relaxed);
+      hot_height.store(0, std::memory_order_relaxed);
+      hot_duplicate_frame_ratio.store(0.0, std::memory_order_relaxed);
+      hot_dropped_frame_ratio.store(0.0, std::memory_order_relaxed);
+      hot_avg_frame_age_ms.store(0.0, std::memory_order_relaxed);
+      hot_frame_jitter_ms.store(0.0, std::memory_order_relaxed);
+      hot_latency_ms.store(0.0, std::memory_order_relaxed);
+      hot_packet_loss.store(0.0, std::memory_order_relaxed);
+      hot_bytes_sent.store(0, std::memory_order_relaxed);
+      // idr_requests_total / invalidate_ref_frames_requests_total are
+      // intentionally NOT reset here: they are process-lifetime recovery
+      // counters (see the header doc comment), not per-session state.
+    }
+  }  // namespace
+
   std::optional<bool> device_nodes_match(const std::string &lhs, const std::string &rhs) {
     if (lhs.empty() || rhs.empty()) {
       return std::nullopt;
@@ -184,6 +252,8 @@ namespace stream_stats {
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
+    j["idr_requests_total"] = idr_requests_total;
+    j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
     j["headless_mode"] = config::video.linux_display.headless_mode;
     j["ai_enabled"] = config::video.ai_optimizer.enabled;
     j["controller_input"] = {
@@ -786,6 +856,7 @@ namespace stream_stats {
       // Reset all stats when stream ends
       current_stats = stats_t {};
       clear_capture_profile_buckets();
+      reset_hot_fields();
     }
   }
 
@@ -831,16 +902,16 @@ namespace stream_stats {
   }
 
   void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height) {
+    hot_fps.store(fps, std::memory_order_relaxed);
+    hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
+    hot_encode_time_ms.store(encode_time_ms, std::memory_order_relaxed);
+    hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
+    hot_width.store(width, std::memory_order_relaxed);
+    hot_height.store(height, std::memory_order_relaxed);
+
+    // Multi-client mirror: bounded by active client count (typically 1),
+    // and the only reason this call still needs stats_mutex at all.
     std::lock_guard<std::mutex> lock(stats_mutex);
-
-    current_stats.fps = fps;
-    current_stats.bitrate_kbps = bitrate_kbps;
-    current_stats.encode_time_ms = encode_time_ms;
-    current_stats.codec = codec;
-    current_stats.width = width;
-    current_stats.height = height;
-
-    // Also update first client if any
     if (!current_stats.clients.empty()) {
       auto &c = current_stats.clients.front();
       c.fps = fps;
@@ -869,12 +940,12 @@ namespace stream_stats {
 
     // Also update top-level stats (use first client for backward compat)
     if (!current_stats.clients.empty() && current_stats.clients.front().ip == client_ip) {
-      current_stats.fps = fps;
-      current_stats.bitrate_kbps = bitrate_kbps;
-      current_stats.encode_time_ms = encode_time_ms;
-      current_stats.codec = codec;
-      current_stats.width = width;
-      current_stats.height = height;
+      hot_fps.store(fps, std::memory_order_relaxed);
+      hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
+      hot_encode_time_ms.store(encode_time_ms, std::memory_order_relaxed);
+      hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
+      hot_width.store(width, std::memory_order_relaxed);
+      hot_height.store(height, std::memory_order_relaxed);
     }
   }
 
@@ -906,20 +977,18 @@ namespace stream_stats {
                              double dropped_frame_ratio,
                              double avg_frame_age_ms,
                              double frame_jitter_ms) {
-    std::lock_guard<std::mutex> lock(stats_mutex);
-
-    current_stats.duplicate_frame_ratio = duplicate_frame_ratio;
-    current_stats.dropped_frame_ratio = dropped_frame_ratio;
-    current_stats.avg_frame_age_ms = avg_frame_age_ms;
-    current_stats.frame_jitter_ms = frame_jitter_ms;
+    // Fully lock-free: no per-client mirror exists for these fields.
+    hot_duplicate_frame_ratio.store(duplicate_frame_ratio, std::memory_order_relaxed);
+    hot_dropped_frame_ratio.store(dropped_frame_ratio, std::memory_order_relaxed);
+    hot_avg_frame_age_ms.store(avg_frame_age_ms, std::memory_order_relaxed);
+    hot_frame_jitter_ms.store(frame_jitter_ms, std::memory_order_relaxed);
   }
 
   void update_network_stats(double latency_ms, double packet_loss, uint64_t bytes_sent) {
-    std::lock_guard<std::mutex> lock(stats_mutex);
-
-    current_stats.latency_ms = latency_ms;
-    current_stats.packet_loss = packet_loss;
-    current_stats.bytes_sent = bytes_sent;
+    // Fully lock-free: no per-client mirror exists on this overload.
+    hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
+    hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
+    hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
   }
 
   void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent) {
@@ -936,9 +1005,9 @@ namespace stream_stats {
 
     // Also update top-level stats (use first client for backward compat)
     if (!current_stats.clients.empty() && current_stats.clients.front().ip == client_ip) {
-      current_stats.latency_ms = latency_ms;
-      current_stats.packet_loss = packet_loss;
-      current_stats.bytes_sent = bytes_sent;
+      hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
+      hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
+      hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
     }
   }
 
@@ -1086,16 +1155,48 @@ namespace stream_stats {
     return static_cast<int>(current_stats.clients.size());
   }
 
-  stats_t get_current() {
-    std::lock_guard<std::mutex> lock(stats_mutex);
-    current_stats.adaptive_target_bitrate_kbps = adaptive_bitrate::get_target_bitrate_kbps();
+  void record_idr_request() {
+    hot_idr_requests_total.fetch_add(1, std::memory_order_relaxed);
+  }
 
-    // Also update adaptive bitrate for all clients
-    for (auto &c : current_stats.clients) {
-      c.adaptive_target_bitrate_kbps = adaptive_bitrate::get_target_bitrate_kbps();
+  void record_invalidate_ref_frames_request() {
+    hot_invalidate_ref_frames_requests_total.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  stats_t get_current() {
+    stats_t result;
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex);
+      auto target_bitrate = adaptive_bitrate::get_target_bitrate_kbps();
+      current_stats.adaptive_target_bitrate_kbps = target_bitrate;
+
+      // Also update adaptive bitrate for all clients
+      for (auto &c : current_stats.clients) {
+        c.adaptive_target_bitrate_kbps = target_bitrate;
+      }
+
+      result = current_stats;
     }
 
-    return current_stats;
+    // Hot fields: independent relaxed loads, taken outside stats_mutex so a
+    // reader here never contends with the encode/network hot writers above.
+    result.fps = hot_fps.load(std::memory_order_relaxed);
+    result.bitrate_kbps = hot_bitrate_kbps.load(std::memory_order_relaxed);
+    result.encode_time_ms = hot_encode_time_ms.load(std::memory_order_relaxed);
+    result.codec = codec_from_id(hot_codec_id.load(std::memory_order_relaxed));
+    result.width = hot_width.load(std::memory_order_relaxed);
+    result.height = hot_height.load(std::memory_order_relaxed);
+    result.duplicate_frame_ratio = hot_duplicate_frame_ratio.load(std::memory_order_relaxed);
+    result.dropped_frame_ratio = hot_dropped_frame_ratio.load(std::memory_order_relaxed);
+    result.avg_frame_age_ms = hot_avg_frame_age_ms.load(std::memory_order_relaxed);
+    result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
+    result.latency_ms = hot_latency_ms.load(std::memory_order_relaxed);
+    result.packet_loss = hot_packet_loss.load(std::memory_order_relaxed);
+    result.bytes_sent = hot_bytes_sent.load(std::memory_order_relaxed);
+    result.idr_requests_total = hot_idr_requests_total.load(std::memory_order_relaxed);
+    result.invalidate_ref_frames_requests_total = hot_invalidate_ref_frames_requests_total.load(std::memory_order_relaxed);
+
+    return result;
   }
 
 }  // namespace stream_stats
