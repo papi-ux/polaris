@@ -40,25 +40,6 @@ endif()
 
 target_compile_options(polaris PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${POLARIS_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${POLARIS_COMPILE_OPTIONS_CUDA};-std=c++17>)  # cmake-lint: disable=C0301
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15 AND
-        (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
-    target_compile_options(polaris PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:
-            -O0
-            -U_FORTIFY_SOURCE
-            -D_FORTIFY_SOURCE=0
-            -fno-lto
-            -fno-unroll-loops
-            -fno-tree-vectorize
-            -fno-ipa-cp-clone
-            -fno-var-tracking
-            -fno-var-tracking-assignments
-            -fno-ipa-sra
-            -fno-inline-functions
-            -fno-inline-small-functions>)
-endif()
-
 # Homebrew build fails the vite build if we set these environment variables
 if(${POLARIS_BUILD_HOMEBREW})
     set(NPM_SOURCE_ASSETS_DIR "")

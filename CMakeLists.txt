@@ -4,6 +4,23 @@ cmake_minimum_required(VERSION 3.20)
 # `cmake_path(CONVERT ... TO_NATIVE_PATH_LIST ...)` requires 3.20
 # todo - set this conditionally
 
+# Packaging escape hatch for the GCC>=15 ICEs quarantined in
+# cmake/targets/common.cmake: Clang does not hit them, so a packager on an
+# affected distro can opt out of GCC entirely instead of waiting on upstream
+# GCC fixes. Only takes effect when nothing else already chose a compiler,
+# and must run before project() - that is where CMake locks in the compiler.
+option(POLARIS_PREFER_CLANG "Use Clang instead of GCC when no compiler is otherwise specified" OFF)
+if(POLARIS_PREFER_CLANG AND NOT CMAKE_C_COMPILER AND NOT CMAKE_CXX_COMPILER
+        AND NOT DEFINED ENV{CC} AND NOT DEFINED ENV{CXX})
+    find_program(POLARIS_CLANG_C_COMPILER NAMES clang)
+    find_program(POLARIS_CLANG_CXX_COMPILER NAMES clang++)
+    if(NOT POLARIS_CLANG_C_COMPILER OR NOT POLARIS_CLANG_CXX_COMPILER)
+        message(FATAL_ERROR "POLARIS_PREFER_CLANG=ON but clang/clang++ was not found on PATH")
+    endif()
+    set(CMAKE_C_COMPILER "${POLARIS_CLANG_C_COMPILER}" CACHE FILEPATH "C compiler" FORCE)
+    set(CMAKE_CXX_COMPILER "${POLARIS_CLANG_CXX_COMPILER}" CACHE FILEPATH "C++ compiler" FORCE)
+endif()
+
 project(Polaris VERSION 1.3.7
         DESCRIPTION "Self-hosted game stream host for Moonlight"
         HOMEPAGE_URL "https://github.com/papi-ux/polaris")
