@@ -1029,6 +1029,20 @@ namespace cage_display_router {
       BOOST_LOG(generated ? info : warning) << "labwc: "sv << rc_status;
     }
 
+    // Companion files with the same ownership contract: the root menu replaces
+    // labwc's built-in Terminal + Exit fallback (the only UI a user sees on an
+    // empty private session) with one that explains what this screen is, and
+    // autostart paints a background when swaybg is present.
+    {
+      std::string menu_status;
+      const bool generated_menu = platf::private_session_input::ensure_generated_menu_xml(config_dir, menu_status);
+      BOOST_LOG(generated_menu ? info : warning) << "labwc: "sv << menu_status;
+
+      std::string autostart_status;
+      const bool generated_autostart = platf::private_session_input::ensure_generated_autostart(config_dir, autostart_status);
+      BOOST_LOG(generated_autostart ? info : warning) << "labwc: "sv << autostart_status;
+    }
+
     const std::string mode = format_wlr_custom_mode(width, height, refresh_hz);
 
     // Build startup command: set resolution then run the game
