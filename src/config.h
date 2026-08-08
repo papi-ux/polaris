@@ -352,6 +352,13 @@ namespace config {
     std::vector<prep_cmd_t> prep_cmds;
     std::vector<prep_cmd_t> state_cmds;
     std::vector<server_cmd_t> server_cmds;
+
+    // Gate-authoritative benchmark run capture's control plane
+    // (measurement-spec-v1.md 6.4). Disabled by default per spec - a
+    // process restart is required to enable it, matching "must require an
+    // explicit benchmark-mode enable at process start" rather than a
+    // dynamically-toggleable runtime setting.
+    bool benchmark_mode_enabled;
   };
 
   struct recording_t {

@@ -463,6 +463,7 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   const std::set<std::string, std::less<>> internalOptions = {
     "flags",  // Internal config flags, not user-configurable
     "api_key",  // Backend API secret, intentionally not exposed in the config UI
+    "benchmark_mode_enabled",  // P0-5 benchmark harness control plane - config-file-only, requires a process restart, not a mainstream user-facing toggle
     "color_range",  // Per-client preference surfaced in pairing/client flows instead of host config
     "hdr_mode",  // Internal encoder policy used outside the config page
     "linux_auto_manage_displays",  // Runtime/Linux workflow setting not surfaced in the current config UI
