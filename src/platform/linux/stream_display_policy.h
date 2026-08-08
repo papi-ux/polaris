@@ -48,6 +48,7 @@ namespace stream_display_policy {
   constexpr std::string_view k_host_virtual_display = stream_path::k_host_virtual_display;
   constexpr std::string_view k_desktop_display = stream_path::k_desktop_display;
   constexpr std::string_view k_gamescope_stream = stream_path::k_gamescope_stream;
+  constexpr std::string_view k_headless_dongle = stream_path::k_headless_dongle;
 
   constexpr std::string_view k_runtime_labwc = stream_path::k_runtime_labwc;
   constexpr std::string_view k_runtime_gamescope = stream_path::k_runtime_gamescope;
@@ -68,6 +69,19 @@ namespace stream_display_policy {
   bool selection_available(std::string_view selection);
 
   std::string selection_unavailable_reason(std::string_view selection);
+
+  /**
+   * @brief Whether a selection would pass apply_selection's id and availability checks.
+   *
+   * The single validity truth for network-facing validators: apply_selection
+   * calls this itself, so a validator delegating here can never accept a mode
+   * apply would then reject - the drift that used to 400 modes the host had
+   * just advertised in allowed_modes.
+   *
+   * @param error On failure, the reason to serve (the host's real unavailable
+   *              reason for registered-but-unavailable modes).
+   */
+  bool selection_valid(std::string_view selection, std::string &error);
 
   /**
    * @brief Derive the configured selection from legacy booleans when

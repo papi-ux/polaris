@@ -159,6 +159,7 @@ export function labelForStreamDisplayMode(mode) {
   if (mode === 'windowed_stream') return 'Private Stream (GPU-native)'
   if (mode === 'desktop_display') return 'Mirror Desktop'
   if (mode === 'gamescope_stream') return 'Gamescope Stream'
+  if (mode === 'headless_dongle') return 'Headless Dongle'
   return ''
 }
 

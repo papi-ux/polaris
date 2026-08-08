@@ -199,7 +199,7 @@ namespace stream_display_policy {
     return configured;
   }
 
-  bool apply_selection(std::string_view selection, std::string &error) {
+  bool selection_valid(std::string_view selection, std::string &error) {
     const auto key = to_lower_copy(selection);
     if (!stream_path::find(key) && key != k_desktop_display) {
       error = "stream_display_mode must be a known stream path id (see /client-settings modes)";
@@ -209,6 +209,14 @@ namespace stream_display_policy {
       error = selection_unavailable_reason(key);
       return false;
     }
+    return true;
+  }
+
+  bool apply_selection(std::string_view selection, std::string &error) {
+    if (!selection_valid(selection, error)) {
+      return false;
+    }
+    const auto key = to_lower_copy(selection);
 
     auto &linux_display = config::video.linux_display;
 
