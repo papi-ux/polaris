@@ -140,6 +140,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/httpcommon.h"
         "${CMAKE_SOURCE_DIR}/src/confighttp.cpp"
         "${CMAKE_SOURCE_DIR}/src/confighttp.h"
+        "${CMAKE_SOURCE_DIR}/src/confighttp_benchmark_auth.cpp"
+        "${CMAKE_SOURCE_DIR}/src/confighttp_benchmark_auth.h"
         "${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp"
         "${CMAKE_SOURCE_DIR}/src/confighttp_validation.h"
         "${CMAKE_SOURCE_DIR}/src/update_status.h"
