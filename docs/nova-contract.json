@@ -409,10 +409,8 @@
       "session_capture": [],
       "client_settings_mode_option": [
         "capture",
-        "group",
         "runtime",
-        "topology",
-        "unavailable_reason"
+        "topology"
       ]
     },
     "$detail": {

@@ -89,6 +89,8 @@ namespace stream_stats {
     bool runtime_requested_headless = false;
     bool runtime_effective_headless = false;
     bool runtime_gpu_native_override_active = false;
+    /** Why this session is not on the display the client asked for; empty when it is. */
+    std::string runtime_display_warning;
     platf::frame_transport_e capture_transport = platf::frame_transport_e::unknown;
     platf::frame_residency_e capture_residency = platf::frame_residency_e::unknown;
     platf::frame_format_e capture_format = platf::frame_format_e::unknown;
@@ -352,6 +354,14 @@ namespace stream_stats {
    * @param state Current runtime state for the active backend.
    */
   void update_runtime_state(const platf::runtime_state_t &state);
+
+  /**
+   * @brief Record why the session fell back from the display mode the client asked for.
+   *
+   * Set at the launch-time fallback sites and served on session status; the
+   * end-of-stream stats reset clears it, so it is per-session state.
+   */
+  void update_runtime_display_warning(const std::string &warning);
 
   /**
    * @brief Update current capture path metadata exposed to the dashboard.

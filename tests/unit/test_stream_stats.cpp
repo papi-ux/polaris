@@ -780,6 +780,18 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
 // The periodic-ping handler in stream.cpp sources loss from ENet's scaled
 // peer->packetLoss; this module stores percent (0-100), matching the readers
 // (network_risk thresholds at 0.35%, session grading at 0.5/2/5%).
+TEST(StreamStatsHotFieldTests, RuntimeDisplayWarningIsServedAndResetWithTheStream) {
+  stream_stats::update_stream_active(true);
+  stream_stats::update_runtime_display_warning("Host Virtual Display could not be created");
+
+  EXPECT_EQ(stream_stats::get_current().runtime_display_warning,
+            "Host Virtual Display could not be created");
+
+  // The end-of-stream wholesale reset is what makes the warning per-session.
+  stream_stats::update_stream_active(false);
+  EXPECT_TRUE(stream_stats::get_current().runtime_display_warning.empty());
+}
+
 TEST(StreamStatsHotFieldTests, PacketLossPercentConvertsScaledRatios) {
   constexpr uint64_t scale = 1ull << 16;  // ENET_PEER_PACKET_LOSS_SCALE
 
