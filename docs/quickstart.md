@@ -61,6 +61,12 @@ linux_use_cage_compositor = enabled
 linux_prefer_gpu_native_capture = enabled
 ```
 
+> **What you'll see:** the built-in **Desktop** entry now streams Polaris' *private* compositor — an
+> intentionally empty screen (right-click opens the session menu) until you launch a game from your
+> client. Wanting your actual desktop on the stream is a different mode: `desktop_display` mirrors
+> the host desktop at host resolution, and `host_virtual_display` adds an extra display sized to the
+> client. Both are one click in the web UI under Configuration → Audio/Video.
+
 [Configuration](configuration.md) explains every setting, and
 [Runtime and Streaming Model](runtime.md) explains what these three actually change.
 

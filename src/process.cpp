@@ -6561,7 +6561,7 @@ namespace proc {
       } else
 #endif
       {
-        BOOST_LOG(info) << "No commands configured, showing desktop..."sv;
+        BOOST_LOG(info) << "No commands configured; streaming the current session output"sv;
       }
       placebo = true;
     } else {

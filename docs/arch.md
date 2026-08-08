@@ -60,6 +60,20 @@ linux_use_cage_compositor = enabled
 linux_prefer_gpu_native_capture = enabled
 ```
 
+> **What you'll see:** with this configuration the built-in **Desktop** entry streams Polaris'
+> *private* compositor — an intentionally empty screen (right-click opens the session menu) until a
+> game is launched from your client. If you wanted a desktop stream instead, pick the mode for it:
+>
+> | I want | Set `linux_stream_mode` to |
+> | --- | --- |
+> | My real desktop, at host resolution | `desktop_display` (Mirror Desktop) |
+> | An extra display, sized to the client | `host_virtual_display` |
+> | An isolated game-only session, desktop untouched | `headless_stream` (this recommended setup) |
+>
+> Moonlight-protocol clients can also request the mirror per launch with `mirrorDesktop=1` on
+> `/launch`. And mind the trap: `headless_mode = enabled` *without* `linux_use_cage_compositor`
+> selects `host_virtual_display`, not a headless session.
+
 Then start a game and read the active runtime, capture path, and encoder in Mission Control. See
 [Runtime and Streaming Model](runtime.md) for what those values mean.
 
