@@ -1122,3 +1122,133 @@ TEST(StreamStatsClientPopulationRevisionTests, SurvivesTheFullStatsResetOnStream
   EXPECT_EQ(stream_stats::client_population_revision(), revision_after_add)
     << "the population revision must not be rewound by the stats_t reset";
 }
+
+// P0-5 benchmark-run-capture engine, piece 1: classify_boundary() and
+// benchmark_stage_capture_t are pure logic with no global state, so unlike
+// the tests above, these need no unique IDs or delta comparisons - each
+// test constructs its own local instance.
+
+TEST(ClassifyBoundaryTests, AcceptsAnObservationEntirelyWithinTheWindow) {
+  EXPECT_EQ(stream_stats::classify_boundary(10, 20, 100), stream_stats::boundary_classification_e::accepted);
+}
+
+TEST(ClassifyBoundaryTests, AcceptsAZeroDurationObservation) {
+  EXPECT_EQ(stream_stats::classify_boundary(10, 10, 100), stream_stats::boundary_classification_e::accepted);
+}
+
+TEST(ClassifyBoundaryTests, AcceptsAnObservationStartingExactlyAtS) {
+  // The spec's rule is the closed lower bound S <= a - a == 0 (== S) must
+  // still be accepted, not excluded.
+  EXPECT_EQ(stream_stats::classify_boundary(0, 5, 100), stream_stats::boundary_classification_e::accepted);
+}
+
+TEST(ClassifyBoundaryTests, ExcludesAnObservationThatStartedBeforeTheWindow) {
+  EXPECT_EQ(stream_stats::classify_boundary(-5, 20, 100), stream_stats::boundary_classification_e::excluded_before_window);
+}
+
+TEST(ClassifyBoundaryTests, IgnoresAnObservationStartingAtOrAfterTheWindowEnd) {
+  EXPECT_EQ(stream_stats::classify_boundary(100, 110, 100), stream_stats::boundary_classification_e::ignored_post_window)
+    << "a == E is already post-window (E is exclusive)";
+  EXPECT_EQ(stream_stats::classify_boundary(150, 160, 100), stream_stats::boundary_classification_e::ignored_post_window);
+}
+
+TEST(ClassifyBoundaryTests, ExcludesAnObservationThatCompletesExactlyAtOrAfterTheWindowEnd) {
+  // The spec's rule is the open upper bound b < E - b == E must be
+  // excluded, not accepted, even though a is still in-window.
+  EXPECT_EQ(stream_stats::classify_boundary(10, 100, 100), stream_stats::boundary_classification_e::excluded_after_window);
+  EXPECT_EQ(stream_stats::classify_boundary(10, 150, 100), stream_stats::boundary_classification_e::excluded_after_window);
+}
+
+TEST(ClassifyBoundaryTests, RejectsANonMonotonicObservationAsInvalid) {
+  EXPECT_EQ(stream_stats::classify_boundary(20, 10, 100), stream_stats::boundary_classification_e::invalid_non_monotonic);
+}
+
+TEST(ClassifyBoundaryTests, ClassificationOrderPrefersBeforeWindowOverNonMonotonic) {
+  // a < 0 and a > b are both true here - rule 1 (before-window) must win,
+  // matching the spec's "classified exactly once, in this order".
+  EXPECT_EQ(stream_stats::classify_boundary(-10, -20, 100), stream_stats::boundary_classification_e::excluded_before_window);
+}
+
+TEST(BenchmarkStageCaptureTests, RecordAcceptsAndStoresWithinCapacity) {
+  stream_stats::benchmark_stage_capture_t stage(10);
+
+  const auto classification = stage.record(10, 25, 1000);
+
+  EXPECT_EQ(classification, stream_stats::boundary_classification_e::accepted);
+  EXPECT_EQ(stage.accepted_count, 1u);
+  ASSERT_EQ(stage.start_offset_us.size(), 1u);
+  ASSERT_EQ(stage.end_offset_us.size(), 1u);
+  ASSERT_EQ(stage.duration_us.size(), 1u);
+  EXPECT_EQ(stage.start_offset_us[0], 10u);
+  EXPECT_EQ(stage.end_offset_us[0], 25u);
+  EXPECT_EQ(stage.duration_us[0], 15u);
+}
+
+TEST(BenchmarkStageCaptureTests, OverflowsPastCapacityWithoutGrowingStorage) {
+  stream_stats::benchmark_stage_capture_t stage(2);
+
+  stage.record(0, 1, 1000);
+  stage.record(2, 3, 1000);
+  stage.record(4, 5, 1000);  // Third accepted-shaped observation, capacity is 2.
+
+  EXPECT_EQ(stage.accepted_count, 2u);
+  EXPECT_EQ(stage.overflow_count, 1u);
+  EXPECT_EQ(stage.start_offset_us.size(), 2u) << "the third observation must not have been stored";
+}
+
+TEST(BenchmarkStageCaptureTests, CountsExcludedBeforeWindowWithoutStoring) {
+  stream_stats::benchmark_stage_capture_t stage(10);
+
+  stage.record(-5, 20, 100);
+
+  EXPECT_EQ(stage.excluded_started_before_window, 1u);
+  EXPECT_EQ(stage.accepted_count, 0u);
+  EXPECT_TRUE(stage.start_offset_us.empty());
+}
+
+TEST(BenchmarkStageCaptureTests, CountsExcludedAfterWindowWithoutStoring) {
+  stream_stats::benchmark_stage_capture_t stage(10);
+
+  stage.record(10, 100, 100);
+
+  EXPECT_EQ(stage.excluded_completed_after_window, 1u);
+  EXPECT_EQ(stage.accepted_count, 0u);
+  EXPECT_TRUE(stage.start_offset_us.empty());
+}
+
+TEST(BenchmarkStageCaptureTests, CountsInvalidNonMonotonicWithoutStoring) {
+  stream_stats::benchmark_stage_capture_t stage(10);
+
+  stage.record(20, 10, 100);
+
+  EXPECT_EQ(stage.invalid_count, 1u);
+  EXPECT_EQ(stage.accepted_count, 0u);
+  EXPECT_TRUE(stage.start_offset_us.empty());
+}
+
+TEST(BenchmarkStageCaptureTests, IgnoredPostWindowObservationIncrementsNoCounterAtAll) {
+  stream_stats::benchmark_stage_capture_t stage(10);
+
+  const auto classification = stage.record(150, 160, 100);
+
+  EXPECT_EQ(classification, stream_stats::boundary_classification_e::ignored_post_window);
+  EXPECT_EQ(stage.accepted_count, 0u);
+  EXPECT_EQ(stage.excluded_started_before_window, 0u);
+  EXPECT_EQ(stage.excluded_completed_after_window, 0u);
+  EXPECT_EQ(stage.invalid_count, 0u);
+  EXPECT_EQ(stage.overflow_count, 0u);
+  EXPECT_EQ(stage.started_in_window_without_terminal_count, 0u);
+}
+
+TEST(BenchmarkStageCaptureTests, MultipleAcceptedObservationsStayInInsertionOrder) {
+  stream_stats::benchmark_stage_capture_t stage(5);
+
+  stage.record(0, 5, 1000);
+  stage.record(100, 108, 1000);
+  stage.record(200, 203, 1000);
+
+  ASSERT_EQ(stage.duration_us.size(), 3u);
+  EXPECT_EQ(stage.duration_us[0], 5u);
+  EXPECT_EQ(stage.duration_us[1], 8u);
+  EXPECT_EQ(stage.duration_us[2], 3u);
+}
