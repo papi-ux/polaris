@@ -777,6 +777,29 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
   stream_stats::update_stream_active(false);
 }
 
+// The periodic-ping handler in stream.cpp sources loss from ENet's scaled
+// peer->packetLoss; this module stores percent (0-100), matching the readers
+// (network_risk thresholds at 0.35%, session grading at 0.5/2/5%).
+TEST(StreamStatsHotFieldTests, PacketLossPercentConvertsScaledRatios) {
+  constexpr uint64_t scale = 1ull << 16;  // ENET_PEER_PACKET_LOSS_SCALE
+
+  EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(0, scale), 0.0);
+  EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(scale, scale), 100.0);
+  EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(scale / 2, scale), 50.0);
+  // 0.35% loss - exactly the network_risk threshold - survives the conversion.
+  EXPECT_NEAR(stream_stats::packet_loss_percent(229, scale), 0.3494, 0.001);
+}
+
+TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {
+  constexpr uint64_t scale = 1ull << 16;
+
+  // A transport briefly reporting loss above its own scale must clamp, not
+  // exceed 100%.
+  EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(scale * 2, scale), 100.0);
+  // A zero scale is a caller bug; report no loss rather than dividing by zero.
+  EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(123, 0), 0.0);
+}
+
 // P0-3A: T0-T2 timing state is per-session, keyed by device_uuid plus a
 // session_generation (measurement-spec-v1.md's ownership model - a
 // process-lifetime-monotonic counter, distinct from device_uuid, assigned

@@ -1012,6 +1012,28 @@ namespace stream {
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
+
+      // Clients on the periodic-ping protocol path never send IDX_LOSS_STATS, so this
+      // is the only packet their sessions can source network health from. ENet already
+      // maintains a smoothed mean RTT and reliable-packet loss ratio on the peer.
+      if (!session->control.peer) {
+        return;
+      }
+
+      const double rtt_ms = (double) session->control.peer->roundTripTime;
+      const double loss_pct = stream_stats::packet_loss_percent(
+        session->control.peer->packetLoss,
+        ENET_PEER_PACKET_LOSS_SCALE);
+
+      if (adaptive_bitrate::is_enabled()) {
+        adaptive_bitrate::update_network_stats(loss_pct, rtt_ms);
+      }
+
+      const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
+      if (!client_ip.empty()) {
+        stream_stats::update_network_stats(client_ip, rtt_ms, loss_pct, 0);
+      }
+      stream_stats::update_network_stats(rtt_ms, loss_pct, 0);
     });
 
     server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
