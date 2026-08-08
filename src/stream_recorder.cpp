@@ -47,6 +47,13 @@ namespace stream_recorder {
   static config_t cfg;
   static std::mutex mutex;
 
+  // Mirrors cfg.mode for push_packet's pre-lock fast path (send thread,
+  // once per encoded video packet). cfg.mode itself is mutex-only state -
+  // reading it without the lock, as the fast path must to stay lock-free
+  // when recording is off, was a real data race against load_config()'s
+  // writer. This mirror is the only thing the fast path reads unlocked.
+  static std::atomic<mode_t> mode_hint {mode_t::disabled};
+
   // Continuous recording state
   static std::atomic<bool> recording {false};
   static std::string recording_file;
@@ -152,6 +159,7 @@ namespace stream_recorder {
                                          : mode_t::disabled;
     cfg.output_dir = config::recording.output_dir;
     cfg.replay_buffer_minutes = config::recording.replay_buffer_minutes;
+    mode_hint.store(cfg.mode, std::memory_order_relaxed);
 
     BOOST_LOG(info) << "stream_recorder: mode="sv
                     << (cfg.mode == mode_t::disabled    ? "disabled"sv :
@@ -255,8 +263,10 @@ namespace stream_recorder {
   }
 
   void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts, int video_format) {
-    // Fast path: nothing to do if disabled and not recording
-    if (cfg.mode == mode_t::disabled && !recording.load()) {
+    // Fast path: nothing to do if disabled and not recording. Reads
+    // mode_hint, not cfg.mode, so this stays lock-free and race-free on
+    // the send thread in the default (disabled) configuration.
+    if (mode_hint.load(std::memory_order_relaxed) == mode_t::disabled && !recording.load()) {
       return;
     }
 
