@@ -1016,6 +1016,51 @@ namespace stream_stats {
     bool caller_is_authorized_harness);
 
   /**
+   * @brief Record one frame's T0/T1/T2 timestamps into whichever active or
+   * draining benchmark run, if any, is owned by (device_uuid,
+   * session_generation) - a no-op if there is none. Intended to be called
+   * from the same send-thread call site as record_frame_timing(), with the
+   * same five arguments, right alongside it; the two are independent
+   * (this engine's bounded run capture vs. the always-on rolling
+   * diagnostics ring) and neither reads the other's state.
+   *
+   * This is the hot path measurement-spec-v1.md 6.4 describes: no
+   * allocation after run start (classify_boundary()/
+   * benchmark_stage_capture_t::record() only ever write into each stage's
+   * already-reserved arrays), no sorting/serializing/logging/percentiles,
+   * and at most one record per frame/session (one call per already-bundled
+   * T0/T1/T2 triple, same as record_frame_timing).
+   *
+   * Deliberately does NOT run apply_lazy_transitions_locked - checking the
+   * abort triggers on every frame would mean an extra get_session_timing()
+   * call (a second mutex) on every single frame, which the hot-path
+   * constraints above rule out. This does not corrupt anything: a sample
+   * arriving after the run's true deadline but before something else
+   * (start/stop/get/delete) lazily notices is still classified correctly
+   * by each stage's own window-relative boundary check below, just under
+   * whatever state label happened to be stored at the time. Being active
+   * or draining is precondition enough to look - a draining run's own
+   * drain grace exists specifically to let already-in-flight frames like
+   * this keep arriving and being classified without being admitted past
+   * the window.
+   *
+   * A generation that no longer owns (device_uuid)'s run - the run's own
+   * owning_session_generation simply won't match session_generation - is
+   * silently dropped by the same lookup, same as record_frame_timing.
+   *
+   * @param device_uuid The frame's owning session (session_t::device_uuid).
+   * @param session_generation The frame's owning session's generation (session_t::session_generation).
+   * @param capture_time T0.
+   * @param encode_done_time T1.
+   * @param send_time T2.
+   */
+  void record_benchmark_sample(const std::string &device_uuid,
+                                std::uint64_t session_generation,
+                                std::chrono::steady_clock::time_point capture_time,
+                                std::chrono::steady_clock::time_point encode_done_time,
+                                std::chrono::steady_clock::time_point send_time);
+
+  /**
    * @brief Get the number of active client sessions.
    * @return Count of active clients.
    */

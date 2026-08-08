@@ -1802,6 +1802,41 @@ namespace stream_stats {
       : benchmark_run_delete_result_e::rejected_run_not_found;
   }
 
+  void record_benchmark_sample(const std::string &device_uuid,
+                                std::uint64_t session_generation,
+                                std::chrono::steady_clock::time_point capture_time,
+                                std::chrono::steady_clock::time_point encode_done_time,
+                                std::chrono::steady_clock::time_point send_time) {
+    // Cheap common-case exit before touching benchmark_run_mutex at all -
+    // today (no control surface exists yet to ever flip this on) every
+    // real call takes this path, so the hot-path cost of the whole P0-5
+    // engine is one relaxed atomic load until that surface ships.
+    if (!benchmark_control_plane_enabled()) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+    auto it = std::find_if(benchmark_runs.begin(), benchmark_runs.end(),
+      [&device_uuid, session_generation](const benchmark_run_t &r) {
+        return (r.state == benchmark_run_state_e::active || r.state == benchmark_run_state_e::draining) &&
+               r.owning_device_uuid == device_uuid &&
+               r.owning_session_generation == session_generation;
+      });
+    if (it == benchmark_runs.end() || !it->started_monotonic) {
+      return;
+    }
+
+    const auto start = *it->started_monotonic;
+    const auto window_end_us = std::chrono::duration_cast<std::chrono::microseconds>(it->expected_duration_ns).count();
+    const auto a_offset_us = std::chrono::duration_cast<std::chrono::microseconds>(capture_time - start).count();
+    const auto b_offset_us = std::chrono::duration_cast<std::chrono::microseconds>(encode_done_time - start).count();
+    const auto c_offset_us = std::chrono::duration_cast<std::chrono::microseconds>(send_time - start).count();
+
+    it->capture_to_encode.record(a_offset_us, b_offset_us, window_end_us);
+    it->encode_to_send_release.record(b_offset_us, c_offset_us, window_end_us);
+    it->capture_to_send_release.record(a_offset_us, c_offset_us, window_end_us);
+  }
+
   int active_client_count() {
     std::lock_guard<std::mutex> lock(stats_mutex);
     return static_cast<int>(current_stats.clients.size());
