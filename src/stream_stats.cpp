@@ -42,6 +42,16 @@ namespace stream_stats {
   static std::mutex stats_mutex;
   static stats_t current_stats;
 
+  // measurement-spec-v1.md 6.1: increments on every add_client()/
+  // remove_client() call. Deliberately its own atomic, outside stats_t -
+  // update_stream_active(false) resets current_stats wholesale when all
+  // sessions end, and this counter must survive that (a full stream
+  // restart between a benchmark run's arm and freeze must never be
+  // masked by the revision coincidentally returning to its starting
+  // value). Starts at 1 so 0 stays available as an obviously-invalid/
+  // unset sentinel.
+  static std::atomic<std::uint64_t> client_population_revision_counter {1};
+
   namespace {
     // Hot-path telemetry: written and read without stats_mutex so the
     // encode-loop and network-report call sites - and their get_current()
@@ -934,6 +944,13 @@ namespace stream_stats {
   }
 
   void add_client(const std::string &client_ip, const std::string &client_name) {
+    // Every call is a real attach from rtsp_stream::start() - bump the
+    // population revision unconditionally, matching measurement-spec-v1.md
+    // 6.1's "increments on every client attach or detach" (the dedup guard
+    // just below is only about not duplicating the clients_t bookkeeping
+    // entry, not about whether this call represents a real event).
+    client_population_revision_counter.fetch_add(1, std::memory_order_relaxed);
+
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     // Check if client already exists
@@ -956,6 +973,8 @@ namespace stream_stats {
   }
 
   void remove_client(const std::string &client_ip) {
+    client_population_revision_counter.fetch_add(1, std::memory_order_relaxed);
+
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.clients.erase(
@@ -1291,6 +1310,10 @@ namespace stream_stats {
   int active_client_count() {
     std::lock_guard<std::mutex> lock(stats_mutex);
     return static_cast<int>(current_stats.clients.size());
+  }
+
+  std::uint64_t client_population_revision() {
+    return client_population_revision_counter.load(std::memory_order_relaxed);
   }
 
   void record_idr_request() {

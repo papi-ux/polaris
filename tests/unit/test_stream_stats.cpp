@@ -1067,3 +1067,58 @@ TEST(StreamStatsSessionTimingTests, RingWrapsAndReportsIncompleteOnceCapacityIsE
 
   stream_stats::stop_session_timing(uuid, 1);
 }
+
+// measurement-spec-v1.md 6.1: client_population_revision is a global,
+// process-lifetime counter (not session-keyed like the tests above), so -
+// like the pre-existing StreamStatsHotFieldTests - these assert on the
+// delta a single call produces rather than an absolute value, since other
+// tests in this binary call add_client()/remove_client()/
+// update_stream_active() too.
+
+TEST(StreamStatsClientPopulationRevisionTests, AddAndRemoveClientEachAdvanceTheRevisionByOne) {
+  const auto before_add = stream_stats::client_population_revision();
+  stream_stats::add_client("203.0.113.10", "pop-revision-test-add");
+  const auto after_add = stream_stats::client_population_revision();
+  EXPECT_EQ(after_add, before_add + 1);
+
+  stream_stats::remove_client("203.0.113.10");
+  const auto after_remove = stream_stats::client_population_revision();
+  EXPECT_EQ(after_remove, after_add + 1);
+}
+
+// The exact scenario measurement-spec-v1.md 6.1 calls out: a leave/join
+// replacement that returns the active client count to its original value
+// must still move the revision, so an armed benchmark run can't be fooled
+// by a population change that "cancels out" before anyone polls it.
+TEST(StreamStatsClientPopulationRevisionTests, LeaveAndRejoinReplacementAdvancesRevisionDespiteReturningToTheSameCount) {
+  const std::string ip = "203.0.113.11";
+  stream_stats::add_client(ip, "pop-revision-test-steady-state");
+  const auto steady_state_count = stream_stats::active_client_count();
+  const auto revision_before_churn = stream_stats::client_population_revision();
+
+  stream_stats::remove_client(ip);
+  stream_stats::add_client(ip, "pop-revision-test-steady-state");
+
+  EXPECT_EQ(stream_stats::active_client_count(), steady_state_count)
+    << "count should be back to where it started";
+  EXPECT_EQ(stream_stats::client_population_revision(), revision_before_churn + 2)
+    << "but the revision must show the two real events that happened in between";
+
+  stream_stats::remove_client(ip);
+}
+
+// The bug this design specifically guards against: update_stream_active(false)
+// does current_stats = stats_t{} wholesale when all sessions end. If
+// client_population_revision lived inside stats_t (as first implemented,
+// then caught in review before it shipped), that reset would silently
+// rewind the counter, and a benchmark run spanning a full stream restart
+// could see its arm-time and freeze-time revisions coincidentally match.
+TEST(StreamStatsClientPopulationRevisionTests, SurvivesTheFullStatsResetOnStreamEnd) {
+  stream_stats::add_client("203.0.113.12", "pop-revision-test-reset-survival");
+  const auto revision_after_add = stream_stats::client_population_revision();
+
+  stream_stats::update_stream_active(false);
+
+  EXPECT_EQ(stream_stats::client_population_revision(), revision_after_add)
+    << "the population revision must not be rewound by the stats_t reset";
+}
