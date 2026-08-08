@@ -5,8 +5,52 @@
 #include "../../tests_common.h"
 
 #ifdef __linux__
+  #include <src/config.h>
   #include <src/platform/linux/cage_display_router.h>
   #include <src/platform/linux/wayland.h>
+
+  #include <cerrno>
+  #include <csignal>
+  #include <filesystem>
+  #include <fstream>
+  #include <sys/stat.h>
+  #include <unistd.h>
+
+namespace {
+  bool wait_for_process_exit(pid_t pid, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (kill(pid, 0) != 0 && errno == ESRCH) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return kill(pid, 0) != 0 && errno == ESRCH;
+  }
+
+  pid_t wait_for_pid_file(const std::filesystem::path &path) {
+    for (int attempt = 0; attempt < 80; ++attempt) {
+      std::ifstream in(path);
+      pid_t pid = -1;
+      if (in >> pid && pid > 0) {
+        return pid;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return -1;
+  }
+
+  bool wait_for_router_exit(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (!cage_display_router::is_running()) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return !cage_display_router::is_running();
+  }
+}
 
 TEST(WaylandOutputRegistryStateTests, OutputHotplugMarksTopologyDirtyUntilCleared) {
   wl::output_registry_state_t state;
@@ -35,6 +79,211 @@ TEST(WaylandOutputRegistryStateTests, RemovingNonOutputGlobalDoesNotDirtyOutputT
 }
 
 #ifdef POLARIS_TESTS
+TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRelaunch) {
+  namespace fs = std::filesystem;
+
+  struct cleanup_t {
+    config::video_t::linux_display_t linux_display;
+    std::string original_path;
+    std::string original_home;
+    std::string original_runtime_dir;
+    std::string original_pid_file;
+    std::string original_compositor_pid_file;
+    bool had_path;
+    bool had_home;
+    bool had_runtime_dir;
+    bool had_pid_file;
+    bool had_compositor_pid_file;
+    fs::path root;
+    std::vector<pid_t> workers;
+
+    ~cleanup_t() {
+      cage_display_router::stop();
+      for (const auto worker : workers) {
+        if (worker > 0 && kill(worker, 0) == 0) {
+          (void) kill(worker, SIGKILL);
+        }
+      }
+      config::video.linux_display = linux_display;
+      auto restore_env = [](const char *name, const std::string &value, bool had_value) {
+        if (had_value) {
+          (void) setenv(name, value.c_str(), 1);
+        } else {
+          (void) unsetenv(name);
+        }
+      };
+      restore_env("PATH", original_path, had_path);
+      restore_env("HOME", original_home, had_home);
+      restore_env("XDG_RUNTIME_DIR", original_runtime_dir, had_runtime_dir);
+      restore_env("FAKE_LABWC_CHILD_PID_FILE", original_pid_file, had_pid_file);
+      restore_env("FAKE_LABWC_COMPOSITOR_PID_FILE", original_compositor_pid_file, had_compositor_pid_file);
+      std::error_code ec;
+      fs::remove_all(root, ec);
+    }
+  };
+
+  const auto *path_env = std::getenv("PATH");
+  const auto *home_env = std::getenv("HOME");
+  const auto *runtime_env = std::getenv("XDG_RUNTIME_DIR");
+  const auto *pid_file_env = std::getenv("FAKE_LABWC_CHILD_PID_FILE");
+  const auto *compositor_pid_file_env = std::getenv("FAKE_LABWC_COMPOSITOR_PID_FILE");
+  cleanup_t cleanup {
+    .linux_display = config::video.linux_display,
+    .original_path = path_env ? path_env : "",
+    .original_home = home_env ? home_env : "",
+    .original_runtime_dir = runtime_env ? runtime_env : "",
+    .original_pid_file = pid_file_env ? pid_file_env : "",
+    .original_compositor_pid_file = compositor_pid_file_env ? compositor_pid_file_env : "",
+    .had_path = path_env != nullptr,
+    .had_home = home_env != nullptr,
+    .had_runtime_dir = runtime_env != nullptr,
+    .had_pid_file = pid_file_env != nullptr,
+    .had_compositor_pid_file = compositor_pid_file_env != nullptr,
+    .root = fs::temp_directory_path() / ("polaris-cage-external-exit-" + std::to_string(getpid())),
+  };
+
+  const auto bin_dir = cleanup.root / "bin";
+  const auto runtime_dir = cleanup.root / "runtime";
+  const auto pid_file = cleanup.root / "worker.pid";
+  const auto compositor_pid_file = cleanup.root / "compositor.pid";
+  ASSERT_TRUE(fs::create_directories(bin_dir));
+  ASSERT_TRUE(fs::create_directories(runtime_dir));
+
+  const auto fake_labwc = bin_dir / "labwc";
+  {
+    std::ofstream script(fake_labwc);
+    ASSERT_TRUE(script.good());
+    script << R"PY(#!/usr/bin/python3
+import os
+import signal
+import socket
+import subprocess
+import sys
+
+if len(sys.argv) > 1 and sys.argv[1] == "-V":
+    print("fake labwc wlroots headless backend")
+    raise SystemExit(0)
+
+socket_path = os.path.join(os.environ["XDG_RUNTIME_DIR"], f"wayland-{(os.getpid() % 10000) + 100}")
+wayland_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+wayland_socket.bind(socket_path)
+worker = subprocess.Popen(["sleep", "60"])
+with open(os.environ["FAKE_LABWC_COMPOSITOR_PID_FILE"], "w", encoding="utf-8") as out:
+    out.write(f"{os.getpid()}\n")
+with open(os.environ["FAKE_LABWC_CHILD_PID_FILE"], "w", encoding="utf-8") as out:
+    out.write(f"{worker.pid}\n")
+
+def stop(_signum, _frame):
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGHUP, stop)
+while True:
+    signal.pause()
+)PY";
+  }
+  ASSERT_EQ(chmod(fake_labwc.c_str(), 0755), 0);
+
+  const auto fake_wlr_randr = bin_dir / "wlr-randr";
+  {
+    std::ofstream script(fake_wlr_randr);
+    ASSERT_TRUE(script.good());
+    script << R"SH(#!/bin/sh
+if [ "$#" -eq 0 ]; then
+  cat <<'EOF'
+HEADLESS-1 "Fake headless output"
+  Enabled: yes
+  Modes:
+    1280x720 px, 60.000000 Hz (current)
+EOF
+fi
+exit 0
+)SH";
+  }
+  ASSERT_EQ(chmod(fake_wlr_randr.c_str(), 0755), 0);
+
+  config::video.linux_display.stream_mode.clear();
+  config::video.linux_display.private_runtime = "labwc";
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.headless_mode = true;
+  config::video.linux_display.prefer_gpu_native_capture = false;
+  config::video.linux_display.capture_profile = false;
+
+  const auto test_path = bin_dir.string() + ":" + cleanup.original_path;
+  ASSERT_EQ(setenv("PATH", test_path.c_str(), 1), 0);
+  ASSERT_EQ(setenv("HOME", cleanup.root.c_str(), 1), 0);
+  ASSERT_EQ(setenv("XDG_RUNTIME_DIR", runtime_dir.c_str(), 1), 0);
+  ASSERT_EQ(setenv("FAKE_LABWC_CHILD_PID_FILE", pid_file.c_str(), 1), 0);
+  ASSERT_EQ(setenv("FAKE_LABWC_COMPOSITOR_PID_FILE", compositor_pid_file.c_str(), 1), 0);
+
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    std::error_code ec;
+    fs::remove(pid_file, ec);
+    fs::remove(compositor_pid_file, ec);
+    ASSERT_TRUE(cage_display_router::start(
+      1280,
+      720,
+      60,
+      "",
+      false,
+      false,
+      "external-exit-cycle-" + std::to_string(cycle)
+    ));
+
+    const auto router_pid = cage_display_router::get_pid();
+    ASSERT_GT(router_pid, 0);
+    const auto compositor_pid = wait_for_pid_file(compositor_pid_file);
+    ASSERT_GT(compositor_pid, 0);
+    EXPECT_NE(router_pid, compositor_pid);
+    EXPECT_EQ(getpgid(compositor_pid), compositor_pid);
+    EXPECT_NE(getpgid(compositor_pid), getpgrp());
+    const auto worker = wait_for_pid_file(pid_file);
+    ASSERT_GT(worker, 0);
+    cleanup.workers.push_back(worker);
+
+    ASSERT_EQ(kill(compositor_pid, SIGTERM), 0);
+    ASSERT_TRUE(wait_for_router_exit(std::chrono::seconds(3)));
+    cage_display_router::stop();
+
+    const bool worker_exited = wait_for_process_exit(worker, std::chrono::seconds(2));
+    EXPECT_TRUE(worker_exited)
+      << "cycle " << cycle << " leaked private worker pid " << worker;
+    if (worker_exited) {
+      cleanup.workers.pop_back();
+    }
+  }
+
+  // A compositor that cannot honor SIGTERM must still be drained by the
+  // supervisor's bounded escalation, not abandoned when stop() gives up.
+  std::error_code ec;
+  fs::remove(pid_file, ec);
+  fs::remove(compositor_pid_file, ec);
+  ASSERT_TRUE(cage_display_router::start(
+    1280,
+    720,
+    60,
+    "",
+    false,
+    false,
+    "explicit-stop-escalation"
+  ));
+  const auto stopped_compositor_pid = wait_for_pid_file(compositor_pid_file);
+  ASSERT_GT(stopped_compositor_pid, 0);
+  const auto stopped_worker_pid = wait_for_pid_file(pid_file);
+  ASSERT_GT(stopped_worker_pid, 0);
+  cleanup.workers.push_back(stopped_worker_pid);
+
+  ASSERT_EQ(kill(stopped_compositor_pid, SIGSTOP), 0);
+  cage_display_router::stop();
+  const bool stopped_worker_exited = wait_for_process_exit(stopped_worker_pid, std::chrono::seconds(2));
+  EXPECT_TRUE(stopped_worker_exited)
+    << "explicit stop leaked private worker pid " << stopped_worker_pid;
+  if (stopped_worker_exited) {
+    cleanup.workers.pop_back();
+  }
+}
+
 TEST(WaylandInterfaceTests, RemovedOutputMarksDirtyButKeepsMonitorStorageUntilReinit) {
   wl::interface_t interface;
 
