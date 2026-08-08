@@ -1603,6 +1603,198 @@ namespace stream_stats {
     return benchmark_run_create_result_e::created;
   }
 
+  namespace {
+    // Caller must hold benchmark_run_mutex. Returns none if run is not
+    // currently active or draining, or if reality still matches what was
+    // true at arm time.
+    benchmark_abort_reason_e detect_abort_trigger_locked(const benchmark_run_t &run) {
+      const auto timing = get_session_timing(run.owning_device_uuid);
+      if (!timing.session_active) {
+        return benchmark_abort_reason_e::session_ended;
+      }
+      if (timing.session_generation != run.owning_session_generation) {
+        return benchmark_abort_reason_e::session_generation_changed;
+      }
+      if (client_population_revision() != run.client_population_revision_at_arm) {
+        return benchmark_abort_reason_e::client_population_revision_changed;
+      }
+      return benchmark_abort_reason_e::none;
+    }
+
+    // Caller must hold benchmark_run_mutex. Reconciles run's state with
+    // reality before whichever operation invoked this evaluates its own
+    // preconditions - see start_benchmark_run's header comment for why
+    // this exists instead of a background timer. Transitions can cascade
+    // (active -> draining -> frozen) within a single call if nobody
+    // touched this run for long enough that both deadlines already
+    // passed.
+    void apply_lazy_transitions_locked(benchmark_run_t &run) {
+      const auto now = std::chrono::steady_clock::now();
+
+      if (run.state == benchmark_run_state_e::active || run.state == benchmark_run_state_e::draining) {
+        const auto reason = detect_abort_trigger_locked(run);
+        if (reason != benchmark_abort_reason_e::none) {
+          run.state = benchmark_run_state_e::aborted;
+          run.abort_reason = reason;
+          run.frozen_monotonic = now;
+          enforce_terminal_retention_locked(benchmark_runs);
+          return;
+        }
+      }
+
+      if (run.state == benchmark_run_state_e::active && run.started_monotonic &&
+          now >= *run.started_monotonic + run.expected_duration_ns) {
+        // The declared deadline, not "now" - so actual_duration_ns reflects
+        // the run's own contract rather than however long it took for some
+        // caller to next touch this run and trigger this reconciliation.
+        run.stopped_monotonic = *run.started_monotonic + run.expected_duration_ns;
+        run.state = benchmark_run_state_e::draining;
+      }
+
+      if (run.state == benchmark_run_state_e::draining && run.stopped_monotonic &&
+          now >= *run.stopped_monotonic + run.drain_grace_ns) {
+        run.frozen_monotonic = now;
+        run.client_population_revision_at_freeze = client_population_revision();
+        run.state = benchmark_run_state_e::frozen;
+        enforce_terminal_retention_locked(benchmark_runs);
+      }
+    }
+  }  // namespace
+
+  benchmark_run_start_result_e start_benchmark_run(
+      const std::string &run_id,
+      const std::string &device_uuid,
+      std::uint64_t session_generation,
+      bool caller_is_authorized_harness) {
+    if (!benchmark_control_plane_enabled()) {
+      return benchmark_run_start_result_e::rejected_control_plane_not_enabled;
+    }
+    if (!caller_is_authorized_harness) {
+      return benchmark_run_start_result_e::rejected_caller_not_authorized_as_harness;
+    }
+
+    auto result = benchmark_run_start_result_e::rejected_run_not_found;
+    const bool found = with_benchmark_run(run_id, [&](benchmark_run_t &run) {
+      apply_lazy_transitions_locked(run);
+
+      if (run.owning_device_uuid != device_uuid || run.owning_session_generation != session_generation) {
+        result = benchmark_run_start_result_e::rejected_wrong_session;
+        return;
+      }
+      if (run.state != benchmark_run_state_e::armed) {
+        result = benchmark_run_start_result_e::rejected_run_not_in_armed_state;
+        return;
+      }
+      if (client_population_revision() != run.client_population_revision_at_arm) {
+        result = benchmark_run_start_result_e::rejected_population_changed_since_arm;
+        return;
+      }
+      if (!get_session_timing(device_uuid).session_active) {
+        result = benchmark_run_start_result_e::rejected_session_no_longer_active;
+        return;
+      }
+
+      run.started_monotonic = std::chrono::steady_clock::now();
+      run.state = benchmark_run_state_e::active;
+      result = benchmark_run_start_result_e::started;
+    });
+
+    return found ? result : benchmark_run_start_result_e::rejected_run_not_found;
+  }
+
+  benchmark_run_stop_result_e stop_benchmark_run(
+      const std::string &run_id,
+      const std::string &device_uuid,
+      std::uint64_t session_generation,
+      bool caller_is_authorized_harness) {
+    if (!benchmark_control_plane_enabled()) {
+      return benchmark_run_stop_result_e::rejected_control_plane_not_enabled;
+    }
+    if (!caller_is_authorized_harness) {
+      return benchmark_run_stop_result_e::rejected_caller_not_authorized_as_harness;
+    }
+
+    auto result = benchmark_run_stop_result_e::rejected_run_not_found;
+    const bool found = with_benchmark_run(run_id, [&](benchmark_run_t &run) {
+      apply_lazy_transitions_locked(run);
+
+      if (run.owning_device_uuid != device_uuid || run.owning_session_generation != session_generation) {
+        result = benchmark_run_stop_result_e::rejected_wrong_session;
+        return;
+      }
+      // started_monotonic is always set alongside state=active by
+      // start_benchmark_run - the "|| !run.started_monotonic" half is
+      // unreachable through any real call path, kept only so the
+      // dereference just below can never be undefined behavior if that
+      // invariant is ever violated (matches apply_lazy_transitions_locked's
+      // own defensive style on the same optional fields just above).
+      if (run.state != benchmark_run_state_e::active || !run.started_monotonic) {
+        result = benchmark_run_stop_result_e::rejected_not_currently_active;
+        return;
+      }
+
+      const auto now = std::chrono::steady_clock::now();
+      const auto elapsed = now - *run.started_monotonic;
+      const auto lower_bound = run.expected_duration_ns - run.duration_tolerance_ns;
+
+      if (elapsed < lower_bound) {
+        run.state = benchmark_run_state_e::aborted;
+        run.abort_reason = benchmark_abort_reason_e::stopped_before_duration_lower_bound;
+        run.frozen_monotonic = now;
+        enforce_terminal_retention_locked(benchmark_runs);
+        result = benchmark_run_stop_result_e::stopped_early_and_aborted;
+        return;
+      }
+
+      run.stopped_monotonic = now;
+      run.state = benchmark_run_state_e::draining;
+      result = benchmark_run_stop_result_e::stopped;
+    });
+
+    return found ? result : benchmark_run_stop_result_e::rejected_run_not_found;
+  }
+
+  benchmark_run_get_result_e get_benchmark_run(
+      const std::string &run_id,
+      bool caller_is_authorized_harness,
+      const std::function<void(benchmark_run_t &)> &fn) {
+    if (!benchmark_control_plane_enabled()) {
+      return benchmark_run_get_result_e::rejected_control_plane_not_enabled;
+    }
+    if (!caller_is_authorized_harness) {
+      return benchmark_run_get_result_e::rejected_caller_not_authorized_as_harness;
+    }
+
+    const bool found = with_benchmark_run(run_id, [&](benchmark_run_t &run) {
+      apply_lazy_transitions_locked(run);
+      fn(run);
+    });
+
+    return found ? benchmark_run_get_result_e::found : benchmark_run_get_result_e::rejected_run_not_found;
+  }
+
+  benchmark_run_delete_result_e delete_benchmark_run(
+      const std::string &run_id,
+      bool caller_is_authorized_harness) {
+    if (!benchmark_control_plane_enabled()) {
+      return benchmark_run_delete_result_e::rejected_control_plane_not_enabled;
+    }
+    if (!caller_is_authorized_harness) {
+      return benchmark_run_delete_result_e::rejected_caller_not_authorized_as_harness;
+    }
+
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+    const auto before = benchmark_runs.size();
+    benchmark_runs.erase(
+      std::remove_if(benchmark_runs.begin(), benchmark_runs.end(),
+        [&run_id](const benchmark_run_t &r) { return r.run_id == run_id; }),
+      benchmark_runs.end());
+
+    return benchmark_runs.size() < before
+      ? benchmark_run_delete_result_e::deleted
+      : benchmark_run_delete_result_e::rejected_run_not_found;
+  }
+
   int active_client_count() {
     std::lock_guard<std::mutex> lock(stats_mutex);
     return static_cast<int>(current_stats.clients.size());
