@@ -87,6 +87,21 @@ namespace virtual_display {
   bool backend_has_required_configuration(backend_e backend, const std::string &streaming_output);
 
   /**
+   * @brief Human-readable reason a virtual display cannot be created right now.
+   * @return Empty string when creation is possible; otherwise the reason to serve to clients.
+   */
+  std::string unavailable_reason();
+
+  /**
+   * @brief Pure mapping from probed availability state to the served reason.
+   * @param backend The backend detection result.
+   * @param evdi_blocked True when the EVDI module and library are usable but no device can be obtained.
+   * @param streaming_output_configured True when linux_streaming_output is set.
+   * @return Empty string when the combination is usable; otherwise the reason.
+   */
+  std::string unavailable_reason_for(backend_e backend, bool evdi_blocked, bool streaming_output_configured);
+
+  /**
    * @brief Create a virtual display with the given resolution and refresh rate.
    * @param width Horizontal resolution in pixels.
    * @param height Vertical resolution in pixels.
