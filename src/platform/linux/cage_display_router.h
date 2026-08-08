@@ -59,8 +59,8 @@ namespace cage_display_router {
   std::string wrap_cmd(const std::string &cmd);
 
   /**
-   * @brief Stop cage and all processes running inside it.
-   * Sends SIGTERM, waits up to 3s, then SIGKILL if needed.
+   * @brief Stop the owned labwc supervisor and all private runtime processes.
+   * Sends SIGTERM, waits up to 3s, then kills the anchored private group if needed.
    */
   void stop();
 
@@ -74,6 +74,8 @@ namespace cage_display_router {
 
 #if defined(POLARIS_TESTS)
   void reset_after_external_stop_for_tests(pid_t pid);
+  void force_cage_pidfd_open_failure_for_tests(bool force_failure);
+  bool cage_pidfd_available_for_tests();
 #endif
 
   /**
@@ -88,7 +90,7 @@ namespace cage_display_router {
   bool is_healthy();
 
   /**
-   * @brief Returns the PID of the running cage process (0 if not running).
+   * @brief Returns the PID of the owned labwc supervisor (0 if not running).
    */
   pid_t get_pid();
 
