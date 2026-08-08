@@ -1103,6 +1103,40 @@ TEST(StreamStatsSessionTimingTests, RingWrapsAndReportsIncompleteOnceCapacityIsE
   stream_stats::stop_session_timing(uuid, 1);
 }
 
+// get_single_active_session_identity() backs the P0-5 benchmark control
+// surface's create route (measurement-spec-v1.md 6.4): a harness's
+// create-and-arm request names no device_uuid at all, since the harness
+// isn't the streaming client itself, so the route needs to find "the one
+// active session" on its own.
+
+TEST(GetSingleActiveSessionIdentityTests, ReturnsNulloptWhenNoSessionsAreActive) {
+  EXPECT_FALSE(stream_stats::get_single_active_session_identity().has_value());
+}
+
+TEST(GetSingleActiveSessionIdentityTests, ReturnsTheSoleSessionsIdentityWhenExactlyOneIsActive) {
+  const std::string uuid = "test-uuid-single-active-session";
+  stream_stats::start_session_timing(uuid, 7);
+
+  const auto identity = stream_stats::get_single_active_session_identity();
+  ASSERT_TRUE(identity.has_value());
+  EXPECT_EQ(identity->device_uuid, uuid);
+  EXPECT_EQ(identity->session_generation, 7u);
+
+  stream_stats::stop_session_timing(uuid, 7);
+}
+
+TEST(GetSingleActiveSessionIdentityTests, ReturnsNulloptWhenMultipleSessionsAreActive) {
+  const std::string uuid_a = "test-uuid-multi-active-a";
+  const std::string uuid_b = "test-uuid-multi-active-b";
+  stream_stats::start_session_timing(uuid_a, 1);
+  stream_stats::start_session_timing(uuid_b, 1);
+
+  EXPECT_FALSE(stream_stats::get_single_active_session_identity().has_value());
+
+  stream_stats::stop_session_timing(uuid_a, 1);
+  stream_stats::stop_session_timing(uuid_b, 1);
+}
+
 // measurement-spec-v1.md 6.1: client_population_revision is a global,
 // process-lifetime counter (not session-keyed like the tests above), so -
 // like the pre-existing StreamStatsHotFieldTests - these assert on the
