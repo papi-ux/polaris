@@ -559,6 +559,20 @@ namespace stream_stats {
   int active_client_count();
 
   /**
+   * @brief Get the current client population revision - a monotonic counter
+   * (measurement-spec-v1.md 6.1) that increments on every
+   * add_client()/remove_client() call, so a leave/join replacement that
+   * returns the client count to its original value still moves the
+   * revision. Deliberately NOT reset by update_stream_active(false)'s
+   * stats_t reset ("all sessions ended") - it lives outside stats_t so a
+   * full stream restart between a benchmark run's arm and freeze can never
+   * be masked by the counter coincidentally returning to its starting
+   * value. Used to detect and abort a benchmark run whose client
+   * population changed mid-run.
+   */
+  std::uint64_t client_population_revision();
+
+  /**
    * @brief Record a client-requested full IDR (keyframe) frame reset.
    */
   void record_idr_request();
