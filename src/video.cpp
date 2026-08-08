@@ -2478,6 +2478,7 @@ namespace video {
 
       if (av_packet && av_packet->pts == frame_nr) {
         packet->frame_timestamp = frame_timestamp;
+        packet->encode_done_timestamp = std::chrono::steady_clock::now();
       }
 
       packet->replacements = &session.replacements;
@@ -2490,6 +2491,7 @@ namespace video {
 
   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto encoded_frame = session.encode_frame(frame_nr);
+    auto encode_done_timestamp = std::chrono::steady_clock::now();
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
       return -1;
@@ -2503,6 +2505,7 @@ namespace video {
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
+    packet->encode_done_timestamp = encode_done_timestamp;
     packets->raise(std::move(packet));
 
     return 0;
