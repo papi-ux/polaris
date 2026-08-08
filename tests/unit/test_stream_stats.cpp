@@ -1730,3 +1730,433 @@ TEST(BenchmarkRunCreateTests, CreatesAndArmsWhenAllPreconditionsPass) {
 
   stream_stats::remove_client("203.0.113.33");
 }
+
+// P0-5 benchmark-run-capture engine, piece 4: start_benchmark_run(),
+// stop_benchmark_run(), get_benchmark_run(), delete_benchmark_run(), and
+// the lazy state-reconciliation they all share (measurement-spec-v1.md
+// 6.4's active->draining and draining->frozen deadlines, plus the
+// session-ended/generation-changed/population-changed abort triggers for
+// an already-active-or-draining run). "Lazy" means there is no timer
+// thread - reconciliation only happens when something next calls one of
+// these four functions for a given run_id, which is why several tests
+// below backdate a run's started_monotonic/stopped_monotonic directly
+// (the same technique BenchmarkRunRetentionTests uses for frozen_monotonic
+// above) rather than actually sleeping past a 60-180s duration in a unit
+// test.
+
+namespace {
+  // RAII: stands up one active client + one live session-timing entry +
+  // one armed benchmark run owned by that session - the trio every
+  // start/stop/get/delete test needs, since start_benchmark_run and the
+  // abort-trigger check both call get_session_timing(). Control plane must
+  // already be enabled (via BenchmarkControlPlaneGuard) before construction,
+  // since arming goes through the real create_benchmark_run. Teardown uses
+  // the ungated erase_benchmark_run/stop_session_timing/remove_client
+  // directly rather than the gated public delete/stop calls under test, so
+  // cleanup can't itself be blocked by whatever state a test left behind
+  // (e.g. control plane disabled, or the run already deleted).
+  struct ArmedRunFixture {
+    std::string ip;
+    std::string device_uuid;
+    std::uint64_t session_generation;
+    std::string run_id;
+
+    ArmedRunFixture(std::string ip_in, std::string device_uuid_in, std::uint64_t session_generation_in, std::string run_id_in):
+        ip(std::move(ip_in)), device_uuid(std::move(device_uuid_in)),
+        session_generation(session_generation_in), run_id(std::move(run_id_in)) {
+      stream_stats::add_client(ip, device_uuid);
+      stream_stats::start_session_timing(device_uuid, session_generation);
+      const auto result = stream_stats::create_benchmark_run(
+        make_valid_create_request(run_id), device_uuid, session_generation, true);
+      EXPECT_EQ(result, stream_stats::benchmark_run_create_result_e::created);
+    }
+
+    ~ArmedRunFixture() {
+      stream_stats::erase_benchmark_run(run_id);
+      stream_stats::stop_session_timing(device_uuid, session_generation);
+      stream_stats::remove_client(ip);
+    }
+  };
+
+  // The exact lower bound make_valid_create_request()'s 120s/250ms pair
+  // implies, per measurement-spec-v1.md 6.4's
+  // abs(actual_duration_ns - expected_duration_ns) <= duration_tolerance_ns.
+  std::chrono::nanoseconds valid_request_duration_lower_bound() {
+    return std::chrono::seconds(120) - std::chrono::milliseconds(250);
+  }
+}  // namespace
+
+TEST(BenchmarkRunLifecycleTests, StartRejectsWhenControlPlaneIsNotEnabled) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.40", "device-start-cp-disabled", 1, "lifecycle-start-cp-disabled");
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  const auto result = stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_start_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+}
+
+TEST(BenchmarkRunLifecycleTests, StartRejectsWhenCallerIsNotAuthorizedAsHarness) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.41", "device-start-unauthorized", 1, "lifecycle-start-unauthorized");
+
+  const auto result = stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, false);
+  EXPECT_EQ(result, stream_stats::benchmark_run_start_result_e::rejected_caller_not_authorized_as_harness);
+}
+
+TEST(BenchmarkRunLifecycleTests, StartRejectsWhenRunNotFound) {
+  BenchmarkControlPlaneGuard guard(true);
+
+  const auto result = stream_stats::start_benchmark_run("lifecycle-start-unknown-run", "device-x", 1, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_start_result_e::rejected_run_not_found);
+}
+
+TEST(BenchmarkRunLifecycleTests, StartRejectsWrongSession) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.42", "device-start-wrong-session", 1, "lifecycle-start-wrong-session");
+
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, "some-other-device", fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::rejected_wrong_session)
+    << "wrong device_uuid";
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation + 1, true),
+            stream_stats::benchmark_run_start_result_e::rejected_wrong_session)
+    << "right device_uuid, wrong session_generation";
+}
+
+TEST(BenchmarkRunLifecycleTests, StartRejectsWhenRunNotInArmedState) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.43", "device-start-duplicate", 1, "lifecycle-start-duplicate");
+
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto second = stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(second, stream_stats::benchmark_run_start_result_e::rejected_run_not_in_armed_state)
+    << "a duplicate start must be rejected, not silently re-accepted";
+}
+
+TEST(BenchmarkRunLifecycleTests, StartRejectsWhenPopulationChangedSinceArm) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.44", "device-start-population-drift", 1, "lifecycle-start-population-drift");
+
+  stream_stats::add_client("203.0.113.45", "lifecycle-start-population-churn");
+  stream_stats::remove_client("203.0.113.45");
+
+  const auto result = stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_start_result_e::rejected_population_changed_since_arm);
+}
+
+TEST(BenchmarkRunLifecycleTests, StartRejectsWhenSessionNoLongerActive) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.46", "device-start-session-ended", 1, "lifecycle-start-session-ended");
+
+  stream_stats::stop_session_timing(fixture.device_uuid, fixture.session_generation);
+
+  const auto result = stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+}
+
+TEST(BenchmarkRunLifecycleTests, StartSucceedsAndActivatesWhenAllPreconditionsPass) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.47", "device-start-happy-path", 1, "lifecycle-start-happy-path");
+
+  const auto before = std::chrono::steady_clock::now();
+  const auto result = stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  const auto after = std::chrono::steady_clock::now();
+  ASSERT_EQ(result, stream_stats::benchmark_run_start_result_e::started);
+
+  const auto get_result = stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::active);
+    ASSERT_TRUE(run.started_monotonic.has_value());
+    EXPECT_GE(*run.started_monotonic, before);
+    EXPECT_LE(*run.started_monotonic, after);
+  });
+  EXPECT_EQ(get_result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, StopRejectsWhenControlPlaneIsNotEnabled) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.48", "device-stop-cp-disabled", 1, "lifecycle-stop-cp-disabled");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  const auto result = stream_stats::stop_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_stop_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+}
+
+TEST(BenchmarkRunLifecycleTests, StopRejectsWhenCallerIsNotAuthorizedAsHarness) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.49", "device-stop-unauthorized", 1, "lifecycle-stop-unauthorized");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto result = stream_stats::stop_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, false);
+  EXPECT_EQ(result, stream_stats::benchmark_run_stop_result_e::rejected_caller_not_authorized_as_harness);
+}
+
+TEST(BenchmarkRunLifecycleTests, StopRejectsWhenRunNotFound) {
+  BenchmarkControlPlaneGuard guard(true);
+
+  const auto result = stream_stats::stop_benchmark_run("lifecycle-stop-unknown-run", "device-x", 1, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_stop_result_e::rejected_run_not_found);
+}
+
+TEST(BenchmarkRunLifecycleTests, StopRejectsWrongSession) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.50", "device-stop-wrong-session", 1, "lifecycle-stop-wrong-session");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto result = stream_stats::stop_benchmark_run(fixture.run_id, "some-other-device", fixture.session_generation, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_stop_result_e::rejected_wrong_session);
+}
+
+TEST(BenchmarkRunLifecycleTests, StopRejectsWhenNotCurrentlyActive) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.51", "device-stop-not-active", 1, "lifecycle-stop-not-active");
+
+  const auto stop_while_armed = stream_stats::stop_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(stop_while_armed, stream_stats::benchmark_run_stop_result_e::rejected_not_currently_active)
+    << "never started";
+
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+  // Real elapsed time here is microseconds, well before the 119.75s lower
+  // bound, so this first stop is correctly an early abort, not a plain
+  // stop - StopAbortsWhenCalledBeforeTheDurationLowerBound covers that
+  // path directly. What this test cares about is that state is no longer
+  // active either way, so the second call below must still be rejected.
+  ASSERT_EQ(stream_stats::stop_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_stop_result_e::stopped_early_and_aborted);
+
+  const auto duplicate_stop = stream_stats::stop_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(duplicate_stop, stream_stats::benchmark_run_stop_result_e::rejected_not_currently_active)
+    << "a duplicate stop must be rejected, not silently re-accepted";
+}
+
+TEST(BenchmarkRunLifecycleTests, StopAbortsWhenCalledBeforeTheDurationLowerBound) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.52", "device-stop-early", 1, "lifecycle-stop-early");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto result = stream_stats::stop_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_stop_result_e::stopped_early_and_aborted)
+    << "this test stops within milliseconds of starting, nowhere near the 119.75s lower bound";
+
+  const auto get_result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::aborted);
+    EXPECT_EQ(run.abort_reason, stream_stats::benchmark_abort_reason_e::stopped_before_duration_lower_bound);
+  });
+  EXPECT_EQ(get_result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, StopTransitionsToDrainingWhenCalledExactlyAtTheDurationLowerBound) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.53", "device-stop-at-lower-bound", 1, "lifecycle-stop-at-lower-bound");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  // Backdate started_monotonic so "elapsed" already equals the lower bound
+  // exactly, without sleeping through a 60-180s duration in a unit test -
+  // the same technique BenchmarkRunRetentionTests uses on frozen_monotonic.
+  stream_stats::with_benchmark_run(fixture.run_id, [](stream_stats::benchmark_run_t &run) {
+    run.started_monotonic = std::chrono::steady_clock::now() - valid_request_duration_lower_bound();
+  });
+
+  const auto result = stream_stats::stop_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_stop_result_e::stopped)
+    << "exactly at the lower bound must be accepted, not aborted";
+
+  const auto get_result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::draining);
+  });
+  EXPECT_EQ(get_result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetRejectsWhenControlPlaneIsNotEnabled) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.54", "device-get-cp-disabled", 1, "lifecycle-get-cp-disabled");
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &) {
+    FAIL() << "callback must not run when the control plane is disabled";
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetRejectsWhenCallerIsNotAuthorizedAsHarness) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.55", "device-get-unauthorized", 1, "lifecycle-get-unauthorized");
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, false, [](stream_stats::benchmark_run_t &) {
+    FAIL() << "callback must not run for an unauthorized caller";
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::rejected_caller_not_authorized_as_harness);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetRejectsWhenRunNotFound) {
+  BenchmarkControlPlaneGuard guard(true);
+
+  const auto result = stream_stats::get_benchmark_run("lifecycle-get-unknown-run", true, [](stream_stats::benchmark_run_t &) {
+    FAIL() << "callback must not run for an unknown run_id";
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::rejected_run_not_found);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetFindsAnArmedRunAndAppliesNoTransition) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.56", "device-get-armed", 1, "lifecycle-get-armed");
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::armed);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetAppliesLazyTransitionFromActiveToDrainingBeforeReturning) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.57", "device-get-lazy-draining", 1, "lifecycle-get-lazy-draining");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  // The full expected duration has "already elapsed" but drain grace has
+  // not - stop_benchmark_run is never called, so this is purely GET
+  // noticing the deadline on its own.
+  stream_stats::with_benchmark_run(fixture.run_id, [](stream_stats::benchmark_run_t &run) {
+    run.started_monotonic = std::chrono::steady_clock::now() - std::chrono::seconds(120);
+  });
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::draining);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetCascadesLazyTransitionAllTheWayToFrozen) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.58", "device-get-lazy-frozen", 1, "lifecycle-get-lazy-frozen");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto revision_before_freeze = stream_stats::client_population_revision();
+
+  // Both the full duration AND the drain grace have "already elapsed" -
+  // a single get() call must cascade active -> draining -> frozen, not
+  // require two separate lazy checks to fully resolve.
+  stream_stats::with_benchmark_run(fixture.run_id, [](stream_stats::benchmark_run_t &run) {
+    run.started_monotonic = std::chrono::steady_clock::now() - std::chrono::seconds(123);
+  });
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::frozen);
+    EXPECT_TRUE(run.frozen_monotonic.has_value());
+    EXPECT_EQ(run.client_population_revision_at_freeze, revision_before_freeze);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetObservesAbortWhenSessionEndedMidRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.59", "device-get-abort-session-ended", 1, "lifecycle-get-abort-session-ended");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  stream_stats::stop_session_timing(fixture.device_uuid, fixture.session_generation);
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::aborted);
+    EXPECT_EQ(run.abort_reason, stream_stats::benchmark_abort_reason_e::session_ended);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetObservesAbortWhenPopulationChangedMidRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.60", "device-get-abort-population", 1, "lifecycle-get-abort-population");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  stream_stats::add_client("203.0.113.61", "lifecycle-get-abort-population-churn");
+  stream_stats::remove_client("203.0.113.61");
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::aborted);
+    EXPECT_EQ(run.abort_reason, stream_stats::benchmark_abort_reason_e::client_population_revision_changed);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunLifecycleTests, GetObservesAbortWhenSessionGenerationChangedMidRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.62", "device-get-abort-generation", 1, "lifecycle-get-abort-generation");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  // Simulates the same device reconnecting mid-run and claiming a new
+  // generation - start_session_timing() discards and replaces any existing
+  // entry for this uuid, same as a real reconnect would.
+  stream_stats::start_session_timing(fixture.device_uuid, fixture.session_generation + 1);
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::aborted);
+    EXPECT_EQ(run.abort_reason, stream_stats::benchmark_abort_reason_e::session_generation_changed);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+
+  // The fixture's own teardown stops session_generation, which the newer
+  // generation registered above has already displaced - clean that one up
+  // too so it doesn't leak into a later test.
+  stream_stats::stop_session_timing(fixture.device_uuid, fixture.session_generation + 1);
+}
+
+TEST(BenchmarkRunLifecycleTests, DeleteRejectsWhenControlPlaneIsNotEnabled) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.63", "device-delete-cp-disabled", 1, "lifecycle-delete-cp-disabled");
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  const auto result = stream_stats::delete_benchmark_run(fixture.run_id, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_delete_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+}
+
+TEST(BenchmarkRunLifecycleTests, DeleteRejectsWhenCallerIsNotAuthorizedAsHarness) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.64", "device-delete-unauthorized", 1, "lifecycle-delete-unauthorized");
+
+  const auto result = stream_stats::delete_benchmark_run(fixture.run_id, false);
+  EXPECT_EQ(result, stream_stats::benchmark_run_delete_result_e::rejected_caller_not_authorized_as_harness);
+}
+
+TEST(BenchmarkRunLifecycleTests, DeleteRejectsWhenRunNotFound) {
+  BenchmarkControlPlaneGuard guard(true);
+
+  const auto result = stream_stats::delete_benchmark_run("lifecycle-delete-unknown-run", true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_delete_result_e::rejected_run_not_found);
+}
+
+TEST(BenchmarkRunLifecycleTests, DeleteRemovesAnArmedRunImmediatelyAndLeavesNoTombstone) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.65", "device-delete-armed", 1, "lifecycle-delete-armed");
+
+  ASSERT_EQ(stream_stats::delete_benchmark_run(fixture.run_id, true), stream_stats::benchmark_run_delete_result_e::deleted);
+
+  const auto get_result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &) {
+    FAIL() << "deleted runs must leave no tombstone, unlike expiry";
+  });
+  EXPECT_EQ(get_result, stream_stats::benchmark_run_get_result_e::rejected_run_not_found);
+}
+
+TEST(BenchmarkRunLifecycleTests, DeleteWorksRegardlessOfRunState) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.66", "device-delete-active", 1, "lifecycle-delete-active");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto result = stream_stats::delete_benchmark_run(fixture.run_id, true);
+  EXPECT_EQ(result, stream_stats::benchmark_run_delete_result_e::deleted)
+    << "delete must not require a terminal state first";
+}
