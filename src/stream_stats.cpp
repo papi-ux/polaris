@@ -1482,6 +1482,127 @@ namespace stream_stats {
     }
   }
 
+  namespace {
+    std::atomic<bool> benchmark_control_plane_enabled_flag {false};
+
+    bool is_valid_manifest_sha256(const std::string &value) {
+      if (value.size() != 64) {
+        return false;
+      }
+      return std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+      });
+    }
+  }  // namespace
+
+  bool benchmark_control_plane_enabled() {
+    return benchmark_control_plane_enabled_flag.load(std::memory_order_relaxed);
+  }
+
+  void set_benchmark_control_plane_enabled(bool enabled) {
+    benchmark_control_plane_enabled_flag.store(enabled, std::memory_order_relaxed);
+  }
+
+  benchmark_run_create_result_e create_benchmark_run(
+      const benchmark_run_create_request_t &request,
+      const std::string &device_uuid,
+      std::uint64_t session_generation,
+      bool caller_is_authorized_harness) {
+    // Cheapest / least-sensitive-information-first ordering. None of these
+    // preconditions require benchmark_run_mutex - only the final
+    // session-dedup + run_id-dedup + insert step does, taken once below so
+    // that check-then-insert can't race a concurrent create call.
+    if (!benchmark_control_plane_enabled()) {
+      return benchmark_run_create_result_e::rejected_control_plane_not_enabled;
+    }
+    if (!caller_is_authorized_harness) {
+      return benchmark_run_create_result_e::rejected_caller_not_authorized_as_harness;
+    }
+    if (active_client_count() != 1) {
+      return benchmark_run_create_result_e::rejected_not_exactly_one_active_session;
+    }
+    if (request.expected_duration_s < 60 || request.expected_duration_s > 180) {
+      return benchmark_run_create_result_e::rejected_duration_out_of_range;
+    }
+    if (request.duration_tolerance_ms < 0 || request.duration_tolerance_ms > 1000) {
+      return benchmark_run_create_result_e::rejected_duration_tolerance_out_of_range;
+    }
+    if (request.drain_grace_ms < 1 || request.drain_grace_ms > 5000) {
+      return benchmark_run_create_result_e::rejected_drain_grace_out_of_range;
+    }
+    if (request.target_fps < 30 || request.target_fps > 240) {
+      return benchmark_run_create_result_e::rejected_target_fps_out_of_range;
+    }
+
+    // measurement-spec-v1.md 6.4: "nominal sample budget expected_duration_s
+    // * target_fps of at least 1,000 frames". Given the range floors just
+    // checked above (60s, 30fps -> 1800), this can't currently fail - kept
+    // anyway as a direct, defensive expression of the spec's own precondition
+    // rather than an assumption that the range floors will never change
+    // independently (e.g. if either becomes config-driven later).
+    const std::uint64_t nominal_sample_budget =
+      static_cast<std::uint64_t>(request.expected_duration_s) * static_cast<std::uint64_t>(request.target_fps);
+    if (nominal_sample_budget < 1000) {
+      return benchmark_run_create_result_e::rejected_nominal_sample_budget_too_small;
+    }
+    if (request.sample_capacity_frames < nominal_sample_budget) {
+      return benchmark_run_create_result_e::rejected_capacity_below_nominal_budget;
+    }
+    if (request.sample_capacity_frames > 65536) {
+      return benchmark_run_create_result_e::rejected_capacity_exceeds_maximum;
+    }
+    if (!is_valid_manifest_sha256(request.manifest_sha256)) {
+      return benchmark_run_create_result_e::rejected_invalid_manifest_sha256_format;
+    }
+
+    // Not checked here (documented gap, matching this engine's established
+    // pattern - see the header comment on this function): "duration,
+    // tolerance, drain grace, target fps, capacity, and workload exactly
+    // match the frozen manifest". There is no manifest file infrastructure
+    // yet for this function to check against; a later piece owns it.
+
+    std::lock_guard<std::mutex> lock(benchmark_run_mutex);
+
+    const bool session_already_has_active_run = std::any_of(
+      benchmark_runs.begin(), benchmark_runs.end(),
+      [&device_uuid](const benchmark_run_t &r) {
+        return r.owning_device_uuid == device_uuid &&
+               (r.state == benchmark_run_state_e::armed ||
+                r.state == benchmark_run_state_e::active ||
+                r.state == benchmark_run_state_e::draining);
+      });
+    if (session_already_has_active_run) {
+      return benchmark_run_create_result_e::rejected_session_already_has_an_active_run;
+    }
+
+    const bool run_id_already_used = std::any_of(
+      benchmark_runs.begin(), benchmark_runs.end(),
+      [&request](const benchmark_run_t &r) { return r.run_id == request.run_id; });
+    if (run_id_already_used) {
+      return benchmark_run_create_result_e::rejected_run_id_already_used;
+    }
+
+    benchmark_run_t run(request.sample_capacity_frames);
+    run.run_id = request.run_id;
+    run.state = benchmark_run_state_e::armed;
+    run.owning_device_uuid = device_uuid;
+    run.owning_session_generation = session_generation;
+    run.manifest_sha256 = request.manifest_sha256;
+    run.label = request.label;
+    run.workload_id = request.workload_id;
+    run.expected_duration_ns = std::chrono::seconds(request.expected_duration_s);
+    run.duration_tolerance_ns = std::chrono::milliseconds(request.duration_tolerance_ms);
+    run.drain_grace_ns = std::chrono::milliseconds(request.drain_grace_ms);
+    run.target_fps = request.target_fps;
+    run.armed_monotonic = std::chrono::steady_clock::now();
+    run.client_population_revision_at_arm = client_population_revision();
+
+    benchmark_runs.push_back(std::move(run));
+    enforce_terminal_retention_locked(benchmark_runs);
+
+    return benchmark_run_create_result_e::created;
+  }
+
   int active_client_count() {
     std::lock_guard<std::mutex> lock(stats_mutex);
     return static_cast<int>(current_stats.clients.size());
