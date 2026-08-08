@@ -1522,7 +1522,7 @@ namespace stream {
         frame_processing_latency_logger.collect_and_log(latency / 10.);
 
         if (packet->encode_done_timestamp) {
-          stream_stats::record_frame_timing(*packet->frame_timestamp, *packet->encode_done_timestamp, t2_send_time);
+          stream_stats::record_frame_timing(session->device_uuid, *packet->frame_timestamp, *packet->encode_done_timestamp, t2_send_time);
         }
       } else {
         frame_header.frame_processing_latency = 0;
@@ -2240,6 +2240,7 @@ namespace stream {
 
       // Remove this client from multi-client stats
       stream_stats::remove_client(session.control.expected_peer_address);
+      stream_stats::stop_session_timing(session.device_uuid);
 
       // If this is the last session, invoke the platform callbacks
       auto remaining = --running_sessions;
@@ -2334,6 +2335,7 @@ namespace stream {
 
       // Track this client in multi-client stats
       stream_stats::add_client(addr_string, session.device_name);
+      stream_stats::start_session_timing(session.device_uuid);
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
         session.session_target_fps > 0 ? static_cast<double>(session.session_target_fps) / 1000.0 : 0.0,
