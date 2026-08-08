@@ -1232,13 +1232,26 @@ namespace nvhttp {
         if (option.value == "host_virtual_display") {
           available = available && host_virtual_display_available();
         }
+        std::string unavailable_reason;
+        if (!available) {
+          unavailable_reason = option.unavailable_reason;
+          if (option.value == "host_virtual_display") {
+            // The backend probe knows exactly why creation would fail; the
+            // policy layer only knows that it would.
+            const auto backend_reason = virtual_display::unavailable_reason();
+            if (!backend_reason.empty()) {
+              unavailable_reason = backend_reason;
+            }
+          }
+          if (unavailable_reason.empty()) {
+            unavailable_reason = "This mode is not available on this host right now.";
+          }
+        }
         modes.push_back({
           {"value", option.value},
           {"label", option.label},
           {"available", available},
-          {"unavailable_reason", available ? "" : (option.unavailable_reason.empty() ?
-            "Host virtual display is not available on this host." :
-            option.unavailable_reason)},
+          {"unavailable_reason", unavailable_reason},
           {"restart_required", true},
           {"reason", option.reason},
           {"group", option.group},
