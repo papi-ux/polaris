@@ -6469,6 +6469,7 @@ namespace nvhttp {
       display_mode["requested_headless"] = stats.runtime_requested_headless;
       display_mode["effective_headless"] = stats.runtime_effective_headless;
       display_mode["gpu_native_override_active"] = stats.runtime_gpu_native_override_active;
+      display_mode["warning"] = stats.runtime_display_warning;
       display_mode["selection"] = stream_display_mode;
       display_mode["stream_display_mode"] = stream_display_mode;
       display_mode["explicit_choice"] = status_snapshot.display_mode_explicit;

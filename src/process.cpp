@@ -5342,6 +5342,9 @@ namespace proc {
     if (using_headless_cage_runtime && launch_session->virtual_display) {
       BOOST_LOG(info) << "session_optimization: normalized virtual_display from true to false for headless cage runtime"sv;
       launch_session->virtual_display = false;
+      stream_stats::update_runtime_display_warning(
+        "Virtual display request skipped: the private stream runtime provides this session's display."
+      );
       resolved_optimization.virtual_display = false;
       resolved_optimization.virtual_display_source = "runtime_policy";
       note_layer(resolved_optimization, "runtime_policy");
@@ -5624,10 +5627,26 @@ namespace proc {
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
           launch_session->virtual_display = false;
+          {
+            auto warning = std::string {"Host Virtual Display could not be created; this session streams the host's current output instead."};
+            const auto reason = virtual_display::unavailable_reason();
+            if (!reason.empty()) {
+              warning += " " + reason;
+            }
+            stream_stats::update_runtime_display_warning(warning);
+          }
         }
       } else {
         BOOST_LOG(warning) << "Virtual display requested but no backend available on Linux"sv;
         launch_session->virtual_display = false;
+        {
+          auto warning = std::string {"Host Virtual Display is unavailable on this host; this session streams the host's current output instead."};
+          const auto reason = virtual_display::unavailable_reason();
+          if (!reason.empty()) {
+            warning += " " + reason;
+          }
+          stream_stats::update_runtime_display_warning(warning);
+        }
       }
     } else if (using_headless_cage) {
       BOOST_LOG(info) << "Linux virtual display: skipped because "sv
