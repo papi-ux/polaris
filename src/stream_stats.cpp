@@ -1076,6 +1076,13 @@ namespace stream_stats {
     hot_frame_jitter_ms.store(frame_jitter_ms, std::memory_order_relaxed);
   }
 
+  double packet_loss_percent(uint64_t scaled_loss, uint64_t scale) {
+    if (scale == 0) {
+      return 0.0;
+    }
+    return std::clamp((double) scaled_loss * 100.0 / (double) scale, 0.0, 100.0);
+  }
+
   void update_network_stats(double latency_ms, double packet_loss, uint64_t bytes_sent) {
     // Fully lock-free: no per-client mirror exists on this overload.
     hot_latency_ms.store(latency_ms, std::memory_order_relaxed);

@@ -339,6 +339,15 @@ namespace stream_stats {
   void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent);
 
   /**
+   * @brief Convert a scaled loss ratio (e.g. ENet's peer packetLoss against
+   *        ENET_PEER_PACKET_LOSS_SCALE) to the 0-100 percentage this module stores.
+   * @param scaled_loss Loss ratio numerator as reported by the transport.
+   * @param scale Value of the transport's full-loss denominator; 0 yields 0.0.
+   * @return Packet loss percentage clamped to [0.0, 100.0].
+   */
+  double packet_loss_percent(uint64_t scaled_loss, uint64_t scale);
+
+  /**
    * @brief Update runtime mode metadata exposed to the dashboard.
    * @param state Current runtime state for the active backend.
    */
