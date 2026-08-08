@@ -66,7 +66,17 @@ namespace stream_display_policy {
 
   std::string selection_unavailable_reason(std::string_view selection) {
     if (const auto *path = stream_path::find(selection)) {
-      return std::string {path->unavailable_reason};
+      // Probe-dependent reasons are not in the static registry entry; mirror
+      // selection_available so the rejection matches the served catalog.
+      if (path->id == stream_path::k_gamescope_stream &&
+          !stream_path::probe_host_capabilities().gamescope_present) {
+        return "gamescope binary not found on PATH";
+      }
+      if (!path->unavailable_reason.empty()) {
+        return std::string {path->unavailable_reason};
+      }
+      // An unavailable path must still explain itself to a rejected client.
+      return std::string {path->label} + " is not available on this host.";
     }
     return "Unknown stream display mode.";
   }
