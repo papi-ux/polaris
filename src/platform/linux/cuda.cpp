@@ -1978,6 +1978,12 @@ namespace cuda {
           return platf::capture_e::error;
         }
 
+        // P0-3 T0: this is where the captured frame genuinely becomes
+        // available. Matches the same stamping point used by every other
+        // Linux capture backend (wlgrab, kmsgrab, x11grab, cage_screencopy) -
+        // this one was the only display_t implementer missing it.
+        img_out->frame_timestamp = std::chrono::steady_clock::now();
+
         return platf::capture_e::ok;
       }
 

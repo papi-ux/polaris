@@ -270,8 +270,16 @@ TEST(NovaContractTests, KnownDriftNamesFieldsThatStillExist) {
 TEST(NovaContractTests, EveryObjectNamesTheFunctionScopingItsNovaReads) {
   // Scope is what went wrong repeatedly on the Nova side too, so it is pinned
   // rather than left to whoever edits the manifest next.
+  //
+  // An object may have no nova_reader at all: it shipped ahead of any Nova
+  // consumer (display_planner did this before papi-ux/nova#197; session_timing
+  // does it now). That is a real, documented state, not something this test
+  // should fail on - it only pins scope for objects that claim a reader.
   for (const auto &[name, object] : manifest()["objects"].items()) {
     SCOPED_TRACE(name);
+    if (!object.contains("nova_reader")) {
+      continue;
+    }
     EXPECT_TRUE(object["nova_reader"].contains("function"))
       << "nova_reader must name a function; Nova gives several functions in the same file "
          "a parameter called `json`, so file or receiver scoping silently mixes objects";

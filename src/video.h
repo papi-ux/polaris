@@ -371,6 +371,14 @@ namespace video {
     void *channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+
+    // T1 (encode-done): stamped by encode_avcodec()/encode_nvenc() right after
+    // the real encode work finishes, before the packet is queued for send.
+    // Travels with the packet to the send thread the same way frame_timestamp
+    // (T0) already does, so the send thread can derive all three P0-3 stages
+    // (T0->T1, T1->T2, T0->T2) from one thread without cross-thread
+    // correlation.
+    std::optional<std::chrono::steady_clock::time_point> encode_done_timestamp;
   };
 
   struct packet_raw_avcodec: packet_raw_t {

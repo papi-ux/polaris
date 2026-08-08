@@ -1511,9 +1511,19 @@ namespace stream {
           return (uint16_t) std::clamp<decltype(duration_us)>((duration_us + 50) / 100, 0, std::numeric_limits<uint16_t>::max());
         };
 
-        uint16_t latency = duration_to_latency(std::chrono::steady_clock::now() - *packet->frame_timestamp);
+        // T2: this is the send thread handing this packet off (the pacer
+        // sleep, if any, already happened earlier in the loop that calls
+        // this). Shared with the wire latency calc below so P0-3's
+        // out-of-band histogram costs no extra steady_clock::now() call.
+        auto t2_send_time = std::chrono::steady_clock::now();
+
+        uint16_t latency = duration_to_latency(t2_send_time - *packet->frame_timestamp);
         frame_header.frame_processing_latency = latency;
         frame_processing_latency_logger.collect_and_log(latency / 10.);
+
+        if (packet->encode_done_timestamp) {
+          stream_stats::record_frame_timing(*packet->frame_timestamp, *packet->encode_done_timestamp, t2_send_time);
+        }
       } else {
         frame_header.frame_processing_latency = 0;
       }

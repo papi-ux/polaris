@@ -776,3 +776,62 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
 
   stream_stats::update_stream_active(false);
 }
+
+// The T0-T2 rings are global and never reset (unlike the hot-field atomics
+// above, which update_stream_active(false) can't touch either, but those are
+// tested via exact-delta instead). Other tests, and potentially a live
+// route, may have already pushed samples before this one runs, so a
+// before/after delta on p50/p99 wouldn't be reliable - percentiles aren't
+// additive. Instead this flood-fills the ring past its fixed capacity with
+// one known value, which deterministically leaves the entire ring holding
+// only that value regardless of prior state.
+TEST(StreamStatsSessionTimingTests, RecordFrameTimingFloodFillProducesKnownPercentiles) {
+  using namespace std::chrono;
+  const auto t0 = steady_clock::now();
+  const auto t1 = t0 + milliseconds(3);
+  const auto t2 = t1 + milliseconds(2);
+
+  for (int i = 0; i < 600; ++i) {
+    stream_stats::record_frame_timing(t0, t1, t2);
+  }
+
+  const auto timing = stream_stats::get_session_timing();
+
+  EXPECT_DOUBLE_EQ(timing.capture_to_encode.p50_ms, 3.0);
+  EXPECT_DOUBLE_EQ(timing.capture_to_encode.p99_ms, 3.0);
+  EXPECT_EQ(timing.capture_to_encode.sample_count, 512);
+
+  EXPECT_DOUBLE_EQ(timing.encode_to_send.p50_ms, 2.0);
+  EXPECT_DOUBLE_EQ(timing.encode_to_send.p99_ms, 2.0);
+  EXPECT_EQ(timing.encode_to_send.sample_count, 512);
+
+  EXPECT_DOUBLE_EQ(timing.capture_to_send.p50_ms, 5.0);
+  EXPECT_DOUBLE_EQ(timing.capture_to_send.p99_ms, 5.0);
+  EXPECT_EQ(timing.capture_to_send.sample_count, 512);
+}
+
+// Mixing two distinct flood-filled values should keep p50 and p99 both
+// within the [min, max] of what was actually pushed - this doesn't assume a
+// specific interpolation method or ordering, just that percentiles can't
+// invent values outside the observed range.
+TEST(StreamStatsSessionTimingTests, RecordFrameTimingMixedValuesStayWithinObservedRange) {
+  using namespace std::chrono;
+  const auto t0 = steady_clock::now();
+  const auto fast_t2 = t0 + milliseconds(1);
+  const auto slow_t2 = t0 + milliseconds(9);
+
+  for (int i = 0; i < 300; ++i) {
+    stream_stats::record_frame_timing(t0, t0, fast_t2);
+  }
+  for (int i = 0; i < 300; ++i) {
+    stream_stats::record_frame_timing(t0, t0, slow_t2);
+  }
+
+  const auto timing = stream_stats::get_session_timing();
+
+  EXPECT_GE(timing.capture_to_send.p50_ms, 1.0);
+  EXPECT_LE(timing.capture_to_send.p50_ms, 9.0);
+  EXPECT_GE(timing.capture_to_send.p99_ms, 1.0);
+  EXPECT_LE(timing.capture_to_send.p99_ms, 9.0);
+  EXPECT_EQ(timing.capture_to_send.sample_count, 512);
+}

@@ -903,6 +903,12 @@ namespace portal {
           return platf::capture_e::reinit;
         }
 
+        // P0-3 T0: the frame is genuinely available as of fill_frame()
+        // succeeding, same moment update_capture_metadata below already
+        // treats as "frame is ready." This backend was the other of the two
+        // display_t implementers missing frame_timestamp.
+        img_out->frame_timestamp = std::chrono::steady_clock::now();
+
         stream_stats::update_capture_metadata(img_out->frame_metadata);
         if (!capture_transport_logged) {
           capture_transport_logged = true;
