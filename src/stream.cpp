@@ -1530,6 +1530,10 @@ namespace stream {
 
         if (packet->encode_done_timestamp) {
           stream_stats::record_frame_timing(session->device_uuid, session->session_generation, *packet->frame_timestamp, *packet->encode_done_timestamp, t2_send_time);
+          // P0-5 gate-authoritative run capture (measurement-spec-v1.md 6.4) -
+          // independent of the rolling ring above; a no-op unless a benchmark
+          // run is currently active/draining for this exact session.
+          stream_stats::record_benchmark_sample(session->device_uuid, session->session_generation, *packet->frame_timestamp, *packet->encode_done_timestamp, t2_send_time);
         }
       } else {
         frame_header.frame_processing_latency = 0;

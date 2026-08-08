@@ -2160,3 +2160,137 @@ TEST(BenchmarkRunLifecycleTests, DeleteWorksRegardlessOfRunState) {
   EXPECT_EQ(result, stream_stats::benchmark_run_delete_result_e::deleted)
     << "delete must not require a terminal state first";
 }
+
+// P0-5 benchmark-run-capture engine, piece 5 (final): record_benchmark_sample(),
+// the hot-path recorder wired into stream.cpp's send thread right alongside
+// record_frame_timing() (same call site, same five arguments, same already-
+// taken T0/T1/T2 timestamps - see stream.cpp's video packet send path).
+// Reuses ArmedRunFixture/BenchmarkControlPlaneGuard/make_valid_create_request
+// from the piece 3/4 tests above.
+
+TEST(BenchmarkRunHotPathTests, RecordIsANoOpWhenControlPlaneIsNotEnabled) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.70", "device-hotpath-cp-disabled", 1, "hotpath-cp-disabled");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  const auto now = std::chrono::steady_clock::now();
+  stream_stats::record_benchmark_sample(fixture.device_uuid, fixture.session_generation,
+                                         now, now + std::chrono::milliseconds(5), now + std::chrono::milliseconds(9));
+  stream_stats::set_benchmark_control_plane_enabled(true);
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.capture_to_encode.accepted_count, 0u);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunHotPathTests, RecordIsANoOpWhenNoMatchingRunExists) {
+  BenchmarkControlPlaneGuard guard(true);
+
+  const auto now = std::chrono::steady_clock::now();
+  stream_stats::record_benchmark_sample("device-hotpath-no-run", 1,
+                                         now, now + std::chrono::milliseconds(5), now + std::chrono::milliseconds(9));
+  // Nothing to assert beyond "this did not crash" - there is no run to
+  // inspect, which is the point of this test.
+}
+
+TEST(BenchmarkRunHotPathTests, RecordIsANoOpForAnArmedRunThatHasNotStarted) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.71", "device-hotpath-armed", 1, "hotpath-armed");
+
+  const auto now = std::chrono::steady_clock::now();
+  stream_stats::record_benchmark_sample(fixture.device_uuid, fixture.session_generation,
+                                         now, now + std::chrono::milliseconds(5), now + std::chrono::milliseconds(9));
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::armed);
+    EXPECT_EQ(run.capture_to_encode.accepted_count, 0u);
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunHotPathTests, RecordIsANoOpForWrongSessionGeneration) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.72", "device-hotpath-wrong-generation", 1, "hotpath-wrong-generation");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto now = std::chrono::steady_clock::now();
+  stream_stats::record_benchmark_sample(fixture.device_uuid, fixture.session_generation + 1,
+                                         now, now + std::chrono::milliseconds(5), now + std::chrono::milliseconds(9));
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.capture_to_encode.accepted_count, 0u)
+      << "a write from a stale/foreign generation must be silently dropped, same as record_frame_timing";
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunHotPathTests, RecordAcceptsAWithinWindowSampleOnAnActiveRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.73", "device-hotpath-active", 1, "hotpath-active");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto t1 = t0 + std::chrono::milliseconds(5);
+  const auto t2 = t0 + std::chrono::milliseconds(9);
+  stream_stats::record_benchmark_sample(fixture.device_uuid, fixture.session_generation, t0, t1, t2);
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.capture_to_encode.accepted_count, 1u);
+    EXPECT_EQ(run.encode_to_send_release.accepted_count, 1u);
+    EXPECT_EQ(run.capture_to_send_release.accepted_count, 1u);
+    ASSERT_EQ(run.capture_to_send_release.duration_us.size(), 1u);
+    EXPECT_EQ(run.capture_to_send_release.duration_us[0], 9000u)
+      << "T0->T2 duration must be the full 9ms in microseconds";
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
+
+TEST(BenchmarkRunHotPathTests, RecordDuringDrainAcceptsInWindowStartsAndExcludesPostWindowCompletions) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("203.0.113.74", "device-hotpath-drain", 1, "hotpath-drain");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, fixture.session_generation, true),
+            stream_stats::benchmark_run_start_result_e::started);
+
+  // Put the run in draining with plenty of drain grace left, without
+  // touching real wall-clock time - the same backdating technique used
+  // throughout BenchmarkRunLifecycleTests above. started_monotonic is set
+  // 10s in the past purely so the synthetic T0/T1/T2 offsets below (all
+  // ~120s past it) land on real steady_clock::time_points; the hot-path
+  // recorder only ever computes offsets relative to started_monotonic, so
+  // this has no effect on the classification math itself.
+  const auto backdated_start = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+  stream_stats::with_benchmark_run(fixture.run_id, [&](stream_stats::benchmark_run_t &run) {
+    run.started_monotonic = backdated_start;
+    run.stopped_monotonic = backdated_start + std::chrono::seconds(120);  // = started + expected_duration_ns
+    run.state = stream_stats::benchmark_run_state_e::draining;
+  });
+
+  // T0/T1 both land before E=120s; T2 lands just after it - exactly the
+  // "in flight when the deadline hit" scenario drain grace exists for.
+  const auto t0 = backdated_start + std::chrono::milliseconds(119900);
+  const auto t1 = backdated_start + std::chrono::milliseconds(119950);
+  const auto t2 = backdated_start + std::chrono::milliseconds(120100);
+  stream_stats::record_benchmark_sample(fixture.device_uuid, fixture.session_generation, t0, t1, t2);
+
+  const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [](stream_stats::benchmark_run_t &run) {
+    ASSERT_EQ(run.state, stream_stats::benchmark_run_state_e::draining)
+      << "stopped_monotonic (60s+ in the future) must not have let this cascade to frozen yet";
+
+    EXPECT_EQ(run.capture_to_encode.accepted_count, 1u)
+      << "T0->T1: both endpoints inside the window";
+
+    EXPECT_EQ(run.encode_to_send_release.accepted_count, 0u);
+    EXPECT_EQ(run.encode_to_send_release.excluded_completed_after_window, 1u)
+      << "T1->T2: started inside the window, completed at/after E - recorded, not silently dropped, but not admitted either";
+
+    EXPECT_EQ(run.capture_to_send_release.accepted_count, 0u);
+    EXPECT_EQ(run.capture_to_send_release.excluded_completed_after_window, 1u)
+      << "T0->T2: same shape as T1->T2 above";
+  });
+  EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+}
