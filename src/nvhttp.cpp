@@ -727,11 +727,12 @@ namespace nvhttp {
 #endif
     }
 
-    // P0-3: host-side T0-T2 glass-to-glass stage timing. A named function,
-    // not built inline in the route lambda below, so nova-contract.json's
-    // extractor (tests/integration/test_nova_contract.cpp) can scope to it
-    // the same way it already scopes to build_launch_mode_contract - the
-    // extractor matches named function signatures, not lambda bodies.
+    // P0-3/P0-3A: host-side T0-T2 stage timing for the calling session. A
+    // named function, not built inline in the route lambda below, so
+    // nova-contract.json's extractor (tests/integration/test_nova_contract.cpp)
+    // can scope to it the same way it already scopes to
+    // build_launch_mode_contract - the extractor matches named function
+    // signatures, not lambda bodies.
     nlohmann::json build_session_timing_json(const stream_stats::session_timing_t &timing) {
       auto percentile_json = [](const stream_stats::frame_timing_percentiles_t &p) {
         return nlohmann::json {
@@ -745,7 +746,10 @@ namespace nvhttp {
       output["capture_to_encode"] = percentile_json(timing.capture_to_encode);
       output["encode_to_send"] = percentile_json(timing.encode_to_send);
       output["capture_to_send"] = percentile_json(timing.capture_to_send);
-      output["stage_vocabulary"] = "T0=capture frame available, T1=encoder finished this frame, T2=packet handed to NIC (post-pacer)";
+      output["stage_vocabulary"] = "T0=capture frame available, T1=encoder finished this frame, T2=packet handed off to send-thread packetization (before FEC/encrypt/pace/sendmsg)";
+      output["session_active"] = timing.session_active;
+      output["epoch_start_ns"] = timing.epoch_start_ns;
+      output["ring_complete"] = timing.ring_complete;
       return output;
     }
 
@@ -6318,7 +6322,7 @@ namespace nvhttp {
         return;
       }
 
-      const auto output = build_session_timing_json(stream_stats::get_session_timing());
+      const auto output = build_session_timing_json(stream_stats::get_session_timing(named_cert_p->uuid));
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");

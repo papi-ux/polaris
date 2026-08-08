@@ -173,16 +173,18 @@ namespace stream_stats {
       return values[pos];
     }
 
-    // P0-3 T0-T2 stage timing: unlike capture_profile_buckets above (which
-    // fills, logs, and clears - fine for periodic logging), this backs an
-    // HTTP-queryable endpoint, so a true ring buffer is used instead of a
-    // tumbling window - there is no "just cleared, empty" moment a query can
-    // land on. One dedicated mutex, separate from stats_mutex: the only
-    // writer is the single video send thread (at most ~120 Hz), the only
-    // readers are occasional HTTP handlers, and coupling this to the
-    // already-de-contended stats_mutex would reintroduce exactly the kind of
-    // cross-concern contention P0-2 removed.
-    constexpr std::size_t FRAME_TIMING_RING_CAPACITY = 512;
+    // P0-3/P0-3A T0-T2 stage timing: unlike capture_profile_buckets above
+    // (which fills, logs, and clears - fine for periodic logging), this
+    // backs an HTTP-queryable endpoint, so a true ring buffer is used
+    // instead of a tumbling window - there is no "just cleared, empty"
+    // moment a query can land on. Sized to comfortably hold a full 120 s
+    // bench run at up to 120 fps (14400 samples) with headroom, so a
+    // P0-5-style run doesn't wrap mid-collection. One dedicated mutex,
+    // separate from stats_mutex: writes happen at up to ~120 Hz per active
+    // session, reads are occasional HTTP handlers, and coupling this to the
+    // already-de-contended stats_mutex would reintroduce exactly the kind
+    // of cross-concern contention P0-2 removed.
+    constexpr std::size_t FRAME_TIMING_RING_CAPACITY = 16384;
 
     struct timing_ring_t {
       std::array<double, FRAME_TIMING_RING_CAPACITY> samples_ms {};
@@ -209,10 +211,27 @@ namespace stream_stats {
       }
     };
 
+    // P0-3A: per-session T0-T2 state, found by linear scan the same way
+    // client_stats_t's own `clients` vector (above) is - config::stream.max_sessions
+    // is clamped to [0,8] and defaults to 2, so a scan is simpler than a
+    // hashed lookup without being any slower at this size.
+    struct session_timing_state_t {
+      std::string device_uuid;
+      timing_ring_t capture_to_encode_ring;
+      timing_ring_t encode_to_send_ring;
+      timing_ring_t capture_to_send_ring;
+      std::chrono::steady_clock::time_point epoch_start;
+    };
+
     std::mutex frame_timing_mutex;
-    timing_ring_t capture_to_encode_ring;
-    timing_ring_t encode_to_send_ring;
-    timing_ring_t capture_to_send_ring;
+    std::vector<session_timing_state_t> session_timings;
+
+    // Caller must hold frame_timing_mutex.
+    session_timing_state_t *find_session_timing_locked(const std::string &device_uuid) {
+      auto it = std::find_if(session_timings.begin(), session_timings.end(),
+        [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; });
+      return it == session_timings.end() ? nullptr : &*it;
+    }
   }  // namespace
 
   std::string stats_t::to_json() const {
@@ -1191,7 +1210,29 @@ namespace stream_stats {
     bucket.total_us.clear();
   }
 
-  void record_frame_timing(std::chrono::steady_clock::time_point capture_time,
+  void start_session_timing(const std::string &device_uuid) {
+    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    session_timings.erase(
+      std::remove_if(session_timings.begin(), session_timings.end(),
+        [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; }),
+      session_timings.end());
+
+    session_timing_state_t state;
+    state.device_uuid = device_uuid;
+    state.epoch_start = std::chrono::steady_clock::now();
+    session_timings.push_back(std::move(state));
+  }
+
+  void stop_session_timing(const std::string &device_uuid) {
+    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    session_timings.erase(
+      std::remove_if(session_timings.begin(), session_timings.end(),
+        [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; }),
+      session_timings.end());
+  }
+
+  void record_frame_timing(const std::string &device_uuid,
+                           std::chrono::steady_clock::time_point capture_time,
                            std::chrono::steady_clock::time_point encode_done_time,
                            std::chrono::steady_clock::time_point send_time) {
     auto to_ms = [](std::chrono::steady_clock::duration d) {
@@ -1199,18 +1240,32 @@ namespace stream_stats {
     };
 
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
-    capture_to_encode_ring.push(to_ms(encode_done_time - capture_time));
-    encode_to_send_ring.push(to_ms(send_time - encode_done_time));
-    capture_to_send_ring.push(to_ms(send_time - capture_time));
+    auto *state = find_session_timing_locked(device_uuid);
+    if (!state) {
+      return;
+    }
+    state->capture_to_encode_ring.push(to_ms(encode_done_time - capture_time));
+    state->encode_to_send_ring.push(to_ms(send_time - encode_done_time));
+    state->capture_to_send_ring.push(to_ms(send_time - capture_time));
   }
 
-  session_timing_t get_session_timing() {
+  session_timing_t get_session_timing(const std::string &device_uuid) {
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
-    return {
-      capture_to_encode_ring.percentiles(),
-      encode_to_send_ring.percentiles(),
-      capture_to_send_ring.percentiles()
+    auto *state = find_session_timing_locked(device_uuid);
+    if (!state) {
+      return {};
+    }
+
+    session_timing_t result {
+      state->capture_to_encode_ring.percentiles(),
+      state->encode_to_send_ring.percentiles(),
+      state->capture_to_send_ring.percentiles()
     };
+    result.epoch_start_ns = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(state->epoch_start.time_since_epoch()).count());
+    result.session_active = true;
+    result.ring_complete = state->capture_to_encode_ring.filled < FRAME_TIMING_RING_CAPACITY;
+    return result;
   }
 
   int active_client_count() {
