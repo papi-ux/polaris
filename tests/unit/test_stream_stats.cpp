@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #ifdef __linux__
   #include <unistd.h>
@@ -39,6 +40,33 @@ namespace {
     bool headless_mode;
     bool use_cage_compositor;
     bool prefer_gpu_native_capture;
+  };
+
+  // A uniquely-named, empty regular file under the system temp directory,
+  // removed on destruction. std::filesystem::equivalent()-based tests need
+  // paths that reliably stat() in every environment this suite runs in -
+  // unlike a GPU render node, or /dev/null and /dev/zero (neither of which
+  // reliably resolves via equivalent() on every CI sandbox this suite has
+  // actually run in), a freshly created regular file has no
+  // environment-specific device-node handling to worry about.
+  struct TempFileGuard {
+    explicit TempFileGuard(const std::string &label) {
+      static int counter = 0;
+      path = std::filesystem::temp_directory_path() /
+        ("polaris-stream-stats-" + label + "-" + std::to_string(++counter));
+      std::ofstream(path).close();
+    }
+
+    ~TempFileGuard() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+
+    std::string string() const {
+      return path.string();
+    }
+
+    std::filesystem::path path;
   };
 }  // namespace
 
@@ -182,12 +210,14 @@ TEST(StreamStatsLinuxGpuProfileTests, KeepsUnresolvableDevicePairingUnknown) {
 
 TEST(StreamStatsLinuxGpuProfileTests, UsesWaylandMainDeviceWhenCaptureFrameDeviceIsUnavailable) {
   LinuxDisplayConfigGuard guard;
-  config::video.adapter_name = "/dev/null";
+  TempFileGuard adapter_node("adapter-unavailable");
+  TempFileGuard wayland_node("wayland-unavailable");
+  config::video.adapter_name = adapter_node.string();
 
   stream_stats::stats_t stats {};
   stats.capture_transport = platf::frame_transport_e::shm;
   stats.capture_residency = platf::frame_residency_e::cpu;
-  stats.wayland_main_device = "/dev/zero";
+  stats.wayland_main_device = wayland_node.string();
   stats.encode_target_device = "vaapi";
   stats.encode_target_residency = platf::frame_residency_e::gpu;
 
@@ -196,7 +226,7 @@ TEST(StreamStatsLinuxGpuProfileTests, UsesWaylandMainDeviceWhenCaptureFrameDevic
   EXPECT_TRUE(profile.at("adapter_matches_capture_device").is_null());
   EXPECT_FALSE(profile.at("adapter_matches_wayland_main_device"));
   EXPECT_EQ(profile.at("adapter_pairing_status"), "mismatched");
-  EXPECT_EQ(profile.at("adapter_pairing_device"), "/dev/zero");
+  EXPECT_EQ(profile.at("adapter_pairing_device"), wayland_node.string());
   EXPECT_EQ(profile.at("adapter_pairing_device_source"), "wayland_main_device");
 
   const auto &warnings = profile.at("configuration_warnings");
@@ -204,22 +234,23 @@ TEST(StreamStatsLinuxGpuProfileTests, UsesWaylandMainDeviceWhenCaptureFrameDevic
     return warning.value("id", std::string {}) == "linux_gpu_adapter_mismatch";
   });
   ASSERT_NE(mismatch, warnings.end());
-  EXPECT_NE(mismatch->at("message").get<std::string>().find("/dev/null"), std::string::npos);
-  EXPECT_NE(mismatch->at("message").get<std::string>().find("/dev/zero"), std::string::npos);
+  EXPECT_NE(mismatch->at("message").get<std::string>().find(adapter_node.string()), std::string::npos);
+  EXPECT_NE(mismatch->at("message").get<std::string>().find(wayland_node.string()), std::string::npos);
 }
 
 #ifdef __linux__
 TEST(StreamStatsLinuxGpuProfileTests, TreatsSymlinkedAdapterAsTheSameDeviceNode) {
   LinuxDisplayConfigGuard guard;
+  TempFileGuard real_node("symlink-target");
   const auto link_path = std::filesystem::temp_directory_path() /
     ("polaris-stream-stats-device-link-" + std::to_string(::getpid()));
   std::error_code ec;
   std::filesystem::remove(link_path, ec);
   ec.clear();
-  std::filesystem::create_symlink("/dev/null", link_path, ec);
+  std::filesystem::create_symlink(real_node.path, link_path, ec);
   ASSERT_FALSE(ec);
 
-  config::video.adapter_name = "/dev/null";
+  config::video.adapter_name = real_node.string();
   stream_stats::stats_t stats {};
   stats.wayland_main_device = link_path.string();
 
@@ -494,7 +525,9 @@ TEST(StreamStatsCapturePathTests, LabelsHeadlessExtcopyDmabufPath) {
 
 TEST(StreamStatsCapturePathTests, FlagsHeadlessCrossGpuDmabufRisk) {
   LinuxDisplayConfigGuard guard;
-  config::video.adapter_name = "/dev/null";
+  TempFileGuard adapter_node("cross-gpu-adapter");
+  TempFileGuard capture_node("cross-gpu-capture");
+  config::video.adapter_name = adapter_node.string();
   config::video.linux_display.use_cage_compositor = true;
 
   stream_stats::stats_t stats {};
@@ -504,7 +537,7 @@ TEST(StreamStatsCapturePathTests, FlagsHeadlessCrossGpuDmabufRisk) {
   stats.capture_transport = platf::frame_transport_e::dmabuf;
   stats.capture_residency = platf::frame_residency_e::gpu;
   stats.capture_format = platf::frame_format_e::bgra8;
-  stats.capture_device = "/dev/zero";
+  stats.capture_device = capture_node.string();
   stats.encode_target_residency = platf::frame_residency_e::gpu;
 
 #ifdef __linux__
@@ -515,7 +548,7 @@ TEST(StreamStatsCapturePathTests, FlagsHeadlessCrossGpuDmabufRisk) {
 #endif
 
   const auto json = nlohmann::json::parse(stats.to_json());
-  EXPECT_EQ(json.at("capture_device"), "/dev/zero");
+  EXPECT_EQ(json.at("capture_device"), capture_node.string());
   EXPECT_FALSE(json.contains("capture_decision"));
 #ifdef __linux__
   EXPECT_TRUE(json.at("capture_cross_gpu_dmabuf_risk"));
