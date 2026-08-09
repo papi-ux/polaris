@@ -5040,6 +5040,39 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
+    // Session-scoped stream-mode override (/launch streamMode): apply the mode
+    // to the IN-MEMORY config for this session only. Nothing here persists to
+    // disk; terminate_impl restores the saved values after teardown, so the
+    // host default survives every launch. Without an override this block only
+    // snapshots current values and behavior is identical to before.
+    {
+      auto &linux_display = config::video.linux_display;
+      this->initial_stream_mode = linux_display.stream_mode;
+      this->initial_private_runtime = linux_display.private_runtime;
+      this->initial_headless_swap_mode = linux_display.headless_swap_mode;
+      this->initial_capture = config::video.capture;
+      this->initial_headless_mode = linux_display.headless_mode;
+      this->initial_use_cage_compositor = linux_display.use_cage_compositor;
+      this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
+      this->initial_auto_manage_displays = linux_display.auto_manage_displays;
+      const std::string session_mode = launch_session ? launch_session->stream_mode : std::string {};
+      if (!session_mode.empty() &&
+          !(launch_session && launch_session->mirror_desktop) &&
+          session_mode != linux_display.stream_mode) {
+        std::string mode_error;
+        if (stream_display_policy::apply_selection(session_mode, mode_error)) {
+          // Saved-state restore is armed only when a mode was actually applied,
+          // so a no-override session touches nothing at save or teardown.
+          this->initial_linux_display_saved = true;
+          BOOST_LOG(info) << "process: session stream mode override ["sv << session_mode
+                          << "] applied in-memory for this session; host default restored at teardown"sv;
+          platf::reevaluate_capture_sources();
+        } else {
+          BOOST_LOG(warning) << "process: session stream mode override ["sv << session_mode
+                             << "] rejected: "sv << mode_error << "; using the host default"sv;
+        }
+      }
+    }
     const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
     const bool gamescope_stream_session =
       config::video.linux_display.stream_mode == "gamescope_stream" ||
@@ -7353,6 +7386,25 @@ namespace proc {
       config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
     }
 
+    if (initial_linux_display_saved) {
+      // Armed only when a session stream-mode override was actually applied.
+      auto &linux_display = config::video.linux_display;
+      linux_display.stream_mode = initial_stream_mode;
+      linux_display.private_runtime = initial_private_runtime;
+      linux_display.headless_swap_mode = initial_headless_swap_mode;
+      linux_display.headless_mode = initial_headless_mode;
+      linux_display.use_cage_compositor = initial_use_cage_compositor;
+      linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
+      linux_display.auto_manage_displays = initial_auto_manage_displays;
+      config::video.capture = initial_capture;
+#ifdef __linux__
+      // The capture source selection was re-baked for the session override;
+      // re-bake it for the restored host default. Teardown above already ran
+      // against the session's effective mode, which is why this sits here.
+      platf::reevaluate_capture_sources();
+#endif
+    }
+
     _app_id = -1;
     _app_name.clear();
     _app = {};
@@ -7363,6 +7415,15 @@ namespace proc {
     initial_max_bitrate = 0;
     initial_adaptive_max_bitrate = 0;
     initial_video_config_saved = false;
+    initial_stream_mode.clear();
+    initial_private_runtime.clear();
+    initial_headless_swap_mode.clear();
+    initial_capture.clear();
+    initial_headless_mode = false;
+    initial_use_cage_compositor = false;
+    initial_prefer_gpu_native_capture = false;
+    initial_auto_manage_displays = false;
+    initial_linux_display_saved = false;
     mode_changed_display.clear();
     _launch_session.reset();
     virtual_display = false;

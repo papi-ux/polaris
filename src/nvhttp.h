@@ -389,6 +389,7 @@ namespace nvhttp {
                                                       bool host_virtual_display_available,
                                                       bool host_prefers_headless);
 #if defined(__linux__)
+  std::string accepted_session_stream_mode_for_tests(const std::string &requested);
   proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
     const args_t &args,
     bool app_uses_steam,

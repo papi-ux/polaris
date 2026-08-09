@@ -82,4 +82,22 @@ TEST(LaunchModeContractTests, ReservedAndUnknownIdsAreRejectedWithGuidance) {
     EXPECT_NE(error.find("known stream path id"), std::string::npos) << id;
   }
 }
+
+TEST(SessionStreamMode, AcceptsRegistryModesItCanRunPerSession) {
+  // Deterministic on CI: these registry paths are statically available and do
+  // not depend on host probes (gamescope/EVDI availability is environmental,
+  // so those ids are deliberately not asserted here).
+  EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("headless_stream"), "headless_stream");
+  EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("windowed_stream"), "windowed_stream");
+  EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("desktop_display"), "desktop_display");
+}
+
+TEST(SessionStreamMode, RejectsDongleReservedUnknownAndEmpty) {
+  // headless_dongle swaps host output topology: host-default-only by design.
+  EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("headless_dongle"), "");
+  // Reserved/unknown ids and absence all resolve to "host default applies".
+  EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("family_isolated"), "");
+  EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("garbage_mode"), "");
+  EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests(""), "");
+}
 #endif
