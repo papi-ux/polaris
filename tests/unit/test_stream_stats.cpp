@@ -842,6 +842,38 @@ TEST(NetworkRiskTrackerTests, RttAloneElevates) {
   EXPECT_TRUE(tracker.update(0.0, 30.0));
 }
 
+TEST(NetworkRiskTrackerTests, EnetRttConvergenceNeverElevates) {
+  stream_stats::network_risk_tracker_t tracker;
+  // The live regression: ENet seeds a fresh peer at 500ms RTT and converges
+  // by ~1/8 per ack, so early samples sit above the 28ms cut for ~20 samples
+  // on a LAN whose true RTT is 3ms. That descent must never grade as risk.
+  double rtt = 500.0;
+  int calm_at = -1;
+  for (int i = 0; i < 60; ++i) {
+    EXPECT_FALSE(tracker.update(0.2, rtt)) << "sample " << i << " rtt " << rtt;
+    if (calm_at < 0 && rtt < stream_stats::network_risk_tracker_t::k_rtt_elevated_ms) {
+      calm_at = i;
+    }
+    rtt = 3.0 + (rtt - 3.0) * 7.0 / 8.0;
+  }
+  ASSERT_GT(calm_at, stream_stats::network_risk_tracker_t::k_warmup_samples);
+  // Once armed by the calm readings, real degradation still flags promptly.
+  tracker.update(0.2, 80.0);
+  EXPECT_TRUE(tracker.update(0.2, 80.0));
+}
+
+TEST(NetworkRiskTrackerTests, BadFromTheStartStillFlagsAfterBoundedGrace) {
+  stream_stats::network_risk_tracker_t tracker;
+  // A link that never produces a calm reading cannot hide forever behind the
+  // convergence grace: the sample bound arms the tracker and the debounce
+  // flips it on the next confirmation.
+  bool flagged = false;
+  for (int i = 0; i < stream_stats::network_risk_tracker_t::k_armed_after_samples + 2; ++i) {
+    flagged = tracker.update(6.0, 90.0);
+  }
+  EXPECT_TRUE(flagged);
+}
+
 TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {
   constexpr uint64_t scale = 1ull << 16;
 

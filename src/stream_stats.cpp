@@ -833,8 +833,13 @@ namespace stream_stats {
     const bool capture_known = doctor_has_capture_metadata(stats);
     const double target_fps = doctor_target_fps(stats);
     const bool meaningful_fps_shortfall = is_meaningful_fps_shortfall(target_fps, stats.fps);
-    const bool network_fail = stats.packet_loss > 2.0 || stats.latency_ms >= 45.0;
-    const bool network_watch = !network_fail && (stats.packet_loss > 0.5 || stats.latency_ms >= 28.0);
+    // The network verdict consumes the debounced flag the session status
+    // serves (network_risk_tracker_t). The raw one-sample cuts this replaced
+    // re-created the exact hair-trigger the tracker exists to prevent — the
+    // old 0.5% watch threshold sat below the control channel's steady EWMA
+    // noise, so Doctor said "network jitter" over perfect streams.
+    const bool network_fail = stats.network_risk && (stats.packet_loss > 2.0 || stats.latency_ms >= 45.0);
+    const bool network_watch = stats.network_risk && !network_fail;
     const bool encoder_fail = stats.encode_time_ms >= 12.0 || stats.avg_frame_age_ms >= 22.0;
     const bool encoder_watch = !encoder_fail && (stats.encode_time_ms >= 8.0 || stats.avg_frame_age_ms >= 18.0);
     const bool pacing_watch =
