@@ -459,3 +459,17 @@ TEST(PipeWireCapturePolicyTests, ResolveCaptureRenderNodeRejectsNonRenderPaths) 
   ASSERT_TRUE(resolved);
   EXPECT_EQ(*resolved, "/dev/dri/renderD128");
 }
+
+TEST(PipeWireCapturePolicyTests, PickSoleRenderNodeResolvesOnlySingleGpuHosts) {
+  // Exactly one canonical candidate — a single-GPU host — resolves.
+  EXPECT_EQ(
+    pipewire_capture::pick_sole_render_node({"/dev/dri/renderD128"}),
+    (std::optional<std::string> {"/dev/dri/renderD128"}));
+  // A sole candidate that is not a canonical render node stays fail-closed.
+  EXPECT_EQ(pipewire_capture::pick_sole_render_node({"/dev/dri/card0"}), std::nullopt);
+  // Multi-GPU and empty lists stay fail-closed: DMA-BUF never crosses GPUs by guess.
+  EXPECT_EQ(
+    pipewire_capture::pick_sole_render_node({"/dev/dri/renderD128", "/dev/dri/renderD129"}),
+    std::nullopt);
+  EXPECT_EQ(pipewire_capture::pick_sole_render_node({}), std::nullopt);
+}
