@@ -307,6 +307,12 @@ namespace proc {
     pid_t reused_pid
   );
   bool isolated_session_generation_blocks_launch_for_tests(bool session_owned_cage, bool generation_available);
+  bool unreadable_environ_latches_capture_for_tests(
+    int read_error,
+    std::optional<uid_t> real_uid,
+    uid_t own_uid,
+    std::optional<bool> descends_from_polaris
+  );
   bool isolated_session_cleanup_resets_router_for_tests(
     bool session_owned_cage,
     bool generation_available,

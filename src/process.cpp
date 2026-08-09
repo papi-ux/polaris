@@ -955,6 +955,25 @@ namespace proc {
       return session_owned_cage || generation_available;
     }
 
+    bool unreadable_environ_latches_capture(
+      int read_error,
+      std::optional<uid_t> real_uid,
+      uid_t own_uid,
+      std::optional<bool> descends_from_polaris
+    ) {
+      // A privileged descendant — Steam's setuid chrome-sandbox helpers gain
+      // a root real uid — keeps /proc/PID/environ root-only forever, and no
+      // signal polaris may send can touch it anyway. It lives and dies with
+      // the same-uid ancestors the snapshot does capture, so treating it as
+      // "capture incomplete" bought no safety and wedged every desktop-Steam
+      // teardown into "retaining immutable cage generation" with the next
+      // launch refused until restart.
+      if (read_error == EACCES && real_uid && *real_uid != own_uid) {
+        return false;
+      }
+      return !descends_from_polaris || *descends_from_polaris;
+    }
+
     bool isolated_session_cleanup_resets_router(
       bool session_owned_cage,
       bool generation_available,
@@ -1328,6 +1347,28 @@ namespace proc {
       return false;
     }
 
+    std::optional<uid_t> proc_status_real_uid(std::string_view status) {
+      const auto label = status.find("Uid:");
+      if (label == std::string_view::npos) {
+        return std::nullopt;
+      }
+      auto pos = label + 4;
+      while (pos < status.size() && std::isspace(static_cast<unsigned char>(status[pos]))) {
+        ++pos;
+      }
+      uid_t uid = 0;
+      bool any_digit = false;
+      while (pos < status.size() && std::isdigit(static_cast<unsigned char>(status[pos]))) {
+        uid = uid * 10 + static_cast<uid_t>(status[pos] - '0');
+        any_digit = true;
+        ++pos;
+      }
+      if (!any_digit) {
+        return std::nullopt;
+      }
+      return uid;
+    }
+
     bool is_active_steam_shutdown_ownership_process(
       std::string_view comm,
       std::string_view argv0_path,
@@ -1531,12 +1572,18 @@ namespace proc {
 
         const auto environ_before = read_proc_status_file_result(pid, "environ");
         if (!environ_before.ok()) {
+          const auto status = read_proc_status_file(pid, "status");
           if (process_vanished_during_proc_read(environ_before.error) ||
-              proc_status_is_zombie(read_proc_status_file(pid, "status"))) {
+              proc_status_is_zombie(status)) {
             continue;
           }
           const auto descends_from_polaris = proc_pid_descends_from(pid, getpid());
-          if (!descends_from_polaris || *descends_from_polaris) {
+          if (unreadable_environ_latches_capture(
+                environ_before.error,
+                proc_status_real_uid(status),
+                getuid(),
+                descends_from_polaris
+              )) {
             snapshot.capture_complete = false;
           }
           continue;
@@ -4568,6 +4615,15 @@ namespace proc {
     return isolated_session_generation_blocks_launch(session_owned_cage, generation_available);
   }
 
+  bool unreadable_environ_latches_capture_for_tests(
+    int read_error,
+    std::optional<uid_t> real_uid,
+    uid_t own_uid,
+    std::optional<bool> descends_from_polaris
+  ) {
+    return unreadable_environ_latches_capture(read_error, real_uid, own_uid, descends_from_polaris);
+  }
+
   bool isolated_session_cleanup_resets_router_for_tests(
     bool session_owned_cage,
     bool generation_available,
@@ -4921,8 +4977,26 @@ namespace proc {
           _session_used_cage_compositor,
           !_session_instance_id.empty()
         )) {
-      BOOST_LOG(error) << "process: refusing launch while an incompletely cleaned isolated session generation remains"sv;
-      return 503;
+      // A teardown that could not prove exact-generation cleanup retained the
+      // generation. Re-validate it now rather than refusing every launch
+      // until restart: the unreadable stragglers that latched it usually exit
+      // with their tree, and once the snapshot completes the retained
+      // processes (if any) are terminated right here.
+      const bool reaped = !_session_instance_id.empty() &&
+                          terminate_isolated_session_processes(
+                            _session_instance_id,
+                            "re-validated at next launch"sv
+                          );
+      if (!reaped) {
+        BOOST_LOG(error) << "process: refusing launch while an incompletely cleaned isolated session generation remains"sv;
+        return 503;
+      }
+      BOOST_LOG(warning) << "process: reaped a retained isolated session generation at launch"sv;
+      stream_runtime::labwc::reset_after_external_stop();
+      _session_instance_id.clear();
+      _session_used_cage_compositor = false;
+      _session_used_gamescope_runtime = false;
+      _exact_generation_cleanup_complete = true;
     }
 #endif
 
