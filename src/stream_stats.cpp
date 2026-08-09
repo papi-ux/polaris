@@ -73,7 +73,13 @@ namespace stream_stats {
     std::atomic<double> hot_frame_jitter_ms {0.0};
     std::atomic<double> hot_latency_ms {0.0};
     std::atomic<double> hot_packet_loss {0.0};
+    std::atomic<bool> hot_network_risk {false};
     std::atomic<uint64_t> hot_bytes_sent {0};
+
+    // Guarded by its own lock so the lock-free update_network_stats
+    // overload stays clear of stats_mutex.
+    network_risk_tracker_t network_risk_tracker;
+    std::mutex network_risk_mutex;
 
     // Recovery counters: monotonic for the life of the process, matching
     // the roadmap's P0-2 ask; a per-session view is a get_current() delta.
@@ -113,6 +119,11 @@ namespace stream_stats {
       hot_frame_jitter_ms.store(0.0, std::memory_order_relaxed);
       hot_latency_ms.store(0.0, std::memory_order_relaxed);
       hot_packet_loss.store(0.0, std::memory_order_relaxed);
+      {
+        std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+        network_risk_tracker.reset();
+      }
+      hot_network_risk.store(false, std::memory_order_relaxed);
       hot_bytes_sent.store(0, std::memory_order_relaxed);
       // idr_requests_total / invalidate_ref_frames_requests_total are
       // intentionally NOT reset here: they are process-lifetime recovery
@@ -1084,11 +1095,22 @@ namespace stream_stats {
     return std::clamp((double) scaled_loss * 100.0 / (double) scale, 0.0, 100.0);
   }
 
+  namespace {
+    void ingest_network_risk(double latency_ms, double packet_loss) {
+      std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+      hot_network_risk.store(
+        network_risk_tracker.update(packet_loss, latency_ms),
+        std::memory_order_relaxed);
+    }
+  }  // namespace
+
   void update_network_stats(double latency_ms, double packet_loss, uint64_t bytes_sent) {
-    // Fully lock-free: no per-client mirror exists on this overload.
+    // No per-client mirror on this overload, and the risk tracker has its
+    // own lock, so stats_mutex stays out of this path.
     hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
     hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
     hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
+    ingest_network_risk(latency_ms, packet_loss);
   }
 
   void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent) {
@@ -1109,6 +1131,7 @@ namespace stream_stats {
       hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
       hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
     }
+    ingest_network_risk(latency_ms, packet_loss);
   }
 
   void update_runtime_state(const platf::runtime_state_t &state) {
@@ -1897,6 +1920,7 @@ namespace stream_stats {
     result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
     result.latency_ms = hot_latency_ms.load(std::memory_order_relaxed);
     result.packet_loss = hot_packet_loss.load(std::memory_order_relaxed);
+    result.network_risk = hot_network_risk.load(std::memory_order_relaxed);
     result.bytes_sent = hot_bytes_sent.load(std::memory_order_relaxed);
     result.idr_requests_total = hot_idr_requests_total.load(std::memory_order_relaxed);
     result.invalidate_ref_frames_requests_total = hot_invalidate_ref_frames_requests_total.load(std::memory_order_relaxed);
