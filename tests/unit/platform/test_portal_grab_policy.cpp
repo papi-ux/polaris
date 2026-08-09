@@ -19,9 +19,14 @@
 #include <drm_fourcc.h>
 #include <spa/param/video/raw.h>
 
+#include "src/config.h"
 #include "src/platform/common.h"
 #include "src/platform/linux/pipewire_capture.h"
 #include "src/platform/linux/portal_session.h"
+
+#ifdef POLARIS_BUILD_WAYLAND
+  #include "src/platform/linux/kwingrab.h"
+#endif
 
 namespace portal {
   std::uint32_t portal_pick_cursor_mode_for_tests(std::uint32_t available);
@@ -36,6 +41,43 @@ TEST(PortalGrabPolicyTests, DongleRequestsMonitorSourceDespiteHeadlessFlag) {
   // headless_dongle uses headless_mode for topology privacy, not window capture.
   EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "headless_dongle"), 1u);
 }
+
+TEST(PortalGrabPolicyTests, HostVirtualDisplayRequestsMonitorSourceDespiteHeadlessFlag) {
+  // host_virtual_display streams the created EVDI virtual monitor. Its legacy
+  // booleans set headless_mode=true, which previously dropped it into the
+  // window-source branch — the wrong source type for a monitor mode, and the
+  // exact window+restore_token combination the dongle comment above warns
+  // hangs KDE ScreenCast.
+  EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "host_virtual_display"), 1u);
+}
+
+#ifdef POLARIS_BUILD_WAYLAND
+TEST(PortalGrabPolicyTests, KwingrabPreferredForHostKdeModesIncludingVirtualDisplay) {
+  struct config_guard_t {
+    config::video_t::linux_display_t linux_display = config::video.linux_display;
+
+    ~config_guard_t() {
+      config::video.linux_display = linux_display;
+    }
+  } guard;
+
+  auto &ld = config::video.linux_display;
+
+  // Host KDE paths pin capture through kwingrab. host_virtual_display must be
+  // one of them: its EVDI output is composited by KWin, and kwingrab is the
+  // only path that can select that output by name — the portal picker cannot.
+  for (const char *mode : {"desktop_display", "headless_dongle", "host_virtual_display"}) {
+    ld.stream_mode = mode;
+    EXPECT_TRUE(kwingrab::prefer_for_current_stream_mode()) << mode;
+  }
+
+  // Private compositor runtimes stay on gamescopegrab / portal / wlroots.
+  for (const char *mode : {"windowed_stream", "headless_stream", "gamescope_stream"}) {
+    ld.stream_mode = mode;
+    EXPECT_FALSE(kwingrab::prefer_for_current_stream_mode()) << mode;
+  }
+}
+#endif
 
 TEST(PortalGrabPolicyTests, PrivateAndWindowedCagePathsRequestWindowSource) {
   EXPECT_EQ(portal::capture_type_for_stream_display(true, true), 2u);

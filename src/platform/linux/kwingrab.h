@@ -2,9 +2,10 @@
  * @file src/platform/linux/kwingrab.h
  * @brief KWin direct ScreenCast (zkde_screencast_unstable_v1) → local PipeWire node.
  *
- * Host KDE paths (desktop_display / headless_dongle) try this before portal.
- * Private gamescope/labwc paths are unchanged. HDR: depends on KWin export;
- * do not claim product HDR — see docs/research/kwingrab-spike.md.
+ * Host KDE paths (desktop_display / headless_dongle / host_virtual_display)
+ * try this before portal. Private gamescope/labwc paths are unchanged.
+ * HDR: depends on KWin export; do not claim product HDR — see
+ * docs/research/kwingrab-spike.md.
  */
 #pragma once
 
