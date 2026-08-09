@@ -684,3 +684,23 @@ TEST(AiOptimizerDoctorExplanation, DisabledConfigFallsBackToDeterministicEvidenc
   EXPECT_EQ("Capture path warning", result.at("explanation").value("likely_cause", ""));
   EXPECT_FALSE(result.at("explanation").value("destructive_action_allowed", true));
 }
+
+TEST(AiOptimizerModeAwareCache, LegacyRequestsKeepTheirBucketAndModesGetTheirOwn) {
+  const auto legacy = ai_optimizer::cache_key_for_tests(
+    "anthropic", "model", "url", "RetroidPocket6", "Control Ultimate Edition", "");
+  const auto gamescope = ai_optimizer::cache_key_for_tests(
+    "anthropic", "model", "url", "RetroidPocket6", "Control Ultimate Edition", "gamescope_stream");
+
+  // Distinct buckets per mode; the mode-less key is stable so every entry
+  // written before this change keeps answering the requests it always did.
+  EXPECT_NE(legacy, gamescope);
+  EXPECT_EQ(legacy, ai_optimizer::cache_key_for_tests(
+    "anthropic", "model", "url", "RetroidPocket6", "Control Ultimate Edition", ""));
+}
+
+TEST(AiOptimizerModeAwareCache, RecommendedModeValidationKeepsRegistryIdsOnly) {
+  EXPECT_EQ("gamescope_stream", ai_optimizer::normalize_stream_mode("Gamescope_Stream"));
+  EXPECT_EQ("headless_stream", ai_optimizer::normalize_stream_mode("headless_stream"));
+  EXPECT_EQ("", ai_optimizer::normalize_stream_mode("not_a_mode"));
+  EXPECT_EQ("", ai_optimizer::normalize_stream_mode(""));
+}

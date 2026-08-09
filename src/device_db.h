@@ -42,6 +42,7 @@ namespace device_db {
     std::optional<int> target_bitrate_kbps;
     std::optional<int> nvenc_tune;
     std::optional<std::string> preferred_codec;  ///< "h264", "hevc", or "av1"
+    std::optional<std::string> recommended_mode;  ///< AI-suggested stream path id, served as ai_recommended_mode
     std::string reasoning;         ///< Human-readable explanation
     std::string source;            ///< "device_db", "ai_cached", "ai_live"
     std::string cache_status;      ///< "hit", "miss", "fallback", "invalidated"

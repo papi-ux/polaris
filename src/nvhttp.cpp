@@ -309,7 +309,7 @@ namespace nvhttp {
       return (client_bytes[full_bytes] & mask) == (network_bytes[full_bytes] & mask);
     }
 
-    void append_optimization_json(nlohmann::json &output, const device_db::optimization_t &optimization) {
+    void append_optimization_json(nlohmann::json &output, const device_db::optimization_t &optimization, const std::string &mode = "") {
       if (optimization.display_mode) {
         output["display_mode"] = *optimization.display_mode;
       }
@@ -341,6 +341,11 @@ namespace nvhttp {
       output["recommendation_version"] = optimization.recommendation_version;
       output["generated_at"] = optimization.generated_at;
       output["expires_at"] = optimization.expires_at;
+      // The bucket this answer came from; empty is the legacy mode-less bucket.
+      output["mode"] = mode;
+      if (optimization.recommended_mode) {
+        output["ai_recommended_mode"] = *optimization.recommended_mode;
+      }
     }
 
     std::string lower_copy(std::string value) {
@@ -8386,6 +8391,11 @@ namespace nvhttp {
       std::string profile_preference = normalize_profile_preference(
         args.count("preference") ? args.find("preference")->second : std::string {"auto"}
       );
+      // Optional and additive: an unknown or absent mode is the legacy bucket,
+      // so old clients keep hitting exactly the cache entries they always had.
+      const std::string mode = ai_optimizer::normalize_stream_mode(
+        args.count("mode") ? args.find("mode")->second : std::string {}
+      );
       if (!named_cert_p->name.empty()) {
         if (device != named_cert_p->name) {
           BOOST_LOG(info) << "ai_optimizer: Optimize API using paired client profile ["sv
@@ -8408,10 +8418,10 @@ namespace nvhttp {
         : config::video.adapter_name;
 
       // Try AI cache first, then device_db
-      auto ai_opt = ai_optimizer::get_cached(device, game);
+      auto ai_opt = ai_optimizer::get_cached(device, game, mode);
       if (ai_opt) {
         effective_optimization = *ai_opt;
-        append_optimization_json(output, *ai_opt);
+        append_optimization_json(output, *ai_opt, mode);
         if (ai_opt->target_bitrate_kbps) {
           target_bitrate_kbps = *ai_opt->target_bitrate_kbps;
         }
@@ -8423,17 +8433,17 @@ namespace nvhttp {
           opt.cache_status = "invalidated";
         }
         effective_optimization = opt;
-        append_optimization_json(output, opt);
+        append_optimization_json(output, opt, mode);
         target_bitrate_kbps = opt.target_bitrate_kbps;
         suggested_codec = opt.preferred_codec;
         hdr_requested = opt.hdr.value_or(false);
 
         if (ai_optimizer::is_enabled()) {
           if (ai_optimizer::should_sync_on_cache_miss()) {
-            if (auto sync_opt = ai_optimizer::request_sync(device, game, gpu_info, "", session_history)) {
+            if (auto sync_opt = ai_optimizer::request_sync(device, game, gpu_info, "", session_history, mode)) {
               effective_optimization = *sync_opt;
               output = nlohmann::json::object();
-              append_optimization_json(output, *sync_opt);
+              append_optimization_json(output, *sync_opt, mode);
               if (sync_opt->target_bitrate_kbps) {
                 target_bitrate_kbps = *sync_opt->target_bitrate_kbps;
               }
@@ -8442,10 +8452,10 @@ namespace nvhttp {
               BOOST_LOG(info) << "ai_optimizer: Sync-prewarmed optimization for \""sv << device
                               << "\" + \""sv << game << "\" before launch"sv;
             } else {
-              ai_optimizer::request_async(device, game, gpu_info, "", session_history);
+              ai_optimizer::request_async(device, game, gpu_info, "", session_history, mode);
             }
           } else {
-            ai_optimizer::request_async(device, game, gpu_info, "", session_history);
+            ai_optimizer::request_async(device, game, gpu_info, "", session_history, mode);
           }
         }
       }

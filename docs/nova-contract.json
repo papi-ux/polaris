@@ -380,6 +380,61 @@
         "style": "initializer_list",
         "declaration": "modes.push_back({"
       }
+    },
+    "optimization": {
+      "$comment": [
+        "Top-level GET /optimize response body. append_optimization_json is the",
+        "shared serializer for the AI profile itself (cached, sync, and async",
+        "answers all pass through it); the route handler attaches the",
+        "profile-state and stability blocks beside it. mode echoes the cache",
+        "bucket the answer came from - empty is the legacy mode-less bucket -",
+        "and ai_recommended_mode is the provider's advisory stream-path pick,",
+        "registry-validated, never acted on by the host (roadmap: mode-aware",
+        "AI with an advisory badge; the host never switches modes)."
+      ],
+      "fields": [
+        "ai_recommended_mode",
+        "cache_status",
+        "color_range",
+        "confidence",
+        "display_mode",
+        "expires_at",
+        "generated_at",
+        "hdr",
+        "mode",
+        "normalization_reason",
+        "nvenc_tune",
+        "preferred_codec",
+        "reasoning",
+        "reasoning_summary",
+        "recommendation_version",
+        "signals_used",
+        "source",
+        "target_bitrate_kbps",
+        "virtual_display"
+      ],
+      "informational_ok": [
+        "color_range",
+        "expires_at",
+        "hdr",
+        "mode",
+        "nvenc_tune",
+        "reasoning_summary",
+        "recommendation_version",
+        "signals_used",
+        "virtual_display"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/ui/NovaGameDetailActivity.kt",
+        "function": "buildOptimizationState",
+        "receiver": "opt"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "append_optimization_json",
+        "style": "assignments",
+        "variable": "output"
+      }
     }
   },
   "known_drift": {
@@ -397,6 +452,14 @@
         "launcher_detail",
         "platform_label",
         "runtime_label"
+      ],
+      "optimization": [
+        "consecutive_poor_outcomes",
+        "effective_profile",
+        "effective_target_fps",
+        "profile_state",
+        "requested_target_fps",
+        "stability"
       ]
     },
     "polaris_sends_nova_never_reads": {
@@ -411,6 +474,9 @@
         "capture",
         "runtime",
         "topology"
+      ],
+      "optimization": [
+        "ai_recommended_mode"
       ]
     },
     "$detail": {
@@ -433,6 +499,14 @@
         "launcher_detail has no host-side value to serve; platform_label and runtime_label",
         "exist so a server can label a value the client cannot map, and every value served",
         "today is one Nova already maps."
+      ],
+      "optimization": [
+        "Not drift in reality, in either direction. The reads listed under",
+        "nova_reads_polaris_never_sends are served by the /optimize route handler, which",
+        "attaches the profile-state and stability blocks beside the serializer; the object",
+        "models append_optimization_json because that is the one named function the audit",
+        "extractor can hold to. ai_recommended_mode under polaris_sends_nova_never_reads is",
+        "simply early: it ships host-first and moves out when the Nova picker badge lands."
       ]
     }
   }
