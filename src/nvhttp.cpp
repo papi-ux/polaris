@@ -437,8 +437,12 @@ namespace nvhttp {
       bool active_desktop_game
     ) {
       const bool private_stream_requested =
-        config::video.linux_display.headless_mode &&
-        config::video.linux_display.use_cage_compositor;
+        proc::streaming_launch_requests_private_family(
+          config::video.linux_display.headless_mode,
+          config::video.linux_display.use_cage_compositor,
+          config::video.linux_display.stream_mode,
+          config::video.linux_display.private_runtime
+        );
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
         explicit_mirror_desktop_requested(args),
@@ -455,8 +459,12 @@ namespace nvhttp {
       bool active_desktop_game
     ) {
       const bool private_stream_requested =
-        config::video.linux_display.headless_mode &&
-        config::video.linux_display.use_cage_compositor;
+        proc::streaming_launch_requests_private_family(
+          config::video.linux_display.headless_mode,
+          config::video.linux_display.use_cage_compositor,
+          config::video.linux_display.stream_mode,
+          config::video.linux_display.private_runtime
+        );
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
         explicit_mirror_desktop_requested(body),
