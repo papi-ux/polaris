@@ -229,6 +229,14 @@ namespace kwingrab {
               break;
             }
           }
+          if (!output) {
+            // A requested output that is not in KWin's registry (e.g. a virtual
+            // display that failed to attach) silently streaming some other
+            // output is exactly the wrong-output bug this pinning exists to
+            // prevent — make the miss visible before falling back.
+            BOOST_LOG(warning) << "kwingrab: requested output ["sv << output_name
+                               << "] not found; falling back to configured/first output"sv;
+          }
         }
         if (!output) {
           // Prefer config streaming_output when set (dongle path).
@@ -510,7 +518,13 @@ namespace kwingrab {
     const auto &mode = config::video.linux_display.stream_mode;
     // Host KDE paths only. gamescope_stream / labwc private runtimes stay on
     // gamescopegrab / portal / wlroots — never kwingrab.
-    if (mode == "desktop_display" || mode == "headless_dongle") {
+    // host_virtual_display belongs here too: its EVDI output is composited by
+    // KWin, and only this path can pin capture to that output by name — the
+    // portal ScreenCast picker cannot select a specific monitor, so falling
+    // through to it captures whatever output the restore token last granted
+    // (observed live: the 7680x2160 primary desktop instead of DVI-I-1).
+    if (mode == "desktop_display" || mode == "headless_dongle" ||
+        mode == "host_virtual_display") {
       return true;
     }
     // Empty mode historically maps to desktop-ish host on some configs; only

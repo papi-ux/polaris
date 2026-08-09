@@ -208,8 +208,13 @@ namespace portal {
     // Host-desktop modes stream a physical output after (optional) topology swap.
     // headless_dongle sets headless_mode for privacy swap but must NOT use window
     // SelectSources — KDE ScreenCast hangs on Start with type=window + restore_token.
+    // host_virtual_display streams the created virtual MONITOR (EVDI connector),
+    // never an app window — it sets headless_mode too, so without this entry it
+    // fell through to portal_source_window: the same hang-prone combination, and
+    // a source type that cannot name the virtual output at all.
     const auto mode = stream_mode.empty() ? std::string_view {config::video.linux_display.stream_mode} : stream_mode;
-    if (mode == "headless_dongle" || mode == "desktop_display" || mode == "headless_evdi") {
+    if (mode == "headless_dongle" || mode == "desktop_display" || mode == "headless_evdi" ||
+        mode == "host_virtual_display") {
       return portal_source_monitor;
     }
 
