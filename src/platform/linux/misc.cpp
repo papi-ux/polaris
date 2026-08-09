@@ -1297,35 +1297,8 @@ std::string get_local_ip_for_gateway() {
     return std::make_unique<linux_deinit_t>();
   }
 
-  std::unique_ptr<deinit_t> init() {
-    // enable low latency mode for AMD
-    // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039
-    set_env("AMD_DEBUG", "lowlatencyenc");
-
-    // Seat isolation trades the logind ACL for group ownership, so an account
-    // outside `input` loses access to its own virtual devices. Report it here
-    // rather than leaving it to be inferred from a controller that never
-    // appears.
-    input_access::warn_if_seat_isolation_lacks_input_group();
-
-    // These are allowed to fail.
-    gbm::init();
-
-    window_system = window_system_e::NONE;
-#ifdef POLARIS_BUILD_WAYLAND
-    if (std::getenv("WAYLAND_DISPLAY")) {
-      window_system = window_system_e::WAYLAND;
-    }
-#endif
-#if defined(POLARIS_BUILD_X11) || defined(POLARIS_BUILD_CUDA)
-    if (std::getenv("DISPLAY") && window_system != window_system_e::WAYLAND) {
-      if (std::getenv("WAYLAND_DISPLAY")) {
-        BOOST_LOG(warning) << "Wayland detected, yet Polaris will use X11 for screencasting, screencasting will only work on XWayland applications"sv;
-      }
-
-      window_system = window_system_e::X11;
-    }
-#endif
+  void reevaluate_capture_sources() {
+    sources.reset();
 
 #ifdef POLARIS_BUILD_CUDA
     const bool force_cage_wlr_capture = config::video.linux_display.use_cage_compositor
@@ -1389,6 +1362,43 @@ std::string get_local_ip_for_gateway() {
       }
     }
 #endif
+
+    if (sources.none()) {
+      BOOST_LOG(warning) << "reevaluate_capture_sources: no capture method available for the current mode"sv;
+    }
+  }
+
+  std::unique_ptr<deinit_t> init() {
+    // enable low latency mode for AMD
+    // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039
+    set_env("AMD_DEBUG", "lowlatencyenc");
+
+    // Seat isolation trades the logind ACL for group ownership, so an account
+    // outside `input` loses access to its own virtual devices. Report it here
+    // rather than leaving it to be inferred from a controller that never
+    // appears.
+    input_access::warn_if_seat_isolation_lacks_input_group();
+
+    // These are allowed to fail.
+    gbm::init();
+
+    window_system = window_system_e::NONE;
+#ifdef POLARIS_BUILD_WAYLAND
+    if (std::getenv("WAYLAND_DISPLAY")) {
+      window_system = window_system_e::WAYLAND;
+    }
+#endif
+#if defined(POLARIS_BUILD_X11) || defined(POLARIS_BUILD_CUDA)
+    if (std::getenv("DISPLAY") && window_system != window_system_e::WAYLAND) {
+      if (std::getenv("WAYLAND_DISPLAY")) {
+        BOOST_LOG(warning) << "Wayland detected, yet Polaris will use X11 for screencasting, screencasting will only work on XWayland applications"sv;
+      }
+
+      window_system = window_system_e::X11;
+    }
+#endif
+
+    reevaluate_capture_sources();
 
     if (sources.none()) {
       BOOST_LOG(error) << "Unable to initialize capture method"sv;

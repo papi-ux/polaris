@@ -445,6 +445,12 @@
       "Verified against origin/master with function scoping, Nova reads every field Polaris",
       "serves; only the reverse direction drifts."
     ],
+    "polaris_accepts_nova_does_not_send_yet": {
+      "$comment": "Session-scoped stream-mode override (step 2 of the launch-must-not-clobber-host-default fix; nova#222 was step 1). GET /launch accepts streamMode=<stream path registry id>: nvhttp::make_launch_session validates it via stream_display_policy::selection_valid, mirrorDesktop wins over it, and headless_dongle is rejected as a session override (host-default-only). proc_t::execute applies the accepted mode to the in-memory config for that session only and re-bakes capture sources (platf::reevaluate_capture_sources); terminate_impl restores the host values after teardown. Nothing persists. Nova does not send streamMode yet; the Nova-side change lands separately, at which point this entry moves to objects.",
+      "launch": [
+        "streamMode"
+      ]
+    },
     "nova_reads_polaris_never_sends": {
       "$comment": "Nova defaults each of these, so platform and runtime resolve to \"unknown\" and the labels to empty strings rather than failing.",
       "game": [

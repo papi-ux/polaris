@@ -121,6 +121,10 @@ namespace rtsp_stream {
     bool virtual_display;
     bool mirror_desktop = false;
     bool force_private_after_desktop_steam_shutdown = false;
+    // Session-scoped stream mode override from the /launch streamMode arg.
+    // Empty = host default. Validated in make_launch_session; applied to the
+    // in-memory config by proc_t::execute and restored at teardown.
+    std::string stream_mode;
     bool user_locked_display_mode;
     bool user_locked_virtual_display;
     uint32_t scale_factor;

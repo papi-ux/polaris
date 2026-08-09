@@ -540,6 +540,17 @@ namespace proc {
     int initial_max_bitrate = 0;
     int initial_adaptive_max_bitrate = 0;
     bool initial_video_config_saved = false;
+    // Session-scoped linux_display override bookkeeping (/launch streamMode):
+    // host values saved by execute(), restored in terminate_impl after teardown.
+    std::string initial_stream_mode;
+    std::string initial_private_runtime;
+    std::string initial_headless_swap_mode;
+    std::string initial_capture;
+    bool initial_headless_mode = false;
+    bool initial_use_cage_compositor = false;
+    bool initial_prefer_gpu_native_capture = false;
+    bool initial_auto_manage_displays = false;
+    bool initial_linux_display_saved = false;
 
     proc_t(
       boost::process::v1::environment &&env,

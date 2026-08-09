@@ -411,6 +411,39 @@ namespace nvhttp {
       return launch_mode == "force_private_stream" || launch_mode == "forceprivate";
     }
 
+    std::string session_stream_mode_requested(const args_t &args) {
+      const auto it = args.find("streamMode");
+      if (it == args.end()) {
+        return {};
+      }
+      return lower_copy(it->second);
+    }
+
+    std::string session_stream_mode_requested(const nlohmann::json &body) {
+      return lower_copy(body.value("streamMode", std::string {}));
+    }
+
+  #if defined(__linux__)
+    // Session-scoped stream-mode override gate: returns the requested mode when
+    // it may drive this session, empty otherwise (the host default applies).
+    // headless_dongle swaps host output topology, so it stays host-default-only.
+    std::string accepted_session_stream_mode(const std::string &requested, std::string &reject_reason) {
+      if (requested.empty()) {
+        return {};
+      }
+      if (requested == "headless_dongle") {
+        reject_reason = "headless_dongle is not supported as a per-session override";
+        return {};
+      }
+      std::string error;
+      if (!stream_display_policy::selection_valid(requested, error)) {
+        reject_reason = error;
+        return {};
+      }
+      return requested;
+    }
+  #endif
+
 #if defined(POLARIS_TESTS)
     proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy(
       const args_t &args,
@@ -436,13 +469,27 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
-      const bool private_stream_requested =
+      bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
           config::video.linux_display.use_cage_compositor,
           config::video.linux_display.stream_mode,
           config::video.linux_display.private_runtime
         );
+#ifdef __linux__
+      // A per-session override changes which family this launch actually is.
+      std::string session_mode_reject_reason;
+      const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(args), session_mode_reject_reason);
+      if (!session_mode.empty() && !explicit_mirror_desktop_requested(args)) {
+        const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
+        private_stream_requested = proc::streaming_launch_requests_private_family(
+          session_booleans.headless_mode,
+          session_booleans.use_cage_compositor,
+          session_mode,
+          std::string {}
+        );
+      }
+#endif
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
         explicit_mirror_desktop_requested(args),
@@ -458,13 +505,27 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
-      const bool private_stream_requested =
+      bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
           config::video.linux_display.use_cage_compositor,
           config::video.linux_display.stream_mode,
           config::video.linux_display.private_runtime
         );
+#ifdef __linux__
+      // A per-session override changes which family this launch actually is.
+      std::string session_mode_reject_reason;
+      const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(body), session_mode_reject_reason);
+      if (!session_mode.empty() && !explicit_mirror_desktop_requested(body)) {
+        const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
+        private_stream_requested = proc::streaming_launch_requests_private_family(
+          session_booleans.headless_mode,
+          session_booleans.use_cage_compositor,
+          session_mode,
+          std::string {}
+        );
+      }
+#endif
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
         explicit_mirror_desktop_requested(body),
@@ -2602,6 +2663,13 @@ namespace nvhttp {
   }
 
 #if defined(__linux__)
+  std::string accepted_session_stream_mode_for_tests(const std::string &requested) {
+    std::string reject_reason;
+    return accepted_session_stream_mode(requested, reject_reason);
+  }
+#endif
+
+#if defined(__linux__)
   proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
     const args_t &args,
     bool app_uses_steam,
@@ -4433,6 +4501,20 @@ namespace nvhttp {
     #if defined(__linux__)
     launch_session->mirror_desktop = explicit_mirror_desktop_requested(args);
     launch_session->force_private_after_desktop_steam_shutdown = force_private_after_desktop_steam_shutdown_requested(args);
+    if (const auto requested_mode = session_stream_mode_requested(args); !requested_mode.empty()) {
+      if (launch_session->mirror_desktop) {
+        BOOST_LOG(info) << "Ignoring streamMode ["sv << requested_mode << "] because mirrorDesktop wins for this launch"sv;
+      } else {
+        std::string reject_reason;
+        const auto accepted = accepted_session_stream_mode(requested_mode, reject_reason);
+        if (!accepted.empty()) {
+          launch_session->stream_mode = accepted;
+          BOOST_LOG(info) << "Session stream mode override requested: ["sv << accepted << ']';
+        } else {
+          BOOST_LOG(warning) << "Ignoring streamMode ["sv << requested_mode << "]: "sv << reject_reason << "; the host default applies"sv;
+        }
+      }
+    }
     #else
     launch_session->mirror_desktop = false;
     launch_session->force_private_after_desktop_steam_shutdown = false;
