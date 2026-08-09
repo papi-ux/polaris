@@ -79,6 +79,49 @@ TEST(PortalGrabPolicyTests, KwingrabPreferredForHostKdeModesIncludingVirtualDisp
 }
 #endif
 
+namespace platf {
+  bool host_virtual_display_needs_portal();
+}
+
+TEST(PortalGrabPolicyTests, HostVirtualDisplayIsKeptOffTheAutoWlrSource) {
+  // Companion to PR #351's kwingrab routing: even with the right kwingrab
+  // preference, host_virtual_display only reaches portal_grab (hence kwingrab)
+  // if reevaluate_capture_sources does NOT auto-select the direct WAYLAND/wlr
+  // source first — which binds the desktop wayland-0 (no wlr-export-dmabuf) and
+  // hard-fails every encoder. This guards the source-selection half of that fix.
+  struct config_guard_t {
+    config::video_t::linux_display_t linux_display = config::video.linux_display;
+    std::string capture = config::video.capture;
+
+    ~config_guard_t() {
+      config::video.linux_display = linux_display;
+      config::video.capture = capture;
+    }
+  } guard;
+
+  auto &ld = config::video.linux_display;
+  config::video.capture.clear();  // the auto path is where the bug lived
+
+  // host_virtual_display composites through KWin (use_cage stays false): must
+  // be kept off the auto wlr source so PORTAL (→ kwingrab) is chosen.
+  ld.stream_mode = "host_virtual_display";
+  ld.use_cage_compositor = false;
+  EXPECT_TRUE(platf::host_virtual_display_needs_portal());
+
+  // A cage-compositor session (the booleans HVD never carries) streams through
+  // labwc's own wlr socket, not portal — must NOT be diverted.
+  ld.use_cage_compositor = true;
+  EXPECT_FALSE(platf::host_virtual_display_needs_portal());
+
+  // Every other mode keeps its existing source selection untouched.
+  ld.use_cage_compositor = false;
+  for (const char *mode :
+       {"windowed_stream", "headless_stream", "gamescope_stream", "desktop_display", "headless_dongle", ""}) {
+    ld.stream_mode = mode;
+    EXPECT_FALSE(platf::host_virtual_display_needs_portal()) << mode;
+  }
+}
+
 TEST(PortalGrabPolicyTests, PrivateAndWindowedCagePathsRequestWindowSource) {
   EXPECT_EQ(portal::capture_type_for_stream_display(true, true), 2u);
   EXPECT_EQ(portal::capture_type_for_stream_display(false, true), 2u);
