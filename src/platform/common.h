@@ -753,6 +753,15 @@ namespace platf {
 
   boost::process::v1::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::v1::environment &env, FILE *file, std::error_code &ec, boost::process::v1::group *group);
 
+  /**
+   * @brief Run a shell-quoted command line through `/bin/sh -lc`.
+   *
+   * For detached children that are not launched inside a compositor's own
+   * shell (the gamescope private runtime): the command carries shell quoting
+   * that a bare exec cannot interpret. Linux only.
+   */
+  boost::process::v1::child run_command_shell(bool elevated, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::v1::environment &env, FILE *file, std::error_code &ec, boost::process::v1::group *group);
+
   enum class thread_priority_e : int {
     low,  ///< Low priority
     normal,  ///< Normal priority

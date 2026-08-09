@@ -6538,7 +6538,13 @@ namespace proc {
                                               boost::filesystem::path(_app.working_dir);
       BOOST_LOG(info) << (gamescope_private_runtime ? "gamescope_runtime: spawning detached ["sv : "Spawning ["sv)
                       << launch_cmd << "] in ["sv << working_dir << ']';
-      auto child = platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
+      // The gamescope runtime launches detached children with no compositor
+      // shell of its own to interpret the shell-quoted isolation wrapper, so
+      // route them through a shell; labwc children keep the direct path, which
+      // is byte-identical to before.
+      auto child = gamescope_private_runtime ?
+        platf::run_command_shell(_app.elevated, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group) :
+        platf::run_command(_app.elevated, true, launch_cmd, working_dir, cmd_env, _pipe.get(), ec, &_process_group);
       if (ec) {
         BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
       }

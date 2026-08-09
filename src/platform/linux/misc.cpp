@@ -508,6 +508,29 @@ std::string get_local_ip_for_gateway() {
     // clang-format on
   }
 
+  bp::child run_command_shell(bool elevated, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
+    (void) elevated;
+    // The command arrives shell-quoted (the gamepad-isolation wrapper emits
+    // shell_quote()'d bwrap argv). bp::child(string) tokenizes on whitespace
+    // and does not strip those quotes, so it tries to exec a file literally
+    // named "'/usr/bin/bwrap'". Hand the whole line to a shell as a single
+    // argv element instead — the same interpretation labwc's `bash -c` gives
+    // its own children, which is why only the shell-less detached path broke.
+    const std::vector<std::string> args {"-lc", cmd};
+    // clang-format off
+    if (!group) {
+      if (!file) {
+        return bp::child("/bin/sh", args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > bp::null, bp::std_err > bp::null, bp::limit_handles, ec);
+      }
+      return bp::child("/bin/sh", args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > file, bp::std_err > file, bp::limit_handles, ec);
+    }
+    if (!file) {
+      return bp::child("/bin/sh", args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > bp::null, bp::std_err > bp::null, bp::limit_handles, ec, *group);
+    }
+    return bp::child("/bin/sh", args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > file, bp::std_err > file, bp::limit_handles, ec, *group);
+    // clang-format on
+  }
+
   /**
    * @brief Open a url in the default web browser.
    * @param url The url to open.
