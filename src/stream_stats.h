@@ -366,8 +366,10 @@ namespace stream_stats {
     static constexpr double k_rtt_elevated_ms = 28.0;
     static constexpr int k_warmup_samples = 5;
     static constexpr int k_debounce_samples = 2;
+    static constexpr int k_armed_after_samples = 40;
 
     int samples_seen = 0;
+    bool calm_seen = false;
     int consecutive_elevated = 0;
     int consecutive_calm = 0;
     bool elevated = false;
@@ -376,7 +378,18 @@ namespace stream_stats {
     bool update(double loss_pct, double rtt_ms) {
       ++samples_seen;
       const bool raw = loss_pct >= k_loss_elevated_pct || rtt_ms >= k_rtt_elevated_ms;
-      if (samples_seen <= k_warmup_samples) {
+      if (!raw) {
+        calm_seen = true;
+      }
+      // ENet seeds a fresh peer's RTT at 500ms and converges by roughly an
+      // eighth per ack, so the first stretch of every session reads above the
+      // RTT cut without a single packet actually arriving late — a fixed
+      // warm-up count cannot cover it. Grading starts once the estimator has
+      // proven itself with one calm reading; k_armed_after_samples bounds how
+      // long a genuinely bad link can hide behind that grace (~20s at the
+      // client's ping cadence).
+      if (samples_seen <= k_warmup_samples ||
+          (!calm_seen && samples_seen <= k_armed_after_samples)) {
         return elevated;
       }
       if (raw) {
