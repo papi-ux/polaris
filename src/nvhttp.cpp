@@ -2322,7 +2322,7 @@ namespace nvhttp {
       const bool meaningful_fps_shortfall =
         stream_stats::is_meaningful_fps_shortfall(target_fps, stats.fps);
 
-      const bool network_risk = stats.packet_loss >= 0.35 || stats.latency_ms >= 28.0;
+      const bool network_risk = stats.network_risk;
       const bool pacing_risk =
         stats.frame_jitter_ms >= 2.2 ||
         stats.duplicate_frame_ratio >= 0.10 ||

@@ -779,7 +779,8 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
 
 // The periodic-ping handler in stream.cpp sources loss from ENet's scaled
 // peer->packetLoss; this module stores percent (0-100), matching the readers
-// (network_risk thresholds at 0.35%, session grading at 0.5/2/5%).
+// (served network_risk elevates at 2% after warm-up and debounce; session
+// grading stays at 0.5/2/5%).
 TEST(StreamStatsHotFieldTests, RuntimeDisplayWarningIsServedAndResetWithTheStream) {
   stream_stats::update_stream_active(true);
   stream_stats::update_runtime_display_warning("Host Virtual Display could not be created");
@@ -798,8 +799,47 @@ TEST(StreamStatsHotFieldTests, PacketLossPercentConvertsScaledRatios) {
   EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(0, scale), 0.0);
   EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(scale, scale), 100.0);
   EXPECT_DOUBLE_EQ(stream_stats::packet_loss_percent(scale / 2, scale), 50.0);
-  // 0.35% loss - exactly the network_risk threshold - survives the conversion.
+  // 0.35% loss - the old hair-trigger risk threshold, now well inside calm -
+  // survives the conversion.
   EXPECT_NEAR(stream_stats::packet_loss_percent(229, scale), 0.3494, 0.001);
+}
+
+TEST(NetworkRiskTrackerTests, WarmupNeverGrades) {
+  stream_stats::network_risk_tracker_t tracker;
+  // Session start is exactly when ENet's ratio comes from the fewest
+  // packets; even absurd readings must not elevate yet.
+  for (int i = 0; i < stream_stats::network_risk_tracker_t::k_warmup_samples; ++i) {
+    EXPECT_FALSE(tracker.update(100.0, 500.0));
+  }
+}
+
+TEST(NetworkRiskTrackerTests, TheLiveFalsePositiveStaysCalm) {
+  stream_stats::network_risk_tracker_t tracker;
+  // The regression this exists for: a perfect 115/120fps 3ms stream held a
+  // permanent "Network jitter" because ENet's EWMA hovered past 0.35%.
+  for (int i = 0; i < 50; ++i) {
+    EXPECT_FALSE(tracker.update(0.5, 3.0));
+  }
+}
+
+TEST(NetworkRiskTrackerTests, TwoElevatedFlipAndTwoCalmClear) {
+  stream_stats::network_risk_tracker_t tracker;
+  for (int i = 0; i < stream_stats::network_risk_tracker_t::k_warmup_samples; ++i) {
+    tracker.update(0.0, 1.0);
+  }
+  EXPECT_FALSE(tracker.update(3.0, 1.0));  // one bad reading is noise
+  EXPECT_TRUE(tracker.update(3.0, 1.0));  // two in a row is a state
+  EXPECT_TRUE(tracker.update(0.0, 1.0));  // one calm reading is noise too
+  EXPECT_FALSE(tracker.update(0.0, 1.0));  // two clear it
+}
+
+TEST(NetworkRiskTrackerTests, RttAloneElevates) {
+  stream_stats::network_risk_tracker_t tracker;
+  for (int i = 0; i < stream_stats::network_risk_tracker_t::k_warmup_samples; ++i) {
+    tracker.update(0.0, 1.0);
+  }
+  tracker.update(0.0, 30.0);
+  EXPECT_TRUE(tracker.update(0.0, 30.0));
 }
 
 TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {
