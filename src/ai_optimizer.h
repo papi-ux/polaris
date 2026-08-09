@@ -71,7 +71,22 @@ namespace ai_optimizer {
    * Returns nullopt if no cached result exists.
    */
   std::optional<device_db::optimization_t> get_cached(
-    const std::string &device_name, const std::string &app_name);
+    const std::string &device_name, const std::string &app_name,
+    const std::string &mode = "");
+
+  /**
+   * @brief Canonicalize a stream display mode id; empty when unknown.
+   *
+   * The six ids mirror stream_path's registry, kept as a local list so this
+   * file stays platform-neutral; a mode this rejects simply falls back to the
+   * legacy (mode-less) behavior rather than failing anything.
+   */
+  std::string normalize_stream_mode(const std::string &mode);
+
+  /** Test seam: the cache bucket a device+game (+optional mode) request lands in. */
+  std::string cache_key_for_tests(
+    const std::string &provider, const std::string &model, const std::string &base_url,
+    const std::string &device, const std::string &app, const std::string &mode);
 
   /**
    * @brief Session quality history for a device+game pair.
@@ -173,7 +188,8 @@ namespace ai_optimizer {
                      const std::string &app_name,
                      const std::string &gpu_info,
                      const std::string &game_category = "",
-                     const std::optional<session_history_t> &history = std::nullopt);
+                     const std::optional<session_history_t> &history = std::nullopt,
+                     const std::string &mode = "");
 
   /**
    * @brief Request an AI optimization synchronously (for manual triggers).
@@ -184,7 +200,8 @@ namespace ai_optimizer {
     const std::string &app_name,
     const std::string &gpu_info,
     const std::string &game_category = "",
-    const std::optional<session_history_t> &history = std::nullopt);
+    const std::optional<session_history_t> &history = std::nullopt,
+    const std::string &mode = "");
 
   /**
    * @brief Request an AI optimization synchronously using ad-hoc config.
@@ -196,7 +213,8 @@ namespace ai_optimizer {
     const std::string &app_name,
     const std::string &gpu_info,
     const std::string &game_category = "",
-    const std::optional<session_history_t> &history = std::nullopt);
+    const std::optional<session_history_t> &history = std::nullopt,
+    const std::string &mode = "");
 
   /**
    * @brief Get a provider-aware model catalog as JSON using ad-hoc config.
