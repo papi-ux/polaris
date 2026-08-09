@@ -2152,6 +2152,26 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownTerminatesOnlyTheE
 #endif
 }
 
+TEST(ProcessRuntimeConfigTests, UnreadableEnvironLatchSparesPrivilegedDescendants) {
+#ifdef __linux__
+  // Steam's setuid sandbox helpers: EACCES on environ, root real uid,
+  // descended from polaris. Unreadable AND unsignalable — they die with the
+  // captured same-uid ancestors, so they must not wedge the teardown into
+  // "retaining immutable cage generation" and 503s until restart.
+  EXPECT_FALSE(proc::unreadable_environ_latches_capture_for_tests(EACCES, uid_t {0}, uid_t {1000}, true));
+  EXPECT_FALSE(proc::unreadable_environ_latches_capture_for_tests(EACCES, uid_t {0}, uid_t {1000}, std::nullopt));
+  // A same-uid process hiding its environ stays conservative: it may be a
+  // session member the cleanup would otherwise leave running.
+  EXPECT_TRUE(proc::unreadable_environ_latches_capture_for_tests(EACCES, uid_t {1000}, uid_t {1000}, true));
+  // Unknown uid keeps the latch too.
+  EXPECT_TRUE(proc::unreadable_environ_latches_capture_for_tests(EACCES, std::nullopt, uid_t {1000}, true));
+  // Non-EACCES read failures on descendants keep the latch regardless of uid.
+  EXPECT_TRUE(proc::unreadable_environ_latches_capture_for_tests(EIO, uid_t {0}, uid_t {1000}, true));
+  // Non-descendants never latched and still do not.
+  EXPECT_FALSE(proc::unreadable_environ_latches_capture_for_tests(EACCES, uid_t {1000}, uid_t {1000}, false));
+#endif
+}
+
 TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCageGeneration) {
 #ifdef __linux__
   EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(true, true));
