@@ -1776,6 +1776,247 @@ namespace confighttp {
     send_response(response, outputTree);
   }
 
+  namespace {
+    std::string_view to_string(stream_stats::benchmark_run_state_e state) {
+      switch (state) {
+        case stream_stats::benchmark_run_state_e::armed:
+          return "armed"sv;
+        case stream_stats::benchmark_run_state_e::active:
+          return "active"sv;
+        case stream_stats::benchmark_run_state_e::draining:
+          return "draining"sv;
+        case stream_stats::benchmark_run_state_e::frozen:
+          return "frozen"sv;
+        case stream_stats::benchmark_run_state_e::aborted:
+          return "aborted"sv;
+        case stream_stats::benchmark_run_state_e::expired:
+          return "expired"sv;
+      }
+      return "unknown"sv;
+    }
+
+    std::string_view to_string(stream_stats::benchmark_abort_reason_e reason) {
+      switch (reason) {
+        case stream_stats::benchmark_abort_reason_e::none:
+          return "none"sv;
+        case stream_stats::benchmark_abort_reason_e::session_ended:
+          return "session_ended"sv;
+        case stream_stats::benchmark_abort_reason_e::session_generation_changed:
+          return "session_generation_changed"sv;
+        case stream_stats::benchmark_abort_reason_e::client_population_revision_changed:
+          return "client_population_revision_changed"sv;
+        case stream_stats::benchmark_abort_reason_e::sample_capacity_exceeded:
+          return "sample_capacity_exceeded"sv;
+        case stream_stats::benchmark_abort_reason_e::invalid_stage_duration:
+          return "invalid_stage_duration"sv;
+        case stream_stats::benchmark_abort_reason_e::stopped_before_duration_lower_bound:
+          return "stopped_before_duration_lower_bound"sv;
+        case stream_stats::benchmark_abort_reason_e::explicit_harness_abort:
+          return "explicit_harness_abort"sv;
+        case stream_stats::benchmark_abort_reason_e::internal_telemetry_failure:
+          return "internal_telemetry_failure"sv;
+      }
+      return "unknown"sv;
+    }
+
+    std::string_view to_string(stream_stats::benchmark_run_get_result_e result) {
+      switch (result) {
+        case stream_stats::benchmark_run_get_result_e::found:
+          return "found"sv;
+        case stream_stats::benchmark_run_get_result_e::rejected_control_plane_not_enabled:
+          return "rejected_control_plane_not_enabled"sv;
+        case stream_stats::benchmark_run_get_result_e::rejected_caller_not_authorized_as_harness:
+          return "rejected_caller_not_authorized_as_harness"sv;
+        case stream_stats::benchmark_run_get_result_e::rejected_run_not_found:
+          return "rejected_run_not_found"sv;
+      }
+      return "unknown"sv;
+    }
+
+    std::string_view to_string(stream_stats::benchmark_run_delete_result_e result) {
+      switch (result) {
+        case stream_stats::benchmark_run_delete_result_e::deleted:
+          return "deleted"sv;
+        case stream_stats::benchmark_run_delete_result_e::rejected_control_plane_not_enabled:
+          return "rejected_control_plane_not_enabled"sv;
+        case stream_stats::benchmark_run_delete_result_e::rejected_caller_not_authorized_as_harness:
+          return "rejected_caller_not_authorized_as_harness"sv;
+        case stream_stats::benchmark_run_delete_result_e::rejected_run_not_found:
+          return "rejected_run_not_found"sv;
+      }
+      return "unknown"sv;
+    }
+
+    // Nanoseconds since steady_clock's own (unspecified, but process-stable)
+    // epoch - comparable to any other steady_clock reading from this same
+    // process instance, not a wall-clock timestamp. clock_domain in the
+    // response body is what tells a consumer that.
+    std::int64_t monotonic_ns(std::chrono::steady_clock::time_point tp) {
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+    }
+
+    nlohmann::json optional_monotonic_ns_json(const std::optional<std::chrono::steady_clock::time_point> &tp) {
+      if (!tp) {
+        return nullptr;
+      }
+      return monotonic_ns(*tp);
+    }
+
+    nlohmann::json benchmark_stage_capture_json(const stream_stats::benchmark_stage_capture_t &stage) {
+      nlohmann::json output;
+      output["accepted_count"] = stage.accepted_count;
+      output["excluded_started_before_window"] = stage.excluded_started_before_window;
+      output["excluded_completed_after_window"] = stage.excluded_completed_after_window;
+      output["started_in_window_without_terminal_count"] = stage.started_in_window_without_terminal_count;
+      output["overflow_count"] = stage.overflow_count;
+      output["invalid_count"] = stage.invalid_count;
+      output["start_offset_us"] = stage.start_offset_us;
+      output["end_offset_us"] = stage.end_offset_us;
+      output["duration_us"] = stage.duration_us;
+      return output;
+    }
+
+    // The full authoritative run output (measurement-spec-v1.md 6.4's field
+    // list) for a found run. schema_version/measurement_spec_id/clock_domain
+    // are new here - no existing endpoint in this codebase has needed them
+    // before (the older rolling-diagnostics GET on nvhttp's server predates
+    // this spec and has no such fields). collector_version reuses the same
+    // PROJECT_VERSION main.cpp's own startup log already uses, rather than
+    // inventing a second version scheme.
+    nlohmann::json benchmark_run_json(const stream_stats::benchmark_run_t &run) {
+      nlohmann::json output;
+      output["schema_version"] = 1;
+      output["measurement_spec_id"] = "measurement-spec-v1";
+      output["collector_version"] = PROJECT_VERSION;
+      output["clock_domain"] = "CLOCK_MONOTONIC";
+
+      output["run_id"] = run.run_id;
+      output["manifest_sha256"] = run.manifest_sha256;
+      output["state"] = to_string(run.state);
+      output["abort_reason"] = to_string(run.abort_reason);
+      output["process_instance_id"] = stream_stats::process_instance_id();
+      output["session_id"] = run.owning_device_uuid;
+      output["session_generation"] = run.owning_session_generation;
+      output["client_population_revision_at_arm"] = run.client_population_revision_at_arm;
+      output["client_population_revision_at_freeze"] = run.client_population_revision_at_freeze;
+      // Only meaningful once frozen (client_population_revision_at_freeze is
+      // still its 0 default before then) - reported as 0 rather than
+      // underflowing an unsigned subtraction for a still-open run.
+      output["population_change_count"] =
+        run.client_population_revision_at_freeze > run.client_population_revision_at_arm
+          ? run.client_population_revision_at_freeze - run.client_population_revision_at_arm
+          : 0;
+
+      output["armed_monotonic_ns"] = monotonic_ns(run.armed_monotonic);
+      output["started_monotonic_ns"] = optional_monotonic_ns_json(run.started_monotonic);
+      output["stopped_monotonic_ns"] = optional_monotonic_ns_json(run.stopped_monotonic);
+      output["frozen_monotonic_ns"] = optional_monotonic_ns_json(run.frozen_monotonic);
+
+      output["expected_duration_ns"] = run.expected_duration_ns.count();
+      output["duration_tolerance_ns"] = run.duration_tolerance_ns.count();
+      output["drain_grace_ns"] = run.drain_grace_ns.count();
+
+      // actual_duration_ns/duration_within_tolerance (measurement-spec-v1.md
+      // 6.4's formula) are only computable once both endpoints exist - null
+      // otherwise, rather than a misleading 0 or a duration measured against
+      // only one real timestamp.
+      if (run.started_monotonic && run.stopped_monotonic) {
+        const std::int64_t actual_duration_ns = monotonic_ns(*run.stopped_monotonic) - monotonic_ns(*run.started_monotonic);
+        output["actual_duration_ns"] = actual_duration_ns;
+        // Written out rather than std::abs() - this file includes both
+        // <cmath> and headers that could plausibly pull in <cstdlib>, and
+        // integer std::abs overload resolution between the two is exactly
+        // the kind of thing not worth risking a compile error over.
+        const std::int64_t duration_delta_ns = actual_duration_ns - run.expected_duration_ns.count();
+        const std::int64_t duration_delta_ns_abs = duration_delta_ns < 0 ? -duration_delta_ns : duration_delta_ns;
+        output["duration_within_tolerance"] = duration_delta_ns_abs <= run.duration_tolerance_ns.count();
+      } else {
+        output["actual_duration_ns"] = nullptr;
+        output["duration_within_tolerance"] = nullptr;
+      }
+
+      output["target_fps"] = run.target_fps;
+      output["workload_id"] = run.workload_id;
+      output["sample_capacity"] = run.sample_capacity;
+
+      output["capture_to_encode"] = benchmark_stage_capture_json(run.capture_to_encode);
+      output["encode_to_send_release"] = benchmark_stage_capture_json(run.encode_to_send_release);
+      output["capture_to_send_release"] = benchmark_stage_capture_json(run.capture_to_send_release);
+
+      return output;
+    }
+  }  // namespace
+
+  /**
+   * @brief Get a run's full authoritative output (measurement-spec-v1.md
+   * 6.4's field list, including raw per-stage sample arrays - "a
+   * percentile-only response is not sufficient for forensic verification").
+   * Unlike start/stop, this takes no device_uuid/session_generation at all -
+   * the harness reads any run by its own ID directly, not scoped to "the
+   * session it currently owns" (see get_benchmark_run's own doc comment in
+   * stream_stats.h).
+   *
+   * On success, responds 200 with the full run body directly (no
+   * status/result wrapper - the presence of a body at 200 already means
+   * found). On rejection, responds 200 with the same {status, run_id,
+   * result} shape every other benchmark route uses.
+   *
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void getBenchmarkRun(resp_https_t response, req_https_t request) {
+    if (!authorizeBenchmarkHarnessRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    const std::string run_id = request->path_match.size() > 1 ? request->path_match[1].str() : std::string {};
+
+    nlohmann::json found_body;
+    const auto result = stream_stats::get_benchmark_run(run_id, true, [&](stream_stats::benchmark_run_t &run) {
+      found_body = benchmark_run_json(run);
+    });
+
+    if (result == stream_stats::benchmark_run_get_result_e::found) {
+      send_response(response, found_body);
+      return;
+    }
+
+    nlohmann::json outputTree;
+    outputTree["status"] = false;
+    outputTree["run_id"] = run_id;
+    outputTree["result"] = to_string(result);
+    send_response(response, outputTree);
+  }
+
+  /**
+   * @brief Delete a run's storage immediately (measurement-spec-v1.md 6.4's
+   * "DELETE releases payload storage immediately"), regardless of its
+   * current state. Unlike start/stop/get, takes no device_uuid/
+   * session_generation either - same harness-reads-any-run-by-ID model as
+   * get.
+   *
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void deleteBenchmarkRun(resp_https_t response, req_https_t request) {
+    if (!authorizeBenchmarkHarnessRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    const std::string run_id = request->path_match.size() > 1 ? request->path_match[1].str() : std::string {};
+    const auto result = stream_stats::delete_benchmark_run(run_id, true);
+
+    nlohmann::json outputTree;
+    outputTree["status"] = result == stream_stats::benchmark_run_delete_result_e::deleted;
+    outputTree["run_id"] = run_id;
+    outputTree["result"] = to_string(result);
+    send_response(response, outputTree);
+  }
+
   /**
    * @brief Serve the SPA index.html for any non-API, non-asset route.
    * @param response The HTTP response object.
@@ -6084,6 +6325,8 @@ namespace confighttp {
     server.resource["^/polaris/v1/session/timing/runs$"]["POST"] = createBenchmarkRun;
     server.resource["^/polaris/v1/session/timing/runs/([^/]+)/start$"]["POST"] = startBenchmarkRun;
     server.resource["^/polaris/v1/session/timing/runs/([^/]+)/stop$"]["POST"] = stopBenchmarkRun;
+    server.resource["^/polaris/v1/session/timing/runs/([^/]+)$"]["GET"] = getBenchmarkRun;
+    server.resource["^/polaris/v1/session/timing/runs/([^/]+)$"]["DELETE"] = deleteBenchmarkRun;
     server.resource["^/api/apps/close$"]["POST"] = withCsrf(closeApp);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
