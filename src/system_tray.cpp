@@ -37,7 +37,10 @@
   #include <atomic>
   #include <chrono>
   #include <csignal>
+  #include <deque>
   #include <format>
+  #include <functional>
+  #include <mutex>
   #include <string>
   #include <thread>
 
@@ -66,6 +69,43 @@ namespace system_tray {
   static std::thread tray_thread;
   static std::atomic tray_thread_running = false;
   static std::atomic tray_thread_should_exit = false;
+
+  // The public update_tray_* functions only enqueue here. They used to call
+  // tray_update on the caller's thread, and on a headless user service that
+  // entered glib with nobody iterating the context and blocked forever -
+  // every pairing attempt wedged an HTTP worker on a cosmetic notification.
+  // The tray thread drains the queue between event iterations; when it is
+  // not running (or stuck), updates drop, which is what a machine without a
+  // working tray deserves. Capped so a stuck drain cannot grow it.
+  static std::mutex tray_task_mutex;
+  static std::deque<std::function<void()>> tray_tasks;
+  constexpr std::size_t k_max_pending_tray_tasks = 8;
+
+  static void post_tray_task(std::function<void()> task) {
+    if (!tray_thread_running) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(tray_task_mutex);
+    if (tray_tasks.size() >= k_max_pending_tray_tasks) {
+      tray_tasks.pop_front();
+    }
+    tray_tasks.push_back(std::move(task));
+  }
+
+  static void drain_tray_tasks() {
+    for (;;) {
+      std::function<void()> task;
+      {
+        std::lock_guard<std::mutex> lock(tray_task_mutex);
+        if (tray_tasks.empty()) {
+          return;
+        }
+        task = std::move(tray_tasks.front());
+        tray_tasks.pop_front();
+      }
+      task();
+    }
+  }
 
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Opening UI from system tray"sv;
@@ -240,7 +280,7 @@ namespace system_tray {
     return 0;
   }
 
-  void update_tray_playing(std::string app_name) {
+  static void update_tray_playing_on_tray_thread(std::string app_name) {
     if (!tray_initialized) {
       return;
     }
@@ -269,7 +309,7 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void update_tray_pausing(std::string app_name) {
+  static void update_tray_pausing_on_tray_thread(std::string app_name) {
     if (!tray_initialized) {
       return;
     }
@@ -293,7 +333,7 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void update_tray_stopped(std::string app_name) {
+  static void update_tray_stopped_on_tray_thread(std::string app_name) {
     if (!tray_initialized) {
       return;
     }
@@ -347,7 +387,7 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void update_tray_require_pin() {
+  static void update_tray_require_pin_on_tray_thread() {
     if (!tray_initialized) {
       return;
     }
@@ -369,8 +409,8 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void
-  update_tray_paired(std::string device_name) {
+  static void
+  update_tray_paired_on_tray_thread(std::string device_name) {
     if (!tray_initialized) {
       return;
     }
@@ -392,8 +432,8 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void
-  update_tray_client_connected(std::string client_name) {
+  static void
+  update_tray_client_connected_on_tray_thread(std::string client_name) {
     if (!tray_initialized) {
       return;
     }
@@ -416,6 +456,42 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  void update_tray_playing(std::string app_name) {
+    post_tray_task([app_name = std::move(app_name)]() mutable {
+      update_tray_playing_on_tray_thread(std::move(app_name));
+    });
+  }
+
+  void update_tray_pausing(std::string app_name) {
+    post_tray_task([app_name = std::move(app_name)]() mutable {
+      update_tray_pausing_on_tray_thread(std::move(app_name));
+    });
+  }
+
+  void update_tray_stopped(std::string app_name) {
+    post_tray_task([app_name = std::move(app_name)]() mutable {
+      update_tray_stopped_on_tray_thread(std::move(app_name));
+    });
+  }
+
+  void update_tray_require_pin() {
+    post_tray_task([]() {
+      update_tray_require_pin_on_tray_thread();
+    });
+  }
+
+  void update_tray_paired(std::string device_name) {
+    post_tray_task([device_name = std::move(device_name)]() mutable {
+      update_tray_paired_on_tray_thread(std::move(device_name));
+    });
+  }
+
+  void update_tray_client_connected(std::string client_name) {
+    post_tray_task([client_name = std::move(client_name)]() mutable {
+      update_tray_client_connected_on_tray_thread(std::move(client_name));
+    });
+  }
+
   // Threading functions available on all platforms
   static void tray_thread_worker() {
     BOOST_LOG(info) << "System tray thread started"sv;
@@ -431,6 +507,7 @@ namespace system_tray {
 
     // Main tray event loop
     while (!tray_thread_should_exit) {
+      drain_tray_tasks();
       if (process_tray_events() != 0) {
         BOOST_LOG(warning) << "Tray event processing failed in thread"sv;
         break;
