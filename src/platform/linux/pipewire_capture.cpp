@@ -140,6 +140,13 @@ namespace pipewire_capture {
     return std::string(path);
   }
 
+  std::optional<std::string> pick_sole_render_node(const std::vector<std::string> &nodes) {
+    if (nodes.size() != 1) {
+      return std::nullopt;
+    }
+    return canonical_render_node(nodes.front());
+  }
+
   bool may_offer_dmabuf(const dmabuf_eligibility_t &eligibility) {
     if (!eligibility.capture_render_node) {
       return false;

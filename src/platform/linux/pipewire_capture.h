@@ -99,6 +99,12 @@ namespace pipewire_capture {
 
   std::optional<std::uint32_t> drm_format_for_spa(std::uint32_t spa_format);
   std::optional<std::string> canonical_render_node(std::string_view path);
+  /**
+   * @brief The sole canonical render node from a candidate list, or nullopt.
+   * Exactly one candidate — a single-GPU host — resolves; anything else stays
+   * fail-closed so DMA-BUF never imports across GPUs by guess.
+   */
+  std::optional<std::string> pick_sole_render_node(const std::vector<std::string> &nodes);
   // When the portal stream omits capture render node, assume the operator-pinned
   // encoder adapter (same-GPU headless/gamescope). Enables DmaBuf offer; MemFd stays fallback.
   std::optional<std::string> resolve_capture_render_node(

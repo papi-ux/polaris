@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -177,6 +178,33 @@ namespace portal {
     return client_dynamic_range <= 0;
   }
 
+  // Encoder render node for DMA-BUF eligibility: the configured adapter_name
+  // when it names a canonical render node, else the host's sole render node.
+  // Single-GPU hosts get zero-copy without configuration; multi-GPU hosts stay
+  // fail-closed so DMA-BUF never imports across GPUs by guess.
+  static std::optional<std::string> encoder_render_node_for_dmabuf() {
+    if (auto configured = pipewire_capture::canonical_render_node(config::video.adapter_name)) {
+      return configured;
+    }
+    std::vector<std::string> nodes;
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator("/dev/dri", ec)) {
+      if (entry.path().filename().string().starts_with("renderD")) {
+        nodes.push_back(entry.path().string());
+      }
+    }
+    auto sole = pipewire_capture::pick_sole_render_node(nodes);
+    if (sole) {
+      static bool logged_auto_render_node = false;
+      if (!logged_auto_render_node) {
+        logged_auto_render_node = true;
+        BOOST_LOG(info) << "portal: adapter_name is unset; using the host's sole render node ["sv
+                        << *sole << "] for DMA-BUF eligibility"sv;
+      }
+    }
+    return sole;
+  }
+
   // Local-graph PW capture (gamescopegrab / kwingrab): remote_fd=-1, no portal session.
   static std::shared_ptr<pipewire_capture::capture_t> start_local_pw_capture(
     std::uint32_t node_id,
@@ -186,7 +214,7 @@ namespace portal {
     platf::mem_type_e mem_type,
     int client_dynamic_range
   ) {
-    const auto encoder_render_node = pipewire_capture::canonical_render_node(config::video.adapter_name);
+    const auto encoder_render_node = encoder_render_node_for_dmabuf();
     std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
     bool may_use_dmabuf = false;
     const bool prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range);
@@ -523,7 +551,7 @@ namespace portal {
       }
       else {
         auto *session = g_media.portal.get();
-        const auto encoder_render_node = pipewire_capture::canonical_render_node(config::video.adapter_name);
+        const auto encoder_render_node = encoder_render_node_for_dmabuf();
         // Headless gamescope often omits SPA capture.device / render_node. If the
         // operator set adapter_name to a render node (same GPU as NVENC), assume it.
         if (!session->capture_render_node) {
