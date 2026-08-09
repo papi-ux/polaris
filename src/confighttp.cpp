@@ -1625,6 +1625,157 @@ namespace confighttp {
     }
   }
 
+  namespace {
+    std::string_view to_string(stream_stats::benchmark_run_start_result_e result) {
+      switch (result) {
+        case stream_stats::benchmark_run_start_result_e::started:
+          return "started"sv;
+        case stream_stats::benchmark_run_start_result_e::rejected_control_plane_not_enabled:
+          return "rejected_control_plane_not_enabled"sv;
+        case stream_stats::benchmark_run_start_result_e::rejected_caller_not_authorized_as_harness:
+          return "rejected_caller_not_authorized_as_harness"sv;
+        case stream_stats::benchmark_run_start_result_e::rejected_run_not_found:
+          return "rejected_run_not_found"sv;
+        case stream_stats::benchmark_run_start_result_e::rejected_wrong_session:
+          return "rejected_wrong_session"sv;
+        case stream_stats::benchmark_run_start_result_e::rejected_run_not_in_armed_state:
+          return "rejected_run_not_in_armed_state"sv;
+        case stream_stats::benchmark_run_start_result_e::rejected_population_changed_since_arm:
+          return "rejected_population_changed_since_arm"sv;
+        case stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active:
+          return "rejected_session_no_longer_active"sv;
+      }
+      return "unknown"sv;
+    }
+
+    std::string_view to_string(stream_stats::benchmark_run_stop_result_e result) {
+      switch (result) {
+        case stream_stats::benchmark_run_stop_result_e::stopped:
+          return "stopped"sv;
+        case stream_stats::benchmark_run_stop_result_e::stopped_early_and_aborted:
+          return "stopped_early_and_aborted"sv;
+        case stream_stats::benchmark_run_stop_result_e::rejected_control_plane_not_enabled:
+          return "rejected_control_plane_not_enabled"sv;
+        case stream_stats::benchmark_run_stop_result_e::rejected_caller_not_authorized_as_harness:
+          return "rejected_caller_not_authorized_as_harness"sv;
+        case stream_stats::benchmark_run_stop_result_e::rejected_run_not_found:
+          return "rejected_run_not_found"sv;
+        case stream_stats::benchmark_run_stop_result_e::rejected_wrong_session:
+          return "rejected_wrong_session"sv;
+        case stream_stats::benchmark_run_stop_result_e::rejected_not_currently_active:
+          return "rejected_not_currently_active"sv;
+      }
+      return "unknown"sv;
+    }
+
+    // start/stop both need a run_id (from the URL, not the body - see the
+    // route registrations below) plus the identity of the one active
+    // session, exactly like createBenchmarkRun(). A missing/ambiguous
+    // active session here reports as the run's own
+    // rejected_wrong_session/rejected_session_no_longer_active outcomes
+    // rather than a bespoke error, since from the run's perspective a
+    // caller with no resolvable session identity can never be its owning
+    // session either way.
+    struct benchmark_route_context_t {
+      std::string run_id;
+      std::optional<stream_stats::active_session_identity_t> session_identity;
+    };
+
+    benchmark_route_context_t extract_benchmark_route_context(const req_https_t &request) {
+      benchmark_route_context_t context;
+      if (request->path_match.size() > 1) {
+        context.run_id = request->path_match[1].str();
+      }
+      context.session_identity = stream_stats::get_single_active_session_identity();
+      return context;
+    }
+  }  // namespace
+
+  /**
+   * @brief Start an armed benchmark run (measurement-spec-v1.md 6.4's
+   * POST /polaris/v1/session/timing/runs/{run_id}/start). Takes no request
+   * body - run_id comes from the URL, and the owning session's identity is
+   * looked up the same way createBenchmarkRun() does, not supplied by the
+   * caller.
+   *
+   * Always responds 200 with a JSON body naming the outcome in `result`
+   * (see to_string() above) - there is no create-style "this route
+   * couldn't even parse the request" case here, since there's no body to
+   * parse.
+   *
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void startBenchmarkRun(resp_https_t response, req_https_t request) {
+    if (!authorizeBenchmarkHarnessRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    const auto context = extract_benchmark_route_context(request);
+
+    nlohmann::json outputTree;
+    outputTree["run_id"] = context.run_id;
+
+    if (!context.session_identity) {
+      outputTree["status"] = false;
+      outputTree["result"] = to_string(stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+      send_response(response, outputTree);
+      return;
+    }
+
+    const auto result = stream_stats::start_benchmark_run(
+      context.run_id, context.session_identity->device_uuid, context.session_identity->session_generation, true);
+
+    outputTree["status"] = result == stream_stats::benchmark_run_start_result_e::started;
+    outputTree["result"] = to_string(result);
+    send_response(response, outputTree);
+  }
+
+  /**
+   * @brief Stop an active benchmark run (measurement-spec-v1.md 6.4's
+   * POST /polaris/v1/session/timing/runs/{run_id}/stop). Same shape as
+   * startBenchmarkRun() - no request body, run_id from the URL, owning
+   * session looked up the same way.
+   *
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void stopBenchmarkRun(resp_https_t response, req_https_t request) {
+    if (!authorizeBenchmarkHarnessRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    const auto context = extract_benchmark_route_context(request);
+
+    nlohmann::json outputTree;
+    outputTree["run_id"] = context.run_id;
+
+    if (!context.session_identity) {
+      outputTree["status"] = false;
+      outputTree["result"] = to_string(stream_stats::benchmark_run_stop_result_e::rejected_wrong_session);
+      send_response(response, outputTree);
+      return;
+    }
+
+    const auto result = stream_stats::stop_benchmark_run(
+      context.run_id, context.session_identity->device_uuid, context.session_identity->session_generation, true);
+
+    // status=true only for the literal stopped outcome, matching
+    // createBenchmarkRun's own status convention (true iff the
+    // semantically-intended outcome happened, not merely "the stop
+    // request was processed without error"). stopped_early_and_aborted
+    // is a real outcome the caller triggered, not a request-processing
+    // failure, but it's not what a naive status check should read as
+    // success either - the run it produced is invalid for measurement.
+    outputTree["status"] = result == stream_stats::benchmark_run_stop_result_e::stopped;
+    outputTree["result"] = to_string(result);
+    send_response(response, outputTree);
+  }
+
   /**
    * @brief Serve the SPA index.html for any non-API, non-asset route.
    * @param response The HTTP response object.
@@ -5931,6 +6082,8 @@ namespace confighttp {
     // (see that function's own doc comment for why a Bearer-token caller is
     // exempt).
     server.resource["^/polaris/v1/session/timing/runs$"]["POST"] = createBenchmarkRun;
+    server.resource["^/polaris/v1/session/timing/runs/([^/]+)/start$"]["POST"] = startBenchmarkRun;
+    server.resource["^/polaris/v1/session/timing/runs/([^/]+)/stop$"]["POST"] = stopBenchmarkRun;
     server.resource["^/api/apps/close$"]["POST"] = withCsrf(closeApp);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
