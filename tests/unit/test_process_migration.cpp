@@ -2152,6 +2152,21 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownTerminatesOnlyTheE
 #endif
 }
 
+TEST(ProcessRuntimeConfigTests, GamescopeCountsAsPrivateFamilyLaunch) {
+#ifdef __linux__
+  // labwc private stream: headless + cage.
+  EXPECT_TRUE(proc::streaming_launch_requests_private_family(true, true, "headless_stream", ""));
+  // Gamescope reaches its cage through the mode/runtime signal, not the cage
+  // config flag, so it must still be classified private-family or its desktop
+  // Steam drain/refuse policy never runs.
+  EXPECT_TRUE(proc::streaming_launch_requests_private_family(false, false, "gamescope_stream", ""));
+  EXPECT_TRUE(proc::streaming_launch_requests_private_family(false, false, "", "gamescope"));
+  // Genuine desktop/mirror launches stay non-private.
+  EXPECT_FALSE(proc::streaming_launch_requests_private_family(false, false, "desktop_display", ""));
+  EXPECT_FALSE(proc::streaming_launch_requests_private_family(false, false, "host_virtual_display", ""));
+#endif
+}
+
 TEST(ProcessRuntimeConfigTests, UnreadableEnvironLatchSparesPrivilegedDescendants) {
 #ifdef __linux__
   // Steam's setuid sandbox helpers: EACCES on environ, root real uid,
