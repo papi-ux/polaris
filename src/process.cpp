@@ -420,7 +420,7 @@ namespace proc {
       host_pause_session_classification_t classification;
       const bool meaningful_fps_shortfall =
         stream_stats::is_meaningful_fps_shortfall(target_fps, stats.fps);
-      classification.network_risk = stats.packet_loss >= 0.35 || stats.latency_ms >= 28.0;
+      classification.network_risk = stats.network_risk;
       classification.pacing_risk =
         stats.frame_jitter_ms >= 2.2 ||
         stats.duplicate_frame_ratio >= 0.10 ||

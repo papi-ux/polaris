@@ -132,6 +132,8 @@ namespace stream_stats {
     // Network
     double latency_ms = 0;
     double packet_loss = 0;
+    /// Debounced by network_risk_tracker_t; the single truth every reader serves.
+    bool network_risk = false;
     uint64_t bytes_sent = 0;
 
     // Adaptive bitrate
@@ -348,6 +350,53 @@ namespace stream_stats {
    * @return Packet loss percentage clamped to [0.0, 100.0].
    */
   double packet_loss_percent(uint64_t scaled_loss, uint64_t scale);
+
+  /**
+   * @brief Debounced elevated/normal state behind the served network_risk.
+   *
+   * ENet's packetLoss is an EWMA computed over the low-rate control channel,
+   * so a single retransmit reads as whole percents for a while - a 0.35%
+   * cut flagged "Network jitter" on objectively perfect streams. The 2%
+   * cut matches the session-grading "fair" line, the warm-up skips the
+   * samples computed from the fewest packets, and the two-sample debounce
+   * keeps one noisy reading from flipping the HUD either way.
+   */
+  struct network_risk_tracker_t {
+    static constexpr double k_loss_elevated_pct = 2.0;
+    static constexpr double k_rtt_elevated_ms = 28.0;
+    static constexpr int k_warmup_samples = 5;
+    static constexpr int k_debounce_samples = 2;
+
+    int samples_seen = 0;
+    int consecutive_elevated = 0;
+    int consecutive_calm = 0;
+    bool elevated = false;
+
+    /** @return The debounced state after folding in one reading. */
+    bool update(double loss_pct, double rtt_ms) {
+      ++samples_seen;
+      const bool raw = loss_pct >= k_loss_elevated_pct || rtt_ms >= k_rtt_elevated_ms;
+      if (samples_seen <= k_warmup_samples) {
+        return elevated;
+      }
+      if (raw) {
+        consecutive_calm = 0;
+        if (++consecutive_elevated >= k_debounce_samples) {
+          elevated = true;
+        }
+      } else {
+        consecutive_elevated = 0;
+        if (++consecutive_calm >= k_debounce_samples) {
+          elevated = false;
+        }
+      }
+      return elevated;
+    }
+
+    void reset() {
+      *this = network_risk_tracker_t {};
+    }
+  };
 
   /**
    * @brief Update runtime mode metadata exposed to the dashboard.

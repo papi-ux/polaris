@@ -474,9 +474,6 @@
         "capture",
         "runtime",
         "topology"
-      ],
-      "optimization": [
-        "ai_recommended_mode"
       ]
     },
     "$detail": {
@@ -505,8 +502,8 @@
         "nova_reads_polaris_never_sends are served by the /optimize route handler, which",
         "attaches the profile-state and stability blocks beside the serializer; the object",
         "models append_optimization_json because that is the one named function the audit",
-        "extractor can hold to. ai_recommended_mode under polaris_sends_nova_never_reads is",
-        "simply early: it ships host-first and moves out when the Nova picker badge lands."
+        "extractor can hold to. ai_recommended_mode moved out of the ledger on",
+        "2026-08-08 when the Nova picker badge landed (papi-ux/nova#215)."
       ]
     }
   }
