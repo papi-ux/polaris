@@ -1297,6 +1297,21 @@ std::string get_local_ip_for_gateway() {
     return std::make_unique<linux_deinit_t>();
   }
 
+  // host_virtual_display is composited by KWin: its EVDI output is an ordinary
+  // KWin monitor, not a private cage. Capture must reach portal_grab, which
+  // routes it to kwingrab's output-pinned KWin ScreenCast (see PR #351). The
+  // auto-selected direct wlr/wlgrab path below would instead bind the desktop
+  // wayland-0, which does not advertise wlr-export-dmabuf — observed live to
+  // hard-fail every encoder (nvenc/vaapi/software) and produce no stream. So
+  // this mode must be kept off the auto WAYLAND source, letting PORTAL be
+  // chosen. An explicit capture=wlr still forces wlr (operator's call);
+  // cage-compositor modes (windowed/headless_stream) are unaffected because
+  // they set use_cage and are not host_virtual_display.
+  bool host_virtual_display_needs_portal() {
+    return !config::video.linux_display.use_cage_compositor
+        && config::video.linux_display.stream_mode == "host_virtual_display";
+  }
+
   void reevaluate_capture_sources() {
     sources.reset();
 
@@ -1311,8 +1326,10 @@ std::string get_local_ip_for_gateway() {
     }
 #endif
 #ifdef POLARIS_BUILD_WAYLAND
-    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "wlr"
-        || config::video.linux_display.use_cage_compositor) {
+    const bool hvd_needs_portal = host_virtual_display_needs_portal();
+    if (((config::video.capture.empty() && sources.none() && !hvd_needs_portal)
+         || config::video.capture == "wlr"
+         || config::video.linux_display.use_cage_compositor)) {
       // When cage/labwc is configured, prefer direct wlr capture over portal
       // and connect to labwc's socket instead of the desktop compositor.
       // In windowed mode this is the fast DMA-BUF path; in headless mode the
