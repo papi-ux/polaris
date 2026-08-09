@@ -762,6 +762,13 @@ namespace platf {
    */
   boost::process::v1::child run_command_shell(bool elevated, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::v1::environment &env, FILE *file, std::error_code &ec, boost::process::v1::group *group);
 
+  /**
+   * @brief Re-evaluates capture-source selection from the current in-memory config.
+   * Runs at startup and again around session-scoped stream-mode overrides so a
+   * per-session mode can cross capture families without a restart (Linux).
+   */
+  void reevaluate_capture_sources();
+
   enum class thread_priority_e : int {
     low,  ///< Low priority
     normal,  ///< Normal priority
