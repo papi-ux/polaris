@@ -107,6 +107,12 @@ namespace proc {
   );
 
   nlohmann::json desktop_launch_safety_policy_to_json(const desktop_launch_safety_policy_t &policy);
+  bool streaming_launch_requests_private_family(
+    bool headless_mode,
+    bool use_cage_compositor,
+    std::string_view stream_mode,
+    std::string_view private_runtime
+  );
   bool desktop_steam_client_active();
   bool request_desktop_steam_shutdown_for_private_stream();
 #endif

@@ -4001,6 +4001,27 @@ namespace proc {
 #endif
 
 #if defined(__linux__)
+  bool streaming_launch_requests_private_family(
+    bool headless_mode,
+    bool use_cage_compositor,
+    std::string_view stream_mode,
+    std::string_view private_runtime
+  ) {
+    // labwc private stream is (headless + cage). Gamescope is also a
+    // private-family session that owns its own display and must not share
+    // the host desktop, but it reaches its cage through a separate
+    // stream_mode/private_runtime signal (execute_impl OR-s gamescope onto
+    // use_cage_compositor at session start). Without counting it here, a
+    // gamescope launch was classified as a desktop stream: the desktop Steam
+    // drain/refuse policy never ran, so the game's `steam steam://` URI was
+    // forwarded to the running desktop Steam singleton and never reached the
+    // session.
+    if (headless_mode && use_cage_compositor) {
+      return true;
+    }
+    return stream_mode == "gamescope_stream" || private_runtime == "gamescope";
+  }
+
   desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy(
     bool private_stream_requested,
     bool mirror_desktop_explicit,
