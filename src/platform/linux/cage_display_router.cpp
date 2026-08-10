@@ -467,6 +467,29 @@ namespace cage_display_router {
       return "1";
     }
 
+    if (headless && key == "WLR_RENDER_DRM_DEVICE") {
+      // Headless-only, deliberately. On the headless backend wlroots owns DRM
+      // device selection outright and, left to itself, picks the first render
+      // node it enumerates — which on a multi-GPU host is not necessarily the
+      // one the operator configured via adapter_name, so the private compositor
+      // renders on (and the stream is captured from) the wrong card (issue #354).
+      // Pin it to adapter_name, the same render node used for capture/encode.
+      //
+      // The windowed (wayland-backend) path is left alone on purpose: there labwc
+      // is a client of the host compositor and negotiates its device from the
+      // parent's dmabuf feedback, so forcing a device could mismatch the parent
+      // and break buffer sharing on a multi-GPU host.
+      //
+      // Only a real, present /dev/dri device is meaningful: WLR_RENDER_DRM_DEVICE
+      // makes wlroots fail rather than fall back if the path is bogus, so an
+      // unset or non-device adapter_name is left to wlroots' own auto-select.
+      const auto adapter = trimmed(config::video.adapter_name);
+      if (adapter.rfind("/dev/dri/", 0) == 0 && access(adapter.c_str(), F_OK) == 0) {
+        return adapter;
+      }
+      return {};
+    }
+
     return {};
   }
 
@@ -476,11 +499,29 @@ namespace cage_display_router {
            "WLR_BACKENDS"sv,
            "WLR_RENDERER"sv,
            "WLR_HEADLESS_OUTPUTS"sv,
+           "WLR_RENDER_DRM_DEVICE"sv,
          }) {
       const auto value = labwc_process_environment_value(headless, key);
       if (!value.empty()) {
         setenv(std::string {key}.c_str(), value.c_str(), 1);
+        if (key == "WLR_RENDER_DRM_DEVICE") {
+          BOOST_LOG(info) << "labwc: pinning wlroots render device to configured adapter_name ["sv
+                          << value << "]"sv;
+        }
       }
+    }
+
+    // If a headless session has adapter_name set but it could not be used as a
+    // render device, say so — the failure mode this fixes (issue #354) is
+    // otherwise invisible: the user sets adapter_name and wlroots silently grabs
+    // a different card. Only meaningful for headless, since the windowed path
+    // intentionally leaves device selection to the parent compositor.
+    const auto adapter = trimmed(config::video.adapter_name);
+    if (headless && !adapter.empty() &&
+        labwc_process_environment_value(headless, "WLR_RENDER_DRM_DEVICE").empty()) {
+      BOOST_LOG(warning) << "labwc: adapter_name ["sv << adapter
+                         << "] is not a present /dev/dri render-device path; "sv
+                         << "wlroots will auto-select a GPU for the private compositor"sv;
     }
   }
 

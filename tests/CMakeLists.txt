@@ -109,6 +109,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_labwc_render_device_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_stream_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_prepared_ffmpeg.cpp
