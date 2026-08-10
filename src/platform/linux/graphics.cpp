@@ -118,15 +118,26 @@ namespace gl {
   }
 
   std::string shader_t::err_str() {
-    int length;
+    // length must be initialized: a failed GetShaderiv (e.g. a broken GL context)
+    // leaves it untouched, and an uninitialized garbage length made string.resize()
+    // allocate a multi-megabyte run of NULs that then flooded the log. resize(length - 1)
+    // also underflows to SIZE_MAX when length is 0.
+    int length = 0;
     ctx.GetShaderiv(handle(), GL_INFO_LOG_LENGTH, &length);
+    if (length <= 0) {
+      return {};
+    }
 
     std::string string;
     string.resize(length);
 
     ctx.GetShaderInfoLog(handle(), length, &length, string.data());
 
-    string.resize(length - 1);
+    if (length > 0) {
+      string.resize(length - 1);
+    } else {
+      string.clear();
+    }
 
     return string;
   }
@@ -194,8 +205,13 @@ namespace gl {
   }
 
   std::string program_t::err_str() {
-    int length;
+    // See shader_t::err_str: length must be initialized so a failed GetProgramiv
+    // cannot leave a garbage size that string.resize() turns into a giant allocation.
+    int length = 0;
     ctx.GetProgramiv(handle(), GL_INFO_LOG_LENGTH, &length);
+    if (length <= 0) {
+      return {};
+    }
 
     std::string string;
     string.resize(length);

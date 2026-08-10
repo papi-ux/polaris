@@ -124,7 +124,19 @@ namespace logging {
     const auto ms = record_time.time_of_day().total_milliseconds() % 1000;
 
     os << "["sv << std::put_time(&lt, "%Y-%m-%d %H:%M:%S.") << boost::format("%03u") % ms << "]: "sv
-       << log_type << view.attribute_values()[message].extract<std::string>();
+       << log_type;
+
+    // Cap any single record so one pathological message (e.g. a broken GL driver
+    // returning a multi-megabyte info log) cannot flood the log file unbounded.
+    constexpr std::size_t max_message_chars = 16 * 1024;
+    auto message_value = view.attribute_values()[message].extract<std::string>();
+    if (message_value && message_value.get().size() > max_message_chars) {
+      const auto &full = message_value.get();
+      os << std::string_view(full.data(), max_message_chars)
+         << "\u2026 [truncated "sv << (full.size() - max_message_chars) << " chars]"sv;
+    } else {
+      os << message_value;
+    }
   }
 #ifdef __ANDROID__
   namespace sinks = boost::log::sinks;

@@ -132,3 +132,47 @@ TEST(LoggingTimeStamp, FormatterPrintsTheRecordTimeStampAttribute) {
   EXPECT_NE(source.find("add_global_attribute(\"TimeStamp\""), std::string::npos)
     << "init() must register the TimeStamp global attribute";
 }
+
+// Source guard: a broken GL context must not be able to flood the log file.
+// See the "bound GL info-log length" fix -- an uninitialized GL_INFO_LOG_LENGTH
+// turned string.resize() into a multi-megabyte NUL record, and the formatter now
+// also caps any single record as a backstop.
+TEST(LoggingRunaway, FormatterCapsRecordSize) {
+  const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/logging.cpp";
+  std::ifstream file {path};
+  ASSERT_TRUE(file.good()) << "could not read src/logging.cpp via POLARIS_SOURCE_DIR";
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  const auto source = buffer.str();
+
+  const auto formatter_start = source.find("void formatter(");
+  ASSERT_NE(formatter_start, std::string::npos);
+  const auto formatter_body = source.substr(formatter_start, source.find("\n  }", formatter_start) - formatter_start);
+
+  EXPECT_NE(formatter_body.find("max_message_chars"), std::string::npos)
+    << "the formatter must cap the per-record message size so one pathological "
+       "message cannot grow the log file without bound";
+}
+
+TEST(LoggingRunaway, GlInfoLogLengthIsInitializedAndGuarded) {
+  const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/platform/linux/graphics.cpp";
+  std::ifstream file {path};
+  ASSERT_TRUE(file.good()) << "could not read src/platform/linux/graphics.cpp via POLARIS_SOURCE_DIR";
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  const auto source = buffer.str();
+
+  for (const auto *fn : {"shader_t::err_str()", "program_t::err_str()"}) {
+    const auto start = source.find(fn);
+    ASSERT_NE(start, std::string::npos) << fn << " not found in graphics.cpp";
+    const auto body = source.substr(start, source.find("\n  }", start) - start);
+
+    // A failed GetShader/Programiv(GL_INFO_LOG_LENGTH) leaves length untouched;
+    // an uninitialized garbage length made string.resize() allocate a
+    // multi-megabyte run of NULs that flooded the log.
+    EXPECT_NE(body.find("int length = 0"), std::string::npos)
+      << fn << " must initialize the info-log length to 0";
+    EXPECT_NE(body.find("length <= 0"), std::string::npos)
+      << fn << " must return early on a non-positive info-log length";
+  }
+}
