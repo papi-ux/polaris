@@ -4028,13 +4028,17 @@ namespace video {
     // work?" and its only correct outcomes are supported / not-supported. A
     // probe must never be able to fail the whole encoder or an SDR session — but
     // the trial encode it runs can raise, not just return a negative status, on
-    // some capture paths (observed: the 10-bit-SDR -> 8-bit-NV12 demotion in
-    // make_encode_device on labwc ext-image-copy DMA-BUF deterministically threw
-    // during the 10-bit HEVC probe). That exception used to propagate out of
-    // validate_encoder and trip its fail_guard, rejecting nvenc entirely even
-    // though 8-bit SDR encoding works fine and the stream is SDR. So every probe
-    // below treats a raised exception exactly like a negative result: mark the
-    // capability unsupported and keep the encoder.
+    // some capture paths (observed: the nvenc 10-bit HEVC probe on the labwc
+    // ext-image-copy DMA-BUF capture path deterministically threw a
+    // std::length_error("basic_string::_M_replace_aux") from deep in the encoder
+    // trial-encode/init — reached via make_nvenc_encode_device / init_encoder,
+    // NOT the avcodec 8-bit-NV12 demotion, which the nvenc path never runs; the
+    // exact string op has not yet been pinned, which is why the catch below now
+    // logs the probe config to locate it on the next occurrence). That exception
+    // used to propagate out of validate_encoder and trip its fail_guard,
+    // rejecting nvenc entirely even though 8-bit SDR encoding works fine and the
+    // stream is SDR. So every probe below treats a raised exception exactly like
+    // a negative result: mark the capability unsupported and keep the encoder.
     {
       // H.264 is special because encoders may support YUV 4:4:4 without supporting 10-bit color depth
       if (encoder.flags & YUV444_SUPPORT) {
@@ -4044,11 +4048,17 @@ namespace video {
                                             validate_config(disp, encoder, config_h264_yuv444) >= 0;
         } catch (const std::exception &e) {
           BOOST_LOG(warning) << "Encoder ["sv << encoder.name << "] H.264 YUV444 capability probe raised ["sv
-                             << e.what() << "]; marking YUV444 unsupported"sv;
+                             << e.what() << "] for videoFormat="sv << config_h264_yuv444.videoFormat
+                             << " chromaSamplingType="sv << config_h264_yuv444.chromaSamplingType
+                             << " dynamicRange="sv << config_h264_yuv444.dynamicRange
+                             << "; marking YUV444 unsupported"sv;
           encoder.h264[encoder_t::YUV444] = false;
         } catch (...) {
           BOOST_LOG(warning) << "Encoder ["sv << encoder.name
-                             << "] H.264 YUV444 capability probe raised a non-standard exception; marking YUV444 unsupported"sv;
+                             << "] H.264 YUV444 capability probe raised a non-standard exception for videoFormat="sv
+                             << config_h264_yuv444.videoFormat << " chromaSamplingType="sv
+                             << config_h264_yuv444.chromaSamplingType << " dynamicRange="sv
+                             << config_h264_yuv444.dynamicRange << "; marking YUV444 unsupported"sv;
           encoder.h264[encoder_t::YUV444] = false;
         }
       } else {
@@ -4099,12 +4109,18 @@ namespace video {
           }
         } catch (const std::exception &e) {
           BOOST_LOG(warning) << "Encoder ["sv << encoder.name << "] HDR/YUV444 capability probe raised ["sv
-                             << e.what() << "]; marking HDR/YUV444 unsupported and keeping the encoder for SDR"sv;
+                             << e.what() << "] for videoFormat="sv << config.videoFormat
+                             << " chromaSamplingType="sv << config.chromaSamplingType
+                             << " dynamicRange="sv << config.dynamicRange
+                             << "; marking HDR/YUV444 unsupported and keeping the encoder for SDR"sv;
           flag_map[encoder_t::YUV444] = false;
           flag_map[encoder_t::DYNAMIC_RANGE] = false;
         } catch (...) {
           BOOST_LOG(warning) << "Encoder ["sv << encoder.name
-                             << "] HDR/YUV444 capability probe raised a non-standard exception; marking HDR/YUV444 unsupported and keeping the encoder for SDR"sv;
+                             << "] HDR/YUV444 capability probe raised a non-standard exception for videoFormat="sv
+                             << config.videoFormat << " chromaSamplingType="sv << config.chromaSamplingType
+                             << " dynamicRange="sv << config.dynamicRange
+                             << "; marking HDR/YUV444 unsupported and keeping the encoder for SDR"sv;
           flag_map[encoder_t::YUV444] = false;
           flag_map[encoder_t::DYNAMIC_RANGE] = false;
         }
