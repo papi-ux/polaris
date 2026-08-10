@@ -460,7 +460,13 @@ namespace cage_display_router {
     }
 
     if (key == "WLR_RENDERER") {
-      return headless ? "gles2" : "vulkan";
+      // Both cages use the vulkan renderer. Headless was formerly pinned to gles2 to
+      // dodge a wlroots-0.19 vulkan_instance_destroy teardown SEGV; that crash no longer
+      // reproduces on 0.20.2 (retested 2026-08-10). vulkan is also the renderer whose
+      // ext-image-copy DMA-BUF the CUDA/NVENC import path can consume, which unblocks
+      // true-headless GPU-native capture -- the gles2 headless frame could not be
+      // imported, which is what forced the visible windowed-cage fallback.
+      return "vulkan";
     }
 
     if (headless && key == "WLR_HEADLESS_OUTPUTS") {
@@ -1159,14 +1165,11 @@ namespace cage_display_router {
         // Headless mode: no visible window on desktop, no parent display needed.
         // labwc creates virtual outputs that still support wlr-screencopy.
         //
-        // Known limitations on NVIDIA + wlroots 0.19:
-        // - Vulkan renderer crashes (vulkan_instance_destroy SEGV)
-        // - GLES2/pixman renderers work but screencopy returns SHM/ARGB frames
-        //   which CUDA/NVENC can't consume directly (needs NV12)
-        // - Requires SHM→NV12 conversion in the capture pipeline (future work)
-        //
-        // For now: use headless with GLES2, the SHM capture path in wlgrab
-        // handles the conversion via software scaler (slower but functional).
+        // Renderer is vulkan (see WLR_RENDERER above), same as the windowed cage.
+        // Headless ran on gles2 until the wlroots-0.19 vulkan_instance_destroy SEGV
+        // was confirmed gone on 0.20.2 (retested 2026-08-10). vulkan's ext-image-copy
+        // DMA-BUF is GPU-native and CUDA/NVENC-importable, so headless no longer has
+        // to fall back to a visible windowed cage to reach a GPU-native capture path.
         // Clear inherited display vars so children ONLY talk to labwc.
         // labwc will set its own WAYLAND_DISPLAY and start XWayland (new DISPLAY).
         // Without this, Steam connects to KDE's :0 instead of labwc's XWayland.
