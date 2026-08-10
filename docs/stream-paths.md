@@ -25,6 +25,27 @@ Config key: `linux_stream_mode = <path id>`. Legacy booleans (`headless_mode`, `
 
 Source of truth: `src/platform/linux/stream_path.{h,cpp}` registry.
 
+## Render device (labwc runtime)
+
+The `labwc` paths (`headless_stream`, `windowed_stream`) choose the private
+compositor's wlroots render device differently, and it matters on a multi-GPU
+host:
+
+- `headless_stream` runs wlroots on the **headless** backend, which owns DRM
+  device selection outright — left alone it grabs the first render node it
+  enumerates, not necessarily the configured GPU. The runtime therefore pins
+  `WLR_RENDER_DRM_DEVICE` to `adapter_name` (the same `/dev/dri/renderD*` used
+  for capture/encode) when `adapter_name` is a present device path; an unset or
+  non-device value is left to wlroots' auto-select. This keeps the compositor
+  and the encoder on the same card (issue #354).
+- `windowed_stream` runs wlroots as a **nested wayland** client of the host
+  compositor and inherits its render device from the parent's dmabuf feedback.
+  The device is deliberately **not** forced there — overriding it could mismatch
+  the parent and break buffer sharing.
+
+Source of truth: `labwc_process_environment_value` in
+`src/platform/linux/cage_display_router.cpp`.
+
 ## Adding a new path (checklist)
 
 1. **Register** a `stream_path::descriptor_t` in `stream_path::registry()` with a stable id.
