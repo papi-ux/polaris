@@ -419,5 +419,10 @@ namespace nvhttp {
   );
   bool save_pairing_state_for_tests();
   void load_pairing_state_for_tests();
+  void ensure_response_status_code_for_tests(
+    boost::property_tree::ptree &tree,
+    int fallback_code,
+    const std::string &fallback_message
+  );
 #endif
 }  // namespace nvhttp
