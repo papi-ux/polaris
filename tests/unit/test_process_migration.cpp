@@ -2594,15 +2594,28 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   );
   const auto cleanup_clear_gate = generation_finish.find("isolated_session_cleanup_clears_state(");
   const auto clear_generation = generation_finish.find("_session_instance_id.clear()");
+  // Retention must not orphan the cage: the supervisor is polaris's own
+  // pidfd-bound child and always provable, so even when the wider generation
+  // snapshot is incomplete the retention branch has to stop the session cage
+  // (via the labwc facade, whose stop() carries its own ownership proof).
+  // Without this, an incompletely attributable teardown leaves labwc running
+  // as an orphan compositor and its supervisor as a zombie until restart.
+  const auto retention_stops_cage = generation_cleanup.find("stream_runtime::labwc::stop()");
   ASSERT_NE(cleanup_result, std::string::npos);
   ASSERT_NE(cleanup_success_gate, std::string::npos);
   ASSERT_NE(reset_cage, std::string::npos);
   ASSERT_NE(retain_generation, std::string::npos);
+  ASSERT_NE(retention_stops_cage, std::string::npos)
+    << "the retention branch of terminate_isolated_session_generation must stop "
+       "the session cage rather than orphan it";
   ASSERT_NE(cleanup_clear_gate, std::string::npos);
   ASSERT_NE(clear_generation, std::string::npos);
   EXPECT_LT(cleanup_result, cleanup_success_gate);
   EXPECT_LT(cleanup_success_gate, reset_cage);
   EXPECT_LT(reset_cage, retain_generation);
+  EXPECT_LT(retain_generation, retention_stops_cage)
+    << "the cage stop belongs on the retention branch, after the retention "
+       "decision is logged";
   EXPECT_LT(cleanup_clear_gate, clear_generation);
   EXPECT_EQ(terminate.find("config::video.linux_display.use_cage_compositor"), std::string::npos);
   EXPECT_EQ(terminate.find("cage_display_router::stop()"), std::string::npos);
