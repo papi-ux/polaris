@@ -57,10 +57,14 @@ namespace portal {
     const std::string legacy = base + "/portal_restore_token.txt";
     std::error_code ec;
     if (!std::filesystem::exists(host, ec) && std::filesystem::is_regular_file(legacy, ec)) {
-      std::error_code copy_ec;
-      std::filesystem::copy_file(legacy, host, copy_ec);
-      if (!copy_ec) {
+      // Consume the legacy token instead of copying it. If a migrated host
+      // token later proves stale, clear_restore_token() must not let the next
+      // retry resurrect the same invalid token from the legacy path.
+      std::filesystem::rename(legacy, host, ec);
+      if (!ec) {
         BOOST_LOG(info) << "portal: migrated legacy restore token to "sv << host;
+      } else {
+        BOOST_LOG(warning) << "portal: failed to migrate legacy restore token: "sv << ec.message();
       }
     }
     return host;

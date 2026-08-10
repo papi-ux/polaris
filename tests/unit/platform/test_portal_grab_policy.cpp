@@ -157,6 +157,27 @@ TEST(PortalGrabPolicyTests, SelectSourcesInvalidatesRestoreTokenOnFailure) {
   EXPECT_EQ(body.find("restore_token_disabled"), std::string::npos);
 }
 
+TEST(PortalGrabPolicyTests, LegacyRestoreTokenMigrationIsOneShot) {
+  const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/portal_session.cpp";
+  std::ifstream in(path);
+  ASSERT_TRUE(in.good());
+  std::ostringstream out;
+  out << in.rdbuf();
+  const auto body = out.str();
+
+  const auto migration_start =
+    body.find("const std::string legacy = base + \"/portal_restore_token.txt\";");
+  ASSERT_NE(migration_start, std::string::npos);
+  const auto migration_end = body.find("return host;", migration_start);
+  ASSERT_NE(migration_end, std::string::npos);
+  const auto migration = body.substr(migration_start, migration_end - migration_start);
+
+  EXPECT_NE(migration.find("std::filesystem::rename(legacy, host, ec)"), std::string::npos)
+    << "legacy token migration must consume the source so a cleared stale host token is not resurrected";
+  EXPECT_EQ(migration.find("copy_file(legacy, host"), std::string::npos)
+    << "copying leaves the legacy token behind and reimports it after clear_restore_token()";
+}
+
 TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   // S4: single media_cache_t + g_media_mu (no dual-mutex). Negotiation waits
   // outside the lock so release_global_capture can progress. Session/token
