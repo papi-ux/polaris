@@ -7105,6 +7105,18 @@ namespace proc {
       stream_runtime::labwc::reset_after_external_stop();
     } else {
       BOOST_LOG(error) << "process: retaining immutable cage generation because exact-generation cleanup was incomplete"sv;
+      // The generation stays retained for whatever the snapshot could not
+      // attribute — that caution is what the next launch's re-validation is
+      // for. It is no reason to leave the session cage running: the cage
+      // supervisor is polaris's own pidfd-bound child, always provable, and
+      // with the session over an unstopped cage is just an orphan compositor
+      // spinning next to a never-reaped supervisor zombie (observed live
+      // 2026-08-10: End Session left labwc rendering shader errors and its
+      // supervisor defunct until a service restart). stop() force-stops and
+      // reaps the supervisor's private group, and fails closed on its own
+      // ownership proof, so it cannot touch anything this session did not
+      // spawn.
+      stream_runtime::labwc::stop();
     }
   }
 
