@@ -464,6 +464,26 @@ namespace nvhttp {
     }
 #endif
 
+    // Guarantee an XML response ptree carries a status_code before it is written
+    // back to the client. The launch/resume handlers arm a fail_guard that
+    // writes `tree` on *every* exit and set the status_code explicitly on each
+    // known path — but a throw after the tree is partially filled (e.g. the
+    // launchPolicy is already in it) and before a status_code is set would
+    // otherwise ship a <root> with no status_code attribute at all. Older Nova
+    // clients dereferenced that missing attribute and crashed (companion to
+    // nova #225, which now tolerates it); the host must never emit it in the
+    // first place. Explicit status_code puts win because they run before the
+    // guard fires.
+    void ensure_response_status_code(pt::ptree &tree, int fallback_code, const std::string &fallback_message) {
+      if (tree.get_optional<int>("root.<xmlattr>.status_code")) {
+        return;
+      }
+      // No status_code means the handler exited before deciding one (a throw);
+      // a status_message without a code is malformed, so set a coherent pair.
+      tree.put("root.<xmlattr>.status_code", fallback_code);
+      tree.put("root.<xmlattr>.status_message", fallback_message);
+    }
+
     proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy(
       const args_t &args,
       const proc::ctx_t &app,
@@ -2688,6 +2708,10 @@ namespace nvhttp {
     );
   }
 #endif
+
+  void ensure_response_status_code_for_tests(pt::ptree &tree, int fallback_code, const std::string &fallback_message) {
+    ensure_response_status_code(tree, fallback_code, fallback_message);
+  }
 #endif
 
 #ifdef __linux__
@@ -5487,6 +5511,8 @@ namespace nvhttp {
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
+      ensure_response_status_code(tree, 500, "The launch failed unexpectedly");
+
       std::ostringstream data;
 
       pt::write_xml(data, tree);
@@ -5824,6 +5850,8 @@ namespace nvhttp {
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
+      ensure_response_status_code(tree, 500, "The resume failed unexpectedly");
+
       std::ostringstream data;
 
       pt::write_xml(data, tree);
