@@ -15,6 +15,7 @@
 #include "src/video.h"
 #include "vaapi.h"
 #include "wayland.h"
+#include "wlgrab_frame_source.h"
 #include "wlgrab_pixel_copy.h"
 
 using namespace std::literals;
@@ -551,15 +552,27 @@ namespace wl {
     platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, bool *cursor) {
       auto capture_start = std::chrono::steady_clock::now();
       auto cursor_enabled = cursor ? *cursor : false;
+      const auto frame_source = select_extcopy_frame_source(
+        capture_ready,
+        cursor_enabled != blend_cursor,
+        prefetched_frame_pending
+      );
 
-      if (!capture_ready || cursor_enabled != blend_cursor) {
+      if (frame_source == extcopy_frame_source_e::initialize) {
         blend_cursor = cursor_enabled;
         if (extcopy.init(display, interface.copy_capture_manager, interface.output_capture_source_manager, interface.dmabuf_interface, output, blend_cursor)) {
           return platf::capture_e::reinit;
         }
         capture_ready = true;
       } else {
-        extcopy.capture(display);
+        if (frame_source == extcopy_frame_source_e::prefetched) {
+          // extcopy.init() captured this frame while validating the negotiated
+          // DMA-BUF. Hand it to the caller before requesting more damage.
+          BOOST_LOG(debug) << "wlr: Consuming ext-image-copy frame captured during initialization"sv;
+        } else {
+          extcopy.capture(display);
+        }
+
         if (interface.consume_output_topology_dirty()) {
           BOOST_LOG(warning) << "wlr: Wayland output topology changed during ext-image-copy capture; reinitializing display capture"sv;
           return platf::capture_e::reinit;
@@ -657,11 +670,13 @@ namespace wl {
       }
 
       capture_ready = true;
+      prefetched_frame_pending = true;
       return 0;
     }
 
     wl::extcopy_t extcopy;
     bool capture_ready {false};
+    bool prefetched_frame_pending {false};
     bool blend_cursor {false};
     std::uint64_t sequence {};
   };
