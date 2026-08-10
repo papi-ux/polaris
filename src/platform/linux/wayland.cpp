@@ -715,7 +715,11 @@ namespace wl {
     shm_info.height = height;
     shm_info.stride = stride;
 
-    BOOST_LOG(debug) << "Screencopy supports SHM format: "sv << format;
+    // Per-frame lines log at verbose, not debug: at 120 fps the screencopy
+    // callbacks emit hundreds of records per second, which is enough to stall
+    // the async log consumer behind journald backpressure and blow journald's
+    // burst cap right when teardown records matter (observed 2026-08-10).
+    BOOST_LOG(verbose) << "Screencopy supports SHM format: "sv << format;
   }
 
   // DMA-BUF format callback
@@ -730,13 +734,13 @@ namespace wl {
     dmabuf_info.width = width;
     dmabuf_info.height = height;
 
-    BOOST_LOG(debug) << "Screencopy supports DMA-BUF format: "sv << format;
+    BOOST_LOG(verbose) << "Screencopy supports DMA-BUF format: "sv << format;
   }
 
   // Flags callback
   void dmabuf_t::flags(zwlr_screencopy_frame_v1 *frame, std::uint32_t flags) {
     y_invert = flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT;
-    BOOST_LOG(debug) << "Frame flags: "sv << flags << (y_invert ? " (y_invert)" : "");
+    BOOST_LOG(verbose) << "Frame flags: "sv << flags << (y_invert ? " (y_invert)" : "");
   }
 
   // DMA-BUF creation helper
@@ -839,8 +843,8 @@ namespace wl {
         return;
       }
 
-      BOOST_LOG(debug) << "Reusing DMA-BUF screencopy buffer for "
-                       << dmabuf_info.width << 'x' << dmabuf_info.height;
+      BOOST_LOG(verbose) << "Reusing DMA-BUF screencopy buffer for "
+                         << dmabuf_info.width << 'x' << dmabuf_info.height;
       zwlr_screencopy_frame_v1_copy(frame, next_frame->buffer);
       return;
     }
@@ -1177,7 +1181,7 @@ namespace wl {
     std::uint32_t tv_sec_lo,
     std::uint32_t tv_nsec
   ) {
-    BOOST_LOG(debug) << "Frame ready"sv;
+    BOOST_LOG(verbose) << "Frame ready"sv;
 
     if (shm_data && shm_size > 0) {
       // SHM frame is ready — data is in shm_data
