@@ -443,26 +443,31 @@ namespace portal {
     return fd;
   }
 
-  // Helper: wait for a Response signal on a request path.
-  // Uses a dedicated GMainLoop thread to ensure D-Bus signals are delivered.
-  static GVariant *wait_for_response(GDBusConnection *conn, const std::string &request_path,
-    int timeout_ms = 30000) {
+  // Subscribe to Request::Response before issuing the portal method call.
+  // Fast KDE responses can otherwise arrive between call_sync() returning and
+  // signal subscription, leaving the caller blocked until its timeout.
+  static GVariant *portal_call_and_wait_for_response(
+    GDBusConnection *conn,
+    const char *method,
+    GVariant *params,
+    const std::string &request_path,
+    int call_timeout_ms = 5000,
+    int response_timeout_ms = 30000) {
 
     struct cb_data_t {
       GVariant *result = nullptr;
-      std::atomic<bool> done{false};
+      std::atomic<bool> done {false};
       uint32_t response = 99;
       GMainLoop *loop = nullptr;
     } cb_data;
 
-    // Create a dedicated main context and loop for this wait
+    // Capture signal delivery on a dedicated thread-default context before the
+    // synchronous method call can trigger a fast Response signal.
     auto *ctx = g_main_context_new();
     cb_data.loop = g_main_loop_new(ctx, FALSE);
-
-    // Push this context as the thread default so GDBus dispatches signals here
     g_main_context_push_thread_default(ctx);
 
-    auto sub_id = g_dbus_connection_signal_subscribe(conn,
+    const auto sub_id = g_dbus_connection_signal_subscribe(conn,
       "org.freedesktop.portal.Desktop",
       "org.freedesktop.portal.Request",
       "Response",
@@ -482,24 +487,38 @@ namespace portal {
       },
       &cb_data, nullptr);
 
-    // Run the main loop with a timeout
-    auto timeout_source = g_timeout_source_new(timeout_ms);
-    g_source_set_callback(timeout_source, [](gpointer userdata) -> gboolean {
-      auto *data = static_cast<cb_data_t *>(userdata);
-      if (!data->done) {
-        if (data->loop) g_main_loop_quit(data->loop);
-      }
-      return G_SOURCE_REMOVE;
-    }, &cb_data, nullptr);
-    g_source_attach(timeout_source, ctx);
-    g_source_unref(timeout_source);
+    const auto cleanup = [&] {
+      g_dbus_connection_signal_unsubscribe(conn, sub_id);
+      g_main_context_pop_thread_default(ctx);
+      g_main_loop_unref(cb_data.loop);
+      g_main_context_unref(ctx);
+    };
 
-    g_main_loop_run(cb_data.loop);
+    auto *call_result = portal_call_sync(conn, method, params, call_timeout_ms);
+    if (!call_result) {
+      cleanup();
+      if (cb_data.result) g_variant_unref(cb_data.result);
+      return nullptr;
+    }
+    g_variant_unref(call_result);
 
-    g_dbus_connection_signal_unsubscribe(conn, sub_id);
-    g_main_context_pop_thread_default(ctx);
-    g_main_loop_unref(cb_data.loop);
-    g_main_context_unref(ctx);
+    // The callback may already have run while call_sync() dispatched D-Bus
+    // traffic. Do not enter the loop after a completed fast response.
+    if (!cb_data.done) {
+      auto *timeout_source = g_timeout_source_new(response_timeout_ms);
+      g_source_set_callback(timeout_source, [](gpointer userdata) -> gboolean {
+        auto *data = static_cast<cb_data_t *>(userdata);
+        if (!data->done && data->loop) {
+          g_main_loop_quit(data->loop);
+        }
+        return G_SOURCE_REMOVE;
+      }, &cb_data, nullptr);
+      g_source_attach(timeout_source, ctx);
+      g_source_unref(timeout_source);
+      g_main_loop_run(cb_data.loop);
+    }
+
+    cleanup();
 
     if (!cb_data.done) {
       BOOST_LOG(warning) << "portal: Timeout waiting for response on "sv << request_path;
@@ -564,11 +583,13 @@ namespace portal {
       g_variant_builder_add(&builder, "{sv}", "handle_token",
         g_variant_new_string(handle_token.c_str()));
 
-      auto *result = portal_call_sync(session->conn, "CreateSession",
-        g_variant_new("(a{sv})", &builder));
-      if (result) g_variant_unref(result);
-
-      auto *resp = wait_for_response(session->conn, req_path, 10000);
+      auto *resp = portal_call_and_wait_for_response(
+        session->conn,
+        "CreateSession",
+        g_variant_new("(a{sv})", &builder),
+        req_path,
+        5000,
+        10000);
       if (!resp) {
         session->failed = true;
         return session;
@@ -631,23 +652,15 @@ namespace portal {
           }
         }
 
-        auto *result = portal_call_sync(session->conn, "SelectSources",
-          g_variant_new("(oa{sv})", session->session_handle.c_str(), &builder));
-        if (!result) {
-          // InvalidArgument / failed restore often fails the method call itself
-          // (no Response signal). Treat as SelectSources failure immediately.
-          BOOST_LOG(warning) << "portal: SelectSources D-Bus call failed"
-                             << (use_restore_token && !saved_token.empty() ?
-                                   " (restore token or cursor mode rejected)" :
-                                   "")
-                             << ""sv;
-          return nullptr;
-        }
-        g_variant_unref(result);
-
-        auto *resp = wait_for_response(session->conn, req_path, 10000);
+        auto *resp = portal_call_and_wait_for_response(
+          session->conn,
+          "SelectSources",
+          g_variant_new("(oa{sv})", session->session_handle.c_str(), &builder),
+          req_path,
+          5000,
+          10000);
         if (!resp) {
-          BOOST_LOG(warning) << "portal: SelectSources response missing or non-zero"
+          BOOST_LOG(warning) << "portal: SelectSources request failed or response missing"
                              << (use_restore_token && !saved_token.empty() ?
                                    " (stale restore token likely)" :
                                    "")
@@ -697,12 +710,13 @@ namespace portal {
         g_variant_builder_add(&builder, "{sv}", "handle_token",
           g_variant_new_string(handle_token.c_str()));
 
-        auto *result = portal_call_sync(session->conn, "Start",
+        return portal_call_and_wait_for_response(
+          session->conn,
+          "Start",
           g_variant_new("(osa{sv})", session->session_handle.c_str(), "", &builder),
+          req_path,
+          start_timeout_ms,
           start_timeout_ms);
-        if (result) g_variant_unref(result);
-
-        return wait_for_response(session->conn, req_path, start_timeout_ms);
       };
 
       auto *resp = try_start(next_handle_token("polaris_st"));

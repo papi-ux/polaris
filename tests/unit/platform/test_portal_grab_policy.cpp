@@ -178,6 +178,27 @@ TEST(PortalGrabPolicyTests, LegacyRestoreTokenMigrationIsOneShot) {
     << "copying leaves the legacy token behind and reimports it after clear_restore_token()";
 }
 
+TEST(PortalGrabPolicyTests, ResponseSignalSubscriptionPrecedesPortalMethodCall) {
+  const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/portal_session.cpp";
+  std::ifstream in(path);
+  ASSERT_TRUE(in.good());
+  std::ostringstream out;
+  out << in.rdbuf();
+  const auto body = out.str();
+
+  const auto helper = body.find("portal_call_and_wait_for_response");
+  ASSERT_NE(helper, std::string::npos)
+    << "portal requests need one helper that subscribes before issuing the synchronous method call";
+  const auto subscribe = body.find("g_dbus_connection_signal_subscribe", helper);
+  const auto call = body.find("portal_call_sync(conn, method", helper);
+  ASSERT_NE(subscribe, std::string::npos);
+  ASSERT_NE(call, std::string::npos);
+  EXPECT_LT(subscribe, call)
+    << "a fast Request::Response signal is lost when subscription starts after the portal method returns";
+  EXPECT_EQ(body.find("wait_for_response(session->conn"), std::string::npos)
+    << "CreateSession, SelectSources, and Start must all use the subscribe-before-call helper";
+}
+
 TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   // S4: single media_cache_t + g_media_mu (no dual-mutex). Negotiation waits
   // outside the lock so release_global_capture can progress. Session/token
