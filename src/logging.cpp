@@ -10,6 +10,7 @@
 
 // lib includes
 #include <boost/core/null_deleter.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/format.hpp>
 #include <boost/log/attributes/clock.hpp>
 #include <boost/log/common.hpp>
@@ -101,15 +102,28 @@ namespace logging {
 #endif
     };
 
-    auto now = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-      now - std::chrono::time_point_cast<std::chrono::seconds>(now)
-    );
+    // Print the RECORD's creation time, not "now". This formatter runs on the
+    // asynchronous sink's consumer thread, so with wall-clock-at-format the
+    // printed time is the FLUSH time — observed live 2026-08-10: the consumer
+    // stalled behind journald backpressure for a whole streaming session and
+    // then drained a 37,500-line backlog in one second, every line stamped
+    // with the drain moment. That fabricated a convincing-but-fake "second
+    // launch" transcript (a full RTSP handshake apparently completing in 1 ms)
+    // and made the real teardown impossible to reconstruct from the journal.
+    // The TimeStamp attribute is stamped at record creation by the global
+    // local_clock registered in init(); the wall-clock fallback only covers
+    // records logged before init() has run.
+    boost::posix_time::ptime record_time;
+    if (auto stamp = view.attribute_values()["TimeStamp"].extract<boost::posix_time::ptime>()) {
+      record_time = stamp.get();
+    } else {
+      record_time = boost::posix_time::microsec_clock::local_time();
+    }
 
-    auto t = std::chrono::system_clock::to_time_t(now);
-    auto lt = *std::localtime(&t);
+    auto lt = boost::posix_time::to_tm(record_time);
+    const auto ms = record_time.time_of_day().total_milliseconds() % 1000;
 
-    os << "["sv << std::put_time(&lt, "%Y-%m-%d %H:%M:%S.") << boost::format("%03u") % ms.count() << "]: "sv
+    os << "["sv << std::put_time(&lt, "%Y-%m-%d %H:%M:%S.") << boost::format("%03u") % ms << "]: "sv
        << log_type << view.attribute_values()[message].extract<std::string>();
   }
 #ifdef __ANDROID__
@@ -203,6 +217,16 @@ namespace logging {
     // Flush after each log record to ensure log file contents on disk isn't stale.
     // This is particularly important when running from a Windows service.
     sink->locked_backend()->auto_flush(true);
+
+    // Stamp every record with its creation time. The formatter runs later, on
+    // the asynchronous sink's consumer thread, and must print this attribute
+    // rather than the wall clock — otherwise a stalled consumer rewrites
+    // history with flush-time stamps (see the formatter comment). Idempotent
+    // across re-init: the attribute survives deinit() and a duplicate add
+    // would be rejected, so only add it when absent.
+    if (bl::core::get()->get_global_attributes().count("TimeStamp") == 0) {
+      bl::core::get()->add_global_attribute("TimeStamp", bl::attributes::local_clock());
+    }
 
     bl::core::get()->add_sink(sink);
 
