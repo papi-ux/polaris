@@ -2194,6 +2194,12 @@ TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCag
   EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(false, true));
   EXPECT_FALSE(proc::isolated_session_generation_blocks_launch_for_tests(false, false));
 
+  EXPECT_TRUE(proc::isolated_session_requires_exact_generation_cleanup_for_tests(true, false, true));
+  EXPECT_TRUE(proc::isolated_session_requires_exact_generation_cleanup_for_tests(false, true, false));
+  EXPECT_FALSE(proc::isolated_session_requires_exact_generation_cleanup_for_tests(false, true, true));
+  EXPECT_FALSE(proc::isolated_session_requires_exact_generation_cleanup_for_tests(false, false, true));
+  EXPECT_FALSE(proc::isolated_session_requires_exact_generation_cleanup_for_tests(false, false, false));
+
   EXPECT_FALSE(proc::isolated_session_cleanup_resets_router_for_tests(true, true, false));
   EXPECT_FALSE(proc::isolated_session_cleanup_clears_state_for_tests(true, true, false));
   EXPECT_FALSE(proc::isolated_session_cleanup_resets_router_for_tests(true, false, true));
@@ -2287,6 +2293,180 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationCleanupLeavesUnownedControlProces
   EXPECT_EQ(control_guard.wait(&control_status, WNOHANG), 0)
     << "unowned control process must remain alive";
   EXPECT_EQ(control_guard.terminate_and_reap(&control_status), control);
+}
+
+TEST(ProcessRuntimeConfigTests, NonCageDetachedGenerationCleanupTerminatesExactChild) {
+#ifdef __linux__
+  const std::string token = "non-cage-detached-generation-cleanup";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+  EXPECT_TRUE(proc::non_cage_detached_generation_cleanup_for_tests(token, child));
+
+  int status = 0;
+  errno = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), -1)
+    << "non-cage detached exact-generation child was not reaped by cleanup";
+  EXPECT_EQ(errno, ECHILD);
+#else
+  GTEST_SKIP() << "Linux-only detached generation cleanup";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, NonCageDetachedPartialLaunchFailureCleansPreviouslyTrackedChild) {
+#ifdef __linux__
+  const std::string token = "non-cage-detached-partial-launch-failure";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+  EXPECT_TRUE(proc::non_cage_detached_partial_launch_cleanup_for_tests(token, child));
+
+  int status = 0;
+  errno = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), -1)
+    << "partial detached-only launch failure left a previously tracked child alive or unreaped";
+  EXPECT_EQ(errno, ECHILD);
+#else
+  GTEST_SKIP() << "Linux-only detached partial-launch cleanup";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, NonCageDetachedGenerationCleanupReapsAlreadyExitedDirectChild) {
+#ifdef __linux__
+  const std::string token = "non-cage-detached-already-exited";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    _exit(0);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto unrelated = fork();
+  ASSERT_GE(unrelated, 0);
+  if (unrelated == 0) {
+    unsetenv("POLARIS_SESSION_INSTANCE_ID");
+    _exit(0);
+  }
+  linux_child_guard_t unrelated_guard {unrelated};
+
+  const auto zombie_visible_for = [](pid_t pid) {
+    std::ifstream status_file("/proc/" + std::to_string(pid) + "/status");
+    const std::string status(
+      (std::istreambuf_iterator<char>(status_file)),
+      std::istreambuf_iterator<char>()
+    );
+    return status.find("State:\tZ") != std::string::npos;
+  };
+  bool target_zombie_visible = false;
+  bool unrelated_zombie_visible = false;
+  for (int attempt = 0;
+       attempt < 40 && (!target_zombie_visible || !unrelated_zombie_visible);
+       ++attempt) {
+    target_zombie_visible = zombie_visible_for(child);
+    unrelated_zombie_visible = zombie_visible_for(unrelated);
+    if (!target_zombie_visible || !unrelated_zombie_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(target_zombie_visible);
+  ASSERT_TRUE(unrelated_zombie_visible);
+  EXPECT_TRUE(proc::non_cage_detached_generation_cleanup_for_tests(token, child));
+
+  int status = 0;
+  errno = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), -1)
+    << "already-exited detached direct child remained waitable after cleanup";
+  EXPECT_EQ(errno, ECHILD);
+
+  int unrelated_status = 0;
+  EXPECT_EQ(unrelated_guard.wait(&unrelated_status, WNOHANG), unrelated)
+    << "detached cleanup must not reap an unrelated exited direct child";
+  EXPECT_TRUE(WIFEXITED(unrelated_status));
+#else
+  GTEST_SKIP() << "Linux-only detached generation zombie cleanup";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, NonCageDetachedCaptureFailureRetainsGenerationAndSendsNoSignal) {
+#ifdef __linux__
+  const std::string token = "non-cage-detached-incomplete-capture";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+  EXPECT_TRUE(
+    proc::non_cage_detached_capture_failure_retains_generation_for_tests(token, child)
+  );
+
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "incomplete exact-generation capture must not signal the detached child";
+  EXPECT_TRUE(proc::terminate_exact_generation_processes_for_tests(token));
+  EXPECT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(WIFSIGNALED(status));
+#else
+  GTEST_SKIP() << "Linux-only detached generation capture fault";
+#endif
 }
 
 TEST(ProcessRuntimeConfigTests, ExactGenerationCaptureFailureRetainsGenerationAndLeavesChildUnsignaled) {
@@ -2463,10 +2643,20 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_NE(source.find("SYS_pidfd_send_signal"), std::string::npos);
   EXPECT_NE(source.find("poll("), std::string::npos);
   EXPECT_NE(source.find("proc_environ_contains_exact_entry("), std::string::npos);
+  const auto exact_generation_completion = source.find("return final_snapshot.capture_complete &&");
+  ASSERT_NE(exact_generation_completion, std::string::npos);
+  const auto exact_generation_completion_contract = source.substr(exact_generation_completion, 220);
   EXPECT_NE(
-    source.find("return final_snapshot.capture_complete && final_snapshot.owned.empty();"),
+    exact_generation_completion_contract.find("final_snapshot.owned.empty()"),
     std::string::npos
   );
+  EXPECT_NE(
+    exact_generation_completion_contract.find("direct_child_reap_complete"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("reap_exited_direct_children("), std::string::npos);
+  EXPECT_NE(source.find("waitid(P_PIDFD"), std::string::npos);
+  EXPECT_EQ(source.find("waitpid(handle.pid"), std::string::npos);
   EXPECT_EQ(source.find("proc_environ_contains_isolated_session_marker("), std::string::npos);
 
   const auto execute = source.substr(execute_start, execute_end - execute_start);
@@ -2482,6 +2672,10 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
     execute.find("isolated_session_generation_blocks_launch("),
     std::string::npos
   );
+  EXPECT_NE(
+    execute.find("retained_session_owned_cage || _detached_child_authority_complete"),
+    std::string::npos
+  );
   ASSERT_NE(generate_instance, std::string::npos);
   ASSERT_NE(inject_instance, std::string::npos);
   ASSERT_NE(start_cage, std::string::npos);
@@ -2490,6 +2684,51 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_LT(generate_instance, inject_instance);
   EXPECT_LT(inject_instance, start_cage);
   EXPECT_LT(start_cage, remember_cage);
+
+  const auto detached_only_gate = execute.find("const bool detached_only = !_app.detached.empty() && _app.cmd.empty()");
+  const auto retain_detached_pidfd = execute.find("_detached_child_pidfds.emplace_back", detached_only_gate);
+  const auto detach_child = execute.find("child.detach()", retain_detached_pidfd);
+  ASSERT_NE(detached_only_gate, std::string::npos);
+  ASSERT_NE(retain_detached_pidfd, std::string::npos);
+  ASSERT_NE(detach_child, std::string::npos);
+  EXPECT_LT(detached_only_gate, retain_detached_pidfd);
+  EXPECT_LT(retain_detached_pidfd, detach_child);
+
+  const auto pidfd_authority_failure = execute.find("could not retain pidfd authority for detached-only child");
+  const auto pidfd_authority_return = execute.find("return 503;", pidfd_authority_failure);
+  ASSERT_NE(pidfd_authority_failure, std::string::npos);
+  ASSERT_NE(pidfd_authority_return, std::string::npos);
+  const auto pidfd_failure_cleanup = execute.substr(
+    pidfd_authority_failure,
+    pidfd_authority_return - pidfd_authority_failure
+  );
+  EXPECT_NE(pidfd_failure_cleanup.find("WNOHANG"), std::string::npos);
+  EXPECT_NE(pidfd_failure_cleanup.find("reap_deadline"), std::string::npos);
+  EXPECT_NE(
+    pidfd_failure_cleanup.find("_detached_child_authority_complete = false"),
+    std::string::npos
+  );
+  EXPECT_EQ(pidfd_failure_cleanup.find("waitpid(child_pid, &status, 0)"), std::string::npos);
+  EXPECT_NE(
+    pidfd_failure_cleanup.find("cleanup_tracked_detached_children_after_launch_failure();"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    pidfd_failure_cleanup.find("terminate_isolated_session_generation();"),
+    std::string::npos
+  );
+
+  const auto tracked_reaper_start = source.find("bool reap_tracked_detached_children(");
+  const auto tracked_reaper_end = source.find("bool proc_pid_dir_name(", tracked_reaper_start);
+  ASSERT_NE(tracked_reaper_start, std::string::npos);
+  ASSERT_NE(tracked_reaper_end, std::string::npos);
+  const auto tracked_reaper = source.substr(
+    tracked_reaper_start,
+    tracked_reaper_end - tracked_reaper_start
+  );
+  EXPECT_NE(tracked_reaper.find("waitid(P_PIDFD"), std::string::npos);
+  EXPECT_EQ(tracked_reaper.find("waitpid(-1"), std::string::npos);
+
   EXPECT_EQ(execute.find("terminate_isolated_session_processes(\"before launching"), std::string::npos);
   const auto cage_child_start = cage_source.find("if (pid == 0)");
   const auto cage_child_end = cage_source.find("set_labwc_process_environment(headless)", cage_child_start);
@@ -2543,7 +2782,13 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_NE(source.find("_session_used_gamescope_runtime = gamescope_stream_session;"), std::string::npos);
   EXPECT_NE(terminate.find("_session_used_gamescope_runtime"), std::string::npos);
   EXPECT_NE(source.find("const bool prior_cleanup_complete = _exact_generation_cleanup_complete;"), std::string::npos);
-  EXPECT_NE(source.find("prior_cleanup_complete && isolated_cleanup_complete"), std::string::npos);
+  const auto cleanup_completion_chain = source.find(
+    "_exact_generation_cleanup_complete = prior_cleanup_complete &&"
+  );
+  ASSERT_NE(cleanup_completion_chain, std::string::npos);
+  const auto cleanup_completion_contract = source.substr(cleanup_completion_chain, 260);
+  EXPECT_NE(cleanup_completion_contract.find("isolated_cleanup_complete"), std::string::npos);
+  EXPECT_NE(cleanup_completion_contract.find("detached_authority_complete"), std::string::npos);
   EXPECT_LT(terminate_generation, terminate_main);
   EXPECT_LT(terminate_generation, legacy_group_gate);
   EXPECT_LT(legacy_group_gate, legacy_detach_gate);
