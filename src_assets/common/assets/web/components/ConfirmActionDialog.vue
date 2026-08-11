@@ -17,10 +17,10 @@
       >
         <div class="flex items-start justify-between gap-4">
           <div>
-            <div class="text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-200">{{ eyebrow }}</div>
+            <div class="text-[11px] font-semibold uppercase tracking-[0.2em] text-warning-bright">{{ eyebrow }}</div>
             <h2 :id="titleId" class="mt-2 text-xl font-semibold text-silver">{{ title }}</h2>
           </div>
-          <span class="rounded-full border border-amber-300/30 bg-amber-300/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-100">
+          <span class="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-warning-bright">
             {{ impactLabel }}
           </span>
         </div>
@@ -29,12 +29,12 @@
 
         <ul v-if="impactItems.length" class="mt-4 space-y-2 rounded-xl border border-storm/20 bg-void/35 p-3">
           <li v-for="item in impactItems" :key="item" class="flex gap-2 text-sm text-silver">
-            <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-200"></span>
+            <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-warning-bright"></span>
             <span>{{ item }}</span>
           </li>
         </ul>
 
-        <div v-if="error" class="mt-4 rounded-lg border-l-4 border-red-500 bg-red-500/10 px-3 py-2 text-sm text-red-100">
+        <div v-if="error" class="mt-4 rounded-lg border-l-4 border-danger bg-danger/10 px-3 py-2 text-sm text-danger-bright">
           {{ error }}
         </div>
         <div v-if="pending" class="mt-4 text-sm text-storm" aria-live="polite">
@@ -54,7 +54,7 @@
           <button
             type="button"
             data-confirm-confirm
-            class="focus-ring rounded-lg border border-red-400/35 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-100 transition-colors hover:border-red-300/60 hover:bg-red-500/25 disabled:cursor-wait disabled:opacity-70"
+            class="focus-ring rounded-lg border border-danger/35 bg-danger/15 px-4 py-2 text-sm font-semibold text-danger-bright transition-colors hover:border-danger/60 hover:bg-danger/25 disabled:cursor-wait disabled:opacity-70"
             :disabled="pending"
             @click="$emit('confirm')"
           >

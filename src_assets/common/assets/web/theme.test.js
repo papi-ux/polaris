@@ -71,17 +71,21 @@ describe('theme skin registry', () => {
     expect(portableChromeCss).toContain('box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), inset 0 -1px 0 rgba(81, 94, 110, 0.30), 0 8px 20px rgba(72, 84, 99, 0.12);')
   })
 
-  it('dims Portable Chrome whites and restrains green status text for readability', () => {
+  it('dims Portable Chrome whites and re-pins status tokens for the light shell', () => {
     const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
     const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
 
     expect(portableChromeCss).toContain('--color-background: #b8c1cc')
     expect(portableChromeCss).toContain('--color-surface: #d6dde5')
     expect(portableChromeCss).toContain('linear-gradient(135deg, #d7dde5 0%, #b8c1cc 46%, #98a6b5 100%)')
-    expect(portableChromeCss).toContain('[data-theme="portable-chrome"] [class*="text-green-"]')
-    expect(portableChromeCss).toContain('color: #315b45 !important;')
-    expect(portableChromeCss).toContain('background-color: rgba(58, 102, 78, 0.12) !important;')
-    expect(portableChromeCss).toContain('border-color: rgba(49, 91, 69, 0.34) !important;')
+    // Status colors are themed tokens now; the old [class*="text-green-"]
+    // !important clamp must stay gone.
+    expect(portableChromeCss).toContain('--color-success: #315b45')
+    expect(portableChromeCss).toContain('--color-warning: #92400e')
+    expect(portableChromeCss).toContain('--color-danger: #b91c1c')
+    expect(portableChromeCss).toContain('--color-info: #1d4ed8')
+    expect(portableChromeCss).not.toContain('!important')
+    expect(css).not.toContain('[class*="text-green-"]')
   })
 
   it('keeps Portable Chrome tokens readable against Moonlight-grey panels', () => {
@@ -91,10 +95,15 @@ describe('theme skin registry', () => {
 
     expect(contrastRatio(tokens.foreground, tokens.surface)).toBeGreaterThanOrEqual(7)
     expect(contrastRatio(tokens.silver, tokens.surface)).toBeGreaterThanOrEqual(7)
-    expect(contrastRatio(tokens.muted, tokens.surface)).toBeGreaterThanOrEqual(4.5)
+    // storm is the caption/body muted text color, so it keeps the AA body-text
+    // floor the removed --color-muted alias used to carry.
+    expect(contrastRatio(tokens.storm, tokens.surface)).toBeGreaterThanOrEqual(4.5)
     expect(contrastRatio(tokens.ice, tokens.surface)).toBeGreaterThanOrEqual(7)
-    expect(contrastRatio('#315b45', tokens.surface)).toBeGreaterThanOrEqual(4.5)
     expect(contrastRatio(tokens.accent, tokens.surface)).toBeGreaterThanOrEqual(3)
+    // Every status token must hold AA body-text contrast on the light panels.
+    for (const status of ['success', 'warning', 'danger', 'info']) {
+      expect(contrastRatio(tokens[status], tokens.surface), `--color-${status}`).toBeGreaterThanOrEqual(4.5)
+    }
   })
 
   it('makes Miami cyan/aqua the scoped hero accent without leaking into other skins', () => {
