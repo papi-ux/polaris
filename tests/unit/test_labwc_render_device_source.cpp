@@ -19,12 +19,24 @@
 
 namespace {
 
-  std::string read_cage_router_source() {
-    const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/platform/linux/cage_display_router.cpp";
+  std::string read_source(const char *relative_path) {
+    const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / relative_path;
     std::ifstream file {path};
     std::ostringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+  }
+
+  std::string read_cage_router_source() {
+    return read_source("src/platform/linux/cage_display_router.cpp");
+  }
+
+  std::size_t count_occurrences(const std::string &haystack, const std::string &needle) {
+    std::size_t count = 0;
+    for (auto pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + needle.size())) {
+      ++count;
+    }
+    return count;
   }
 
 }  // namespace
@@ -56,15 +68,56 @@ TEST(LabwcRenderDeviceSource, PinsWlrootsRenderDeviceToConfiguredAdapter) {
   EXPECT_NE(set_env_body.find("\"WLR_RENDER_DRM_DEVICE\"sv"), std::string::npos)
     << "WLR_RENDER_DRM_DEVICE must be exported to labwc, not just computed";
 
-  // Only a present /dev/dri device is used; a bad path is left to auto-select,
-  // never forced (which would make wlroots fail instead of falling back).
+  // Only an accessible /dev/dri device is used; a bad path is never forced
+  // (which would make wlroots fail instead of falling back), and a node the
+  // Polaris user cannot open (no render group) is exactly as fatal as a
+  // missing one, so the check must be R_OK|W_OK rather than mere existence.
   EXPECT_NE(source.find("/dev/dri/"), std::string::npos)
     << "adapter_name must be validated as a /dev/dri device path";
-  EXPECT_NE(source.find("access(adapter.c_str(), F_OK)"), std::string::npos)
-    << "adapter_name must be checked for existence before being forced on wlroots";
+  EXPECT_NE(source.find("access(adapter.c_str(), R_OK | W_OK)"), std::string::npos)
+    << "adapter_name must be checked for read/write access before being forced on wlroots";
 
   // A configured-but-unusable adapter_name must be surfaced, since the bug it
   // fixes is otherwise invisible (wlroots silently grabs another card).
   EXPECT_NE(source.find("wlroots will auto-select a GPU"), std::string::npos)
     << "an ignored adapter_name must be logged, not swallowed";
+}
+
+TEST(LabwcRenderDeviceSource, FallsBackToSharedDefaultRenderDevice) {
+  const auto source = read_cage_router_source();
+  ASSERT_FALSE(source.empty()) << "could not read cage_display_router.cpp via POLARIS_SOURCE_DIR";
+
+  // With no usable adapter_name the headless pin must come from the shared
+  // default-device resolver, never from wlroots' own auto-pick: probe order is
+  // what put the private compositor on the APU while VAAPI encoded on the dGPU
+  // (issue #367).
+  const auto pin_pos = source.find("headless && key == \"WLR_RENDER_DRM_DEVICE\"");
+  ASSERT_NE(pin_pos, std::string::npos);
+  const auto pin_body = source.substr(pin_pos, 2400);
+  EXPECT_NE(pin_body.find("platf::default_render_device()"), std::string::npos)
+    << "the headless render-device pin must fall back to platf::default_render_device() "
+       "when adapter_name is unset or unusable";
+}
+
+TEST(LabwcRenderDeviceSource, VaapiDefaultsToSharedResolverNotRenderD128) {
+  const auto source = read_source("src/platform/linux/vaapi.cpp");
+  ASSERT_FALSE(source.empty()) << "could not read vaapi.cpp via POLARIS_SOURCE_DIR";
+
+  // The encoder side of the same agreement: VAAPI must resolve its default
+  // device through the VAAPI-safe shared resolver — the general default may
+  // pick an NVIDIA node, where no VA driver exists. The renderD128 literal is
+  // a probe-order accident on multi-GPU hosts and may survive only as the
+  // last-resort inside that single fallback helper.
+  EXPECT_NE(source.find("platf::default_vaapi_render_device()"), std::string::npos)
+    << "vaapi must resolve its default device through the VAAPI-safe shared resolver "
+       "so encode and headless capture agree on multi-GPU hosts";
+  EXPECT_LE(count_occurrences(source, "/dev/dri/renderD128"), 1u)
+    << "hardcoded renderD128 fallbacks outside the single last-resort helper "
+       "reintroduce the encoder/compositor device split (issue #367)";
+  // A configured adapter_name must go through the same trim-and-validate the
+  // cage pin applies; passing it through verbatim recreates the silent
+  // compositor/encoder split for stale or mistyped paths.
+  EXPECT_NE(source.find("access(adapter.c_str(), R_OK | W_OK)"), std::string::npos)
+    << "vaapi must validate adapter_name accessibility before using it, "
+       "mirroring the cage pin's checks";
 }

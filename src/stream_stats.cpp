@@ -840,8 +840,19 @@ namespace stream_stats {
     // noise, so Doctor said "network jitter" over perfect streams.
     const bool network_fail = stats.network_risk && (stats.packet_loss > 2.0 || stats.latency_ms >= 45.0);
     const bool network_watch = stats.network_risk && !network_fail;
-    const bool encoder_fail = stats.encode_time_ms >= 12.0 || stats.avg_frame_age_ms >= 22.0;
-    const bool encoder_watch = !encoder_fail && (stats.encode_time_ms >= 8.0 || stats.avg_frame_age_ms >= 18.0);
+    // Frame age is capture→encoder latency. On a CPU-copy capture path it is
+    // dominated by the SHM copy/convert, so an over-budget age indicts the
+    // capture path, not the encoder — the old verdict here sent an SHM-bound
+    // user to lower bitrate, which cannot recover capture throughput (issue
+    // #367: encode at 5.8 ms of budget while frames arrived 26.5 ms old).
+    const bool encoder_time_fail = stats.encode_time_ms >= 12.0;
+    const bool frame_age_counts_against_encoder = !capture_cpu_copy;
+    const bool encoder_fail = encoder_time_fail ||
+                              (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 22.0);
+    const bool encoder_watch = !encoder_fail &&
+                               (stats.encode_time_ms >= 8.0 ||
+                                (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 18.0));
+    const bool capture_latency_fail = capture_cpu_copy && !encoder_time_fail && stats.avg_frame_age_ms >= 22.0;
     const bool pacing_watch =
       stats.frame_jitter_ms >= 2.2 ||
       stats.duplicate_frame_ratio >= 0.10 ||
@@ -852,8 +863,14 @@ namespace stream_stats {
     if (primary_issue == "steady") primary_issue = "none";
     if (primary_issue.empty()) {
       if (!stats.streaming) primary_issue = "no_active_stream";
-      else if (network_fail || network_watch) primary_issue = "network_jitter";
-      else if (encoder_fail || encoder_watch) primary_issue = "encoder_load";
+      else if (network_fail) primary_issue = "network_jitter";
+      else if (encoder_fail) primary_issue = "encoder_load";
+      // A capture path failing its frame-age budget is the red verdict here;
+      // letting a mere network watch outrank it would re-serve the
+      // lower-bitrate advice this attribution exists to avoid.
+      else if (capture_latency_fail) primary_issue = capture_reason;
+      else if (network_watch) primary_issue = "network_jitter";
+      else if (encoder_watch) primary_issue = "encoder_load";
       else if (capture_cpu_copy) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
@@ -870,7 +887,7 @@ namespace stream_stats {
       status = "unknown";
       severity = "warning";
       simple_state = "Needs attention";
-    } else if (health_grade == "degraded" || network_fail || encoder_fail) {
+    } else if (health_grade == "degraded" || network_fail || encoder_fail || capture_latency_fail) {
       traffic = "red";
       status = "needs_action";
       severity = "critical";
@@ -894,7 +911,7 @@ namespace stream_stats {
 
     nlohmann::json evidence = nlohmann::json::array();
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
-    append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
+    append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_latency_fail ? "fail" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
     append_doctor_evidence(evidence, "packet_loss", "Packet loss", stats.packet_loss, "%", network_fail ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Packet loss reported by current stream telemetry.");
     append_doctor_evidence(evidence, "frame_pacing", "Frame pacing", stats.frame_jitter_ms, "ms jitter", pacing_watch ? "watch" : "pass", "stream_stats", "Frame jitter, duplicate/drop ratios, and target FPS gap classify pacing risk.");
