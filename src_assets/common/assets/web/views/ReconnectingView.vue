@@ -1,6 +1,6 @@
 <template>
   <main class="relative flex min-h-screen items-center justify-center overflow-hidden bg-background p-6">
-    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(124,115,255,0.16),transparent_38%),radial-gradient(circle_at_bottom_right,rgba(200,214,229,0.08),transparent_30%)]"></div>
+    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,color-mix(in_srgb,var(--color-accent)_16%,transparent),transparent_38%),radial-gradient(circle_at_bottom_right,color-mix(in_srgb,var(--color-ice)_8%,transparent),transparent_30%)]"></div>
     <section
       role="status"
       aria-live="polite"
@@ -16,7 +16,7 @@
         Polaris is temporarily unavailable. Your session has not been cleared.
       </p>
       <div class="mx-auto mt-6 flex w-fit items-center gap-3 rounded-full border border-storm/20 bg-void/45 px-4 py-2 text-xs text-storm">
-        <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.55)]"></span>
+        <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-warning shadow-[0_0_14px_color-mix(in_srgb,var(--color-warning)_55%,transparent)]"></span>
         {{ checking ? 'Checking host…' : `Retrying connection · attempt ${attempts + 1}` }}
       </div>
       <button

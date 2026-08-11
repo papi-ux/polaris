@@ -32,7 +32,7 @@
           <a
             v-for="document in legalDocs"
             :key="document.href"
-            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-red-500/18 px-4 text-sm font-medium text-red-300 transition-[background-color,color] duration-200 hover:bg-red-500/28 no-underline"
+            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-danger/18 px-4 text-sm font-medium text-danger transition-[background-color,color] duration-200 hover:bg-danger/28 no-underline"
             :href="document.href"
             target="_blank"
           >

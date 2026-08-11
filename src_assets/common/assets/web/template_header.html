@@ -5,3 +5,16 @@
 <title>Polaris</title>
 <link rel="icon" type="image/x-icon" href="./images/polaris-favicon.ico?v=20260726">
 <link rel="icon" type="image/svg+xml" href="./images/polaris-favicon.svg?v=20260726">
+<script src="./theme-boot.js"></script>
+<link rel="preload" href="./assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  /* Inter is self-hosted: this UI must work offline against a self-signed
+     host, so no font CDNs. Served from public/assets/fonts/. */
+  @font-face {
+    font-family: 'Inter';
+    src: url('./assets/fonts/InterVariable.woff2') format('woff2');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }
+</style>
