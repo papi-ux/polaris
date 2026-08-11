@@ -955,6 +955,14 @@ namespace proc {
       return session_owned_cage || generation_available;
     }
 
+    bool isolated_session_requires_exact_generation_cleanup(
+      bool session_owned_cage,
+      bool has_detached_commands,
+      bool has_main_command
+    ) {
+      return session_owned_cage || (has_detached_commands && !has_main_command);
+    }
+
     bool unreadable_environ_latches_capture(
       int read_error,
       std::optional<uid_t> real_uid,
@@ -983,11 +991,11 @@ namespace proc {
     }
 
     bool isolated_session_cleanup_clears_state(
-      bool session_owned_cage,
+      bool exact_cleanup_required,
       bool generation_available,
       bool exact_cleanup_complete
     ) {
-      return !session_owned_cage || (generation_available && exact_cleanup_complete);
+      return !exact_cleanup_required || (generation_available && exact_cleanup_complete);
     }
 
     bool isolated_session_uses_legacy_group_termination(
@@ -1081,37 +1089,6 @@ namespace proc {
         "systemctl --user start polaris-gamescope-idle.service 2>/dev/null"
       );
     }
-
-    struct pidfd_handle_t {
-      pid_t pid = -1;
-      int fd = -1;
-
-      pidfd_handle_t() = default;
-      pidfd_handle_t(pid_t process_id, int descriptor): pid(process_id), fd(descriptor) {}
-      pidfd_handle_t(const pidfd_handle_t &) = delete;
-      pidfd_handle_t &operator=(const pidfd_handle_t &) = delete;
-      pidfd_handle_t(pidfd_handle_t &&other) noexcept: pid(other.pid), fd(other.fd) {
-        other.pid = -1;
-        other.fd = -1;
-      }
-      pidfd_handle_t &operator=(pidfd_handle_t &&other) noexcept {
-        if (this != &other) {
-          if (fd >= 0) {
-            close(fd);
-          }
-          pid = other.pid;
-          fd = other.fd;
-          other.pid = -1;
-          other.fd = -1;
-        }
-        return *this;
-      }
-      ~pidfd_handle_t() {
-        if (fd >= 0) {
-          close(fd);
-        }
-      }
-    };
 
 #ifdef POLARIS_TESTS
     thread_local pid_t forced_pidfd_open_failure_pid = -1;
@@ -1234,6 +1211,83 @@ namespace proc {
         }
       }
       return wait_for_pidfds_exit(handles, kill_timeout);
+    }
+
+    bool reap_exited_direct_children(
+      const std::vector<pidfd_handle_t> &handles,
+      std::string_view label
+    ) {
+      bool complete = true;
+      for (const auto &handle : handles) {
+        siginfo_t child_info {};
+        int result;
+        do {
+          result = waitid(P_PIDFD, static_cast<id_t>(handle.fd), &child_info, WEXITED | WNOHANG);
+        } while (result < 0 && errno == EINTR);
+
+        if (result == 0 && child_info.si_pid != 0) {
+          BOOST_LOG(info) << "process: reaped direct child for "sv << label
+                          << " pid="sv << handle.pid;
+          continue;
+        }
+        if (result < 0 && errno == ECHILD) {
+          // Non-child descendants are reaped by their actual parent. ECHILD also
+          // covers a direct child already consumed by another SIGCHLD owner.
+          continue;
+        }
+
+        complete = false;
+        if (result == 0) {
+          BOOST_LOG(warning) << "process: pidfd reported exit but direct child was not waitable for "sv
+                             << label << " pid="sv << handle.pid;
+        } else {
+          BOOST_LOG(warning) << "process: waitid(P_PIDFD) failed while reaping "sv << label
+                             << " pid="sv << handle.pid << " error="sv << std::strerror(errno);
+        }
+      }
+      return complete;
+    }
+
+    bool reap_tracked_detached_children(
+      std::vector<pidfd_handle_t> &handles,
+      std::string_view label,
+      bool require_exit
+    ) {
+      bool complete = true;
+      for (auto it = handles.begin(); it != handles.end();) {
+        siginfo_t child_info {};
+        int result;
+        do {
+          result = waitid(P_PIDFD, static_cast<id_t>(it->fd), &child_info, WEXITED | WNOHANG);
+        } while (result < 0 && errno == EINTR);
+
+        if (result == 0 && child_info.si_pid != 0) {
+          BOOST_LOG(info) << "process: reaped tracked detached direct child for "sv << label
+                          << " pid="sv << it->pid;
+          it = handles.erase(it);
+          continue;
+        }
+        if (result < 0 && errno == ECHILD) {
+          // The exact child was already consumed by another SIGCHLD owner.
+          it = handles.erase(it);
+          continue;
+        }
+        if (result == 0) {
+          if (require_exit) {
+            complete = false;
+            BOOST_LOG(warning) << "process: tracked detached direct child was not waitable after termination for "sv
+                               << label << " pid="sv << it->pid;
+          }
+          ++it;
+          continue;
+        }
+
+        complete = false;
+        BOOST_LOG(warning) << "process: waitid(P_PIDFD) failed for tracked detached child "sv
+                           << label << " pid="sv << it->pid << " error="sv << std::strerror(errno);
+        ++it;
+      }
+      return complete;
     }
 
     bool proc_pid_dir_name(std::string_view name) {
@@ -1653,12 +1707,21 @@ namespace proc {
 
     bool terminate_isolated_session_processes(
       std::string_view session_instance_id,
-      std::string_view reason
+      std::string_view reason,
+      std::vector<pidfd_handle_t> *tracked_detached_children = nullptr
     ) {
       if (session_instance_id.empty()) {
         return false;
       }
 
+      bool direct_child_reap_complete = true;
+      if (tracked_detached_children != nullptr) {
+        direct_child_reap_complete = reap_tracked_detached_children(
+          *tracked_detached_children,
+          "detached session process"sv,
+          false
+        );
+      }
       for (int pass = 0; pass < 2; ++pass) {
         auto snapshot = isolated_session_process_snapshot(session_instance_id);
         if (!snapshot.capture_complete) {
@@ -1666,19 +1729,53 @@ namespace proc {
           return false;
         }
         if (snapshot.owned.empty()) {
-          return true;
+          if (tracked_detached_children != nullptr) {
+            direct_child_reap_complete = reap_tracked_detached_children(
+                                           *tracked_detached_children,
+                                           "detached session process"sv,
+                                           false
+                                         ) &&
+                                         direct_child_reap_complete;
+          }
+          return direct_child_reap_complete &&
+                 (tracked_detached_children == nullptr || tracked_detached_children->empty());
         }
 
         BOOST_LOG(info) << "process: terminating "sv << snapshot.owned.size()
                         << " exact-generation isolated process(es) "sv << reason;
-        if (!terminate_pidfds(snapshot.owned, 2s, 1s, "isolated session process"sv)) {
+        const bool terminated = terminate_pidfds(snapshot.owned, 2s, 1s, "isolated session process"sv);
+        if (tracked_detached_children != nullptr) {
+          direct_child_reap_complete = reap_exited_direct_children(
+                                         snapshot.owned,
+                                         "detached session process"sv
+                                       ) &&
+                                       direct_child_reap_complete;
+          direct_child_reap_complete = reap_tracked_detached_children(
+                                         *tracked_detached_children,
+                                         "detached session process"sv,
+                                         true
+                                       ) &&
+                                       direct_child_reap_complete;
+        }
+        if (!terminated) {
           BOOST_LOG(warning) << "process: exact-generation isolated processes remained after bounded pidfd cleanup "sv
                              << reason;
         }
       }
 
       const auto final_snapshot = isolated_session_process_snapshot(session_instance_id);
-      return final_snapshot.capture_complete && final_snapshot.owned.empty();
+      if (tracked_detached_children != nullptr) {
+        direct_child_reap_complete = reap_tracked_detached_children(
+                                       *tracked_detached_children,
+                                       "detached session process"sv,
+                                       true
+                                     ) &&
+                                     direct_child_reap_complete;
+      }
+      return final_snapshot.capture_complete &&
+             final_snapshot.owned.empty() &&
+             direct_child_reap_complete &&
+             (tracked_detached_children == nullptr || tracked_detached_children->empty());
     }
 
     struct steam_client_ownership_snapshot_t {
@@ -4497,6 +4594,161 @@ namespace proc {
            );
   }
 
+  bool proc_t::non_cage_detached_generation_cleanup_for_tests(
+    std::string_view session_instance_id,
+    pid_t direct_child_pid
+  ) {
+    int pidfd_open_error = 0;
+    auto tracked_child = open_process_pidfd(direct_child_pid, pidfd_open_error);
+    if (!tracked_child) {
+      return false;
+    }
+    const auto previous_app = _app;
+    const auto previous_instance_id = _session_instance_id;
+    const auto previous_used_cage = _session_used_cage_compositor;
+    const auto previous_used_gamescope = _session_used_gamescope_runtime;
+    const auto previous_cleanup_complete = _exact_generation_cleanup_complete;
+    _app = {};
+    _app.detached = {"detached-generation-test"};
+    _session_instance_id = session_instance_id;
+    _session_used_cage_compositor = false;
+    _session_used_gamescope_runtime = false;
+    _exact_generation_cleanup_complete = true;
+    auto restore_state = util::fail_guard([
+      this,
+      previous_app,
+      previous_instance_id,
+      previous_used_cage,
+      previous_used_gamescope,
+      previous_cleanup_complete
+    ]() {
+      _app = previous_app;
+      _session_instance_id = previous_instance_id;
+      _session_used_cage_compositor = previous_used_cage;
+      _session_used_gamescope_runtime = previous_used_gamescope;
+      _exact_generation_cleanup_complete = previous_cleanup_complete;
+    });
+
+    _detached_child_pidfds.emplace_back(std::move(*tracked_child));
+    terminate_isolated_session_generation();
+    finish_isolated_session_generation_cleanup();
+    return _exact_generation_cleanup_complete && _session_instance_id.empty();
+  }
+
+  bool proc_t::non_cage_detached_capture_failure_retains_generation_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  ) {
+    int pidfd_open_error = 0;
+    auto tracked_child = open_process_pidfd(forced_capture_failure_pid, pidfd_open_error);
+    if (!tracked_child) {
+      return false;
+    }
+    const auto previous_failure_pid = forced_isolated_session_capture_failure_pid;
+    const auto previous_app = _app;
+    const auto previous_instance_id = _session_instance_id;
+    const auto previous_used_cage = _session_used_cage_compositor;
+    const auto previous_used_gamescope = _session_used_gamescope_runtime;
+    const auto previous_cleanup_complete = _exact_generation_cleanup_complete;
+    forced_isolated_session_capture_failure_pid = forced_capture_failure_pid;
+    _app = {};
+    _app.detached = {"detached-generation-test"};
+    _session_instance_id = session_instance_id;
+    _session_used_cage_compositor = false;
+    _session_used_gamescope_runtime = false;
+    _exact_generation_cleanup_complete = true;
+    auto restore_state = util::fail_guard([
+      this,
+      previous_failure_pid,
+      previous_app,
+      previous_instance_id,
+      previous_used_cage,
+      previous_used_gamescope,
+      previous_cleanup_complete
+    ]() {
+      forced_isolated_session_capture_failure_pid = previous_failure_pid;
+      _app = previous_app;
+      _session_instance_id = previous_instance_id;
+      _session_used_cage_compositor = previous_used_cage;
+      _session_used_gamescope_runtime = previous_used_gamescope;
+      _exact_generation_cleanup_complete = previous_cleanup_complete;
+    });
+
+    _detached_child_pidfds.emplace_back(std::move(*tracked_child));
+    terminate_isolated_session_generation();
+    finish_isolated_session_generation_cleanup();
+    const bool retained_after_capture_failure =
+      !_exact_generation_cleanup_complete &&
+      !_session_used_cage_compositor &&
+      _session_instance_id == session_instance_id &&
+      isolated_session_generation_blocks_launch(
+        _session_used_cage_compositor,
+        !_session_instance_id.empty()
+      );
+
+    // execute_impl() calls terminate_impl() once more before it reaches the
+    // retained-generation relaunch gate. By then the stopped app metadata has
+    // already been cleared, so the retained credential must remain authoritative
+    // without consulting _app again.
+    _app = {};
+    finish_isolated_session_generation_cleanup();
+    return retained_after_capture_failure &&
+           _session_instance_id == session_instance_id &&
+           isolated_session_generation_blocks_launch(
+             _session_used_cage_compositor,
+             !_session_instance_id.empty()
+           );
+  }
+
+  bool proc_t::non_cage_detached_partial_launch_cleanup_for_tests(
+    std::string_view session_instance_id,
+    pid_t prior_child_pid
+  ) {
+    int pidfd_open_error = 0;
+    auto tracked_child = open_process_pidfd(prior_child_pid, pidfd_open_error);
+    if (!tracked_child) {
+      return false;
+    }
+    const auto previous_app = _app;
+    const auto previous_instance_id = _session_instance_id;
+    const auto previous_used_cage = _session_used_cage_compositor;
+    const auto previous_used_gamescope = _session_used_gamescope_runtime;
+    const auto previous_authority_complete = _detached_child_authority_complete;
+    const auto previous_cleanup_complete = _exact_generation_cleanup_complete;
+    _app = {};
+    _app.detached = {"detached-generation-test-1", "detached-generation-test-2"};
+    _session_instance_id = session_instance_id;
+    _session_used_cage_compositor = false;
+    _session_used_gamescope_runtime = false;
+    _detached_child_authority_complete = true;
+    _exact_generation_cleanup_complete = true;
+    auto restore_state = util::fail_guard([
+      this,
+      previous_app,
+      previous_instance_id,
+      previous_used_cage,
+      previous_used_gamescope,
+      previous_authority_complete,
+      previous_cleanup_complete
+    ]() {
+      _app = previous_app;
+      _session_instance_id = previous_instance_id;
+      _session_used_cage_compositor = previous_used_cage;
+      _session_used_gamescope_runtime = previous_used_gamescope;
+      _detached_child_authority_complete = previous_authority_complete;
+      _exact_generation_cleanup_complete = previous_cleanup_complete;
+    });
+
+    _detached_child_pidfds.emplace_back(std::move(*tracked_child));
+    const bool direct_cleanup_complete = cleanup_tracked_detached_children_after_launch_failure();
+    terminate_isolated_session_generation();
+    finish_isolated_session_generation_cleanup();
+    return direct_cleanup_complete &&
+           _detached_child_pidfds.empty() &&
+           _exact_generation_cleanup_complete &&
+           _session_instance_id.empty();
+  }
+
   bool proc_t::terminate_session_owned_steam_before_cage_stop_for_tests(
     const ctx_t &app,
     bool session_owned_cage,
@@ -4538,6 +4790,42 @@ namespace proc {
     return test_process.isolated_session_capture_failure_retains_generation_for_tests(
       session_instance_id,
       forced_capture_failure_pid
+    );
+  }
+
+  bool non_cage_detached_generation_cleanup_for_tests(
+    std::string_view session_instance_id,
+    pid_t direct_child_pid
+  ) {
+    boost::process::v1::environment env = boost::this_process::environment();
+    proc_t test_process {std::move(env), {}};
+    return test_process.non_cage_detached_generation_cleanup_for_tests(
+      session_instance_id,
+      direct_child_pid
+    );
+  }
+
+  bool non_cage_detached_capture_failure_retains_generation_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  ) {
+    boost::process::v1::environment env = boost::this_process::environment();
+    proc_t test_process {std::move(env), {}};
+    return test_process.non_cage_detached_capture_failure_retains_generation_for_tests(
+      session_instance_id,
+      forced_capture_failure_pid
+    );
+  }
+
+  bool non_cage_detached_partial_launch_cleanup_for_tests(
+    std::string_view session_instance_id,
+    pid_t prior_child_pid
+  ) {
+    boost::process::v1::environment env = boost::this_process::environment();
+    proc_t test_process {std::move(env), {}};
+    return test_process.non_cage_detached_partial_launch_cleanup_for_tests(
+      session_instance_id,
+      prior_child_pid
     );
   }
 
@@ -4634,6 +4922,18 @@ namespace proc {
     bool generation_available
   ) {
     return isolated_session_generation_blocks_launch(session_owned_cage, generation_available);
+  }
+
+  bool isolated_session_requires_exact_generation_cleanup_for_tests(
+    bool session_owned_cage,
+    bool has_detached_commands,
+    bool has_main_command
+  ) {
+    return isolated_session_requires_exact_generation_cleanup(
+      session_owned_cage,
+      has_detached_commands,
+      has_main_command
+    );
   }
 
   bool unreadable_environ_latches_capture_for_tests(
@@ -5003,21 +5303,32 @@ namespace proc {
       // until restart: the unreadable stragglers that latched it usually exit
       // with their tree, and once the snapshot completes the retained
       // processes (if any) are terminated right here.
-      const bool reaped = !_session_instance_id.empty() &&
-                          terminate_isolated_session_processes(
-                            _session_instance_id,
-                            "re-validated at next launch"sv
-                          );
+      const bool retained_session_owned_cage = _session_used_cage_compositor;
+      const bool generation_reaped = !_session_instance_id.empty() &&
+                                     terminate_isolated_session_processes(
+                                       _session_instance_id,
+                                       "re-validated at next launch"sv,
+                                       retained_session_owned_cage ? nullptr : &_detached_child_pidfds
+                                     );
+      const bool reaped = generation_reaped &&
+                          (retained_session_owned_cage || _detached_child_authority_complete);
       if (!reaped) {
         BOOST_LOG(error) << "process: refusing launch while an incompletely cleaned isolated session generation remains"sv;
         return 503;
       }
       BOOST_LOG(warning) << "process: reaped a retained isolated session generation at launch"sv;
-      stream_runtime::labwc::reset_after_external_stop();
+      if (retained_session_owned_cage) {
+        stream_runtime::labwc::reset_after_external_stop();
+      }
       _session_instance_id.clear();
       _session_used_cage_compositor = false;
       _session_used_gamescope_runtime = false;
+      _detached_child_authority_complete = true;
       _exact_generation_cleanup_complete = true;
+    }
+    if (!_detached_child_pidfds.empty()) {
+      BOOST_LOG(error) << "process: refusing launch while tracked detached child authority remains"sv;
+      return 503;
     }
 #endif
 
@@ -5026,6 +5337,7 @@ namespace proc {
     _session_instance_id = generate_session_token();
     _session_used_cage_compositor = false;
     _session_used_gamescope_runtime = false;
+    _detached_child_authority_complete = true;
 #endif
     _app = app;
     _app_id = util::from_view(app.id);
@@ -6658,7 +6970,10 @@ namespace proc {
     } else
 #endif
     {
-      // Non-cage path: launch detached commands normally
+      // Non-cage path: launch detached commands normally. Detached-only apps
+      // retain pidfd authority for their direct children so stop can reap exact
+      // children even if they exit before /proc ownership scanning begins.
+      const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
       for (auto &cmd : _app.detached) {
         boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                 find_working_directory(cmd, _env) :
@@ -6668,6 +6983,49 @@ namespace proc {
         if (ec) {
           BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
         } else {
+          if (detached_only) {
+            const auto child_pid = static_cast<pid_t>(child.id());
+            int pidfd_open_error = 0;
+            auto child_pidfd = open_process_pidfd(child_pid, pidfd_open_error);
+            if (!child_pidfd) {
+              BOOST_LOG(error) << "process: could not retain pidfd authority for detached-only child pid="sv
+                               << child_pid << " error="sv << std::strerror(pidfd_open_error);
+              const int kill_result = kill(child_pid, SIGKILL);
+              const int kill_error = errno;
+              bool child_reaped = false;
+              if (kill_result == 0 || kill_error == ESRCH) {
+                const auto reap_deadline = std::chrono::steady_clock::now() + 1s;
+                int status = 0;
+                while (std::chrono::steady_clock::now() < reap_deadline) {
+                  pid_t wait_result;
+                  do {
+                    wait_result = waitpid(child_pid, &status, WNOHANG);
+                  } while (wait_result < 0 && errno == EINTR);
+                  if (wait_result == child_pid || (wait_result < 0 && errno == ECHILD)) {
+                    child_reaped = true;
+                    break;
+                  }
+                  if (wait_result < 0) {
+                    BOOST_LOG(warning) << "process: bounded waitpid failed for untracked detached-only child pid="sv
+                                       << child_pid << " error="sv << std::strerror(errno);
+                    break;
+                  }
+                  std::this_thread::sleep_for(10ms);
+                }
+              }
+              if (!child_reaped) {
+                _detached_child_authority_complete = false;
+                _exact_generation_cleanup_complete = false;
+                BOOST_LOG(error) << "process: detached-only child could not be proven reaped after pidfd authority failure pid="sv
+                                 << child_pid;
+              }
+              (void) cleanup_tracked_detached_children_after_launch_failure();
+              terminate_isolated_session_generation();
+              child.detach();
+              return 503;
+            }
+            _detached_child_pidfds.emplace_back(std::move(*child_pidfd));
+          }
           child.detach();
         }
       }
@@ -7086,17 +7444,61 @@ namespace proc {
     );
   }
 
+  bool proc_t::cleanup_tracked_detached_children_after_launch_failure() {
+    const auto graceful_timeout = std::min(_app.exit_timeout, 1s);
+    const bool terminated = terminate_pidfds(
+      _detached_child_pidfds,
+      graceful_timeout,
+      2s,
+      "partial detached-only launch"sv
+    );
+    const bool reaped = reap_tracked_detached_children(
+      _detached_child_pidfds,
+      "partial detached-only launch"sv,
+      true
+    );
+    const bool complete = terminated && reaped && _detached_child_pidfds.empty();
+    if (!complete) {
+      _detached_child_authority_complete = false;
+      _exact_generation_cleanup_complete = false;
+      BOOST_LOG(error) << "process: retained detached child cleanup incomplete after partial launch failure"sv;
+    }
+    return complete;
+  }
+
   void proc_t::terminate_isolated_session_generation() {
     const bool prior_cleanup_complete = _exact_generation_cleanup_complete;
-    if (!_session_used_cage_compositor) {
+    const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
+    const bool exact_cleanup_required = isolated_session_requires_exact_generation_cleanup(
+      _session_used_cage_compositor,
+      !_app.detached.empty(),
+      !_app.cmd.empty()
+    );
+    if (!exact_cleanup_required) {
       return;
     }
 
+    const auto reason = _session_used_cage_compositor ?
+                          "after private Steam pre-cage termination"sv :
+                          "during non-cage detached-only shutdown"sv;
     const bool isolated_cleanup_complete = terminate_isolated_session_processes(
       _session_instance_id,
-      "after private Steam pre-cage termination"sv
+      reason,
+      (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr
     );
-    _exact_generation_cleanup_complete = prior_cleanup_complete && isolated_cleanup_complete;
+    const bool detached_authority_complete =
+      _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;
+    _exact_generation_cleanup_complete = prior_cleanup_complete &&
+                                         isolated_cleanup_complete &&
+                                         detached_authority_complete;
+
+    if (!_session_used_cage_compositor) {
+      if (!_exact_generation_cleanup_complete) {
+        BOOST_LOG(error) << "process: retaining immutable detached-only generation after incomplete exact cleanup"sv;
+      }
+      return;
+    }
+
     if (isolated_session_cleanup_resets_router(
           _session_used_cage_compositor,
           !_session_instance_id.empty(),
@@ -7121,8 +7523,17 @@ namespace proc {
   }
 
   void proc_t::finish_isolated_session_generation_cleanup() {
+    const bool retained_incomplete_generation =
+      !_exact_generation_cleanup_complete && !_session_instance_id.empty();
+    const bool exact_cleanup_required =
+      retained_incomplete_generation ||
+      isolated_session_requires_exact_generation_cleanup(
+        _session_used_cage_compositor,
+        !_app.detached.empty(),
+        !_app.cmd.empty()
+      );
     if (isolated_session_cleanup_clears_state(
-          _session_used_cage_compositor,
+          exact_cleanup_required,
           !_session_instance_id.empty(),
           _exact_generation_cleanup_complete
         )) {
