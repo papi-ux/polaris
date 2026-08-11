@@ -33,10 +33,158 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/linux/pipewire_capture.h"
+#include "src/platform/linux/session_media.h"
 
 using namespace std::literals;
 
 namespace portal {
+
+  namespace {
+    struct pending_request_t {
+      GCancellable *cancellable = nullptr;
+      const void *owner_tag = nullptr;
+    };
+
+    struct portal_response_wait_data_t {
+      GVariant *result = nullptr;
+      std::atomic<bool> done {false};
+      std::atomic<bool> cancelled {false};
+      uint32_t response = 99;
+      GMainLoop *loop = nullptr;
+    };
+
+    gboolean cancel_portal_response_wait(GCancellable *, gpointer userdata) {
+      auto *data = static_cast<portal_response_wait_data_t *>(userdata);
+      data->cancelled = true;
+      if (data->loop) {
+        g_main_loop_quit(data->loop);
+      }
+      return G_SOURCE_REMOVE;
+    }
+
+    std::mutex g_pending_request_mutex;
+    std::vector<pending_request_t> g_pending_requests;
+
+    struct cancellable_unref_t {
+      void operator()(GCancellable *cancellable) const {
+        if (cancellable) {
+          g_object_unref(cancellable);
+        }
+      }
+    };
+
+    using cancellable_ptr_t = std::unique_ptr<GCancellable, cancellable_unref_t>;
+
+    class pending_request_registration_t {
+    public:
+      explicit pending_request_registration_t(
+        GCancellable *cancellable,
+        const void *owner_tag = session_media::pending_start_owner()
+      ):
+          cancellable_ {cancellable} {
+        if (!cancellable_) {
+          return;
+        }
+        std::lock_guard lock(g_pending_request_mutex);
+        g_pending_requests.push_back({
+          G_CANCELLABLE(g_object_ref(cancellable_)),
+          owner_tag
+        });
+      }
+
+      pending_request_registration_t(const pending_request_registration_t &) = delete;
+      pending_request_registration_t &operator=(const pending_request_registration_t &) = delete;
+
+      ~pending_request_registration_t() {
+        if (!cancellable_) {
+          return;
+        }
+        std::lock_guard lock(g_pending_request_mutex);
+        const auto it = std::find_if(
+          g_pending_requests.begin(),
+          g_pending_requests.end(),
+          [this](const pending_request_t &request) {
+            return request.cancellable == cancellable_;
+          }
+        );
+        if (it != g_pending_requests.end()) {
+          g_object_unref(it->cancellable);
+          g_pending_requests.erase(it);
+        }
+      }
+
+    private:
+      GCancellable *cancellable_ = nullptr;
+    };
+  }  // namespace
+
+  void cancel_pending_requests(const void *owner_tag) {
+    std::vector<GCancellable *> pending;
+    {
+      std::lock_guard lock(g_pending_request_mutex);
+      pending.reserve(g_pending_requests.size());
+      for (const auto &request : g_pending_requests) {
+        if (!owner_tag || request.owner_tag == owner_tag) {
+          pending.push_back(G_CANCELLABLE(g_object_ref(request.cancellable)));
+        }
+      }
+    }
+
+    for (auto *cancellable : pending) {
+      g_cancellable_cancel(cancellable);
+      g_object_unref(cancellable);
+    }
+  }
+
+#if defined(POLARIS_TESTS)
+  bool portal_cancel_pending_request_for_tests() {
+    auto *cancellable = g_cancellable_new();
+    bool cancelled = false;
+    {
+      pending_request_registration_t registration {cancellable};
+      cancel_pending_requests();
+      cancelled = g_cancellable_is_cancelled(cancellable);
+    }
+    g_object_unref(cancellable);
+    return cancelled;
+  }
+
+  bool portal_cancel_request_owner_for_tests() {
+    int owner_a = 0;
+    int owner_b = 0;
+    auto *first = g_cancellable_new();
+    auto *second = g_cancellable_new();
+    bool matched = false;
+    {
+      pending_request_registration_t first_registration {first, &owner_a};
+      pending_request_registration_t second_registration {second, &owner_b};
+      cancel_pending_requests(&owner_a);
+      matched = g_cancellable_is_cancelled(first) && !g_cancellable_is_cancelled(second);
+    }
+    g_object_unref(first);
+    g_object_unref(second);
+    return matched;
+  }
+
+  bool portal_cancel_source_wakes_wait_for_tests() {
+    portal_response_wait_data_t data;
+    auto *context = g_main_context_new();
+    data.loop = g_main_loop_new(context, FALSE);
+    auto *cancellable = g_cancellable_new();
+    auto *source = g_cancellable_source_new(cancellable);
+    g_source_set_callback(source, G_SOURCE_FUNC(cancel_portal_response_wait), &data, nullptr);
+    g_source_attach(source, context);
+    g_cancellable_cancel(cancellable);
+    const bool dispatched = g_main_context_iteration(context, FALSE);
+    const bool woke = dispatched && data.cancelled;
+    g_source_destroy(source);
+    g_source_unref(source);
+    g_object_unref(cancellable);
+    g_main_loop_unref(data.loop);
+    g_main_context_unref(context);
+    return woke;
+  }
+#endif
 
   // -----------------------------------------------------------------------
   // Restore token persistence
@@ -57,10 +205,14 @@ namespace portal {
     const std::string legacy = base + "/portal_restore_token.txt";
     std::error_code ec;
     if (!std::filesystem::exists(host, ec) && std::filesystem::is_regular_file(legacy, ec)) {
-      std::error_code copy_ec;
-      std::filesystem::copy_file(legacy, host, copy_ec);
-      if (!copy_ec) {
+      // Consume the legacy token instead of copying it. If a migrated host
+      // token later proves stale, clear_restore_token() must not let the next
+      // retry resurrect the same invalid token from the legacy path.
+      std::filesystem::rename(legacy, host, ec);
+      if (!ec) {
         BOOST_LOG(info) << "portal: migrated legacy restore token to "sv << host;
+      } else {
+        BOOST_LOG(warning) << "portal: failed to migrate legacy restore token: "sv << ec.message();
       }
     }
     return host;
@@ -230,16 +382,20 @@ namespace portal {
 
   // Helper: call a portal method synchronously via D-Bus
   static GVariant *portal_call_sync(GDBusConnection *conn, const char *method,
-    GVariant *params, int timeout_ms = 5000) {
+    GVariant *params, int timeout_ms = 5000, GCancellable *cancellable = nullptr) {
     GError *gerr = nullptr;
     auto *result = g_dbus_connection_call_sync(conn,
       "org.freedesktop.portal.Desktop",
       "/org/freedesktop/portal/desktop",
       "org.freedesktop.portal.ScreenCast",
       method, params, nullptr,
-      G_DBUS_CALL_FLAGS_NONE, timeout_ms, nullptr, &gerr);
+      G_DBUS_CALL_FLAGS_NONE, timeout_ms, cancellable, &gerr);
     if (!result && gerr) {
-      BOOST_LOG(warning) << "portal: D-Bus call "sv << method << " failed: "sv << gerr->message;
+      if (g_error_matches(gerr, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+        BOOST_LOG(info) << "portal: D-Bus call "sv << method << " cancelled for teardown"sv;
+      } else {
+        BOOST_LOG(warning) << "portal: D-Bus call "sv << method << " failed: "sv << gerr->message;
+      }
       g_error_free(gerr);
     }
     return result;
@@ -249,7 +405,10 @@ namespace portal {
   // 1 = Hidden, 2 = Embedded, 4 = Metadata.
   // gamescope portal may report 0 until it is bound to a live compositor; never
   // hard-require Embedded (2) — that yields InvalidArgument and hangs handshake.
-  static uint32_t portal_available_cursor_modes(GDBusConnection *conn) {
+  static uint32_t portal_available_cursor_modes(
+    GDBusConnection *conn,
+    GCancellable *cancellable
+  ) {
     GError *gerr = nullptr;
     auto *result = g_dbus_connection_call_sync(conn,
       "org.freedesktop.portal.Desktop",
@@ -260,11 +419,15 @@ namespace portal {
       G_VARIANT_TYPE("(v)"),
       G_DBUS_CALL_FLAGS_NONE,
       3000,
-      nullptr,
+      cancellable,
       &gerr);
     if (!result) {
       if (gerr) {
-        BOOST_LOG(warning) << "portal: AvailableCursorModes query failed: "sv << gerr->message;
+        if (g_error_matches(gerr, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+          BOOST_LOG(info) << "portal: AvailableCursorModes query cancelled for teardown"sv;
+        } else {
+          BOOST_LOG(warning) << "portal: AvailableCursorModes query failed: "sv << gerr->message;
+        }
         g_error_free(gerr);
       }
       return 0;
@@ -308,15 +471,22 @@ namespace portal {
   // Brief wait for gamescope/xdg-desktop-portal-gamescope to advertise cursor
   // modes after bind. Avoids a cold-start AvailableCursorModes=0 path that ends
   // up omitting cursor_mode (which works but loses embedded cursors).
-  static uint32_t portal_wait_cursor_modes(GDBusConnection *conn, int timeout_ms = 2000) {
-    uint32_t modes = portal_available_cursor_modes(conn);
-    if (modes != 0 || timeout_ms <= 0) {
+  static uint32_t portal_wait_cursor_modes(
+    GDBusConnection *conn,
+    GCancellable *cancellable,
+    int timeout_ms = 2000
+  ) {
+    uint32_t modes = portal_available_cursor_modes(conn, cancellable);
+    if (modes != 0 || timeout_ms <= 0 || g_cancellable_is_cancelled(cancellable)) {
       return modes;
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
+      if (g_cancellable_is_cancelled(cancellable)) {
+        break;
+      }
       std::this_thread::sleep_for(100ms);
-      modes = portal_available_cursor_modes(conn);
+      modes = portal_available_cursor_modes(conn, cancellable);
       if (modes != 0) {
         BOOST_LOG(info) << "portal: AvailableCursorModes became "sv << modes
                         << " after wait"sv;
@@ -388,7 +558,17 @@ namespace portal {
     return std::nullopt;
   }
 
-  int open_pipewire_remote_fd(GDBusConnection *conn, const std::string &session_handle) {
+  int open_pipewire_remote_fd(
+    GDBusConnection *conn,
+    const std::string &session_handle
+  ) {
+    cancellable_ptr_t cancellable_owner {g_cancellable_new()};
+    auto *cancellable = cancellable_owner.get();
+    pending_request_registration_t registration {cancellable};
+    if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) {
+      g_cancellable_cancel(cancellable);
+    }
+
     GVariantBuilder builder;
     g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
 
@@ -406,7 +586,7 @@ namespace portal {
       10000,
       nullptr,
       &out_fd_list,
-      nullptr,
+      cancellable,
       &gerr);
 
     if (!result) {
@@ -439,26 +619,42 @@ namespace portal {
     return fd;
   }
 
-  // Helper: wait for a Response signal on a request path.
-  // Uses a dedicated GMainLoop thread to ensure D-Bus signals are delivered.
-  static GVariant *wait_for_response(GDBusConnection *conn, const std::string &request_path,
-    int timeout_ms = 30000) {
+  struct portal_request_result_t {
+    GVariant *response = nullptr;
+    bool cancelled = false;
+  };
 
-    struct cb_data_t {
-      GVariant *result = nullptr;
-      std::atomic<bool> done{false};
-      uint32_t response = 99;
-      GMainLoop *loop = nullptr;
-    } cb_data;
+  // Subscribe to Request::Response before issuing the portal method call.
+  // Fast KDE responses can otherwise arrive between call_sync() returning and
+  // signal subscription, leaving the caller blocked until its timeout.
+  static portal_request_result_t portal_call_and_wait_for_response(
+    GDBusConnection *conn,
+    const char *method,
+    GVariant *params,
+    const std::string &request_path,
+    GCancellable *cancellable,
+    int call_timeout_ms = 5000,
+    int response_timeout_ms = 30000) {
 
-    // Create a dedicated main context and loop for this wait
+    portal_response_wait_data_t cb_data;
+
+    // Capture signal delivery on a dedicated thread-default context before the
+    // synchronous method call can trigger a fast Response signal.
     auto *ctx = g_main_context_new();
     cb_data.loop = g_main_loop_new(ctx, FALSE);
-
-    // Push this context as the thread default so GDBus dispatches signals here
     g_main_context_push_thread_default(ctx);
 
-    auto sub_id = g_dbus_connection_signal_subscribe(conn,
+    auto *cancel_source = g_cancellable_source_new(cancellable);
+    g_source_set_callback(
+      cancel_source,
+      G_SOURCE_FUNC(cancel_portal_response_wait),
+      &cb_data,
+      nullptr
+    );
+    g_source_attach(cancel_source, ctx);
+    GSource *timeout_source = nullptr;
+
+    const auto sub_id = g_dbus_connection_signal_subscribe(conn,
       "org.freedesktop.portal.Desktop",
       "org.freedesktop.portal.Request",
       "Response",
@@ -467,7 +663,7 @@ namespace portal {
       G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
       [](GDBusConnection *, const gchar *, const gchar *, const gchar *,
          const gchar *, GVariant *parameters, gpointer userdata) {
-        auto *data = static_cast<cb_data_t *>(userdata);
+        auto *data = static_cast<portal_response_wait_data_t *>(userdata);
         uint32_t resp = 0;
         GVariant *results = nullptr;
         g_variant_get(parameters, "(u@a{sv})", &resp, &results);
@@ -478,36 +674,64 @@ namespace portal {
       },
       &cb_data, nullptr);
 
-    // Run the main loop with a timeout
-    auto timeout_source = g_timeout_source_new(timeout_ms);
-    g_source_set_callback(timeout_source, [](gpointer userdata) -> gboolean {
-      auto *data = static_cast<cb_data_t *>(userdata);
-      if (!data->done) {
-        if (data->loop) g_main_loop_quit(data->loop);
+    const auto cleanup = [&] {
+      g_dbus_connection_signal_unsubscribe(conn, sub_id);
+      if (timeout_source) {
+        g_source_destroy(timeout_source);
+        g_source_unref(timeout_source);
       }
-      return G_SOURCE_REMOVE;
-    }, &cb_data, nullptr);
-    g_source_attach(timeout_source, ctx);
-    g_source_unref(timeout_source);
+      g_source_destroy(cancel_source);
+      g_source_unref(cancel_source);
+      g_main_context_pop_thread_default(ctx);
+      g_main_loop_unref(cb_data.loop);
+      g_main_context_unref(ctx);
+    };
 
-    g_main_loop_run(cb_data.loop);
+    auto *call_result = portal_call_sync(conn, method, params, call_timeout_ms, cancellable);
+    if (!call_result) {
+      cleanup();
+      if (cb_data.result) g_variant_unref(cb_data.result);
+      return {nullptr, g_cancellable_is_cancelled(cancellable) != FALSE};
+    }
+    g_variant_unref(call_result);
 
-    g_dbus_connection_signal_unsubscribe(conn, sub_id);
-    g_main_context_pop_thread_default(ctx);
-    g_main_loop_unref(cb_data.loop);
-    g_main_context_unref(ctx);
+    if (g_cancellable_is_cancelled(cancellable)) {
+      cb_data.cancelled = true;
+    }
 
+    // The callback may already have run while call_sync() dispatched D-Bus
+    // traffic. Do not enter the loop after a completed fast response.
+    if (!cb_data.done && !cb_data.cancelled) {
+      timeout_source = g_timeout_source_new(response_timeout_ms);
+      g_source_set_callback(timeout_source, [](gpointer userdata) -> gboolean {
+        auto *data = static_cast<portal_response_wait_data_t *>(userdata);
+        if (!data->done && data->loop) {
+          g_main_loop_quit(data->loop);
+        }
+        return G_SOURCE_REMOVE;
+      }, &cb_data, nullptr);
+      g_source_attach(timeout_source, ctx);
+      g_main_loop_run(cb_data.loop);
+    }
+
+    cleanup();
+
+    if (cb_data.cancelled) {
+      BOOST_LOG(info) << "portal: Request cancelled for teardown on "sv << request_path;
+      if (cb_data.result) g_variant_unref(cb_data.result);
+      return {nullptr, true};
+    }
     if (!cb_data.done) {
       BOOST_LOG(warning) << "portal: Timeout waiting for response on "sv << request_path;
-      return nullptr;
+      return {};
     }
     if (cb_data.response != 0) {
       BOOST_LOG(warning) << "portal: Response code "sv << cb_data.response
                          << " on "sv << request_path;
       if (cb_data.result) g_variant_unref(cb_data.result);
-      return nullptr;
+      return {};
     }
-    return cb_data.result;
+    return {cb_data.result, false};
   }
 
   // Build the request object path from the connection's unique name and a token
@@ -536,6 +760,12 @@ namespace portal {
 
   std::unique_ptr<portal_session_t> create_portal_session(uint32_t capture_type) {
     auto session = std::make_unique<portal_session_t>();
+    cancellable_ptr_t cancellable_owner {g_cancellable_new()};
+    auto *cancellable = cancellable_owner.get();
+    pending_request_registration_t registration {cancellable};
+    if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) {
+      g_cancellable_cancel(cancellable);
+    }
 
     GError *gerr = nullptr;
     session->conn = portal_bus_connection(&gerr);
@@ -560,15 +790,19 @@ namespace portal {
       g_variant_builder_add(&builder, "{sv}", "handle_token",
         g_variant_new_string(handle_token.c_str()));
 
-      auto *result = portal_call_sync(session->conn, "CreateSession",
-        g_variant_new("(a{sv})", &builder));
-      if (result) g_variant_unref(result);
-
-      auto *resp = wait_for_response(session->conn, req_path, 10000);
-      if (!resp) {
+      auto result = portal_call_and_wait_for_response(
+        session->conn,
+        "CreateSession",
+        g_variant_new("(a{sv})", &builder),
+        req_path,
+        cancellable,
+        5000,
+        10000);
+      if (!result.response) {
         session->failed = true;
         return session;
       }
+      auto *resp = result.response;
 
       GVariant *handle_v = g_variant_lookup_value(resp, "session_handle", G_VARIANT_TYPE_STRING);
       if (handle_v) {
@@ -590,8 +824,11 @@ namespace portal {
     // retry SelectSources once without it; Start will persist a fresh token.
     BOOST_LOG(info) << "portal: Selecting sources (type="sv << capture_type << ")..."sv;
     {
-      auto try_select_sources = [&](const std::string &handle_token, bool use_restore_token) -> GVariant * {
-        const uint32_t available_cursor = portal_wait_cursor_modes(session->conn);
+      auto try_select_sources = [&](const std::string &handle_token, bool use_restore_token) -> portal_request_result_t {
+        const uint32_t available_cursor = portal_wait_cursor_modes(session->conn, cancellable);
+        if (g_cancellable_is_cancelled(cancellable)) {
+          return {nullptr, true};
+        }
         const uint32_t cursor_mode = portal_pick_cursor_mode(available_cursor);
         BOOST_LOG(info) << "portal: AvailableCursorModes="sv << available_cursor
                         << " selected_cursor_mode="sv << cursor_mode
@@ -627,36 +864,33 @@ namespace portal {
           }
         }
 
-        auto *result = portal_call_sync(session->conn, "SelectSources",
-          g_variant_new("(oa{sv})", session->session_handle.c_str(), &builder));
-        if (!result) {
-          // InvalidArgument / failed restore often fails the method call itself
-          // (no Response signal). Treat as SelectSources failure immediately.
-          BOOST_LOG(warning) << "portal: SelectSources D-Bus call failed"
-                             << (use_restore_token && !saved_token.empty() ?
-                                   " (restore token or cursor mode rejected)" :
-                                   "")
-                             << ""sv;
-          return nullptr;
-        }
-        g_variant_unref(result);
-
-        auto *resp = wait_for_response(session->conn, req_path, 10000);
-        if (!resp) {
-          BOOST_LOG(warning) << "portal: SelectSources response missing or non-zero"
+        auto result = portal_call_and_wait_for_response(
+          session->conn,
+          "SelectSources",
+          g_variant_new("(oa{sv})", session->session_handle.c_str(), &builder),
+          req_path,
+          cancellable,
+          5000,
+          10000);
+        if (!result.response && !result.cancelled) {
+          BOOST_LOG(warning) << "portal: SelectSources request failed or response missing"
                              << (use_restore_token && !saved_token.empty() ?
                                    " (stale restore token likely)" :
                                    "")
                              << ""sv;
         }
-        return resp;
+        return result;
       };
 
       // Always prefer restore tokens when present. Host vs private gamescope portals
       // use separate on-disk files (token_path), so they cannot cross-contaminate.
       const bool had_saved_token = !load_restore_token().empty();
-      auto *resp = try_select_sources(next_handle_token("polaris_ss"), true);
-      if (!resp) {
+      auto result = try_select_sources(next_handle_token("polaris_ss"), true);
+      if (!result.response) {
+        if (result.cancelled) {
+          session->failed = true;
+          return session;
+        }
         if (had_saved_token) {
           // Policy: always invalidate the on-disk token after SelectSources
           // failure, then retry once without restore_token. Cursor is re-queried
@@ -664,13 +898,13 @@ namespace portal {
           clear_restore_token();
         }
         BOOST_LOG(warning) << "portal: SelectSources failed — retry once without restore_token"sv;
-        resp = try_select_sources(next_handle_token("polaris_ss"), false);
-        if (!resp) {
+        result = try_select_sources(next_handle_token("polaris_ss"), false);
+        if (!result.response) {
           session->failed = true;
           return session;
         }
       }
-      g_variant_unref(resp);
+      g_variant_unref(result.response);
     }
 
     // Step 3: Start. With a host restore token this is non-interactive and must
@@ -685,7 +919,7 @@ namespace portal {
                                               " (ScreenCast picker may appear on host — approve once)"sv)
                     << " timeout_ms="sv << start_timeout_ms << ""sv;
     {
-      auto try_start = [&](const std::string &handle_token) -> GVariant * {
+      auto try_start = [&](const std::string &handle_token) -> portal_request_result_t {
         std::string req_path = make_request_path(session->conn, handle_token);
 
         GVariantBuilder builder;
@@ -693,28 +927,33 @@ namespace portal {
         g_variant_builder_add(&builder, "{sv}", "handle_token",
           g_variant_new_string(handle_token.c_str()));
 
-        auto *result = portal_call_sync(session->conn, "Start",
+        return portal_call_and_wait_for_response(
+          session->conn,
+          "Start",
           g_variant_new("(osa{sv})", session->session_handle.c_str(), "", &builder),
+          req_path,
+          cancellable,
+          start_timeout_ms,
           start_timeout_ms);
-        if (result) g_variant_unref(result);
-
-        return wait_for_response(session->conn, req_path, start_timeout_ms);
       };
 
-      auto *resp = try_start(next_handle_token("polaris_st"));
-      if (!resp) {
-        // Bad/stale restore token often hangs Start with no Response; drop it so
-        // the next connect can re-bootstrap with a visible picker.
-        clear_restore_token();
-        // Nested↔idle gamescope handoff leaves a short window where
-        // xdg-desktop-portal-gamescope cannot open WAYLAND_DISPLAY=gamescope-0
-        // ("failed to connect to wayland socket" → Response code 2). One delayed
-        // retry on a *fresh* session is owned by the caller; here we only clear
-        // the token so the next CreateSession is clean.
-        BOOST_LOG(warning) << "portal: Start timeout/failure — cleared restore_token (no Start retry; session is single-use)"sv;
+      auto result = try_start(next_handle_token("polaris_st"));
+      if (!result.response) {
+        if (!result.cancelled) {
+          // Bad/stale restore token often hangs Start with no Response; drop it so
+          // the next connect can re-bootstrap with a visible picker.
+          clear_restore_token();
+          // Nested↔idle gamescope handoff leaves a short window where
+          // xdg-desktop-portal-gamescope cannot open WAYLAND_DISPLAY=gamescope-0
+          // ("failed to connect to wayland socket" → Response code 2). One delayed
+          // retry on a *fresh* session is owned by the caller; here we only clear
+          // the token so the next CreateSession is clean.
+          BOOST_LOG(warning) << "portal: Start timeout/failure — cleared restore_token (no Start retry; session is single-use)"sv;
+        }
         session->failed = true;
         return session;
       }
+      auto *resp = result.response;
 
       // Parse streams
       GVariant *streams_v = g_variant_lookup_value(resp, "streams", nullptr);
@@ -755,7 +994,10 @@ namespace portal {
       g_variant_unref(resp);
 
       if (session->pw_node_id > 0) {
-        session->pw_remote_fd = open_pipewire_remote_fd(session->conn, session->session_handle);
+        session->pw_remote_fd = open_pipewire_remote_fd(
+          session->conn,
+          session->session_handle
+        );
         if (session->pw_remote_fd < 0) {
           session->failed = true;
           return session;

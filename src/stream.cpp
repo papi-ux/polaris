@@ -31,6 +31,9 @@ extern "C" {
 #include "logging.h"
 #include "network.h"
 #include "platform/common.h"
+#ifdef __linux__
+  #include "platform/linux/session_media.h"
+#endif
 #include "process.h"
 #include "stream.h"
 #include "stream_recorder.h"
@@ -2247,6 +2250,9 @@ namespace stream {
       });
 
       BOOST_LOG(debug) << "Waiting for video to end..."sv;
+#ifdef __linux__
+      auto pending_start_cancel = session_media::cancel_pending_starts(&session);
+#endif
       session.videoThread.join();
       BOOST_LOG(debug) << "Waiting for audio to end..."sv;
       session.audioThread.join();

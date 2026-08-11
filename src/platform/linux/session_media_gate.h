@@ -137,9 +137,24 @@ namespace session_media {
     }
 
     teardown_owner_t begin_teardown() {
+      return begin_teardown([]() {});
+    }
+
+    template <typename Announcement>
+    teardown_owner_t begin_teardown(Announcement &&announce) {
       std::unique_lock lock(state_->mutex);
       ++state_->teardown_owners;
       state_->changed.notify_all();
+      try {
+        // The announcement runs after admission closes but before waiting for
+        // existing starts. Keep it non-blocking and do not re-enter this gate.
+        std::forward<Announcement>(announce)();
+      } catch (...) {
+        --state_->teardown_owners;
+        lock.unlock();
+        state_->changed.notify_all();
+        throw;
+      }
       state_->changed.wait(lock, [this]() {
         return state_->start_owners == 0;
       });
