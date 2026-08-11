@@ -1,5 +1,5 @@
 <template>
-  <SpaceParticles v-if="!showNav" :dense="true" />
+  <SpaceParticles v-if="!showNav" :dense="true" :theme="currentTheme" />
   <div v-if="showNav" class="relative z-[1] flex h-screen bg-background text-foreground">
     <a href="#polaris-main" class="skip-link">Skip to main content</a>
     <!-- Mobile overlay -->
@@ -77,18 +77,7 @@
         </template>
       </router-link>
       <div class="px-3 mb-1">
-        <button
-          type="button"
-          @click="cycleAppTheme"
-          :aria-label="`Switch theme to ${nextThemeLabel}`"
-          class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-[background-color,color,border-color] duration-200"
-          :class="currentTheme !== 'polaris' ? 'text-ice bg-ice/10' : 'text-storm hover:text-silver hover:bg-twilight/50'"
-          :title="'Switch to ' + nextThemeLabel"
-        >
-          <svg v-if="currentTheme === 'oled'" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
-          <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-          <span v-if="!sidebarCollapsed">{{ currentThemeMeta.shortLabel }}</span>
-        </button>
+        <ThemeToggle :collapsed="sidebarCollapsed" />
       </div>
       <div class="px-3 mb-1">
         <button
@@ -135,7 +124,7 @@
 
     <!-- Main content -->
     <main id="polaris-main" tabindex="-1" class="relative flex-1 overflow-auto overflow-x-hidden bg-background">
-      <SpaceParticles :dense="false" :absolute="true" />
+      <SpaceParticles :dense="false" :absolute="true" :theme="currentTheme" />
       <!-- Mobile header -->
       <div class="flex items-center gap-3 border-b border-storm/20 px-4 py-4 md:hidden">
         <button type="button" aria-label="Toggle navigation" aria-controls="polaris-sidebar" :aria-expanded="sidebarOpen" @click="sidebarOpen = !sidebarOpen" class="focus-ring text-silver transition-colors duration-200 hover:text-ice">
@@ -174,7 +163,8 @@ import { useI18n } from 'vue-i18n'
 import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
-import { cycleTheme, getNextTheme, getTheme, getThemeMeta, initTheme } from './theme.js'
+import ThemeToggle from './ThemeToggle.vue'
+import { getTheme, initTheme, onThemeChange } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
 import { webUiAuthenticated } from './auth-state.js'
 import { isPublicRoute } from './router-helpers.js'
@@ -183,10 +173,7 @@ import { buildUpdateCenterState, updateStatusLightClass } from './update-center.
 
 const route = useRoute()
 const currentTheme = ref(getTheme())
-const currentThemeMeta = computed(() => getThemeMeta(currentTheme.value))
-const nextThemeLabel = computed(() => getThemeMeta(getNextTheme(currentTheme.value)).label)
-
-function cycleAppTheme() { currentTheme.value = cycleTheme() }
+onThemeChange((theme) => { currentTheme.value = theme })
 const router = useRouter()
 const commandPaletteOpen = ref(false)
 const sidebarOpen = ref(false)

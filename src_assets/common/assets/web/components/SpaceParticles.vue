@@ -96,7 +96,87 @@ function getModeConfig(mode) {
   }
 }
 
+// Per-theme particle strength, mirroring Nova's librarySurfaces particle
+// table: OLED disables the field entirely for true black.
+const THEME_PARTICLE_ALPHA = {
+  polaris: 1,
+  'portable-chrome': 0.44,
+  oled: 0,
+  miami: 0.68,
+  'high-contrast': 0.28,
+}
+
+function getThemeParticleAlpha(theme) {
+  return THEME_PARTICLE_ALPHA[theme] ?? 1
+}
+
 function getThemePalette(theme) {
+  if (theme === 'miami') {
+    return {
+      starRgb: [255, 231, 240],
+      glowRgb: [255, 92, 171],
+      nebulae: [
+        [255, 92, 171],
+        [71, 243, 255],
+        [190, 84, 150],
+        [108, 60, 111],
+      ],
+      nebulaOpacity: [0.014, 0.032],
+      nebulaRadius: [130, 320],
+      galaxyRadius: [70, 160],
+      galaxyGlow: [0.05, 0.09],
+      galaxyCore: [0.08, 0.16],
+      galaxyRing: [0.12, 0.22],
+      starBloom: 0.14,
+      shootingRgb: [255, 214, 231],
+      headRgb: [255, 245, 250],
+    }
+  }
+
+  if (theme === 'portable-chrome') {
+    // Glints in the four PlayStation face-button hues, Nova's ambient accents
+    // for this theme.
+    return {
+      starRgb: [201, 209, 217],
+      glowRgb: [90, 147, 214],
+      nebulae: [
+        [90, 147, 214],
+        [181, 131, 181],
+        [212, 131, 138],
+        [111, 191, 138],
+      ],
+      nebulaOpacity: [0.01, 0.024],
+      nebulaRadius: [120, 280],
+      galaxyRadius: [60, 130],
+      galaxyGlow: [0.03, 0.06],
+      galaxyCore: [0.05, 0.1],
+      galaxyRing: [0.08, 0.15],
+      starBloom: 0.1,
+      shootingRgb: [222, 228, 235],
+      headRgb: [244, 247, 250],
+    }
+  }
+
+  if (theme === 'high-contrast') {
+    return {
+      starRgb: [229, 231, 235],
+      glowRgb: [96, 165, 250],
+      nebulae: [
+        [96, 165, 250],
+        [147, 197, 253],
+      ],
+      nebulaOpacity: [0.008, 0.018],
+      nebulaRadius: [120, 260],
+      galaxyRadius: [56, 120],
+      galaxyGlow: [0.02, 0.05],
+      galaxyCore: [0.04, 0.08],
+      galaxyRing: [0.06, 0.12],
+      starBloom: 0.08,
+      shootingRgb: [229, 231, 235],
+      headRgb: [255, 255, 255],
+    }
+  }
+
   if (theme === 'oled') {
     return {
       starRgb: [245, 249, 255],
@@ -213,6 +293,11 @@ function syncVisualMode() {
   currentTheme = props.theme || 'polaris'
   currentConfig = getModeConfig(currentMode)
   currentPalette = getThemePalette(currentTheme)
+  if (canvas.value) {
+    const themeAlpha = getThemeParticleAlpha(currentTheme)
+    canvas.value.style.opacity = String(themeAlpha)
+    canvas.value.style.display = themeAlpha === 0 ? 'none' : ''
+  }
 }
 
 function syncReducedMotionPreference() {
@@ -391,6 +476,7 @@ function restartAnimation() {
     animId = null
   }
   if (!pageVisible) return
+  if (getThemeParticleAlpha(currentTheme) === 0) return
   animate(prefersReducedMotion)
 }
 

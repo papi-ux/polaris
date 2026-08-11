@@ -9,6 +9,7 @@ import {
   getNextTheme,
   getTheme,
   setTheme,
+  onThemeChange,
   THEMES,
   toggleTheme,
 } from './theme.js'
@@ -31,106 +32,130 @@ function contrastRatio(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
+const appCss = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
+
+const BLOCK_MARKERS = {
+  oled: '/* ── Console OLED Theme',
+  miami: '/* ── Miami Nebula Skin',
+  'portable-chrome': '/* ── Portable Chrome Skin',
+  'high-contrast': '/* ── High Contrast Skin',
+}
+
+function themeCss(themeId) {
+  if (themeId === 'polaris') {
+    // Default theme: tokens live in @theme / :root, before the first skin block.
+    return appCss.slice(0, appCss.indexOf('/* ── Console OLED Theme'))
+  }
+  const markers = Object.values(BLOCK_MARKERS)
+  const start = appCss.indexOf(BLOCK_MARKERS[themeId])
+  const ends = markers.map((m) => appCss.indexOf(m)).filter((idx) => idx > start)
+  return appCss.slice(start, ends.length ? Math.min(...ends) : undefined)
+}
+
+function extractTokens(css) {
+  const tokens = {}
+  for (const [, name, value] of css.matchAll(/--(?:color|surface)-([\w-]+):\s*(#[0-9a-f]{6}|#[0-9a-f]{3})\b/gi)) {
+    if (!(name in tokens)) tokens[name] = value.toLowerCase()
+  }
+  return tokens
+}
+
 describe('theme skin registry', () => {
   beforeEach(() => {
     localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
   })
 
-  it('registers Portable Chrome after Miami Nebula alongside the existing skins', () => {
-    expect(THEMES.map((theme) => theme.id)).toEqual(['polaris', 'oled', 'miami', 'portable-chrome'])
-    expect(THEMES.find((theme) => theme.id === 'miami')).toMatchObject({
-      label: 'Miami Nebula',
-      shortLabel: 'Miami',
-    })
-    expect(THEMES.find((theme) => theme.id === 'portable-chrome')).toMatchObject({
-      label: 'Portable Chrome',
-      shortLabel: 'Portable Chrome',
-    })
-  })
-
-  it('defines Portable Chrome as a Moonlight-grey early-2000s skin', () => {
-    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
-    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
-
-    expect(portableChromeCss).toContain('Moonlight-grey early-2000s')
-    expect(portableChromeCss).toContain('--color-background: #b8c1cc')
-    expect(portableChromeCss).toContain('--color-accent: #2f64b3')
-    expect(portableChromeCss).toContain('linear-gradient(180deg, rgba(224, 231, 238, 0.90)')
-    expect(portableChromeCss).toContain('repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.06)')
-  })
-
-  it('adds panel depth while keeping the approved Portable Chrome base palette', () => {
-    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
-    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
-
-    expect(portableChromeCss).toContain('--color-background: #b8c1cc')
-    expect(portableChromeCss).toContain('--color-surface: #d6dde5')
-    expect(portableChromeCss).toContain('0 22px 48px rgba(54, 65, 79, 0.28)')
-    expect(portableChromeCss).toContain('inset 0 0 0 1px rgba(74, 86, 101, 0.20)')
-    expect(portableChromeCss).toContain('box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), inset 0 -1px 0 rgba(81, 94, 110, 0.30), 0 8px 20px rgba(72, 84, 99, 0.12);')
-  })
-
-  it('dims Portable Chrome whites and re-pins status tokens for the light shell', () => {
-    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
-    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
-
-    expect(portableChromeCss).toContain('--color-background: #b8c1cc')
-    expect(portableChromeCss).toContain('--color-surface: #d6dde5')
-    expect(portableChromeCss).toContain('linear-gradient(135deg, #d7dde5 0%, #b8c1cc 46%, #98a6b5 100%)')
-    // Status colors are themed tokens now; the old [class*="text-green-"]
-    // !important clamp must stay gone.
-    expect(portableChromeCss).toContain('--color-success: #315b45')
-    expect(portableChromeCss).toContain('--color-warning: #92400e')
-    expect(portableChromeCss).toContain('--color-danger: #b91c1c')
-    expect(portableChromeCss).toContain('--color-info: #1d4ed8')
-    expect(portableChromeCss).not.toContain('!important')
-    expect(css).not.toContain('[class*="text-green-"]')
-  })
-
-  it('keeps Portable Chrome tokens readable against Moonlight-grey panels', () => {
-    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
-    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
-    const tokens = Object.fromEntries([...portableChromeCss.matchAll(/--color-([\w-]+):\s*(#[0-9a-f]{6})/gi)].map(([, name, value]) => [name, value.toLowerCase()]))
-
-    expect(contrastRatio(tokens.foreground, tokens.surface)).toBeGreaterThanOrEqual(7)
-    expect(contrastRatio(tokens.silver, tokens.surface)).toBeGreaterThanOrEqual(7)
-    // storm is the caption/body muted text color, so it keeps the AA body-text
-    // floor the removed --color-muted alias used to carry.
-    expect(contrastRatio(tokens.storm, tokens.surface)).toBeGreaterThanOrEqual(4.5)
-    expect(contrastRatio(tokens.ice, tokens.surface)).toBeGreaterThanOrEqual(7)
-    expect(contrastRatio(tokens.accent, tokens.surface)).toBeGreaterThanOrEqual(3)
-    // Every status token must hold AA body-text contrast on the light panels.
-    for (const status of ['success', 'warning', 'danger', 'info']) {
-      expect(contrastRatio(tokens[status], tokens.surface), `--color-${status}`).toBeGreaterThanOrEqual(4.5)
+  it('registers the five Nova-matched skins in Nova ordering', () => {
+    expect(THEMES.map((theme) => theme.id)).toEqual(['polaris', 'portable-chrome', 'oled', 'miami', 'high-contrast'])
+    expect(THEMES.map((theme) => theme.label)).toEqual([
+      'Polaris Aurora',
+      'Portable Chrome',
+      'Console OLED',
+      'Miami Nebula',
+      'High Contrast',
+    ])
+    for (const theme of THEMES) {
+      expect(theme.subtitle, `${theme.id} subtitle`).toBeTruthy()
+      expect(theme.preview, `${theme.id} preview`).toMatchObject({
+        window: expect.stringMatching(/^#[0-9a-f]{6}$/),
+        card: expect.stringMatching(/^#[0-9a-f]{6}$/),
+        accent: expect.stringMatching(/^#[0-9a-f]{6}$/),
+      })
     }
   })
 
-  it('makes Miami cyan/aqua the scoped hero accent without leaking into other skins', () => {
-    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
-    const miamiCss = css.slice(css.indexOf('/* ── Miami Nebula Skin ── */'), css.indexOf('/* ── Portable Chrome Skin ── */'))
-    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
-    const dq = String.fromCharCode(34)
-
-    expect(miamiCss).toContain('--color-accent: #47f3ff')
-    expect(miamiCss).toContain('[data-theme=' + dq + 'miami' + dq + '] .sidebar-link.active')
-    expect(miamiCss).toContain('box-shadow: inset 2px 0 0 rgba(71, 243, 255, 0.92)')
-    expect(miamiCss).toContain('border-color: rgba(71, 243, 255, 0.36)')
-    expect(miamiCss).toContain('box-shadow: 0 0 18px rgba(71, 243, 255, 0.52)')
-    expect(portableChromeCss).not.toContain('--color-accent: #47f3ff')
+  it('keeps picker preview swatches in sync with each skin token block', () => {
+    for (const theme of THEMES) {
+      const tokens = extractTokens(themeCss(theme.id))
+      expect(theme.preview.window, `${theme.id} preview.window`).toBe(tokens.void)
+      expect(theme.preview.accent, `${theme.id} preview.accent`).toBe(tokens.accent)
+      expect(theme.preview.card, `${theme.id} preview.card`).toBe(tokens['card-base'])
+    }
   })
 
-  it('moves Portable Chrome accents to subtle original PlayStation button colors', () => {
-    const css = readFileSync('src_assets/common/assets/web/app.css', 'utf8')
-    const portableChromeCss = css.slice(css.indexOf('/* ── Portable Chrome Skin ── */'))
+  it('defines Portable Chrome as Nova dark graphite with PlayStation accents', () => {
+    const portable = themeCss('portable-chrome')
 
-    expect(portableChromeCss).toContain('--color-accent: #2f64b3')
-    expect(portableChromeCss).toContain('--portable-cross: #2f64b3')
-    expect(portableChromeCss).toContain('--portable-square: #9d679d')
-    expect(portableChromeCss).toContain('--portable-circle: #b8575f')
-    expect(portableChromeCss).toContain('--portable-triangle: #4f9a67')
-    expect(portableChromeCss).toContain('box-shadow: inset 2px 0 0 rgba(47, 100, 179, 0.90)')
-    expect(portableChromeCss).toContain('0 0 18px rgba(157, 103, 157, 0.20)')
+    expect(portable).toContain('--color-accent: #5a93d6')
+    expect(portable).toContain('--color-void: #14161a')
+    expect(portable).toContain('--color-danger: #f28b93')
+    expect(portable).toContain('--portable-cross: #5a93d6')
+    expect(portable).toContain('--portable-square: #b583b5')
+    expect(portable).toContain('--portable-circle: #d4838a')
+    expect(portable).toContain('--portable-triangle: #6fbf8a')
+    // The light retro chrome is fully retired.
+    expect(portable).not.toContain('color-scheme: light')
+    expect(portable).not.toContain('repeating-linear-gradient')
+    expect(portable).not.toContain('!important')
+    expect(appCss).not.toContain('[class*="text-green-"]')
+  })
+
+  it('leads Miami Nebula with flamingo pink and keeps water cyan as the secondary', () => {
+    const miami = themeCss('miami')
+
+    expect(miami).toContain('--color-accent: #ff5cab')
+    expect(miami).toContain('--color-accent-2: #47f3ff')
+    expect(miami).toContain('--color-info: #47f3ff')
+    expect(miami).toContain('--color-void: #130817')
+    expect(themeCss('portable-chrome')).not.toContain('#ff5cab')
+  })
+
+  it('ships High Contrast with near-opaque surfaces and no glass blur', () => {
+    const highContrast = themeCss('high-contrast')
+
+    expect(highContrast).toContain('--color-accent: #60a5fa')
+    expect(highContrast).toContain('--color-void: #05070c')
+    expect(highContrast).toContain('--color-ice: #ffffff')
+    expect(highContrast).toContain('--surface-card: rgba(15, 23, 42, 0.97)')
+    expect(highContrast).toContain('backdrop-filter: none')
+  })
+
+  it('keeps every skin readable against its own card surface', () => {
+    // Ratios are gated against the solid card base; rendered cards sit at
+    // high alpha over the darker window, so the solid base is the
+    // conservative (lightest) ground for light-on-dark text.
+    const floors = [
+      ['ice', 4.5],
+      ['silver', 3],
+      ['storm', 3],
+      ['accent', 3],
+      ['success', 3],
+      ['warning', 3],
+      ['danger', 3],
+      ['info', 3],
+    ]
+    const defaults = extractTokens(themeCss('polaris'))
+    for (const theme of THEMES) {
+      const tokens = { ...defaults, ...extractTokens(themeCss(theme.id)) }
+      const surface = tokens['card-base']
+      for (const [token, floor] of floors) {
+        expect(
+          contrastRatio(tokens[token], surface),
+          `${theme.id} --color-${token} on ${surface}`,
+        ).toBeGreaterThanOrEqual(floor)
+      }
+    }
   })
 
   it('applies non-default skins through the data-theme attribute', () => {
@@ -142,43 +167,34 @@ describe('theme skin registry', () => {
   })
 
   it('resolves metadata for registered skins and falls back for unknown skins', () => {
-    expect(getThemeMeta('portable-chrome')).toMatchObject({
-      id: 'portable-chrome',
-      label: 'Portable Chrome',
-      shortLabel: 'Portable Chrome',
+    expect(getThemeMeta('high-contrast')).toMatchObject({
+      id: 'high-contrast',
+      label: 'High Contrast',
+      shortLabel: 'Contrast',
     })
-    expect(getThemeMeta('mystery-meat')).toMatchObject({ id: 'polaris', label: 'Space Whale' })
+    expect(getThemeMeta('mystery-meat')).toMatchObject({ id: 'polaris', label: 'Polaris Aurora' })
   })
 
   it('resolves the next registered skin from any current skin', () => {
-    expect(getNextTheme()).toBe('oled')
-    expect(getNextTheme('polaris')).toBe('oled')
+    expect(getNextTheme()).toBe('portable-chrome')
+    expect(getNextTheme('polaris')).toBe('portable-chrome')
+    expect(getNextTheme('portable-chrome')).toBe('oled')
     expect(getNextTheme('oled')).toBe('miami')
-    expect(getNextTheme('miami')).toBe('portable-chrome')
-    expect(getNextTheme('portable-chrome')).toBe('polaris')
+    expect(getNextTheme('miami')).toBe('high-contrast')
+    expect(getNextTheme('high-contrast')).toBe('polaris')
     expect(getNextTheme('mystery-meat')).toBe('polaris')
   })
 
   it('cycles through every registered skin and wraps back to the default', () => {
-    expect(cycleTheme()).toBe('oled')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('oled')
-    expect(cycleTheme()).toBe('miami')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('miami')
     expect(cycleTheme()).toBe('portable-chrome')
     expect(document.documentElement.getAttribute('data-theme')).toBe('portable-chrome')
+    expect(cycleTheme()).toBe('oled')
+    expect(cycleTheme()).toBe('miami')
+    expect(cycleTheme()).toBe('high-contrast')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('high-contrast')
     expect(cycleTheme()).toBe('polaris')
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
-  })
-
-  it('keeps toggleTheme as the backward-compatible cycle API', () => {
-    setTheme('oled')
-
-    expect(toggleTheme()).toBe('miami')
-    expect(getTheme()).toBe('miami')
     expect(toggleTheme()).toBe('portable-chrome')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('portable-chrome')
-    expect(toggleTheme()).toBe('polaris')
-    expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
   })
 
   it('falls back to the default when storage contains an unknown skin', () => {
@@ -189,25 +205,65 @@ describe('theme skin registry', () => {
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
   })
 
-  it('renders toggle copy from the active and next registered skins', async () => {
+  it('notifies theme-change subscribers exactly until they unsubscribe', () => {
+    const seen = []
+    const unsubscribe = onThemeChange((theme) => seen.push(theme))
+
     setTheme('miami')
-    const wrapper = mount(ThemeToggle)
+    expect(seen).toEqual(['miami'])
 
-    expect(wrapper.text()).toBe('Miami')
-    expect(wrapper.attributes('title')).toBe('Switch to Portable Chrome theme')
+    unsubscribe()
+    setTheme('oled')
+    expect(seen).toEqual(['miami'])
+  })
+})
 
-    await wrapper.trigger('click')
-
-    expect(getTheme()).toBe('portable-chrome')
-    expect(wrapper.text()).toBe('Portable Chrome')
-    expect(wrapper.attributes('title')).toBe('Switch to Space Whale theme')
+describe('theme picker', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    document.documentElement.removeAttribute('data-theme')
   })
 
-  it('keeps registered skin titles accurate when collapsed', () => {
-    setTheme('portable-chrome')
+  it('opens a listbox with every registered skin and marks the current one', async () => {
+    setTheme('miami')
+    const wrapper = mount(ThemeToggle, { attachTo: document.body })
+
+    expect(wrapper.find('[role="listbox"]').exists()).toBe(false)
+    await wrapper.find('button[aria-haspopup="listbox"]').trigger('click')
+
+    const options = wrapper.findAll('[role="option"]')
+    expect(options).toHaveLength(THEMES.length)
+    for (const theme of THEMES) {
+      expect(options.some((option) => option.text().includes(theme.label)), theme.label).toBe(true)
+    }
+    const current = wrapper.find('[role="option"][aria-selected="true"]')
+    expect(current.text()).toContain('Miami Nebula')
+    expect(current.text()).toContain('Current')
+    wrapper.unmount()
+  })
+
+  it('applies a chosen skin and closes the listbox', async () => {
+    const wrapper = mount(ThemeToggle, { attachTo: document.body })
+
+    await wrapper.find('button[aria-haspopup="listbox"]').trigger('click')
+    const oledOption = wrapper.findAll('[role="option"]').find((option) => option.text().includes('Console OLED'))
+    await oledOption.trigger('click')
+
+    expect(getTheme()).toBe('oled')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('oled')
+    expect(wrapper.find('[role="listbox"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-haspopup="listbox"]').text()).toContain('OLED')
+    wrapper.unmount()
+  })
+
+  it('keeps an accessible name while collapsed and hides the label text', () => {
+    setTheme('high-contrast')
     const wrapper = mount(ThemeToggle, { props: { collapsed: true } })
 
-    expect(wrapper.text()).toBe('')
-    expect(wrapper.attributes('title')).toBe('Switch to Space Whale theme')
+    const button = wrapper.find('button[aria-haspopup="listbox"]')
+    expect(button.attributes('aria-label')).toBe('Choose theme')
+    expect(button.text()).toBe('')
+    expect(button.attributes('title')).toBe('Theme: High Contrast')
+    wrapper.unmount()
   })
 })
