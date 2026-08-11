@@ -1,0 +1,621 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Polaris benchmark control API",
+    "version": "1.0.0",
+    "description": "Machine-readable contract for the authenticated benchmark-run control surface consumed by external measurement harnesses. Field, route, unit, or compatibility changes require this file and its source-derived drift test to change together.",
+    "license": {
+      "name": "GPL-3.0-only",
+      "identifier": "GPL-3.0-only"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://localhost:{port}",
+      "description": "Local Polaris Web UI endpoint; benchmark control is loopback/origin restricted",
+      "variables": {
+        "port": {
+          "default": "47990",
+          "description": "Configured Polaris Web UI port"
+        }
+      }
+    }
+  ],
+  "x-polaris-compatibility-policy": {
+    "add_field": "Update this contract and the consumer in the same reviewed change; do not silently reinterpret retained evidence.",
+    "remove_or_rename_field": "Breaking change requiring a run-record schema_version increment and an explicit migration decision.",
+    "change_unit_or_meaning": "Breaking change requiring a run-record schema_version increment; changing only a suffix is insufficient.",
+    "retained_evidence": "Evidence remains interpreted under the schema_version it records."
+  },
+  "security": [
+    {
+      "BenchmarkApiKey": []
+    }
+  ],
+  "paths": {
+    "/polaris/v1/session/timing/runs": {
+      "post": {
+        "operationId": "createBenchmarkRun",
+        "x-polaris-handler": "createBenchmarkRun",
+        "x-polaris-source-regex": "^/polaris/v1/session/timing/runs$",
+        "summary": "Create and arm one benchmark run for the single active session",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBenchmarkRunRequest"
+              },
+              "example": {
+                "run_id": "pair-0001-control",
+                "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "label": "P0-7-synthetic-A-pair-01",
+                "workload_id": "synthetic-frame-counter-v1",
+                "expected_duration_s": 120,
+                "duration_tolerance_ms": 250,
+                "drain_grace_ms": 2000,
+                "target_fps": 120,
+                "sample_capacity_frames": 32768
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created or a named benchmark precondition rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON, wrong content type, or missing run_id"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/AuthorizationFailure"
+          }
+        }
+      }
+    },
+    "/polaris/v1/session/timing/runs/{run_id}/start": {
+      "post": {
+        "operationId": "startBenchmarkRun",
+        "x-polaris-handler": "startBenchmarkRun",
+        "x-polaris-source-regex": "^/polaris/v1/session/timing/runs/([^/]+)/start$",
+        "summary": "Start an armed benchmark run",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/CommandResponse"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/AuthorizationFailure"
+          }
+        }
+      }
+    },
+    "/polaris/v1/session/timing/runs/{run_id}/stop": {
+      "post": {
+        "operationId": "stopBenchmarkRun",
+        "x-polaris-handler": "stopBenchmarkRun",
+        "x-polaris-source-regex": "^/polaris/v1/session/timing/runs/([^/]+)/stop$",
+        "summary": "Stop an active benchmark run and begin its bounded drain",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/CommandResponse"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/AuthorizationFailure"
+          }
+        }
+      }
+    },
+    "/polaris/v1/session/timing/runs/{run_id}": {
+      "get": {
+        "operationId": "getBenchmarkRun",
+        "x-polaris-handler": "getBenchmarkRun",
+        "x-polaris-source-regex": "^/polaris/v1/session/timing/runs/([^/]+)$",
+        "summary": "Read the full authoritative run record",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run record, or a named lookup rejection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/BenchmarkRunRecord"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CommandResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/AuthorizationFailure"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBenchmarkRun",
+        "x-polaris-handler": "deleteBenchmarkRun",
+        "x-polaris-source-regex": "^/polaris/v1/session/timing/runs/([^/]+)$",
+        "summary": "Release one run's retained payload storage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/CommandResponse"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/AuthorizationFailure"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BenchmarkApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Polaris API key",
+        "description": "Existing Polaris Web UI API key. Never retain its resolved value in benchmark evidence."
+      }
+    },
+    "parameters": {
+      "RunId": {
+        "name": "run_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "responses": {
+      "AuthorizationFailure": {
+        "description": "Rejected by loopback/origin policy, authentication, CSRF policy, or the benchmark-specific rate limit"
+      },
+      "CommandResponse": {
+        "description": "Named command outcome",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CommandResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "CreateBenchmarkRunRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "manifest_sha256",
+          "label",
+          "workload_id",
+          "expected_duration_s",
+          "duration_tolerance_ms",
+          "drain_grace_ms",
+          "target_fps",
+          "sample_capacity_frames"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "manifest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "label": {
+            "type": "string"
+          },
+          "workload_id": {
+            "type": "string"
+          },
+          "expected_duration_s": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 180,
+            "x-unit": "seconds",
+            "x-storage-field": "expected_duration_ns",
+            "x-storage-unit": "nanoseconds",
+            "x-chrono-constructor": "seconds"
+          },
+          "duration_tolerance_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "x-unit": "milliseconds",
+            "x-storage-field": "duration_tolerance_ns",
+            "x-storage-unit": "nanoseconds",
+            "x-chrono-constructor": "milliseconds"
+          },
+          "drain_grace_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5000,
+            "x-unit": "milliseconds",
+            "x-storage-field": "drain_grace_ns",
+            "x-storage-unit": "nanoseconds",
+            "x-chrono-constructor": "milliseconds"
+          },
+          "target_fps": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 240,
+            "x-unit": "frames_per_second"
+          },
+          "sample_capacity_frames": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536,
+            "x-unit": "frames",
+            "x-minimum-formula": "expected_duration_s * target_fps"
+          }
+        }
+      },
+      "CommandResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "run_id",
+          "result"
+        ],
+        "properties": {
+          "status": {
+            "type": "boolean"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          }
+        },
+        "example": {
+          "status": true,
+          "run_id": "pair-0001-control",
+          "result": "created"
+        }
+      },
+      "BenchmarkStageCapture": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "accepted_count",
+          "excluded_started_before_window",
+          "excluded_completed_after_window",
+          "started_in_window_without_terminal_count",
+          "overflow_count",
+          "invalid_count",
+          "start_offset_us",
+          "end_offset_us",
+          "duration_us"
+        ],
+        "properties": {
+          "accepted_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "excluded_started_before_window": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "excluded_completed_after_window": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "started_in_window_without_terminal_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "overflow_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "invalid_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "start_offset_us": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "x-unit": "microseconds"
+          },
+          "end_offset_us": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "x-unit": "microseconds"
+          },
+          "duration_us": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "x-unit": "microseconds"
+          }
+        }
+      },
+      "BenchmarkRunRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "measurement_spec_id",
+          "collector_version",
+          "clock_domain",
+          "run_id",
+          "manifest_sha256",
+          "state",
+          "abort_reason",
+          "process_instance_id",
+          "session_id",
+          "session_generation",
+          "client_population_revision_at_arm",
+          "client_population_revision_at_freeze",
+          "population_change_count",
+          "armed_monotonic_ns",
+          "started_monotonic_ns",
+          "stopped_monotonic_ns",
+          "frozen_monotonic_ns",
+          "expected_duration_ns",
+          "duration_tolerance_ns",
+          "drain_grace_ns",
+          "actual_duration_ns",
+          "duration_within_tolerance",
+          "target_fps",
+          "workload_id",
+          "sample_capacity",
+          "capture_to_encode",
+          "encode_to_send_release",
+          "capture_to_send_release"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "measurement_spec_id": {
+            "type": "string",
+            "const": "measurement-spec-v1"
+          },
+          "collector_version": {
+            "type": "string"
+          },
+          "clock_domain": {
+            "type": "string",
+            "const": "CLOCK_MONOTONIC"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "manifest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "state": {
+            "type": "string"
+          },
+          "abort_reason": {
+            "type": "string"
+          },
+          "process_instance_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "client_population_revision_at_arm": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "client_population_revision_at_freeze": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "population_change_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "armed_monotonic_ns": {
+            "type": "integer",
+            "x-unit": "nanoseconds"
+          },
+          "started_monotonic_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "x-unit": "nanoseconds"
+          },
+          "stopped_monotonic_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "x-unit": "nanoseconds"
+          },
+          "frozen_monotonic_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "x-unit": "nanoseconds"
+          },
+          "expected_duration_ns": {
+            "type": "integer",
+            "x-unit": "nanoseconds"
+          },
+          "duration_tolerance_ns": {
+            "type": "integer",
+            "x-unit": "nanoseconds"
+          },
+          "drain_grace_ns": {
+            "type": "integer",
+            "x-unit": "nanoseconds"
+          },
+          "actual_duration_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "x-unit": "nanoseconds"
+          },
+          "duration_within_tolerance": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "target_fps": {
+            "type": "integer",
+            "x-unit": "frames_per_second"
+          },
+          "workload_id": {
+            "type": "string"
+          },
+          "sample_capacity": {
+            "type": "integer",
+            "x-unit": "frames"
+          },
+          "capture_to_encode": {
+            "$ref": "#/components/schemas/BenchmarkStageCapture"
+          },
+          "encode_to_send_release": {
+            "$ref": "#/components/schemas/BenchmarkStageCapture"
+          },
+          "capture_to_send_release": {
+            "$ref": "#/components/schemas/BenchmarkStageCapture"
+          }
+        },
+        "example": {
+          "schema_version": 1,
+          "measurement_spec_id": "measurement-spec-v1",
+          "collector_version": "1.3.7",
+          "clock_domain": "CLOCK_MONOTONIC",
+          "run_id": "pair-0001-control",
+          "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "state": "frozen",
+          "abort_reason": "none",
+          "process_instance_id": "host-process-0001",
+          "session_id": "client-device-0001",
+          "session_generation": 7,
+          "client_population_revision_at_arm": 11,
+          "client_population_revision_at_freeze": 11,
+          "population_change_count": 0,
+          "armed_monotonic_ns": 1000000000,
+          "started_monotonic_ns": 2000000000,
+          "stopped_monotonic_ns": 122000000000,
+          "frozen_monotonic_ns": 124000000000,
+          "expected_duration_ns": 120000000000,
+          "duration_tolerance_ns": 250000000,
+          "drain_grace_ns": 2000000000,
+          "actual_duration_ns": 120000000000,
+          "duration_within_tolerance": true,
+          "target_fps": 120,
+          "workload_id": "synthetic-frame-counter-v1",
+          "sample_capacity": 32768,
+          "capture_to_encode": {
+            "accepted_count": 2,
+            "excluded_started_before_window": 0,
+            "excluded_completed_after_window": 0,
+            "started_in_window_without_terminal_count": 0,
+            "overflow_count": 0,
+            "invalid_count": 0,
+            "start_offset_us": [
+              0,
+              8333
+            ],
+            "end_offset_us": [
+              500,
+              8833
+            ],
+            "duration_us": [
+              500,
+              500
+            ]
+          },
+          "encode_to_send_release": {
+            "accepted_count": 2,
+            "excluded_started_before_window": 0,
+            "excluded_completed_after_window": 0,
+            "started_in_window_without_terminal_count": 0,
+            "overflow_count": 0,
+            "invalid_count": 0,
+            "start_offset_us": [
+              500,
+              8833
+            ],
+            "end_offset_us": [
+              1300,
+              9633
+            ],
+            "duration_us": [
+              800,
+              800
+            ]
+          },
+          "capture_to_send_release": {
+            "accepted_count": 2,
+            "excluded_started_before_window": 0,
+            "excluded_completed_after_window": 0,
+            "started_in_window_without_terminal_count": 0,
+            "overflow_count": 0,
+            "invalid_count": 0,
+            "start_offset_us": [
+              0,
+              8333
+            ],
+            "end_offset_us": [
+              1300,
+              9633
+            ],
+            "duration_us": [
+              1300,
+              1300
+            ]
+          }
+        }
+      }
+    }
+  }
+}
