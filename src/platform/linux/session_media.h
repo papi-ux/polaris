@@ -33,6 +33,11 @@ namespace session_media {
   teardown_owner_t begin_teardown();
 
   /**
+   * @brief Whether teardown has closed admission for new media starts.
+   */
+  bool teardown_in_progress();
+
+  /**
    * @brief Ordered media teardown for an ending stream session.
    *
    * 1) signal Browser Stream capture shutdown (if any)

@@ -9,6 +9,7 @@
 
   #include "src/browser_stream.h"
   #include "src/logging.h"
+  #include "src/platform/linux/portal_session.h"
 
   #include <condition_variable>
   #include <deque>
@@ -94,7 +95,13 @@ namespace session_media {
   }
 
   teardown_owner_t begin_teardown() {
-    return media_gate().begin_teardown();
+    return media_gate().begin_teardown([] {
+      portal::cancel_pending_requests();
+    });
+  }
+
+  bool teardown_in_progress() {
+    return media_gate().teardown_in_progress();
   }
 
   teardown_owner_t prepare_for_stop() {

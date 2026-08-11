@@ -30,6 +30,7 @@
 
 namespace portal {
   std::uint32_t portal_pick_cursor_mode_for_tests(std::uint32_t available);
+  bool portal_cancel_pending_request_for_tests();
 }
 
 TEST(PortalGrabPolicyTests, DesktopDisplayRequestsMonitorSource) {
@@ -137,6 +138,139 @@ TEST(PortalGrabPolicyTests, CursorModePrefersEmbeddedThenMetadataThenHidden) {
   EXPECT_EQ(portal::portal_pick_cursor_mode_for_tests(7), 2u);  // all → Embedded
   EXPECT_EQ(portal::portal_pick_cursor_mode_for_tests(5), 4u);  // Hidden|Metadata → Metadata
   EXPECT_EQ(portal::portal_pick_cursor_mode_for_tests(3), 2u);  // Hidden|Embedded → Embedded
+}
+
+TEST(PortalGrabPolicyTests, CancelPendingRequestsCancelsRegisteredRequest) {
+  EXPECT_TRUE(portal::portal_cancel_pending_request_for_tests());
+}
+
+TEST(PortalGrabPolicyTests, TeardownCancelsPortalWaitBeforeWaitingForStartFence) {
+  const auto portal_path =
+    std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/portal_session.cpp";
+  const auto media_path =
+    std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/session_media.cpp";
+  std::ifstream portal_in(portal_path);
+  std::ifstream media_in(media_path);
+  ASSERT_TRUE(portal_in.good());
+  ASSERT_TRUE(media_in.good());
+  std::ostringstream portal_out;
+  std::ostringstream media_out;
+  portal_out << portal_in.rdbuf();
+  media_out << media_in.rdbuf();
+  const auto portal_source = portal_out.str();
+  const auto media_source = media_out.str();
+
+  const auto begin = media_source.find("teardown_owner_t begin_teardown()");
+  const auto begin_end = media_source.find("teardown_owner_t prepare_for_stop()", begin);
+  ASSERT_NE(begin, std::string::npos);
+  ASSERT_NE(begin_end, std::string::npos);
+  const auto begin_body = media_source.substr(begin, begin_end - begin);
+  const auto gate_wait = begin_body.find("media_gate().begin_teardown([]");
+  const auto cancel = begin_body.find("portal::cancel_pending_requests()", gate_wait);
+  ASSERT_NE(gate_wait, std::string::npos)
+    << "teardown must announce cancellation atomically with closing start admission";
+  ASSERT_NE(cancel, std::string::npos)
+    << "the gate announcement must cancel in-flight portal calls before waiting for starts";
+
+  const auto helper = portal_source.find("static portal_request_result_t portal_call_and_wait_for_response");
+  const auto helper_end = portal_source.find("static std::string make_request_path", helper);
+  ASSERT_NE(helper, std::string::npos);
+  ASSERT_NE(helper_end, std::string::npos);
+  const auto helper_body = portal_source.substr(helper, helper_end - helper);
+  EXPECT_NE(helper_body.find("g_cancellable_source_new(cancellable)"), std::string::npos)
+    << "cancellation must also wake a Response wait after the method call returns";
+  EXPECT_NE(
+    helper_body.find("portal_call_sync(conn, method, params, call_timeout_ms, cancellable)"),
+    std::string::npos
+  ) << "the synchronous D-Bus call must receive the same cancellable";
+
+  const auto create = portal_source.find("std::unique_ptr<portal_session_t> create_portal_session");
+  ASSERT_NE(create, std::string::npos);
+  const auto create_body = portal_source.substr(create);
+  EXPECT_NE(create_body.find("pending_request_registration_t registration"), std::string::npos)
+    << "the cancellable must cover cursor queries and every portal request";
+  EXPECT_NE(
+    create_body.find("portal_wait_cursor_modes(session->conn, cancellable)"),
+    std::string::npos
+  ) << "cursor-mode property calls must be teardown-cancellable";
+  EXPECT_NE(create_body.find("session_media::teardown_in_progress()"), std::string::npos)
+    << "a session registered after teardown announcement must cancel itself";
+}
+
+TEST(PortalGrabPolicyTests, TeardownCancellationPreservesRestoreToken) {
+  const auto path =
+    std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/portal_session.cpp";
+  std::ifstream input(path);
+  ASSERT_TRUE(input.good());
+  std::ostringstream output;
+  output << input.rdbuf();
+  const auto source = output.str();
+
+  EXPECT_NE(source.find("struct portal_request_result_t"), std::string::npos)
+    << "portal cancellation must be distinguishable from timeout/failure";
+
+  const auto select_begin = source.find("// Step 2: SelectSources");
+  const auto select_end = source.find("// Step 3: Start", select_begin);
+  ASSERT_NE(select_begin, std::string::npos);
+  ASSERT_NE(select_end, std::string::npos);
+  const auto select_body = source.substr(select_begin, select_end - select_begin);
+  const auto select_cancelled = select_body.find("if (result.cancelled)");
+  const auto select_clear = select_body.find("clear_restore_token()");
+  ASSERT_NE(select_cancelled, std::string::npos);
+  ASSERT_NE(select_clear, std::string::npos);
+  EXPECT_LT(select_cancelled, select_clear)
+    << "SelectSources cancellation must exit before stale-token invalidation";
+
+  const auto start_begin = select_end;
+  const auto start_end = source.find("session->ready = true", start_begin);
+  ASSERT_NE(start_end, std::string::npos);
+  const auto start_body = source.substr(start_begin, start_end - start_begin);
+  const auto preserve_guard = start_body.find("if (!result.cancelled)");
+  const auto start_clear = start_body.find("clear_restore_token()", preserve_guard);
+  ASSERT_NE(preserve_guard, std::string::npos);
+  ASSERT_NE(start_clear, std::string::npos)
+    << "Start may clear a failed token only inside the non-cancelled path";
+}
+
+TEST(PortalGrabPolicyTests, TeardownCancellationCoversRemoteReopenAndRetryLoop) {
+  const auto session_path =
+    std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/portal_session.cpp";
+  const auto grab_path =
+    std::filesystem::path(POLARIS_SOURCE_DIR) / "src/platform/linux/portal_grab.cpp";
+  std::ifstream session_in(session_path);
+  std::ifstream grab_in(grab_path);
+  ASSERT_TRUE(session_in.good());
+  ASSERT_TRUE(grab_in.good());
+  std::ostringstream session_out;
+  std::ostringstream grab_out;
+  session_out << session_in.rdbuf();
+  grab_out << grab_in.rdbuf();
+  const auto session_source = session_out.str();
+  const auto grab_source = grab_out.str();
+
+  const auto open_begin = session_source.find("int open_pipewire_remote_fd(");
+  const auto open_end = session_source.find("struct portal_request_result_t", open_begin);
+  ASSERT_NE(open_begin, std::string::npos);
+  ASSERT_NE(open_end, std::string::npos);
+  const auto open_body = session_source.substr(open_begin, open_end - open_begin);
+  EXPECT_NE(open_body.find("pending_request_registration_t registration"), std::string::npos)
+    << "an existing session remote reopen must register its own cancellable";
+  EXPECT_NE(open_body.find("session_media::teardown_in_progress()"), std::string::npos)
+    << "a reopen racing a previously announced teardown must self-cancel";
+  EXPECT_NE(open_body.find("&out_fd_list,\n      cancellable,"), std::string::npos)
+    << "OpenPipeWireRemote must receive the registered cancellable";
+
+  const auto ensure_begin = grab_source.find("static bool ensure_session_unlocked()");
+  const auto ensure_end = grab_source.find("static bool ensure_global_session()", ensure_begin);
+  ASSERT_NE(ensure_begin, std::string::npos);
+  ASSERT_NE(ensure_end, std::string::npos);
+  const auto ensure_body = grab_source.substr(ensure_begin, ensure_end - ensure_begin);
+  const auto shutdown_guard = ensure_body.find("if (session_media::teardown_in_progress())");
+  const auto retry_sleep = ensure_body.find("std::this_thread::sleep_for");
+  ASSERT_NE(shutdown_guard, std::string::npos)
+    << "a cancelled portal session must not enter the retry backoff during teardown";
+  ASSERT_NE(retry_sleep, std::string::npos);
+  EXPECT_LT(shutdown_guard, retry_sleep);
 }
 
 TEST(PortalGrabPolicyTests, SelectSourcesInvalidatesRestoreTokenOnFailure) {
