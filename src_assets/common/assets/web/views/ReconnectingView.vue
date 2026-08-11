@@ -16,7 +16,7 @@
         Polaris is temporarily unavailable. Your session has not been cleared.
       </p>
       <div class="mx-auto mt-6 flex w-fit items-center gap-3 rounded-full border border-storm/20 bg-void/45 px-4 py-2 text-xs text-storm">
-        <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-warning shadow-[0_0_14px_rgba(252,211,77,0.55)]"></span>
+        <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-warning shadow-[0_0_14px_color-mix(in_srgb,var(--color-warning)_55%,transparent)]"></span>
         {{ checking ? 'Checking host…' : `Retrying connection · attempt ${attempts + 1}` }}
       </div>
       <button

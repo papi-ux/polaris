@@ -355,7 +355,7 @@
 import { ref, computed } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
-import { buildUpdateCenterState } from '../update-center.js'
+import { buildUpdateCenterState, updateStatusLightClass } from '../update-center.js'
 import InfoHint from '../components/InfoHint.vue'
 
 const { gpu, displays, audio, sessionType, displaySession, loading: systemLoading } = useSystemStats(3000)
@@ -543,20 +543,7 @@ const updateCenterBadgeClass = computed(() => {
 })
 
 
-const updateCenterStatusLightClass = computed(() => {
-  switch (updateCenterState.value.statusTone) {
-    case 'update':
-      return 'bg-ice shadow-[0_0_18px_color-mix(in_srgb,var(--color-ice)_75%,transparent)] animate-pulse'
-    case 'ahead':
-      return 'bg-accent shadow-[0_0_14px_rgba(216,180,254,0.55)]'
-    case 'warning':
-      return 'bg-warning shadow-[0_0_14px_rgba(252,211,77,0.55)]'
-    case 'disabled':
-      return 'bg-storm/60'
-    default:
-      return 'bg-success shadow-[0_0_14px_color-mix(in_srgb,var(--color-success)_55%,transparent)]'
-  }
-})
+const updateCenterStatusLightClass = computed(() => updateStatusLightClass(updateCenterState.value.statusTone))
 
 const updateCenterCtaClass = computed(() => {
   if (updateCenterState.value.status === 'update_available') {

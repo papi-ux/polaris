@@ -32,9 +32,9 @@ const buttonVariants = cva(
     variants: {
       variant: {
         primary: 'bg-ice text-void hover:bg-ice/90 hover:shadow-glow-ice active:bg-ice/80',
-        danger: 'bg-danger text-white hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] active:bg-danger/70',
-        success: 'bg-ice/20 text-ice hover:bg-ice/30 hover:shadow-[0_0_24px_rgba(34,197,94,0.2)] active:bg-success/60',
-        warning: 'bg-warning/85 text-white hover:bg-warning/70 active:bg-warning/60',
+        danger: 'bg-danger text-void hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] active:bg-danger/70',
+        success: 'bg-ice/20 text-ice hover:bg-ice/30 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-success)_20%,transparent)] active:bg-success/60',
+        warning: 'bg-warning text-void hover:bg-warning/85 active:bg-warning/70',
         ghost: 'text-storm hover:text-silver hover:bg-twilight/50 active:bg-twilight',
         outline: 'border border-storm text-silver hover:border-ice hover:text-ice hover:shadow-[0_0_16px_color-mix(in_srgb,var(--color-ice)_8%,transparent)] active:bg-twilight/30',
       },

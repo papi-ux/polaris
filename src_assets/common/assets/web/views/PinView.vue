@@ -349,7 +349,7 @@
             </span>
             <button
               type="button"
-              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-white transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="unpairAllPressed || clients.length === 0"
               @click="unpairAll"
             >
@@ -593,7 +593,7 @@
                     <div v-if="aiSuggestion.reasoning" class="mt-2 text-xs italic text-silver/60">{{ aiSuggestion.reasoning }}</div>
                     <button
                       type="button"
-                      class="mt-3 inline-flex h-7 items-center justify-center rounded-lg bg-accent px-3 text-xs font-medium text-white transition-all duration-200 hover:bg-accent/85"
+                      class="mt-3 inline-flex h-7 items-center justify-center rounded-lg bg-accent px-3 text-xs font-medium text-void transition-all duration-200 hover:bg-accent/85"
                       @click="applySuggestion(client)"
                     >
                       {{ $t('pin.apply_suggestion') }}
@@ -704,7 +704,7 @@
                             <div class="flex gap-1">
                               <button
                                 type="button"
-                                class="rounded bg-danger px-2 py-1 text-white transition hover:bg-danger/85"
+                                class="rounded bg-danger px-2 py-1 text-void transition hover:bg-danger/85"
                                 :aria-label="$t('pin.remove_command')"
                                 @click="removeCmd(client[`edit_${cmdType}`], i)"
                               >
@@ -799,7 +799,7 @@
                   <button
                     v-if="client.connected"
                     type="button"
-                    class="rounded-lg bg-warning/85 px-2.5 py-2 text-white transition hover:bg-warning/70"
+                    class="rounded-lg bg-warning px-2.5 py-2 text-void transition hover:bg-warning/85"
                     :aria-label="$t('pin.disconnect_client')"
                     @click="disconnectClient(client.uuid)"
                   >
@@ -875,7 +875,7 @@
             </span>
             <button
               type="button"
-              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-white transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="removingStaleProfiles || staleProfileEntries.length === 0"
               @click="deleteStaleProfiles"
             >

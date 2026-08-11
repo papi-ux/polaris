@@ -95,7 +95,9 @@ describe('theme skin registry', () => {
 
     expect(contrastRatio(tokens.foreground, tokens.surface)).toBeGreaterThanOrEqual(7)
     expect(contrastRatio(tokens.silver, tokens.surface)).toBeGreaterThanOrEqual(7)
-    expect(contrastRatio(tokens.storm, tokens.surface)).toBeGreaterThanOrEqual(3)
+    // storm is the caption/body muted text color, so it keeps the AA body-text
+    // floor the removed --color-muted alias used to carry.
+    expect(contrastRatio(tokens.storm, tokens.surface)).toBeGreaterThanOrEqual(4.5)
     expect(contrastRatio(tokens.ice, tokens.surface)).toBeGreaterThanOrEqual(7)
     expect(contrastRatio(tokens.accent, tokens.surface)).toBeGreaterThanOrEqual(3)
     // Every status token must hold AA body-text contrast on the light panels.

@@ -344,8 +344,7 @@
                         :class="{
                           'bg-success/20 text-success': s.quality_grade === 'A',
                           'bg-info/20 text-info': s.quality_grade === 'B',
-                          'bg-warning/20 text-warning': s.quality_grade === 'C',
-                          'bg-warning/20 text-warning': s.quality_grade === 'D',
+                          'bg-warning/20 text-warning': s.quality_grade === 'C' || s.quality_grade === 'D',
                           'bg-danger/20 text-danger': s.quality_grade === 'F'
                         }"
                       >

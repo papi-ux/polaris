@@ -1337,8 +1337,7 @@ onBeforeUnmount(() => {
               <span class="px-1.5 py-0.5 rounded text-xs" :class="{
                 'bg-success/10 text-success': device.type === 'handheld',
                 'bg-info/10 text-info': device.type === 'phone',
-                'bg-warning/10 text-warning': device.type === 'desktop',
-                'bg-warning/10 text-warning': device.type === 'tablet'
+                'bg-warning/10 text-warning': device.type === 'desktop' || device.type === 'tablet'
               }">{{ device.type }}</span>
             </div>
           </div>

@@ -471,7 +471,7 @@ textarea {
 }
 
 .operator-console {
-  --console-border: color-mix(in srgb, var(--color-ice) 8%, transparent);
+  --console-border: var(--edge-glass);
   --console-surface: color-mix(in srgb, var(--color-void) 44%, transparent);
   --console-surface-strong: color-mix(in srgb, var(--color-void) 62%, transparent);
   --console-muted: color-mix(in srgb, var(--color-storm) 74%, transparent);
@@ -1191,7 +1191,7 @@ textarea {
 }
 
 .dashboard-action-button-danger {
-  @apply bg-danger text-white hover:bg-danger/85;
+  @apply bg-danger text-void hover:bg-danger/85;
 }
 
 .dashboard-preview-frame {
@@ -1357,7 +1357,7 @@ textarea {
 }
 
 .troubleshooting-action-button-danger {
-  @apply bg-danger text-white hover:bg-danger/85;
+  @apply bg-danger text-void hover:bg-danger/85;
 }
 
 .troubleshooting-action-card {
@@ -1471,7 +1471,9 @@ textarea {
   color-scheme: light;
   --color-ice: #17202a;
   --color-silver: #33404c;
-  --color-storm: #6f7b88;
+  /* storm carries caption/body text, so it holds the 4.5:1 AA floor the old
+     --color-muted assertion guarded (that alias was removed as unused). */
+  --color-storm: #4f5d6b;
   --color-twilight: #a7b2be;
   --color-deep: #b8c1cc;
   --color-void: #d6dde5;
