@@ -171,6 +171,41 @@ TEST(SessionStopContractTests, VideoCaptureTagsPortalStartOwner) {
   EXPECT_LT(scope, reset);
 }
 
+TEST(SessionStopContractTests, PortalCancellationIsGuardedWhenBackendIsUnavailable) {
+  const auto source = read_source_for_contract("src/platform/linux/session_media.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto include = source.find("#include \"src/platform/linux/portal_session.h\"");
+  ASSERT_NE(include, std::string::npos);
+  const auto include_guard = source.rfind("#ifdef POLARIS_BUILD_PORTAL", include);
+  const auto include_guard_end = source.find("#endif", include_guard);
+  ASSERT_NE(include_guard, std::string::npos)
+    << "portal_session.h requires GIO and must only be included when the portal backend is built";
+  ASSERT_NE(include_guard_end, std::string::npos);
+  EXPECT_LT(include_guard, include);
+  EXPECT_LT(include, include_guard_end);
+
+  const auto owner_cancel = source.find("portal::cancel_pending_requests(owner_tag)");
+  ASSERT_NE(owner_cancel, std::string::npos);
+  const auto owner_guard = source.rfind("#ifdef POLARIS_BUILD_PORTAL", owner_cancel);
+  const auto owner_guard_end = source.find("#endif", owner_guard);
+  ASSERT_NE(owner_guard, std::string::npos);
+  ASSERT_NE(owner_guard_end, std::string::npos);
+  EXPECT_LT(owner_guard, owner_cancel);
+  EXPECT_LT(owner_cancel, owner_guard_end);
+
+  const auto teardown_cancel = source.find("portal::cancel_pending_requests()", owner_cancel + 1);
+  ASSERT_NE(teardown_cancel, std::string::npos);
+  const auto teardown_guard = source.rfind("#ifdef POLARIS_BUILD_PORTAL", teardown_cancel);
+  const auto teardown_guard_end = source.find("#endif", teardown_guard);
+  ASSERT_NE(teardown_guard, std::string::npos);
+  ASSERT_NE(teardown_guard_end, std::string::npos);
+  EXPECT_LT(teardown_guard, teardown_cancel);
+  EXPECT_LT(teardown_cancel, teardown_guard_end);
+  EXPECT_EQ(source.find("portal::cancel_pending_requests", teardown_cancel + 1), std::string::npos)
+    << "every optional portal cancellation call must be feature guarded";
+}
+
 TEST(SessionStopContractTests, CancelAnswersClientBeforeNestedTeardown) {
   // SB-2 residual: nested gamescope undo can SEGV mid-cancel; Moonlight must
   // already have cancel=1 or it maps the failed HTTP as "another device".

@@ -9,7 +9,9 @@
 
   #include "src/browser_stream.h"
   #include "src/logging.h"
-  #include "src/platform/linux/portal_session.h"
+  #ifdef POLARIS_BUILD_PORTAL
+    #include "src/platform/linux/portal_session.h"
+  #endif
 
   #include <condition_variable>
   #include <deque>
@@ -146,7 +148,9 @@ namespace session_media {
       std::lock_guard lock(state.mutex);
       ++state.owners[owner_tag];
     }
+  #ifdef POLARIS_BUILD_PORTAL
     portal::cancel_pending_requests(owner_tag);
+  #endif
     return owner;
   }
 
@@ -178,7 +182,9 @@ namespace session_media {
 
   teardown_owner_t begin_teardown() {
     return media_gate().begin_teardown([] {
+  #ifdef POLARIS_BUILD_PORTAL
       portal::cancel_pending_requests();
+  #endif
     });
   }
 
