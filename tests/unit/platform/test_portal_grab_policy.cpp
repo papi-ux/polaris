@@ -33,6 +33,7 @@ namespace portal {
   std::uint32_t portal_pick_cursor_mode_for_tests(std::uint32_t available);
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
+  bool portal_cancel_source_wakes_wait_for_tests();
 }
 
 TEST(PortalGrabPolicyTests, DesktopDisplayRequestsMonitorSource) {
@@ -148,6 +149,10 @@ TEST(PortalGrabPolicyTests, CancelPendingRequestsCancelsRegisteredRequest) {
 
 TEST(PortalGrabPolicyTests, CancelPendingRequestsMatchesOwner) {
   EXPECT_TRUE(portal::portal_cancel_request_owner_for_tests());
+}
+
+TEST(PortalGrabPolicyTests, CancellableSourceWakesWaitLoop) {
+  EXPECT_TRUE(portal::portal_cancel_source_wakes_wait_for_tests());
 }
 
 TEST(PortalGrabPolicyTests, PendingStartCancellationScopeIsOwnerBounded) {

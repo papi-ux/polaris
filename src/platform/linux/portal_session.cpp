@@ -45,6 +45,23 @@ namespace portal {
       const void *owner_tag = nullptr;
     };
 
+    struct portal_response_wait_data_t {
+      GVariant *result = nullptr;
+      std::atomic<bool> done {false};
+      std::atomic<bool> cancelled {false};
+      uint32_t response = 99;
+      GMainLoop *loop = nullptr;
+    };
+
+    gboolean cancel_portal_response_wait(GCancellable *, gpointer userdata) {
+      auto *data = static_cast<portal_response_wait_data_t *>(userdata);
+      data->cancelled = true;
+      if (data->loop) {
+        g_main_loop_quit(data->loop);
+      }
+      return G_SOURCE_REMOVE;
+    }
+
     std::mutex g_pending_request_mutex;
     std::vector<pending_request_t> g_pending_requests;
 
@@ -147,6 +164,25 @@ namespace portal {
     g_object_unref(first);
     g_object_unref(second);
     return matched;
+  }
+
+  bool portal_cancel_source_wakes_wait_for_tests() {
+    portal_response_wait_data_t data;
+    auto *context = g_main_context_new();
+    data.loop = g_main_loop_new(context, FALSE);
+    auto *cancellable = g_cancellable_new();
+    auto *source = g_cancellable_source_new(cancellable);
+    g_source_set_callback(source, G_SOURCE_FUNC(cancel_portal_response_wait), &data, nullptr);
+    g_source_attach(source, context);
+    g_cancellable_cancel(cancellable);
+    const bool dispatched = g_main_context_iteration(context, FALSE);
+    const bool woke = dispatched && data.cancelled;
+    g_source_destroy(source);
+    g_source_unref(source);
+    g_object_unref(cancellable);
+    g_main_loop_unref(data.loop);
+    g_main_context_unref(context);
+    return woke;
   }
 #endif
 
@@ -600,13 +636,7 @@ namespace portal {
     int call_timeout_ms = 5000,
     int response_timeout_ms = 30000) {
 
-    struct cb_data_t {
-      GVariant *result = nullptr;
-      std::atomic<bool> done {false};
-      std::atomic<bool> cancelled {false};
-      uint32_t response = 99;
-      GMainLoop *loop = nullptr;
-    } cb_data;
+    portal_response_wait_data_t cb_data;
 
     // Capture signal delivery on a dedicated thread-default context before the
     // synchronous method call can trigger a fast Response signal.
@@ -615,14 +645,12 @@ namespace portal {
     g_main_context_push_thread_default(ctx);
 
     auto *cancel_source = g_cancellable_source_new(cancellable);
-    g_source_set_callback(cancel_source, [](gpointer userdata) -> gboolean {
-      auto *data = static_cast<cb_data_t *>(userdata);
-      data->cancelled = true;
-      if (data->loop) {
-        g_main_loop_quit(data->loop);
-      }
-      return G_SOURCE_REMOVE;
-    }, &cb_data, nullptr);
+    g_source_set_callback(
+      cancel_source,
+      G_SOURCE_FUNC(cancel_portal_response_wait),
+      &cb_data,
+      nullptr
+    );
     g_source_attach(cancel_source, ctx);
     GSource *timeout_source = nullptr;
 
@@ -635,7 +663,7 @@ namespace portal {
       G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
       [](GDBusConnection *, const gchar *, const gchar *, const gchar *,
          const gchar *, GVariant *parameters, gpointer userdata) {
-        auto *data = static_cast<cb_data_t *>(userdata);
+        auto *data = static_cast<portal_response_wait_data_t *>(userdata);
         uint32_t resp = 0;
         GVariant *results = nullptr;
         g_variant_get(parameters, "(u@a{sv})", &resp, &results);
@@ -676,7 +704,7 @@ namespace portal {
     if (!cb_data.done && !cb_data.cancelled) {
       timeout_source = g_timeout_source_new(response_timeout_ms);
       g_source_set_callback(timeout_source, [](gpointer userdata) -> gboolean {
-        auto *data = static_cast<cb_data_t *>(userdata);
+        auto *data = static_cast<portal_response_wait_data_t *>(userdata);
         if (!data->done && data->loop) {
           g_main_loop_quit(data->loop);
         }
