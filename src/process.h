@@ -28,6 +28,11 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef __linux__
+  #include <sys/types.h>
+  #include <unistd.h>
+#endif
+
 // lib includes
 #include <boost/process/v1/child.hpp>
 #include <boost/process/v1/group.hpp>
@@ -58,6 +63,37 @@ namespace proc {
 #ifdef __linux__
   struct steam_big_picture_guard_runtime_t;
   struct steam_big_picture_guard_snapshot_t;
+
+  struct pidfd_handle_t {
+    pid_t pid = -1;
+    int fd = -1;
+
+    pidfd_handle_t() = default;
+    pidfd_handle_t(pid_t process_id, int descriptor): pid(process_id), fd(descriptor) {}
+    pidfd_handle_t(const pidfd_handle_t &) = delete;
+    pidfd_handle_t &operator=(const pidfd_handle_t &) = delete;
+    pidfd_handle_t(pidfd_handle_t &&other) noexcept: pid(other.pid), fd(other.fd) {
+      other.pid = -1;
+      other.fd = -1;
+    }
+    pidfd_handle_t &operator=(pidfd_handle_t &&other) noexcept {
+      if (this != &other) {
+        if (fd >= 0) {
+          ::close(fd);
+        }
+        pid = other.pid;
+        fd = other.fd;
+        other.pid = -1;
+        other.fd = -1;
+      }
+      return *this;
+    }
+    ~pidfd_handle_t() {
+      if (fd >= 0) {
+        ::close(fd);
+      }
+    }
+  };
 #endif
 
 #ifdef _WIN32
@@ -283,6 +319,18 @@ namespace proc {
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid
   );
+  bool non_cage_detached_generation_cleanup_for_tests(
+    std::string_view session_instance_id,
+    pid_t direct_child_pid
+  );
+  bool non_cage_detached_capture_failure_retains_generation_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  );
+  bool non_cage_detached_partial_launch_cleanup_for_tests(
+    std::string_view session_instance_id,
+    pid_t prior_child_pid
+  );
   bool terminate_session_owned_steam_before_cage_stop_for_tests(
     const struct ctx_t &app,
     bool session_owned_cage,
@@ -313,6 +361,11 @@ namespace proc {
     pid_t reused_pid
   );
   bool isolated_session_generation_blocks_launch_for_tests(bool session_owned_cage, bool generation_available);
+  bool isolated_session_requires_exact_generation_cleanup_for_tests(
+    bool session_owned_cage,
+    bool has_detached_commands,
+    bool has_main_command
+  );
   bool unreadable_environ_latches_capture_for_tests(
     int read_error,
     std::optional<uid_t> real_uid,
@@ -614,6 +667,18 @@ namespace proc {
       std::string_view session_instance_id,
       pid_t forced_capture_failure_pid
     );
+    bool non_cage_detached_generation_cleanup_for_tests(
+      std::string_view session_instance_id,
+      pid_t direct_child_pid
+    );
+    bool non_cage_detached_capture_failure_retains_generation_for_tests(
+      std::string_view session_instance_id,
+      pid_t forced_capture_failure_pid
+    );
+    bool non_cage_detached_partial_launch_cleanup_for_tests(
+      std::string_view session_instance_id,
+      pid_t prior_child_pid
+    );
     bool terminate_session_owned_steam_before_cage_stop_for_tests(
       const ctx_t &app,
       bool session_owned_cage,
@@ -641,6 +706,7 @@ namespace proc {
     void terminate_impl(bool immediate, bool needs_refresh);
 #ifdef __linux__
     bool terminate_session_owned_steam_before_cage_stop();
+    bool cleanup_tracked_detached_children_after_launch_failure();
     void terminate_isolated_session_generation();
     void finish_isolated_session_generation_cleanup();
     std::shared_ptr<const steam_big_picture_guard_snapshot_t> snapshot_steam_big_picture_input_guard(
@@ -687,6 +753,8 @@ namespace proc {
 #ifdef __linux__
     std::shared_ptr<steam_big_picture_guard_runtime_t> _steam_big_picture_guard;
     std::string _session_instance_id;
+    std::vector<pidfd_handle_t> _detached_child_pidfds;
+    bool _detached_child_authority_complete = true;
     bool _session_used_cage_compositor = false;
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
