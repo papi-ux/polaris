@@ -4,14 +4,11 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import ThemeToggle from './ThemeToggle.vue'
 import {
   applyTheme,
-  cycleTheme,
   getThemeMeta,
-  getNextTheme,
   getTheme,
   setTheme,
   onThemeChange,
   THEMES,
-  toggleTheme,
 } from './theme.js'
 
 function hexToRgb(hex) {
@@ -135,9 +132,12 @@ describe('theme skin registry', () => {
     // Ratios are gated against the solid card base; rendered cards sit at
     // high alpha over the darker window, so the solid base is the
     // conservative (lightest) ground for light-on-dark text.
+    // silver is --color-foreground (app-wide body text), so it holds the AA
+    // body-text floor alongside ice. storm is the deliberately muted caption
+    // tier and holds the large-text floor, matching Nova's own muted values.
     const floors = [
       ['ice', 4.5],
-      ['silver', 3],
+      ['silver', 4.5],
       ['storm', 3],
       ['accent', 3],
       ['success', 3],
@@ -175,26 +175,29 @@ describe('theme skin registry', () => {
     expect(getThemeMeta('mystery-meat')).toMatchObject({ id: 'polaris', label: 'Polaris Aurora' })
   })
 
-  it('resolves the next registered skin from any current skin', () => {
-    expect(getNextTheme()).toBe('portable-chrome')
-    expect(getNextTheme('polaris')).toBe('portable-chrome')
-    expect(getNextTheme('portable-chrome')).toBe('oled')
-    expect(getNextTheme('oled')).toBe('miami')
-    expect(getNextTheme('miami')).toBe('high-contrast')
-    expect(getNextTheme('high-contrast')).toBe('polaris')
-    expect(getNextTheme('mystery-meat')).toBe('polaris')
+  it('keeps the pre-paint boot script in lockstep with the theme registry', () => {
+    const boot = readFileSync('src_assets/common/assets/web/public/assets/theme-boot.js', 'utf8')
+    const header = readFileSync('src_assets/common/assets/web/template_header.html', 'utf8')
+
+    // The boot script must be reachable on the production host: only /assets,
+    // /images, and /sw.js are routed by confighttp, so it lives under assets/.
+    expect(header).toContain('<script src="./assets/theme-boot.js"></script>')
+    expect(boot).toContain("localStorage.getItem('polaris-theme')")
+    expect(boot).toContain("theme !== 'polaris'")
+    for (const theme of THEMES) {
+      expect(boot, `boot id list includes ${theme.id}`).toContain(`'${theme.id}'`)
+    }
   })
 
-  it('cycles through every registered skin and wraps back to the default', () => {
-    expect(cycleTheme()).toBe('portable-chrome')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('portable-chrome')
-    expect(cycleTheme()).toBe('oled')
-    expect(cycleTheme()).toBe('miami')
-    expect(cycleTheme()).toBe('high-contrast')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('high-contrast')
-    expect(cycleTheme()).toBe('polaris')
-    expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
-    expect(toggleTheme()).toBe('portable-chrome')
+  it('re-applying the active skin is a no-op for subscribers', () => {
+    const seen = []
+    const unsubscribe = onThemeChange((theme) => seen.push(theme))
+
+    setTheme('miami')
+    setTheme('miami')
+    expect(seen).toEqual(['miami'])
+
+    unsubscribe()
   })
 
   it('falls back to the default when storage contains an unknown skin', () => {

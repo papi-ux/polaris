@@ -45,7 +45,7 @@ async function togglePicker() {
 
 function choose(themeId) {
   setTheme(themeId)
-  open.value = false
+  close(true)
 }
 
 function close(focusButton = true) {

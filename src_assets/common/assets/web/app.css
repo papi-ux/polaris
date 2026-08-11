@@ -26,6 +26,12 @@
   --edge-pill: color-mix(in srgb, var(--color-storm) 30%, transparent);
   --edge-chip: color-mix(in srgb, var(--color-storm) 25%, transparent);
   --shimmer-sheen: color-mix(in srgb, var(--color-ice) 6%, transparent);
+  /* Sidebar treatment: one shared rule in App.vue consumes these, so a theme
+     restyles the active nav item with token overrides, not selector blocks. */
+  --sidebar-fg: var(--color-storm);
+  --sidebar-active-fg: var(--color-ice);
+  --sidebar-active-bg: color-mix(in srgb, var(--color-twilight) 80%, transparent);
+  --sidebar-active-bar: color-mix(in srgb, var(--color-ice) 85%, transparent);
 }
 
 @theme {
@@ -130,14 +136,9 @@
   --edge-pill: rgba(255, 255, 255, 0.08);
   --edge-chip: rgba(255, 255, 255, 0.08);
   --shimmer-sheen: rgba(255, 255, 255, 0.03);
-}
-[data-theme="oled"] .sidebar-link {
-  color: #a8b0b8;
-}
-[data-theme="oled"] .sidebar-link.active {
-  color: #e0e6ed;
-  background: rgba(224, 230, 237, 0.06);
-  box-shadow: inset 2px 0 0 rgba(224, 230, 237, 0.9), inset 0 1px 0 rgba(255,255,255,0.04);
+  --sidebar-fg: var(--color-silver);
+  --sidebar-active-bg: rgba(224, 230, 237, 0.06);
+  --sidebar-active-bar: rgba(224, 230, 237, 0.9);
 }
 [data-theme="oled"] aside {
   border-color: transparent !important;
@@ -1493,11 +1494,8 @@ textarea {
   /* Nova's Miami panels carry an accent-tinted border (panelBorder = accent at 18%). */
   --edge-glass: color-mix(in srgb, var(--color-accent) 24%, transparent);
   --edge-card: color-mix(in srgb, var(--color-accent) 18%, transparent);
-}
-[data-theme="miami"] .sidebar-link.active {
-  color: #fff1f7;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 16%, transparent), color-mix(in srgb, var(--color-accent-2) 10%, transparent));
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--color-accent) 92%, transparent), inset 0 1px 0 color-mix(in srgb, var(--color-accent-2) 12%, transparent);
+  --sidebar-active-bg: linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 16%, transparent), color-mix(in srgb, var(--color-accent-2) 10%, transparent));
+  --sidebar-active-bar: color-mix(in srgb, var(--color-accent) 92%, transparent);
 }
 [data-theme="miami"] .pulse-dot {
   background: var(--color-accent);
@@ -1525,11 +1523,8 @@ textarea {
   /* Nova gives this theme its own softened error red. */
   --color-danger: #f28b93;
   --surface-card-base: #1e2228;
-}
-[data-theme="portable-chrome"] .sidebar-link.active {
-  color: #c9d1d9;
-  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--color-accent) 90%, transparent);
+  --sidebar-active-bg: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  --sidebar-active-bar: color-mix(in srgb, var(--color-accent) 90%, transparent);
 }
 
 /* ── High Contrast Skin ── */

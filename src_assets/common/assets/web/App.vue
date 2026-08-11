@@ -1,5 +1,5 @@
 <template>
-  <SpaceParticles v-if="!showNav" :dense="true" :theme="currentTheme" />
+  <SpaceParticles v-if="!showNav" :dense="true" />
   <div v-if="showNav" class="relative z-[1] flex h-screen bg-background text-foreground">
     <a href="#polaris-main" class="skip-link">Skip to main content</a>
     <!-- Mobile overlay -->
@@ -124,7 +124,7 @@
 
     <!-- Main content -->
     <main id="polaris-main" tabindex="-1" class="relative flex-1 overflow-auto overflow-x-hidden bg-background">
-      <SpaceParticles :dense="false" :absolute="true" :theme="currentTheme" />
+      <SpaceParticles :dense="false" :absolute="true" />
       <!-- Mobile header -->
       <div class="flex items-center gap-3 border-b border-storm/20 px-4 py-4 md:hidden">
         <button type="button" aria-label="Toggle navigation" aria-controls="polaris-sidebar" :aria-expanded="sidebarOpen" @click="sidebarOpen = !sidebarOpen" class="focus-ring text-silver transition-colors duration-200 hover:text-ice">
@@ -164,7 +164,7 @@ import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
 import ThemeToggle from './ThemeToggle.vue'
-import { getTheme, initTheme, onThemeChange } from './theme.js'
+import { initTheme } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
 import { webUiAuthenticated } from './auth-state.js'
 import { isPublicRoute } from './router-helpers.js'
@@ -172,8 +172,6 @@ import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-meta
 import { buildUpdateCenterState, updateStatusLightClass } from './update-center.js'
 
 const route = useRoute()
-const currentTheme = ref(getTheme())
-onThemeChange((theme) => { currentTheme.value = theme })
 const router = useRouter()
 const commandPaletteOpen = ref(false)
 const sidebarOpen = ref(false)
@@ -349,13 +347,15 @@ onUnmounted(() => {
 @reference "./app.css";
 
 .sidebar-link {
-  @apply flex items-center gap-3 px-3 py-2 rounded-lg text-storm no-underline
+  @apply flex items-center gap-3 px-3 py-2 rounded-lg no-underline
          transition-[background-color,color,box-shadow] duration-200 relative
          hover:bg-twilight/60 hover:text-silver;
+  color: var(--sidebar-fg);
 }
 .sidebar-link.active,
 .sidebar-link.router-link-exact-active {
-  @apply bg-twilight/80 text-ice;
-  box-shadow: inset 2px 0 0 rgba(200, 214, 229, 0.85), var(--shadow-inset-glow);
+  color: var(--sidebar-active-fg);
+  background: var(--sidebar-active-bg);
+  box-shadow: inset 2px 0 0 var(--sidebar-active-bar), var(--shadow-inset-glow);
 }
 </style>

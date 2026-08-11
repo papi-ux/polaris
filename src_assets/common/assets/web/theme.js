@@ -50,6 +50,10 @@ const THEME_IDS = THEMES.map((theme) => theme.id)
 
 const changeListeners = new Set()
 
+function currentAppliedTheme() {
+  return document.documentElement.getAttribute('data-theme') || DEFAULT_THEME
+}
+
 export function getTheme() {
   const storedTheme = localStorage.getItem(STORAGE_KEY)
   return THEME_IDS.includes(storedTheme) ? storedTheme : DEFAULT_THEME
@@ -65,27 +69,16 @@ export function setTheme(theme) {
   applyTheme(theme)
 }
 
-export function getNextTheme(theme = getTheme()) {
-  const currentIndex = THEME_IDS.indexOf(theme)
-  if (currentIndex === -1) return DEFAULT_THEME
-  return THEME_IDS[(currentIndex + 1) % THEME_IDS.length]
-}
-
-export function cycleTheme() {
-  const next = getNextTheme()
-  setTheme(next)
-  return next
-}
-
-export const toggleTheme = cycleTheme
-
 export function applyTheme(theme) {
+  if (!THEME_IDS.includes(theme)) return
+  // The DOM attribute is the source of truth (the boot script or a test may
+  // have stamped it already); re-applying the active theme is a no-op so a
+  // picker misclick does not rebuild charts and particles for nothing.
+  if (theme === currentAppliedTheme()) return
   if (theme === DEFAULT_THEME) {
     document.documentElement.removeAttribute('data-theme')
-  } else if (THEME_IDS.includes(theme)) {
-    document.documentElement.setAttribute('data-theme', theme)
   } else {
-    return
+    document.documentElement.setAttribute('data-theme', theme)
   }
   for (const listener of changeListeners) {
     try {
