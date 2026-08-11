@@ -5,7 +5,6 @@ import {
   buildMissionControlStrip,
   buildQualityGrade,
   buildQualityScore,
-  buildSecondScreenOverlayRecommendation,
   buildTelemetryGuidance,
 } from './dashboard-summary'
 
@@ -75,10 +74,4 @@ describe('Mission Control dashboard summary helpers', () => {
     expect(strip[2]).toMatchObject({ title: 'Library', to: '/apps' })
   })
 
-  it('keeps second-screen overlay as a later local lane recommendation', () => {
-    const recommendation = buildSecondScreenOverlayRecommendation()
-
-    expect(recommendation.title).toContain('second-screen overlay')
-    expect(recommendation.detail).toContain('After the base cockpit is proven')
-  })
 })

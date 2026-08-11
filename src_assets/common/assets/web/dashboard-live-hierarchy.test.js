@@ -44,11 +44,4 @@ describe('DashboardView live-session hierarchy', () => {
     expect(dashboard).toContain('Open fix')
   })
 
-  it('keeps second-screen overlay framed as a later local lane', () => {
-    const dashboard = webSource('views/DashboardView.vue')
-
-    expectBefore(dashboard, 'mission-control-overlay-note', 'dashboard-live-shell')
-    expect(dashboard).toContain('Recommended later local lane')
-    expect(dashboard).toContain('secondScreenOverlayRecommendation')
-  })
 })

@@ -5,9 +5,6 @@
       <div class="page-heading">
         <div class="section-title-row">
           <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
-          <InfoHint size="sm" label="Mission Control summary">
-            {{ actionSummary }}
-          </InfoHint>
         </div>
         <div class="page-subtitle">{{ actionSummary }}</div>
       </div>
@@ -26,14 +23,6 @@
         <div class="mission-control-copy">{{ item.detail }}</div>
         <router-link v-if="item.to" :to="item.to" class="mission-control-link">Open fix</router-link>
       </div>
-    </section>
-
-    <section class="mission-control-overlay-note" aria-label="Mission Control overlay recommendation">
-      <div>
-        <div class="mission-control-label">Recommended later local lane</div>
-        <div class="mission-control-title text-silver">{{ secondScreenOverlayRecommendation.title }}</div>
-      </div>
-      <div class="mission-control-copy">{{ secondScreenOverlayRecommendation.detail }}</div>
     </section>
 
     <div v-if="statsLoaded && !stats?.streaming" class="grid grid-cols-1 gap-3 lg:grid-cols-3">
@@ -209,6 +198,7 @@
                   <div class="dashboard-preview-meta">
                     <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
                     <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
+                    <span v-if="hdrChipLabel" class="data-pill text-accent-2" :title="stats.hdr_downgrade_message || ''">{{ hdrChipLabel }}</span>
                     <span class="data-pill">{{ runtimeBackendLabel }}</span>
                     <span class="data-pill">{{ capturePathLabel }}</span>
                   </div>
@@ -492,8 +482,14 @@
                       </div>
                       <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}</div>
                     </div>
-                    <div class="text-right text-[11px] text-storm">
+                    <div class="text-right text-[11px] text-storm tabular-nums">
                       <div>{{ client.latency_ms?.toFixed(0) || '--' }} ms</div>
+                      <div v-if="client.fps" class="mt-0.5">
+                        {{ client.fps.toFixed(0) }} fps<template v-if="client.bitrate_kbps"> · {{ (client.bitrate_kbps / 1000).toFixed(1) }} Mbps</template>
+                      </div>
+                      <div v-if="client.codec || client.width" class="mt-0.5">
+                        <template v-if="client.codec">{{ client.codec.toUpperCase() }}</template><template v-if="client.width"> · {{ client.width }}×{{ client.height }}</template><template v-if="Number.isFinite(client.packet_loss)"> · {{ client.packet_loss.toFixed(1) }}%</template>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -501,11 +497,14 @@
               <div class="dashboard-context-section">
                 <div class="dashboard-context-header">
                   <span>{{ $t('dashboard.runtime_path') }}</span>
+                  <router-link to="/troubleshooting" class="focus-ring text-[11px] font-semibold text-ice no-underline hover:text-ice/80">
+                    {{ $t('dashboard.runtime_detail_link') }}
+                  </router-link>
                 </div>
                 <div class="dashboard-runtime-pill-grid">
-                  <div v-for="row in runtimeSummaryRows" :key="row.label" class="dashboard-runtime-pill">
-                    <span class="dashboard-runtime-label">{{ row.label }}</span>
-                    <span class="text-sm font-medium" :class="row.tone">{{ row.value }}</span>
+                  <div class="dashboard-runtime-pill">
+                    <span class="dashboard-runtime-label">{{ $t('dashboard.capture') }}</span>
+                    <span class="text-sm font-medium" :class="captureGpuNativeTone">{{ capturePathLabel }}</span>
                   </div>
                 </div>
                 <div v-if="runtimePathNote" class="dashboard-rail-footnote" :class="runtimePathNoteTone">
@@ -673,78 +672,51 @@
         </div>
       </div>
 
-      <!-- Recent Games + Launch Deck -->
-      <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div class="section-card">
-          <div class="flex items-center justify-between gap-3 mb-3">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
-              <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
-            </div>
-            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
-              {{ $t('navbar.library') }}
-            </router-link>
+      <!-- Recent Games: the landing page is a remote control, so rows launch. -->
+      <div class="section-card" data-dashboard-play-rail>
+        <div class="flex items-center justify-between gap-3 mb-3">
+          <div>
+            <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
+            <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
           </div>
-          <div v-if="recentApps.length" class="space-y-1.5">
-            <div v-for="app in recentApps" :key="app.uuid" class="flex items-center gap-3 p-1.5 rounded-lg hover:bg-ice/5 transition-colors">
-              <div class="w-8 h-11 rounded bg-void/60 shrink-0 overflow-hidden">
-                <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="w-full h-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
-              </div>
-              <div class="flex-1 min-w-0">
-                <div class="text-sm text-silver truncate">{{ app.name }}</div>
-                <div class="text-[10px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
-              </div>
-            </div>
-          </div>
-          <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
+          <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
+            {{ $t('navbar.library') }}
+          </router-link>
         </div>
-        <div class="section-card">
-          <div class="flex items-start justify-between gap-3 mb-4">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.launch_deck') }}</div>
-              <div class="mt-2 flex items-center gap-2">
-                <div class="text-sm font-medium text-silver">Stream shortcuts</div>
-                <InfoHint size="sm" :label="$t('dashboard.launch_deck')">{{ $t('dashboard.launch_deck_desc') }}</InfoHint>
-              </div>
+        <div v-if="recentApps.length" class="space-y-1.5">
+          <div v-for="app in recentApps" :key="app.uuid" class="flex items-center gap-3 p-1.5 rounded-lg hover:bg-ice/5 transition-colors">
+            <div class="w-8 h-11 rounded bg-void/60 shrink-0 overflow-hidden">
+              <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="w-full h-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
             </div>
-            <span class="px-2 py-1 rounded-full text-[10px] font-medium whitespace-nowrap" :class="headlessEnabled ? 'bg-accent/15 text-accent' : 'bg-storm/20 text-storm'">
-              {{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}
-            </span>
-          </div>
-          <div class="grid gap-2 sm:grid-cols-3">
-            <router-link to="/apps" class="action-tile">
-              <div class="text-sm font-medium text-silver">{{ $t('navbar.library') }}</div>
-              <div class="mt-1 text-[11px] text-storm">{{ $t('dashboard.launch_deck_library_desc') }}</div>
-            </router-link>
-            <router-link to="/pin" class="action-tile">
-              <div class="text-sm font-medium text-silver">{{ $t('navbar.pairing') }}</div>
-              <div class="mt-1 text-[11px] text-storm">{{ $t('dashboard.launch_deck_pairing_desc') }}</div>
-            </router-link>
-            <router-link to="/config" class="action-tile">
-              <div class="text-sm font-medium text-silver">{{ $t('navbar.settings') }}</div>
-              <div class="mt-1 text-[11px] text-storm">{{ $t('dashboard.launch_deck_settings_desc') }}</div>
-            </router-link>
-          </div>
-          <div class="surface-subtle mt-4 px-3 py-3">
-            <div class="eyebrow-label">{{ $t('dashboard.host_context') }}</div>
-            <div class="mt-3 flex flex-wrap gap-2 text-[11px] text-silver">
-              <span class="data-pill">
-                {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
-              </span>
-              <span class="data-pill">
-                {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
-              </span>
-              <span class="data-pill" v-if="audio?.sink">
-                {{ formatAudioName(audio.sink) }}
-              </span>
-              <span class="data-pill">
-                v{{ version }}
-              </span>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm text-silver truncate">{{ app.name }}</div>
+              <div class="text-[10px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
             </div>
-            <router-link to="/info" class="mt-3 inline-flex text-[11px] font-medium text-ice no-underline hover:text-ice/80">
-              {{ $t('dashboard.host_context_desc') }}
-            </router-link>
+            <button
+              type="button"
+              class="focus-ring inline-flex h-7 shrink-0 items-center rounded-lg border border-accent/40 px-3 text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="launchingUuid === app.uuid"
+              @click="launchRecentApp(app)"
+            >
+              {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
+            </button>
           </div>
+        </div>
+        <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
+        <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
+          <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
+          <span class="data-pill">
+            {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
+          </span>
+          <span class="data-pill">
+            {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
+          </span>
+          <span class="data-pill" v-if="audio?.sink">
+            {{ formatAudioName(audio.sink) }}
+          </span>
+          <span class="data-pill">
+            v{{ version }}
+          </span>
         </div>
       </div>
     </template>
@@ -809,7 +781,6 @@ import {
   buildMissionControlStrip,
   buildQualityGrade,
   buildQualityScore,
-  buildSecondScreenOverlayRecommendation,
   buildTelemetryGuidance,
 } from '../dashboard-summary'
 
@@ -1008,8 +979,19 @@ const connectedClients = computed(() => {
 })
 
 const viewerCountLabel = computed(() => {
-  const count = connectedClients.value.length || 1
+  // The host reports the true session count; client-list length is a fallback.
+  const reported = Number(stats.value?.active_sessions)
+  const count = Number.isFinite(reported) && reported > 0 ? reported : (connectedClients.value.length || 1)
   return `${count} ${count === 1 ? 'viewer' : 'viewers'}`
+})
+
+// First HDR surface in the web UI: state plus downgrade reason on hover.
+const hdrChipLabel = computed(() => {
+  const s = stats.value || {}
+  const mode = s.hdr_effective_mode || s.dynamic_range
+  if (!mode || String(mode).toLowerCase() === 'sdr') return ''
+  const label = String(mode).toUpperCase()
+  return s.hdr_downgrade_reason ? `${label} → SDR` : label
 })
 const currentClientName = computed(() => connectedClients.value[0]?.name || t('dashboard.unknown_client'))
 
@@ -1383,12 +1365,17 @@ const previewLoaded = ref(false)
 const previewError = ref(false)
 const previewUrl = ref('')
 const previewBackoffMs = ref(PREVIEW_REFRESH_MS)
+// 'mjpeg' renders the host's multipart stream in the img tag (a genuinely
+// live preview, no polling); 'poll' is the JPEG-refresh fallback, also used
+// under reduced motion where a self-animating stream is unwanted.
+const previewMode = ref('mjpeg')
 let previewTimer = null
 
 function startPreview() {
   previewLoaded.value = false
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
+  previewMode.value = prefersReducedMotion.value ? 'poll' : 'mjpeg'
   showPreview.value = true
   refreshPreview()
 }
@@ -1410,18 +1397,32 @@ function refreshPreview() {
   previewError.value = false
   // When streaming, crop to the streaming output; otherwise show full display
   const output = streamingOutput.value ? `&output=${encodeURIComponent(streamingOutput.value)}` : ''
-  previewUrl.value = `./api/display/screenshot?t=${Date.now()}${output}`
+  if (previewMode.value === 'mjpeg') {
+    previewUrl.value = `./api/display/stream?t=${Date.now()}${output}`
+  } else {
+    previewUrl.value = `./api/display/screenshot?t=${Date.now()}${output}`
+  }
 }
 
 function handlePreviewLoad() {
   previewLoaded.value = true
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
-  schedulePreviewRefresh(PREVIEW_REFRESH_MS)
+  // The MJPEG stream keeps updating the img on its own; only polling refreshes.
+  if (previewMode.value !== 'mjpeg') {
+    schedulePreviewRefresh(PREVIEW_REFRESH_MS)
+  }
 }
 
 function handlePreviewError() {
   previewLoaded.value = false
+  if (previewMode.value === 'mjpeg') {
+    // Host without the stream endpoint (or a dropped stream): fall back to
+    // JPEG polling instead of surfacing an error.
+    previewMode.value = 'poll'
+    refreshPreview()
+    return
+  }
   previewError.value = true
   previewBackoffMs.value = Math.min(
     Math.max(PREVIEW_FAILURE_BACKOFF_MS, previewBackoffMs.value * 2),
@@ -1432,6 +1433,7 @@ function handlePreviewError() {
 
 function retryPreviewNow() {
   previewBackoffMs.value = PREVIEW_REFRESH_MS
+  previewMode.value = prefersReducedMotion.value ? 'poll' : 'mjpeg'
   refreshPreview()
 }
 
@@ -1494,20 +1496,6 @@ const aiOptimizationSummary = computed(() => {
   return firstSentence || String(reasoning)
 })
 
-const runtimeSummaryRows = computed(() => ([
-  { label: 'Backend', value: runtimeBackendLabel.value, tone: 'text-silver' },
-  { label: 'Path', value: capturePathLabel.value, tone: captureGpuNativeTone.value },
-  { label: 'Transport', value: captureTransportLabel.value, tone: 'text-silver' },
-  { label: 'Format', value: captureFormatLabel.value, tone: 'text-silver' },
-  { label: 'Residency', value: captureResidencyLabel.value, tone: 'text-silver' },
-  { label: 'Encode', value: encodeTargetLabel.value, tone: encodeTargetTone.value },
-  { label: 'Copy', value: captureCpuCopyLabel.value, tone: captureCpuCopyTone.value },
-  { label: 'Native', value: captureGpuNativeLabel.value, tone: captureGpuNativeTone.value },
-  { label: 'Requested', value: runtimeRequestedMode.value, tone: 'text-silver' },
-  { label: 'Effective', value: runtimeEffectiveMode.value, tone: runtimeEffectiveTone.value },
-  { label: 'Override', value: runtimeOverrideLabel.value, tone: runtimeOverrideTone.value },
-]))
-
 const qualityBadgeClass = computed(() => {
   const g = qualityGrade.value
   return {
@@ -1555,7 +1543,6 @@ const missionControlStrip = computed(() => buildMissionControlStrip({
   runtimePathNote: runtimePathNote.value,
 }))
 
-const secondScreenOverlayRecommendation = buildSecondScreenOverlayRecommendation()
 
 // Recording controls
 const recording = ref({ active: false, file: '' })
@@ -1578,6 +1565,33 @@ async function stopRecording() {
 
 async function saveReplay() {
   await runRecordingAction('./api/recording/save-replay', 'dashboard.recording_replay_success', 'dashboard.recording_replay_error')
+}
+
+// Launch a recent game straight from the landing page (same endpoint the
+// Library uses). Launching is the page's primary action, not destructive.
+const launchingUuid = ref('')
+
+async function launchRecentApp(app) {
+  if (launchingUuid.value) return
+  launchingUuid.value = app.uuid
+  try {
+    const response = await fetch('./api/apps/launch', {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify({ uuid: app.uuid }),
+    })
+    const result = await response.json()
+    if (result.status) {
+      showToast(t('dashboard.launched', { name: app.name }), 'success')
+    } else {
+      showToast(t('dashboard.launch_failed') + (result.error || ''), 'error')
+    }
+  } catch (e) {
+    showToast(t('dashboard.launch_failed') + e.message, 'error')
+  } finally {
+    launchingUuid.value = ''
+  }
 }
 
 async function runRecordingAction(url, successKey, errorKey) {

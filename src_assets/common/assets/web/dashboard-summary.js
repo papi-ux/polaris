@@ -182,9 +182,3 @@ export function buildMissionControlStrip({
   ]
 }
 
-export function buildSecondScreenOverlayRecommendation() {
-  return {
-    title: 'Later lane: second-screen overlay',
-    detail: 'After the base cockpit is proven, split a TV/handheld-safe overlay mode that keeps Now / Next / Fix, stream grade, latency, FPS, loss, and one top cue visible without dragging in full charts or admin controls.',
-  }
-}
