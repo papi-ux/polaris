@@ -40,11 +40,11 @@
             </div>
           </div>
         </details>
-        <div class="mt-4 rounded-xl border border-sky-400/20 bg-sky-400/10 p-3" data-ai-doctor-explanation>
+        <div class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation>
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-200">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
-              <p class="mt-1 text-xs leading-relaxed text-blue-100">{{ $t('troubleshooting.ai_doctor_explanation_privacy') }}</p>
+              <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
+              <p class="mt-1 text-xs leading-relaxed text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation_privacy') }}</p>
               <p class="mt-2 text-[11px] leading-relaxed text-storm">{{ aiDoctorCategoriesText }}</p>
             </div>
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="requestingAiDoctorExplanation" @click="requestAiDoctorExplanation">
@@ -170,17 +170,17 @@
         </div>
       </div>
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <div class="surface-subtle flex h-full flex-col border-green-500/15 p-4">
+        <div class="surface-subtle flex h-full flex-col border-success/15 p-4">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-green-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-green-300">{{ $t('troubleshooting.recovery_rank_1') }}</span>
+            <span class="rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-success">{{ $t('troubleshooting.recovery_rank_1') }}</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_1_label') }}</span>
           </div>
           <h3 id="close_apps" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.force_close') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.force_close_desc') }}</p>
-          <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="closeAppStatus === true">
+          <div class="mt-3 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver" v-if="closeAppStatus === true">
             {{ $t('troubleshooting.force_close_success') }}
           </div>
-          <div class="mt-3 rounded-lg border-l-4 border-red-500 bg-twilight/50 p-3 text-silver" v-if="closeAppStatus === false">
+          <div class="mt-3 rounded-lg border-l-4 border-danger bg-twilight/50 p-3 text-silver" v-if="closeAppStatus === false">
             {{ $t('troubleshooting.force_close_error') }}
           </div>
           <div class="mt-4">
@@ -190,14 +190,14 @@
           </div>
         </div>
 
-        <div class="surface-subtle flex h-full flex-col border-amber-300/15 p-4">
+        <div class="surface-subtle flex h-full flex-col border-warning/15 p-4">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-amber-300/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-200">{{ $t('troubleshooting.recovery_rank_2') }}</span>
+            <span class="rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-warning-bright">{{ $t('troubleshooting.recovery_rank_2') }}</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_2_label') }}</span>
           </div>
           <h3 id="restart" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.restart_polaris') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.restart_polaris_desc') }}</p>
-          <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="serverRestarting">
+          <div class="mt-3 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver" v-if="serverRestarting">
             {{ $t('troubleshooting.restart_polaris_success') }}
           </div>
           <div class="mt-4">
@@ -207,17 +207,17 @@
           </div>
         </div>
 
-        <div class="surface-subtle flex h-full flex-col border-red-500/15 p-4">
+        <div class="surface-subtle flex h-full flex-col border-danger/15 p-4">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-red-300">{{ $t('troubleshooting.recovery_rank_3') }}</span>
+            <span class="rounded-full bg-danger/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-danger">{{ $t('troubleshooting.recovery_rank_3') }}</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_3_label') }}</span>
           </div>
           <h3 id="quit" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.quit_polaris') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.quit_polaris_desc') }}</p>
-          <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="serverQuit">
+          <div class="mt-3 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver" v-if="serverQuit">
             {{ $t('troubleshooting.quit_polaris_success') }}
           </div>
-          <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="serverQuitting">
+          <div class="mt-3 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver" v-if="serverQuitting">
             {{ $t('troubleshooting.quit_polaris_success_ongoing') }}
           </div>
           <div class="mt-4">
@@ -227,17 +227,17 @@
           </div>
         </div>
 
-        <div class="surface-subtle flex h-full flex-col border-sky-400/15 p-4" v-if="platform === 'windows'">
+        <div class="surface-subtle flex h-full flex-col border-info/15 p-4" v-if="platform === 'windows'">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-sky-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-200">Optional</span>
+            <span class="rounded-full bg-info/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-info-bright">Optional</span>
             <span class="text-[10px] uppercase tracking-[0.18em] text-storm">Display reset</span>
           </div>
           <h3 id="dd_reset" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.dd_reset') }}</h3>
           <p class="mt-2 flex-1 whitespace-pre-line text-sm text-storm">{{ $t('troubleshooting.dd_reset_desc') }}</p>
-          <div class="mt-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver" v-if="ddResetStatus === true">
+          <div class="mt-3 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver" v-if="ddResetStatus === true">
             {{ $t('troubleshooting.dd_reset_success') }}
           </div>
-          <div class="mt-3 rounded-lg border-l-4 border-red-500 bg-twilight/50 p-3 text-silver" v-if="ddResetStatus === false">
+          <div class="mt-3 rounded-lg border-l-4 border-danger bg-twilight/50 p-3 text-silver" v-if="ddResetStatus === false">
             {{ $t('troubleshooting.dd_reset_error') }}
           </div>
           <div class="mt-4">
@@ -257,7 +257,7 @@
             <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.session_snapshot_desc') }}</p>
           </div>
           <span class="rounded-full border px-2.5 py-1 text-sm"
-                :class="streamStatsConnected ? 'border-green-500/40 bg-green-500/10 text-green-300' : 'border-storm/40 bg-deep/60 text-storm'">
+                :class="streamStatsConnected ? 'border-success/40 bg-success/10 text-success' : 'border-storm/40 bg-deep/60 text-storm'">
             {{ streamStatsConnected ? $t('troubleshooting.session_snapshot_connected') : $t('troubleshooting.session_snapshot_disconnected') }}
           </span>
         </div>
@@ -297,9 +297,9 @@
               <div class="flex items-start gap-3">
                 <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]"
                       :class="entry.level === 'Fatal'
-                        ? 'border border-red-500/30 bg-red-500/10 text-red-200'
+                        ? 'border border-danger/30 bg-danger/10 text-danger-bright'
                         : entry.level === 'Warning'
-                          ? 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
+                          ? 'border border-warning/30 bg-warning/10 text-warning-bright'
                           : 'border border-storm/30 bg-deep/60 text-storm'">
                   {{ entry.level }}
                 </span>
@@ -317,7 +317,7 @@
         <div v-else class="mt-4 rounded-xl border border-dashed border-storm/25 bg-deep/35 px-4 py-5 text-sm text-storm">
           {{ $t('troubleshooting.recent_incidents_empty') }}
         </div>
-        <div class="mt-4 rounded-xl border border-blue-400/20 bg-blue-400/10 px-4 py-3 text-sm text-blue-100">
+        <div class="mt-4 rounded-xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
           {{ $t('troubleshooting.support_redaction_notice') }}
         </div>
         <div class="mt-4 grid gap-2 sm:grid-cols-2">
@@ -759,15 +759,15 @@ const supportSelfTestCopy = computed(() => buildSupportSelfTestCopy({
 }))
 
 function selfTestCardClass(status) {
-  if (status === 'pass') return 'border-green-500/20'
-  if (status === 'fail') return 'border-red-500/25'
-  return 'border-amber-300/25'
+  if (status === 'pass') return 'border-success/20'
+  if (status === 'fail') return 'border-danger/25'
+  return 'border-warning/25'
 }
 
 function selfTestBadgeClass(status) {
-  if (status === 'pass') return 'border border-green-500/30 bg-green-500/10 text-green-300'
-  if (status === 'fail') return 'border border-red-500/30 bg-red-500/10 text-red-200'
-  return 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
+  if (status === 'pass') return 'border border-success/30 bg-success/10 text-success'
+  if (status === 'fail') return 'border border-danger/30 bg-danger/10 text-danger-bright'
+  return 'border border-warning/30 bg-warning/10 text-warning-bright'
 }
 
 function selfTestStatusLabel(status) {
@@ -824,15 +824,15 @@ function fixMyStreamStatusLabel(status) {
 }
 
 function fixMyStreamStatusClass(status) {
-  if (status === 'pass') return 'border-green-500/20'
-  if (status === 'fail') return 'border-red-500/25'
-  return 'border-amber-300/25'
+  if (status === 'pass') return 'border-success/20'
+  if (status === 'fail') return 'border-danger/25'
+  return 'border-warning/25'
 }
 
 function fixMyStreamBadgeClass(status) {
-  if (status === 'pass') return 'border border-green-500/30 bg-green-500/10 text-green-300'
-  if (status === 'fail') return 'border border-red-500/30 bg-red-500/10 text-red-200'
-  return 'border border-amber-300/30 bg-amber-300/10 text-amber-200'
+  if (status === 'pass') return 'border border-success/30 bg-success/10 text-success'
+  if (status === 'fail') return 'border border-danger/30 bg-danger/10 text-danger-bright'
+  return 'border border-warning/30 bg-warning/10 text-warning-bright'
 }
 
 const sessionSnapshotItems = computed(() => {

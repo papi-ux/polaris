@@ -13,7 +13,7 @@
       </div>
       <div class="page-meta" role="status" aria-live="polite" aria-atomic="true">
         <span v-if="stats?.streaming" class="pulse-dot"></span>
-        <span class="meta-pill" :class="stats?.streaming ? 'border-green-500/30 bg-green-500/10 text-green-300' : ''">
+        <span class="meta-pill" :class="stats?.streaming ? 'border-success/30 bg-success/10 text-success' : ''">
           {{ stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
         </span>
       </div>
@@ -299,7 +299,7 @@
                       <InfoHint size="sm" label="Session tools">{{ $t('dashboard.recording_desc') }}</InfoHint>
                     </div>
                   </div>
-                  <span class="meta-pill" :class="recording.active ? 'border-red-500/35 bg-red-500/10 text-red-300' : ''">
+                  <span class="meta-pill" :class="recording.active ? 'border-danger/35 bg-danger/10 text-danger' : ''">
                     {{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}
                   </span>
                 </div>
@@ -342,11 +342,11 @@
                       <span
                         class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
                         :class="{
-                          'bg-green-500/20 text-green-400': s.quality_grade === 'A',
-                          'bg-blue-500/20 text-blue-400': s.quality_grade === 'B',
-                          'bg-yellow-500/20 text-yellow-400': s.quality_grade === 'C',
-                          'bg-orange-500/20 text-orange-400': s.quality_grade === 'D',
-                          'bg-red-500/20 text-red-400': s.quality_grade === 'F'
+                          'bg-success/20 text-success': s.quality_grade === 'A',
+                          'bg-info/20 text-info': s.quality_grade === 'B',
+                          'bg-warning/20 text-warning': s.quality_grade === 'C',
+                          'bg-warning/20 text-warning': s.quality_grade === 'D',
+                          'bg-danger/20 text-danger': s.quality_grade === 'F'
                         }"
                       >
                         {{ s.quality_grade }}
@@ -388,11 +388,11 @@
 
               <div v-if="!prefersReducedMotion" class="dashboard-telemetry-grid mt-4">
                 <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-green-400/80">FPS</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-success/80">FPS</div>
                   <div ref="fpsChartEl" class="h-24 w-full"></div>
                 </div>
                 <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-sky-400/80">Bitrate</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-info/80">Bitrate</div>
                   <div ref="bitrateChartEl" class="h-24 w-full"></div>
                 </div>
                 <div class="card p-3">
@@ -400,15 +400,15 @@
                   <div ref="encodeChartEl" class="h-24 w-full"></div>
                 </div>
                 <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">Latency</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-warning/80">Latency</div>
                   <div ref="latencyChartEl" class="h-24 w-full"></div>
                 </div>
                 <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300/80">GPU Load</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-accent/80">GPU Load</div>
                   <div ref="gpuChartEl" class="h-24 w-full"></div>
                 </div>
                 <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-red-400/80">Packet Loss</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-danger/80">Packet Loss</div>
                   <div ref="lossChartEl" class="h-24 w-full"></div>
                 </div>
               </div>
@@ -419,19 +419,19 @@
               <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div class="dashboard-metric-tile">
                   <div class="dashboard-metric-label">GPU Temp</div>
-                  <div class="dashboard-metric-value" :class="gpu.temperature_c != null ? (gpu.temperature_c > 80 ? 'text-red-400' : gpu.temperature_c > 65 ? 'text-yellow-400' : 'text-green-400') : 'text-storm'">
+                  <div class="dashboard-metric-value" :class="gpu.temperature_c != null ? (gpu.temperature_c > 80 ? 'text-danger' : gpu.temperature_c > 65 ? 'text-warning' : 'text-success') : 'text-storm'">
                     {{ gpu.temperature_c != null ? gpu.temperature_c + '°' : '--' }}
                   </div>
                   <div class="mt-1 text-xs text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W draw</div>
                 </div>
                 <div class="dashboard-metric-tile">
                   <div class="dashboard-metric-label">GPU Load</div>
-                  <div class="dashboard-metric-value text-fuchsia-300">{{ gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '--' }}</div>
+                  <div class="dashboard-metric-value text-accent">{{ gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '--' }}</div>
                   <div class="mt-1 text-xs text-storm">{{ gpu.clock_mhz || gpu.clock_gpu_mhz || '--' }} MHz</div>
                 </div>
                 <div class="dashboard-metric-tile" v-if="gpu.encoder_pct != null">
                   <div class="dashboard-metric-label">Encoder</div>
-                  <div class="dashboard-metric-value text-sky-300">{{ gpu.encoder_pct }}%</div>
+                  <div class="dashboard-metric-value text-info">{{ gpu.encoder_pct }}%</div>
                   <div class="mt-1 text-xs text-storm">{{ gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN' }} workload</div>
                 </div>
                 <div class="dashboard-metric-tile">
@@ -546,7 +546,7 @@
       <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <div class="surface-subtle p-4">
           <div class="eyebrow-label mb-1">{{ $t('dashboard.status') }}</div>
-          <div class="text-lg font-bold text-green-400">{{ $t('dashboard.ready') }}</div>
+          <div class="text-lg font-bold text-success">{{ $t('dashboard.ready') }}</div>
           <div class="mt-1 text-xs text-storm">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</div>
         </div>
         <div class="surface-subtle p-4">
@@ -556,7 +556,7 @@
         </div>
         <div class="surface-subtle p-4">
           <div class="eyebrow-label mb-1">GPU</div>
-          <div class="text-lg font-bold" :class="gpu?.temperature_c > 65 ? 'text-yellow-400' : 'text-green-400'">{{ gpu?.temperature_c || '--' }}°C</div>
+          <div class="text-lg font-bold" :class="gpu?.temperature_c > 65 ? 'text-warning' : 'text-success'">{{ gpu?.temperature_c || '--' }}°C</div>
           <div class="mt-1 text-xs text-storm">{{ gpu?.utilization_pct || 0 }}% load · {{ gpu?.power_draw_w?.toFixed(0) || '--' }}W</div>
         </div>
         <div class="surface-subtle p-4">
@@ -619,23 +619,23 @@
                 </div>
               </div>
               <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium"
-                    :class="readyChecksPassing === readyChecks.length ? 'border-green-500/30 bg-green-500/10 text-green-300' : 'border-amber-300/30 bg-amber-300/10 text-amber-200'">
+                    :class="readyChecksPassing === readyChecks.length ? 'border-success/30 bg-success/10 text-success' : 'border-warning/30 bg-warning/10 text-warning-bright'">
                 {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
             <div v-if="readyChecksAllPassing" class="ready-check-summary mt-4">
               <div>
-                <div class="text-sm font-semibold text-green-300">All launch checks are ready</div>
+                <div class="text-sm font-semibold text-success">All launch checks are ready</div>
                 <div class="mt-1 text-xs text-storm">Pairing, library, discovery, displays, and audio are clear.</div>
               </div>
-              <span class="rounded-full border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-green-300">
+              <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-success">
                 {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
             <div v-else class="mt-4 space-y-3">
               <div class="ready-check-summary ready-check-summary-attention">
                 <div>
-                  <div class="text-sm font-semibold text-amber-200">{{ readyChecksAttentionCount }} launch checks need attention</div>
+                  <div class="text-sm font-semibold text-warning-bright">{{ readyChecksAttentionCount }} launch checks need attention</div>
                   <div class="mt-1 text-xs text-storm">
                     Start with {{ readyChecksPrimaryIssue?.label || 'the first missing check' }} to get this host stream-ready.
                   </div>
@@ -787,7 +787,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick, reactive } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
 import { useSessionHistory, formatDuration } from '../composables/useSessionHistory'
@@ -858,8 +858,8 @@ const readinessLabel = computed(() => {
 })
 
 const readinessTone = computed(() => {
-  if (stats.value?.streaming || pairedClients.value > 0) return 'text-green-400'
-  return 'text-amber-300'
+  if (stats.value?.streaming || pairedClients.value > 0) return 'text-success'
+  return 'text-warning'
 })
 
 const readinessDetail = computed(() => {
@@ -936,9 +936,9 @@ const readyChecks = computed(() => {
     ...item,
     state: item.ok ? t('dashboard.check_state_ready') : t('dashboard.check_state_attention'),
     cardClass: item.ok
-      ? 'border-green-500/15 bg-green-500/5 hover:border-green-500/30 hover:bg-green-500/8'
-      : 'border-amber-300/15 bg-amber-300/5 hover:border-amber-300/30 hover:bg-amber-300/8',
-    badgeClass: item.ok ? 'bg-green-500/10 text-green-300' : 'bg-amber-300/10 text-amber-200'
+      ? 'border-success/15 bg-success/5 hover:border-success/30 hover:bg-success/8'
+      : 'border-warning/15 bg-warning/5 hover:border-warning/30 hover:bg-warning/8',
+    badgeClass: item.ok ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning-bright'
   }))
 })
 
@@ -977,9 +977,9 @@ const clientSettingsSyncLabel = computed(() => {
 
 const clientSettingsSyncTone = computed(() => {
   if (!clientSettingsSync.value.available || clientSettingsSync.value.relaunchRequired) {
-    return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+    return 'border-warning/30 bg-warning/10 text-warning-bright'
   }
-  return 'border-green-400/30 bg-green-400/10 text-green-300'
+  return 'border-success/30 bg-success/10 text-success'
 })
 
 const clientSettingsSyncCopy = computed(() => {
@@ -1126,7 +1126,7 @@ const runtimeModeTone = computed(() => {
   if (!stats.value?.streaming) return 'bg-storm/20 text-storm'
   const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
   if (mode.includes('private stream')) return 'bg-accent/15 text-accent'
-  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'bg-amber-500/15 text-amber-300'
+  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'bg-warning/15 text-warning'
   return 'bg-storm/20 text-storm'
 })
 
@@ -1134,7 +1134,7 @@ const runtimeEffectiveTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
   const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
   if (mode.includes('private stream')) return 'text-accent'
-  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'text-amber-300'
+  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'text-warning'
   return 'text-silver'
 })
 
@@ -1145,7 +1145,7 @@ const runtimeOverrideLabel = computed(() => {
 
 const runtimeOverrideTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
-  return stats.value?.runtime_gpu_native_override_active ? 'text-amber-300' : 'text-green-400'
+  return stats.value?.runtime_gpu_native_override_active ? 'text-warning' : 'text-success'
 })
 
 const headlessGpuNativeOverrideActive = computed(() => {
@@ -1202,7 +1202,7 @@ const captureCpuCopyLabel = computed(() => {
 
 const captureCpuCopyTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
-  return stats.value?.capture_cpu_copy ? 'text-orange-300' : 'text-green-400'
+  return stats.value?.capture_cpu_copy ? 'text-warning' : 'text-success'
 })
 
 const captureGpuNativeLabel = computed(() => {
@@ -1212,7 +1212,7 @@ const captureGpuNativeLabel = computed(() => {
 
 const captureGpuNativeTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
-  return stats.value?.capture_gpu_native ? 'text-green-400' : 'text-amber-300'
+  return stats.value?.capture_gpu_native ? 'text-success' : 'text-warning'
 })
 
 const encodeTargetLabel = computed(() => {
@@ -1226,8 +1226,8 @@ const encodeTargetLabel = computed(() => {
 const encodeTargetTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
   return String(stats.value?.encode_target_residency || '').toLowerCase() === 'gpu'
-    ? 'text-green-400'
-    : 'text-orange-300'
+    ? 'text-success'
+    : 'text-warning'
 })
 
 const runtimePathNote = computed(() => {
@@ -1263,10 +1263,10 @@ const runtimePathNote = computed(() => {
 
 const runtimePathNoteTone = computed(() => {
   if (!runtimePathNote.value) return 'text-storm'
-  if (nestedLabwcShmFallbackActive.value) return 'text-orange-300'
-  if (stats.value?.capture_cpu_copy) return 'text-orange-300'
-  if (stats.value?.capture_gpu_native) return 'text-green-400'
-  return 'text-amber-300'
+  if (nestedLabwcShmFallbackActive.value) return 'text-warning'
+  if (stats.value?.capture_cpu_copy) return 'text-warning'
+  if (stats.value?.capture_gpu_native) return 'text-success'
+  return 'text-warning'
 })
 
 const fpsTargetGap = computed(() => buildFpsTargetGap(stats.value || {}))
@@ -1284,8 +1284,8 @@ const streamPathNotices = computed(() => {
       key: 'gpu-native-override',
       title: 'GPU-native override',
       message: 'Polaris requested headless, but is running windowed labwc so GPU-native capture can stay GPU-resident.',
-      surfaceClass: 'border-amber-300/25 bg-amber-300/10',
-      titleClass: 'text-amber-200',
+      surfaceClass: 'border-warning/25 bg-warning/10',
+      titleClass: 'text-warning-bright',
     })
   }
 
@@ -1294,16 +1294,16 @@ const streamPathNotices = computed(() => {
       key: 'gpu-native-active',
       title: 'GPU-native path active',
       message: `${captureReasonLabel.value} Capture is ${transport}/${residency} and encode target is ${encodeTarget}.`,
-      surfaceClass: 'border-green-400/25 bg-green-400/10',
-      titleClass: 'text-green-300',
+      surfaceClass: 'border-success/25 bg-success/10',
+      titleClass: 'text-success',
     })
   } else if (stats.value?.capture_cpu_copy) {
     notices.push({
       key: 'cpu-copy-active',
       title: 'CPU copy path active',
       message: `${captureReasonLabel.value} Capture is ${transport}/${residency}.`,
-      surfaceClass: 'border-orange-300/25 bg-orange-300/10',
-      titleClass: 'text-orange-200',
+      surfaceClass: 'border-warning/25 bg-warning/10',
+      titleClass: 'text-warning-bright',
     })
   }
 
@@ -1355,11 +1355,11 @@ function isClientAiOptimized(clientName) {
 }
 
 function gradeColor(grade) {
-  if (grade === 'A') return 'text-green-400'
+  if (grade === 'A') return 'text-success'
   if (grade === 'B') return 'text-ice'
-  if (grade === 'C') return 'text-yellow-400'
-  if (grade === 'D') return 'text-orange-400'
-  return 'text-red-400'
+  if (grade === 'C') return 'text-warning'
+  if (grade === 'D') return 'text-warning'
+  return 'text-danger'
 }
 
 function formatSessionDate(ts) {
@@ -1455,28 +1455,18 @@ const qualityScore = computed(() => buildQualityScore(stats.value || {}))
 
 const qualityGrade = computed(() => buildQualityGrade(qualityScore.value))
 
-// Stream metrics for the left column (compact vertical list)
-const streamMetrics = computed(() => {
+// Signal-snapshot metrics (the only stream metric list the template renders)
+const primaryStreamMetrics = computed(() => {
   if (!stats.value?.streaming) return []
   const s = stats.value
-  const fpsColor = s.fps >= 55 ? 'text-green-400' : s.fps >= 30 ? 'text-yellow-400' : 'text-red-400'
-  const latColor = s.latency_ms <= 20 ? 'text-green-400' : s.latency_ms <= 50 ? 'text-yellow-400' : 'text-red-400'
-  const lossColor = s.packet_loss < 0.5 ? 'text-green-400' : s.packet_loss < 2 ? 'text-yellow-400' : 'text-red-400'
+  const fpsColor = s.fps >= 55 ? 'text-success' : s.fps >= 30 ? 'text-warning' : 'text-danger'
+  const latColor = s.latency_ms <= 20 ? 'text-success' : s.latency_ms <= 50 ? 'text-warning' : 'text-danger'
   return [
     { label: 'FPS', value: s.fps.toFixed(1), color: fpsColor },
     { label: 'RTT', value: s.latency_ms.toFixed(0) + 'ms', color: latColor },
     { label: 'Bitrate', value: (s.bitrate_kbps / 1000).toFixed(1) + ' Mbps', color: 'text-silver' },
     { label: 'Encode', value: s.encode_time_ms.toFixed(1) + 'ms', color: 'text-silver' },
-    { label: 'Codec', value: s.codec?.toUpperCase(), color: 'text-accent' },
-    { label: 'Resolution', value: s.width + '×' + s.height, color: 'text-silver' },
-    { label: 'Pkt Loss', value: s.packet_loss.toFixed(1) + '%', color: lossColor },
-    { label: 'Sent', value: formatBytes(s.bytes_sent), color: 'text-storm' },
   ]
-})
-
-const primaryStreamMetrics = computed(() => {
-  const labels = new Set(['FPS', 'RTT', 'Bitrate', 'Encode'])
-  return streamMetrics.value.filter((metric) => labels.has(metric.label))
 })
 
 const previewHeadline = computed(() => (
@@ -1521,11 +1511,10 @@ const runtimeSummaryRows = computed(() => ([
 const qualityBadgeClass = computed(() => {
   const g = qualityGrade.value
   return {
-    'bg-green-500/20 text-green-400': g === 'A',
-    'bg-blue-500/20 text-blue-400': g === 'B',
-    'bg-yellow-500/20 text-yellow-400': g === 'C',
-    'bg-orange-500/20 text-orange-400': g === 'D',
-    'bg-red-500/20 text-red-400': g === 'F' || g === '-',
+    'bg-success/20 text-success': g === 'A',
+    'bg-info/20 text-info': g === 'B',
+    'bg-warning/20 text-warning': g === 'C' || g === 'D',
+    'bg-danger/20 text-danger': g === 'F' || g === '-',
   }
 })
 
@@ -1685,34 +1674,16 @@ function updateReducedMotionPreference(event) {
 // Track whether we've gotten at least one stats response
 const statsLoaded = ref(false)
 
-// System info from config
-const systemInfo = reactive({
-  gpuName: '',
-  gpuDriver: '',
-  version: ''
-})
-const pairedClientCount = ref(0)
-
-// Fetch system info
+// Fetch the config-derived state the ready checks and sync badge depend on.
 async function fetchSystemInfo() {
   try {
-    const [configRes, clientsRes] = await Promise.all([
-      fetch('./api/config', { credentials: 'include' }),
-      fetch('./api/clients/list', { credentials: 'include' })
-    ])
+    const configRes = await fetch('./api/config', { credentials: 'include' })
     if (configRes.ok) {
       const config = await configRes.json()
       refreshClientSettingsSync(config)
-      systemInfo.gpuName = config.adapter_name || ''
-      systemInfo.gpuDriver = config.gpu_driver || ''
-      systemInfo.version = config.version || ''
       streamingOutput.value = config.linux_streaming_output || config.output_name || ''
       discoveryEnabled.value = config.enable_discovery !== 'disabled'
       pairingEnabled.value = config.enable_pairing !== 'disabled'
-    }
-    if (clientsRes.ok) {
-      const clients = await clientsRes.json()
-      pairedClientCount.value = clients.named_certs?.length || 0
     }
   } catch (e) {
     // Non-critical, just leave defaults
@@ -1744,13 +1715,6 @@ const encodeHistory = ref([])
 const latencyHistory = ref([])
 const gpuHistory = ref([])
 const lossHistory = ref([])
-
-function formatBytes(bytes) {
-  if (!bytes || bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i]
-}
 
 function makeChartOpts(title, suffix, color = '#c8d6e5') {
   const r = parseInt(color.slice(1,3), 16)

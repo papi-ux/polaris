@@ -15,7 +15,7 @@
               <span class="ml-1">{{ $t(counter.label) }}</span>
             </span>
           </template>
-          <span v-else class="meta-pill border-green-500/20 bg-green-500/10 text-green-200">
+          <span v-else class="meta-pill border-success/20 bg-success/10 text-success-bright">
             {{ $t('index.no_active_issues') }}
           </span>
         </div>
@@ -37,7 +37,7 @@
           <div class="header-support-copy">{{ versionHeaderSummary }}</div>
           <a
             v-if="stableBuildAvailable"
-            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg bg-ice px-3 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] no-underline"
+            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg bg-ice px-3 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-glow-ice no-underline"
             :href="githubVersion.release.html_url"
             target="_blank"
           >
@@ -45,7 +45,7 @@
           </a>
           <a
             v-else-if="notifyPreReleases && preReleaseBuildAvailable"
-            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg border border-purple-400/30 px-3 text-sm font-medium text-purple-200 transition-[background-color,border-color,color] duration-200 hover:bg-purple-500/10 no-underline"
+            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg border border-accent/30 px-3 text-sm font-medium text-accent-bright transition-[background-color,border-color,color] duration-200 hover:bg-accent/10 no-underline"
             :href="preReleaseVersion.release.html_url"
             target="_blank"
           >
@@ -183,7 +183,7 @@
           <div v-if="gpu" class="mt-3">
             <div class="min-w-0 text-sm font-medium text-silver">{{ gpu.name || $t('index.gpu_active') }}</div>
             <div class="mt-3 flex items-end gap-2 tabular-nums">
-              <div class="text-3xl font-semibold text-purple-300">{{ gpu.utilization_pct ?? '--' }}<span class="text-base">%</span></div>
+              <div class="text-3xl font-semibold text-accent">{{ gpu.utilization_pct ?? '--' }}<span class="text-base">%</span></div>
               <div class="pb-1 text-xs text-storm">{{ $t('index.gpu_utilization') }}</div>
             </div>
             <div class="mt-3 flex flex-wrap gap-2 text-xs text-storm tabular-nums">
@@ -228,14 +228,14 @@
           <div
             v-if="displaySession?.environment_repaired"
             data-display-session-health
-            class="mt-3 rounded-lg border border-green-400/30 bg-green-400/10 px-3 py-2 text-xs text-green-200"
+            class="mt-3 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-xs text-success-bright"
           >
             Desktop session environment was repaired automatically from the user service.
           </div>
           <div
             v-else-if="displaySession?.status === 'missing_display_environment'"
             data-display-session-health
-            class="mt-3 rounded-lg border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs text-amber-100"
+            class="mt-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-bright"
           >
             Desktop preview environment is missing. Restart Polaris from the desktop session or run the user service so it inherits Wayland/X11.
           </div>
@@ -319,7 +319,7 @@
           <a
             v-for="resource in resources"
             :key="resource.href"
-            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-[border-color,color,box-shadow,background-color] duration-200 hover:border-ice hover:text-ice hover:shadow-[0_0_16px_rgba(200,214,229,0.08)] no-underline"
+            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-[border-color,color,box-shadow,background-color] duration-200 hover:border-ice hover:text-ice hover:shadow-[0_0_16px_color-mix(in_srgb,var(--color-ice)_8%,transparent)] no-underline"
             :href="resource.href"
             target="_blank"
           >
@@ -339,7 +339,7 @@
           <a
             v-for="document in legalDocs"
             :key="document.href"
-            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-red-500/20 px-4 text-sm font-medium text-red-300 transition-[background-color,color] duration-200 hover:bg-red-500/30 no-underline"
+            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-danger/20 px-4 text-sm font-medium text-danger transition-[background-color,color] duration-200 hover:bg-danger/30 no-underline"
             :href="document.href"
             target="_blank"
           >
@@ -502,11 +502,11 @@ const systemHeaderTitle = computed(() => {
 const healthBadgeClass = computed(() => {
   switch (healthState.value) {
     case 'critical':
-      return 'border-red-500/30 bg-red-500/10 text-red-200'
+      return 'border-danger/30 bg-danger/10 text-danger-bright'
     case 'warning':
-      return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+      return 'border-warning/30 bg-warning/10 text-warning-bright'
     default:
-      return 'border-green-500/30 bg-green-500/10 text-green-200'
+      return 'border-success/30 bg-success/10 text-success-bright'
   }
 })
 
@@ -532,13 +532,13 @@ const updateCenterBadgeClass = computed(() => {
     case 'update_available':
       return 'border-ice/30 bg-ice/10 text-ice'
     case 'ahead':
-      return 'border-purple-300/30 bg-purple-500/10 text-purple-200'
+      return 'border-accent/30 bg-accent/10 text-accent-bright'
     case 'unavailable':
-      return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+      return 'border-warning/30 bg-warning/10 text-warning-bright'
     case 'disabled':
       return 'border-storm/30 bg-deep/60 text-storm'
     default:
-      return 'border-green-500/30 bg-green-500/10 text-green-200'
+      return 'border-success/30 bg-success/10 text-success-bright'
   }
 })
 
@@ -546,21 +546,21 @@ const updateCenterBadgeClass = computed(() => {
 const updateCenterStatusLightClass = computed(() => {
   switch (updateCenterState.value.statusTone) {
     case 'update':
-      return 'bg-ice shadow-[0_0_18px_rgba(200,214,229,0.75)] animate-pulse'
+      return 'bg-ice shadow-[0_0_18px_color-mix(in_srgb,var(--color-ice)_75%,transparent)] animate-pulse'
     case 'ahead':
-      return 'bg-purple-300 shadow-[0_0_14px_rgba(216,180,254,0.55)]'
+      return 'bg-accent shadow-[0_0_14px_rgba(216,180,254,0.55)]'
     case 'warning':
-      return 'bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.55)]'
+      return 'bg-warning shadow-[0_0_14px_rgba(252,211,77,0.55)]'
     case 'disabled':
       return 'bg-storm/60'
     default:
-      return 'bg-green-400 shadow-[0_0_14px_rgba(74,222,128,0.55)]'
+      return 'bg-success shadow-[0_0_14px_color-mix(in_srgb,var(--color-success)_55%,transparent)]'
   }
 })
 
 const updateCenterCtaClass = computed(() => {
   if (updateCenterState.value.status === 'update_available') {
-    return 'bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.22)]'
+    return 'bg-ice text-void hover:bg-ice/90 hover:shadow-glow-ice'
   }
   if (updateCenterState.value.primaryActionKind === 'none') {
     return 'border border-storm bg-deep/50 text-storm'
@@ -583,9 +583,9 @@ function buildIssueCounter(count, label, tone) {
     return {
       count,
       label,
-      cardClass: 'border border-red-500/20 bg-red-500/10',
-      valueClass: 'text-red-300',
-      labelClass: 'text-red-200/70'
+      cardClass: 'border border-danger/20 bg-danger/10',
+      valueClass: 'text-danger',
+      labelClass: 'text-danger-bright/70'
     }
   }
 
@@ -593,18 +593,18 @@ function buildIssueCounter(count, label, tone) {
     return {
       count,
       label,
-      cardClass: 'border border-amber-300/20 bg-amber-300/10',
-      valueClass: 'text-amber-200',
-      labelClass: 'text-amber-200/70'
+      cardClass: 'border border-warning/20 bg-warning/10',
+      valueClass: 'text-warning-bright',
+      labelClass: 'text-warning-bright/70'
     }
   }
 
   return {
     count,
     label,
-    cardClass: 'border border-blue-400/20 bg-blue-400/10',
-    valueClass: 'text-blue-200',
-    labelClass: 'text-blue-200/70'
+    cardClass: 'border border-info/20 bg-info/10',
+    valueClass: 'text-info-bright',
+    labelClass: 'text-info-bright/70'
   }
 }
 

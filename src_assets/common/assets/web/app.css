@@ -4,6 +4,27 @@
   color-scheme: dark;
 }
 
+/* ── Surface Tokens ──
+   Base surfaces derive from the theme palette via color-mix, so a theme only
+   overrides these when its surfaces are not a straight mix of its core colors
+   (e.g. OLED wants near-black glass regardless of its twilight value). */
+:root {
+  --surface-glass: color-mix(in srgb, var(--color-twilight) 50%, transparent);
+  --surface-card: color-mix(in srgb, var(--color-twilight) 70%, transparent);
+  --surface-raised: color-mix(in srgb, var(--color-deep) 40%, transparent);
+  --surface-raised-hover: color-mix(in srgb, var(--color-twilight) 30%, transparent);
+  --surface-pill: color-mix(in srgb, var(--color-deep) 60%, transparent);
+  --surface-chip: color-mix(in srgb, var(--color-void) 50%, transparent);
+  --surface-shimmer: var(--color-twilight);
+  --edge-glass: color-mix(in srgb, var(--color-ice) 8%, transparent);
+  --edge-card: color-mix(in srgb, var(--color-ice) 6%, transparent);
+  --edge-raised: color-mix(in srgb, var(--color-storm) 20%, transparent);
+  --edge-raised-hover: color-mix(in srgb, var(--color-silver) 35%, transparent);
+  --edge-pill: color-mix(in srgb, var(--color-storm) 30%, transparent);
+  --edge-chip: color-mix(in srgb, var(--color-storm) 25%, transparent);
+  --shimmer-sheen: color-mix(in srgb, var(--color-ice) 6%, transparent);
+}
+
 @theme {
   /* ── Space Whale Palette ── */
   --color-ice: #c8d6e5;
@@ -15,23 +36,35 @@
   --color-accent: #7c73ff;
 
   /* ── Semantic Tokens ── */
-  --color-primary: var(--color-ice);
   --color-surface: var(--color-twilight);
   --color-background: var(--color-deep);
   --color-foreground: var(--color-silver);
-  --color-muted: var(--color-storm);
-  --color-border: var(--color-storm);
+
+  /* ── Status Tokens ──
+     Shared across every theme by default (they match Nova's status colors);
+     a theme may override them, e.g. for a light surface. The -bright variants
+     are derived so themes only need to restate them when the derivation is
+     wrong for their polarity. */
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  --color-info: #38bdf8;
+  --color-success-bright: color-mix(in srgb, var(--color-success) 45%, white);
+  --color-warning-bright: color-mix(in srgb, var(--color-warning) 45%, white);
+  --color-danger-bright: color-mix(in srgb, var(--color-danger) 45%, white);
+  --color-info-bright: color-mix(in srgb, var(--color-info) 45%, white);
+  --color-accent-bright: color-mix(in srgb, var(--color-accent) 45%, white);
 
   /* ── Typography ── */
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
 
-  /* ── Shadows ── */
-  --shadow-glow: 0 0 20px rgba(200, 214, 229, 0.08);
-  --shadow-glow-lg: 0 0 40px rgba(200, 214, 229, 0.12);
-  --shadow-glow-ice: 0 0 24px rgba(200, 214, 229, 0.15);
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(200, 214, 229, 0.03);
-  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(200, 214, 229, 0.06);
-  --shadow-inset-glow: inset 0 1px 0 rgba(200, 214, 229, 0.05);
+  /* ── Shadows (glow color follows the theme's ice) ── */
+  --shadow-glow: 0 0 20px color-mix(in srgb, var(--color-ice) 8%, transparent);
+  --shadow-glow-lg: 0 0 40px color-mix(in srgb, var(--color-ice) 12%, transparent);
+  --shadow-glow-ice: 0 0 24px color-mix(in srgb, var(--color-ice) 15%, transparent);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.2), 0 0 0 1px color-mix(in srgb, var(--color-ice) 3%, transparent);
+  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.3), 0 0 0 1px color-mix(in srgb, var(--color-ice) 6%, transparent);
+  --shadow-inset-glow: inset 0 1px 0 color-mix(in srgb, var(--color-ice) 5%, transparent);
 
   /* ── Animations ── */
   --animate-fade-in: fade-in 0.2s ease-out;
@@ -57,8 +90,8 @@
     100% { background-position: 200% 0; }
   }
   @keyframes pulse-glow {
-    0%, 100% { box-shadow: 0 0 8px rgba(200, 214, 229, 0.1); }
-    50% { box-shadow: 0 0 20px rgba(200, 214, 229, 0.2); }
+    0%, 100% { box-shadow: 0 0 8px color-mix(in srgb, var(--color-ice) 10%, transparent); }
+    50% { box-shadow: 0 0 20px color-mix(in srgb, var(--color-ice) 20%, transparent); }
   }
 }
 
@@ -74,41 +107,21 @@
   --color-surface: #090b10;
   --color-background: #000000;
   --color-foreground: #c0c8d0;
-  --color-muted: #6e7880;
-  --color-border: #1d2028;
-}
-[data-theme="oled"] .glass {
-  background: rgba(8, 9, 12, 0.88);
-  border-color: rgba(255, 255, 255, 0.06);
-}
-[data-theme="oled"] .card {
-  background: rgba(8, 9, 12, 0.92);
-  border-color: rgba(255, 255, 255, 0.06);
-}
-[data-theme="oled"] .section-card {
-  background: rgba(8, 9, 12, 0.92);
-  border-color: rgba(255, 255, 255, 0.06);
-}
-[data-theme="oled"] .config-page .settings-section {
-  background: rgba(8, 9, 12, 0.92);
-  border-color: rgba(255, 255, 255, 0.06);
-}
-[data-theme="oled"] .surface-subtle {
-  background: rgba(7, 8, 11, 0.78);
-  border-color: rgba(255, 255, 255, 0.06);
-}
-[data-theme="oled"] .action-tile {
-  background: rgba(6, 7, 10, 0.72);
-  border-color: rgba(255, 255, 255, 0.05);
-}
-[data-theme="oled"] .action-tile:hover {
-  background: rgba(15, 18, 24, 0.78);
-  border-color: rgba(232, 237, 243, 0.12);
-}
-[data-theme="oled"] .meta-pill,
-[data-theme="oled"] .control-chip {
-  background: rgba(255, 255, 255, 0.035);
-  border-color: rgba(255, 255, 255, 0.08);
+  /* Near-black surfaces regardless of the twilight mix. */
+  --surface-glass: rgba(8, 9, 12, 0.88);
+  --surface-card: rgba(8, 9, 12, 0.92);
+  --surface-raised: rgba(7, 8, 11, 0.78);
+  --surface-raised-hover: rgba(15, 18, 24, 0.78);
+  --surface-pill: rgba(255, 255, 255, 0.035);
+  --surface-chip: rgba(255, 255, 255, 0.035);
+  --surface-shimmer: #0a0a0e;
+  --edge-glass: rgba(255, 255, 255, 0.06);
+  --edge-card: rgba(255, 255, 255, 0.06);
+  --edge-raised: rgba(255, 255, 255, 0.06);
+  --edge-raised-hover: rgba(232, 237, 243, 0.12);
+  --edge-pill: rgba(255, 255, 255, 0.08);
+  --edge-chip: rgba(255, 255, 255, 0.08);
+  --shimmer-sheen: rgba(255, 255, 255, 0.03);
 }
 [data-theme="oled"] .sidebar-link {
   color: #c0c8d0;
@@ -129,11 +142,7 @@
   border-color: rgba(255, 255, 255, 0.04);
 }
 [data-theme="oled"] .pulse-dot {
-  box-shadow: 0 0 12px rgba(34, 197, 94, 0.6);
-}
-[data-theme="oled"] .skeleton-shimmer {
-  background: linear-gradient(90deg, #0a0a0e 25%, rgba(255,255,255,0.03) 50%, #0a0a0e 75%);
-  background-size: 200% 100%;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--color-success) 60%, transparent);
 }
 
 /* ── Base ── */
@@ -171,18 +180,18 @@ textarea {
 
 /* ── Glass Surface ── */
 .glass {
-  background: rgba(76, 82, 101, 0.5);
+  background: var(--surface-glass);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(200, 214, 229, 0.08);
+  border: 1px solid var(--edge-glass);
 }
 
 /* ── Card System ── */
 .card {
-  background: rgba(76, 82, 101, 0.7);
+  background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(200, 214, 229, 0.06);
+  border: 1px solid var(--edge-card);
   border-radius: 0.75rem;
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
 }
@@ -209,7 +218,7 @@ textarea {
   opacity: 0.3;
 }
 .gradient-border-top-green::before {
-  background: linear-gradient(90deg, #22c55e, #16a34a);
+  background: linear-gradient(90deg, var(--color-success), color-mix(in srgb, var(--color-success) 78%, black));
   opacity: 0.8;
 }
 
@@ -226,9 +235,9 @@ textarea {
 .skeleton-shimmer {
   background: linear-gradient(
     90deg,
-    var(--color-twilight) 25%,
-    rgba(200, 214, 229, 0.06) 50%,
-    var(--color-twilight) 75%
+    var(--surface-shimmer) 25%,
+    var(--shimmer-sheen) 50%,
+    var(--surface-shimmer) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 2s infinite linear;
@@ -240,9 +249,9 @@ textarea {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #22c55e;
+  background: var(--color-success);
   animation: pulse-glow 2s ease-in-out infinite;
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--color-success) 40%, transparent);
 }
 
 /* ── Page Enter Animation ── */
@@ -309,7 +318,9 @@ textarea {
 }
 
 .meta-pill {
-  @apply rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-storm;
+  @apply rounded-full border px-2.5 py-1 text-storm;
+  background: var(--surface-pill);
+  border-color: var(--edge-pill);
 }
 
 .stat-tile {
@@ -330,10 +341,10 @@ textarea {
 
 .section-card {
   @apply p-5;
-  background: rgba(76, 82, 101, 0.7);
+  background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(200, 214, 229, 0.06);
+  border: 1px solid var(--edge-card);
   border-radius: 0.75rem;
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
 }
@@ -355,7 +366,9 @@ textarea {
 }
 
 .surface-subtle {
-  @apply rounded-2xl border border-storm/20 bg-deep/40;
+  @apply rounded-2xl border;
+  background: var(--surface-raised);
+  border-color: var(--edge-raised);
 }
 
 .surface-muted {
@@ -363,13 +376,15 @@ textarea {
 }
 
 .action-tile {
-  @apply rounded-2xl border border-storm/20 bg-deep/40 p-4 no-underline;
+  @apply rounded-2xl border p-4 no-underline;
+  background: var(--surface-raised);
+  border-color: var(--edge-raised);
   transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
 .action-tile:hover {
-  border-color: rgba(151, 159, 158, 0.35);
-  background: rgba(76, 82, 101, 0.3);
+  border-color: var(--edge-raised-hover);
+  background: var(--surface-raised-hover);
 }
 
 .eyebrow-label {
@@ -381,7 +396,9 @@ textarea {
 }
 
 .control-chip {
-  @apply rounded-full border border-storm/25 bg-void/50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-storm;
+  @apply rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-storm;
+  background: var(--surface-chip);
+  border-color: var(--edge-chip);
 }
 
 .icon-action-button {
@@ -389,15 +406,15 @@ textarea {
 }
 
 .icon-action-button-danger {
-  @apply hover:border-red-400/35 hover:bg-red-500/10 hover:text-red-300;
+  @apply hover:border-danger/35 hover:bg-danger/10 hover:text-danger;
 }
 
 .icon-action-button-success {
-  @apply hover:border-green-400/35 hover:bg-green-500/10 hover:text-green-300;
+  @apply hover:border-success/35 hover:bg-success/10 hover:text-success;
 }
 
 .icon-action-button-warning {
-  @apply hover:border-amber-300/35 hover:bg-amber-300/10 hover:text-amber-200;
+  @apply hover:border-warning/35 hover:bg-warning/10 hover:text-warning-bright;
 }
 
 .focus-ring {
@@ -454,10 +471,10 @@ textarea {
 }
 
 .operator-console {
-  --console-border: rgba(200, 214, 229, 0.08);
-  --console-surface: rgba(42, 40, 64, 0.44);
-  --console-surface-strong: rgba(42, 40, 64, 0.62);
-  --console-muted: rgba(104, 123, 129, 0.74);
+  --console-border: color-mix(in srgb, var(--color-ice) 8%, transparent);
+  --console-surface: color-mix(in srgb, var(--color-void) 44%, transparent);
+  --console-surface-strong: color-mix(in srgb, var(--color-void) 62%, transparent);
+  --console-muted: color-mix(in srgb, var(--color-storm) 74%, transparent);
 }
 
 .operator-console.page-shell,
@@ -544,11 +561,11 @@ textarea {
 }
 
 .operator-console .ready-check-summary {
-  @apply flex flex-col gap-3 rounded-lg border border-green-500/20 bg-green-500/8 px-3 py-3 sm:flex-row sm:items-center sm:justify-between;
+  @apply flex flex-col gap-3 rounded-lg border border-success/20 bg-success/8 px-3 py-3 sm:flex-row sm:items-center sm:justify-between;
 }
 
 .operator-console .ready-check-summary-attention {
-  @apply border-amber-300/25 bg-amber-300/8;
+  @apply border-warning/25 bg-warning/8;
 }
 
 .operator-console .mission-control-strip {
@@ -556,7 +573,7 @@ textarea {
 }
 
 .operator-console .mission-control-tile {
-  @apply min-w-0 rounded-lg border border-ice/15 bg-deep/55 px-4 py-3 shadow-[inset_0_1px_0_rgba(200,214,229,0.05)];
+  @apply min-w-0 rounded-lg border border-ice/15 bg-deep/55 px-4 py-3 shadow-inset-glow;
 }
 
 .operator-console .mission-control-label {
@@ -588,11 +605,11 @@ textarea {
 }
 
 .operator-console .dashboard-degraded-state {
-  @apply flex flex-col gap-3 rounded-lg border border-amber-300/20 bg-amber-300/6 px-4 py-4 sm:flex-row sm:items-center sm:justify-between;
+  @apply flex flex-col gap-3 rounded-lg border border-warning/20 bg-warning/6 px-4 py-4 sm:flex-row sm:items-center sm:justify-between;
 }
 
 .operator-console .dashboard-degraded-action {
-  @apply inline-flex h-9 shrink-0 items-center justify-center rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 text-xs font-semibold text-amber-100 no-underline transition-[background-color,border-color,color] duration-150 hover:border-amber-200/40 hover:bg-amber-300/15 hover:text-amber-50;
+  @apply inline-flex h-9 shrink-0 items-center justify-center rounded-lg border border-warning/25 bg-warning/10 px-3 text-xs font-semibold text-warning-bright no-underline transition-[background-color,border-color,color] duration-150 hover:border-warning-bright/40 hover:bg-warning/15 hover:text-warning-bright;
 }
 
 .operator-console .library-search {
@@ -620,7 +637,7 @@ textarea {
 }
 
 .operator-console .library-row-launch {
-  @apply border-green-400/25 bg-green-500/10 text-green-300;
+  @apply border-success/25 bg-success/10 text-success;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -708,7 +725,7 @@ textarea {
 }
 
 .operator-console .library-import-alert {
-  @apply flex flex-col gap-3 rounded-lg border border-amber-300/25 bg-amber-300/8 px-4 py-3 sm:flex-row sm:items-center sm:justify-between;
+  @apply flex flex-col gap-3 rounded-lg border border-warning/25 bg-warning/8 px-4 py-3 sm:flex-row sm:items-center sm:justify-between;
 }
 
 .operator-console .library-import-workspace {
@@ -937,7 +954,7 @@ textarea {
 }
 
 .settings-action-button-primary {
-  @apply bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.18)];
+  @apply bg-ice text-void hover:bg-ice/90 hover:shadow-glow-ice;
 }
 
 .settings-action-button-accent {
@@ -1021,9 +1038,9 @@ textarea {
 }
 
 .settings-search-hit {
-  border-color: rgba(200, 214, 229, 0.4) !important;
-  background: rgba(200, 214, 229, 0.08) !important;
-  box-shadow: 0 0 0 1px rgba(200, 214, 229, 0.12), 0 0 0 10px rgba(200, 214, 229, 0.04);
+  border-color: color-mix(in srgb, var(--color-ice) 40%, transparent) !important;
+  background: color-mix(in srgb, var(--color-ice) 8%, transparent) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-ice) 12%, transparent), 0 0 0 10px color-mix(in srgb, var(--color-ice) 4%, transparent);
 }
 
 .settings-subnav-card {
@@ -1048,10 +1065,10 @@ textarea {
 
 .config-page .settings-section {
   @apply p-5;
-  background: rgba(76, 82, 101, 0.7);
+  background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(200, 214, 229, 0.06);
+  border: 1px solid var(--edge-card);
   border-radius: 0.75rem;
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
 }
@@ -1085,7 +1102,7 @@ textarea {
 }
 
 .config-page .settings-warning-surface {
-  @apply rounded-2xl border border-amber-300/25 bg-amber-300/5 p-4 text-sm text-amber-100;
+  @apply rounded-2xl border border-warning/25 bg-warning/5 p-4 text-sm text-warning-bright;
 }
 
 .dashboard-live-shell {
@@ -1162,7 +1179,7 @@ textarea {
 }
 
 .dashboard-action-button-primary {
-  @apply bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.18)];
+  @apply bg-ice text-void hover:bg-ice/90 hover:shadow-glow-ice;
 }
 
 .dashboard-action-button-secondary {
@@ -1174,7 +1191,7 @@ textarea {
 }
 
 .dashboard-action-button-danger {
-  @apply bg-red-500 text-white hover:bg-red-600;
+  @apply bg-danger text-white hover:bg-danger/85;
 }
 
 .dashboard-preview-frame {
@@ -1182,7 +1199,7 @@ textarea {
 }
 
 .dashboard-preview-frame.has-error {
-  @apply border-red-500/25 bg-red-500/5;
+  @apply border-danger/25 bg-danger/5;
 }
 
 .dashboard-preview-image {
@@ -1332,7 +1349,7 @@ textarea {
 }
 
 .troubleshooting-action-button-primary {
-  @apply bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)];
+  @apply bg-ice text-void hover:bg-ice/90 hover:shadow-glow-ice;
 }
 
 .troubleshooting-action-button-secondary {
@@ -1340,7 +1357,7 @@ textarea {
 }
 
 .troubleshooting-action-button-danger {
-  @apply bg-red-500 text-white hover:bg-red-600;
+  @apply bg-danger text-white hover:bg-danger/85;
 }
 
 .troubleshooting-action-card {
@@ -1417,8 +1434,6 @@ textarea {
   --color-surface: #243652;
   --color-background: #151529;
   --color-foreground: #dcfbff;
-  --color-muted: #85c7d4;
-  --color-border: #326477;
 }
 
 [data-theme="miami"] .glass {
@@ -1468,8 +1483,17 @@ textarea {
   --color-surface: #d6dde5;
   --color-background: #b8c1cc;
   --color-foreground: #25313d;
-  --color-muted: #4f5d6b;
-  --color-border: #7f8c9a;
+  /* Status colors re-pinned for the light shell: the dark-theme defaults fail
+     contrast on pearl-silver surfaces. Values are WCAG-gated by theme.test.js. */
+  --color-success: #315b45;
+  --color-warning: #92400e;
+  --color-danger: #b91c1c;
+  --color-info: #1d4ed8;
+  --color-success-bright: color-mix(in srgb, var(--color-success) 72%, black);
+  --color-warning-bright: color-mix(in srgb, var(--color-warning) 72%, black);
+  --color-danger-bright: color-mix(in srgb, var(--color-danger) 72%, black);
+  --color-info-bright: color-mix(in srgb, var(--color-info) 72%, black);
+  --color-accent-bright: color-mix(in srgb, var(--color-accent) 72%, black);
 }
 
 [data-theme="portable-chrome"] body {
@@ -1556,20 +1580,4 @@ textarea {
 [data-theme="portable-chrome"] .skeleton-shimmer {
   background: linear-gradient(90deg, rgba(177, 188, 201, 0.86) 25%, rgba(226, 232, 239, 0.56) 50%, rgba(177, 188, 201, 0.86) 75%);
   background-size: 200% 100%;
-}
-
-
-[data-theme="portable-chrome"] [class*="text-green-"],
-[data-theme="portable-chrome"] [class*="text-emerald-"] {
-  color: #315b45 !important;
-}
-
-[data-theme="portable-chrome"] [class*="bg-green-"],
-[data-theme="portable-chrome"] [class*="bg-emerald-"] {
-  background-color: rgba(58, 102, 78, 0.12) !important;
-}
-
-[data-theme="portable-chrome"] [class*="border-green-"],
-[data-theme="portable-chrome"] [class*="border-emerald-"] {
-  border-color: rgba(49, 91, 69, 0.34) !important;
 }

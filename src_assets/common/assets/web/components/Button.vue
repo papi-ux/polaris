@@ -31,12 +31,12 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        primary: 'bg-ice text-void hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] active:bg-ice/80',
-        danger: 'bg-red-500 text-white hover:bg-red-600 hover:shadow-[0_0_24px_rgba(239,68,68,0.2)] active:bg-red-700',
-        success: 'bg-ice/20 text-ice hover:bg-ice/30 hover:shadow-[0_0_24px_rgba(34,197,94,0.2)] active:bg-green-800',
-        warning: 'bg-yellow-600 text-white hover:bg-yellow-700 active:bg-yellow-800',
+        primary: 'bg-ice text-void hover:bg-ice/90 hover:shadow-glow-ice active:bg-ice/80',
+        danger: 'bg-danger text-white hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] active:bg-danger/70',
+        success: 'bg-ice/20 text-ice hover:bg-ice/30 hover:shadow-[0_0_24px_rgba(34,197,94,0.2)] active:bg-success/60',
+        warning: 'bg-warning/85 text-white hover:bg-warning/70 active:bg-warning/60',
         ghost: 'text-storm hover:text-silver hover:bg-twilight/50 active:bg-twilight',
-        outline: 'border border-storm text-silver hover:border-ice hover:text-ice hover:shadow-[0_0_16px_rgba(200,214,229,0.08)] active:bg-twilight/30',
+        outline: 'border border-storm text-silver hover:border-ice hover:text-ice hover:shadow-[0_0_16px_color-mix(in_srgb,var(--color-ice)_8%,transparent)] active:bg-twilight/30',
       },
       size: {
         sm: 'h-8 px-3 text-xs',

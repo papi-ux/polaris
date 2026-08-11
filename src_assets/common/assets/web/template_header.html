@@ -5,3 +5,24 @@
 <title>Polaris</title>
 <link rel="icon" type="image/x-icon" href="./images/polaris-favicon.ico?v=20260726">
 <link rel="icon" type="image/svg+xml" href="./images/polaris-favicon.svg?v=20260726">
+<script>
+  // Apply the stored theme before first paint so a non-default theme never
+  // flashes the default palette. Mirrors theme.js: default theme = no attribute.
+  try {
+    var polarisTheme = localStorage.getItem('polaris-theme');
+    if (polarisTheme && polarisTheme !== 'polaris') {
+      document.documentElement.setAttribute('data-theme', polarisTheme);
+    }
+  } catch (e) { /* storage unavailable: default theme */ }
+</script>
+<style>
+  /* Inter is self-hosted: this UI must work offline against a self-signed
+     host, so no font CDNs. Served from public/assets/fonts/. */
+  @font-face {
+    font-family: 'Inter';
+    src: url('./assets/fonts/InterVariable.woff2') format('woff2');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }
+</style>
