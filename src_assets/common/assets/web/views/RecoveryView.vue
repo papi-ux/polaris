@@ -12,7 +12,7 @@
           </div>
         </header>
 
-        <div class="bg-twilight/50 border-l-4 border-yellow-500 text-silver p-4 rounded-lg mb-6">
+        <div class="bg-twilight/50 border-l-4 border-warning text-silver p-4 rounded-lg mb-6">
           <p class="font-semibold mb-1">{{ $t('recovery.browser_reset_unavailable') }}</p>
           <p class="text-sm text-storm">{{ $t('recovery.browser_reset_reason') }}</p>
         </div>
@@ -49,7 +49,7 @@
           </div>
         </div>
 
-        <div class="bg-twilight/50 border-l-4 border-blue-400 text-silver p-4 rounded-lg mt-6">
+        <div class="bg-twilight/50 border-l-4 border-info text-silver p-4 rounded-lg mt-6">
           <p class="font-semibold mb-1">{{ $t('recovery.notes_title') }}</p>
           <ul class="space-y-1 text-sm text-storm list-disc list-inside">
             <li>{{ $t('recovery.notes.full_path') }}</li>

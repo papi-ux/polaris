@@ -334,3 +334,18 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     ...action,
   }
 }
+
+export function updateStatusLightClass(statusTone) {
+  switch (statusTone) {
+    case 'update':
+      return 'bg-ice shadow-[0_0_18px_color-mix(in_srgb,var(--color-ice)_75%,transparent)] animate-pulse'
+    case 'ahead':
+      return 'bg-accent shadow-[0_0_14px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]'
+    case 'warning':
+      return 'bg-warning shadow-[0_0_14px_color-mix(in_srgb,var(--color-warning)_55%,transparent)]'
+    case 'disabled':
+      return 'bg-storm/60'
+    default:
+      return 'bg-success shadow-[0_0_14px_color-mix(in_srgb,var(--color-success)_55%,transparent)]'
+  }
+}

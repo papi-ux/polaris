@@ -146,10 +146,10 @@ const streamDisplayRuntimeNotice = computed(() => (
 ))
 const streamDisplayRuntimeNoticeTone = computed(() => {
   if (streamDisplayRuntimeNotice.value.state === 'synced') {
-    return 'border-green-400/25 bg-green-400/10 text-green-200'
+    return 'border-success/25 bg-success/10 text-success-bright'
   }
   if (streamDisplayRuntimeNotice.value.state === 'pending_relaunch' || streamDisplayRuntimeNotice.value.state === 'unsaved') {
-    return 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+    return 'border-warning/25 bg-warning/10 text-warning-bright'
   }
   return 'border-storm/30 bg-deep/40 text-storm'
 })
@@ -160,9 +160,9 @@ const clientSettingsSyncBadge = computed(() => {
 })
 const clientSettingsSyncTone = computed(() => {
   if (!clientSettingsSync.value.available || clientSettingsSync.value.relaunchRequired) {
-    return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+    return 'border-warning/30 bg-warning/10 text-warning-bright'
   }
-  return 'border-green-400/30 bg-green-400/10 text-green-300'
+  return 'border-success/30 bg-success/10 text-success'
 })
 const clientSettingsSyncCopy = computed(() => {
   if (!clientSettingsSync.value.available) {
@@ -194,8 +194,8 @@ const autoQualityBadge = computed(() => {
   return 'Manual'
 })
 const autoQualityTone = computed(() => {
-  if (autoQualityEnabled.value) return 'border-green-400/30 bg-green-400/10 text-green-300'
-  if (autoQualityPartial.value) return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
+  if (autoQualityEnabled.value) return 'border-success/30 bg-success/10 text-success'
+  if (autoQualityPartial.value) return 'border-warning/30 bg-warning/10 text-warning-bright'
   return 'border-storm/40 bg-storm/10 text-storm'
 })
 const autoQualityCopy = computed(() => {
@@ -438,9 +438,9 @@ function updateDisplayPlannerSource(event) {
                 <span
                   class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]"
                   :class="mode.id === 'headless_stream'
-                    ? 'border-green-400/30 bg-green-400/10 text-green-300'
+                    ? 'border-success/30 bg-success/10 text-success'
                     : mode.id === 'windowed_stream'
-                      ? 'border-amber-300/40 bg-amber-300/10 text-amber-200'
+                      ? 'border-warning/40 bg-warning/10 text-warning-bright'
                       : mode.id === 'gamescope_stream'
                         ? 'border-ice/30 bg-ice/10 text-ice'
                         : 'border-storm/40 bg-storm/10 text-storm'"
@@ -602,7 +602,7 @@ function updateDisplayPlannerSource(event) {
               </div>
             </div>
             <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-green-300">GPU path</div>
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-success">GPU path</div>
               <div class="mt-2 text-sm leading-relaxed text-storm">
                 {{ isLabwcPath
                   ? 'GPU-native is a labwc capture preference. Force it only when diagnostics show CPU/SHM fallback.'
@@ -612,7 +612,7 @@ function updateDisplayPlannerSource(event) {
               </div>
             </div>
             <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">FPS target</div>
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-warning-bright">FPS target</div>
               <div class="mt-2 text-sm leading-relaxed text-storm">A 120 FPS client target still needs the game/output to render above 60 FPS; Polaris will show the live gap on the dashboard.</div>
             </div>
           </div>
@@ -879,7 +879,7 @@ pactl info | grep Source</pre>
                 Start from the client panel shape, keep the aspect ratio at {{ displayPlanner.sourceAspectRatio }}, and choose a plain-language target before touching raw WxHxFPS values.
               </div>
             </div>
-            <div class="rounded-2xl border border-green-400/25 bg-green-400/10 px-3 py-2 text-right text-sm text-green-200">
+            <div class="rounded-2xl border border-success/25 bg-success/10 px-3 py-2 text-right text-sm text-success-bright">
               <div class="text-[10px] font-semibold uppercase tracking-[0.16em]">Recommended</div>
               <div class="mt-1 font-medium">{{ displayPlanner.recommendedMode }}</div>
             </div>
@@ -891,7 +891,7 @@ pactl info | grep Source</pre>
               :key="choice.id"
               type="button"
               class="focus-ring min-h-[126px] rounded-lg border border-storm/30 bg-deep/40 p-4 text-left transition hover:border-storm/70"
-              :class="choice.id === displayPlanner.recommendedId ? 'border-green-400/45 bg-green-400/10' : ''"
+              :class="choice.id === displayPlanner.recommendedId ? 'border-success/45 bg-success/10' : ''"
               @click="applyDisplayPlan(choice)"
             >
               <div class="flex items-start justify-between gap-3">
@@ -926,13 +926,13 @@ pactl info | grep Source</pre>
                 :key="factor.label"
                 type="button"
                 class="focus-ring rounded-lg border px-3 py-3 text-left"
-                :class="factor.safe ? 'border-storm/30 bg-void/25 hover:border-storm/70' : 'border-amber-300/25 bg-amber-300/10 opacity-60'"
+                :class="factor.safe ? 'border-storm/30 bg-void/25 hover:border-storm/70' : 'border-warning/25 bg-warning/10 opacity-60'"
                 :disabled="!factor.safe"
                 @click="customDisplayScale = factor.scaleFactor"
               >
                 <div class="text-sm font-semibold text-silver">{{ factor.label }}</div>
                 <div class="mt-1 font-mono text-xs text-storm">{{ factor.targetMode }}</div>
-                <div class="mt-1 text-[11px]" :class="factor.safe ? 'text-storm' : 'text-amber-100'">{{ factor.safe ? 'Available' : 'Hidden as excessive' }}</div>
+                <div class="mt-1 text-[11px]" :class="factor.safe ? 'text-storm' : 'text-warning-bright'">{{ factor.safe ? 'Available' : 'Hidden as excessive' }}</div>
               </button>
             </div>
             <label class="block text-sm font-medium text-storm">
@@ -975,14 +975,14 @@ pactl info | grep Source</pre>
         <div
           v-if="isWindows"
           class="settings-subtle-surface"
-          :class="props.vdisplay ? 'border-amber-300/25' : 'border-green-400/25'"
+          :class="props.vdisplay ? 'border-warning/25' : 'border-success/25'"
         >
           <div class="flex items-center gap-2 text-sm font-medium text-silver">
             <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
             SudoVDA Driver
           </div>
           <div class="mt-2 text-sm text-storm">Current status: <span class="text-silver">{{ currentDriverStatus }}</span></div>
-          <div v-if="props.vdisplay" class="mt-2 text-sm text-amber-100">Install or update the SudoVDA driver if Polaris should be able to create Windows virtual displays reliably.</div>
+          <div v-if="props.vdisplay" class="mt-2 text-sm text-warning-bright">Install or update the SudoVDA driver if Polaris should be able to create Windows virtual displays reliably.</div>
         </div>
 
         <VirtualDisplayStatus

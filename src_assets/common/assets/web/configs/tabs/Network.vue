@@ -202,7 +202,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
               v-model="config.trusted_subnets[index]"
             />
             <button
-              class="px-3 py-2 bg-deep border border-storm rounded-lg text-red-400 hover:bg-red-500/20 hover:border-red-500/50 transition-colors text-sm"
+              class="px-3 py-2 bg-deep border border-storm rounded-lg text-danger hover:bg-danger/20 hover:border-danger/50 transition-colors text-sm"
               @click="config.trusted_subnets.splice(index, 1)"
             >
               Remove

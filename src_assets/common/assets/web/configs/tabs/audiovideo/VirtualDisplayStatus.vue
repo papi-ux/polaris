@@ -55,7 +55,7 @@ onMounted(async () => {
         Detecting backends...
       </div>
 
-      <div v-else-if="error" class="text-sm text-red-400">
+      <div v-else-if="error" class="text-sm text-danger">
         {{ error }}
       </div>
 
@@ -63,7 +63,7 @@ onMounted(async () => {
         <div class="flex items-center gap-2">
           <span
             class="w-2 h-2 rounded-full"
-            :class="vdStatus.available ? 'bg-green-400' : 'bg-red-400'"
+            :class="vdStatus.available ? 'bg-success' : 'bg-danger'"
           ></span>
           <span class="text-sm text-storm">
             {{ vdStatus.available ? 'Available' : 'Not available' }}
@@ -83,7 +83,7 @@ onMounted(async () => {
           >
             <span
               class="w-1.5 h-1.5 rounded-full"
-              :class="b.detected ? 'bg-green-400' : 'bg-gray-600'"
+              :class="b.detected ? 'bg-success' : 'bg-storm/70'"
             ></span>
             <span :class="b.detected ? 'text-silver' : 'text-storm/60'">{{ b.name }}</span>
             <span v-if="b.detected" class="text-xs text-ice">(active)</span>

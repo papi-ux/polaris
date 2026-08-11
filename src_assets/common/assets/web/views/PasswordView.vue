@@ -7,7 +7,7 @@
         <p class="page-subtitle">Update the web sign-in without leaving the host.</p>
         <div class="page-meta">
           <span class="meta-pill">{{ $t('password.web_ui_only') }}</span>
-          <span class="meta-pill border-amber-300/30 bg-amber-300/10 text-amber-200">Reloads on save</span>
+          <span class="meta-pill border-warning/30 bg-warning/10 text-warning-bright">Reloads on save</span>
         </div>
       </div>
 
@@ -15,7 +15,7 @@
         <div class="header-support-title-row">
           <div class="flex items-center gap-2">
             <div class="section-kicker !mb-0">Commit</div>
-            <span class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-200">
+            <span class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
               {{ $t('password.sensitive_action') }}
             </span>
           </div>
@@ -37,7 +37,7 @@
               <InfoHint size="sm" label="Current credentials guidance">
                 {{ $t('password.current_creds_desc') }}
               </InfoHint>
-              <span class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-200">
+              <span class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
                 {{ $t('password.sensitive_action') }}
               </span>
             </div>
@@ -148,7 +148,7 @@
                   required
                   :type="showConfirmPassword ? 'text' : 'password'"
                   class="w-full rounded-lg border bg-deep px-3 py-2 pr-20 text-silver focus:border-ice focus:outline-none"
-                  :class="passwordMismatch ? 'border-red-500/70' : 'border-storm'"
+                  :class="passwordMismatch ? 'border-danger/70' : 'border-storm'"
                 />
                 <button
                   type="button"
@@ -158,13 +158,13 @@
                   {{ showConfirmPassword ? $t('password.hide') : $t('password.show') }}
                 </button>
               </div>
-              <div v-if="passwordMismatch" class="mt-1 text-sm text-red-400">{{ $t('password.password_mismatch') }}</div>
+              <div v-if="passwordMismatch" class="mt-1 text-sm text-danger">{{ $t('password.password_mismatch') }}</div>
             </div>
           </div>
         </section>
       </div>
 
-      <section class="section-card border border-amber-300/20 bg-amber-300/5">
+      <section class="section-card border border-warning/20 bg-warning/5">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div class="min-w-0">
             <div class="section-kicker">{{ $t('password.commit_changes') }}</div>
@@ -177,17 +177,17 @@
             <div class="mt-1 text-sm text-storm">Apply the new credentials and let Polaris reload the web gate.</div>
           </div>
           <button
-            class="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:cursor-not-allowed disabled:opacity-50"
+            class="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="!canSave"
           >
             {{ saving ? $t('password.saving') : $t('password.save_and_reload') }}
           </button>
         </div>
 
-        <div v-if="error" class="mt-4 rounded-lg border-l-4 border-red-500 bg-twilight/50 p-3 text-silver">
+        <div v-if="error" class="mt-4 rounded-lg border-l-4 border-danger bg-twilight/50 p-3 text-silver">
           <b>{{ $t('_common.error') }}</b> {{ error }}
         </div>
-        <div v-if="success" class="mt-4 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver">
+        <div v-if="success" class="mt-4 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver">
           <b>{{ $t('_common.success') }}</b> {{ $t('password.success_msg') }}
         </div>
       </section>

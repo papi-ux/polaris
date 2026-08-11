@@ -182,9 +182,9 @@ const syncCopyKey = computed(() => {
   return 'quick_controls.sync_ready_desc'
 })
 const syncBadgeTone = computed(() => {
-  if (!clientSettingsSync.value.available) return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
-  if (clientSettingsSync.value.relaunchRequired) return 'border-amber-300/30 bg-amber-300/10 text-amber-200'
-  return 'border-green-400/30 bg-green-400/10 text-green-300'
+  if (!clientSettingsSync.value.available) return 'border-warning/30 bg-warning/10 text-warning-bright'
+  if (clientSettingsSync.value.relaunchRequired) return 'border-warning/30 bg-warning/10 text-warning-bright'
+  return 'border-success/30 bg-success/10 text-success'
 })
 </script>
 

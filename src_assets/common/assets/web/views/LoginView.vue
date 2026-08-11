@@ -1,7 +1,7 @@
 <template>
   <div class="relative min-h-screen overflow-hidden bg-background">
     <a href="#polaris-login-main" class="skip-link">Skip to main content</a>
-    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(124,115,255,0.18),transparent_35%),radial-gradient(circle_at_bottom_right,rgba(200,214,229,0.08),transparent_28%)]"></div>
+    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,color-mix(in_srgb,var(--color-accent)_18%,transparent),transparent_35%),radial-gradient(circle_at_bottom_right,color-mix(in_srgb,var(--color-ice)_8%,transparent),transparent_28%)]"></div>
     <div class="relative mx-auto flex min-h-screen max-w-5xl items-center justify-center p-4 sm:p-6">
       <div class="grid w-full max-w-4xl gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <main id="polaris-login-main" tabindex="-1" class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
@@ -25,7 +25,7 @@
                 autocomplete="username"
                 required
                 autofocus
-                class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]"
+                class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-glow"
               />
             </div>
             <div>
@@ -36,7 +36,7 @@
                 type="password"
                 autocomplete="current-password"
                 required
-                class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]"
+                class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-glow"
               />
             </div>
 
@@ -50,7 +50,7 @@
 
             <button
               type="submit"
-              class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.25)] disabled:opacity-50"
+              class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-glow-ice disabled:opacity-50"
               :disabled="loading"
             >
               {{ loading ? 'Signing In…' : $t('welcome.login') }}
@@ -63,10 +63,10 @@
               </router-link>
             </div>
 
-            <div v-if="error" class="rounded-2xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+            <div v-if="error" class="rounded-2xl border border-danger/25 bg-danger/10 px-4 py-3 text-sm text-danger-bright">
               <b>{{ $t('_common.error') }}</b> {{ error }}
             </div>
-            <div v-if="success" class="rounded-2xl border border-green-500/25 bg-green-500/10 px-4 py-3 text-sm text-green-100">
+            <div v-if="success" class="rounded-2xl border border-success/25 bg-success/10 px-4 py-3 text-sm text-success-bright">
               <b>{{ $t('_common.success') }}</b> {{ $t('welcome.login_success') }}
             </div>
           </form>

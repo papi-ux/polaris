@@ -9,7 +9,7 @@
         <span class="meta-pill">{{ visibleTabCountLabel }}</span>
         <span class="meta-pill">{{ activePanelTitle }}</span>
         <span class="meta-pill">{{ activePanelGroupLabel }}</span>
-        <span class="meta-pill" :class="hasUnsavedChanges ? 'border-amber-300/40 bg-amber-300/10 text-amber-300' : 'border-green-400/30 bg-green-400/10 text-green-300'">
+        <span class="meta-pill" :class="hasUnsavedChanges ? 'border-warning/40 bg-warning/10 text-warning' : 'border-success/30 bg-success/10 text-success'">
           {{ hasUnsavedChanges ? $t('config.unsaved_changes') : $t('config.all_changes_saved') }}
         </span>
         <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
@@ -30,8 +30,8 @@
       <div class="settings-command-tools">
         <div class="settings-command-meta">
           <span class="meta-pill">{{ visibleTabCountLabel }}</span>
-          <span v-if="hasUnsavedChanges" class="meta-pill border-amber-300/40 bg-amber-300/10 text-amber-300">{{ $t('config.pending_badge') }}</span>
-          <span v-else class="meta-pill border-green-400/30 bg-green-400/10 text-green-300">{{ $t('config.synced_badge') }}</span>
+          <span v-if="hasUnsavedChanges" class="meta-pill border-warning/40 bg-warning/10 text-warning">{{ $t('config.pending_badge') }}</span>
+          <span v-else class="meta-pill border-success/30 bg-success/10 text-success">{{ $t('config.synced_badge') }}</span>
         </div>
 
         <input
@@ -98,7 +98,7 @@
             </div>
             <div>
               <div class="eyebrow-label">{{ $t('config.pending_changes_after') }}</div>
-              <div class="mt-1 break-words rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 font-mono text-xs text-amber-100">{{ change.after }}</div>
+              <div class="mt-1 break-words rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 font-mono text-xs text-warning-bright">{{ change.after }}</div>
             </div>
           </div>
         </article>

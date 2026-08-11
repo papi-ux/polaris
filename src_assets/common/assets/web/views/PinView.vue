@@ -27,7 +27,7 @@
           type="button"
           class="focus-ring pairing-method-card rounded-xl border px-4 py-3 text-left transition-[border-color,background-color,box-shadow] duration-200"
           :class="currentTab === method.key
-            ? 'border-ice/40 bg-twilight/70 shadow-[0_0_32px_rgba(124,110,255,0.12)]'
+            ? 'border-ice/40 bg-twilight/70 shadow-[0_0_32px_color-mix(in_srgb,var(--color-accent)_12%,transparent)]'
             : 'border-storm/20 bg-deep/40 hover:border-storm/40 hover:bg-twilight/30'"
           :aria-pressed="currentTab === method.key"
           @click="switchTab(method.key)"
@@ -39,7 +39,7 @@
               class="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]"
               :class="method.badgeTone === 'recommended'
                 ? 'border-ice/30 bg-ice/10 text-ice'
-                : 'border-amber-300/25 bg-amber-300/10 text-amber-200'"
+                : 'border-warning/25 bg-warning/10 text-warning-bright'"
             >
               {{ $t(method.badgeKey) }}
             </span>
@@ -98,7 +98,7 @@
               </div>
               <a
                 href="#/config#encryption_and_trust"
-                class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)]"
+                class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
               >
                 {{ $t('pin.configure_network') }}
               </a>
@@ -164,7 +164,7 @@
               <div class="flex flex-wrap items-center gap-3">
                 <button
                   type="submit"
-                  class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)]"
+                  class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
                 >
                   {{ $t('pin.send') }}
                 </button>
@@ -175,8 +175,8 @@
               v-if="pinMessage"
               class="mt-4 rounded-lg border-l-4 p-3 text-silver"
               :class="pinStatus === 'success'
-                ? 'border-green-500 bg-twilight/50'
-                : 'border-red-500 bg-twilight/50'"
+                ? 'border-success bg-twilight/50'
+                : 'border-danger bg-twilight/50'"
             >
               {{ pinMessage }}
             </div>
@@ -223,7 +223,7 @@
                   <div class="flex gap-3">
                     <button
                       type="button"
-                      class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)] disabled:opacity-50"
+                      class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice disabled:opacity-50"
                       :disabled="!canSaveHost"
                       @click="saveHost"
                     >
@@ -270,7 +270,7 @@
                   <div class="flex flex-wrap items-center gap-3">
                     <button
                       type="submit"
-                      class="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)]"
+                      class="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
                     >
                       <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
@@ -316,10 +316,10 @@
               v-if="otpMessage"
               class="mt-4 rounded-lg border-l-4 p-3 text-silver"
               :class="otpStatus === 'success'
-                ? 'border-green-500 bg-twilight/50'
+                ? 'border-success bg-twilight/50'
                 : otpStatus === 'danger'
-                  ? 'border-red-500 bg-twilight/50'
-                  : 'border-yellow-500 bg-twilight/50'"
+                  ? 'border-danger bg-twilight/50'
+                  : 'border-warning bg-twilight/50'"
             >
               {{ otpMessage }}
             </div>
@@ -349,7 +349,7 @@
             </span>
             <button
               type="button"
-              class="inline-flex h-9 items-center justify-center rounded-lg bg-red-500 px-4 text-sm font-medium text-white transition-all duration-200 hover:bg-red-600 hover:shadow-[0_0_24px_rgba(239,68,68,0.2)] disabled:cursor-not-allowed disabled:opacity-50"
+              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="unpairAllPressed || clients.length === 0"
               @click="unpairAll"
             >
@@ -358,7 +358,7 @@
           </div>
         </div>
 
-        <div v-if="showApplyMessage" class="mt-4 flex items-center gap-3 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver">
+        <div v-if="showApplyMessage" class="mt-4 flex items-center gap-3 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver">
           <div><b>{{ $t('_common.success') }}</b> {{ $t('pin.unpair_single_success') }}</div>
           <button
             type="button"
@@ -368,10 +368,10 @@
             {{ $t('_common.dismiss') }}
           </button>
         </div>
-        <div v-if="unpairAllStatus === true" class="mt-4 rounded-lg border-l-4 border-green-500 bg-twilight/50 p-3 text-silver">
+        <div v-if="unpairAllStatus === true" class="mt-4 rounded-lg border-l-4 border-success bg-twilight/50 p-3 text-silver">
           {{ $t('pin.unpair_all_success') }}
         </div>
-        <div v-if="unpairAllStatus === false" class="mt-4 rounded-lg border-l-4 border-red-500 bg-twilight/50 p-3 text-silver">
+        <div v-if="unpairAllStatus === false" class="mt-4 rounded-lg border-l-4 border-danger bg-twilight/50 p-3 text-silver">
           {{ $t('pin.unpair_all_error') }}
         </div>
       </div>
@@ -412,7 +412,7 @@
                   <span
                     class="rounded-full border px-2.5 py-1 text-xs font-medium"
                     :class="client.connected
-                      ? 'border-green-500/30 bg-green-500/10 text-green-300'
+                      ? 'border-success/30 bg-success/10 text-success'
                       : 'border-storm/30 bg-deep/60 text-storm'"
                   >
                     {{ client.connected ? $t('pin.status_connected') : $t('pin.status_offline') }}
@@ -437,7 +437,7 @@
                   </span>
                   <button
                     type="button"
-                    class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.2)]"
+                    class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
                     @click="saveClient(client)"
                   >
                     {{ $t('_common.save') }}
@@ -499,7 +499,7 @@
                           class="rounded-lg border px-2 py-1 text-left text-xs transition"
                           :disabled="isSuppressed(client.editPerm, perm.name, perm.suppressed_by)"
                           :class="(isSuppressed(client.editPerm, perm.name, perm.suppressed_by) || checkPermission(client.editPerm, perm.name))
-                            ? 'border-green-600 bg-green-600/20 text-green-400'
+                            ? 'border-success bg-success/20 text-success'
                             : 'border-storm bg-deep text-storm hover:border-ice hover:text-silver'"
                           @click="togglePermission(client, perm.name)"
                         >
@@ -549,7 +549,7 @@
                     </div>
                     <button
                       type="button"
-                      class="inline-flex h-7 items-center justify-center gap-1.5 rounded-lg border border-purple-500/30 px-2.5 text-xs font-medium text-purple-400 transition-all duration-200 hover:bg-purple-500/10 disabled:opacity-50"
+                      class="inline-flex h-7 items-center justify-center gap-1.5 rounded-lg border border-accent/30 px-2.5 text-xs font-medium text-accent transition-all duration-200 hover:bg-accent/10 disabled:opacity-50"
                       :disabled="aiLoading"
                       @click="fetchAiSuggestion(client)"
                     >
@@ -566,11 +566,11 @@
 
                   <div
                     v-if="aiSuggestion && aiSuggestionFor === (client.editName || client.name)"
-                    class="mt-4 rounded-xl border border-purple-500/20 bg-purple-500/5 p-3"
+                    class="mt-4 rounded-xl border border-accent/20 bg-accent/5 p-3"
                   >
                     <div class="flex items-center justify-between gap-3">
                       <div class="flex items-center gap-2">
-                        <span class="text-sm font-medium text-purple-300">{{ $t('pin.ai_suggestion') }}</span>
+                        <span class="text-sm font-medium text-accent">{{ $t('pin.ai_suggestion') }}</span>
                         <span class="text-xs text-storm">{{ aiSuggestion.source }}</span>
                       </div>
                       <button
@@ -593,7 +593,7 @@
                     <div v-if="aiSuggestion.reasoning" class="mt-2 text-xs italic text-silver/60">{{ aiSuggestion.reasoning }}</div>
                     <button
                       type="button"
-                      class="mt-3 inline-flex h-7 items-center justify-center rounded-lg bg-purple-500 px-3 text-xs font-medium text-white transition-all duration-200 hover:bg-purple-600"
+                      class="mt-3 inline-flex h-7 items-center justify-center rounded-lg bg-accent px-3 text-xs font-medium text-void transition-all duration-200 hover:bg-accent/85"
                       @click="applySuggestion(client)"
                     >
                       {{ $t('pin.apply_suggestion') }}
@@ -704,7 +704,7 @@
                             <div class="flex gap-1">
                               <button
                                 type="button"
-                                class="rounded bg-red-500 px-2 py-1 text-white transition hover:bg-red-600"
+                                class="rounded bg-danger px-2 py-1 text-void transition hover:bg-danger/85"
                                 :aria-label="$t('pin.remove_command')"
                                 @click="removeCmd(client[`edit_${cmdType}`], i)"
                               >
@@ -750,7 +750,7 @@
                     <span
                       class="rounded-full border px-2.5 py-1 text-xs font-medium"
                       :class="client.connected
-                        ? 'border-green-500/30 bg-green-500/10 text-green-300'
+                        ? 'border-success/30 bg-success/10 text-success'
                         : 'border-storm/30 bg-deep/60 text-storm'"
                     >
                       {{ client.connected ? $t('pin.status_connected') : $t('pin.status_offline') }}
@@ -784,7 +784,7 @@
                   <button
                     v-if="client.name"
                     type="button"
-                    class="rounded-lg bg-green-600/20 px-2.5 py-2 text-green-400 transition hover:bg-green-600/30"
+                    class="rounded-lg bg-success/20 px-2.5 py-2 text-success transition hover:bg-success/30"
                     :disabled="client.wolSending"
                     :aria-label="$t('pin.wol_send')"
                     @click="sendWol(client)"
@@ -799,7 +799,7 @@
                   <button
                     v-if="client.connected"
                     type="button"
-                    class="rounded-lg bg-yellow-600 px-2.5 py-2 text-white transition hover:bg-yellow-700"
+                    class="rounded-lg bg-warning px-2.5 py-2 text-void transition hover:bg-warning/85"
                     :aria-label="$t('pin.disconnect_client')"
                     @click="disconnectClient(client.uuid)"
                   >
@@ -819,7 +819,7 @@
                   </button>
                   <button
                     type="button"
-                    class="rounded-lg bg-red-500/20 px-2.5 py-2 text-red-400 transition hover:bg-red-500/30"
+                    class="rounded-lg bg-danger/20 px-2.5 py-2 text-danger transition hover:bg-danger/30"
                     :aria-label="$t('pin.unpair_single_action')"
                     @click="handleUnpairSingle(client.uuid)"
                   >
@@ -875,7 +875,7 @@
             </span>
             <button
               type="button"
-              class="inline-flex h-9 items-center justify-center rounded-lg bg-red-500 px-4 text-sm font-medium text-white transition-all duration-200 hover:bg-red-600 hover:shadow-[0_0_24px_rgba(239,68,68,0.2)] disabled:cursor-not-allowed disabled:opacity-50"
+              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="removingStaleProfiles || staleProfileEntries.length === 0"
               @click="deleteStaleProfiles"
             >
@@ -896,7 +896,7 @@
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
                   <h3 class="text-sm font-semibold text-silver">{{ entry.name }}</h3>
-                  <span class="rounded-full border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-xs font-medium text-amber-200">
+                  <span class="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning-bright">
                     Stale alias
                   </span>
                 </div>
@@ -905,7 +905,7 @@
 
               <button
                 type="button"
-                class="inline-flex h-9 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 px-4 text-sm font-medium text-red-200 transition-all duration-200 hover:bg-red-500/20"
+                class="inline-flex h-9 items-center justify-center rounded-lg border border-danger/30 bg-danger/10 px-4 text-sm font-medium text-danger-bright transition-all duration-200 hover:bg-danger/20"
                 @click="deleteClientProfileEntry(entry.name)"
               >
                 Remove
@@ -955,7 +955,7 @@ const permissionPresets = [
   {
     key: 'viewer',
     labelKey: 'pin.viewer_access',
-    activeClass: 'border-blue-400/40 bg-blue-400/10 text-blue-200',
+    activeClass: 'border-info/40 bg-info/10 text-info-bright',
   },
   {
     key: 'standard',
@@ -965,12 +965,12 @@ const permissionPresets = [
   {
     key: 'game_control',
     labelKey: 'pin.game_control_access',
-    activeClass: 'border-green-400/40 bg-green-400/10 text-green-200',
+    activeClass: 'border-success/40 bg-success/10 text-success-bright',
   },
   {
     key: 'full',
     labelKey: 'pin.full_control',
-    activeClass: 'border-red-400/40 bg-red-400/10 text-red-200',
+    activeClass: 'border-danger/40 bg-danger/10 text-danger-bright',
   },
 ]
 const pairingPermissionPresets = permissionPresets.filter((preset) => ['standard', 'game_control', 'full'].includes(preset.key))
@@ -1066,7 +1066,7 @@ function clientFamilyLabel(client) {
 
 function clientFamilyToneClass(client) {
   return client?.client_family === 'nova'
-    ? 'border-indigo-400/30 bg-indigo-400/10 text-indigo-200'
+    ? 'border-accent/30 bg-accent/10 text-accent-bright'
     : 'border-storm/30 bg-deep/60 text-storm'
 }
 
@@ -1111,9 +1111,9 @@ function clientRecommendationState(client) {
 function recommendationToneClass(state) {
   switch (state?.tone) {
     case 'good':
-      return 'border-green-500/30 bg-green-500/10 text-green-300'
+      return 'border-success/30 bg-success/10 text-success'
     case 'warn':
-      return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+      return 'border-warning/30 bg-warning/10 text-warning-bright'
     default:
       return 'border-storm/30 bg-deep/60 text-storm'
   }
@@ -1426,13 +1426,13 @@ function accessPresetLabel(perm) {
 function accessToneClass(perm) {
   switch (permissionPresetKey(perm)) {
     case 'full':
-      return 'border-red-400/30 bg-red-400/10 text-red-200'
+      return 'border-danger/30 bg-danger/10 text-danger-bright'
     case 'game_control':
-      return 'border-green-400/30 bg-green-400/10 text-green-200'
+      return 'border-success/30 bg-success/10 text-success-bright'
     case 'standard':
       return 'border-ice/30 bg-ice/10 text-ice'
     case 'viewer':
-      return 'border-blue-400/30 bg-blue-400/10 text-blue-200'
+      return 'border-info/30 bg-info/10 text-info-bright'
     default:
       return 'border-storm/30 bg-deep/60 text-storm'
   }

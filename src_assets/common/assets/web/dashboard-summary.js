@@ -59,14 +59,14 @@ export function buildLiveSummary({ stats = {}, qualityGrade = 'F', qualityScore 
     qualityTone: gradeTone,
     latency: formatLiveNumber(latency, 0, ' ms'),
     latencyTone: Number.isFinite(latency)
-      ? (latency <= 20 ? 'text-green-400' : latency <= 50 ? 'text-yellow-400' : 'text-red-400')
+      ? (latency <= 20 ? 'text-success' : latency <= 50 ? 'text-warning' : 'text-danger')
       : 'text-storm',
     fps: formatLiveNumber(fps, 1),
-    fpsTone: fps > 0 ? (fps >= 55 ? 'text-green-400' : fps >= 30 ? 'text-yellow-400' : 'text-red-400') : 'text-storm',
+    fpsTone: fps > 0 ? (fps >= 55 ? 'text-success' : fps >= 30 ? 'text-warning' : 'text-danger') : 'text-storm',
     fpsDetail: targetFps > 0 ? `${targetFps.toFixed(0)} target` : 'Encoded',
     loss: formatLiveNumber(loss, 1, '%'),
     lossTone: Number.isFinite(loss)
-      ? (loss < 0.5 ? 'text-green-400' : loss < 2 ? 'text-yellow-400' : 'text-red-400')
+      ? (loss < 0.5 ? 'text-success' : loss < 2 ? 'text-warning' : 'text-danger')
       : 'text-storm',
     bitrate: Number.isFinite(bitrate) ? `${(bitrate / 1000).toFixed(1)} Mbps` : '--',
   }
@@ -82,20 +82,20 @@ export function buildTelemetryGuidance({ stats = {}, gpu = null, fpsTargetGap = 
   const latency = Number(stats.latency_ms)
 
   if (Number.isFinite(packetLoss) && packetLoss > 2) {
-    concerns.push({ key: 'network-risk', label: 'Network risk', tone: 'text-red-400', detail: `Packet loss is ${packetLoss.toFixed(1)}%. Lower bitrate, try wired, or enable FEC before blaming the encoder.` })
+    concerns.push({ key: 'network-risk', label: 'Network risk', tone: 'text-danger', detail: `Packet loss is ${packetLoss.toFixed(1)}%. Lower bitrate, try wired, or enable FEC before blaming the encoder.` })
   } else if ((Number.isFinite(packetLoss) && packetLoss > 0.5) || (Number.isFinite(latency) && latency > 40)) {
     const latencyCopy = Number.isFinite(latency) ? `${latency.toFixed(0)} ms latency` : 'latency is high'
-    concerns.push({ key: 'network-risk', label: 'Network risk', tone: 'text-yellow-400', detail: `${latencyCopy}${packetLoss > 0 ? ` with ${packetLoss.toFixed(1)}% loss` : ''}. Watch for artifacts or input delay.` })
+    concerns.push({ key: 'network-risk', label: 'Network risk', tone: 'text-warning', detail: `${latencyCopy}${packetLoss > 0 ? ` with ${packetLoss.toFixed(1)}% loss` : ''}. Watch for artifacts or input delay.` })
   }
 
   if (Number.isFinite(encodeTime) && encodeTime > 12) {
-    concerns.push({ key: 'encoder-pressure', label: 'Encoder pressure', tone: 'text-yellow-400', detail: `${encodeTime.toFixed(1)} ms encode time. Drop resolution/FPS or switch to the low-latency hardware preset.` })
+    concerns.push({ key: 'encoder-pressure', label: 'Encoder pressure', tone: 'text-warning', detail: `${encodeTime.toFixed(1)} ms encode time. Drop resolution/FPS or switch to the low-latency hardware preset.` })
   } else if (Number.isFinite(encodeTime) && encodeTime > 8) {
     concerns.push({ key: 'encoder-pressure', label: 'Encoder pressure', tone: 'text-ice', detail: `${encodeTime.toFixed(1)} ms encode time is close to the 120 FPS budget.` })
   }
 
   if (stats.capture_cpu_copy) {
-    concerns.push({ key: 'cpu-copy-path', label: 'CPU copy path', tone: 'text-orange-300', detail: captureReason || 'Frames are crossing SHM/system-memory. For AMD/VAAPI, this can be the conservative Private Stream baseline; compare DMA-BUF/GPU-native capture truth before changing advanced flags.' })
+    concerns.push({ key: 'cpu-copy-path', label: 'CPU copy path', tone: 'text-warning', detail: captureReason || 'Frames are crossing SHM/system-memory. For AMD/VAAPI, this can be the conservative Private Stream baseline; compare DMA-BUF/GPU-native capture truth before changing advanced flags.' })
   }
 
   if (fpsTargetGap) {
@@ -103,17 +103,17 @@ export function buildTelemetryGuidance({ stats = {}, gpu = null, fpsTargetGap = 
     concerns.push({
       key: 'frame-cap-likely',
       label: 'Frame cap likely',
-      tone: gpuHeadroom ? 'text-green-400' : 'text-ice',
+      tone: gpuHeadroom ? 'text-success' : 'text-ice',
       detail: `Client asked for ${fpsTargetGap.target.toFixed(0)} FPS but encode is ${fpsTargetGap.encoded.toFixed(1)} FPS. Check in-game caps, VSync, menus, or launch flags first.`,
     })
   }
 
   if (headlessGpuNativeOverrideActive) {
-    concerns.push({ key: 'gpu-native-override', label: 'GPU-native override', tone: 'text-amber-300', detail: 'Polaris is using windowed labwc to keep capture GPU-resident instead of forcing true headless SHM.' })
+    concerns.push({ key: 'gpu-native-override', label: 'GPU-native override', tone: 'text-warning', detail: 'Polaris is using windowed labwc to keep capture GPU-resident instead of forcing true headless SHM.' })
   }
 
   if (concerns.length === 0) {
-    recommendations.push({ color: 'text-green-400', message: 'Stream signals look clean. Keep playing; only tune if the game feels off.' })
+    recommendations.push({ color: 'text-success', message: 'Stream signals look clean. Keep playing; only tune if the game feels off.' })
   } else {
     recommendations.push(...concerns.slice(0, 3).map((concern) => ({ color: concern.tone, message: `${concern.label}: ${concern.detail}` })))
   }
@@ -121,7 +121,7 @@ export function buildTelemetryGuidance({ stats = {}, gpu = null, fpsTargetGap = 
   if (!autoQuality.enabled && stats.streaming) {
     recommendations.push({ color: 'text-accent', message: 'Enable Auto Quality in Audio/Video settings so Polaris can balance bitrate, profile choice, and recovery behavior automatically.' })
   } else if (autoQuality.detail && autoQuality.state === 'recovering') {
-    recommendations.push({ color: 'text-amber-300', message: autoQuality.detail })
+    recommendations.push({ color: 'text-warning', message: autoQuality.detail })
   }
 
   return { concerns, recommendations }
@@ -150,8 +150,8 @@ export function buildMissionControlStrip({
     const urgentConcern = telemetryConcerns[0]
     return [
       { key: 'now', label: 'Now', title: `Streaming ${liveSummary.quality || ''}`.trim(), detail: runtimePathNote || 'Live session is active; watch player feel first, graphs second.', tone: liveSummary.qualityTone || 'text-silver' },
-      { key: 'next', label: 'Next', title: urgentConcern ? urgentConcern.label : 'Keep playing', detail: urgentConcern?.detail || 'No immediate tuning move. Let Auto Quality and session history collect signal.', tone: urgentConcern?.tone || 'text-green-400' },
-      { key: 'fix', label: 'Fix', title: primaryRecommendation ? 'Top cue' : 'Nothing hot', detail: primaryRecommendation?.message || 'No live cues are asking for attention right now.', tone: primaryRecommendation?.color || 'text-green-400' },
+      { key: 'next', label: 'Next', title: urgentConcern ? urgentConcern.label : 'Keep playing', detail: urgentConcern?.detail || 'No immediate tuning move. Let Auto Quality and session history collect signal.', tone: urgentConcern?.tone || 'text-success' },
+      { key: 'fix', label: 'Fix', title: primaryRecommendation ? 'Top cue' : 'Nothing hot', detail: primaryRecommendation?.message || 'No live cues are asking for attention right now.', tone: primaryRecommendation?.color || 'text-success' },
     ]
   }
 
@@ -162,21 +162,21 @@ export function buildMissionControlStrip({
       label: 'Now',
       title: pairedClients > 0 ? 'Host on standby' : 'Pair a client',
       detail: pairedClients > 0 ? `${pairedClients} paired client${pairedClients === 1 ? '' : 's'} ready to launch.` : 'No paired client yet, so Moonlight/Nova cannot start a stream.',
-      tone: pairedClients > 0 ? 'text-green-400' : 'text-amber-300',
+      tone: pairedClients > 0 ? 'text-success' : 'text-warning',
     },
     {
       key: 'next',
       label: 'Next',
       title: appCatalogCount > 0 ? 'Launch from Library' : 'Import games',
       detail: appCatalogCount > 0 ? `${appCatalogCount} app${appCatalogCount === 1 ? '' : 's'} available. Pick a game and send it.` : 'Scan/import games so this cockpit becomes a launcher, not a settings shrine.',
-      tone: appCatalogCount > 0 ? 'text-ice' : 'text-amber-300',
+      tone: appCatalogCount > 0 ? 'text-ice' : 'text-warning',
     },
     {
       key: 'fix',
       label: 'Fix',
       title: primaryIssue ? primaryIssue.label : 'Launch checks clear',
       detail: primaryIssue ? primaryIssue.detail : 'Pairing, library, discovery, display, and audio checks are green.',
-      tone: primaryIssue ? 'text-amber-300' : 'text-green-400',
+      tone: primaryIssue ? 'text-warning' : 'text-success',
       to: primaryIssue?.to || null,
     },
   ]

@@ -12,7 +12,7 @@
         <div class="flex flex-wrap gap-2">
           <span class="meta-pill">LAN only</span>
           <span class="meta-pill">Zero install</span>
-          <span class="meta-pill border-amber-300/30 bg-amber-300/10 text-amber-200">Controller via Nova</span>
+          <span class="meta-pill border-warning/30 bg-warning/10 text-warning-bright">Controller via Nova</span>
         </div>
       </div>
 
@@ -26,13 +26,13 @@
             <span class="data-pill">Quick host smoke tests</span>
           </div>
         </article>
-        <article class="surface-subtle border-amber-300/20 bg-amber-300/5 p-4">
-          <div class="text-xs font-semibold uppercase text-amber-200">Use Nova or Moonlight for</div>
+        <article class="surface-subtle border-warning/20 bg-warning/5 p-4">
+          <div class="text-xs font-semibold uppercase text-warning-bright">Use Nova or Moonlight for</div>
           <div class="mt-3 grid gap-2 text-sm text-silver sm:grid-cols-2">
-            <span class="data-pill border-amber-300/20 bg-amber-300/10 text-amber-100">Retroid controls</span>
-            <span class="data-pill border-amber-300/20 bg-amber-300/10 text-amber-100">Controller-first games</span>
-            <span class="data-pill border-amber-300/20 bg-amber-300/10 text-amber-100">Competitive action</span>
-            <span class="data-pill border-amber-300/20 bg-amber-300/10 text-amber-100">WAN streaming</span>
+            <span class="data-pill border-warning/20 bg-warning/10 text-warning-bright">Retroid controls</span>
+            <span class="data-pill border-warning/20 bg-warning/10 text-warning-bright">Controller-first games</span>
+            <span class="data-pill border-warning/20 bg-warning/10 text-warning-bright">Competitive action</span>
+            <span class="data-pill border-warning/20 bg-warning/10 text-warning-bright">WAN streaming</span>
           </div>
         </article>
       </div>
@@ -55,7 +55,7 @@
               v-for="input in inputSummary"
               :key="input.key"
               class="data-pill"
-              :class="input.supported ? 'border-green-400/20 bg-green-400/10 text-green-200' : 'border-amber-300/20 bg-amber-300/10 text-amber-100'"
+              :class="input.supported ? 'border-success/20 bg-success/10 text-success-bright' : 'border-warning/20 bg-warning/10 text-warning-bright'"
             >
               {{ input.label }} {{ input.supported ? 'yes' : (input.deferred ? 'deferred' : 'no') }}
             </span>
@@ -70,7 +70,7 @@
 
       <div
         class="mt-4 rounded-lg border p-4 text-sm text-silver"
-        :class="readiness.ready ? 'border-storm/20 bg-deep/40' : 'border-amber-300/30 bg-amber-300/10'"
+        :class="readiness.ready ? 'border-storm/20 bg-deep/40' : 'border-warning/30 bg-warning/10'"
       >
         {{ supportMessage }}
       </div>
@@ -93,7 +93,7 @@
           </div>
           <router-link
             to="/pin?method=OTP"
-            class="focus-ring inline-flex h-10 items-center justify-center rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 text-sm font-medium text-amber-100 transition-colors hover:border-amber-200/50 hover:text-amber-50"
+            class="focus-ring inline-flex h-10 items-center justify-center rounded-lg border border-warning/25 bg-warning/10 px-3 text-sm font-medium text-warning-bright transition-colors hover:border-warning-bright/50 hover:text-warning-bright"
           >
             Nova/Moonlight setup
           </router-link>
@@ -177,7 +177,7 @@
                 </button>
                 <button
                   type="button"
-                  class="focus-ring rounded-lg border border-white/20 bg-black/70 px-4 py-3 text-sm font-semibold text-silver shadow-lg backdrop-blur transition-colors hover:border-amber-300/60 hover:text-amber-100 sm:px-3 sm:py-2 sm:text-xs"
+                  class="focus-ring rounded-lg border border-white/20 bg-black/70 px-4 py-3 text-sm font-semibold text-silver shadow-lg backdrop-blur transition-colors hover:border-warning/60 hover:text-warning-bright sm:px-3 sm:py-2 sm:text-xs"
                   @click="stop"
                 >
                   Stop
@@ -418,9 +418,9 @@ const canStart = computed(() => (
 ))
 
 function toneClass(tone) {
-  if (tone === 'success') return 'border-green-400/25 bg-green-400/10 text-green-200'
-  if (tone === 'warning') return 'border-amber-300/30 bg-amber-300/10 text-amber-100'
-  if (tone === 'danger') return 'border-red-400/30 bg-red-400/10 text-red-100'
+  if (tone === 'success') return 'border-success/25 bg-success/10 text-success-bright'
+  if (tone === 'warning') return 'border-warning/30 bg-warning/10 text-warning-bright'
+  if (tone === 'danger') return 'border-danger/30 bg-danger/10 text-danger-bright'
   return ''
 }
 

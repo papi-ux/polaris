@@ -170,7 +170,7 @@
 
       <div v-if="gameScanError" class="library-import-alert">
         <div class="min-w-0">
-          <div class="text-sm font-semibold text-amber-100">Import scanner needs attention</div>
+          <div class="text-sm font-semibold text-warning-bright">Import scanner needs attention</div>
           <div class="mt-1 text-xs text-storm">{{ gameScanError }}</div>
         </div>
         <Button variant="outline" size="sm" :disabled="gameScanning" @click="scanGames">Retry scan</Button>
@@ -342,7 +342,7 @@
                 <span class="control-chip shrink-0">{{ quickLaunchStateLabel(app) }}</span>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5 text-[11px] text-storm">
-                <span v-if="quickLaunchDetails(app).favorite" class="meta-pill border-yellow-300/25 bg-yellow-300/10 text-yellow-100">Favorite</span>
+                <span v-if="quickLaunchDetails(app).favorite" class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">Favorite</span>
                 <span v-if="quickLaunchDetails(app).recent" class="meta-pill border-ice/20 bg-ice/10 text-ice">Recent</span>
                 <span v-if="app.source && app.source !== 'manual'" class="meta-pill">{{ app.source }}</span>
               </div>
@@ -456,10 +456,10 @@
           <InfoHint size="sm" label="Ordering and export">
             Drag rows to reorder. Open an app to export its `.art` launcher file or change per-title behavior.
           </InfoHint>
-          <span v-if="libraryViewFiltered" class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-100">
+          <span v-if="libraryViewFiltered" class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
             Reorder disabled while filtered
           </span>
-          <span v-else-if="listReordered" class="meta-pill border-amber-300/25 bg-amber-300/10 text-amber-100">
+          <span v-else-if="listReordered" class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
             Pending order save
           </span>
         </div>
@@ -497,8 +497,8 @@
                   <div class="flex h-full w-full items-center justify-center">
                     <svg class="h-5 w-5 text-storm/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
                   </div>
-                  <div v-if="currentApp === app.uuid" class="absolute inset-0 flex items-center justify-center bg-green-400/20">
-                    <span class="rounded-full border border-green-400/25 bg-green-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-green-200">
+                  <div v-if="currentApp === app.uuid" class="absolute inset-0 flex items-center justify-center bg-success/20">
+                    <span class="rounded-full border border-success/25 bg-success/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-success-bright">
                       Live
                     </span>
                   </div>
@@ -1232,13 +1232,13 @@ const importSources = computed(() => ([
     key: 'lutris',
     label: 'Lutris',
     ...summarizeImportGames(lutrisGames.value),
-    activeClass: 'border-orange-400/30 bg-orange-500/10 text-orange-300',
+    activeClass: 'border-warning/30 bg-warning/10 text-warning',
   },
   {
     key: 'heroic',
     label: 'Heroic',
     ...summarizeImportGames(heroicGames.value),
-    activeClass: 'border-purple-400/30 bg-purple-500/10 text-purple-200',
+    activeClass: 'border-accent/30 bg-accent/10 text-accent-bright',
   },
 ]).filter((source) => importPools.value[source.key]?.length > 0))
 const hasImportSources = computed(() => importSources.value.length > 0)
@@ -1280,9 +1280,9 @@ const canExportEdit = computed(() => Boolean(editForm.value?.uuid))
 
 function sourceBadgeClass(source) {
   return {
-    steam: 'bg-blue-500/10 text-blue-300',
-    lutris: 'bg-orange-500/10 text-orange-300',
-    heroic: 'bg-purple-500/10 text-purple-200',
+    steam: 'bg-info/10 text-info',
+    lutris: 'bg-warning/10 text-warning',
+    heroic: 'bg-accent/10 text-accent-bright',
   }[source] || 'bg-void/60 text-silver'
 }
 

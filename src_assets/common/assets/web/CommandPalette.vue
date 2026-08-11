@@ -72,7 +72,7 @@
                   </div>
                   <div class="text-right">
                     <div class="text-[11px] text-storm">{{ action.hint }}</div>
-                    <div v-if="action.dangerous" class="mt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-200">Confirm</div>
+                    <div v-if="action.dangerous" class="mt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-warning-bright">Confirm</div>
                   </div>
                 </div>
               </li>

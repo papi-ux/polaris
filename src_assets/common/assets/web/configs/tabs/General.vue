@@ -314,20 +314,20 @@ function handleSteamGridDbKeyInput() {
       </div>
       <div class="mt-1">
         <label for="steamgriddb_api_key" class="block text-sm font-medium text-storm mb-1">SteamGridDB API Key</label>
-        <div v-if="config.has_steamgriddb_api_key && !config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-emerald-300/20 bg-emerald-300/8 px-3 py-2 text-xs text-emerald-100">
+        <div v-if="config.has_steamgriddb_api_key && !config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-success/20 bg-success/8 px-3 py-2 text-xs text-success-bright">
           <span>A SteamGridDB key is already stored on the host. Leave this blank to keep it, or type a new key to replace it.</span>
           <button
             type="button"
-            class="rounded-full border border-emerald-300/25 px-2.5 py-1 text-[11px] font-medium text-emerald-100 transition-colors hover:border-rose-300/40 hover:text-rose-200"
+            class="rounded-full border border-success/25 px-2.5 py-1 text-[11px] font-medium text-success-bright transition-colors hover:border-danger/40 hover:text-danger-bright"
             @click="clearStoredSteamGridDbKey">
             Clear Stored Key
           </button>
         </div>
-        <div v-else-if="config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-rose-300/20 bg-rose-300/8 px-3 py-2 text-xs text-rose-100">
+        <div v-else-if="config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-danger/20 bg-danger/8 px-3 py-2 text-xs text-danger-bright">
           <span>The stored SteamGridDB key will be removed when you save.</span>
           <button
             type="button"
-            class="rounded-full border border-rose-300/30 px-2.5 py-1 text-[11px] font-medium text-rose-100 transition-colors hover:border-ice/40 hover:text-ice"
+            class="rounded-full border border-danger/30 px-2.5 py-1 text-[11px] font-medium text-danger-bright transition-colors hover:border-ice/40 hover:text-ice"
             @click="keepStoredSteamGridDbKey">
             Keep Existing Key
           </button>

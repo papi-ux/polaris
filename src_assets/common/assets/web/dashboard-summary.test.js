@@ -22,7 +22,7 @@ describe('Mission Control dashboard summary helpers', () => {
     }
     const score = buildQualityScore(stats)
     const grade = buildQualityGrade(score)
-    const summary = buildLiveSummary({ stats, qualityGrade: grade, qualityScore: score, gradeTone: 'text-green-400' })
+    const summary = buildLiveSummary({ stats, qualityGrade: grade, qualityScore: score, gradeTone: 'text-success' })
 
     expect(score).toBeGreaterThanOrEqual(90)
     expect(grade).toBe('A')
