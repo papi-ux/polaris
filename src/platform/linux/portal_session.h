@@ -52,6 +52,13 @@ namespace portal {
 
   bool is_portal_available();
 
+  /**
+   * @brief Cancel in-flight portal D-Bus calls and response waits.
+   *
+   * Safe to call from teardown before waiting for admitted media starts.
+   */
+  void cancel_pending_requests(const void *owner_tag = nullptr);
+
   uint32_t capture_type_for_stream_display(bool headless_mode, bool use_cage_compositor,
                                            std::string_view stream_mode = {});
 
@@ -64,10 +71,16 @@ namespace portal {
    * @brief OpenPipeWireRemote on an existing ScreenCast session handle.
    * @return Owned fd, or -1 on failure.
    */
-  int open_pipewire_remote_fd(GDBusConnection *conn, const std::string &session_handle);
+  int open_pipewire_remote_fd(
+    GDBusConnection *conn,
+    const std::string &session_handle
+  );
 
 #if defined(POLARIS_TESTS)
   uint32_t portal_pick_cursor_mode_for_tests(uint32_t available);
+  bool portal_cancel_pending_request_for_tests();
+  bool portal_cancel_request_owner_for_tests();
+  bool portal_cancel_source_wakes_wait_for_tests();
 #endif
 
   /**

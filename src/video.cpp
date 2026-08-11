@@ -43,6 +43,7 @@ extern "C" {
 
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/session_media.h"
   #include "platform/linux/cuda.h"
   #include "platform/linux/graphics.h"
   #include "platform/linux/vaapi.h"
@@ -1424,6 +1425,7 @@ namespace video {
   struct capture_ctx_t {
     img_event_t images;
     config_t config;
+    void *channel_data;
   };
 
   struct capture_thread_async_ctx_t {
@@ -2154,6 +2156,12 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
+    {
+#ifdef __linux__
+    session_media::pending_start_owner_scope_t initial_owner_scope {
+      capture_ctxs.front().channel_data
+    };
+#endif
     if (!proc::proc.display_name.empty()) {
       disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
     }
@@ -2171,6 +2179,7 @@ namespace video {
       } else {
         return;
       }
+    }
     }
 
     display_wp = disp;
@@ -2381,7 +2390,14 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+              {
+#ifdef __linux__
+                session_media::pending_start_owner_scope_t owner_scope {
+                  capture_ctxs.front().channel_data
+                };
+#endif
+                reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+              }
               if (disp) {
                 proc::proc.display_name = display_names[display_p];
                 break;
@@ -3562,7 +3578,14 @@ namespace video {
       }
 
       // reset_display() will sleep between retries
-      reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config);
+      {
+#ifdef __linux__
+        session_media::pending_start_owner_scope_t owner_scope {
+          synced_session_ctxs.front()->channel_data
+        };
+#endif
+        reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config);
+      }
       if (disp) {
         break;
       }
@@ -3739,7 +3762,7 @@ namespace video {
       return;
     }
 
-    ref->capture_ctx_queue->raise(capture_ctx_t {images, config});
+    ref->capture_ctx_queue->raise(capture_ctx_t {images, config, channel_data});
 
     if (!ref->capture_ctx_queue->running()) {
       return;

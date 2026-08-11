@@ -71,6 +71,26 @@ TEST(SessionMediaGateTests, TeardownWaitsForAnAdmittedStartBeforeTakingOwnership
   EXPECT_TRUE(teardown.owns_teardown());
 }
 
+TEST(SessionMediaGateTests, TeardownAnnouncementRunsBeforeWaitingForAdmittedStart) {
+  session_media::teardown_gate_t gate;
+  std::optional<session_media::start_owner_t> admitted_start {gate.begin_start()};
+  std::promise<void> announced;
+  auto announcement = announced.get_future();
+
+  auto pending_teardown = std::async(std::launch::async, [&gate, &announced]() {
+    return gate.begin_teardown([&announced]() {
+      announced.set_value();
+    });
+  });
+
+  EXPECT_EQ(announcement.wait_for(1s), std::future_status::ready)
+    << "teardown cancellation must be announced before waiting for active starts";
+  EXPECT_EQ(pending_teardown.wait_for(20ms), std::future_status::timeout);
+  admitted_start.reset();
+  ASSERT_EQ(pending_teardown.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(pending_teardown.get().owns_teardown());
+}
+
 TEST(SessionMediaGateTests, TerminalWaitDoesNotReturnWhileAnOwnedCleanupIsRunning) {
   session_media::teardown_gate_t gate;
   std::optional<session_media::teardown_owner_t> cleanup_owner {gate.begin_teardown()};
