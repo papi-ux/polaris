@@ -694,6 +694,92 @@ TEST(StreamStatsDoctorTests, KeepsNvidiaHeadlessWarningsInAdvancedEvidence) {
   EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
 }
 
+TEST(StreamStatsDoctorTests, FrameAgeOnCpuCopyCaptureIndictsCaptureNotEncoder) {
+  // The issue #367 bundle: encode at 5.8 ms of a 16.6 ms budget, but frames
+  // arriving 26.5 ms old because every 4K frame crossed the SHM CPU copy.
+  // Frame age on a CPU-copy capture path measures the capture side, so Doctor
+  // must indict the capture path — the old encoder_load verdict sent the user
+  // to lower bitrate, which cannot help.
+  LinuxDisplayConfigGuard guard;
+  config::video.adapter_name = "/dev/dri/renderD128";
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = true;
+
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.capture_format = platf::frame_format_e::bgra8;
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 5.8;
+  stats.avg_frame_age_ms = 26.5;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+
+  EXPECT_EQ(doctor.at("primary_issue"), "gpu_native_requested_shm_fallback");
+  EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
+  for (const auto &item : doctor.at("evidence")) {
+    if (item.at("id") == "encoder") {
+      EXPECT_EQ(item.at("status"), "pass")
+        << "a healthy encode time must not be blamed for capture-side frame age";
+    }
+    if (item.at("id") == "capture_path") {
+      EXPECT_EQ(item.at("status"), "fail")
+        << "a CPU-copy capture path that blows the frame-age budget is the failing evidence";
+    }
+  }
+}
+
+TEST(StreamStatsDoctorTests, CaptureLatencyFailOutranksNetworkWatch) {
+  // A WiFi client adds a mild network watch to the same SHM-bound stream; the
+  // red capture verdict must keep the primary issue (and with it the
+  // recommendation), or Doctor hands out lower-bitrate advice again through
+  // the network branch. A hard network failure still takes priority.
+  LinuxDisplayConfigGuard guard;
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = true;
+
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.encode_target_device = "vaapi";
+  stats.encode_time_ms = 5.8;
+  stats.avg_frame_age_ms = 26.5;
+  stats.network_risk = true;
+  stats.packet_loss = 0.5;
+  stats.latency_ms = 20.0;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+
+  EXPECT_EQ(doctor.at("primary_issue"), "gpu_native_requested_shm_fallback");
+  EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
+}
+
+TEST(StreamStatsDoctorTests, SlowEncoderStillFailsOnCpuCopyCapture) {
+  // The reattribution must not blind Doctor to a genuinely slow encoder: an
+  // encode time over budget is encoder_load whatever the capture path.
+  LinuxDisplayConfigGuard guard;
+  config::video.linux_display.use_cage_compositor = true;
+  config::video.linux_display.prefer_gpu_native_capture = true;
+
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.encode_target_device = "vaapi";
+  stats.encode_time_ms = 14.0;
+  stats.avg_frame_age_ms = 26.5;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+
+  EXPECT_EQ(doctor.at("primary_issue"), "encoder_load");
+}
+
 TEST(StreamStatsDoctorTests, CaptureMissingNeedsTelemetryBeforeTuning) {
   stream_stats::stats_t stats {};
   stats.streaming = true;

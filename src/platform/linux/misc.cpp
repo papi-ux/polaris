@@ -9,7 +9,9 @@
 #endif
 
 // standard includes
+#include <algorithm>
 #include <atomic>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -1460,5 +1462,146 @@ std::string get_local_ip_for_gateway() {
   set_clipboard(const std::string& content) {
     // Placeholder
     return false;
+  }
+
+  namespace {
+
+    long long read_sysfs_number(const fs::path &path) {
+      std::ifstream in(path);
+      long long value = 0;
+      if (in && (in >> value)) {
+        return value;
+      }
+      return 0;
+    }
+
+    bool nvidia_bound(const render_device_candidate_t &candidate) {
+      return candidate.driver == "nvidia" || candidate.driver == "nouveau";
+    }
+
+    int render_device_rank(const render_device_candidate_t &candidate) {
+      // NVIDIA drivers (nvidia, nouveau) only bind discrete GPUs; amdgpu covers
+      // both APUs and cards, and only cards carry a real dedicated pool — APU
+      // carve-outs report well under 1 GiB on default firmware settings.
+      if (nvidia_bound(candidate)) {
+        return 2;
+      }
+      if (candidate.vram_total_bytes >= (1ll << 30)) {
+        return 2;
+      }
+      return 1;
+    }
+
+    const std::vector<render_device_candidate_t> &render_device_candidates() {
+      static const auto cached = []() -> std::vector<render_device_candidate_t> {
+        std::vector<render_device_candidate_t> candidates;
+        // directory_iterator only takes the error code at construction; an
+        // increment failure throws, and this runs inside a static initializer,
+        // so an unusual /dev/dri must degrade to "no answer", never terminate.
+        try {
+          std::error_code ec;
+          for (const auto &entry : fs::directory_iterator("/dev/dri", ec)) {
+            const auto name = entry.path().filename().string();
+            if (name.rfind("renderD", 0) != 0) {
+              continue;
+            }
+            render_device_candidate_t candidate;
+            candidate.path = entry.path().string();
+            const auto device_dir = fs::path("/sys/class/drm") / name / "device";
+            std::error_code link_ec;
+            const auto driver_link = fs::read_symlink(device_dir / "driver", link_ec);
+            if (!link_ec) {
+              candidate.driver = driver_link.filename().string();
+            }
+            // amdgpu exposes VRAM as mem_info_vram_total; i915/xe discrete
+            // parts expose local memory as lmem_total_bytes. Either one is the
+            // "dedicated pool" signal; integrated parts expose neither.
+            candidate.vram_total_bytes = std::max(
+              read_sysfs_number(device_dir / "mem_info_vram_total"),
+              read_sysfs_number(device_dir / "lmem_total_bytes")
+            );
+            candidate.boot_vga = read_sysfs_number(device_dir / "boot_vga") == 1;
+            candidates.push_back(std::move(candidate));
+          }
+          if (ec) {
+            return {};
+          }
+        } catch (const std::exception &) {
+          return {};
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+          return a.path < b.path;
+        });
+        if (candidates.size() > 1) {
+          // Node numbering is probe order, so on a multi-GPU host "the first
+          // node" is not a choice at all — say what each card looks like,
+          // since every consumer (compositor pin, VAAPI fallback) chooses
+          // from this list (issue #367).
+          for (const auto &candidate : candidates) {
+            BOOST_LOG(info) << "render_device: candidate ["sv << candidate.path
+                            << "] driver="sv << (candidate.driver.empty() ? "unknown"sv : std::string_view {candidate.driver})
+                            << " vram_mb="sv << candidate.vram_total_bytes / (1024 * 1024)
+                            << " boot_vga="sv << candidate.boot_vga;
+          }
+        }
+        return candidates;
+      }();
+      return cached;
+    }
+
+  }  // namespace
+
+  std::string choose_default_render_device(std::vector<render_device_candidate_t> candidates) {
+    if (candidates.empty()) {
+      return {};
+    }
+
+    const auto preferred = [](const render_device_candidate_t &a, const render_device_candidate_t &b) {
+      const int rank_a = render_device_rank(a);
+      const int rank_b = render_device_rank(b);
+      if (rank_a != rank_b) {
+        return rank_a > rank_b;
+      }
+      if (a.vram_total_bytes != b.vram_total_bytes) {
+        return a.vram_total_bytes > b.vram_total_bytes;
+      }
+      if (a.boot_vga != b.boot_vga) {
+        return a.boot_vga;
+      }
+      return a.path < b.path;
+    };
+
+    return std::min_element(candidates.begin(), candidates.end(), [&](const auto &a, const auto &b) {
+      return preferred(a, b);
+    })->path;
+  }
+
+  std::string default_render_device() {
+    static const std::string cached = []() -> std::string {
+      const auto &candidates = render_device_candidates();
+      auto chosen = choose_default_render_device(candidates);
+      if (candidates.size() > 1 && !chosen.empty()) {
+        BOOST_LOG(info) << "render_device: multi-GPU host, defaulting to ["sv << chosen
+                        << "]; set adapter_name to override"sv;
+      }
+      return chosen;
+    }();
+    return cached;
+  }
+
+  std::string default_vaapi_render_device() {
+    static const std::string cached = []() -> std::string {
+      auto candidates = render_device_candidates();
+      std::erase_if(candidates, [](const render_device_candidate_t &candidate) {
+        return nvidia_bound(candidate);
+      });
+      auto chosen = choose_default_render_device(candidates);
+      if (!chosen.empty() && chosen != default_render_device()) {
+        BOOST_LOG(info) << "render_device: VAAPI default is ["sv << chosen
+                        << "] (NVIDIA-bound nodes have no VA driver and were excluded)"sv;
+      }
+      return chosen;
+    }();
+    return cached;
   }
 }  // namespace platf

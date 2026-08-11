@@ -24,6 +24,10 @@ namespace stream_runtime {
     bool force_windowed = false;
     bool allow_mangohud = true;
     std::string session_instance_id;
+    // The client's raw requested FPS (whole hertz or millihertz; 0 = unknown).
+    // When refresh_hz runs below it the launch was deliberately clamped, and
+    // resume refresh re-applies are held to that ceiling (issue #367).
+    int requested_refresh_hz = 0;
   };
 
   class stream_runtime_t {
@@ -71,7 +75,8 @@ namespace stream_runtime {
       const std::string &game_cmd = "",
       bool force_windowed = false,
       bool allow_mangohud = true,
-      const std::string &session_instance_id = ""
+      const std::string &session_instance_id = "",
+      int requested_refresh_hz = 0
     );
     bool is_running();
     bool is_healthy();
@@ -81,6 +86,13 @@ namespace stream_runtime {
     std::string wayland_socket();
     std::string x11_display();
     platf::runtime_state_t runtime_state();
+
+    /**
+     * Re-apply the running cage's output refresh for a resuming session
+     * (millihertz-aware); the launch-time resolution is kept. See
+     * cage_display_router::ensure_output_refresh (issue #367).
+     */
+    bool ensure_output_refresh(int session_fps);
 
     bool should_attempt_windowed_gpu_native_probe(
       bool requested_headless,

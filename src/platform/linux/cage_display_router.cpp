@@ -18,6 +18,7 @@
 
 #include "cage_display_router.h"
 #include "../../logging.h"
+#include "misc.h"
 #include "private_session_input.h"
 
 #include <algorithm>
@@ -75,6 +76,22 @@ namespace cage_display_router {
 
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
   static std::string cage_x11_display;  // e.g., ":1"
+
+  // The output mode most recently requested of the running compositor. A
+  // resume can carry a different refresh than the launch that started the
+  // cage; without re-applying it the output stays at the old rate for the
+  // whole session (issue #367: a 120 FPS client resuming a 60 Hz session
+  // could never be served more than 60). Written by the launch thread,
+  // read by the nvhttp resume handler — atomics, and zeroed until startup
+  // has settled so a resume racing a launch reports "not applied" instead
+  // of silently succeeding.
+  static std::atomic<int> cage_mode_width {0};
+  static std::atomic<int> cage_mode_height {0};
+  static std::atomic<int> cage_mode_refresh_hz {0};
+  // Non-zero when the launch deliberately ran below the client's request
+  // (optimizer/runtime policy clamp): a resume must not out-vote that
+  // decision by re-applying the raw request.
+  static std::atomic<int> cage_mode_refresh_ceiling_hz {0};
   static std::atomic_bool headless_ram_capture_warning_logged {false};
   static std::atomic_bool windowed_ram_capture_warning_logged {false};
 
@@ -486,12 +503,24 @@ namespace cage_display_router {
       // parent's dmabuf feedback, so forcing a device could mismatch the parent
       // and break buffer sharing on a multi-GPU host.
       //
-      // Only a real, present /dev/dri device is meaningful: WLR_RENDER_DRM_DEVICE
-      // makes wlroots fail rather than fall back if the path is bogus, so an
-      // unset or non-device adapter_name is left to wlroots' own auto-select.
+      // Only a real, accessible /dev/dri device is meaningful:
+      // WLR_RENDER_DRM_DEVICE makes wlroots fail rather than fall back if the
+      // path is bogus — and a node the Polaris user cannot open (no render
+      // group membership) is exactly as fatal as a missing one, so the check
+      // is R_OK|W_OK, not mere existence.
       const auto adapter = trimmed(config::video.adapter_name);
-      if (adapter.rfind("/dev/dri/", 0) == 0 && access(adapter.c_str(), F_OK) == 0) {
+      if (adapter.rfind("/dev/dri/", 0) == 0 && access(adapter.c_str(), R_OK | W_OK) == 0) {
         return adapter;
+      }
+      // No usable adapter_name: pin to the shared default-device choice instead
+      // of letting wlroots auto-pick. The encoder's VAAPI fallback resolves the
+      // same default, so headless capture and encode agree on multi-GPU hosts
+      // where "first node enumerated" and "first node numbered" differ (issue
+      // #367: compositor on the APU, encoder on the dGPU, every frame through
+      // a CPU copy).
+      const auto fallback = platf::default_render_device();
+      if (!fallback.empty() && access(fallback.c_str(), R_OK | W_OK) == 0) {
+        return fallback;
       }
       return {};
     }
@@ -500,6 +529,7 @@ namespace cage_display_router {
   }
 
   static void set_labwc_process_environment(bool headless) {
+    const auto adapter = trimmed(config::video.adapter_name);
     for (std::string_view key : {
            "WLR_NO_HARDWARE_CURSORS"sv,
            "WLR_BACKENDS"sv,
@@ -511,23 +541,28 @@ namespace cage_display_router {
       if (!value.empty()) {
         setenv(std::string {key}.c_str(), value.c_str(), 1);
         if (key == "WLR_RENDER_DRM_DEVICE") {
-          BOOST_LOG(info) << "labwc: pinning wlroots render device to configured adapter_name ["sv
-                          << value << "]"sv;
+          BOOST_LOG(info) << "labwc: pinning wlroots render device to ["sv << value
+                          << "] ("sv
+                          << (value == adapter ? "configured adapter_name"sv : "auto-selected default render device"sv)
+                          << ')';
         }
       }
     }
 
     // If a headless session has adapter_name set but it could not be used as a
     // render device, say so — the failure mode this fixes (issue #354) is
-    // otherwise invisible: the user sets adapter_name and wlroots silently grabs
-    // a different card. Only meaningful for headless, since the windowed path
-    // intentionally leaves device selection to the parent compositor.
-    const auto adapter = trimmed(config::video.adapter_name);
-    if (headless && !adapter.empty() &&
-        labwc_process_environment_value(headless, "WLR_RENDER_DRM_DEVICE").empty()) {
-      BOOST_LOG(warning) << "labwc: adapter_name ["sv << adapter
-                         << "] is not a present /dev/dri render-device path; "sv
-                         << "wlroots will auto-select a GPU for the private compositor"sv;
+    // otherwise invisible: the user sets adapter_name and the compositor silently
+    // lands on a different card. Only meaningful for headless, since the windowed
+    // path intentionally leaves device selection to the parent compositor.
+    if (headless && !adapter.empty()) {
+      const auto pinned = labwc_process_environment_value(headless, "WLR_RENDER_DRM_DEVICE");
+      if (pinned != adapter) {
+        BOOST_LOG(warning) << "labwc: adapter_name ["sv << adapter
+                           << "] is not a present /dev/dri render-device path; "sv
+                           << (pinned.empty() ?
+                                 "wlroots will auto-select a GPU for the private compositor"s :
+                                 "pinning the private compositor to the default render device ["s + pinned + "] instead"s);
+      }
     }
   }
 
@@ -1002,7 +1037,8 @@ namespace cage_display_router {
     const std::string &game_cmd,
     bool force_windowed,
     bool allow_mangohud,
-    const std::string &session_instance_id
+    const std::string &session_instance_id,
+    int requested_refresh_hz
   ) {
     const auto startup_begin = std::chrono::steady_clock::now();
 
@@ -1017,6 +1053,13 @@ namespace cage_display_router {
     cage_pid = 0;
     cage_wayland_socket.clear();
     cage_x11_display.clear();
+    // The mode is unrecorded until this startup settles: a resume racing the
+    // launch must see "no recorded mode" and report failure, not silently
+    // claim the refresh was applied.
+    cage_mode_width = 0;
+    cage_mode_height = 0;
+    cage_mode_refresh_hz = 0;
+    cage_mode_refresh_ceiling_hz = 0;
 
     bool requested_headless = config::video.linux_display.headless_mode;
     bool headless = requested_headless && !force_windowed;
@@ -1242,6 +1285,14 @@ namespace cage_display_router {
                          << width << "x"sv << height << "@"sv << refresh_hz << "Hz"sv
                          << " before startup continued"sv;
     }
+    cage_mode_width = width;
+    cage_mode_height = height;
+    cage_mode_refresh_hz = refresh_hz;
+    // If the launch deliberately ran below the client's request (optimizer or
+    // runtime policy clamp), record the effective rate as a ceiling so a
+    // resume cannot re-apply the raw request over that decision.
+    const int requested_norm = normalize_session_refresh_hz(requested_refresh_hz);
+    cage_mode_refresh_ceiling_hz = (requested_norm > 0 && refresh_hz < requested_norm) ? refresh_hz : 0;
 
     cage_x11_display = find_new_x11_display(x11_displays_before, 3000);
     if (!cage_x11_display.empty()) {
@@ -1258,6 +1309,67 @@ namespace cage_display_router {
                     << std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now() - startup_begin
                        ).count();
+    return true;
+  }
+
+  int normalize_session_refresh_hz(int session_fps) {
+    // Session FPS arrives in whole hertz from most clients, but in millihertz
+    // from clients that request fractional rates (matching the launch-time
+    // handling in process.cpp).
+    if (session_fps >= 1000) {
+      return static_cast<int>(std::lround(static_cast<double>(session_fps) / 1000.0));
+    }
+    return session_fps;
+  }
+
+  int resolve_resume_refresh_hz(int session_fps, int recorded_ceiling_hz) {
+    const int refresh_hz = normalize_session_refresh_hz(session_fps);
+    if (refresh_hz > 0 && recorded_ceiling_hz > 0 && refresh_hz > recorded_ceiling_hz) {
+      // The launch deliberately ran below the client's request; a resume
+      // carrying the raw request must not out-vote that decision.
+      return recorded_ceiling_hz;
+    }
+    return refresh_hz;
+  }
+
+  bool ensure_output_refresh(int session_fps) {
+    if (cage_pid <= 0 || cage_wayland_socket.empty() || !is_running()) {
+      return false;
+    }
+    const int mode_width = cage_mode_width;
+    const int mode_height = cage_mode_height;
+    const int current_refresh_hz = cage_mode_refresh_hz;
+    if (mode_width <= 0 || mode_height <= 0 || current_refresh_hz <= 0) {
+      // Startup has not recorded a settled mode yet (or a start is racing this
+      // resume); claiming success here would silently drop the re-apply.
+      return false;
+    }
+    const int refresh_hz = resolve_resume_refresh_hz(session_fps, cage_mode_refresh_ceiling_hz);
+    if (refresh_hz <= 0) {
+      return false;
+    }
+    if (refresh_hz == current_refresh_hz) {
+      return true;
+    }
+
+    // The cage outlives the launch that started it, and the mode is otherwise
+    // only ever set from the startup command — a resume carrying a different
+    // refresh must re-apply it or the output stays at the old rate for the
+    // whole session (issue #367).
+    const std::string output_name = cage_runtime_state.effective_headless ? "HEADLESS-1" : "WL-1";
+    const std::string mode = format_wlr_custom_mode(mode_width, mode_height, refresh_hz);
+    exec_capture(
+      "WAYLAND_DISPLAY=" + cage_wayland_socket +
+      " wlr-randr --output " + output_name + " --custom-mode " + mode + " 2>&1"
+    );
+    if (!wait_for_requested_mode(cage_wayland_socket, output_name, mode_width, mode_height, refresh_hz, 5000)) {
+      BOOST_LOG(warning) << "labwc: Output ["sv << output_name << "] did not settle to resumed mode "sv
+                         << mode << "; keeping "sv << current_refresh_hz << "Hz"sv;
+      return false;
+    }
+    BOOST_LOG(info) << "labwc: Output ["sv << output_name << "] refresh re-applied for resume — "sv
+                    << mode << " (was "sv << current_refresh_hz << "Hz)"sv;
+    cage_mode_refresh_hz = refresh_hz;
     return true;
   }
 

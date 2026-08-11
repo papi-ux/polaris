@@ -13,6 +13,7 @@
   #include <csignal>
   #include <filesystem>
   #include <fstream>
+  #include <sstream>
   #include <sys/stat.h>
   #include <unistd.h>
 
@@ -891,6 +892,51 @@ TEST(CageDisplayRouterPolicyTests, WaylandSocketNameParserAcceptsNumberedSockets
   EXPECT_FALSE(cage_display_router::is_wayland_socket_name_for_tests("nested-wayland-1"));
 }
 #endif
+
+TEST(CageDisplayRouterResumeRefreshTests, NormalizesMillihertzSessionFps) {
+  EXPECT_EQ(cage_display_router::normalize_session_refresh_hz(60), 60);
+  EXPECT_EQ(cage_display_router::normalize_session_refresh_hz(120), 120);
+  // Clients requesting fractional rates send millihertz (59.94 Hz → 59940).
+  EXPECT_EQ(cage_display_router::normalize_session_refresh_hz(59940), 60);
+  EXPECT_EQ(cage_display_router::normalize_session_refresh_hz(120000), 120);
+  EXPECT_EQ(cage_display_router::normalize_session_refresh_hz(0), 0);
+}
+
+TEST(CageDisplayRouterResumeRefreshTests, EnsureOutputRefreshRefusesWithoutRunningCage) {
+  // No cage is running in the test environment; the resume-path re-apply must
+  // refuse rather than shell out to wlr-randr against a stale socket.
+  EXPECT_FALSE(cage_display_router::ensure_output_refresh(120));
+  EXPECT_FALSE(cage_display_router::ensure_output_refresh(0));
+}
+
+TEST(CageDisplayRouterResumeRefreshTests, ResumeRefreshHonorsLaunchClamp) {
+  // A launch that deliberately ran below the client's request (optimizer or
+  // runtime policy) records the effective rate as a ceiling; a resume with
+  // the raw request must not out-vote that decision.
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(120, 60), 60);
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(120000, 60), 60);
+  // Unclamped launches leave no ceiling, and lower requests always pass.
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(120, 0), 120);
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(60, 120), 60);
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(0, 60), 0);
+}
+
+TEST(CageDisplayRouterResumeRefreshTests, ResumePathReappliesRefreshInNvhttp) {
+  // Source pin, same rationale as the render-device guards: the fix is only
+  // real if the resume handler actually calls it. A cage that outlives its
+  // launch otherwise keeps the old refresh for the whole session (issue #367).
+  const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/nvhttp.cpp";
+  std::ifstream file {path};
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  const auto source = buffer.str();
+  ASSERT_FALSE(source.empty()) << "could not read nvhttp.cpp via POLARIS_SOURCE_DIR";
+
+  const auto resume_pos = source.find("void resume(");
+  ASSERT_NE(resume_pos, std::string::npos);
+  EXPECT_NE(source.find("stream_runtime::labwc::ensure_output_refresh", resume_pos), std::string::npos)
+    << "the resume handler must re-apply the resuming client's refresh to a running cage";
+}
 #else
 TEST(CageDisplayRouterPolicyTests, LinuxOnly) {
   GTEST_SKIP() << "Linux-only runtime policy tests";

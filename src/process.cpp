@@ -6590,6 +6590,7 @@ namespace proc {
         .force_windowed = force_windowed,
         .allow_mangohud = allow_cage_mangohud,
         .session_instance_id = _session_instance_id,
+        .requested_refresh_hz = launch_session->requested_fps,
       };
       if (!private_runtime->start(start_params)) {
         return false;
