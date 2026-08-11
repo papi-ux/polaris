@@ -34,8 +34,8 @@ const providerOptions = [
     defaultBaseUrl: 'https://api.anthropic.com',
     defaultAuth: 'subscription',
     authModes: ['subscription', 'api_key'],
-    accent: 'border-amber-300/30 bg-amber-300/8 text-amber-200',
-    pill: 'text-amber-200 border-amber-300/30',
+    accent: 'border-warning/30 bg-warning/8 text-warning-bright',
+    pill: 'text-warning-bright border-warning/30',
     subscriptionLabel: 'Claude CLI',
     subscriptionBinary: 'claude',
     keyPlaceholder: 'sk-ant-api03-...',
@@ -68,8 +68,8 @@ const providerOptions = [
     defaultBaseUrl: 'https://api.openai.com/v1',
     defaultAuth: 'subscription',
     authModes: ['subscription', 'api_key'],
-    accent: 'border-emerald-300/30 bg-emerald-300/8 text-emerald-200',
-    pill: 'text-emerald-200 border-emerald-300/30',
+    accent: 'border-success/30 bg-success/8 text-success-bright',
+    pill: 'text-success-bright border-success/30',
     subscriptionLabel: 'Codex CLI',
     subscriptionBinary: 'codex',
     subscriptionLoginCommand: 'codex login',
@@ -103,8 +103,8 @@ const providerOptions = [
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     defaultAuth: 'api_key',
     authModes: ['api_key'],
-    accent: 'border-sky-300/30 bg-sky-300/8 text-sky-200',
-    pill: 'text-sky-200 border-sky-300/30',
+    accent: 'border-info/30 bg-info/8 text-info-bright',
+    pill: 'text-info-bright border-info/30',
     keyPlaceholder: 'AIza...',
     keyHint: 'Gemini API key from Google AI Studio.',
     profiles: [
@@ -127,8 +127,8 @@ const providerOptions = [
     defaultBaseUrl: 'http://127.0.0.1:11434/v1',
     defaultAuth: 'none',
     authModes: ['none', 'api_key'],
-    accent: 'border-stone-300/25 bg-stone-300/8 text-stone-200',
-    pill: 'text-stone-200 border-stone-300/25',
+    accent: 'border-storm/25 bg-storm/8 text-silver',
+    pill: 'text-silver border-storm/25',
     keyPlaceholder: 'optional',
     keyHint: 'Usually not required for local endpoints. LM Studio or reverse proxies may add one.',
     profiles: [
@@ -350,7 +350,7 @@ const modelDiscoverySummary = computed(() => {
   if (providerModelCatalog.value?.discovered) {
     const count = providerModelCatalog.value.model_count || providerModelCatalog.value.models?.length || 0
     return {
-      tone: 'text-emerald-300',
+      tone: 'text-success',
       badge: 'Live list',
       text: `Discovered ${count} model${count === 1 ? '' : 's'} from ${currentProvider.value.name}.`
     }
@@ -358,7 +358,7 @@ const modelDiscoverySummary = computed(() => {
 
   if (providerModelCatalog.value?.error) {
     return {
-      tone: config.value.ai_auth_mode === 'subscription' ? 'text-amber-200' : 'text-storm',
+      tone: config.value.ai_auth_mode === 'subscription' ? 'text-warning-bright' : 'text-storm',
       badge: 'Preset hints',
       text: providerModelCatalog.value.error
     }
@@ -396,11 +396,11 @@ function optimizationSourceLabel(source) {
 function confidenceTone(confidence) {
   switch ((confidence || '').toLowerCase()) {
     case 'high':
-      return 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200'
+      return 'border-success/20 bg-success/8 text-success-bright'
     case 'medium':
-      return 'border-amber-300/20 bg-amber-300/8 text-amber-200'
+      return 'border-warning/20 bg-warning/8 text-warning-bright'
     case 'low':
-      return 'border-red-400/20 bg-red-400/8 text-red-300'
+      return 'border-danger/20 bg-danger/8 text-danger'
     default:
       return 'border-storm/40 bg-void/30 text-storm'
   }
@@ -409,13 +409,13 @@ function confidenceTone(confidence) {
 function cacheStatusTone(status) {
   switch ((status || '').toLowerCase()) {
     case 'hit':
-      return 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200'
+      return 'border-success/20 bg-success/8 text-success-bright'
     case 'miss':
-      return 'border-sky-300/20 bg-sky-300/8 text-sky-200'
+      return 'border-info/20 bg-info/8 text-info-bright'
     case 'invalidated':
-      return 'border-red-400/20 bg-red-400/8 text-red-300'
+      return 'border-danger/20 bg-danger/8 text-danger'
     case 'stale':
-      return 'border-amber-300/20 bg-amber-300/8 text-amber-200'
+      return 'border-warning/20 bg-warning/8 text-warning-bright'
     default:
       return 'border-storm/40 bg-void/30 text-storm'
   }
@@ -436,20 +436,20 @@ const providerHealthSummary = computed(() => {
   }
   if (aiStatus.value.last_failure_at && (!aiStatus.value.last_success_at || aiStatus.value.last_failure_at >= aiStatus.value.last_success_at)) {
     return {
-      tone: 'text-red-300',
+      tone: 'text-danger',
       label: 'Attention',
       detail: aiStatus.value.last_error || 'The most recent provider request failed.'
     }
   }
   if (Number(aiStatus.value.in_flight_requests || 0) > 0) {
     return {
-      tone: 'text-sky-200',
+      tone: 'text-info-bright',
       label: 'Busy',
       detail: `${aiStatus.value.in_flight_requests} request${aiStatus.value.in_flight_requests === 1 ? '' : 's'} in flight.`
     }
   }
   return {
-    tone: 'text-emerald-200',
+    tone: 'text-success-bright',
     label: 'Healthy',
     detail: aiStatus.value.last_success_at ? `Last success ${formatRelativeTime(aiStatus.value.last_success_at)}.` : 'No provider calls have completed yet.'
   }
@@ -472,14 +472,14 @@ function providerRuntimeSummary(provider) {
 
 function providerRuntimeTone(provider) {
   if (!aiStatus.value || aiStatus.value.provider !== provider.id) return 'text-storm'
-  return aiStatus.value.enabled ? 'text-emerald-200' : 'text-amber-200'
+  return aiStatus.value.enabled ? 'text-success-bright' : 'text-warning-bright'
 }
 
 function subscriptionRuntimeTone(status) {
   if (!status) return 'text-storm'
-  if (status.cli_authenticated === true) return 'text-green-300'
-  if (status.cli_authenticated === false) return 'text-amber-200'
-  return status.cli_available ? 'text-green-300' : 'text-red-300'
+  if (status.cli_authenticated === true) return 'text-success'
+  if (status.cli_authenticated === false) return 'text-warning-bright'
+  return status.cli_available ? 'text-success' : 'text-danger'
 }
 
 function subscriptionRuntimeSummary(status) {
@@ -760,9 +760,9 @@ onBeforeUnmount(() => {
             v-for="step in setupSteps"
             :key="step.label"
             class="rounded-xl border px-3 py-2"
-            :class="step.done ? 'border-emerald-300/20 bg-emerald-300/8' : 'border-storm/30 bg-void/30'">
-            <div class="text-xs font-semibold" :class="step.done ? 'text-emerald-200' : 'text-silver'">{{ step.label }}</div>
-            <div class="mt-1 text-[11px] leading-5" :class="step.done ? 'text-emerald-100/80' : 'text-storm'">{{ step.status }}</div>
+            :class="step.done ? 'border-success/20 bg-success/8' : 'border-storm/30 bg-void/30'">
+            <div class="text-xs font-semibold" :class="step.done ? 'text-success-bright' : 'text-silver'">{{ step.label }}</div>
+            <div class="mt-1 text-[11px] leading-5" :class="step.done ? 'text-success-bright/80' : 'text-storm'">{{ step.status }}</div>
           </div>
         </div>
       </div>
@@ -856,13 +856,13 @@ onBeforeUnmount(() => {
                   :key="model.id"
                   @click="config.ai_model = model.id"
                   class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors"
-                  :class="config.ai_model === model.id ? 'border-ice/40 bg-ice/10 text-ice' : model.origin === 'live' ? 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200 hover:border-emerald-300/35' : 'border-storm/40 bg-void/30 text-storm hover:border-ice/30 hover:text-silver'">
+                  :class="config.ai_model === model.id ? 'border-ice/40 bg-ice/10 text-ice' : model.origin === 'live' ? 'border-success/20 bg-success/8 text-success-bright hover:border-success/35' : 'border-storm/40 bg-void/30 text-storm hover:border-ice/30 hover:text-silver'">
                   {{ model.id }}
                 </button>
               </div>
               <div class="mt-2 flex items-start justify-between gap-3 text-xs">
                 <div :class="modelDiscoverySummary.tone">{{ modelDiscoverySummary.text }}</div>
-                <span class="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]" :class="providerModelCatalog?.discovered ? 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200' : 'border-storm/40 bg-void/30 text-storm'">
+                <span class="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]" :class="providerModelCatalog?.discovered ? 'border-success/20 bg-success/8 text-success-bright' : 'border-storm/40 bg-void/30 text-storm'">
                   {{ modelDiscoverySummary.badge }}
                 </span>
               </div>
@@ -879,13 +879,13 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div v-if="config.ai_auth_mode === 'subscription'" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-4 space-y-3">
+          <div v-if="config.ai_auth_mode === 'subscription'" class="rounded-xl border border-warning/20 bg-warning/6 p-4 space-y-3">
             <div>
               <div class="text-xs uppercase tracking-[0.2em] text-storm">{{ currentSubscriptionLabel }}</div>
-              <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
+              <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-warning-bright">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
               <div class="text-xs text-storm mt-2">The Web UI can test the draft config below, but live sessions still switch over only after save and apply.</div>
               <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
-                If this host is not authorized yet, run <code class="bg-void/40 px-1 rounded text-amber-200">{{ currentSubscriptionLoginCommand }}</code> in a terminal first.
+                If this host is not authorized yet, run <code class="bg-void/40 px-1 rounded text-warning-bright">{{ currentSubscriptionLoginCommand }}</code> in a terminal first.
               </div>
             </div>
             <div v-if="config.ai_provider === 'openai'">
@@ -900,27 +900,27 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div v-else-if="config.ai_auth_mode === 'none'" class="rounded-xl border border-stone-300/20 bg-stone-300/6 p-4">
+          <div v-else-if="config.ai_auth_mode === 'none'" class="rounded-xl border border-storm/20 bg-storm/6 p-4">
             <div class="text-sm text-silver">Polaris will call the configured endpoint without an Authorization header.</div>
             <div class="text-xs text-storm mt-2">This is the usual setup for Ollama on <code class="bg-void/40 px-1 rounded">http://127.0.0.1:11434/v1</code>.</div>
           </div>
 
           <div v-else>
             <label class="block text-sm font-medium text-silver mb-1">API Key</label>
-            <div v-if="hasStoredApiKey" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-emerald-300/20 bg-emerald-300/8 px-3 py-2 text-xs text-emerald-100">
+            <div v-if="hasStoredApiKey" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-success/20 bg-success/8 px-3 py-2 text-xs text-success-bright">
               <span>An API key is already stored on the host. Leave this blank to keep it, or type a new key to replace it.</span>
               <button
                 type="button"
-                class="rounded-full border border-emerald-300/25 px-2.5 py-1 text-[11px] font-medium text-emerald-100 transition-colors hover:border-rose-300/40 hover:text-rose-200"
+                class="rounded-full border border-success/25 px-2.5 py-1 text-[11px] font-medium text-success-bright transition-colors hover:border-danger/40 hover:text-danger-bright"
                 @click="config.clear_ai_api_key = true; config.ai_api_key = ''">
                 Clear Stored Key
               </button>
             </div>
-            <div v-else-if="config.clear_ai_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-rose-300/20 bg-rose-300/8 px-3 py-2 text-xs text-rose-100">
+            <div v-else-if="config.clear_ai_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-danger/20 bg-danger/8 px-3 py-2 text-xs text-danger-bright">
               <span>The stored API key will be removed when you save.</span>
               <button
                 type="button"
-                class="rounded-full border border-rose-300/30 px-2.5 py-1 text-[11px] font-medium text-rose-100 transition-colors hover:border-ice/40 hover:text-ice"
+                class="rounded-full border border-danger/30 px-2.5 py-1 text-[11px] font-medium text-danger-bright transition-colors hover:border-ice/40 hover:text-ice"
                 @click="config.clear_ai_api_key = false">
                 Keep Existing Key
               </button>
@@ -1015,11 +1015,11 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div v-if="testResult" class="rounded-xl border px-4 py-3" :class="testResult.success ? 'border-green-400/20 bg-green-400/8' : 'border-red-400/20 bg-red-400/8'">
-            <div class="text-[10px] uppercase tracking-[0.2em]" :class="testResult.success ? 'text-green-300' : 'text-red-300'">{{ testResult.label }}</div>
-            <div class="text-sm font-medium" :class="testResult.success ? 'text-green-300' : 'text-red-300'">{{ testResult.message }}</div>
+          <div v-if="testResult" class="rounded-xl border px-4 py-3" :class="testResult.success ? 'border-success/20 bg-success/8' : 'border-danger/20 bg-danger/8'">
+            <div class="text-[10px] uppercase tracking-[0.2em]" :class="testResult.success ? 'text-success' : 'text-danger'">{{ testResult.label }}</div>
+            <div class="text-sm font-medium" :class="testResult.success ? 'text-success' : 'text-danger'">{{ testResult.message }}</div>
             <div v-if="testResult.detail" class="text-xs text-silver/70 mt-2">{{ testResult.detail }}</div>
-            <div v-if="testResult.action" class="mt-3 rounded-lg border px-3 py-2 text-xs" :class="testResult.success ? 'border-green-400/20 bg-void/30 text-green-100' : 'border-red-400/20 bg-void/30 text-red-100'">
+            <div v-if="testResult.action" class="mt-3 rounded-lg border px-3 py-2 text-xs" :class="testResult.success ? 'border-success/20 bg-void/30 text-success-bright' : 'border-danger/20 bg-void/30 text-danger-bright'">
               {{ testResult.action }}
             </div>
             <div v-if="testResult.retryLabel" class="mt-2 text-xs font-medium text-silver/80">{{ testResult.retryLabel }}</div>
@@ -1056,7 +1056,7 @@ onBeforeUnmount(() => {
               </div>
               <div v-if="testResult.payload.hdr != null" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
                 <div class="text-[10px] uppercase tracking-wider text-storm">HDR</div>
-                <div class="text-sm font-mono mt-1" :class="testResult.payload.hdr ? 'text-green-300' : 'text-storm'">
+                <div class="text-sm font-mono mt-1" :class="testResult.payload.hdr ? 'text-success' : 'text-storm'">
                   {{ testResult.payload.hdr ? 'Enabled' : 'Disabled' }}
                 </div>
               </div>
@@ -1069,17 +1069,17 @@ onBeforeUnmount(() => {
                 </span>
               </div>
             </div>
-            <div v-if="testResult.success && testResult.payload?.normalization_reason" class="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/6 px-3 py-2">
+            <div v-if="testResult.success && testResult.payload?.normalization_reason" class="mt-3 rounded-lg border border-warning/20 bg-warning/6 px-3 py-2">
               <div class="text-[10px] uppercase tracking-wider text-storm">Normalization</div>
               <div class="text-xs text-silver mt-2">{{ testResult.payload.normalization_reason }}</div>
             </div>
-            <div v-if="selectedHistoryEntry" class="mt-3 rounded-lg border px-3 py-2" :class="selectedHistoryEntry.consecutive_poor_outcomes > 0 ? 'border-red-400/20 bg-red-400/8' : 'border-storm/20 bg-void/40'">
+            <div v-if="selectedHistoryEntry" class="mt-3 rounded-lg border px-3 py-2" :class="selectedHistoryEntry.consecutive_poor_outcomes > 0 ? 'border-danger/20 bg-danger/8' : 'border-storm/20 bg-void/40'">
               <div class="text-[10px] uppercase tracking-wider text-storm">Recent outcome for this device + app</div>
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="confidenceTone(selectedHistoryEntry.last_optimization_confidence)">
                   {{ optimizationSourceLabel(selectedHistoryEntry.last_optimization_source) }}
                 </span>
-                <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="(selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'A' || (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'B' ? 'border-emerald-300/20 bg-emerald-300/8 text-emerald-200' : (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'C' ? 'border-amber-300/20 bg-amber-300/8 text-amber-200' : 'border-red-400/20 bg-red-400/8 text-red-300'">
+                <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="(selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'A' || (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'B' ? 'border-success/20 bg-success/8 text-success-bright' : (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'C' ? 'border-warning/20 bg-warning/8 text-warning-bright' : 'border-danger/20 bg-danger/8 text-danger'">
                   Grade {{ selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade || '—' }}
                 </span>
                 <span class="text-xs text-storm">Updated {{ formatRelativeTime(selectedHistoryEntry.last_updated_at) }}</span>
@@ -1096,7 +1096,7 @@ onBeforeUnmount(() => {
                 {{ selectedHistoryEntry.poor_outcome_count }} poor outcome{{ selectedHistoryEntry.poor_outcome_count === 1 ? '' : 's' }} total,
                 {{ selectedHistoryEntry.consecutive_poor_outcomes }} consecutive poor sessions.
               </div>
-              <div v-if="selectedHistoryEntry.last_invalidated_at" class="text-xs text-amber-200 mt-2">
+              <div v-if="selectedHistoryEntry.last_invalidated_at" class="text-xs text-warning-bright mt-2">
                 Cache invalidated {{ formatRelativeTime(selectedHistoryEntry.last_invalidated_at) }} after the last poor run.
               </div>
             </div>
@@ -1115,7 +1115,7 @@ onBeforeUnmount(() => {
             <div class="flex items-center gap-2">
               <span
                 class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
-                :class="draftMatchesRuntime ? 'border-green-400/20 bg-green-400/8 text-green-300' : 'border-amber-300/20 bg-amber-300/8 text-amber-200'">
+                :class="draftMatchesRuntime ? 'border-success/20 bg-success/8 text-success' : 'border-warning/20 bg-warning/8 text-warning-bright'">
                 {{ draftMatchesRuntime ? 'In sync' : 'Unsaved draft' }}
               </span>
               <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
@@ -1185,24 +1185,24 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div v-if="aiStatus?.auth_mode === 'subscription'" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-3">
+            <div v-if="aiStatus?.auth_mode === 'subscription'" class="rounded-xl border border-warning/20 bg-warning/6 p-3">
               <div class="text-xs uppercase tracking-wider text-storm">{{ liveSubscriptionLabel }}</div>
               <div class="text-sm mt-2" :class="subscriptionRuntimeTone(aiStatus)">
                 {{ subscriptionRuntimeSummary(aiStatus) }}
               </div>
               <div v-if="aiStatus?.cli_authenticated === false && aiStatus?.cli_login_command" class="text-xs text-storm mt-2">
-                Authorize this host by running <code class="bg-void/40 px-1 rounded text-amber-200">{{ aiStatus.cli_login_command }}</code> in a terminal.
+                Authorize this host by running <code class="bg-void/40 px-1 rounded text-warning-bright">{{ aiStatus.cli_login_command }}</code> in a terminal.
               </div>
             </div>
 
-            <div v-if="aiStatus && !draftMatchesRuntime" class="rounded-xl border border-amber-300/20 bg-amber-300/6 p-3">
+            <div v-if="aiStatus && !draftMatchesRuntime" class="rounded-xl border border-warning/20 bg-warning/6 p-3">
               <div class="text-xs uppercase tracking-wider text-storm">Pending Change</div>
               <div class="text-sm text-silver mt-2">The draft on the left differs from the loaded runtime. Save and apply before expecting live sessions to switch providers or models.</div>
             </div>
 
-            <div v-if="aiStatus?.last_error" class="rounded-xl border border-red-400/20 bg-red-400/8 p-3">
+            <div v-if="aiStatus?.last_error" class="rounded-xl border border-danger/20 bg-danger/8 p-3">
               <div class="text-xs uppercase tracking-wider text-storm">Recent Error</div>
-              <div class="text-sm text-red-300 mt-2">{{ aiStatus.last_error }}</div>
+              <div class="text-sm text-danger mt-2">{{ aiStatus.last_error }}</div>
             </div>
           </div>
         </details>
@@ -1216,7 +1216,7 @@ onBeforeUnmount(() => {
             <div class="flex items-center gap-2">
               <button
                 @click.stop="handleClearCache"
-                class="text-xs text-storm hover:text-red-400 transition-colors"
+                class="text-xs text-storm hover:text-danger transition-colors"
                 :class="{ 'opacity-50 pointer-events-none': !Array.isArray(aiCache) || aiCache.length === 0 }">
                 Clear All
               </button>
@@ -1275,7 +1275,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="flex justify-between" v-if="entry.hdr != null">
                   <span class="text-storm">HDR</span>
-                  <span class="font-mono" :class="entry.hdr ? 'text-green-400' : 'text-storm'">{{ entry.hdr ? 'Yes' : 'No' }}</span>
+                  <span class="font-mono" :class="entry.hdr ? 'text-success' : 'text-storm'">{{ entry.hdr ? 'Yes' : 'No' }}</span>
                 </div>
                 <div class="flex justify-between" v-if="entry.expires_at">
                   <span class="text-storm">Expires</span>
@@ -1335,10 +1335,9 @@ onBeforeUnmount(() => {
             </div>
             <div class="flex items-center gap-1 shrink-0">
               <span class="px-1.5 py-0.5 rounded text-xs" :class="{
-                'bg-green-500/10 text-green-400': device.type === 'handheld',
-                'bg-blue-500/10 text-blue-400': device.type === 'phone',
-                'bg-yellow-500/10 text-yellow-400': device.type === 'desktop',
-                'bg-orange-500/10 text-orange-400': device.type === 'tablet'
+                'bg-success/10 text-success': device.type === 'handheld',
+                'bg-info/10 text-info': device.type === 'phone',
+                'bg-warning/10 text-warning': device.type === 'desktop' || device.type === 'tablet'
               }">{{ device.type }}</span>
             </div>
           </div>

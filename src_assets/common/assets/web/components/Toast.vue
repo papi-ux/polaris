@@ -11,8 +11,8 @@
           :key="t.id"
           class="glass max-w-sm overflow-hidden rounded-xl shadow-lg pointer-events-auto"
           :class="{
-            'border-green-500/40': t.type === 'success',
-            'border-red-500/40': t.type === 'error',
+            'border-success/40': t.type === 'success',
+            'border-danger/40': t.type === 'error',
             'border-storm/40': t.type === 'info'
           }"
           :role="t.type === 'error' ? 'alert' : 'status'"
@@ -22,8 +22,8 @@
           <div class="flex items-start gap-3 px-4 py-3">
             <!-- Icon -->
             <div class="shrink-0 mt-0.5">
-              <svg v-if="t.type === 'success'" class="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-              <svg v-else-if="t.type === 'error'" class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <svg v-if="t.type === 'success'" class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <svg v-else-if="t.type === 'error'" class="w-5 h-5 text-danger" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <svg v-else class="w-5 h-5 text-ice" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
             </div>
             <!-- Content -->
@@ -44,8 +44,8 @@
           <div v-if="t.duration" class="h-0.5 bg-storm/20">
             <div class="h-full transition-all ease-linear"
                  :class="{
-                   'bg-green-500/60': t.type === 'success',
-                   'bg-red-500/60': t.type === 'error',
+                   'bg-success/60': t.type === 'success',
+                   'bg-danger/60': t.type === 'error',
                    'bg-ice/40': t.type === 'info'
                  }"
                  :style="{ width: '100%', animation: `toast-progress ${t.duration}ms linear forwards` }">
