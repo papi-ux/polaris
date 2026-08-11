@@ -29,7 +29,8 @@ namespace stream_runtime {
       const std::string &game_cmd,
       bool force_windowed,
       bool allow_mangohud,
-      const std::string &session_instance_id
+      const std::string &session_instance_id,
+      int requested_refresh_hz
     ) {
       return cage_display_router::start(
         width,
@@ -38,7 +39,8 @@ namespace stream_runtime {
         game_cmd,
         force_windowed,
         allow_mangohud,
-        session_instance_id
+        session_instance_id,
+        requested_refresh_hz
       );
     }
 
@@ -72,6 +74,10 @@ namespace stream_runtime {
 
     platf::runtime_state_t runtime_state() {
       return cage_display_router::runtime_state();
+    }
+
+    bool ensure_output_refresh(int session_fps) {
+      return cage_display_router::ensure_output_refresh(session_fps);
     }
 
     // Trivial AND/negation helpers live here only (not dual-exported via cage).
@@ -174,7 +180,8 @@ namespace stream_runtime {
           params.game_cmd,
           params.force_windowed,
           params.allow_mangohud,
-          params.session_instance_id
+          params.session_instance_id,
+          params.requested_refresh_hz
         );
       }
 

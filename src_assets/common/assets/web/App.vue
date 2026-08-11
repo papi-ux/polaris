@@ -179,7 +179,7 @@ import { getCachedConfig } from './config-cache.js'
 import { webUiAuthenticated } from './auth-state.js'
 import { isPublicRoute } from './router-helpers.js'
 import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-metadata.js'
-import { buildUpdateCenterState } from './update-center.js'
+import { buildUpdateCenterState, updateStatusLightClass } from './update-center.js'
 
 const route = useRoute()
 const currentTheme = ref(getTheme())
@@ -241,20 +241,7 @@ const sidebarUpdateDetail = computed(() => {
   return 'System update details'
 })
 const sidebarUpdateTitle = computed(() => `Update Center: ${sidebarUpdateLabel.value}. ${sidebarUpdateDetail.value}`)
-const sidebarUpdateStatusLightClass = computed(() => {
-  switch (sidebarUpdateState.value.statusTone) {
-    case 'update':
-      return 'bg-ice shadow-[0_0_18px_rgba(200,214,229,0.75)] animate-pulse'
-    case 'ahead':
-      return 'bg-purple-300 shadow-[0_0_14px_rgba(216,180,254,0.55)]'
-    case 'warning':
-      return 'bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.55)]'
-    case 'disabled':
-      return 'bg-storm/60'
-    default:
-      return 'bg-green-400 shadow-[0_0_14px_rgba(74,222,128,0.55)]'
-  }
-})
+const sidebarUpdateStatusLightClass = computed(() => updateStatusLightClass(sidebarUpdateState.value.statusTone))
 const showNav = computed(() => {
   return webUiAuthenticated.value && !isPublicRoute(route.path)
 })

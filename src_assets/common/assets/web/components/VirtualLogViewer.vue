@@ -3,11 +3,11 @@
     <div class="absolute inset-x-0 top-0 z-10 flex flex-wrap items-center justify-between gap-2 border-b border-storm/15 bg-void/75 px-3 py-2 backdrop-blur-sm">
       <div class="flex min-w-0 flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-storm">
         <span class="truncate">{{ lineCountLabel }}</span>
-        <span v-if="severityCounts.fatal" class="rounded-full border border-red-500/20 bg-red-500/10 px-2 py-0.5 text-red-200">Fatal {{ severityCounts.fatal }}</span>
-        <span v-if="severityCounts.warning" class="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-amber-200">Warn {{ severityCounts.warning }}</span>
-        <span v-if="severityCounts.error" class="rounded-full border border-red-400/15 bg-red-400/5 px-2 py-0.5 text-red-100">Err {{ severityCounts.error }}</span>
-        <span v-if="paused" class="rounded-full border border-amber-300/25 bg-amber-300/10 px-2 py-0.5 text-amber-200">Paused</span>
-        <span v-else-if="followTail" class="rounded-full border border-green-500/25 bg-green-500/10 px-2 py-0.5 text-green-300">Following</span>
+        <span v-if="severityCounts.fatal" class="rounded-full border border-danger/20 bg-danger/10 px-2 py-0.5 text-danger-bright">Fatal {{ severityCounts.fatal }}</span>
+        <span v-if="severityCounts.warning" class="rounded-full border border-warning/20 bg-warning/10 px-2 py-0.5 text-warning-bright">Warn {{ severityCounts.warning }}</span>
+        <span v-if="severityCounts.error" class="rounded-full border border-danger/15 bg-danger/5 px-2 py-0.5 text-danger-bright">Err {{ severityCounts.error }}</span>
+        <span v-if="paused" class="rounded-full border border-warning/25 bg-warning/10 px-2 py-0.5 text-warning-bright">Paused</span>
+        <span v-else-if="followTail" class="rounded-full border border-success/25 bg-success/10 px-2 py-0.5 text-success">Following</span>
       </div>
       <div class="flex items-center gap-1.5">
         <button class="rounded-md border border-storm/20 bg-void/60 px-2 py-1 text-[11px] text-storm transition-colors hover:border-storm/40 hover:text-silver" @click="followTail = !followTail">
@@ -150,16 +150,16 @@ function severityForLine(line) {
 }
 
 function severityDotClass(severity) {
-  if (severity === 'fatal') return 'bg-red-400'
-  if (severity === 'warning') return 'bg-amber-300'
-  if (severity === 'error') return 'bg-rose-300'
+  if (severity === 'fatal') return 'bg-danger'
+  if (severity === 'warning') return 'bg-warning'
+  if (severity === 'error') return 'bg-danger'
   return 'bg-storm/35'
 }
 
 function severityTextClass(severity) {
-  if (severity === 'fatal') return 'text-red-300'
-  if (severity === 'warning') return 'text-amber-200'
-  if (severity === 'error') return 'text-red-100'
+  if (severity === 'fatal') return 'text-danger'
+  if (severity === 'warning') return 'text-warning-bright'
+  if (severity === 'error') return 'text-danger-bright'
   return ''
 }
 

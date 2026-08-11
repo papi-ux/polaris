@@ -1,6 +1,6 @@
 <template>
   <div class="relative min-h-screen overflow-hidden bg-background">
-    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(124,115,255,0.18),transparent_32%),radial-gradient(circle_at_bottom_right,rgba(200,214,229,0.08),transparent_24%)]"></div>
+    <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,color-mix(in_srgb,var(--color-accent)_18%,transparent),transparent_32%),radial-gradient(circle_at_bottom_right,color-mix(in_srgb,var(--color-ice)_8%,transparent),transparent_24%)]"></div>
     <div class="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center p-4 sm:p-6">
       <div class="grid w-full max-w-5xl gap-6 xl:grid-cols-[minmax(0,1.15fr)_340px]">
         <section class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
@@ -38,30 +38,30 @@
 
             <div v-if="currentStep === 0">
               <p class="mb-4 text-sm leading-relaxed text-storm">{{ $t('welcome.create_creds') }}</p>
-              <div class="mb-4 rounded-2xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+              <div class="mb-4 rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright">
                 {{ $t('welcome.create_creds_alert') }}
               </div>
               <form @submit.prevent="save" class="space-y-4">
                 <div>
                   <label for="usernameInput" class="mb-1 block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
-                  <input type="text" class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]" id="usernameInput" autocomplete="username"
+                  <input type="text" class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-glow" id="usernameInput" autocomplete="username"
                     v-model="passwordData.newUsername" />
                 </div>
                 <div>
                   <label for="passwordInput" class="mb-1 block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                  <input type="password" class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]" id="passwordInput" autocomplete="new-password"
+                  <input type="password" class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-glow" id="passwordInput" autocomplete="new-password"
                     v-model="passwordData.newPassword" required />
                 </div>
                 <div>
                   <label for="confirmPasswordInput" class="mb-1 block text-sm font-medium text-storm">{{ $t('welcome.confirm_password') }}</label>
-                  <input type="password" class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-[0_0_20px_rgba(200,214,229,0.08)]" id="confirmPasswordInput" autocomplete="new-password"
+                  <input type="password" class="w-full rounded-xl border border-storm/30 bg-void/55 px-3 py-3 text-silver transition-[border-color,background-color,box-shadow] duration-200 focus:border-ice/40 focus:bg-void/70 focus:outline-none focus:shadow-glow" id="confirmPasswordInput" autocomplete="new-password"
                     v-model="passwordData.confirmNewPassword" required />
                 </div>
-                <button type="submit" class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.25)] disabled:opacity-50" v-bind:disabled="loading">
+                <button type="submit" class="inline-flex h-11 w-full items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-glow-ice disabled:opacity-50" v-bind:disabled="loading">
                   {{ loading ? 'Saving…' : 'Save Credentials' }}
                 </button>
-                <div class="rounded-2xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-100" v-if="error"><b>{{ $t('_common.error') }}</b> {{error}}</div>
-                <div class="rounded-2xl border border-green-500/25 bg-green-500/10 px-4 py-3 text-sm text-green-100" v-if="success">
+                <div class="rounded-2xl border border-danger/25 bg-danger/10 px-4 py-3 text-sm text-danger-bright" v-if="error"><b>{{ $t('_common.error') }}</b> {{error}}</div>
+                <div class="rounded-2xl border border-success/25 bg-success/10 px-4 py-3 text-sm text-success-bright" v-if="success">
                   <b>{{ $t('_common.success') }}</b> Credentials saved. Continue when you are ready.
                 </div>
               </form>
@@ -79,11 +79,11 @@
                   <div class="text-sm text-storm">GPU / Display Adapter</div>
                   <div class="mt-2 text-base font-medium text-silver">{{ configData.adapter_name || configData.output_name || 'Default' }}</div>
                 </div>
-                <div class="rounded-2xl border border-blue-400/20 bg-blue-400/10 px-4 py-3 text-sm text-blue-100">
+                <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
                   You can fine-tune encoder and display behavior later in Configuration → Audio/Video.
                 </div>
               </div>
-              <div v-else class="rounded-2xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+              <div v-else class="rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright">
                 Could not load the configuration. You can still continue and revisit hardware settings later.
               </div>
             </div>
@@ -100,10 +100,10 @@
                     UDP: 47998-48000, 48002, 48010
                   </div>
                 </div>
-                <div class="rounded-2xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                <div class="rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright">
                   <b>Firewall reminder:</b> allow the ports above before testing a new client. Add port forwarding only if you actually plan to stream beyond your LAN.
                 </div>
-                <div class="rounded-2xl border border-blue-400/20 bg-blue-400/10 px-4 py-3 text-sm text-blue-100">
+                <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
                   You can change the host port later in Configuration → Network.
                 </div>
               </div>
@@ -140,7 +140,7 @@
                 <a href="#/pin" target="_blank" class="inline-flex h-10 items-center justify-center rounded-xl border border-storm/25 bg-deep/50 px-4 text-sm font-medium text-ice transition-[background-color,border-color,color] duration-200 hover:border-ice/30 hover:bg-twilight/35 no-underline">
                   Open Clients &amp; Pairing
                 </a>
-                <div class="rounded-2xl border border-blue-400/20 bg-blue-400/10 px-4 py-3 text-sm text-blue-100">
+                <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
                   Trusted pair and QR flows can be faster than manual PIN entry when the client supports them.
                 </div>
               </div>
@@ -160,14 +160,14 @@
               v-if="currentStep < steps.length - 1"
               @click="nextStep"
               :disabled="currentStep === 0 && !success"
-              class="inline-flex h-10 items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.25)] disabled:cursor-not-allowed disabled:opacity-50"
+              class="inline-flex h-10 items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-glow-ice disabled:cursor-not-allowed disabled:opacity-50"
             >
               Next
             </button>
             <button
               v-else
               @click="finishWizard"
-              class="inline-flex h-10 items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-[0_0_24px_rgba(200,214,229,0.25)]"
+              class="inline-flex h-10 items-center justify-center rounded-xl bg-ice px-4 text-sm font-semibold text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
             >
               Finish Setup
             </button>

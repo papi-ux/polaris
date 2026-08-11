@@ -35,6 +35,10 @@ namespace cage_display_router {
    *                       take priority over invisibility.
    * @param session_instance_id Immutable generation inherited only by the cage
    *                            child and its descendants; never by Polaris itself.
+   * @param requested_refresh_hz The client's raw requested FPS (whole hertz or
+   *                             millihertz; 0 = unknown). When refresh_hz runs
+   *                             below it, the launch was deliberately clamped
+   *                             and resumes are held to that ceiling.
    * @return true if cage started successfully and wayland socket is available
    */
   bool start(
@@ -44,8 +48,40 @@ namespace cage_display_router {
     const std::string &game_cmd = "",
     bool force_windowed = false,
     bool allow_mangohud = true,
-    const std::string &session_instance_id = ""
+    const std::string &session_instance_id = "",
+    int requested_refresh_hz = 0
   );
+
+  /**
+   * @brief Normalize a session FPS value to whole hertz (millihertz-aware).
+   */
+  int normalize_session_refresh_hz(int session_fps);
+
+  /**
+   * @brief The refresh a resume should apply, honoring a launch-time clamp.
+   *
+   * @param session_fps The resuming session's FPS (whole hertz or millihertz).
+   * @param recorded_ceiling_hz Non-zero when the launch deliberately ran below
+   *                            the client's request; resumes stay at or under it.
+   */
+  int resolve_resume_refresh_hz(int session_fps, int recorded_ceiling_hz);
+
+  /**
+   * @brief Re-apply the running compositor's output refresh for a resuming session.
+   *
+   * The cage outlives the launch that started it and the output mode is only
+   * ever set from the startup command, so a client resuming with a different
+   * refresh than the original launch would otherwise stay capped at the old
+   * rate for the whole session (issue #367). Keeps the launch-time resolution
+   * and any launch-time refresh clamp; only an unclamped refresh follows the
+   * resuming client.
+   *
+   * @param session_fps The resuming session's FPS (whole hertz or millihertz).
+   * @return true when the mode already matches or was re-applied; false when
+   *         the cage is not running, startup has not recorded a settled mode
+   *         yet, or the compositor did not settle on the new mode.
+   */
+  bool ensure_output_refresh(int session_fps);
 
   /**
    * @brief Wrap a command to run inside the cage compositor.

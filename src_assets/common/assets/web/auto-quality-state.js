@@ -74,18 +74,18 @@ function toneClasses(tone) {
   switch (tone) {
     case 'stable':
       return {
-        toneClass: 'border-green-400/30 bg-green-400/10 text-green-300',
-        panelClass: 'border-green-400/20 bg-green-400/5',
+        toneClass: 'border-success/30 bg-success/10 text-success',
+        panelClass: 'border-success/20 bg-success/5',
       }
     case 'warning':
       return {
-        toneClass: 'border-amber-300/30 bg-amber-300/10 text-amber-200',
-        panelClass: 'border-amber-300/25 bg-amber-300/10',
+        toneClass: 'border-warning/30 bg-warning/10 text-warning-bright',
+        panelClass: 'border-warning/25 bg-warning/10',
       }
     case 'danger':
       return {
-        toneClass: 'border-red-400/30 bg-red-400/10 text-red-300',
-        panelClass: 'border-red-400/25 bg-red-400/10',
+        toneClass: 'border-danger/30 bg-danger/10 text-danger',
+        panelClass: 'border-danger/25 bg-danger/10',
       }
     case 'info':
       return {
