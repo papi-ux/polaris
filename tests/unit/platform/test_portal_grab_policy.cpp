@@ -23,6 +23,7 @@
 #include "src/platform/common.h"
 #include "src/platform/linux/pipewire_capture.h"
 #include "src/platform/linux/portal_session.h"
+#include "src/platform/linux/session_media.h"
 
 #ifdef POLARIS_BUILD_WAYLAND
   #include "src/platform/linux/kwingrab.h"
@@ -31,6 +32,7 @@
 namespace portal {
   std::uint32_t portal_pick_cursor_mode_for_tests(std::uint32_t available);
   bool portal_cancel_pending_request_for_tests();
+  bool portal_cancel_request_owner_for_tests();
 }
 
 TEST(PortalGrabPolicyTests, DesktopDisplayRequestsMonitorSource) {
@@ -142,6 +144,22 @@ TEST(PortalGrabPolicyTests, CursorModePrefersEmbeddedThenMetadataThenHidden) {
 
 TEST(PortalGrabPolicyTests, CancelPendingRequestsCancelsRegisteredRequest) {
   EXPECT_TRUE(portal::portal_cancel_pending_request_for_tests());
+}
+
+TEST(PortalGrabPolicyTests, CancelPendingRequestsMatchesOwner) {
+  EXPECT_TRUE(portal::portal_cancel_request_owner_for_tests());
+}
+
+TEST(PortalGrabPolicyTests, PendingStartCancellationScopeIsOwnerBounded) {
+  int owner_a = 0;
+  int owner_b = 0;
+  EXPECT_FALSE(session_media::pending_start_cancelled(&owner_a));
+  {
+    auto owner = session_media::cancel_pending_starts(&owner_a);
+    EXPECT_TRUE(session_media::pending_start_cancelled(&owner_a));
+    EXPECT_FALSE(session_media::pending_start_cancelled(&owner_b));
+  }
+  EXPECT_FALSE(session_media::pending_start_cancelled(&owner_a));
 }
 
 TEST(PortalGrabPolicyTests, TeardownCancelsPortalWaitBeforeWaitingForStartFence) {
@@ -265,10 +283,12 @@ TEST(PortalGrabPolicyTests, TeardownCancellationCoversRemoteReopenAndRetryLoop) 
   ASSERT_NE(ensure_begin, std::string::npos);
   ASSERT_NE(ensure_end, std::string::npos);
   const auto ensure_body = grab_source.substr(ensure_begin, ensure_end - ensure_begin);
-  const auto shutdown_guard = ensure_body.find("if (session_media::teardown_in_progress())");
+  const auto shutdown_guard = ensure_body.find(
+    "if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner()))"
+  );
   const auto retry_sleep = ensure_body.find("std::this_thread::sleep_for");
   ASSERT_NE(shutdown_guard, std::string::npos)
-    << "a cancelled portal session must not enter the retry backoff during teardown";
+    << "a cancelled portal session must not enter retry backoff during stop";
   ASSERT_NE(retry_sleep, std::string::npos);
   EXPECT_LT(shutdown_guard, retry_sleep);
 }

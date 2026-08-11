@@ -366,8 +366,8 @@ namespace portal {
            (!g_media.portal || g_media.portal->failed || !g_media.portal->ready ||
             g_media.portal->pw_node_id == 0);
            ++attempt) {
-        if (session_media::teardown_in_progress()) {
-          BOOST_LOG(info) << "portal: teardown requested; skipping failed-session retry backoff"sv;
+        if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) {
+          BOOST_LOG(info) << "portal: stop requested; skipping failed-session retry backoff"sv;
           g_media.portal.reset();
           break;
         }

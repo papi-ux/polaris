@@ -40,8 +40,13 @@ using namespace std::literals;
 namespace portal {
 
   namespace {
+    struct pending_request_t {
+      GCancellable *cancellable = nullptr;
+      const void *owner_tag = nullptr;
+    };
+
     std::mutex g_pending_request_mutex;
-    std::vector<GCancellable *> g_pending_requests;
+    std::vector<pending_request_t> g_pending_requests;
 
     struct cancellable_unref_t {
       void operator()(GCancellable *cancellable) const {
@@ -55,15 +60,19 @@ namespace portal {
 
     class pending_request_registration_t {
     public:
-      explicit pending_request_registration_t(GCancellable *cancellable):
+      explicit pending_request_registration_t(
+        GCancellable *cancellable,
+        const void *owner_tag = session_media::pending_start_owner()
+      ):
           cancellable_ {cancellable} {
         if (!cancellable_) {
           return;
         }
         std::lock_guard lock(g_pending_request_mutex);
-        g_pending_requests.push_back(
-          G_CANCELLABLE(g_object_ref(cancellable_))
-        );
+        g_pending_requests.push_back({
+          G_CANCELLABLE(g_object_ref(cancellable_)),
+          owner_tag
+        });
       }
 
       pending_request_registration_t(const pending_request_registration_t &) = delete;
@@ -74,9 +83,15 @@ namespace portal {
           return;
         }
         std::lock_guard lock(g_pending_request_mutex);
-        const auto it = std::find(g_pending_requests.begin(), g_pending_requests.end(), cancellable_);
+        const auto it = std::find_if(
+          g_pending_requests.begin(),
+          g_pending_requests.end(),
+          [this](const pending_request_t &request) {
+            return request.cancellable == cancellable_;
+          }
+        );
         if (it != g_pending_requests.end()) {
-          g_object_unref(*it);
+          g_object_unref(it->cancellable);
           g_pending_requests.erase(it);
         }
       }
@@ -86,13 +101,15 @@ namespace portal {
     };
   }  // namespace
 
-  void cancel_pending_requests() {
+  void cancel_pending_requests(const void *owner_tag) {
     std::vector<GCancellable *> pending;
     {
       std::lock_guard lock(g_pending_request_mutex);
       pending.reserve(g_pending_requests.size());
-      for (auto *cancellable : g_pending_requests) {
-        pending.push_back(G_CANCELLABLE(g_object_ref(cancellable)));
+      for (const auto &request : g_pending_requests) {
+        if (!owner_tag || request.owner_tag == owner_tag) {
+          pending.push_back(G_CANCELLABLE(g_object_ref(request.cancellable)));
+        }
       }
     }
 
@@ -113,6 +130,23 @@ namespace portal {
     }
     g_object_unref(cancellable);
     return cancelled;
+  }
+
+  bool portal_cancel_request_owner_for_tests() {
+    int owner_a = 0;
+    int owner_b = 0;
+    auto *first = g_cancellable_new();
+    auto *second = g_cancellable_new();
+    bool matched = false;
+    {
+      pending_request_registration_t first_registration {first, &owner_a};
+      pending_request_registration_t second_registration {second, &owner_b};
+      cancel_pending_requests(&owner_a);
+      matched = g_cancellable_is_cancelled(first) && !g_cancellable_is_cancelled(second);
+    }
+    g_object_unref(first);
+    g_object_unref(second);
+    return matched;
   }
 #endif
 
@@ -495,7 +529,7 @@ namespace portal {
     cancellable_ptr_t cancellable_owner {g_cancellable_new()};
     auto *cancellable = cancellable_owner.get();
     pending_request_registration_t registration {cancellable};
-    if (session_media::teardown_in_progress()) {
+    if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) {
       g_cancellable_cancel(cancellable);
     }
 
@@ -701,7 +735,7 @@ namespace portal {
     cancellable_ptr_t cancellable_owner {g_cancellable_new()};
     auto *cancellable = cancellable_owner.get();
     pending_request_registration_t registration {cancellable};
-    if (session_media::teardown_in_progress()) {
+    if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) {
       g_cancellable_cancel(cancellable);
     }
 

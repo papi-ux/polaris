@@ -15,6 +15,8 @@
   #include <deque>
   #include <mutex>
   #include <thread>
+  #include <unordered_map>
+  #include <utility>
 
 using namespace std::literals;
 
@@ -41,6 +43,18 @@ namespace session_media {
       static auto *gate = new teardown_gate_t;
       return *gate;
     }
+
+    struct pending_cancel_state_t {
+      std::mutex mutex;
+      std::unordered_map<const void *, unsigned> owners;
+    };
+
+    pending_cancel_state_t &pending_cancel_state() {
+      static auto *state = new pending_cancel_state_t;
+      return *state;
+    }
+
+    thread_local const void *current_pending_start_owner = nullptr;
 
     void worker_main(worker_state_t *state) {
       for (;;) {
@@ -89,6 +103,74 @@ namespace session_media {
       }
     }
   }  // namespace
+
+  pending_start_cancel_owner_t::pending_start_cancel_owner_t(
+    pending_start_cancel_owner_t &&other
+  ) noexcept:
+      owner_tag_(std::exchange(other.owner_tag_, nullptr)) {}
+
+  pending_start_cancel_owner_t &pending_start_cancel_owner_t::operator=(
+    pending_start_cancel_owner_t &&other
+  ) noexcept {
+    if (this != &other) {
+      reset();
+      owner_tag_ = std::exchange(other.owner_tag_, nullptr);
+    }
+    return *this;
+  }
+
+  pending_start_cancel_owner_t::~pending_start_cancel_owner_t() {
+    reset();
+  }
+
+  void pending_start_cancel_owner_t::reset() noexcept {
+    const auto *owner_tag = std::exchange(owner_tag_, nullptr);
+    if (!owner_tag) {
+      return;
+    }
+    auto &state = pending_cancel_state();
+    std::lock_guard lock(state.mutex);
+    const auto it = state.owners.find(owner_tag);
+    if (it != state.owners.end() && --it->second == 0) {
+      state.owners.erase(it);
+    }
+  }
+
+  pending_start_cancel_owner_t cancel_pending_starts(const void *owner_tag) {
+    if (!owner_tag) {
+      return {};
+    }
+    auto owner = pending_start_cancel_owner_t {owner_tag};
+    auto &state = pending_cancel_state();
+    {
+      std::lock_guard lock(state.mutex);
+      ++state.owners[owner_tag];
+    }
+    portal::cancel_pending_requests(owner_tag);
+    return owner;
+  }
+
+  bool pending_start_cancelled(const void *owner_tag) {
+    if (!owner_tag) {
+      return false;
+    }
+    auto &state = pending_cancel_state();
+    std::lock_guard lock(state.mutex);
+    return state.owners.contains(owner_tag);
+  }
+
+  pending_start_owner_scope_t::pending_start_owner_scope_t(const void *owner_tag):
+      previous_(current_pending_start_owner) {
+    current_pending_start_owner = owner_tag;
+  }
+
+  pending_start_owner_scope_t::~pending_start_owner_scope_t() {
+    current_pending_start_owner = previous_;
+  }
+
+  const void *pending_start_owner() {
+    return current_pending_start_owner;
+  }
 
   start_owner_t begin_start() {
     return media_gate().begin_start();
