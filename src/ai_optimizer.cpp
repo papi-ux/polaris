@@ -471,6 +471,19 @@ namespace ai_optimizer {
       is_low_confidence_soft_end_without_confirming_signal(session);
   }
 
+  static bool session_network_risk_elevated(const session_history_t &session) {
+    const auto risk = to_lower_copy(session.last_network_risk);
+    if (!risk.empty()) {
+      // Both session writers now record the tracker's debounced verdict; a raw
+      // recompute here would re-flag sessions the warmed-up tracker cleared.
+      return risk == "elevated";
+    }
+    // Legacy histories predate the debounced flag. Classify their raw averages
+    // against the session-grading "fair" cut (2% loss), not the retired 0.35%
+    // hair-trigger that flagged healthy ENet reliable-channel sessions forever.
+    return session.last_packet_loss_pct >= 2.0 || session.last_latency_ms >= 28.0;
+  }
+
   static bool has_session_observation(const session_history_t &session) {
     return session.avg_fps > 0.0 ||
       session.last_fps > 0.0 ||
@@ -879,7 +892,7 @@ namespace ai_optimizer {
       history_fps > 0.0 ? history_fps :
       session.last_fps;
     const bool prior_frame_pacing = has_frame_or_host_pacing_issue(session);
-    const bool network_risk = session.last_packet_loss_pct >= 0.35 || session.last_latency_ms >= 28.0;
+    const bool network_risk = session_network_risk_elevated(session);
     const bool client_pacing_risk =
       (target_fps > 0.0 && session.last_low_1_percent_fps > 0.0 &&
        session.last_low_1_percent_fps < target_fps * 0.85) ||
@@ -2792,16 +2805,14 @@ namespace ai_optimizer {
       return false;
     }
     if (session.last_frame_pacing_bad_pct >= 25.0 ||
-        session.last_packet_loss_pct >= 0.35 ||
-        session.last_latency_ms >= 28.0) {
+        session_network_risk_elevated(session)) {
       return false;
     }
 
     const auto elevated = [](const std::string &risk) {
       return to_lower_copy(risk) == "elevated";
     };
-    if (elevated(session.last_network_risk) ||
-        elevated(session.last_decoder_risk) ||
+    if (elevated(session.last_decoder_risk) ||
         elevated(session.last_hdr_risk)) {
       return false;
     }
@@ -2820,7 +2831,12 @@ namespace ai_optimizer {
       const session_history_t &raw_session,
       const device_db::optimization_t &optimization) {
     const auto session = sanitize_session_history(raw_session);
-    if (session.last_target_fps <= 0.0 || session.last_target_fps > 45.0) {
+    // 60 covers this ladder's real recovery targets: a 120-native host downgrades
+    // to 60, a 60-native host to 30. The old 45 ceiling made a recovery-60 cache
+    // unretirable -- no stable trial at its own target could ever qualify -- so it
+    // outlived the network blip that created it until someone reset the profile.
+    // recovery_capped below still keeps deliberate quality caps out of reach.
+    if (session.last_target_fps <= 0.0 || session.last_target_fps > 60.0) {
       return false;
     }
 
@@ -2843,8 +2859,7 @@ namespace ai_optimizer {
       return false;
     }
     if (session.last_frame_pacing_bad_pct >= 3.0 ||
-        session.last_packet_loss_pct >= 0.35 ||
-        session.last_latency_ms >= 28.0 ||
+        session_network_risk_elevated(session) ||
         session.consecutive_poor_outcomes > 0) {
       return false;
     }
