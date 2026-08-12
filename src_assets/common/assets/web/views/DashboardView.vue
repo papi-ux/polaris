@@ -16,39 +16,6 @@
       </div>
     </section>
 
-    <section class="mission-control-strip" aria-label="Mission Control Now Next Fix">
-      <div v-for="item in missionControlStrip" :key="item.key" class="mission-control-tile">
-        <div class="mission-control-label">{{ item.label }}</div>
-        <div class="mission-control-title" :class="item.tone">{{ item.title }}</div>
-        <div class="mission-control-copy">{{ item.detail }}</div>
-        <router-link v-if="item.to" :to="item.to" class="mission-control-link">Open fix</router-link>
-      </div>
-    </section>
-
-    <div v-if="statsLoaded && !stats?.streaming" class="grid grid-cols-1 gap-3 lg:grid-cols-3">
-      <div class="surface-subtle p-4">
-        <div class="section-title-row">
-          <div class="eyebrow-label">{{ $t('dashboard.primary_focus') }}</div>
-          <InfoHint size="sm" :label="$t('dashboard.primary_focus')">{{ primaryFocus.desc }}</InfoHint>
-        </div>
-        <div class="mt-2 text-base font-semibold text-silver">{{ primaryFocus.title }}</div>
-      </div>
-      <div class="surface-subtle p-4">
-        <div class="section-title-row">
-          <div class="eyebrow-label">{{ $t('dashboard.stream_readiness') }}</div>
-          <InfoHint size="sm" :label="$t('dashboard.stream_readiness')">{{ readinessDetail }}</InfoHint>
-        </div>
-        <div class="mt-2 text-base font-semibold" :class="readinessTone">{{ readinessLabel }}</div>
-      </div>
-      <div class="surface-subtle p-4">
-        <div class="section-title-row">
-          <div class="eyebrow-label">{{ $t('dashboard.next_step') }}</div>
-          <InfoHint size="sm" :label="$t('dashboard.next_step')">{{ nextStep.desc }}</InfoHint>
-        </div>
-        <div class="mt-2 text-base font-semibold text-silver">{{ nextStep.title }}</div>
-      </div>
-    </div>
-
     <!-- Loading skeleton state -->
     <template v-if="!statsLoaded">
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -68,8 +35,6 @@
           </div>
           <div class="dashboard-live-header-meta">
             <span class="meta-pill">{{ viewerCountLabel }}</span>
-            <span class="meta-pill">{{ qualitySummaryLabel }}</span>
-            <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
             <span class="meta-pill" :class="captureGpuNativeTone">{{ capturePathLabel }}</span>
           </div>
         </div>
@@ -100,48 +65,36 @@
             <div class="dashboard-live-summary-value text-silver">{{ liveSummary.bitrate }}</div>
             <div class="dashboard-live-summary-copy">{{ stats.codec?.toUpperCase() || '--' }}</div>
           </div>
-          <div class="dashboard-live-summary-tile" data-live-summary-metric="Capture path">
-            <div class="dashboard-live-summary-label">Capture path</div>
-            <div class="dashboard-live-summary-value" :class="captureGpuNativeTone">{{ capturePathLabel }}</div>
-            <div class="dashboard-live-summary-copy">{{ captureTransportLabel }} · {{ captureResidencyLabel }}</div>
-          </div>
-          <div class="dashboard-live-summary-tile" data-live-summary-metric="Runtime mode">
-            <div class="dashboard-live-summary-label">Runtime mode</div>
-            <div class="dashboard-live-summary-value" :class="runtimeEffectiveTone">{{ runtimeEffectiveMode }}</div>
-            <div class="dashboard-live-summary-copy">{{ runtimeBackendLabel }}</div>
-          </div>
         </section>
 
-        <section class="rounded-xl border p-4" :class="autoQuality.panelClass">
-          <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <!-- Doctor: the host's own per-second diagnosis replaces the old
+             Auto Quality panel, stream-path notices, and priority guidance. -->
+        <section class="rounded-xl border p-4" :class="doctorPanelClass" data-dashboard-doctor>
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div class="min-w-0">
-              <div class="section-kicker">Auto Quality</div>
+              <div class="section-kicker">{{ $t('dashboard.doctor') }}</div>
               <div class="mt-2 flex flex-wrap items-center gap-2">
-                <h3 class="text-xl font-semibold leading-tight text-silver">{{ autoQuality.label }}</h3>
+                <span class="inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
+                <h3 class="text-xl font-semibold leading-tight text-silver">{{ doctorHeadline }}</h3>
+                <span v-if="doctorConfidenceLabel" class="control-chip">{{ doctorConfidenceLabel }}</span>
                 <span class="meta-pill" :class="autoQuality.toneClass">{{ autoQuality.compactLabel }}</span>
                 <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
               </div>
+              <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ doctorRecommendation }}</p>
             </div>
-            <div class="flex shrink-0 flex-wrap gap-2 lg:max-w-sm lg:justify-end">
-              <span v-if="autoQuality.targetSummary" class="data-pill">{{ autoQuality.targetSummary }}</span>
-              <span v-for="badge in autoQuality.badges" :key="badge" class="data-pill">{{ badge }}</span>
+            <div class="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
+              <button
+                v-if="doctorSafeAction"
+                type="button"
+                class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
+                :disabled="doctorActionPending"
+                @click="doctorActionConfirmOpen = true"
+              >
+                {{ doctorSafeAction.label }}
+              </button>
             </div>
           </div>
         </section>
-
-        <div v-if="streamPathNotices.length" class="grid gap-2 md:grid-cols-2">
-          <div
-            v-for="notice in streamPathNotices"
-            :key="notice.key"
-            class="rounded-lg border px-3 py-2"
-            :class="notice.surfaceClass"
-          >
-            <div class="text-[11px] font-semibold uppercase tracking-[0.16em]" :class="notice.titleClass">
-              {{ notice.title }}
-            </div>
-            <div class="mt-1 text-sm leading-relaxed text-silver">{{ notice.message }}</div>
-          </div>
-        </div>
 
         <div class="dashboard-live-stage" :class="{ 'is-preview-expanded': showPreview && previewExpanded, 'is-preview-hidden': !showPreview }">
           <div class="dashboard-live-main">
@@ -218,63 +171,6 @@
             </section>
 
             <div class="dashboard-live-support-grid">
-              <details class="dashboard-secondary-group" open>
-                <summary class="dashboard-secondary-group-summary">
-                  <span>Priority guidance</span>
-                  <span>{{ primaryRecommendations.length || 0 }} live cues</span>
-                </summary>
-                <section class="surface-subtle p-4 dashboard-support-card">
-                <div class="flex items-start justify-between gap-3">
-                  <div>
-                    <div class="eyebrow-label">{{ $t('dashboard.recommendations') }}</div>
-                    <div class="mt-2 flex items-center gap-2">
-                      <div class="text-base font-semibold text-silver">Priority guidance</div>
-                      <InfoHint size="sm" :label="$t('dashboard.recommendations')">
-                        {{ $t('dashboard.recommendations_desc') }}
-                      </InfoHint>
-                    </div>
-                  </div>
-                  <span class="meta-pill">{{ primaryRecommendations.length || 0 }} live cues</span>
-                </div>
-                <div v-if="primaryRecommendations.length" class="mt-4 space-y-2">
-                  <div v-for="(rec, i) in primaryRecommendations" :key="i" class="glass rounded-lg px-3 py-2 text-xs text-silver">
-                    <div class="flex items-start gap-2">
-                      <svg class="mt-0.5 h-3.5 w-3.5 shrink-0" :class="rec.color" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      <span>{{ rec.message }}</span>
-                    </div>
-                  </div>
-                </div>
-                <div v-else class="dashboard-empty-state">
-                  {{ $t('dashboard.recommendations_empty') }}
-                </div>
-                <div v-if="telemetryConcerns.length" class="dashboard-support-subsection">
-                  <div class="dashboard-support-subtitle">Gamer-readable telemetry</div>
-                  <div class="mt-3 grid gap-2 sm:grid-cols-2">
-                    <div v-for="concern in telemetryConcerns" :key="concern.key" class="dashboard-telemetry-concern">
-                      <div class="text-[11px] font-semibold uppercase tracking-[0.16em]" :class="concern.tone">{{ concern.label }}</div>
-                      <div class="mt-1 text-xs leading-relaxed text-storm">{{ concern.detail }}</div>
-                    </div>
-                  </div>
-                </div>
-                <div class="dashboard-support-subsection">
-                  <div class="dashboard-support-subtitle">{{ $t('dashboard.ai_optimization') }}</div>
-                  <div v-if="aiOptimization" class="space-y-3">
-                    <div class="text-sm leading-relaxed text-silver">{{ aiOptimizationSummary }}</div>
-                    <div class="flex flex-wrap gap-2">
-                      <span class="data-pill">{{ aiOptimization.source }}</span>
-                      <span v-if="aiOptimization.display_mode" class="data-pill">{{ aiOptimization.display_mode }}</span>
-                      <span v-if="aiOptimization.target_bitrate_kbps" class="data-pill">{{ (aiOptimization.target_bitrate_kbps / 1000).toFixed(0) }} Mbps</span>
-                    </div>
-                  </div>
-                  <div v-else class="text-sm text-storm">
-                    {{ $t('dashboard.ai_optimization_empty') }}
-                  </div>
-                </div>
-                </section>
-              </details>
-
               <details class="dashboard-secondary-group" open>
                 <summary class="dashboard-secondary-group-summary">
                   <span>Capture and replay</span>
@@ -540,29 +436,30 @@
 
     <!-- ═══ IDLE LAYOUT ═══ -->
     <template v-else>
-      <!-- At-a-glance status cards -->
-      <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <div class="surface-subtle p-4">
-          <div class="eyebrow-label mb-1">{{ $t('dashboard.status') }}</div>
-          <div class="text-lg font-bold text-success">{{ $t('dashboard.ready') }}</div>
-          <div class="mt-1 text-xs text-storm">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</div>
+      <!-- Status hero: one band answering "can I stream right now, and if
+           not, what fixes it" (absorbs the old strip, triptych, and quad). -->
+      <section class="section-card" data-dashboard-idle-hero>
+        <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div class="min-w-0">
+            <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
+            <h2 class="mt-2 text-2xl font-semibold leading-tight" :class="readinessTone">{{ readinessLabel }}</h2>
+            <p class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ nextStep.title }} · {{ nextStep.desc }}</p>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <span class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
+              <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
+              <span class="data-pill" v-if="gpu">{{ gpu.temperature_c || '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
+              <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
+            </div>
+          </div>
+          <router-link
+            v-if="readyCheckDisplay.primaryIssue"
+            :to="readyCheckDisplay.primaryIssue.to"
+            class="focus-ring dashboard-action-button dashboard-action-button-primary shrink-0 no-underline"
+          >
+            {{ $t('dashboard.open_priority_fix') }}
+          </router-link>
         </div>
-        <div class="surface-subtle p-4">
-          <div class="eyebrow-label mb-1">{{ $t('dashboard.mode') }}</div>
-          <div class="text-lg font-bold" :class="headlessEnabled ? 'text-accent' : 'text-silver'">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</div>
-          <div class="mt-1 text-xs text-storm">{{ headlessEnabled ? $t('dashboard.headless_desc') : $t('dashboard.windowed_desc') }}</div>
-        </div>
-        <div class="surface-subtle p-4">
-          <div class="eyebrow-label mb-1">GPU</div>
-          <div class="text-lg font-bold" :class="gpu?.temperature_c > 65 ? 'text-warning' : 'text-success'">{{ gpu?.temperature_c || '--' }}°C</div>
-          <div class="mt-1 text-xs text-storm">{{ gpu?.utilization_pct || 0 }}% load · {{ gpu?.power_draw_w?.toFixed(0) || '--' }}W</div>
-        </div>
-        <div class="surface-subtle p-4">
-          <div class="eyebrow-label mb-1">Optimizer</div>
-          <div class="text-lg font-bold" :class="aiStatus?.enabled ? 'text-accent' : 'text-storm'">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }}</div>
-          <div class="mt-1 text-xs text-storm">{{ aiStatus?.cache_count || 0 }} {{ $t('dashboard.cached') }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</div>
-        </div>
-      </div>
+      </section>
 
       <!-- GPU Gauges + Quick Controls -->
       <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -754,6 +651,15 @@
       :pending-label="t('dashboard.disconnect_client_pending')"
       @confirm="disconnectClient"
     />
+    <ConfirmActionDialog
+      v-model="doctorActionConfirmOpen"
+      :title="t('dashboard.doctor_action_confirm_title')"
+      :message="doctorSafeAction ? `${doctorSafeAction.label}. ${doctorSafeAction.rollback || ''}` : ''"
+      :confirm-label="doctorSafeAction?.label || ''"
+      :cancel-label="t('_common.cancel')"
+      :pending="doctorActionPending"
+      @confirm="runDoctorSafeAction"
+    />
   </div>
 </template>
 
@@ -776,12 +682,9 @@ import { resolveClientSettingsSync } from '../client-settings-sync'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import {
-  buildFpsTargetGap,
   buildLiveSummary,
-  buildMissionControlStrip,
   buildQualityGrade,
   buildQualityScore,
-  buildTelemetryGuidance,
 } from '../dashboard-summary'
 
 const { stats } = useStreamStats(1000)
@@ -1251,57 +1154,6 @@ const runtimePathNoteTone = computed(() => {
   return 'text-warning'
 })
 
-const fpsTargetGap = computed(() => buildFpsTargetGap(stats.value || {}))
-
-const streamPathNotices = computed(() => {
-  if (!stats.value?.streaming) return []
-
-  const notices = []
-  const transport = captureTransportLabel.value
-  const residency = captureResidencyLabel.value
-  const encodeTarget = encodeTargetLabel.value
-
-  if (headlessGpuNativeOverrideActive.value) {
-    notices.push({
-      key: 'gpu-native-override',
-      title: 'GPU-native override',
-      message: 'Polaris requested headless, but is running windowed labwc so GPU-native capture can stay GPU-resident.',
-      surfaceClass: 'border-warning/25 bg-warning/10',
-      titleClass: 'text-warning-bright',
-    })
-  }
-
-  if (stats.value?.capture_gpu_native) {
-    notices.push({
-      key: 'gpu-native-active',
-      title: 'GPU-native path active',
-      message: `${captureReasonLabel.value} Capture is ${transport}/${residency} and encode target is ${encodeTarget}.`,
-      surfaceClass: 'border-success/25 bg-success/10',
-      titleClass: 'text-success',
-    })
-  } else if (stats.value?.capture_cpu_copy) {
-    notices.push({
-      key: 'cpu-copy-active',
-      title: 'CPU copy path active',
-      message: `${captureReasonLabel.value} Capture is ${transport}/${residency}.`,
-      surfaceClass: 'border-warning/25 bg-warning/10',
-      titleClass: 'text-warning-bright',
-    })
-  }
-
-  if (fpsTargetGap.value) {
-    notices.push({
-      key: 'fps-target-gap',
-      title: 'FPS target gap',
-      message: `Client target is ${fpsTargetGap.value.target.toFixed(0)} FPS; encoder is averaging ${fpsTargetGap.value.encoded.toFixed(1)} FPS. Check game caps, VSync, or launch flags before treating this as a capture fallback.`,
-      surfaceClass: 'border-ice/25 bg-ice/10',
-      titleClass: 'text-ice',
-    })
-  }
-
-  return notices
-})
-
 const liveSessionTitle = computed(() => (
   connectedClients.value.length > 1
     ? t('dashboard.live_session_multi', { count: connectedClients.value.length })
@@ -1489,13 +1341,6 @@ const previewStatusText = computed(() => {
   return t('dashboard.preview_status')
 })
 
-const aiOptimizationSummary = computed(() => {
-  const reasoning = aiOptimization.value?.reasoning
-  if (!reasoning) return ''
-  const firstSentence = String(reasoning).split(/(?<=[.!?])\s+/)[0]
-  return firstSentence || String(reasoning)
-})
-
 const qualityBadgeClass = computed(() => {
   const g = qualityGrade.value
   return {
@@ -1506,42 +1351,6 @@ const qualityBadgeClass = computed(() => {
   }
 })
 
-const telemetryGuidance = computed(() => buildTelemetryGuidance({
-  stats: stats.value || {},
-  gpu: gpu.value,
-  fpsTargetGap: fpsTargetGap.value,
-  captureReason: captureReasonLabel.value,
-  autoQuality: autoQuality.value,
-  headlessGpuNativeOverrideActive: headlessGpuNativeOverrideActive.value,
-}))
-
-const telemetryConcerns = computed(() => telemetryGuidance.value.concerns)
-
-// Optimization recommendations (computed from live stats)
-const recommendations = computed(() => {
-  if (!stats.value?.streaming) return []
-  const recs = [...telemetryGuidance.value.recommendations]
-
-  if (!stats.value.headless_mode) {
-    recs.push({ color: 'text-accent', message: 'Use Private Stream in Audio/Video settings for hidden stream-only sessions that leave the desktop layout alone.' })
-  }
-
-  return recs
-})
-
-const primaryRecommendations = computed(() => recommendations.value.slice(0, 2))
-
-const missionControlStrip = computed(() => buildMissionControlStrip({
-  statsLoaded: statsLoaded.value,
-  stats: stats.value || {},
-  pairedClients: pairedClients.value,
-  appCatalogCount: appCatalogCount.value,
-  readyCheckDisplay: readyCheckDisplay.value,
-  liveSummary: liveSummary.value,
-  telemetryConcerns: telemetryConcerns.value,
-  primaryRecommendation: primaryRecommendations.value[0] || null,
-  runtimePathNote: runtimePathNote.value,
-}))
 
 
 // Recording controls
@@ -1565,6 +1374,73 @@ async function stopRecording() {
 
 async function saveReplay() {
   await runRecordingAction('./api/recording/save-replay', 'dashboard.recording_replay_success', 'dashboard.recording_replay_error')
+}
+
+// ── Doctor: the host's deterministic per-second diagnosis (SSE `doctor`) ──
+const doctor = computed(() => stats.value?.doctor || null)
+
+const doctorHeadline = computed(() => {
+  const d = doctor.value
+  if (!d) return t('dashboard.doctor_all_clear')
+  if (d.traffic_light === 'green' || !d.primary_issue || d.primary_issue === 'none') {
+    return d.summary || t('dashboard.doctor_all_clear')
+  }
+  return d.summary || d.primary_issue
+})
+
+const doctorRecommendation = computed(() => doctor.value?.recommendation || '')
+
+const doctorPanelClass = computed(() => {
+  switch (doctor.value?.traffic_light) {
+    case 'red': return 'border-danger/30 bg-danger/5'
+    case 'yellow': return 'border-warning/25 bg-warning/5'
+    default: return 'border-success/20 bg-success/5'
+  }
+})
+
+const doctorLightClass = computed(() => {
+  switch (doctor.value?.traffic_light) {
+    case 'red': return 'bg-danger'
+    case 'yellow': return 'bg-warning'
+    default: return 'bg-success'
+  }
+})
+
+const doctorConfidenceLabel = computed(() => {
+  const level = doctor.value?.confidence?.level
+  return level ? t('dashboard.doctor_confidence', { level }) : ''
+})
+
+// The host describes an executable safe recovery ({endpoint, method, payload});
+// it runs only after explicit confirmation.
+const doctorSafeAction = computed(() => {
+  const action = doctor.value?.safe_recovery_action
+  if (!action || action.kind === 'none' || !action.endpoint) return null
+  return action
+})
+
+const doctorActionConfirmOpen = ref(false)
+const doctorActionPending = ref(false)
+
+async function runDoctorSafeAction() {
+  const action = doctorSafeAction.value
+  doctorActionConfirmOpen.value = false
+  if (!action || doctorActionPending.value) return
+  doctorActionPending.value = true
+  try {
+    const response = await fetch(`.${action.endpoint.startsWith('/') ? '' : '/'}${action.endpoint}`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: action.method || 'POST',
+      body: JSON.stringify(action.payload || {}),
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    showToast(t('dashboard.doctor_action_success') + action.label, 'success')
+  } catch (e) {
+    showToast(t('dashboard.doctor_action_error') + e.message, 'error')
+  } finally {
+    doctorActionPending.value = false
+  }
 }
 
 // Launch a recent game straight from the landing page (same endpoint the

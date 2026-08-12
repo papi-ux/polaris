@@ -1,11 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  buildFpsTargetGap,
   buildLiveSummary,
-  buildMissionControlStrip,
   buildQualityGrade,
   buildQualityScore,
-  buildTelemetryGuidance,
 } from './dashboard-summary'
 
 describe('Mission Control dashboard summary helpers', () => {
@@ -29,49 +26,5 @@ describe('Mission Control dashboard summary helpers', () => {
     expect(summary.bitrate).toBe('45.0 Mbps')
   })
 
-  it('turns noisy telemetry into gamer-readable concerns', () => {
-    const stats = {
-      streaming: true,
-      fps: 58,
-      requested_client_fps: 120,
-      latency_ms: 48,
-      packet_loss: 2.5,
-      bitrate_kbps: 30000,
-      encode_time_ms: 13.4,
-      capture_cpu_copy: true,
-    }
-    const fpsTargetGap = buildFpsTargetGap(stats)
-    const guidance = buildTelemetryGuidance({
-      stats,
-      fpsTargetGap,
-      captureReason: 'Wayland capture fell back to SHM/system-memory frames.',
-      autoQuality: { enabled: false },
-    })
-
-    expect(guidance.concerns.map((concern) => concern.label)).toEqual([
-      'Network risk',
-      'Encoder pressure',
-      'CPU copy path',
-      'Frame cap likely',
-    ])
-    expect(guidance.recommendations[0].message).toContain('Network risk')
-    expect(guidance.recommendations.at(-1).message).toContain('Enable Auto Quality')
-  })
-
-  it('builds Now Next Fix for idle launch blockers', () => {
-    const strip = buildMissionControlStrip({
-      statsLoaded: true,
-      stats: { streaming: false },
-      pairedClients: 1,
-      appCatalogCount: 0,
-      readyCheckDisplay: {
-        primaryIssue: { label: 'Library', detail: 'Import at least one game.', to: '/apps' },
-      },
-    })
-
-    expect(strip.map((item) => item.label)).toEqual(['Now', 'Next', 'Fix'])
-    expect(strip[1].title).toBe('Import games')
-    expect(strip[2]).toMatchObject({ title: 'Library', to: '/apps' })
-  })
 
 })
