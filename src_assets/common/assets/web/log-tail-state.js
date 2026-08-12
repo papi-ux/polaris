@@ -120,14 +120,15 @@ export function applyLogTailPayload(state, payload, {
   const combined = append ? concatenate(previous.bytes, incoming) : incoming
   const initialStartOffset = append ? previous.startOffset : payload.start_offset
   const bounded = trimBytes(combined, maxBytes, maxLines)
+  const boundedStartOffset = initialStartOffset + bounded.removed
 
   return {
     bytes: bounded.bytes,
     text: decodeText(bounded.bytes, payload.charset),
-    startOffset: initialStartOffset + bounded.removed,
+    startOffset: boundedStartOffset,
     endOffset: payload.end_offset,
     generation: payload.generation,
-    truncated: payload.truncated || bounded.removed > 0,
+    truncated: payload.truncated || boundedStartOffset > 0,
     reset: payload.reset || !append,
   }
 }

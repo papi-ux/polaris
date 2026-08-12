@@ -147,6 +147,27 @@ describe('bounded browser log-tail state', () => {
     expect(state.truncated).toBe(true)
   })
 
+  it('preserves omitted-history state across an empty contiguous delta', () => {
+    const initial = applyLogTailPayload(createLogTailState(), payload('recent\n', {
+      start_offset: 100,
+      end_offset: 107,
+      truncated: true,
+      reset: true,
+    }))
+    const next = applyLogTailPayload(initial, payload('', {
+      start_offset: 107,
+      end_offset: 107,
+      truncated: false,
+      reset: false,
+    }))
+
+    expect(next.text).toBe('recent\n')
+    expect(next.startOffset).toBe(100)
+    expect(next.endOffset).toBe(107)
+    expect(next.truncated).toBe(true)
+    expect(next.reset).toBe(false)
+  })
+
   it('keeps a large response inside the production browser bound', () => {
     const large = `${'x'.repeat(1023)}\n`.repeat(1024)
     const state = applyLogTailPayload(createLogTailState(), payload(large), {
