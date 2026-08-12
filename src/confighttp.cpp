@@ -21,6 +21,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <numeric>
@@ -49,6 +50,7 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "log_tail_api.h"
 #include "network.h"
 #include "nvhttp.h"
 #include "platform/common.h"
@@ -4247,6 +4249,98 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get a versioned, bounded tail of the active log file.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * Query parameters are strict decimal values: `max_bytes`, `max_lines`, and
+   * optional `after` plus `after_generation`. The payload is Base64 encoded so
+   * every source byte is representable in JSON. `reset` tells incremental
+   * callers whether the returned content must replace their local state.
+   *
+   * @api_examples{/polaris/v1/diagnostics/logs/tail| GET| ?max_bytes=262144&max_lines=2000&after=0&after_generation=1}
+   */
+  void getLogTail(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      const auto query = request->parse_query_string();
+      for (const auto &entry : query) {
+        const auto &name = entry.first;
+        if (name != "max_bytes" && name != "max_lines" && name != "after" && name != "after_generation") {
+          bad_request(response, request, "Unknown query parameter: " + name);
+          return;
+        }
+      }
+
+      const auto query_value = [&](const std::string &name) -> std::optional<std::string_view> {
+        if (query.count(name) > 1) {
+          throw std::invalid_argument(name + " must appear at most once");
+        }
+        const auto value = query.find(name);
+        if (value == query.end()) {
+          return std::nullopt;
+        }
+        return value->second;
+      };
+
+      const auto tail_request = log_tail_api::parse_request(
+        query_value("max_bytes"),
+        query_value("max_lines"),
+        query_value("after"),
+        query_value("after_generation")
+      );
+
+      std::optional<file_handler::tail_result_t> stable_tail;
+      std::uint64_t stable_generation = 0;
+      for (int attempt = 0; attempt < 3; ++attempt) {
+        const auto generation_before = logging::log_file_generation();
+        auto candidate = file_handler::read_file_tail(config::sunshine.log_file.c_str(), tail_request.max_bytes);
+        const auto generation_after = logging::log_file_generation();
+        if (generation_before == generation_after) {
+          stable_tail = std::move(candidate);
+          stable_generation = generation_after;
+          break;
+        }
+      }
+      if (!stable_tail) {
+        nlohmann::json output = {
+          {"status", false},
+          {"error", "The active log changed repeatedly; retry the request."},
+        };
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Retry-After", "1");
+        headers.emplace("Cache-Control", "no-store");
+        append_json_security_headers(headers);
+        response->write(SimpleWeb::StatusCode::server_error_service_unavailable, output.dump(), headers);
+        return;
+      }
+
+      auto output = log_tail_api::serialize_response(log_tail_api::build_response(
+        std::move(*stable_tail),
+        tail_request,
+        stable_generation
+      ));
+      output["media_type"] = "text/plain";
+  #ifdef _WIN32
+      output["charset"] = currentCodePageToCharset();
+  #else
+      output["charset"] = "utf-8";
+  #endif
+
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Cache-Control", "no-store");
+      append_json_security_headers(headers);
+      response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+    } catch (const std::invalid_argument &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+
+  /**
    * @brief Get the logs from the log file.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -4258,7 +4352,7 @@ namespace confighttp {
       return;
     }
 
-    std::string content = file_handler::read_file(config::sunshine.log_file.c_str());
+    const auto tail = file_handler::read_file_tail(config::sunshine.log_file.c_str(), log_tail_api::legacy_max_bytes);
     SimpleWeb::CaseInsensitiveMultimap headers;
     std::string contentType = "text/plain";
   #ifdef _WIN32
@@ -4266,8 +4360,12 @@ namespace confighttp {
     contentType += currentCodePageToCharset();
   #endif
     headers.emplace("Content-Type", contentType);
+    headers.emplace("Cache-Control", "no-store");
+    headers.emplace("X-Polaris-Log-Start-Offset", std::to_string(tail.start_offset));
+    headers.emplace("X-Polaris-Log-End-Offset", std::to_string(tail.end_offset));
+    headers.emplace("X-Polaris-Log-Truncated", tail.truncated ? "true" : "false");
     append_common_security_headers(headers);
-    response->write(SimpleWeb::StatusCode::success_ok, content, headers);
+    response->write(SimpleWeb::StatusCode::success_ok, tail.content, headers);
   }
 
   /**
@@ -6347,6 +6445,7 @@ namespace confighttp {
     server.resource["^/api/apps/close$"]["POST"] = withCsrf(closeApp);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
+    server.resource["^/polaris/v1/diagnostics/logs/tail$"]["GET"] = getLogTail;
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/logs/clear$"]["POST"] = withCsrf(clearLogs);
     server.resource["^/api/config$"]["GET"] = getConfig;
