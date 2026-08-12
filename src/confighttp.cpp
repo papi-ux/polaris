@@ -65,6 +65,7 @@
 #include "wol.h"
 #include "client_profiles.h"
 #include "device_db.h"
+#include "doctor_actions.h"
 #include "ai_optimizer.h"
 #include "game_classifier.h"
 #include "game_library_scanner.h"
@@ -3550,6 +3551,22 @@ namespace confighttp {
     }
   }
 
+  void runDoctorAction(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      const auto body = nlohmann::json::parse(ss.str());
+      send_response(response, doctor_actions::execute(body));
+    } catch (const std::exception &e) {
+      send_response(response, {{"status", false}, {"changed", false}, {"error", e.what()}});
+    }
+  }
+
   // ---- Client Profile CRUD API ----
 
   void getClientProfiles(resp_https_t response, req_https_t request) {
@@ -6355,6 +6372,7 @@ namespace confighttp {
     server.resource["^/api/ai/test$"]["POST"] = withCsrf(testAiConfig);
     server.resource["^/api/ai/optimize$"]["POST"] = withCsrf(triggerAiOptimize);
     server.resource["^/api/ai/explain-doctor$"]["POST"] = withCsrf(explainDoctorWithAi);
+    server.resource["^/api/doctor/action$"]["POST"] = withCsrf(runDoctorAction);
     server.resource["^/api/devices$"]["GET"] = getDevices;
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;
     server.resource["^/api/clients/profiles$"]["GET"] = getClientProfiles;
