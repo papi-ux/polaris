@@ -728,6 +728,7 @@
       "display": "Open Display Device Settings",
       "ai": "Open AI Optimization Settings",
       "network": "Open Trusted Subnets Settings",
+      "launch": "Launch",
       "restart": "Restart Polaris",
       "quit": "Quit Polaris"
     }

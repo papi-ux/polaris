@@ -1044,7 +1044,7 @@ function refreshPreview() {
     // Chromium may never fire img load for multipart streams; clear the
     // spinner once frames have had time to arrive unless an error landed.
     previewTimer = setTimeout(() => {
-      if (previewMode.value === 'mjpeg' && showPreview.value && !previewError.value) {
+      if (previewMode.value === 'mjpeg' && showPreview.value && !previewError.value && !document.hidden) {
         previewLoaded.value = true
         schedulePreviewRefresh(30000)
       }
@@ -1175,8 +1175,9 @@ function relativeSeen(value) {
 
 const pairedClientChips = computed(() => {
   const chips = pairedClientList.value.slice(0, 3).map((cert) => {
+    const displayName = cert.name || cert.uuid || ''
     const seen = relativeSeen(cert.last_seen_at)
-    return { name: cert.name || cert.uuid, label: seen ? `${cert.name} · ${seen}` : cert.name }
+    return { name: displayName, label: seen ? `${displayName} · ${seen}` : displayName }
   }).filter((chip) => chip.name)
   const extra = pairedClientList.value.length - chips.length
   if (extra > 0) chips.push({ name: '+extra', label: `+${extra} more` })
@@ -1401,7 +1402,13 @@ const prefersReducedMotion = ref(false)
 let reducedMotionQuery = null
 
 function updateReducedMotionPreference(event) {
-  prefersReducedMotion.value = Boolean(event?.matches)
+  const next = Boolean(event?.matches)
+  if (next !== prefersReducedMotion.value) {
+    // The spark slots remount on this flip; stale uPlot instances would keep
+    // drawing into detached nodes, so drop them and let the next tick rebuild.
+    destroyChartInstances()
+  }
+  prefersReducedMotion.value = next
 }
 
 // Track whether we've gotten at least one stats response

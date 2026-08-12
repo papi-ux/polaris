@@ -189,11 +189,12 @@ export function createGameLaunchActions(apps, { t, fetchImpl = fetch, toast = ()
         body: JSON.stringify({ uuid: app.uuid }),
       })
       const result = response.ok ? await response.json() : { status: false }
+      const launched = result.status === true
       toast(
-        result.status === true
-          ? `${app.name} launched`
-          : `Launch failed${result.error ? `: ${result.error}` : ''}`,
-        result.status === true ? 'success' : 'error',
+        launched
+          ? (typeof t === 'function' ? t('dashboard.launched', { name: app.name }) : `${app.name} launched`)
+          : (typeof t === 'function' ? t('dashboard.launch_failed') : 'Launch failed: ') + (result.error || ''),
+        launched ? 'success' : 'error',
       )
     },
   }))

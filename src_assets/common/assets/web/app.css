@@ -684,11 +684,7 @@ textarea {
 
 .operator-console .dashboard-preview-panel,
 .operator-console .dashboard-preview-frame,
-.operator-console .dashboard-preview-empty,
-.operator-console .dashboard-metric-tile,
 .operator-console .dashboard-client-row,
-.operator-console .dashboard-empty-state,
-.operator-console .dashboard-telemetry-card,
 .operator-console .settings-subtle-surface {
   border-radius: 0.5rem;
 }
@@ -705,7 +701,7 @@ textarea {
   @apply border-warning/25 bg-warning/8;
 }
 
-.operator-console .operator-console .dashboard-degraded-state {
+.operator-console .dashboard-degraded-state {
   @apply flex flex-col gap-3 rounded-lg border border-warning/20 bg-warning/6 px-4 py-4 sm:flex-row sm:items-center sm:justify-between;
 }
 
@@ -1231,20 +1227,12 @@ textarea {
   @apply flex min-w-[5.5rem] flex-col-reverse gap-1 border-0 bg-transparent p-0;
 }
 
-.dashboard-live-summary-tile-primary {
-  @apply border-0 bg-transparent;
-}
-
 .dashboard-live-summary-label {
   @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-live-summary-value {
   @apply truncate font-mono text-[1.65rem] font-bold leading-none tracking-tight tabular-nums;
-}
-
-.dashboard-live-summary-copy {
-  @apply mt-1 truncate text-[11px] text-storm;
 }
 
 .dashboard-live-stage {
@@ -1324,25 +1312,9 @@ textarea {
   @apply flex flex-wrap gap-2;
 }
 
-.dashboard-preview-empty {
-  @apply mt-4 flex min-h-[280px] flex-col justify-between gap-4 rounded-2xl border border-dashed border-storm/25 bg-void/35 p-5;
-}
-
 .dashboard-live-side {
   @apply space-y-4;
   align-self: start;
-}
-
-.dashboard-metric-tile {
-  @apply rounded-2xl border border-storm/15 bg-void/35 px-3.5 py-3;
-}
-
-.dashboard-metric-label {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
-.dashboard-metric-value {
-  @apply mt-2 text-lg font-semibold text-silver;
 }
 
 .dashboard-runtime-grid {
@@ -1369,49 +1341,8 @@ textarea {
   @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2;
 }
 
-.dashboard-empty-state {
-  @apply mt-4 rounded-2xl border border-dashed border-storm/25 bg-void/35 px-4 py-5 text-sm leading-relaxed text-storm;
-}
-
 .dashboard-live-support-grid {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)];
-}
-
-.dashboard-secondary-group {
-  @apply rounded-2xl border border-storm/20 bg-deep/20;
-}
-
-.dashboard-secondary-group[open] {
-  @apply bg-deep/30;
-}
-
-.dashboard-secondary-group-summary {
-  @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 font-mono text-[11px] font-semibold uppercase tracking-eyebrow text-storm transition-colors duration-200 hover:text-silver;
-}
-
-.dashboard-secondary-group-summary::-webkit-details-marker {
-  display: none;
-}
-
-.dashboard-secondary-group-summary span:last-child {
-  @apply rounded-full border border-storm/20 bg-void/40 px-2 py-1 text-[10px] normal-case tracking-normal text-silver;
-}
-
-.dashboard-secondary-group > .surface-subtle,
-.dashboard-secondary-group > .dashboard-telemetry-card {
-  @apply rounded-t-none border-x-0 border-b-0;
-}
-
-.dashboard-support-card {
-  @apply space-y-4;
-}
-
-.dashboard-support-subsection {
-  @apply mt-4 space-y-2 border-t border-storm/15 pt-4;
-}
-
-.dashboard-support-subtitle {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-context-card {
@@ -1428,10 +1359,6 @@ textarea {
 
 .dashboard-rail-footnote {
   @apply mt-3 text-[11px] text-storm;
-}
-
-.dashboard-telemetry-card {
-  @apply rounded-2xl border border-storm/20 bg-deep/30 p-4;
 }
 
 .dashboard-telemetry-grid {
@@ -1505,8 +1432,6 @@ textarea {
 
   .dashboard-live-shell,
   .dashboard-preview-panel,
-  .dashboard-telemetry-card,
-  .dashboard-secondary-group,
   .dashboard-live-summary-tile {
     box-shadow: none;
   }

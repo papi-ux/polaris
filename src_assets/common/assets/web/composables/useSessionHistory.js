@@ -37,10 +37,10 @@ export function useSessionHistory(stats) {
     } catch {}
   }
 
-  function startSession(s) {
-    activeStartedAt.value = Date.now()
+  function startSession(s, witnessedStart = true) {
+    activeStartedAt.value = witnessedStart ? Date.now() : 0
     currentSession = {
-      started_at: activeStartedAt.value,
+      started_at: Date.now(),
       client_name: s.client_name || 'Unknown',
       client_ip: s.client_ip || '',
       codec: s.codec || '',
@@ -123,7 +123,9 @@ export function useSessionHistory(stats) {
     if (!newStats) return
 
     if (newStats.streaming && (!oldStats || !oldStats.streaming)) {
-      startSession(newStats)
+      // A first tick that is already mid-stream has an unknown start time;
+      // only a witnessed idle-to-streaming transition gets a live duration.
+      startSession(newStats, Boolean(oldStats && !oldStats.streaming))
     }
 
     if (newStats.streaming && currentSession) {
