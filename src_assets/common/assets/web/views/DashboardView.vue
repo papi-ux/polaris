@@ -370,15 +370,11 @@
 
       <!-- GPU Gauges + Quick Controls -->
       <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div class="min-w-0 space-y-4">
         <div class="section-card space-y-5">
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
-              <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
-            </div>
-            <span class="meta-pill">
-              {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
-            </span>
+          <div>
+            <div class="section-kicker">Host vitals</div>
+            <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
           </div>
 
           <div class="surface-subtle p-4" v-if="gpu">
@@ -407,20 +403,7 @@
           </div>
 
           <div>
-            <div class="flex items-start justify-between gap-3">
-              <div>
-                <div class="section-kicker">{{ $t('dashboard.ready_checks') }}</div>
-                <div class="mt-2 flex items-center gap-2">
-                  <div class="text-sm font-medium text-silver">{{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}</div>
-                  <InfoHint size="sm" :label="$t('dashboard.ready_checks')">{{ $t('dashboard.ready_checks_desc') }}</InfoHint>
-                </div>
-              </div>
-              <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium"
-                    :class="readyChecksPassing === readyChecks.length ? 'border-success/30 bg-success/10 text-success' : 'border-warning/30 bg-warning/10 text-warning-bright'">
-                {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
-              </span>
-            </div>
-            <div v-if="readyChecksAllPassing" class="ready-check-summary mt-4">
+            <div v-if="readyChecksAllPassing" class="ready-check-summary">
               <div>
                 <div class="text-sm font-semibold text-success">All launch checks are ready</div>
                 <div class="mt-1 text-xs text-storm">Pairing, library, discovery, displays, and audio are clear.</div>
@@ -429,7 +412,7 @@
                 {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
-            <div v-else class="mt-4 space-y-3">
+            <div v-else class="space-y-3">
               <div class="ready-check-summary ready-check-summary-attention">
                 <div>
                   <div class="text-sm font-semibold text-warning-bright">{{ readyChecksAttentionCount }} launch checks need attention</div>
@@ -466,58 +449,59 @@
             </div>
           </div>
         </div>
+        <!-- Recent Games: the landing page is a remote control, so rows launch. -->
+        <div class="section-card" data-dashboard-play-rail>
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
+              <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
+            </div>
+            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
+              {{ $t('navbar.library') }}
+            </router-link>
+          </div>
+          <div v-if="recentApps.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
+            <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
+              <div class="dashboard-play-cover">
+                <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="h-full w-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
+              </div>
+              <div class="mt-2 min-w-0">
+                <div class="truncate text-xs font-semibold text-silver">{{ app.name }}</div>
+                <div class="truncate font-mono text-[9px] uppercase tracking-eyebrow text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
+              </div>
+              <button
+                type="button"
+                class="focus-ring dashboard-play-launch"
+                :disabled="launchingUuid === app.uuid"
+                @click="launchRecentApp(app)"
+              >
+                {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
+              </button>
+            </div>
+          </div>
+          <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
+          <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
+            <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
+            <span class="data-pill">
+              {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
+            </span>
+            <span class="data-pill">
+              {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
+            </span>
+            <span class="data-pill" v-if="audio?.sink">
+              {{ formatAudioName(audio.sink) }}
+            </span>
+            <span class="data-pill">
+              v{{ version }}
+            </span>
+          </div>
+        </div>
+        </div>
         <div class="section-card">
           <QuickControls @change="handleQuickControlChange" />
         </div>
       </div>
 
-      <!-- Recent Games: the landing page is a remote control, so rows launch. -->
-      <div class="section-card" data-dashboard-play-rail>
-        <div class="flex items-center justify-between gap-3 mb-3">
-          <div>
-            <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
-            <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
-          </div>
-          <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
-            {{ $t('navbar.library') }}
-          </router-link>
-        </div>
-        <div v-if="recentApps.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
-          <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
-            <div class="dashboard-play-cover">
-              <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="h-full w-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
-            </div>
-            <div class="mt-2 min-w-0">
-              <div class="truncate text-xs font-semibold text-silver">{{ app.name }}</div>
-              <div class="truncate font-mono text-[9px] uppercase tracking-eyebrow text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
-            </div>
-            <button
-              type="button"
-              class="focus-ring dashboard-play-launch"
-              :disabled="launchingUuid === app.uuid"
-              @click="launchRecentApp(app)"
-            >
-              {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
-            </button>
-          </div>
-        </div>
-        <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
-        <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
-          <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
-          <span class="data-pill">
-            {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
-          </span>
-          <span class="data-pill">
-            {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
-          </span>
-          <span class="data-pill" v-if="audio?.sink">
-            {{ formatAudioName(audio.sink) }}
-          </span>
-          <span class="data-pill">
-            v{{ version }}
-          </span>
-        </div>
-      </div>
     </template>
 
     <!-- Session History (idle): one list; this browser's rich local history,
@@ -538,7 +522,7 @@
     </div>
     <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="card p-4">
       <div class="flex items-center justify-between mb-3">
-        <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">Session History</div>
+        <div class="eyebrow-label">Session History</div>
         <button @click="clearHistory" class="text-[10px] text-storm hover:text-ice transition-colors">Clear</button>
       </div>
       <div class="space-y-0">
