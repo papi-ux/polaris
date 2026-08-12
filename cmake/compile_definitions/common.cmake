@@ -81,6 +81,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/doctor_actions.h"
         "${CMAKE_SOURCE_DIR}/src/doctor_actions.cpp"
         "${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.h"
+        "${CMAKE_SOURCE_DIR}/src/bounded_log_file.cpp"
+        "${CMAKE_SOURCE_DIR}/src/bounded_log_file.h"
         "${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.cpp"
         "${CMAKE_SOURCE_DIR}/src/browser_stream.h"
         "${CMAKE_SOURCE_DIR}/src/browser_stream.cpp"

@@ -4,7 +4,6 @@
  */
 // standard includes
 #include <atomic>
-#include <fstream>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -16,10 +15,12 @@
 #include <boost/log/attributes/clock.hpp>
 #include <boost/log/common.hpp>
 #include <boost/log/expressions.hpp>
+#include <boost/log/sinks/basic_sink_backend.hpp>
 #include <boost/log/sinks.hpp>
 #include <boost/log/sources/severity_logger.hpp>
 
 // local includes
+#include "bounded_log_file.h"
 #include "logging.h"
 
 // conditional includes
@@ -37,10 +38,69 @@ using namespace std::literals;
 
 namespace bl = boost::log;
 
-boost::shared_ptr<boost::log::sinks::asynchronous_sink<boost::log::sinks::text_ostream_backend>> sink;
-boost::shared_ptr<std::ofstream> log_file_stream;
-std::string active_log_file_path;
+boost::shared_ptr<text_sink> sink;
 std::atomic_uint64_t active_log_file_generation {0};
+
+namespace {
+  using bounded_file_backend_base_t = boost::log::sinks::basic_formatted_sink_backend<
+    char,
+    boost::log::sinks::combine_requirements<
+      boost::log::sinks::synchronized_feeding,
+      boost::log::sinks::flushing
+    >::type
+  >;
+
+  class bounded_file_backend_t: public bounded_file_backend_base_t {
+  public:
+    bounded_file_backend_t(
+      const std::filesystem::path &active_path,
+      const std::filesystem::path &backup_path,
+      const std::uintmax_t max_bytes
+    ):
+        file_(active_path, backup_path, max_bytes, []() {
+          active_log_file_generation.fetch_add(1, std::memory_order_release);
+        }) {
+    }
+
+    void consume(const boost::log::record_view &, const string_type &formatted_message) {
+      const auto result = file_.write_record(formatted_message);
+      if (result == logging::bounded_log_write_result_e::rejected && !reported_failure_) {
+        std::cerr << "Polaris stopped writing the active log because its bounded file backend failed." << std::endl;
+        reported_failure_ = true;
+      }
+    }
+
+    void flush() {
+      file_.flush();
+    }
+
+    [[nodiscard]] bool good() const {
+      return file_.good();
+    }
+
+    bool clear() {
+      const auto cleared = file_.clear();
+      if (cleared) {
+        reported_failure_ = false;
+      }
+      return cleared;
+    }
+
+  private:
+    logging::bounded_log_file_t file_;
+    bool reported_failure_ = false;
+  };
+
+  using bounded_file_queue_t = boost::log::sinks::bounded_fifo_queue<
+    async_log_queue_capacity,
+    boost::log::sinks::block_on_overflow
+  >;
+  using bounded_file_sink_t = boost::log::sinks::asynchronous_sink<
+    bounded_file_backend_t,
+    bounded_file_queue_t
+  >;
+  boost::shared_ptr<bounded_file_sink_t> file_sink;
+}  // namespace
 
 bl::sources::severity_logger<int> verbose(0);  // Dominating output
 bl::sources::severity_logger<int> debug(1);  // Follow what is happening
@@ -61,14 +121,14 @@ namespace logging {
 
   void deinit() {
     log_flush();
-    bl::core::get()->remove_sink(sink);
-    sink.reset();
-    if (log_file_stream) {
-      log_file_stream->flush();
-      log_file_stream->close();
-      log_file_stream.reset();
+    if (file_sink) {
+      bl::core::get()->remove_sink(file_sink);
+      file_sink.reset();
     }
-    active_log_file_path.clear();
+    if (sink) {
+      bl::core::get()->remove_sink(sink);
+      sink.reset();
+    }
   }
 
   void formatter(const boost::log::record_view &view, boost::log::formatting_ostream &os) {
@@ -184,7 +244,7 @@ namespace logging {
 #endif
 
   [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file) {
-    if (sink) {
+    if (sink || file_sink) {
       // Deinitialize the logging system before reinitializing it. This can probably only ever be hit in tests.
       deinit();
     }
@@ -195,17 +255,15 @@ namespace logging {
     if (!log_file.empty()) {
       backup_log_file = log_file + ".backup";
     }
-    if (!log_file.empty() && std::filesystem::exists(log_file)) {
-      try {
-        // If the backup file exists, remove it
-        if (std::filesystem::exists(backup_log_file)) {
-          std::filesystem::remove(backup_log_file);
-        }
-        // Rename the current log file to the backup name
-        std::filesystem::rename(log_file, backup_log_file);
-      } catch (std::exception& e) {
-        std::cout << "Failed to rotate log file: " << e.what() << std::endl;
-      }
+    auto file_logging_ready = !log_file.empty();
+    if (file_logging_ready && !bounded_log_file_t::preserve_existing(
+                                log_file,
+                                backup_log_file,
+                                runtime_log_max_bytes
+                              )) {
+      std::cout << "Failed to preserve a bounded backup of the prior log file." << std::endl;
+      // Fail closed instead of truncating the only surviving copy below.
+      file_logging_ready = false;
     }
 
 #ifndef __ANDROID__
@@ -214,17 +272,26 @@ namespace logging {
 #endif
 
     sink = boost::make_shared<text_sink>();
-    active_log_file_path = log_file;
 
 #ifndef POLARIS_TESTS
     boost::shared_ptr<std::ostream> stream {&std::cout, boost::null_deleter()};
     sink->locked_backend()->add_stream(stream);
 #endif
 
-    if (!log_file.empty()) {
-      log_file_stream = boost::make_shared<std::ofstream>(log_file);
-      sink->locked_backend()->add_stream(log_file_stream);
-      active_log_file_generation.fetch_add(1, std::memory_order_release);
+    if (file_logging_ready) {
+      auto backend = boost::make_shared<bounded_file_backend_t>(
+        log_file,
+        backup_log_file,
+        runtime_log_max_bytes
+      );
+      if (backend->good()) {
+        file_sink = boost::make_shared<bounded_file_sink_t>(backend);
+        file_sink->set_filter(severity >= min_log_level);
+        file_sink->set_formatter(&formatter);
+        active_log_file_generation.fetch_add(1, std::memory_order_release);
+      } else {
+        std::cout << "Failed to open the bounded active log file." << std::endl;
+      }
     }
     sink->set_filter(severity >= min_log_level);
     sink->set_formatter(&formatter);
@@ -244,6 +311,9 @@ namespace logging {
     }
 
     bl::core::get()->add_sink(sink);
+    if (file_sink) {
+      bl::core::get()->add_sink(file_sink);
+    }
 
 #ifdef __ANDROID__
     auto android_sink = boost::make_shared<sinks::synchronous_sink<android_sink_backend>>();
@@ -316,6 +386,9 @@ namespace logging {
     if (sink) {
       sink->flush();
     }
+    if (file_sink) {
+      file_sink->flush();
+    }
   }
 
   std::uint64_t log_file_generation() {
@@ -323,18 +396,16 @@ namespace logging {
   }
 
   bool clear_log_file() {
-    if (!sink || !log_file_stream || active_log_file_path.empty()) {
+    if (!file_sink) {
       return false;
     }
 
-    log_flush();
+    // Clear only depends on the file queue. The console consumer can be blocked
+    // by journald or a full pipe and must not prevent log-file recovery.
+    file_sink->flush();
 
-    auto backend = sink->locked_backend();
-    log_file_stream->flush();
-    log_file_stream->close();
-    log_file_stream->clear();
-    log_file_stream->open(active_log_file_path, std::ios::out | std::ios::trunc);
-    const auto reopened = log_file_stream->is_open() && log_file_stream->good();
+    auto backend = file_sink->locked_backend();
+    const auto reopened = backend->clear();
     if (reopened) {
       active_log_file_generation.fetch_add(1, std::memory_order_release);
     }
