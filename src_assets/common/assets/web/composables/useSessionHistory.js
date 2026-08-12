@@ -16,6 +16,9 @@ const MAX_SESSIONS = 50
  */
 export function useSessionHistory(stats) {
   const sessions = ref(loadSessions())
+  // Epoch ms of the in-flight session's start; 0 when idle. Lets views show
+  // a live duration without duplicating the start/end tracking below.
+  const activeStartedAt = ref(0)
 
   let currentSession = null
   let samples = null
@@ -35,8 +38,9 @@ export function useSessionHistory(stats) {
   }
 
   function startSession(s) {
+    activeStartedAt.value = Date.now()
     currentSession = {
-      started_at: Date.now(),
+      started_at: activeStartedAt.value,
       client_name: s.client_name || 'Unknown',
       client_ip: s.client_ip || '',
       codec: s.codec || '',
@@ -106,6 +110,7 @@ export function useSessionHistory(stats) {
 
     currentSession = null
     samples = null
+    activeStartedAt.value = 0
   }
 
   function clearHistory() {
@@ -130,7 +135,7 @@ export function useSessionHistory(stats) {
     }
   })
 
-  return { sessions, clearHistory }
+  return { sessions, clearHistory, activeStartedAt }
 }
 
 /**

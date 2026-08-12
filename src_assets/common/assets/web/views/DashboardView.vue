@@ -32,6 +32,9 @@
               <h2 class="section-title">{{ liveSessionTitle }}</h2>
               <InfoHint size="sm" :label="$t('dashboard.live_session')">{{ liveSessionSummary }}</InfoHint>
             </div>
+            <div v-if="currentAppName || sessionDurationLabel" class="mt-1.5 font-mono text-[11px] text-storm">
+              <template v-if="currentAppName">{{ currentAppName }}</template><template v-if="currentAppName && sessionDurationLabel"> · </template><template v-if="sessionDurationLabel">{{ sessionDurationLabel }}</template>
+            </div>
           </div>
           <div class="dashboard-live-header-meta">
             <span class="meta-pill">{{ viewerCountLabel }}</span>
@@ -43,6 +46,7 @@
              Live stream trends drawer lives here now as sparklines. -->
         <section class="dashboard-live-summary-grid" role="status" aria-live="polite" aria-atomic="true" aria-label="Live stream telemetry summary">
           <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="qualityChartEl"></div>
             <div class="dashboard-live-summary-label">Quality</div>
             <div class="flex items-center gap-2">
               <span class="dashboard-grade-badge" :class="liveSummary.qualityTone">{{ qualityGrade }}</span>
@@ -290,6 +294,7 @@
                 <span v-for="chip in pairedClientChips" :key="chip.name" class="data-pill">{{ chip.label }}</span>
               </template>
               <span v-else class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
+              <span v-if="lastSessionChip" class="data-pill">{{ lastSessionChip }}</span>
               <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
               <span class="data-pill" v-if="gpu">{{ gpu.temperature_c || '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
               <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
@@ -536,7 +541,57 @@ import {
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
-const { sessions, clearHistory } = useSessionHistory(stats)
+const { sessions, clearHistory, activeStartedAt } = useSessionHistory(stats)
+
+// Apps catalog: recents for the play rail plus the running app for the hero.
+async function refreshApps() {
+  try {
+    const res = await fetch('./api/apps', { credentials: 'include' })
+    if (res.ok) {
+      const data = await res.json()
+      currentAppUuid.value = data.current_app || ''
+      allAppsById.value = Object.fromEntries((data.apps || []).filter(a => a.uuid).map(a => [a.uuid, a.name]))
+      const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
+      apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
+      appCatalogCount.value = apps.length
+      recentApps.value = apps.slice(0, 5)
+    }
+  } catch {}
+}
+
+// Hero context: what is being played and for how long. current_app arrives
+// with the /api/apps payload; duration ticks against the SSE stats clock.
+const currentAppUuid = ref('')
+const currentAppName = computed(() => {
+  if (!currentAppUuid.value) return ''
+  return recentApps.value.find((app) => app.uuid === currentAppUuid.value)?.name
+    || allAppsById.value[currentAppUuid.value]
+    || ''
+})
+const allAppsById = ref({})
+
+const sessionDurationLabel = computed(() => {
+  // Touch stats so the label re-computes on every SSE tick.
+  void stats.value
+  if (!activeStartedAt.value) return ''
+  const totalS = Math.max(0, Math.round((Date.now() - activeStartedAt.value) / 1000))
+  if (totalS < 60) return `${totalS}s`
+  const minutes = Math.floor(totalS / 60)
+  if (minutes < 60) return `${minutes} min`
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
+})
+
+// Last-session recap for the idle hero.
+const lastSessionChip = computed(() => {
+  const last = sessions.value[0]
+  if (!last) return ''
+  const bits = [
+    last.quality_grade ? `${last.quality_grade}` : '',
+    Number.isFinite(last.duration_s) ? formatDuration(last.duration_s) : '',
+    last.client_name || '',
+  ].filter(Boolean)
+  return bits.length ? `Last: ${bits.join(' · ')}` : ''
+})
 const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices } = useAiOptimizer()
 
 // AI optimization state for current stream
@@ -1263,6 +1318,7 @@ async function launchRecentApp(app) {
     const result = response.ok ? await response.json() : { status: false, error: `HTTP ${response.status}` }
     if (result.status === true) {
       showToast(t('dashboard.launched', { name: app.name }), 'success')
+      refreshApps()
     } else {
       showToast(t('dashboard.launch_failed') + (result.error || ''), 'error')
     }
@@ -1368,6 +1424,7 @@ async function fetchSystemInfo() {
 }
 
 // Chart refs
+const qualityChartEl = ref(null)
 const fpsChartEl = ref(null)
 const bitrateChartEl = ref(null)
 const encodeChartEl = ref(null)
@@ -1375,6 +1432,7 @@ const latencyChartEl = ref(null)
 const lossChartEl = ref(null)
 
 // Chart instances
+let qualityChart = null
 let fpsChart = null
 let bitrateChart = null
 let encodeChart = null
@@ -1384,6 +1442,7 @@ let lossChart = null
 // Rolling data (60 seconds)
 const MAX_POINTS = 60
 const timestamps = ref([])
+const qualityHistory = ref([])
 const fpsHistory = ref([])
 const bitrateHistory = ref([])
 const encodeHistory = ref([])
@@ -1429,6 +1488,7 @@ function updateChartData(chart, ts, values) {
 
 function resizeCharts() {
   const charts = [
+    { chart: qualityChart, el: qualityChartEl.value },
     { chart: fpsChart, el: fpsChartEl.value },
     { chart: bitrateChart, el: bitrateChartEl.value },
     { chart: encodeChart, el: encodeChartEl.value },
@@ -1447,6 +1507,9 @@ let resizeObserver = null
 async function setupCharts() {
   await loadUPlot()
   await nextTick()
+  if (qualityChartEl.value && !qualityChart) {
+    qualityChart = initChart(qualityChartEl.value, makeChartOpts('Quality', '', 'ice'))
+  }
   if (fpsChartEl.value && !fpsChart) {
     fpsChart = initChart(fpsChartEl.value, makeChartOpts('FPS', 'fps', 'success'))
   }
@@ -1465,6 +1528,7 @@ async function setupCharts() {
 }
 
 function destroyChartInstances() {
+  if (qualityChart) { qualityChart.destroy(); qualityChart = null }
   if (fpsChart) { fpsChart.destroy(); fpsChart = null }
   if (bitrateChart) { bitrateChart.destroy(); bitrateChart = null }
   if (encodeChart) { encodeChart.destroy(); encodeChart = null }
@@ -1475,6 +1539,7 @@ function destroyChartInstances() {
 function destroyCharts() {
   destroyChartInstances()
   timestamps.value = []
+  qualityHistory.value = []
   fpsHistory.value = []
   bitrateHistory.value = []
   encodeHistory.value = []
@@ -1484,11 +1549,12 @@ function destroyCharts() {
 
 // Rebuild live charts with the new theme's colors, keeping their history.
 async function refreshChartTheme() {
-  const hadCharts = Boolean(fpsChart || bitrateChart || encodeChart || latencyChart || lossChart)
+  const hadCharts = Boolean(qualityChart || fpsChart || bitrateChart || encodeChart || latencyChart || lossChart)
   if (!hadCharts) return
   destroyChartInstances()
   await setupCharts()
   const ts = [...timestamps.value]
+  updateChartData(qualityChart, ts, [...qualityHistory.value])
   updateChartData(fpsChart, ts, [...fpsHistory.value])
   updateChartData(bitrateChart, ts, [...bitrateHistory.value])
   updateChartData(encodeChart, ts, [...encodeHistory.value])
@@ -1508,9 +1574,10 @@ watch(stats, (newStats, oldStats) => {
     return
   }
 
-  // Resolve client UUID and auto-show preview when streaming starts
+  // Resolve client UUID, running app, and auto-show preview when streaming starts
   if (newStats.streaming && (!oldStats || !oldStats.streaming)) {
     resolveConnectedClient()
+    refreshApps()
     if (!showPreview.value && !prefersReducedMotion.value) startPreview()
   }
 
@@ -1522,6 +1589,7 @@ watch(stats, (newStats, oldStats) => {
   const now = Date.now() / 1000
 
   timestamps.value.push(now)
+  qualityHistory.value.push(qualityScore.value || 0)
   fpsHistory.value.push(newStats.fps)
   bitrateHistory.value.push(newStats.bitrate_kbps / 1000)
   encodeHistory.value.push(newStats.encode_time_ms)
@@ -1531,6 +1599,7 @@ watch(stats, (newStats, oldStats) => {
   // Keep rolling window
   while (timestamps.value.length > MAX_POINTS) {
     timestamps.value.shift()
+    qualityHistory.value.shift()
     fpsHistory.value.shift()
     bitrateHistory.value.shift()
     encodeHistory.value.shift()
@@ -1539,13 +1608,14 @@ watch(stats, (newStats, oldStats) => {
   }
 
   // Initialize charts if needed
-  if (!fpsChart || !bitrateChart || !encodeChart || !latencyChart || !lossChart) {
+  if (!qualityChart || !fpsChart || !bitrateChart || !encodeChart || !latencyChart || !lossChart) {
     setupCharts()
   }
 
   // Update chart data
   nextTick(() => {
     const ts = [...timestamps.value]
+    updateChartData(qualityChart, ts, [...qualityHistory.value])
     updateChartData(fpsChart, ts, [...fpsHistory.value])
     updateChartData(bitrateChart, ts, [...bitrateHistory.value])
     updateChartData(encodeChart, ts, [...encodeHistory.value])
@@ -1595,17 +1665,7 @@ onMounted(async () => {
   } catch {}
 
   // Fetch recent games for quick launch
-  try {
-    const res = await fetch('./api/apps', { credentials: 'include' })
-    if (res.ok) {
-      const data = await res.json()
-      const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
-      // Sort by last-launched (most recent first), take top 5
-      apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
-      appCatalogCount.value = apps.length
-      recentApps.value = apps.slice(0, 5)
-    }
-  } catch {}
+  await refreshApps()
 
   // Fetch paired clients count + version
   try {

@@ -114,6 +114,7 @@ import { useToast } from './composables/useToast'
 import ConfirmActionDialog from './components/ConfirmActionDialog.vue'
 import {
   createCommandActions,
+  createGameLaunchActions,
   executeCommandAction,
   filterCommandActions,
   readRecentCommandIds,
@@ -141,7 +142,28 @@ const confirmPending = ref(false)
 const confirmError = ref('')
 const pendingDangerousAction = ref(null)
 
-const actions = computed(() => createCommandActions({ t, router, fetchImpl: fetch, toast }))
+// Recent games load when the palette opens so launches are one keystroke away.
+const recentGames = ref([])
+
+watch(() => props.modelValue, async (open) => {
+  if (!open) return
+  try {
+    const res = await fetch('./api/apps', { credentials: 'include' })
+    if (res.ok) {
+      const data = await res.json()
+      const apps = (data.apps || []).filter((app) => app.uuid && app.name !== 'Desktop')
+      apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
+      recentGames.value = apps.slice(0, 5)
+    }
+  } catch {
+    recentGames.value = []
+  }
+})
+
+const actions = computed(() => [
+  ...createCommandActions({ t, router, fetchImpl: fetch, toast }),
+  ...createGameLaunchActions(recentGames.value, { t, fetchImpl: fetch, toast }),
+])
 const filteredActions = computed(() => filterCommandActions(actions.value, query.value, {
   recentCommandIds: recentCommandIds.value,
 }))

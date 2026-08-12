@@ -171,3 +171,30 @@ export async function executeCommandAction(action, { confirmDangerousAction } = 
   await action.action()
   return true
 }
+
+export function createGameLaunchActions(apps, { t, fetchImpl = fetch, toast = () => {} } = {}) {
+  return (apps || []).slice(0, 5).map((app) => ({
+    id: `launch-${app.uuid}`,
+    group: 'Launch',
+    icon: '🎮',
+    label: `${translate(t, 'command_palette.actions.launch', 'Launch')} ${app.name}`,
+    description: 'Start this game on the host and stream it to your client.',
+    hint: 'POST /api/apps/launch',
+    aliases: ['launch', 'play', app.name],
+    action: async () => {
+      const response = await fetchImpl('./api/apps/launch', {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        body: JSON.stringify({ uuid: app.uuid }),
+      })
+      const result = response.ok ? await response.json() : { status: false }
+      toast(
+        result.status === true
+          ? `${app.name} launched`
+          : `Launch failed${result.error ? `: ${result.error}` : ''}`,
+        result.status === true ? 'success' : 'error',
+      )
+    },
+  }))
+}
