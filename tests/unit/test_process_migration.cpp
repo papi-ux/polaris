@@ -1438,15 +1438,21 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateG
   close(ready_pipe[0]);
   const pid_t descendant = static_cast<pid_t>(std::strtol(descendant_text, nullptr, 10));
   ASSERT_GT(descendant, 1);
+  const int descendant_fd = static_cast<int>(syscall(SYS_pidfd_open, descendant, 0));
+  if (descendant_fd < 0) {
+    const int pidfd_error = errno;
+    (void) kill(-root, SIGKILL);
+    (void) kill(root, SIGKILL);
+    FAIL() << "pidfd_open failed for descendant " << descendant << ": " << std::strerror(pidfd_error);
+  }
+  linux_fd_guard_t descendant_pidfd {descendant_fd};
   const bool terminated = proc::terminate_gamescope_attached_clients_for_tests("4242");
   if (!terminated) {
     (void) kill(-root, SIGKILL);
   }
   EXPECT_TRUE(terminated);
   EXPECT_EQ(waitpid(root, nullptr, 0), root);
-  errno = 0;
-  EXPECT_EQ(kill(descendant, 0), -1);
-  EXPECT_EQ(errno, ESRCH);
+  EXPECT_TRUE(wait_for_pidfd_exit(descendant_pidfd.fd, std::chrono::seconds(2)));
 }
 
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupRejectsUnownedSameAppProcess) {
@@ -2261,6 +2267,43 @@ TEST(ProcessRuntimeConfigTests, UnreadableEnvironLatchSparesPrivilegedDescendant
 #endif
 }
 
+TEST(ProcessRuntimeConfigTests, UnreadableEnvironRetryIsLimitedToKnownPolarisDescendants) {
+#ifdef __linux__
+  EXPECT_TRUE(proc::unreadable_environ_capture_failure_may_retry_for_tests(
+    EACCES,
+    uid_t {1000},
+    uid_t {1000},
+    true
+  ));
+  EXPECT_TRUE(proc::unreadable_environ_capture_failure_may_retry_for_tests(
+    EIO,
+    uid_t {1000},
+    uid_t {1000},
+    true
+  ));
+  EXPECT_FALSE(proc::unreadable_environ_capture_failure_may_retry_for_tests(
+    EACCES,
+    uid_t {0},
+    uid_t {1000},
+    true
+  ));
+  EXPECT_FALSE(proc::unreadable_environ_capture_failure_may_retry_for_tests(
+    EACCES,
+    uid_t {1000},
+    uid_t {1000},
+    std::nullopt
+  ));
+  EXPECT_FALSE(proc::unreadable_environ_capture_failure_may_retry_for_tests(
+    EACCES,
+    uid_t {1000},
+    uid_t {1000},
+    false
+  ));
+#else
+  GTEST_SKIP() << "Linux-only unreadable environ retry policy";
+#endif
+}
+
 TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCageGeneration) {
 #ifdef __linux__
   EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(true, true));
@@ -2540,6 +2583,399 @@ TEST(ProcessRuntimeConfigTests, NonCageDetachedCaptureFailureRetainsGenerationAn
   EXPECT_TRUE(WIFSIGNALED(status));
 #else
   GTEST_SKIP() << "Linux-only detached generation capture fault";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationTransientCaptureFailureRetriesBeforeSignaling) {
+#ifdef __linux__
+  const std::string token = "transient-incomplete-generation-capture";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  EXPECT_TRUE(proc::exact_generation_transient_capture_failure_retries_for_tests(token, child));
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(WIFSIGNALED(status));
+#else
+  GTEST_SKIP() << "Linux-only transient exact-generation capture retry";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationPersistentCaptureFailureStillFailsClosed) {
+#ifdef __linux__
+  const std::string token = "persistent-incomplete-generation-capture";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  EXPECT_TRUE(proc::exact_generation_persistent_capture_failure_fails_closed_for_tests(token, child));
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "persistent incomplete capture must not authorize exact-generation signaling";
+#else
+  GTEST_SKIP() << "Linux-only persistent exact-generation capture fault";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationMissingPostCaptureIdentityStillFailsClosed) {
+#ifdef __linux__
+  const std::string token = "missing-post-capture-identity";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  EXPECT_TRUE(proc::exact_generation_missing_post_capture_identity_fails_closed_for_tests(token, child));
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "missing post-pidfd identity must not authorize exact-generation signaling";
+#else
+  GTEST_SKIP() << "Linux-only post-pidfd identity ambiguity";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationMixedTransientAndHardFailuresFailClosed) {
+#ifdef __linux__
+  const std::string token = "mixed-transient-hard-capture";
+  const auto spawn_owned = [&]() {
+    const auto child = fork();
+    if (child == 0) {
+      setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      execl("/bin/sleep", "sleep", "60", nullptr);
+      _exit(127);
+    }
+    return child;
+  };
+  const auto transient = spawn_owned();
+  ASSERT_GE(transient, 0);
+  linux_child_guard_t transient_guard {transient};
+  const auto hard = spawn_owned();
+  ASSERT_GE(hard, 0);
+  linux_child_guard_t hard_guard {hard};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  const auto visible = [&](pid_t pid) {
+    std::ifstream environ_file("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    return environ.find(expected) != std::string::npos;
+  };
+  bool ready = false;
+  for (int attempt = 0; attempt < 40 && !ready; ++attempt) {
+    ready = visible(transient) && visible(hard);
+    if (!ready) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(ready);
+
+  int capture_attempts = 0;
+  EXPECT_TRUE(proc::exact_generation_mixed_capture_failures_fail_closed_for_tests(
+    token,
+    transient,
+    hard,
+    capture_attempts
+  ));
+  EXPECT_EQ(capture_attempts, 1)
+    << "a hard fault must dominate a simultaneous retryable fault without entering quiescence retries";
+  int status = 0;
+  EXPECT_EQ(transient_guard.wait(&status, WNOHANG), 0);
+  EXPECT_EQ(hard_guard.wait(&status, WNOHANG), 0);
+#else
+  GTEST_SKIP() << "Linux-only mixed exact-generation capture faults";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationLivePostCaptureAmbiguityFailsClosedWithoutRetry) {
+#ifdef __linux__
+  const std::string token = "live-post-capture-ambiguity";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  int capture_attempts = 0;
+  EXPECT_TRUE(proc::exact_generation_live_post_capture_ambiguity_fails_closed_for_tests(
+    token,
+    child,
+    capture_attempts
+  ));
+  EXPECT_EQ(capture_attempts, 1)
+    << "a live pidfd with ambiguous post-capture ownership must fail closed before token loss can hide it";
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "a live ambiguous process must not be signaled or forgotten by a retry";
+#else
+  GTEST_SKIP() << "Linux-only live post-capture ambiguity";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationUnreadableLiveCandidateCannotDisappearAcrossRetry) {
+#ifdef __linux__
+  const std::string token = "unreadable-live-candidate";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  int capture_attempts = 0;
+  EXPECT_TRUE(proc::exact_generation_unreadable_candidate_cannot_disappear_for_tests(
+    token,
+    child,
+    capture_attempts
+  ));
+  EXPECT_EQ(capture_attempts, 2)
+    << "a live unreadable candidate must remain latched when a later scan cannot prove ownership";
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "an unreadable live candidate must not be signaled or forgotten";
+#else
+  GTEST_SKIP() << "Linux-only unreadable exact-generation ambiguity";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationMissingPreCaptureIdentityFailsClosedWithoutRetry) {
+#ifdef __linux__
+  const std::string token = "missing-pre-capture-identity";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  int capture_attempts = 0;
+  EXPECT_TRUE(proc::exact_generation_missing_pre_capture_identity_fails_closed_for_tests(
+    token,
+    child,
+    capture_attempts
+  ));
+  EXPECT_EQ(capture_attempts, 1)
+    << "a live process with unreadable pre-pidfd identity must fail closed without retry";
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, WNOHANG), 0)
+    << "missing pre-pidfd identity must not authorize signaling";
+#else
+  GTEST_SKIP() << "Linux-only pre-pidfd identity ambiguity";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationOwnedCandidateSurvivesAnotherCandidatesRetry) {
+#ifdef __linux__
+  const std::string token = "owned-candidate-across-retry";
+  const auto spawn_owned = [&]() {
+    const auto child = fork();
+    if (child == 0) {
+      setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      execl("/bin/sleep", "sleep", "60", nullptr);
+      _exit(127);
+    }
+    return child;
+  };
+  const auto owned = spawn_owned();
+  ASSERT_GE(owned, 0);
+  linux_child_guard_t owned_guard {owned};
+  const auto transient = spawn_owned();
+  ASSERT_GE(transient, 0);
+  linux_child_guard_t transient_guard {transient};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  const auto visible = [&](pid_t pid) {
+    std::ifstream environ_file("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    return environ.find(expected) != std::string::npos;
+  };
+  bool ready = false;
+  for (int attempt = 0; attempt < 40 && !ready; ++attempt) {
+    ready = visible(owned) && visible(transient);
+    if (!ready) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(ready);
+
+  const int owned_fd = static_cast<int>(syscall(SYS_pidfd_open, owned, 0));
+  ASSERT_GE(owned_fd, 0);
+  linux_fd_guard_t owned_pidfd {owned_fd};
+  const int transient_fd = static_cast<int>(syscall(SYS_pidfd_open, transient, 0));
+  ASSERT_GE(transient_fd, 0);
+  linux_fd_guard_t transient_pidfd {transient_fd};
+
+  int capture_attempts = 0;
+  EXPECT_TRUE(proc::exact_generation_owned_candidate_survives_other_retry_for_tests(
+    token,
+    owned,
+    transient,
+    capture_attempts
+  ));
+  EXPECT_GE(capture_attempts, 2);
+  const bool owned_exited = wait_for_pidfd_exit(owned_pidfd.fd, std::chrono::seconds(2));
+  const bool transient_exited = wait_for_pidfd_exit(transient_pidfd.fd, std::chrono::seconds(2));
+  EXPECT_TRUE(owned_exited) << "a previously proven owned pidfd must survive another candidate's retry";
+  EXPECT_TRUE(transient_exited);
+  if (owned_exited) EXPECT_EQ(owned_guard.wait(nullptr, 0), owned);
+  if (transient_exited) EXPECT_EQ(transient_guard.wait(nullptr, 0), transient);
+#else
+  GTEST_SKIP() << "Linux-only exact-generation owned pidfd retention";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationPidfdEsrchRequiresCleanRescan) {
+#ifdef __linux__
+  const std::string token = "pidfd-esrch-clean-rescan";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  int capture_attempts = 0;
+  EXPECT_TRUE(proc::exact_generation_pidfd_esrch_retries_for_tests(token, child, capture_attempts));
+  EXPECT_GE(capture_attempts, 2)
+    << "pidfd_open ESRCH after an exact-generation match must require a clean rescan";
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(WIFSIGNALED(status));
+#else
+  GTEST_SKIP() << "Linux-only pidfd ESRCH recapture";
 #endif
 }
 
