@@ -72,7 +72,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
         </div>
 
         <div class="settings-subtle-surface mt-3">
-          <div class="mb-2 text-[11px] font-medium uppercase tracking-[0.18em] text-storm">Port map</div>
+          <div class="mb-2 text-[11px] font-medium uppercase tracking-eyebrow text-storm">Port map</div>
           <table class="w-full text-left">
             <thead>
             <tr>

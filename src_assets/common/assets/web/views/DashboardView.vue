@@ -192,12 +192,6 @@
                     {{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}
                   </span>
                 </div>
-                <div class="dashboard-support-subsection">
-                  <div class="section-title-row">
-                    <div class="dashboard-support-subtitle">{{ $t('dashboard.recording') }}</div>
-                    <InfoHint size="sm" :label="$t('dashboard.recording')">{{ $t('dashboard.recording_desc') }}</InfoHint>
-                  </div>
-                </div>
                 <div class="mt-4 flex flex-wrap items-center gap-2">
                   <button
                     v-if="!recording.active"
@@ -429,12 +423,7 @@
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
-              <div class="section-title-row">
-                <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
-                <InfoHint size="sm" :label="$t('dashboard.stream_readiness')">
-                  {{ headlessEnabled ? $t('dashboard.primary_ready_desc') : $t('dashboard.windowed_desc') }}
-                </InfoHint>
-              </div>
+              <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
             </div>
             <span class="meta-pill">
               {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
@@ -485,7 +474,7 @@
                 <div class="text-sm font-semibold text-success">All launch checks are ready</div>
                 <div class="mt-1 text-xs text-storm">Pairing, library, discovery, displays, and audio are clear.</div>
               </div>
-              <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-success">
+              <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-eyebrow text-success">
                 {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
@@ -515,7 +504,7 @@
                 >
                   <div class="flex items-center justify-between gap-3">
                     <div class="text-sm font-medium text-silver">{{ check.label }}</div>
-                    <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="check.badgeClass">
+                    <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="check.badgeClass">
                       {{ check.state }}
                     </span>
                   </div>

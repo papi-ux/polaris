@@ -126,17 +126,17 @@
 
       <div class="mt-5 grid gap-3 lg:grid-cols-3">
         <article class="surface-subtle p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">Installed</div>
+          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Installed</div>
           <div class="mt-2 text-2xl font-semibold text-silver">{{ updateCenterState.currentVersion || version?.version || '—' }}</div>
           <div class="mt-1 text-xs text-storm">Running on this host</div>
         </article>
         <article class="surface-subtle p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">Latest</div>
+          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Latest</div>
           <div class="mt-2 text-2xl font-semibold text-ice">{{ updateCenterState.latestVersion || '—' }}</div>
           <a v-if="updateCenterState.releaseUrl" class="mt-2 inline-flex text-sm font-medium text-ice no-underline hover:text-ice/80" :href="updateCenterState.releaseUrl" target="_blank">View release notes</a>
         </article>
         <article class="surface-subtle p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">Package</div>
+          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Package</div>
           <div class="mt-2 text-sm font-medium text-silver">{{ updateCenterState.packageLabel || 'Manual release page' }}</div>
           <div class="mt-1 break-all text-xs text-storm">{{ updateCenterState.asset?.name || 'No matching package detected for this host yet.' }}</div>
           <div v-if="updateCenterState.assetDigest" class="mt-2 break-all text-[11px] text-storm">{{ updateCenterState.assetDigest }}</div>
@@ -179,7 +179,7 @@
 
       <div class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.gpu_health') }}</div>
+          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.gpu_health') }}</div>
           <div v-if="gpu" class="mt-3">
             <div class="min-w-0 text-sm font-medium text-silver">{{ gpu.name || $t('index.gpu_active') }}</div>
             <div class="mt-3 flex items-end gap-2 tabular-nums">
@@ -196,7 +196,7 @@
         </article>
 
         <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.display_state') }}</div>
+          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.display_state') }}</div>
           <div class="mt-3 flex items-end gap-2 tabular-nums">
             <div class="text-3xl font-semibold text-silver">{{ displays.length }}</div>
             <div class="pb-1 text-xs text-storm">{{ $t('index.active_displays') }}</div>
@@ -210,7 +210,7 @@
         </article>
 
         <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.audio_state') }}</div>
+          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.audio_state') }}</div>
           <div class="mt-3 text-sm font-medium text-silver">
             {{ audio?.sink ? formatAudioName(audio.sink) : $t('index.audio_unavailable') }}
           </div>
@@ -220,7 +220,7 @@
         </article>
 
         <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('index.session_mode') }}</div>
+          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.session_mode') }}</div>
           <div class="mt-3 text-sm font-medium capitalize text-silver">{{ sessionType || $t('index.session_mode_idle') }}</div>
           <div class="mt-3 text-xs text-storm">
             {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
@@ -285,7 +285,7 @@
           >
             <div class="flex items-center justify-between gap-3">
               <div class="text-sm font-medium text-silver">{{ client.platform }}</div>
-              <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.18em]" :class="client.link ? 'border-ice/30 bg-ice/10 text-ice' : 'border-storm/30 bg-deep/60 text-storm'">
+              <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-eyebrow" :class="client.link ? 'border-ice/30 bg-ice/10 text-ice' : 'border-storm/30 bg-deep/60 text-storm'">
                 {{ client.status }}
               </span>
             </div>

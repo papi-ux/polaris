@@ -5,6 +5,21 @@ import { POLARIS_VIEWPORTS } from './polaris-viewports.js'
 
 const screenshotDir = process.env.POLARIS_UI_SWEEP_SCREENSHOT_DIR || path.resolve('.hermes/artifacts/polaris-ui-ux-sweep/screenshots')
 
+// Themes to sweep, e.g. POLARIS_UI_SWEEP_THEMES=polaris,portable-chrome,oled,miami,high-contrast.
+// Defaults to the default skin so the standard matrix stays 48 tests.
+const sweepThemes = (process.env.POLARIS_UI_SWEEP_THEMES || 'polaris').split(',').map((theme) => theme.trim()).filter(Boolean)
+
+async function applyTheme(page, themeId) {
+  await page.evaluate((theme) => {
+    localStorage.setItem('polaris-theme', theme)
+    if (theme === 'polaris') {
+      document.documentElement.removeAttribute('data-theme')
+    } else {
+      document.documentElement.setAttribute('data-theme', theme)
+    }
+  }, themeId)
+}
+
 const routes = [
   { name: 'mission-control', path: '/#/', heading: /Mission Control/i },
   { name: 'library', path: '/#/apps', heading: /Library/i },
@@ -44,10 +59,12 @@ test.describe('Polaris UI screenshot and overflow sweep', () => {
     await fs.mkdir(screenshotDir, { recursive: true })
   })
 
+  for (const themeId of sweepThemes) {
   for (const viewport of POLARIS_VIEWPORTS) {
     for (const route of routes) {
-      test(`${viewport.name} ${route.name} captures screenshot without horizontal overflow`, async ({ loggedInPage }) => {
+      test(`${themeId} ${viewport.name} ${route.name} captures screenshot without horizontal overflow`, async ({ loggedInPage }) => {
         await loggedInPage.setViewportSize({ width: viewport.width, height: viewport.height })
+        await applyTheme(loggedInPage, themeId)
         await gotoRoute(loggedInPage, route)
 
         const dimensions = await loggedInPage.evaluate(() => {
@@ -66,10 +83,11 @@ test.describe('Polaris UI screenshot and overflow sweep', () => {
         expect(dimensions.overflow, `${route.name} overflows ${viewport.name}: ${dimensions.documentWidth}px document vs ${dimensions.viewportWidth}px viewport`).toBeLessThanOrEqual(1)
 
         await loggedInPage.screenshot({
-          path: path.join(screenshotDir, `${viewport.name}-${route.name}.png`),
+          path: path.join(screenshotDir, `${themeId}-${viewport.name}-${route.name}.png`),
           fullPage: true,
         })
       })
     }
+  }
   }
 })

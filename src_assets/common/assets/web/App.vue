@@ -30,7 +30,7 @@
         >
           <div
             v-if="!sidebarCollapsed"
-            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/70"
+            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-eyebrow text-storm/70"
           >
             {{ section.label }}
           </div>
@@ -70,7 +70,7 @@
         ></span>
         <template v-if="!sidebarCollapsed">
           <span class="min-w-0 flex-1">
-            <span class="block text-[10px] font-semibold uppercase tracking-[0.2em] text-storm/70">Update</span>
+            <span class="block text-[10px] font-semibold uppercase tracking-eyebrow text-storm/70">Update</span>
             <span class="block truncate text-sm font-medium text-silver">{{ sidebarUpdateLabel }}</span>
             <span class="block truncate text-[11px] text-storm">{{ sidebarUpdateDetail }}</span>
           </span>

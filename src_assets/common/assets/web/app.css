@@ -69,6 +69,7 @@
 
   /* ── Typography ── */
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --tracking-eyebrow: 0.18em;
 
   /* ── Shadows (glow color follows the theme's ice) ── */
   --shadow-glow: 0 0 20px color-mix(in srgb, var(--color-ice) 8%, transparent);
@@ -337,7 +338,7 @@ textarea {
 }
 
 .stat-kicker {
-  @apply text-[10px] font-semibold uppercase tracking-[0.2em] text-storm;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .stat-value {
@@ -359,7 +360,7 @@ textarea {
 }
 
 .section-kicker {
-  @apply text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/80;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm/80;
 }
 
 .section-title {
@@ -397,7 +398,7 @@ textarea {
 }
 
 .eyebrow-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .data-pill {
@@ -405,7 +406,7 @@ textarea {
 }
 
 .control-chip {
-  @apply rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-storm;
+  @apply rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow text-storm;
   background: var(--surface-chip);
   border-color: var(--edge-chip);
 }
@@ -1002,7 +1003,7 @@ textarea {
 }
 
 .settings-nav-group-title {
-  @apply text-[10px] font-semibold uppercase tracking-[0.22em] text-storm/85;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm/85;
 }
 
 .settings-nav-list {
@@ -1158,7 +1159,7 @@ textarea {
 }
 
 .dashboard-live-summary-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-live-summary-value {
@@ -1264,7 +1265,7 @@ textarea {
 }
 
 .dashboard-metric-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-metric-value {
@@ -1280,7 +1281,7 @@ textarea {
 }
 
 .dashboard-runtime-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-runtime-pill-grid {
@@ -1316,7 +1317,7 @@ textarea {
 }
 
 .dashboard-secondary-group-summary {
-  @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-storm transition-colors duration-200 hover:text-silver;
+  @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-[11px] font-semibold uppercase tracking-eyebrow text-storm transition-colors duration-200 hover:text-silver;
 }
 
 .dashboard-secondary-group-summary::-webkit-details-marker {
@@ -1341,7 +1342,7 @@ textarea {
 }
 
 .dashboard-support-subtitle {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-context-card {
@@ -1353,7 +1354,7 @@ textarea {
 }
 
 .dashboard-context-header {
-  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-rail-footnote {
