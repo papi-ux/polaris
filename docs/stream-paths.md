@@ -35,9 +35,16 @@ host:
   device selection outright — left alone it grabs the first render node it
   enumerates, not necessarily the configured GPU. The runtime therefore pins
   `WLR_RENDER_DRM_DEVICE` to `adapter_name` (the same `/dev/dri/renderD*` used
-  for capture/encode) when `adapter_name` is a present device path; an unset or
-  non-device value is left to wlroots' auto-select. This keeps the compositor
-  and the encoder on the same card (issue #354).
+  for capture/encode) when `adapter_name` is an accessible device path; with
+  no usable `adapter_name` it pins to `platf::default_render_device()`, a
+  sysfs heuristic that prefers the discrete GPU (an NVIDIA driver — nvidia or
+  nouveau — or a ≥1 GiB dedicated pool from amdgpu VRAM / Intel lmem, then
+  the larger pool, then the boot display). The VAAPI encoder resolves the
+  VAAPI-safe variant of the same default (NVIDIA-bound nodes excluded — no VA
+  driver exists there) in place of its old literal `renderD128` fallback, so
+  the compositor and the encoder agree on the card either way (issues #354,
+  #367). Known gap: an Intel Arc dGPU without lmem sysfs ranks as integrated —
+  set `adapter_name` on such hosts.
 - `windowed_stream` runs wlroots as a **nested wayland** client of the host
   compositor and inherits its render device from the parent's dmabuf feedback.
   The device is deliberately **not** forced there — overriding it could mismatch

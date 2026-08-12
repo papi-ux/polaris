@@ -3,6 +3,9 @@
  * @brief Definitions for VA-API hardware accelerated capture.
  */
 // standard includes
+#include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <fcntl.h>
 #include <format>
 #include <sstream>
@@ -42,6 +45,39 @@ using namespace std::literals;
 extern "C" struct AVBufferRef;
 
 namespace va {
+
+  /**
+   * @brief The render node VAAPI should open, from adapter_name or the shared default.
+   *
+   * A literal first-node fallback is a probe-order accident on multi-GPU
+   * hosts; resolve the VAAPI-safe shared default instead so the encoder and
+   * the headless private compositor land on the same card family (issue
+   * #367). adapter_name goes through the same trim-and-validate the cage pin
+   * applies — a stale or mistyped path falling through verbatim would put the
+   * compositor and the encoder on different answers again. The renderD128
+   * literal remains only as the last resort when enumeration found nothing.
+   */
+  static std::string render_device_or_default() {
+    auto adapter = config::video.adapter_name;
+    const auto not_space = [](unsigned char ch) {
+      return std::isspace(ch) == 0;
+    };
+    adapter.erase(adapter.begin(), std::find_if(adapter.begin(), adapter.end(), not_space));
+    adapter.erase(std::find_if(adapter.rbegin(), adapter.rend(), not_space).base(), adapter.end());
+    if (!adapter.empty()) {
+      if (adapter.rfind("/dev/dri/", 0) == 0 && access(adapter.c_str(), R_OK | W_OK) == 0) {
+        return adapter;
+      }
+      static std::atomic_flag warned;
+      if (!warned.test_and_set()) {
+        BOOST_LOG(warning) << "vaapi: adapter_name ["sv << adapter
+                           << "] is not an accessible /dev/dri render-device path; using the default render device instead"sv;
+      }
+    }
+    auto resolved = platf::default_vaapi_render_device();
+    return resolved.empty() ? "/dev/dri/renderD128" : resolved;
+  }
+
   constexpr auto SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 = 0x40000000;
   constexpr auto EXPORT_SURFACE_WRITE_ONLY = 0x0002;
   constexpr auto EXPORT_SURFACE_SEPARATE_LAYERS = 0x0004;
@@ -561,9 +597,7 @@ namespace va {
 
     va::display_t display {vaGetDisplayDRM(fd)};
     if (!display) {
-      auto render_device = config::video.adapter_name.empty() ? "/dev/dri/renderD128" : config::video.adapter_name.c_str();
-
-      BOOST_LOG(error) << "Couldn't open a va display from DRM with device: "sv << render_device;
+      BOOST_LOG(error) << "Couldn't open a va display from DRM with device: "sv << render_device_or_default();
       return -1;
     }
 
@@ -684,9 +718,9 @@ namespace va {
   }
 
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(int width, int height, int offset_x, int offset_y, bool vram) {
-    auto render_device = config::video.adapter_name.empty() ? "/dev/dri/renderD128" : config::video.adapter_name.c_str();
+    const auto render_device = render_device_or_default();
 
-    file_t file = open(render_device, O_RDWR);
+    file_t file = open(render_device.c_str(), O_RDWR);
     if (file.el < 0) {
       char string[1024];
       BOOST_LOG(error) << "Couldn't open "sv << render_device << ": " << strerror_r(errno, string, sizeof(string));

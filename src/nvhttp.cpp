@@ -5960,6 +5960,18 @@ namespace nvhttp {
       launch_session->input_only = true;
     }
 
+#ifdef __linux__
+    if (!watch_only && no_active_sessions &&
+        config::video.linux_display.use_cage_compositor &&
+        stream_runtime::labwc::is_running()) {
+      // The cage outlives the launch that started it and only the startup
+      // command ever set its output mode, so a resume carrying a different
+      // refresh stayed capped at the previous session's rate (issue #367:
+      // a 120 FPS client resuming a 60 Hz session could never get past 60).
+      stream_runtime::labwc::ensure_output_refresh(launch_session->fps);
+    }
+#endif
+
     if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
       // We want to prepare display only if there are no active sessions
       // and the current session isn't virtual display at the moment.
