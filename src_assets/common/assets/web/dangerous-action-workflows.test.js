@@ -21,7 +21,6 @@ describe('dangerous host action workflows', () => {
     expect(dashboard).toContain('disconnectingClient')
     expect(dashboard).toContain('dashboard.disconnect_client_impact_stream')
     expect(dashboard).toContain('dashboard.disconnect_client_success')
-    expect(dashboard).toContain('dashboard.recording_start_success')
 
     const troubleshooting = webSource('views/TroubleshootingView.vue')
     expect(troubleshooting).toContain('confirmActionOpen')

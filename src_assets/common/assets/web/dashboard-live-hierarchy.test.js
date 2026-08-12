@@ -45,7 +45,7 @@ describe('DashboardView hierarchy', () => {
     const dashboard = webSource('views/DashboardView.vue')
     const groupedPanelCount = (dashboard.match(/<details class="dashboard-secondary-group/g) || []).length
 
-    expect(groupedPanelCount).toBeGreaterThanOrEqual(2)
+    expect(groupedPanelCount).toBeGreaterThanOrEqual(1)
     expectBefore(dashboard, 'dashboard-live-summary-grid', '<details class="dashboard-secondary-group')
     expect(dashboard).toContain('dashboard-secondary-group-summary')
   })

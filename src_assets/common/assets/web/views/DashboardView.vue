@@ -122,22 +122,6 @@
                     {{ $t('dashboard.show_display') }}
                   </button>
                   <template v-else>
-                    <button
-                      v-if="!recording.active"
-                      :disabled="recordingActionPending"
-                      @click="startRecording"
-                      class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
-                    >
-                      {{ $t('dashboard.record') }}
-                    </button>
-                    <button
-                      v-else
-                      :disabled="recordingActionPending"
-                      @click="stopRecording"
-                      class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
-                    >
-                      {{ $t('dashboard.stop_recording') }}
-                    </button>
                     <button @click="togglePreviewExpanded" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
                       {{ previewExpanded ? $t('dashboard.collapse_display') : $t('dashboard.expand_display') }}
                     </button>
@@ -172,8 +156,8 @@
                     </button>
                   </div>
                   <span v-if="previewLoaded && !previewError" class="dashboard-preview-live-badge">
-                    <span :class="recording.active ? 'text-danger' : 'text-success'">●</span>
-                    {{ previewMode === 'mjpeg' ? 'LIVE' : 'PREVIEW' }}<template v-if="recording.active"> · REC</template>
+                    <span class="text-success">●</span>
+                    {{ previewMode === 'mjpeg' ? 'LIVE' : 'PREVIEW' }}
                   </span>
                   <!-- Stream facts ride the stage as overlays instead of chrome around it. -->
                   <div v-if="previewLoaded && !previewError" class="dashboard-preview-hud">
@@ -196,134 +180,6 @@
               </div>
             </section>
 
-            <div class="dashboard-live-support-grid">
-              <details class="dashboard-secondary-group" open>
-                <summary class="dashboard-secondary-group-summary">
-                  <span>Capture and replay</span>
-                  <span>{{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}</span>
-                </summary>
-                <section class="surface-subtle p-4 dashboard-support-card">
-                <div class="flex items-start justify-between gap-3">
-                  <div>
-                    <div class="eyebrow-label">Session tools</div>
-                    <div class="mt-2 flex items-center gap-2">
-                      <div class="text-base font-semibold text-silver">Capture and replay</div>
-                      <InfoHint size="sm" label="Session tools">{{ $t('dashboard.recording_desc') }}</InfoHint>
-                    </div>
-                  </div>
-                  <span class="meta-pill" :class="recording.active ? 'border-danger/35 bg-danger/10 text-danger' : ''">
-                    {{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}
-                  </span>
-                </div>
-                <div class="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    v-if="!recording.active"
-                    :disabled="recordingActionPending"
-                    @click="startRecording"
-                    class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {{ $t('dashboard.record') }}
-                  </button>
-                  <button
-                    v-if="recording.active"
-                    :disabled="recordingActionPending"
-                    @click="stopRecording"
-                    class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {{ $t('dashboard.stop_recording') }}
-                  </button>
-                  <button
-                    :disabled="recordingActionPending"
-                    @click="saveReplay"
-                    class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {{ $t('dashboard.save_replay') }}
-                  </button>
-                </div>
-                <div v-if="recording.file" class="mt-3 text-xs break-all text-storm">{{ recording.file }}</div>
-                </section>
-              </details>
-            </div>
-
-            <details class="dashboard-secondary-group" open>
-              <summary class="dashboard-secondary-group-summary">
-                <span>{{ $t('dashboard.telemetry_title') }}</span>
-                <span>{{ stats.fps?.toFixed(1) || '--' }} fps · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
-              </summary>
-              <section class="dashboard-telemetry-card">
-              <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                <div>
-                  <div class="section-kicker">{{ $t('dashboard.telemetry') }}</div>
-                  <div class="section-title-row">
-                    <h3 class="section-title">{{ $t('dashboard.telemetry_title') }}</h3>
-                    <InfoHint size="sm" :label="$t('dashboard.telemetry')">{{ $t('dashboard.telemetry_desc') }}</InfoHint>
-                  </div>
-                </div>
-                <!-- Frame health: the numbers that explain "feels stuttery"
-                     when FPS looks fine; the strip already covers the rest. -->
-                <div class="flex flex-wrap gap-2 text-[11px] text-silver" data-dashboard-frame-health>
-                  <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
-                  <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
-                  <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
-                </div>
-              </div>
-
-              <div v-if="!prefersReducedMotion" class="dashboard-telemetry-grid mt-4">
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-success/80">FPS</div>
-                  <div ref="fpsChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-info/80">Bitrate</div>
-                  <div ref="bitrateChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-silver/60">Encode</div>
-                  <div ref="encodeChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-warning/80">Latency</div>
-                  <div ref="latencyChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-accent/80">GPU Load</div>
-                  <div ref="gpuChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-danger/80">Packet Loss</div>
-                  <div ref="lossChartEl" class="h-24 w-full"></div>
-                </div>
-              </div>
-              <div v-else class="dashboard-empty-state mt-4">
-                Live charts are paused while reduced motion is enabled; the summary tiles above keep updating without the extra canvas work.
-              </div>
-
-              <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <div class="dashboard-metric-tile">
-                  <div class="dashboard-metric-label">GPU Temp</div>
-                  <div class="dashboard-metric-value" :class="gpu.temperature_c != null ? (gpu.temperature_c > 80 ? 'text-danger' : gpu.temperature_c > 65 ? 'text-warning' : 'text-success') : 'text-storm'">
-                    {{ gpu.temperature_c != null ? gpu.temperature_c + '°' : '--' }}
-                  </div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W draw</div>
-                </div>
-                <div class="dashboard-metric-tile">
-                  <div class="dashboard-metric-label">GPU Load</div>
-                  <div class="dashboard-metric-value text-accent">{{ gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '--' }}</div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.clock_mhz || gpu.clock_gpu_mhz || '--' }} MHz</div>
-                </div>
-                <div class="dashboard-metric-tile" v-if="gpu.encoder_pct != null">
-                  <div class="dashboard-metric-label">Encoder</div>
-                  <div class="dashboard-metric-value text-info">{{ gpu.encoder_pct }}%</div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN' }} workload</div>
-                </div>
-                <div class="dashboard-metric-tile">
-                  <div class="dashboard-metric-label">VRAM</div>
-                  <div class="dashboard-metric-value text-silver">{{ gpu.vram_used_mb != null ? (gpu.vram_used_mb / 1024).toFixed(1) + ' GB' : '--' }}</div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.vram_total_mb != null ? '/ ' + (gpu.vram_total_mb / 1024).toFixed(0) + ' GB' : '' }}</div>
-                </div>
-              </div>
-              </section>
-            </details>
           </div>
 
           <div class="dashboard-live-side">
@@ -396,6 +252,80 @@
             </section>
           </div>
         </div>
+
+        <details class="dashboard-secondary-group" open>
+          <summary class="dashboard-secondary-group-summary">
+            <span>{{ $t('dashboard.telemetry_title') }}</span>
+            <span>{{ stats.fps?.toFixed(1) || '--' }} fps · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
+          </summary>
+          <section class="dashboard-telemetry-card">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <InfoHint size="sm" :label="$t('dashboard.telemetry')">{{ $t('dashboard.telemetry_desc') }}</InfoHint>
+            <!-- Frame health: the numbers that explain "feels stuttery"
+                 when FPS looks fine; the strip already covers the rest. -->
+            <div class="flex flex-wrap gap-2 text-[11px] text-silver" data-dashboard-frame-health>
+              <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
+              <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
+              <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
+            </div>
+          </div>
+
+          <div v-if="!prefersReducedMotion" class="dashboard-telemetry-grid mt-4">
+            <div class="card p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-success/80">FPS</div>
+              <div ref="fpsChartEl" class="h-24 w-full"></div>
+            </div>
+            <div class="card p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-info/80">Bitrate</div>
+              <div ref="bitrateChartEl" class="h-24 w-full"></div>
+            </div>
+            <div class="card p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-silver/60">Encode</div>
+              <div ref="encodeChartEl" class="h-24 w-full"></div>
+            </div>
+            <div class="card p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-warning/80">Latency</div>
+              <div ref="latencyChartEl" class="h-24 w-full"></div>
+            </div>
+            <div class="card p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-accent/80">GPU Load</div>
+              <div ref="gpuChartEl" class="h-24 w-full"></div>
+            </div>
+            <div class="card p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-danger/80">Packet Loss</div>
+              <div ref="lossChartEl" class="h-24 w-full"></div>
+            </div>
+          </div>
+          <div v-else class="dashboard-empty-state mt-4">
+            Live charts are paused while reduced motion is enabled; the summary tiles above keep updating without the extra canvas work.
+          </div>
+
+          <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="dashboard-metric-tile">
+              <div class="dashboard-metric-label">GPU Temp</div>
+              <div class="dashboard-metric-value" :class="gpu.temperature_c != null ? (gpu.temperature_c > 80 ? 'text-danger' : gpu.temperature_c > 65 ? 'text-warning' : 'text-success') : 'text-storm'">
+                {{ gpu.temperature_c != null ? gpu.temperature_c + '°' : '--' }}
+              </div>
+              <div class="mt-1 text-xs text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W draw</div>
+            </div>
+            <div class="dashboard-metric-tile">
+              <div class="dashboard-metric-label">GPU Load</div>
+              <div class="dashboard-metric-value text-accent">{{ gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '--' }}</div>
+              <div class="mt-1 text-xs text-storm">{{ gpu.clock_mhz || gpu.clock_gpu_mhz || '--' }} MHz</div>
+            </div>
+            <div class="dashboard-metric-tile" v-if="gpu.encoder_pct != null">
+              <div class="dashboard-metric-label">Encoder</div>
+              <div class="dashboard-metric-value text-info">{{ gpu.encoder_pct }}%</div>
+              <div class="mt-1 text-xs text-storm">{{ gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN' }} workload</div>
+            </div>
+            <div class="dashboard-metric-tile">
+              <div class="dashboard-metric-label">VRAM</div>
+              <div class="dashboard-metric-value text-silver">{{ gpu.vram_used_mb != null ? (gpu.vram_used_mb / 1024).toFixed(1) + ' GB' : '--' }}</div>
+              <div class="mt-1 text-xs text-storm">{{ gpu.vram_total_mb != null ? '/ ' + (gpu.vram_total_mb / 1024).toFixed(0) + ' GB' : '' }}</div>
+            </div>
+          </div>
+          </section>
+        </details>
       </section>
     </template>
 
@@ -1219,29 +1149,6 @@ const previewStatusText = computed(() => {
 
 
 
-// Recording controls
-const recording = ref({ active: false, file: '' })
-const recordingActionPending = ref(false)
-
-async function fetchRecordingStatus() {
-  try {
-    const res = await fetch('./api/recording/status', { credentials: 'include' })
-    if (res.ok) recording.value = await res.json()
-  } catch {}
-}
-
-async function startRecording() {
-  await runRecordingAction('./api/recording/start', 'dashboard.recording_start_success', 'dashboard.recording_start_error')
-}
-
-async function stopRecording() {
-  await runRecordingAction('./api/recording/stop', 'dashboard.recording_stop_success', 'dashboard.recording_stop_error')
-}
-
-async function saveReplay() {
-  await runRecordingAction('./api/recording/save-replay', 'dashboard.recording_replay_success', 'dashboard.recording_replay_error')
-}
-
 // Frame health: dropped/duplicate ratios and jitter arrive on every SSE tick
 // but were never surfaced; they explain stutter that FPS alone hides.
 const frameHealth = computed(() => {
@@ -1431,22 +1338,6 @@ async function launchRecentApp(app) {
     showToast(t('dashboard.launch_failed') + e.message, 'error')
   } finally {
     launchingUuid.value = ''
-  }
-}
-
-async function runRecordingAction(url, successKey, errorKey) {
-  if (recordingActionPending.value) return
-  recordingActionPending.value = true
-  try {
-    const response = await fetch(url, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    await fetchRecordingStatus()
-    showToast(t(successKey), 'success')
-  } catch (error) {
-    console.error(error)
-    showToast(t(errorKey), 'error')
-  } finally {
-    recordingActionPending.value = false
   }
 }
 
@@ -1708,10 +1599,9 @@ watch(stats, (newStats, oldStats) => {
     return
   }
 
-  // Resolve client UUID, recording status, AI optimization, and auto-show preview when streaming starts
+  // Resolve client UUID and auto-show preview when streaming starts
   if (newStats.streaming && (!oldStats || !oldStats.streaming)) {
     resolveConnectedClient()
-    fetchRecordingStatus()
     if (!showPreview.value && !prefersReducedMotion.value) startPreview()
   }
 
