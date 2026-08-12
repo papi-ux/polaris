@@ -221,30 +221,6 @@
                   </button>
                 </div>
                 <div v-if="recording.file" class="mt-3 text-xs break-all text-storm">{{ recording.file }}</div>
-                <div class="dashboard-support-subsection">
-                  <div class="dashboard-support-subtitle">{{ $t('dashboard.session_history') }}</div>
-                  <div v-if="sessionHistory.length" class="mt-3 space-y-2">
-                    <div v-for="(s, i) in sessionHistory.slice(0, 4)" :key="i" class="dashboard-list-row">
-                      <span
-                        class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
-                        :class="{
-                          'bg-success/20 text-success': s.quality_grade === 'A',
-                          'bg-info/20 text-info': s.quality_grade === 'B',
-                          'bg-warning/20 text-warning': s.quality_grade === 'C' || s.quality_grade === 'D',
-                          'bg-danger/20 text-danger': s.quality_grade === 'F'
-                        }"
-                      >
-                        {{ s.quality_grade }}
-                      </span>
-                      <div class="min-w-0 flex-1 text-[11px] text-storm">
-                        <div class="truncate text-sm text-silver">{{ s.key }}</div>
-                      </div>
-                    </div>
-                  </div>
-                  <div v-else class="dashboard-empty-state mt-3">
-                    {{ $t('dashboard.session_history_empty') }}
-                  </div>
-                </div>
                 </section>
               </details>
             </div>
@@ -263,11 +239,12 @@
                     <InfoHint size="sm" :label="$t('dashboard.telemetry')">{{ $t('dashboard.telemetry_desc') }}</InfoHint>
                   </div>
                 </div>
-                <div class="flex flex-wrap gap-2 text-[11px] text-silver">
-                  <span class="data-pill">{{ stats.fps?.toFixed(1) || '--' }} fps</span>
-                  <span class="data-pill">{{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
-                  <span class="data-pill">{{ stats.latency_ms?.toFixed(0) || '--' }} ms</span>
-                  <span class="data-pill">{{ stats.packet_loss?.toFixed(1) || '--' }}% loss</span>
+                <!-- Frame health: the numbers that explain "feels stuttery"
+                     when FPS looks fine; the strip already covers the rest. -->
+                <div class="flex flex-wrap gap-2 text-[11px] text-silver" data-dashboard-frame-health>
+                  <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
+                  <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
+                  <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
                 </div>
               </div>
 
@@ -993,11 +970,6 @@ const runtimeBackendLabel = computed(() => {
   return titleizeToken(backend)
 })
 
-const runtimeRequestedMode = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return modeLabelFromBool(Boolean(stats.value?.runtime_requested_headless))
-})
-
 const runtimeEffectiveMode = computed(() => {
   if (!stats.value?.streaming) {
     // Idle: still show configured path when stats expose it.
@@ -1013,33 +985,6 @@ const runtimeModeTone = computed(() => {
   if (mode.includes('private stream')) return 'bg-accent/15 text-accent'
   if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'bg-warning/15 text-warning'
   return 'bg-storm/20 text-storm'
-})
-
-const runtimeEffectiveTone = computed(() => {
-  if (!stats.value?.streaming) return 'text-storm'
-  const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
-  if (mode.includes('private stream')) return 'text-accent'
-  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'text-warning'
-  return 'text-silver'
-})
-
-const runtimeOverrideLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return stats.value?.runtime_gpu_native_override_active ? 'Active' : 'Inactive'
-})
-
-const runtimeOverrideTone = computed(() => {
-  if (!stats.value?.streaming) return 'text-storm'
-  return stats.value?.runtime_gpu_native_override_active ? 'text-warning' : 'text-success'
-})
-
-const headlessGpuNativeOverrideActive = computed(() => {
-  if (!stats.value?.streaming) return false
-  const effectiveKnown = stats.value?.runtime_effective_headless !== undefined && stats.value?.runtime_effective_headless !== null
-  return Boolean(stats.value?.runtime_requested_headless) &&
-    effectiveKnown &&
-    !Boolean(stats.value?.runtime_effective_headless) &&
-    Boolean(stats.value?.runtime_gpu_native_override_active)
 })
 
 const nestedLabwcShmFallbackActive = computed(() => {
@@ -1058,61 +1003,14 @@ const captureTransportLabel = computed(() => {
   return titleizeToken(stats.value?.capture_transport || 'unknown')
 })
 
-const captureResidencyLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return titleizeToken(stats.value?.capture_residency || 'unknown')
-})
-
-const captureFormatLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  const format = stats.value?.capture_format
-  if (!format) return '--'
-  return String(format).toUpperCase()
-})
-
 const capturePathLabel = computed(() => {
   if (!stats.value?.streaming) return '--'
   return titleizeToken(stats.value?.capture_path || 'unknown')
 })
 
-const captureReasonLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return captureReasonMessage(stats.value?.capture_path_reason)
-})
-
-const captureCpuCopyLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return stats.value?.capture_cpu_copy ? 'CPU copy' : 'No CPU copy'
-})
-
-const captureCpuCopyTone = computed(() => {
-  if (!stats.value?.streaming) return 'text-storm'
-  return stats.value?.capture_cpu_copy ? 'text-warning' : 'text-success'
-})
-
-const captureGpuNativeLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return stats.value?.capture_gpu_native ? 'GPU native' : 'Mixed path'
-})
-
 const captureGpuNativeTone = computed(() => {
   if (!stats.value?.streaming) return 'text-storm'
   return stats.value?.capture_gpu_native ? 'text-success' : 'text-warning'
-})
-
-const encodeTargetLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  const device = stats.value?.encode_target_device || 'unknown'
-  const residency = stats.value?.encode_target_residency || 'unknown'
-  const format = stats.value?.encode_target_format || 'unknown'
-  return `${titleizeToken(device)} / ${titleizeToken(residency)} / ${String(format).toUpperCase()}`
-})
-
-const encodeTargetTone = computed(() => {
-  if (!stats.value?.streaming) return 'text-storm'
-  return String(stats.value?.encode_target_residency || '').toLowerCase() === 'gpu'
-    ? 'text-success'
-    : 'text-warning'
 })
 
 const runtimePathNote = computed(() => {
@@ -1375,6 +1273,24 @@ async function stopRecording() {
 async function saveReplay() {
   await runRecordingAction('./api/recording/save-replay', 'dashboard.recording_replay_success', 'dashboard.recording_replay_error')
 }
+
+// Frame health: dropped/duplicate ratios and jitter arrive on every SSE tick
+// but were never surfaced; they explain stutter that FPS alone hides.
+const frameHealth = computed(() => {
+  const s = stats.value || {}
+  const dropped = Number(s.dropped_frame_ratio)
+  const duplicate = Number(s.duplicate_frame_ratio)
+  const jitter = Number(s.frame_jitter_ms)
+  const pct = (v) => (Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : '--')
+  return {
+    dropped: pct(dropped),
+    droppedTone: Number.isFinite(dropped) && dropped > 0.02 ? 'text-danger' : Number.isFinite(dropped) && dropped > 0.005 ? 'text-warning' : '',
+    duplicate: pct(duplicate),
+    duplicateTone: Number.isFinite(duplicate) && duplicate > 0.05 ? 'text-warning' : '',
+    jitter: Number.isFinite(jitter) ? `${jitter.toFixed(1)} ms` : '--',
+    jitterTone: Number.isFinite(jitter) && jitter > 4 ? 'text-warning' : '',
+  }
+})
 
 // ── Doctor: the host's deterministic per-second diagnosis (SSE `doctor`) ──
 const doctor = computed(() => stats.value?.doctor || null)
