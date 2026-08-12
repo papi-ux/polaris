@@ -358,6 +358,12 @@
         <div class="flex w-full flex-col gap-3 xl:w-auto xl:items-end">
           <div class="page-meta">
             <span class="meta-pill">{{ logFilterSummary }}</span>
+            <span v-if="logsTruncated" class="meta-pill" data-log-tail-truncated>
+              Bounded tail · earlier content omitted · bytes {{ logStartOffset }}–{{ logEndOffset }}
+            </span>
+            <span v-if="logsReset" class="meta-pill" data-log-tail-reset>
+              Log window reset after clear, rotation, or a missed range
+            </span>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <button v-for="level in ['All', 'Error', 'Warning', 'Fatal']" :key="level"
@@ -439,6 +445,7 @@ import {
   buildSupportSelfTestCopy,
 } from '../diagnostics-export.js'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
+import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -449,6 +456,10 @@ const closeAppStatus = ref(null)
 const ddResetPressed = ref(false)
 const ddResetStatus = ref(null)
 const logs = ref('Loading...')
+const logsTruncated = ref(false)
+const logsReset = ref(false)
+const logStartOffset = ref(0)
+const logEndOffset = ref(0)
 const clearingLogs = ref(false)
 const clearingAiCache = ref(false)
 const cleaningStaleVirtualDisplay = ref(false)
@@ -459,6 +470,10 @@ const aiDoctorExplanation = ref(null)
 const logFilter = ref(null)
 const logLevelFilter = ref(null)
 let logInterval = null
+let logTailState = createLogTailState()
+let logRefreshInFlight = null
+let logRefreshQueued = false
+let logTailGeneration = 0
 const serverRestarting = ref(false)
 const serverQuitting = ref(false)
 const serverQuit = ref(false)
@@ -903,21 +918,43 @@ const logFilterSummary = computed(() => {
   return parts.join(' · ')
 })
 
+function resetLogTailState() {
+  ++logTailGeneration
+  logTailState = createLogTailState()
+  logs.value = ''
+  logsTruncated.value = false
+  logsReset.value = false
+  logStartOffset.value = 0
+  logEndOffset.value = 0
+}
+
 function refreshLogs() {
-  fetch("./api/logs", { credentials: 'include' })
-    .then(response => {
-      const contentType = response.headers.get("Content-Type") || ""
-      const charsetMatch = contentType.match(/charset=([^;]+)/i)
-      const charset = charsetMatch ? charsetMatch[1].trim() : "utf-8"
-      return response.arrayBuffer().then(buffer => {
-        const decoder = new TextDecoder(charset)
-        return decoder.decode(buffer)
-      })
-    })
-    .then(text => {
-      logs.value = text
+  if (logRefreshInFlight) {
+    logRefreshQueued = true
+    return logRefreshInFlight
+  }
+
+  const generation = logTailGeneration
+  const hadCursor = logTailState.endOffset !== null
+  logRefreshInFlight = fetchLogTail(logTailState)
+    .then((nextState) => {
+      if (generation !== logTailGeneration) return
+      logTailState = nextState
+      logs.value = nextState.text
+      logsTruncated.value = nextState.truncated
+      logsReset.value = hadCursor && nextState.reset
+      logStartOffset.value = nextState.startOffset ?? 0
+      logEndOffset.value = nextState.endOffset ?? 0
     })
     .catch(error => console.error("Error fetching logs:", error))
+    .finally(() => {
+      logRefreshInFlight = null
+      if (logRefreshQueued) {
+        logRefreshQueued = false
+        refreshLogs()
+      }
+    })
+  return logRefreshInFlight
 }
 
 function refreshNetworkPathProbe() {
@@ -992,7 +1029,7 @@ function clearLogs() {
         throw new Error(r.error || "Failed to clear logs")
       }
 
-      logs.value = ''
+      resetLogTailState()
       showToast(i18n.t('troubleshooting.logs_clear_success') || 'Logs cleared.', 'success')
       refreshLogs()
     })
@@ -1014,18 +1051,6 @@ async function safeFetchJson(url) {
     return await response.json()
   } catch (error) {
     return { _error: error instanceof Error ? error.message : String(error) }
-  }
-}
-
-async function safeFetchText(url) {
-  try {
-    const response = await fetch(url, { credentials: 'include' })
-    if (!response.ok) {
-      return `HTTP ${response.status}`
-    }
-    return await response.text()
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -1094,12 +1119,11 @@ function cleanupStaleVirtualDisplay() {
 }
 
 async function collectSupportContext() {
-  const [systemStats, aiStatus, aiCache, aiHistory, latestLogs, config] = await Promise.all([
+  const [systemStats, aiStatus, aiCache, aiHistory, config] = await Promise.all([
     safeFetchJson('./api/stats/system'),
     safeFetchJson('./api/ai/status'),
     safeFetchJson('./api/ai/cache'),
     safeFetchJson('./api/ai/history'),
-    safeFetchText('./api/logs'),
     safeFetchJson('./api/config')
   ])
 
@@ -1122,7 +1146,7 @@ async function collectSupportContext() {
     ai_cache: aiCache,
     ai_history: aiHistory,
     recent_issues: groupedRecentIssues.value,
-    logs: latestLogs || logs.value
+    logs: logs.value
   }
 }
 

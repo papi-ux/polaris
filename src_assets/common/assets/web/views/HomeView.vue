@@ -357,6 +357,7 @@ import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
 import { buildUpdateCenterState, updateStatusLightClass } from '../update-center.js'
 import InfoHint from '../components/InfoHint.vue'
+import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 
 const { gpu, displays, audio, sessionType, displaySession, loading: systemLoading } = useSystemStats(3000)
 
@@ -699,7 +700,7 @@ async function refreshUpdateStatus() {
 ;(async () => {
   await refreshUpdateStatus()
   try {
-    logs.value = await fetch('./api/logs', { credentials: 'include' }).then((r) => r.text())
+    logs.value = (await fetchLogTail(createLogTailState())).text
   } catch (error) {
     console.error(error)
   }
