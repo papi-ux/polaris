@@ -41,6 +41,16 @@ describe('DashboardView hierarchy', () => {
     expect(dashboard).not.toContain('mission-control-strip')
   })
 
+  it('executes Doctor v2 actions on the web origin and verifies reversible fixes', () => {
+    const dashboard = webSource('views/DashboardView.vue')
+
+    expect(dashboard).toContain("postDoctorAction(action.payload_preview || action.payload || {})")
+    expect(dashboard).toContain("fetch('./api/doctor/action'")
+    expect(dashboard).toContain('verifyDoctorAction(result.verification)')
+    expect(dashboard).toContain('undoDoctorAction')
+    expect(dashboard).toContain('requestDoctorSafeAction')
+    expect(dashboard).not.toContain("fetch('./polaris/v1/client-settings'")
+  })
   it('leads idle mode with the status hero and keeps the play rail launchable', () => {
     const dashboard = webSource('views/DashboardView.vue')
 

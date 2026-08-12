@@ -112,9 +112,9 @@
                 type="button"
                 class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
                 :disabled="doctorActionPending"
-                @click="doctorActionConfirmOpen = true"
+                @click="requestDoctorSafeAction"
               >
-                {{ doctorSafeAction.label }}
+                {{ doctorActionPending ? $t('dashboard.doctor_action_working') : doctorSafeAction.label }}
               </button>
               <span v-else-if="doctorSafeAction" class="dashboard-doctor-advice" :title="doctorSafeAction.rollback || ''">
                 Suggested: {{ doctorSafeAction.label }}
@@ -128,8 +128,20 @@
               >
                 {{ doctorExplainPending ? $t('dashboard.doctor_explaining') : $t('dashboard.doctor_explain') }}
               </button>
+              <button
+                v-if="doctorActionUndoAvailable"
+                type="button"
+                class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
+                :disabled="doctorActionPending"
+                @click="undoDoctorAction"
+              >
+                {{ $t('dashboard.doctor_action_undo') }}
+              </button>
             </div>
           </div>
+          <p v-if="doctorActionStatus" class="mt-3 text-xs leading-relaxed text-storm" role="status" aria-live="polite">
+            {{ doctorActionStatus }}
+          </p>
         </section>
 
         <div class="dashboard-live-stage" :class="{ 'is-preview-expanded': showPreview && previewExpanded, 'is-preview-hidden': !showPreview }">
@@ -1280,6 +1292,73 @@ const doctorActionExecutable = computed(() => Boolean(doctorSafeAction.value?.en
 
 const doctorActionConfirmOpen = ref(false)
 const doctorActionPending = ref(false)
+const doctorActionResult = ref(null)
+let doctorVerificationTimer = null
+
+const doctorActionUndoAvailable = computed(() => Boolean(
+  doctorActionResult.value?.undo?.available &&
+  doctorActionResult.value?.state !== 'undone'
+))
+
+const doctorActionStatus = computed(() => {
+  const result = doctorActionResult.value
+  if (!result) return ''
+  if (result.message) return result.message
+  switch (result.state) {
+    case 'watching': return t('dashboard.doctor_action_watching')
+    case 'resolved': return t('dashboard.doctor_action_resolved')
+    case 'stable': return t('dashboard.doctor_action_stable')
+    case 'confirmed_pressure': return t('dashboard.doctor_action_confirmed')
+    case 'needs_attention': return t('dashboard.doctor_action_needs_attention')
+    case 'undone': return t('dashboard.doctor_action_undone')
+    default: return ''
+  }
+})
+
+async function postDoctorAction(payload) {
+  const response = await fetch('./api/doctor/action', {
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok || result.status === false) {
+    throw new Error(result.error || `HTTP ${response.status}`)
+  }
+  return result
+}
+
+function requestDoctorSafeAction() {
+  if (doctorSafeAction.value?.requires_confirmation) {
+    doctorActionConfirmOpen.value = true
+    return
+  }
+  runDoctorSafeAction()
+}
+
+async function verifyDoctorAction(verification) {
+  if (!verification?.run_id) return
+  try {
+    const result = await postDoctorAction({
+      action_id: verification.action_id || 'verify',
+      run_id: verification.run_id,
+    })
+    doctorActionResult.value = result
+    if (result.state === 'resolved') {
+      showToast(t('dashboard.doctor_action_resolved'), 'success')
+    } else if (result.state === 'needs_attention') {
+      showToast(t('dashboard.doctor_action_needs_attention'), 'warning')
+    }
+    if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
+    if (result.verification?.run_id) {
+      const delayMs = Math.max(1, Number(result.verification.delay_seconds) || 8) * 1000
+      doctorVerificationTimer = setTimeout(() => verifyDoctorAction(result.verification), delayMs)
+    }
+  } catch (e) {
+    showToast(t('dashboard.doctor_action_error') + e.message, 'error')
+  }
+}
 
 async function runDoctorSafeAction() {
   const action = doctorSafeAction.value
@@ -1287,14 +1366,29 @@ async function runDoctorSafeAction() {
   if (!action || doctorActionPending.value) return
   doctorActionPending.value = true
   try {
-    const response = await fetch(`.${action.endpoint.startsWith('/') ? '' : '/'}${action.endpoint}`, {
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      method: action.method || 'POST',
-      body: JSON.stringify(action.payload_preview || action.payload || {}),
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    showToast(t('dashboard.doctor_action_success') + action.label, 'success')
+    const result = await postDoctorAction(action.payload_preview || action.payload || {})
+    doctorActionResult.value = result
+    showToast(result.message || t('dashboard.doctor_action_success') + action.label, 'success')
+    if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
+    if (result.verification?.run_id) {
+      const delayMs = Math.max(1, Number(result.verification.delay_seconds) || 8) * 1000
+      doctorVerificationTimer = setTimeout(() => verifyDoctorAction(result.verification), delayMs)
+    }
+  } catch (e) {
+    showToast(t('dashboard.doctor_action_error') + e.message, 'error')
+  } finally {
+    doctorActionPending.value = false
+  }
+}
+
+async function undoDoctorAction() {
+  const undo = doctorActionResult.value?.undo
+  if (!undo?.run_id || doctorActionPending.value) return
+  doctorActionPending.value = true
+  if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
+  try {
+    doctorActionResult.value = await postDoctorAction({ action_id: undo.action_id || 'undo', run_id: undo.run_id })
+    showToast(t('dashboard.doctor_action_undone'), 'success')
   } catch (e) {
     showToast(t('dashboard.doctor_action_error') + e.message, 'error')
   } finally {
@@ -1737,6 +1831,7 @@ onUnmounted(() => {
   stopPreview()
   document.removeEventListener('visibilitychange', handlePreviewVisibility)
   destroyCharts()
+  if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
   if (unsubscribeThemeTokens) {
     unsubscribeThemeTokens()
     unsubscribeThemeTokens = null

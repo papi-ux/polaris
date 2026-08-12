@@ -5,6 +5,7 @@
 
 #include <src/stream_stats.h>
 #include <src/config.h>
+#include <src/doctor_actions.h>
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -640,6 +641,150 @@ TEST(StreamStatsDoctorTests, KeepsNearTargetHighRefreshPacingGreen) {
   EXPECT_EQ(doctor.at("traffic_light"), "green");
   EXPECT_EQ(doctor.at("status"), "ok");
   EXPECT_EQ(doctor.at("primary_issue"), "none");
+}
+
+TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClean) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+  stats.packet_loss = 0.0;
+  stats.latency_ms = 3.8;
+  stats.network_risk = false;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "degraded"}, {"summary", "Old network warning"}, {"safe_bitrate_kbps", 7580}}
+  );
+
+  EXPECT_EQ(doctor.at("version"), 2);
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("summary"), "Streaming telemetry looks ready.");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
+  ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+  EXPECT_EQ(doctor.at("suppressed_findings").at(0).at("id"), "stale_network_jitter");
+}
+
+TEST(StreamStatsDoctorTests, NetworkWatchRechecksWithoutChangingBitrate) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.network_risk = true;
+  stats.packet_loss = 0.4;
+  stats.latency_ms = 20.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "watch"}, {"safe_bitrate_kbps", 12000}}
+  );
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(doctor.at("primary_issue"), "network_observation");
+  EXPECT_EQ(action.at("id"), "recheck_network");
+  EXPECT_EQ(action.at("endpoint"), "/api/doctor/action");
+  EXPECT_FALSE(action.at("requires_confirmation"));
+  EXPECT_FALSE(action.at("undo").at("supported"));
+  EXPECT_FALSE(action.at("payload_preview").contains("target_bitrate_kbps"));
+}
+
+TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.network_risk = true;
+  stats.packet_loss = 3.4;
+  stats.latency_ms = 52.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
+  );
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
+  EXPECT_EQ(action.at("id"), "lower_bitrate");
+  EXPECT_EQ(action.at("endpoint"), "/api/doctor/action");
+  EXPECT_EQ(action.at("payload_preview").at("target_bitrate_kbps"), 16000);
+  EXPECT_EQ(action.at("payload_preview").at("source_result_id"), doctor.at("result_id"));
+  EXPECT_FALSE(action.at("requires_confirmation"));
+  EXPECT_TRUE(action.at("undo").at("supported"));
+}
+
+TEST(StreamStatsDoctorTests, CleanHistorySafeCapOffersGraduatedQualityRestore) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 40.0;
+  stats.encode_target_fps = 40.0;
+  stats.bitrate_kbps = 7580;
+  stats.adaptive_target_bitrate_kbps = 7580;
+  stats.paired_target_bitrate_kbps = 20000;
+  stats.optimization_source = "paired_client+ai_cached+history_safe";
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+  stats.packet_loss = 0.0;
+  stats.latency_ms = 3.8;
+  stats.network_risk = false;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "degraded"}, {"summary", "Old network warning"}}
+  );
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(doctor.at("primary_issue"), "quality_capped_by_history");
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  EXPECT_EQ(doctor.at("confidence").at("level"), "high");
+  EXPECT_EQ(action.at("id"), "restore_quality");
+  EXPECT_EQ(action.at("payload_preview").at("target_bitrate_kbps"), 20000);
+  EXPECT_FALSE(action.at("requires_confirmation"));
+  EXPECT_TRUE(action.at("undo").at("supported"));
+  ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+}
+
+TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.network_risk = true;
+  stats.packet_loss = 0.4;
+  stats.latency_ms = 20.0;
+
+  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+
+  stats.packet_loss = 3.4;
+  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
+
+  stats.packet_loss = 0.0;
+  stats.latency_ms = 45.0;
+  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
+}
+
+TEST(DoctorActionTests, NeverDropsMoreThanOneGuardedBitrateStep) {
+  EXPECT_EQ(doctor_actions::guarded_bitrate_target(20000, 7580, 2000), 16000);
+  EXPECT_EQ(doctor_actions::guarded_bitrate_target(20000, 18000, 2000), 18000);
+  EXPECT_EQ(doctor_actions::guarded_bitrate_target(8000, 2000, 7000), 7000);
+}
+
+TEST(DoctorActionTests, QualityRetryClimbsAtMostTwentyFivePercentPerCheck) {
+  EXPECT_EQ(doctor_actions::guarded_quality_retry_target(7580, 20000), 9475);
+  EXPECT_EQ(doctor_actions::guarded_quality_retry_target(18000, 20000), 20000);
+  EXPECT_EQ(doctor_actions::guarded_quality_retry_target(20000, 20000), 20000);
 }
 
 TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {

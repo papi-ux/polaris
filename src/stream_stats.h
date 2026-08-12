@@ -126,6 +126,7 @@ namespace stream_stats {
     std::string optimization_reasoning;
     std::string optimization_normalization_reason;
     int recommendation_version = 0;
+    int paired_target_bitrate_kbps = 0;
     int width = 0;
     int height = 0;
 
@@ -301,6 +302,7 @@ namespace stream_stats {
    * @param optimization_reasoning Human-readable summary for the chosen recommendation.
    * @param optimization_normalization_reason Explanation for any server-side correction.
    * @param recommendation_version Optimization schema version used to produce the result.
+   * @param paired_target_bitrate_kbps Bitrate explicitly saved for the paired client, if any.
    */
   void update_session_targets(double requested_client_fps,
                               double session_target_fps,
@@ -311,7 +313,8 @@ namespace stream_stats {
                               const std::string &optimization_cache_status,
                               const std::string &optimization_reasoning,
                               const std::string &optimization_normalization_reason,
-                              int recommendation_version);
+                              int recommendation_version,
+                              int paired_target_bitrate_kbps);
 
   /**
    * @brief Update frame delivery telemetry derived from the encode loop.
