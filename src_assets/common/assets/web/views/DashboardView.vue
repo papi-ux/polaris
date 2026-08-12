@@ -307,24 +307,6 @@
           </div>
 
           <div class="dashboard-live-side">
-            <section class="surface-subtle p-4">
-              <div class="flex items-center justify-between gap-3">
-                <div class="eyebrow-label">{{ $t('dashboard.signal_snapshot') }}</div>
-                <span class="inline-flex h-8 min-w-8 items-center justify-center rounded-full px-3 text-sm font-semibold" :class="qualityBadgeClass">
-                  {{ qualityGrade }}
-                </span>
-              </div>
-              <div class="dashboard-metric-grid">
-                <div v-for="metric in primaryStreamMetrics" :key="metric.label" class="dashboard-metric-tile">
-                  <div class="dashboard-metric-label">{{ metric.label }}</div>
-                  <div class="dashboard-metric-value" :class="metric.color">{{ metric.value }}</div>
-                </div>
-              </div>
-              <div class="dashboard-rail-footnote">
-                {{ stats.codec?.toUpperCase() || '--' }} · {{ stats.width }}×{{ stats.height }}
-              </div>
-            </section>
-
             <section class="surface-subtle p-4 dashboard-context-card">
               <div class="flex items-center justify-between gap-3">
                 <div class="eyebrow-label">Session context</div>
@@ -1207,20 +1189,6 @@ const qualityScore = computed(() => buildQualityScore(stats.value || {}))
 
 const qualityGrade = computed(() => buildQualityGrade(qualityScore.value))
 
-// Signal-snapshot metrics (the only stream metric list the template renders)
-const primaryStreamMetrics = computed(() => {
-  if (!stats.value?.streaming) return []
-  const s = stats.value
-  const fpsColor = s.fps >= 55 ? 'text-success' : s.fps >= 30 ? 'text-warning' : 'text-danger'
-  const latColor = s.latency_ms <= 20 ? 'text-success' : s.latency_ms <= 50 ? 'text-warning' : 'text-danger'
-  return [
-    { label: 'FPS', value: s.fps.toFixed(1), color: fpsColor },
-    { label: 'RTT', value: s.latency_ms.toFixed(0) + 'ms', color: latColor },
-    { label: 'Bitrate', value: (s.bitrate_kbps / 1000).toFixed(1) + ' Mbps', color: 'text-silver' },
-    { label: 'Encode', value: s.encode_time_ms.toFixed(1) + 'ms', color: 'text-silver' },
-  ]
-})
-
 const previewHeadline = computed(() => (
   previewExpanded.value
     ? t('dashboard.preview_headline_expanded')
@@ -1237,16 +1205,6 @@ const previewStatusText = computed(() => {
   if (previewError.value) return t('dashboard.preview_unavailable_status')
   if (!previewLoaded.value) return t('dashboard.preview_capturing')
   return t('dashboard.preview_status')
-})
-
-const qualityBadgeClass = computed(() => {
-  const g = qualityGrade.value
-  return {
-    'bg-success/20 text-success': g === 'A',
-    'bg-info/20 text-info': g === 'B',
-    'bg-warning/20 text-warning': g === 'C' || g === 'D',
-    'bg-danger/20 text-danger': g === 'F' || g === '-',
-  }
 })
 
 
