@@ -91,15 +91,22 @@ Open **https://localhost:47990/#/welcome**, create your web UI account, and pair
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at `https://localhost:<port + 1>`. If you want background autostart, enable the user service with `systemctl --user enable --now polaris`.
 
-## What is New in v1.3.7
+## What is New in v1.3.8
 
-Polaris v1.3.7 fixes a use-after-free in VAAPI DMA-BUF capture that AMD hosts have been running into, and puts the nix packaging under CI for the first time.
+Polaris v1.3.8 turns the private Linux stream path into a safer daily-driver release: true-headless GPU-native capture, session-only launch choices, exact process ownership, an evidence-gated Doctor, and bounded diagnostics.
 
-- **VAAPI capture no longer frees a surface it is still reading**: a use-after-free in the VRAM converter, which destroyed its imported DMA-BUF surface before importing the replacement while a conversion in flight could still be holding it. Imports now live in a buffer-keyed cache, so a newly captured frame cannot pull the surface out from under an active conversion.
-- **This was reachable, not theoretical**: the VAAPI refusal in earlier releases only gated the gamescope windowed override. DRM/KMS capture and the non-cage wlroots VRAM path build the converter directly, so AMD hosts on those paths were running the unfixed version.
-- **Nix packaging is built and checked**: the vendored gamescope patch stacks are verified on every push, and CI builds the patched compositor, so a stack that cannot apply — or that applies without taking effect — fails before it reaches a host.
+- **True-headless GPU-native streaming**: the private headless compositor now uses the Vulkan/ext-image-copy path and preserves its initialization frame, so supported NVIDIA/NVENC hosts can stream a real `HEADLESS-1` session without falling back to a visible window. The merged implementation head was exercised on the RTX 4090 host and Retroid Pocket 6 with live changing frames and clean teardown; the exact `v1.3.8` candidate still requires its final hash-bound device smoke before publication.
+- **One launch changes one session**: Polaris accepts a validated `streamMode` override for a single launch without rewriting the host-wide default. Capture sources are re-evaluated at the session boundary, display-mode fallback is reported explicitly, and mode-aware optimizer advice follows the resolved path. Matching client support is versioned separately in Nova `v1.3.6`; it is not embedded in the Polaris repository.
+- **Fail-closed lifecycle ownership**: detached-only workloads retain exact PIDFD authority before detaching; teardown signals and reaps only the captured generation and blocks replacement launch when attribution is incomplete. Portal startup, cancellation, restore-token handling, and private-compositor cleanup are also hardened.
+- **Doctor can apply and verify**: stale network labels no longer cause another destructive bitrate reduction. Polaris exposes evidence-gated actions to recheck, lower bitrate one guarded step, restore a clean history-capped profile gradually, verify live telemetry, and offer Undo through the web console. Matching Nova client controls are versioned and released independently.
+- **Bounded diagnostics**: runtime logging is capped at an 8 MiB active file plus one 8 MiB backup, queues are bounded, records keep creation-time stamps, and the authenticated binary-safe tail API gives the browser a bounded 256 KiB / 2,000-line view with truthful truncation state.
+- **Benchmark and UI work**: authenticated benchmark-run controls expose bounded T0-T2 host-stage evidence; Mission Control is rebuilt around one status hero, one live strip, the Doctor, a safer preview, and five Nova-aligned themes.
+- **GPU and launch hardening**: single-GPU DMA-BUF render-node discovery, configured/default multi-GPU pairing, VAAPI-safe device selection, resume refresh restoration, guarded HDR/YUV444 probes, and complete launch/resume status responses reduce wrong-GPU, slow-path, and crash-shaped failures.
 - **Security gate**: `npm audit --audit-level=high` remains mandatory.
 - **Exact release set**: the official artifacts are `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb`.
+
+Field-proof caveats remain explicit: the reporter's AMD 4K60 scenario needs a current-candidate retest, host-virtual-display routing still needs its queued end-to-end device confirmation, and SteamOS remains an experimental Desktop Mode package rather than certified Game Mode support.
+
 See the [changelog](docs/changelog.md) for the full release history.
 
 ## Install
