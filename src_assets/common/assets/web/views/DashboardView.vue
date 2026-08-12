@@ -84,7 +84,7 @@
             </div>
             <div class="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
               <button
-                v-if="doctorSafeAction"
+                v-if="doctorSafeAction && doctorActionExecutable"
                 type="button"
                 class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
                 :disabled="doctorActionPending"
@@ -92,6 +92,9 @@
               >
                 {{ doctorSafeAction.label }}
               </button>
+              <span v-else-if="doctorSafeAction" class="data-pill" :title="doctorSafeAction.rollback || ''">
+                {{ doctorSafeAction.label }}
+              </span>
             </div>
           </div>
         </section>
@@ -649,10 +652,9 @@ import {
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
 const { sessions, clearHistory } = useSessionHistory(stats)
-const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices, getSuggestion: getAiSuggestion } = useAiOptimizer()
+const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices } = useAiOptimizer()
 
 // AI optimization state for current stream
-const aiOptimization = ref(null)
 const aiCacheKeys = ref([])
 const sessionHistory = ref([])
 const recentApps = ref([])
@@ -674,16 +676,6 @@ const actionSummary = computed(() => {
   return t('dashboard.idle_summary', { count: pairedClients.value })
 })
 
-const primaryFocus = computed(() => {
-  if (stats.value?.streaming) {
-    return { title: t('dashboard.primary_stream_title'), desc: t('dashboard.primary_stream_desc') }
-  }
-  if (!pairedClients.value) {
-    return { title: t('dashboard.primary_pair_title'), desc: t('dashboard.primary_pair_desc') }
-  }
-  return { title: t('dashboard.primary_ready_title'), desc: t('dashboard.primary_ready_desc') }
-})
-
 const readinessLabel = computed(() => {
   if (stats.value?.streaming) return t('dashboard.readiness_live')
   if (pairedClients.value > 0) return t('dashboard.readiness_ready')
@@ -693,12 +685,6 @@ const readinessLabel = computed(() => {
 const readinessTone = computed(() => {
   if (stats.value?.streaming || pairedClients.value > 0) return 'text-success'
   return 'text-warning'
-})
-
-const readinessDetail = computed(() => {
-  if (stats.value?.streaming) return t('dashboard.readiness_live_desc')
-  if (pairedClients.value > 0) return t('dashboard.readiness_ready_desc')
-  return t('dashboard.readiness_setup_desc')
 })
 
 const nextStep = computed(() => {
@@ -849,11 +835,14 @@ const viewerCountLabel = computed(() => {
 
 // First HDR surface in the web UI: state plus downgrade reason on hover.
 const hdrChipLabel = computed(() => {
+  // Host contract: hdr_effective_mode is sdr_8bit|sdr_10bit|hdr10 and
+  // hdr_downgrade_reason is the literal string "none" when nothing degraded.
   const s = stats.value || {}
-  const mode = s.hdr_effective_mode || s.dynamic_range
-  if (!mode || String(mode).toLowerCase() === 'sdr') return ''
-  const label = String(mode).toUpperCase()
-  return s.hdr_downgrade_reason ? `${label} → SDR` : label
+  const mode = String(s.hdr_effective_mode || s.dynamic_range || '').toLowerCase()
+  if (!mode || mode.startsWith('sdr')) return ''
+  const label = mode.toUpperCase()
+  const reason = String(s.hdr_downgrade_reason || 'none')
+  return reason !== 'none' ? ` → SDR` : label
 })
 const currentClientName = computed(() => connectedClients.value[0]?.name || t('dashboard.unknown_client'))
 
@@ -1131,6 +1120,11 @@ function refreshPreview() {
   const output = streamingOutput.value ? `&output=${encodeURIComponent(streamingOutput.value)}` : ''
   if (previewMode.value === 'mjpeg') {
     previewUrl.value = `./api/display/stream?t=${Date.now()}${output}`
+    // Chromium may never fire img load for multipart streams; clear the
+    // spinner once frames have had time to arrive unless an error landed.
+    previewTimer = setTimeout(() => {
+      if (previewMode.value === 'mjpeg' && showPreview.value && !previewError.value) previewLoaded.value = true
+    }, 1500)
   } else {
     previewUrl.value = `./api/display/screenshot?t=${Date.now()}${output}`
   }
@@ -1262,7 +1256,13 @@ const doctorHeadline = computed(() => {
   return d.summary || d.primary_issue
 })
 
-const doctorRecommendation = computed(() => doctor.value?.recommendation || '')
+// The host emits recommendation as {title, body, ...}, not a string.
+const doctorRecommendation = computed(() => {
+  const rec = doctor.value?.recommendation
+  if (!rec) return ''
+  if (typeof rec === 'string') return rec
+  return [rec.title, rec.body].filter(Boolean).join('. ')
+})
 
 const doctorPanelClass = computed(() => {
   switch (doctor.value?.traffic_light) {
@@ -1285,13 +1285,17 @@ const doctorConfidenceLabel = computed(() => {
   return level ? t('dashboard.doctor_confidence', { level }) : ''
 })
 
-// The host describes an executable safe recovery ({endpoint, method, payload});
-// it runs only after explicit confirmation.
+// The host describes a safe recovery action. Only /api/ endpoints are
+// reachable from this web server (the host also emits game-stream-server
+// endpoints like /polaris/v1/client-settings, which would 404 here), so
+// anything else renders as advice without an execute button.
 const doctorSafeAction = computed(() => {
   const action = doctor.value?.safe_recovery_action
   if (!action || action.kind === 'none' || !action.endpoint) return null
   return action
 })
+
+const doctorActionExecutable = computed(() => Boolean(doctorSafeAction.value?.endpoint?.startsWith('/api/')))
 
 const doctorActionConfirmOpen = ref(false)
 const doctorActionPending = ref(false)
@@ -1306,7 +1310,7 @@ async function runDoctorSafeAction() {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       method: action.method || 'POST',
-      body: JSON.stringify(action.payload || {}),
+      body: JSON.stringify(action.payload_preview || action.payload || {}),
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     showToast(t('dashboard.doctor_action_success') + action.label, 'success')
@@ -1615,7 +1619,6 @@ watch(stats, (newStats, oldStats) => {
     }
     destroyCharts()
     connectedClientUuid.value = null
-    aiOptimization.value = null
     return
   }
 
@@ -1624,12 +1627,6 @@ watch(stats, (newStats, oldStats) => {
     resolveConnectedClient()
     fetchRecordingStatus()
     if (!showPreview.value && !prefersReducedMotion.value) startPreview()
-    // Fetch AI optimization for connected device
-    if (newStats.client_name) {
-      getAiSuggestion(newStats.client_name).then(opt => {
-        if (opt && opt.status) aiOptimization.value = opt
-      })
-    }
   }
 
   if (prefersReducedMotion.value) {
