@@ -24,7 +24,7 @@
     </template>
 
     <template v-else-if="stats?.streaming">
-      <section class="section-card dashboard-live-shell" :class="{ 'is-preview-expanded': showPreview && previewExpanded }">
+      <section class="section-card gradient-border-top gradient-border-top-accent dashboard-live-shell" :class="{ 'is-preview-expanded': showPreview && previewExpanded }">
         <div class="dashboard-live-header">
           <div class="dashboard-live-header-copy">
             <div class="section-kicker">{{ $t('dashboard.live_session') }}</div>
@@ -394,7 +394,7 @@
     <template v-else>
       <!-- Status hero: one band answering "can I stream right now, and if
            not, what fixes it" (absorbs the old strip, triptych, and quad). -->
-      <section class="section-card" data-dashboard-idle-hero>
+      <section class="section-card gradient-border-top gradient-border-top-accent" data-dashboard-idle-hero>
         <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div class="min-w-0">
             <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>

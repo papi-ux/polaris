@@ -13,14 +13,14 @@
 :root {
   --surface-card-base: #343150; /* Nova polaris card */
   --surface-glass: color-mix(in srgb, var(--surface-card-base) 55%, transparent);
-  --surface-card: color-mix(in srgb, var(--surface-card-base) 78%, transparent);
+  --surface-card: color-mix(in srgb, var(--surface-card-base) 86%, transparent);
   --surface-raised: color-mix(in srgb, var(--surface-card-base) 44%, transparent);
   --surface-raised-hover: color-mix(in srgb, var(--surface-card-base) 62%, transparent);
   --surface-pill: color-mix(in srgb, var(--surface-card-base) 64%, transparent);
   --surface-chip: color-mix(in srgb, var(--color-void) 50%, transparent);
   --surface-shimmer: var(--color-twilight);
-  --edge-glass: color-mix(in srgb, var(--color-ice) 8%, transparent);
-  --edge-card: color-mix(in srgb, var(--color-ice) 6%, transparent);
+  --edge-glass: color-mix(in srgb, var(--color-ice) 10%, transparent);
+  --edge-card: color-mix(in srgb, var(--color-ice) 11%, transparent);
   --edge-raised: color-mix(in srgb, var(--color-storm) 20%, transparent);
   --edge-raised-hover: color-mix(in srgb, var(--color-silver) 35%, transparent);
   --edge-pill: color-mix(in srgb, var(--color-storm) 30%, transparent);
@@ -231,6 +231,15 @@ textarea {
   background: linear-gradient(90deg, var(--color-success), color-mix(in srgb, var(--color-success) 78%, black));
   opacity: 0.8;
 }
+/* Accent hairline for hero surfaces: picks up each theme's accent pair
+   (Miami runs pink into water cyan, others stay monochrome accent). */
+.gradient-border-top-accent::before {
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--color-accent) 30%, var(--color-accent-2) 70%, transparent);
+  opacity: 0.9;
+}
 
 /* ── Hidden Scrollbar ── */
 .scrollbar-hidden {
@@ -271,7 +280,7 @@ textarea {
 
 /* ── Shared Layout Vocabulary ── */
 .page-shell {
-  @apply my-6 space-y-5;
+  @apply my-5 space-y-4;
 }
 
 .page-header {
@@ -283,7 +292,7 @@ textarea {
 }
 
 .page-title {
-  @apply text-[clamp(1.65rem,2vw,2.15rem)] font-bold text-silver text-balance;
+  @apply text-[clamp(1.65rem,2vw,2.15rem)] font-bold tracking-tight text-ice text-balance;
 }
 
 .page-subtitle {
@@ -361,6 +370,12 @@ textarea {
 
 .section-kicker {
   @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm/80;
+}
+
+/* Hero surfaces lead with the theme accent. */
+[data-dashboard-idle-hero] .section-kicker,
+.dashboard-live-shell .section-kicker {
+  color: var(--color-accent);
 }
 
 .section-title {
@@ -1158,7 +1173,7 @@ textarea {
 }
 
 .dashboard-live-summary-value {
-  @apply mt-2 truncate text-xl font-semibold leading-tight;
+  @apply mt-2 truncate text-2xl font-bold leading-tight tracking-tight tabular-nums;
 }
 
 .dashboard-live-summary-copy {
