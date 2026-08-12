@@ -1128,7 +1128,9 @@ const previewSupportCopy = computed(() => (
 const previewStatusText = computed(() => {
   if (previewError.value) return t('dashboard.preview_unavailable_status')
   if (!previewLoaded.value) return t('dashboard.preview_capturing')
-  return t('dashboard.preview_status')
+  return previewMode.value === 'mjpeg'
+    ? t('dashboard.preview_status_live')
+    : t('dashboard.preview_status')
 })
 
 

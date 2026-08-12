@@ -852,6 +852,7 @@
     "preview_error": "Display preview is unavailable right now. The active stream may still be healthy.",
     "preview_unavailable_status": "Preview refresh is backing off after a failed capture.",
     "preview_status": "Preview refreshes against the active streaming output every few seconds.",
+    "preview_status_live": "Live MJPEG stream straight from the host.",
     "preview_hidden_title": "Display preview is hidden.",
     "preview_hidden_desc": "Keep Mission Control compact until you need visual confirmation from the live output, then bring the display back inline.",
     "connected_clients": "Connected Clients",
