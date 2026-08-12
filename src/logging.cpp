@@ -3,6 +3,7 @@
  * @brief Definitions for logging related functions.
  */
 // standard includes
+#include <atomic>
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
@@ -39,6 +40,7 @@ namespace bl = boost::log;
 boost::shared_ptr<boost::log::sinks::asynchronous_sink<boost::log::sinks::text_ostream_backend>> sink;
 boost::shared_ptr<std::ofstream> log_file_stream;
 std::string active_log_file_path;
+std::atomic_uint64_t active_log_file_generation {0};
 
 bl::sources::severity_logger<int> verbose(0);  // Dominating output
 bl::sources::severity_logger<int> debug(1);  // Follow what is happening
@@ -222,6 +224,7 @@ namespace logging {
     if (!log_file.empty()) {
       log_file_stream = boost::make_shared<std::ofstream>(log_file);
       sink->locked_backend()->add_stream(log_file_stream);
+      active_log_file_generation.fetch_add(1, std::memory_order_release);
     }
     sink->set_filter(severity >= min_log_level);
     sink->set_formatter(&formatter);
@@ -315,6 +318,10 @@ namespace logging {
     }
   }
 
+  std::uint64_t log_file_generation() {
+    return active_log_file_generation.load(std::memory_order_acquire);
+  }
+
   bool clear_log_file() {
     if (!sink || !log_file_stream || active_log_file_path.empty()) {
       return false;
@@ -327,8 +334,11 @@ namespace logging {
     log_file_stream->close();
     log_file_stream->clear();
     log_file_stream->open(active_log_file_path, std::ios::out | std::ios::trunc);
-
-    return log_file_stream->is_open() && log_file_stream->good();
+    const auto reopened = log_file_stream->is_open() && log_file_stream->good();
+    if (reopened) {
+      active_log_file_generation.fetch_add(1, std::memory_order_release);
+    }
+    return reopened;
   }
 
   void print_help(const char *name) {

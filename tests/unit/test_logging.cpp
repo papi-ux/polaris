@@ -176,3 +176,14 @@ TEST(LoggingRunaway, GlInfoLogLengthIsInitializedAndGuarded) {
       << fn << " must return early on a non-positive info-log length";
   }
 }
+
+TEST(LoggingGeneration, SuccessfulClearAdvancesGenerationAndKeepsLoggingUsable) {
+  const auto before = logging::log_file_generation();
+
+  ASSERT_TRUE(logging::clear_log_file());
+  EXPECT_EQ(logging::log_file_generation(), before + 1);
+
+  const auto marker = std::format("post-clear-generation-{}", before + 1);
+  BOOST_LOG(info) << marker;
+  ASSERT_TRUE(log_checker::line_contains(test_paths::log_file().string(), marker));
+}

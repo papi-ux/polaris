@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <cstdint>
+
 // lib includes
 #include <boost/log/common.hpp>
 #include <boost/log/sinks.hpp>
@@ -75,6 +77,15 @@ namespace logging {
    * @examples_end
    */
   void log_flush();
+
+  /**
+   * @brief Return the process-local generation of the active log file.
+   *
+   * The generation changes after initialization and every successful clear so
+   * incremental readers can distinguish reused byte offsets from the same
+   * logical log generation.
+   */
+  std::uint64_t log_file_generation();
 
   /**
    * @brief Clear the active log file while keeping logging enabled.

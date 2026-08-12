@@ -124,6 +124,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/entry_handler.h"
         "${CMAKE_SOURCE_DIR}/src/file_handler.cpp"
         "${CMAKE_SOURCE_DIR}/src/file_handler.h"
+        "${CMAKE_SOURCE_DIR}/src/log_tail_api.cpp"
+        "${CMAKE_SOURCE_DIR}/src/log_tail_api.h"
         "${CMAKE_SOURCE_DIR}/src/private_state_file.cpp"
         "${CMAKE_SOURCE_DIR}/src/private_state_file.h"
         "${CMAKE_SOURCE_DIR}/src/web_session_store.cpp"
