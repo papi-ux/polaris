@@ -36,7 +36,7 @@
             <div class="text-sm font-semibold text-silver">{{ $t(method.titleKey) }}</div>
             <span
               v-if="method.badgeKey"
-              class="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]"
+              class="rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow"
               :class="method.badgeTone === 'recommended'
                 ? 'border-ice/30 bg-ice/10 text-ice'
                 : 'border-warning/25 bg-warning/10 text-warning-bright'"
@@ -62,7 +62,7 @@
       <div v-if="currentTab !== 'TOFU'" class="mt-5 rounded-xl border border-storm/20 bg-void/40 p-4">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div class="min-w-0">
-            <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.pairing_access') }}</div>
+            <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.pairing_access') }}</div>
             <h3 class="mt-2 text-base font-semibold text-silver">{{ $t('pin.pairing_access_title') }}</h3>
             <p class="mt-1 text-sm text-storm">{{ $t('pin.pairing_access_desc') }}</p>
           </div>
@@ -105,7 +105,7 @@
             </div>
 
             <div class="mt-5">
-              <div class="mb-2 text-xs font-medium uppercase tracking-[0.18em] text-storm">{{ $t('pin.trusted_subnets_label') }}</div>
+              <div class="mb-2 text-xs font-medium uppercase tracking-eyebrow text-storm">{{ $t('pin.trusted_subnets_label') }}</div>
               <div v-if="tofuSubnets.length > 0" class="flex flex-wrap gap-2">
                 <code
                   v-for="(subnet, i) in tofuSubnets"
@@ -283,7 +283,7 @@
 
               <div class="rounded-2xl border border-storm/20 bg-void/50 p-4">
                 <div v-if="otp && hostAddr" class="flex flex-col items-center text-center">
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.scan_with_nova') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.scan_with_nova') }}</div>
                   <div id="qrRef" class="mt-3 flex justify-center"></div>
                   <div class="mt-3 text-xs text-storm">{{ $t('pin.scan_or_open') }}</div>
                   <div class="mt-2 flex items-center gap-2 break-all text-sm text-silver">
@@ -399,7 +399,7 @@
             <div class="p-5">
               <div class="pairing-client-toolbar flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.edit_access') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.edit_access') }}</div>
                   <h3 :id="`client-edit-title-${client.uuid}`" class="mt-2 text-lg font-semibold text-silver">
                     {{ clientDisplayName(client) || $t('pin.unpair_single_unknown') }}
                   </h3>
@@ -454,7 +454,7 @@
 
               <div class="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
                 <section class="rounded-2xl border border-storm/20 bg-void/40 p-4">
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.identity_access') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.identity_access') }}</div>
                   <h4 class="mt-2 text-base font-semibold text-silver">{{ $t('pin.access_presets') }}</h4>
                   <p class="mt-2 text-sm text-storm">{{ $t('pin.access_presets_desc') }}</p>
 
@@ -491,7 +491,7 @@
                     </summary>
                     <div class="mt-4 flex flex-wrap gap-4">
                       <div v-for="group in permissionGroups" :key="group.name" class="flex min-w-[180px] flex-col gap-2">
-                        <div class="text-xs font-medium uppercase tracking-[0.18em] text-storm">{{ group.name }}</div>
+                        <div class="text-xs font-medium uppercase tracking-eyebrow text-storm">{{ group.name }}</div>
                         <button
                           v-for="perm in group.permissions"
                           :key="perm.name"
@@ -543,7 +543,7 @@
                 <section class="rounded-2xl border border-storm/20 bg-void/40 p-4">
                   <div class="flex items-start justify-between gap-4">
                     <div>
-                      <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm">{{ $t('pin.display_profile') }}</div>
+                      <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.display_profile') }}</div>
                       <h4 class="mt-2 text-base font-semibold text-silver">{{ $t('pin.display_profile') }}</h4>
                       <p class="mt-2 text-sm text-storm">{{ $t('pin.display_profile_desc') }}</p>
                     </div>
@@ -620,7 +620,7 @@
                     </div>
 
                     <div>
-                      <label class="mb-1 block text-xs font-medium uppercase tracking-[0.18em] text-storm">{{ $t('pin.output_name') }}</label>
+                      <label class="mb-1 block text-xs font-medium uppercase tracking-eyebrow text-storm">{{ $t('pin.output_name') }}</label>
                       <input
                         v-model="client.editProfile.output_name"
                         type="text"
@@ -630,7 +630,7 @@
                       />
                     </div>
                     <div>
-                      <label class="mb-1 block text-xs font-medium uppercase tracking-[0.18em] text-storm">{{ $t('pin.color_range_label') }}</label>
+                      <label class="mb-1 block text-xs font-medium uppercase tracking-eyebrow text-storm">{{ $t('pin.color_range_label') }}</label>
                       <select
                         v-model="client.editProfile.color_range"
                         class="w-full rounded-lg border border-storm/50 bg-void/50 px-2.5 py-1.5 text-sm text-silver focus:border-ice focus:outline-none"
@@ -641,7 +641,7 @@
                       </select>
                     </div>
                     <div>
-                      <label class="mb-1 block text-xs font-medium uppercase tracking-[0.18em] text-storm">{{ $t('pin.wol_mac_address') }}</label>
+                      <label class="mb-1 block text-xs font-medium uppercase tracking-eyebrow text-storm">{{ $t('pin.wol_mac_address') }}</label>
                       <input
                         v-model="client.editProfile.mac_address"
                         type="text"
@@ -832,23 +832,23 @@
 
               <div class="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-5">
                 <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.permissions_summary') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.permissions_summary') }}</div>
                   <div class="mt-1.5 text-sm font-medium text-silver">{{ accessPresetLabel(client.perm) }}</div>
                 </div>
                 <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.display_summary') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.display_summary') }}</div>
                   <div class="mt-1.5 text-sm font-medium text-silver">{{ clientDisplaySummary(client) }}</div>
                 </div>
                 <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.client_commands_summary') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.client_commands_summary') }}</div>
                   <div class="mt-1.5 text-sm font-medium text-silver">{{ clientCommandSummary(client) }}</div>
                 </div>
                 <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.date_added') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.date_added') }}</div>
                   <div class="mt-1.5 text-sm font-medium text-silver">{{ formatClientTimestamp(client.paired_at, undefined, undefined, $t('pin.not_recorded')) }}</div>
                 </div>
                 <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-storm">{{ $t('pin.last_seen') }}</div>
+                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.last_seen') }}</div>
                   <div class="mt-1.5 text-sm font-medium text-silver">{{ formatClientTimestamp(client.last_seen_at, undefined, undefined, $t('pin.not_recorded')) }}</div>
                 </div>
               </div>

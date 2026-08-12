@@ -10,7 +10,7 @@
       <div class="flex items-center justify-center gap-3">
         <img :src="polarisWordmarkSrc" class="h-12 w-auto" alt="Polaris">
       </div>
-      <div class="mt-5 text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/85">Host connection</div>
+      <div class="mt-5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm/85">Host connection</div>
       <h1 class="mt-3 text-3xl font-bold text-silver">Host reconnecting…</h1>
       <p class="mt-4 text-sm leading-relaxed text-storm">
         Polaris is temporarily unavailable. Your session has not been cleared.

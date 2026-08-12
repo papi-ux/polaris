@@ -24,13 +24,16 @@
     </template>
 
     <template v-else-if="stats?.streaming">
-      <section class="section-card dashboard-live-shell" :class="{ 'is-preview-expanded': showPreview && previewExpanded }">
+      <section class="section-card gradient-border-top gradient-border-top-accent dashboard-live-shell" :class="{ 'is-preview-expanded': showPreview && previewExpanded }">
         <div class="dashboard-live-header">
           <div class="dashboard-live-header-copy">
             <div class="section-kicker">{{ $t('dashboard.live_session') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ liveSessionTitle }}</h2>
               <InfoHint size="sm" :label="$t('dashboard.live_session')">{{ liveSessionSummary }}</InfoHint>
+            </div>
+            <div v-if="currentAppName || sessionDurationLabel" class="mt-1.5 font-mono text-[11px] text-storm">
+              <template v-if="currentAppName">{{ currentAppName }}</template><template v-if="currentAppName && sessionDurationLabel"> · </template><template v-if="sessionDurationLabel">{{ sessionDurationLabel }}</template>
             </div>
           </div>
           <div class="dashboard-live-header-meta">
@@ -39,37 +42,55 @@
           </div>
         </div>
 
+        <!-- Instrument cluster: figure, label, and trend per metric; the old
+             Live stream trends drawer lives here now as sparklines. -->
         <section class="dashboard-live-summary-grid" role="status" aria-live="polite" aria-atomic="true" aria-label="Live stream telemetry summary">
           <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="qualityChartEl"></div>
             <div class="dashboard-live-summary-label">Quality</div>
-            <div class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ liveSummary.quality }}</div>
-            <div class="dashboard-live-summary-copy">{{ liveSummary.qualityDetail }}</div>
+            <div class="flex items-center gap-2">
+              <span class="dashboard-grade-badge" :class="liveSummary.qualityTone">{{ qualityGrade }}</span>
+              <span class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ qualityScore }}</span>
+            </div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Latency">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="latencyChartEl"></div>
             <div class="dashboard-live-summary-label">Latency</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.latencyTone">{{ liveSummary.latency }}</div>
-            <div class="dashboard-live-summary-copy">Round trip</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="FPS">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="fpsChartEl"></div>
             <div class="dashboard-live-summary-label">FPS</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.fpsTone">{{ liveSummary.fps }}</div>
-            <div class="dashboard-live-summary-copy">{{ liveSummary.fpsDetail }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Loss">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="lossChartEl"></div>
             <div class="dashboard-live-summary-label">Loss</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.lossTone">{{ liveSummary.loss }}</div>
-            <div class="dashboard-live-summary-copy">Packet loss</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Bitrate">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="bitrateChartEl"></div>
             <div class="dashboard-live-summary-label">Bitrate</div>
             <div class="dashboard-live-summary-value text-silver">{{ liveSummary.bitrate }}</div>
-            <div class="dashboard-live-summary-copy">{{ stats.codec?.toUpperCase() || '--' }}</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="Encode">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="encodeChartEl"></div>
+            <div class="dashboard-live-summary-label">Encode</div>
+            <div class="dashboard-live-summary-value text-silver">{{ stats.encode_time_ms?.toFixed(1) || '--' }} ms</div>
+          </div>
+          <div class="ml-auto flex flex-col items-end justify-end gap-1.5 self-end" data-dashboard-frame-health>
+            <div class="flex flex-wrap justify-end gap-1.5">
+              <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
+              <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
+              <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
+            </div>
+            <span v-if="prefersReducedMotion" class="font-mono text-[10px] text-storm">Live charts are paused while reduced motion is enabled.</span>
           </div>
         </section>
 
         <!-- Doctor: the host's own per-second diagnosis replaces the old
              Auto Quality panel, stream-path notices, and priority guidance. -->
-        <section class="rounded-xl border p-4" :class="doctorPanelClass" data-dashboard-doctor>
+        <section class="dashboard-doctor-card" :class="doctorPanelClass" data-dashboard-doctor>
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div class="min-w-0">
               <div class="section-kicker">{{ $t('dashboard.doctor') }}</div>
@@ -81,6 +102,9 @@
                 <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
               </div>
               <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ doctorRecommendation }}</p>
+              <p v-if="doctorExplanation" class="mt-3 max-w-3xl rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-sm leading-relaxed text-silver">
+                {{ doctorExplanation }}
+              </p>
             </div>
             <div class="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
               <button
@@ -92,9 +116,18 @@
               >
                 {{ doctorSafeAction.label }}
               </button>
-              <span v-else-if="doctorSafeAction" class="data-pill" :title="doctorSafeAction.rollback || ''">
-                {{ doctorSafeAction.label }}
+              <span v-else-if="doctorSafeAction" class="dashboard-doctor-advice" :title="doctorSafeAction.rollback || ''">
+                Suggested: {{ doctorSafeAction.label }}
               </span>
+              <button
+                v-if="aiStatus?.enabled && doctor"
+                type="button"
+                class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
+                :disabled="doctorExplainPending"
+                @click="explainDoctorVerdict"
+              >
+                {{ doctorExplainPending ? $t('dashboard.doctor_explaining') : $t('dashboard.doctor_explain') }}
+              </button>
             </div>
           </div>
         </section>
@@ -102,13 +135,10 @@
         <div class="dashboard-live-stage" :class="{ 'is-preview-expanded': showPreview && previewExpanded, 'is-preview-hidden': !showPreview }">
           <div class="dashboard-live-main">
             <section class="dashboard-preview-panel">
-              <div class="dashboard-preview-header">
-                <div class="min-w-0">
+              <div class="dashboard-preview-header items-center">
+                <div class="flex min-w-0 items-center gap-2">
                   <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
-                  <div class="mt-2 flex items-center gap-2">
-                    <div class="text-base font-semibold text-silver">{{ previewHeadline }}</div>
-                    <InfoHint size="sm" :label="$t('dashboard.display_preview')">{{ previewSupportCopy }}</InfoHint>
-                  </div>
+                  <InfoHint size="sm" :label="$t('dashboard.display_preview')">{{ previewSupportCopy }}</InfoHint>
                 </div>
                 <div class="dashboard-preview-actions">
                   <button v-if="!showPreview" @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary">
@@ -148,24 +178,24 @@
                       {{ $t('dashboard.preview_retry') }}
                     </button>
                   </div>
-                </div>
-
-                <div class="dashboard-preview-footer">
-                  <div class="dashboard-preview-meta">
-                    <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
-                    <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
-                    <span v-if="hdrChipLabel" class="data-pill text-accent-2" :title="stats.hdr_downgrade_message || ''">{{ hdrChipLabel }}</span>
-                    <span class="data-pill">{{ runtimeBackendLabel }}</span>
-                    <span class="data-pill">{{ capturePathLabel }}</span>
+                  <span v-if="previewLoaded && !previewError" class="dashboard-preview-live-badge">
+                    <span class="text-success">●</span>
+                    {{ previewMode === 'mjpeg' ? 'LIVE' : 'PREVIEW' }}
+                  </span>
+                  <!-- Stream facts ride the stage as overlays instead of chrome around it. -->
+                  <div v-if="previewLoaded && !previewError" class="dashboard-preview-hud">
+                    <div class="dashboard-preview-meta">
+                      <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
+                      <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
+                      <span v-if="hdrChipLabel" class="data-pill text-accent-2" :title="stats.hdr_downgrade_message || ''">{{ hdrChipLabel }}</span>
+                      <span class="data-pill">{{ capturePathLabel }}</span>
+                    </div>
+                    <span class="dashboard-preview-hud-status">{{ previewStatusText }}</span>
                   </div>
-                  <div class="text-xs text-storm">{{ previewStatusText }}</div>
                 </div>
               </template>
-              <div v-else class="dashboard-preview-empty">
-                <div>
-                  <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_hidden_title') }}</div>
-                  <div class="mt-2 text-sm leading-relaxed text-storm">{{ $t('dashboard.preview_hidden_desc') }}</div>
-                </div>
+              <div v-else class="flex items-center justify-between gap-3 py-1">
+                <span class="text-xs text-storm">{{ $t('dashboard.preview_hidden_title') }}</span>
                 <div class="dashboard-preview-meta">
                   <span class="data-pill">{{ viewerCountLabel }}</span>
                   <span class="data-pill">{{ qualitySummaryLabel }}</span>
@@ -173,140 +203,6 @@
               </div>
             </section>
 
-            <div class="dashboard-live-support-grid">
-              <details class="dashboard-secondary-group" open>
-                <summary class="dashboard-secondary-group-summary">
-                  <span>Capture and replay</span>
-                  <span>{{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}</span>
-                </summary>
-                <section class="surface-subtle p-4 dashboard-support-card">
-                <div class="flex items-start justify-between gap-3">
-                  <div>
-                    <div class="eyebrow-label">Session tools</div>
-                    <div class="mt-2 flex items-center gap-2">
-                      <div class="text-base font-semibold text-silver">Capture and replay</div>
-                      <InfoHint size="sm" label="Session tools">{{ $t('dashboard.recording_desc') }}</InfoHint>
-                    </div>
-                  </div>
-                  <span class="meta-pill" :class="recording.active ? 'border-danger/35 bg-danger/10 text-danger' : ''">
-                    {{ recording.active ? $t('dashboard.recording_active') : $t('dashboard.recording_idle') }}
-                  </span>
-                </div>
-                <div class="dashboard-support-subsection">
-                  <div class="section-title-row">
-                    <div class="dashboard-support-subtitle">{{ $t('dashboard.recording') }}</div>
-                    <InfoHint size="sm" :label="$t('dashboard.recording')">{{ $t('dashboard.recording_desc') }}</InfoHint>
-                  </div>
-                </div>
-                <div class="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    v-if="!recording.active"
-                    :disabled="recordingActionPending"
-                    @click="startRecording"
-                    class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {{ $t('dashboard.record') }}
-                  </button>
-                  <button
-                    v-if="recording.active"
-                    :disabled="recordingActionPending"
-                    @click="stopRecording"
-                    class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {{ $t('dashboard.stop_recording') }}
-                  </button>
-                  <button
-                    :disabled="recordingActionPending"
-                    @click="saveReplay"
-                    class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {{ $t('dashboard.save_replay') }}
-                  </button>
-                </div>
-                <div v-if="recording.file" class="mt-3 text-xs break-all text-storm">{{ recording.file }}</div>
-                </section>
-              </details>
-            </div>
-
-            <details class="dashboard-secondary-group" open>
-              <summary class="dashboard-secondary-group-summary">
-                <span>{{ $t('dashboard.telemetry_title') }}</span>
-                <span>{{ stats.fps?.toFixed(1) || '--' }} fps · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
-              </summary>
-              <section class="dashboard-telemetry-card">
-              <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                <div>
-                  <div class="section-kicker">{{ $t('dashboard.telemetry') }}</div>
-                  <div class="section-title-row">
-                    <h3 class="section-title">{{ $t('dashboard.telemetry_title') }}</h3>
-                    <InfoHint size="sm" :label="$t('dashboard.telemetry')">{{ $t('dashboard.telemetry_desc') }}</InfoHint>
-                  </div>
-                </div>
-                <!-- Frame health: the numbers that explain "feels stuttery"
-                     when FPS looks fine; the strip already covers the rest. -->
-                <div class="flex flex-wrap gap-2 text-[11px] text-silver" data-dashboard-frame-health>
-                  <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
-                  <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
-                  <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
-                </div>
-              </div>
-
-              <div v-if="!prefersReducedMotion" class="dashboard-telemetry-grid mt-4">
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-success/80">FPS</div>
-                  <div ref="fpsChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-info/80">Bitrate</div>
-                  <div ref="bitrateChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-silver/60">Encode</div>
-                  <div ref="encodeChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-warning/80">Latency</div>
-                  <div ref="latencyChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-accent/80">GPU Load</div>
-                  <div ref="gpuChartEl" class="h-24 w-full"></div>
-                </div>
-                <div class="card p-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-wider text-danger/80">Packet Loss</div>
-                  <div ref="lossChartEl" class="h-24 w-full"></div>
-                </div>
-              </div>
-              <div v-else class="dashboard-empty-state mt-4">
-                Live charts are paused while reduced motion is enabled; the summary tiles above keep updating without the extra canvas work.
-              </div>
-
-              <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <div class="dashboard-metric-tile">
-                  <div class="dashboard-metric-label">GPU Temp</div>
-                  <div class="dashboard-metric-value" :class="gpu.temperature_c != null ? (gpu.temperature_c > 80 ? 'text-danger' : gpu.temperature_c > 65 ? 'text-warning' : 'text-success') : 'text-storm'">
-                    {{ gpu.temperature_c != null ? gpu.temperature_c + '°' : '--' }}
-                  </div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W draw</div>
-                </div>
-                <div class="dashboard-metric-tile">
-                  <div class="dashboard-metric-label">GPU Load</div>
-                  <div class="dashboard-metric-value text-accent">{{ gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '--' }}</div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.clock_mhz || gpu.clock_gpu_mhz || '--' }} MHz</div>
-                </div>
-                <div class="dashboard-metric-tile" v-if="gpu.encoder_pct != null">
-                  <div class="dashboard-metric-label">Encoder</div>
-                  <div class="dashboard-metric-value text-info">{{ gpu.encoder_pct }}%</div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN' }} workload</div>
-                </div>
-                <div class="dashboard-metric-tile">
-                  <div class="dashboard-metric-label">VRAM</div>
-                  <div class="dashboard-metric-value text-silver">{{ gpu.vram_used_mb != null ? (gpu.vram_used_mb / 1024).toFixed(1) + ' GB' : '--' }}</div>
-                  <div class="mt-1 text-xs text-storm">{{ gpu.vram_total_mb != null ? '/ ' + (gpu.vram_total_mb / 1024).toFixed(0) + ' GB' : '' }}</div>
-                </div>
-              </div>
-              </section>
-            </details>
           </div>
 
           <div class="dashboard-live-side">
@@ -314,6 +210,9 @@
               <div class="flex items-center justify-between gap-3">
                 <div class="eyebrow-label">Session context</div>
                 <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
+              </div>
+              <div v-if="gpu" class="mt-2 font-mono text-[11px] tabular-nums text-storm">
+                {{ gpu.name }} · {{ gpu.temperature_c ?? '--' }}°C · {{ gpu.utilization_pct ?? 0 }}% · {{ gpu.encoder_pct ?? 0 }}% enc · {{ gpu.vram_used_mb ? (gpu.vram_used_mb / 1024).toFixed(1) : '--' }}G
               </div>
               <div class="dashboard-context-section">
                 <div class="dashboard-context-header">
@@ -372,27 +271,11 @@
             </section>
 
             <section class="card p-4">
-              <div class="flex items-center justify-between gap-3">
-                <div>
-                  <div class="eyebrow-label">{{ $t('dashboard.quick_controls') }}</div>
-                  <div class="mt-2 flex items-center gap-2">
-                    <div class="text-sm font-medium text-silver">{{ clientSettingsSyncLabel }}</div>
-                    <InfoHint size="sm" :label="$t('dashboard.quick_controls')">{{ clientSettingsSyncCopy }}</InfoHint>
-                  </div>
-                </div>
-                <div class="flex shrink-0 items-center gap-2">
-                  <span class="meta-pill whitespace-nowrap" :class="clientSettingsSyncTone">{{ clientSettingsSyncLabel }}</span>
-                  <router-link to="/config" class="text-[11px] font-medium text-ice no-underline hover:text-ice/80">
-                    Settings
-                  </router-link>
-                </div>
-              </div>
-              <div class="mt-4">
-                <QuickControls compact @change="handleQuickControlChange" />
-              </div>
+              <QuickControls compact @change="handleQuickControlChange" />
             </section>
           </div>
         </div>
+
       </section>
     </template>
 
@@ -400,45 +283,49 @@
     <template v-else>
       <!-- Status hero: one band answering "can I stream right now, and if
            not, what fixes it" (absorbs the old strip, triptych, and quad). -->
-      <section class="section-card" data-dashboard-idle-hero>
+      <section class="section-card gradient-border-top gradient-border-top-accent" data-dashboard-idle-hero>
         <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div class="min-w-0">
             <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
             <h2 class="mt-2 text-2xl font-semibold leading-tight" :class="readinessTone">{{ readinessLabel }}</h2>
             <p class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ nextStep.title }} · {{ nextStep.desc }}</p>
             <div class="mt-4 flex flex-wrap gap-2">
-              <span class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
+              <template v-if="pairedClientChips.length">
+                <span v-for="chip in pairedClientChips" :key="chip.name" class="data-pill">{{ chip.label }}</span>
+              </template>
+              <span v-else class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
+              <span v-if="lastSessionChip" class="data-pill">{{ lastSessionChip }}</span>
               <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
               <span class="data-pill" v-if="gpu">{{ gpu.temperature_c || '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
               <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
             </div>
           </div>
-          <router-link
-            v-if="readyCheckDisplay.primaryIssue"
-            :to="readyCheckDisplay.primaryIssue.to"
-            class="focus-ring dashboard-action-button dashboard-action-button-primary shrink-0 no-underline"
-          >
-            {{ $t('dashboard.open_priority_fix') }}
-          </router-link>
+          <div class="flex shrink-0 flex-col items-end gap-3">
+            <span
+              class="inline-flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-eyebrow"
+              :class="readyCheckDisplay.allPassing ? 'border-success/35 text-success' : 'border-warning/35 text-warning'"
+            >
+              <span class="pulse-dot" :class="readyCheckDisplay.allPassing ? '' : '!bg-warning'"></span>
+              {{ readyCheckDisplay.allPassing ? 'READY' : 'ATTENTION' }}
+            </span>
+            <router-link
+              v-if="readyCheckDisplay.primaryIssue"
+              :to="readyCheckDisplay.primaryIssue.to"
+              class="focus-ring dashboard-action-button dashboard-action-button-primary shrink-0 no-underline"
+            >
+              {{ $t('dashboard.open_priority_fix') }}
+            </router-link>
+          </div>
         </div>
       </section>
 
       <!-- GPU Gauges + Quick Controls -->
       <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div class="min-w-0 space-y-4">
         <div class="section-card space-y-5">
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
-              <div class="section-title-row">
-                <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
-                <InfoHint size="sm" :label="$t('dashboard.stream_readiness')">
-                  {{ headlessEnabled ? $t('dashboard.primary_ready_desc') : $t('dashboard.windowed_desc') }}
-                </InfoHint>
-              </div>
-            </div>
-            <span class="meta-pill">
-              {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
-            </span>
+          <div>
+            <div class="section-kicker">Host vitals</div>
+            <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
           </div>
 
           <div class="surface-subtle p-4" v-if="gpu">
@@ -467,29 +354,16 @@
           </div>
 
           <div>
-            <div class="flex items-start justify-between gap-3">
-              <div>
-                <div class="section-kicker">{{ $t('dashboard.ready_checks') }}</div>
-                <div class="mt-2 flex items-center gap-2">
-                  <div class="text-sm font-medium text-silver">{{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}</div>
-                  <InfoHint size="sm" :label="$t('dashboard.ready_checks')">{{ $t('dashboard.ready_checks_desc') }}</InfoHint>
-                </div>
-              </div>
-              <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium"
-                    :class="readyChecksPassing === readyChecks.length ? 'border-success/30 bg-success/10 text-success' : 'border-warning/30 bg-warning/10 text-warning-bright'">
-                {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
-              </span>
-            </div>
-            <div v-if="readyChecksAllPassing" class="ready-check-summary mt-4">
+            <div v-if="readyChecksAllPassing" class="ready-check-summary">
               <div>
                 <div class="text-sm font-semibold text-success">All launch checks are ready</div>
                 <div class="mt-1 text-xs text-storm">Pairing, library, discovery, displays, and audio are clear.</div>
               </div>
-              <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-success">
+              <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-eyebrow text-success">
                 {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
-            <div v-else class="mt-4 space-y-3">
+            <div v-else class="space-y-3">
               <div class="ready-check-summary ready-check-summary-attention">
                 <div>
                   <div class="text-sm font-semibold text-warning-bright">{{ readyChecksAttentionCount }} launch checks need attention</div>
@@ -515,7 +389,7 @@
                 >
                   <div class="flex items-center justify-between gap-3">
                     <div class="text-sm font-medium text-silver">{{ check.label }}</div>
-                    <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="check.badgeClass">
+                    <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="check.badgeClass">
                       {{ check.state }}
                     </span>
                   </div>
@@ -526,64 +400,80 @@
             </div>
           </div>
         </div>
+        <!-- Recent Games: the landing page is a remote control, so rows launch. -->
+        <div class="section-card" data-dashboard-play-rail>
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
+              <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
+            </div>
+            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
+              {{ $t('navbar.library') }}
+            </router-link>
+          </div>
+          <div v-if="recentApps.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
+            <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
+              <div class="dashboard-play-cover">
+                <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="h-full w-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
+              </div>
+              <div class="mt-2 min-w-0">
+                <div class="truncate text-xs font-semibold text-silver">{{ app.name }}</div>
+                <div class="truncate font-mono text-[9px] uppercase tracking-eyebrow text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
+              </div>
+              <button
+                type="button"
+                class="focus-ring dashboard-play-launch"
+                :disabled="launchingUuid === app.uuid"
+                @click="launchRecentApp(app)"
+              >
+                {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
+              </button>
+            </div>
+          </div>
+          <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
+          <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
+            <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
+            <span class="data-pill">
+              {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
+            </span>
+            <span class="data-pill">
+              {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
+            </span>
+            <span class="data-pill" v-if="audio?.sink">
+              {{ formatAudioName(audio.sink) }}
+            </span>
+            <span class="data-pill">
+              v{{ version }}
+            </span>
+          </div>
+        </div>
+        </div>
         <div class="section-card">
           <QuickControls @change="handleQuickControlChange" />
         </div>
       </div>
 
-      <!-- Recent Games: the landing page is a remote control, so rows launch. -->
-      <div class="section-card" data-dashboard-play-rail>
-        <div class="flex items-center justify-between gap-3 mb-3">
-          <div>
-            <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
-            <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
-          </div>
-          <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
-            {{ $t('navbar.library') }}
-          </router-link>
-        </div>
-        <div v-if="recentApps.length" class="space-y-1.5">
-          <div v-for="app in recentApps" :key="app.uuid" class="flex items-center gap-3 p-1.5 rounded-lg hover:bg-ice/5 transition-colors">
-            <div class="w-8 h-11 rounded bg-void/60 shrink-0 overflow-hidden">
-              <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="w-full h-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
-            </div>
-            <div class="flex-1 min-w-0">
-              <div class="text-sm text-silver truncate">{{ app.name }}</div>
-              <div class="text-[10px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
-            </div>
-            <button
-              type="button"
-              class="focus-ring inline-flex h-7 shrink-0 items-center rounded-lg border border-accent/40 px-3 text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="launchingUuid === app.uuid"
-              @click="launchRecentApp(app)"
-            >
-              {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
-            </button>
-          </div>
-        </div>
-        <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
-        <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
-          <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
-          <span class="data-pill">
-            {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
-          </span>
-          <span class="data-pill">
-            {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
-          </span>
-          <span class="data-pill" v-if="audio?.sink">
-            {{ formatAudioName(audio.sink) }}
-          </span>
-          <span class="data-pill">
-            v{{ version }}
-          </span>
-        </div>
-      </div>
     </template>
 
-    <!-- Session History (idle) -->
+    <!-- Session History (idle): one list; this browser's rich local history,
+         with the host's session log as the fallback source. -->
+    <div v-if="statsLoaded && !stats?.streaming && !sessions.length && hostHistoryRows.length" class="card p-4">
+      <div class="eyebrow-label mb-3">Session History</div>
+      <div class="space-y-2">
+        <div v-for="(s, i) in hostHistoryRows" :key="i" class="flex items-center gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2">
+          <span class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold" :class="{
+            'bg-success/20 text-success': s.quality_grade === 'A',
+            'bg-info/20 text-info': s.quality_grade === 'B',
+            'bg-warning/20 text-warning': s.quality_grade === 'C' || s.quality_grade === 'D',
+            'bg-danger/20 text-danger': s.quality_grade === 'F'
+          }">{{ s.quality_grade || '·' }}</span>
+          <div class="min-w-0 flex-1 truncate text-sm text-silver">{{ s.key }}</div>
+        </div>
+      </div>
+    </div>
     <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="card p-4">
       <div class="flex items-center justify-between mb-3">
-        <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">Session History</div>
+        <div class="eyebrow-label">Session History</div>
         <button @click="clearHistory" class="text-[10px] text-storm hover:text-ice transition-colors">Clear</button>
       </div>
       <div class="space-y-0">
@@ -651,7 +541,57 @@ import {
 
 const { stats } = useStreamStats(1000)
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
-const { sessions, clearHistory } = useSessionHistory(stats)
+const { sessions, clearHistory, activeStartedAt } = useSessionHistory(stats)
+
+// Apps catalog: recents for the play rail plus the running app for the hero.
+async function refreshApps() {
+  try {
+    const res = await fetch('./api/apps', { credentials: 'include' })
+    if (res.ok) {
+      const data = await res.json()
+      currentAppUuid.value = data.current_app || ''
+      allAppsById.value = Object.fromEntries((data.apps || []).filter(a => a.uuid).map(a => [a.uuid, a.name]))
+      const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
+      apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
+      appCatalogCount.value = apps.length
+      recentApps.value = apps.slice(0, 5)
+    }
+  } catch {}
+}
+
+// Hero context: what is being played and for how long. current_app arrives
+// with the /api/apps payload; duration ticks against the SSE stats clock.
+const currentAppUuid = ref('')
+const currentAppName = computed(() => {
+  if (!currentAppUuid.value) return ''
+  return recentApps.value.find((app) => app.uuid === currentAppUuid.value)?.name
+    || allAppsById.value[currentAppUuid.value]
+    || ''
+})
+const allAppsById = ref({})
+
+const sessionDurationLabel = computed(() => {
+  // Touch stats so the label re-computes on every SSE tick.
+  void stats.value
+  if (!activeStartedAt.value) return ''
+  const totalS = Math.max(0, Math.round((Date.now() - activeStartedAt.value) / 1000))
+  if (totalS < 60) return `${totalS}s`
+  const minutes = Math.floor(totalS / 60)
+  if (minutes < 60) return `${minutes} min`
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
+})
+
+// Last-session recap for the idle hero.
+const lastSessionChip = computed(() => {
+  const last = sessions.value[0]
+  if (!last) return ''
+  const bits = [
+    last.quality_grade ? `${last.quality_grade}` : '',
+    Number.isFinite(last.duration_s) ? formatDuration(last.duration_s) : '',
+    last.client_name || '',
+  ].filter(Boolean)
+  return bits.length ? `Last: ${bits.join(' · ')}` : ''
+})
 const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices } = useAiOptimizer()
 
 // AI optimization state for current stream
@@ -788,29 +728,6 @@ function refreshClientSettingsSync(configPayload) {
   clientSettingsSync.value = resolveClientSettingsSync(configPayload || {})
 }
 
-const clientSettingsSyncLabel = computed(() => {
-  if (!clientSettingsSync.value.available) return 'Sync unavailable'
-  if (clientSettingsSync.value.relaunchRequired) return 'Sync pending'
-  return 'Nova sync ready'
-})
-
-const clientSettingsSyncTone = computed(() => {
-  if (!clientSettingsSync.value.available || clientSettingsSync.value.relaunchRequired) {
-    return 'border-warning/30 bg-warning/10 text-warning-bright'
-  }
-  return 'border-success/30 bg-success/10 text-success'
-})
-
-const clientSettingsSyncCopy = computed(() => {
-  if (!clientSettingsSync.value.available) {
-    return 'Nova-facing client settings are unavailable on this Polaris build.'
-  }
-  if (clientSettingsSync.value.relaunchRequired) {
-    return 'A requested display mode is saved and will become active after the stream relaunches.'
-  }
-  return 'Nova-facing controls are available for live bitrate, Auto Quality, and next-stream display choices.'
-})
-
 const connectedClients = computed(() => {
   if (!stats.value?.streaming) return []
 
@@ -835,14 +752,15 @@ const viewerCountLabel = computed(() => {
 
 // First HDR surface in the web UI: state plus downgrade reason on hover.
 const hdrChipLabel = computed(() => {
-  // Host contract: hdr_effective_mode is sdr_8bit|sdr_10bit|hdr10 and
-  // hdr_downgrade_reason is the literal string "none" when nothing degraded.
+  // Host contract: hdr_effective_mode is sdr_8bit|sdr_10bit|hdr10, and a
+  // DOWNGRADED stream reports an sdr_* mode with hdr_downgrade_reason set
+  // (the literal "none" means no downgrade). So: downgrade first, then hdr.
   const s = stats.value || {}
+  const reason = String(s.hdr_downgrade_reason || 'none')
+  if (reason !== 'none') return 'HDR → SDR'
   const mode = String(s.hdr_effective_mode || s.dynamic_range || '').toLowerCase()
   if (!mode || mode.startsWith('sdr')) return ''
-  const label = mode.toUpperCase()
-  const reason = String(s.hdr_downgrade_reason || 'none')
-  return reason !== 'none' ? ` → SDR` : label
+  return mode.toUpperCase()
 })
 const currentClientName = computed(() => connectedClients.value[0]?.name || t('dashboard.unknown_client'))
 
@@ -1119,11 +1037,17 @@ function refreshPreview() {
   // When streaming, crop to the streaming output; otherwise show full display
   const output = streamingOutput.value ? `&output=${encodeURIComponent(streamingOutput.value)}` : ''
   if (previewMode.value === 'mjpeg') {
-    previewUrl.value = `./api/display/stream?t=${Date.now()}${output}`
+    // fps=2 keeps the host's capture loop light (it defaults to 5), and the
+    // 30 s re-issue is a staleness watchdog: a cleanly ended multipart stream
+    // fires neither load nor error, which would otherwise freeze the frame.
+    previewUrl.value = `./api/display/stream?fps=2&t=${Date.now()}${output}`
     // Chromium may never fire img load for multipart streams; clear the
     // spinner once frames have had time to arrive unless an error landed.
     previewTimer = setTimeout(() => {
-      if (previewMode.value === 'mjpeg' && showPreview.value && !previewError.value) previewLoaded.value = true
+      if (previewMode.value === 'mjpeg' && showPreview.value && !previewError.value && !document.hidden) {
+        previewLoaded.value = true
+        schedulePreviewRefresh(30000)
+      }
     }, 1500)
   } else {
     previewUrl.value = `./api/display/screenshot?t=${Date.now()}${output}`
@@ -1163,6 +1087,19 @@ function retryPreviewNow() {
   refreshPreview()
 }
 
+// A backgrounded tab must not keep the host capturing for an MJPEG stream
+// nobody is watching; pause the stream and resume on return.
+function handlePreviewVisibility() {
+  if (!showPreview.value) return
+  if (document.hidden) {
+    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
+    previewUrl.value = ''
+    previewLoaded.value = false
+  } else {
+    refreshPreview()
+  }
+}
+
 function togglePreviewExpanded() {
   if (!showPreview.value) {
     startPreview()
@@ -1183,12 +1120,6 @@ const qualityScore = computed(() => buildQualityScore(stats.value || {}))
 
 const qualityGrade = computed(() => buildQualityGrade(qualityScore.value))
 
-const previewHeadline = computed(() => (
-  previewExpanded.value
-    ? t('dashboard.preview_headline_expanded')
-    : t('dashboard.preview_headline')
-))
-
 const previewSupportCopy = computed(() => (
   previewExpanded.value
     ? t('dashboard.preview_support_expanded')
@@ -1198,33 +1129,12 @@ const previewSupportCopy = computed(() => (
 const previewStatusText = computed(() => {
   if (previewError.value) return t('dashboard.preview_unavailable_status')
   if (!previewLoaded.value) return t('dashboard.preview_capturing')
-  return t('dashboard.preview_status')
+  return previewMode.value === 'mjpeg'
+    ? t('dashboard.preview_status_live')
+    : t('dashboard.preview_status')
 })
 
 
-
-// Recording controls
-const recording = ref({ active: false, file: '' })
-const recordingActionPending = ref(false)
-
-async function fetchRecordingStatus() {
-  try {
-    const res = await fetch('./api/recording/status', { credentials: 'include' })
-    if (res.ok) recording.value = await res.json()
-  } catch {}
-}
-
-async function startRecording() {
-  await runRecordingAction('./api/recording/start', 'dashboard.recording_start_success', 'dashboard.recording_start_error')
-}
-
-async function stopRecording() {
-  await runRecordingAction('./api/recording/stop', 'dashboard.recording_stop_success', 'dashboard.recording_stop_error')
-}
-
-async function saveReplay() {
-  await runRecordingAction('./api/recording/save-replay', 'dashboard.recording_replay_success', 'dashboard.recording_replay_error')
-}
 
 // Frame health: dropped/duplicate ratios and jitter arrive on every SSE tick
 // but were never surfaced; they explain stutter that FPS alone hides.
@@ -1243,6 +1153,69 @@ const frameHealth = computed(() => {
     jitterTone: Number.isFinite(jitter) && jitter > 4 ? 'text-warning' : '',
   }
 })
+
+// Host-side session log rows, the fallback history source when this browser
+// has no local session records yet.
+const hostHistoryRows = computed(() => (Array.isArray(sessionHistory.value) ? sessionHistory.value.slice(0, 8) : []))
+
+// Paired-client chips with last-seen times (the host records last_seen_at
+// per certificate; epoch seconds, tolerating milliseconds).
+const pairedClientList = ref([])
+
+function relativeSeen(value) {
+  const raw = Number(value)
+  if (!Number.isFinite(raw) || raw <= 0) return ''
+  const ms = raw > 1e12 ? raw : raw * 1000
+  const deltaS = Math.max(0, (Date.now() - ms) / 1000)
+  if (deltaS < 90) return 'seen just now'
+  if (deltaS < 5400) return `seen ${Math.round(deltaS / 60)} min ago`
+  if (deltaS < 129600) return `seen ${Math.round(deltaS / 3600)} h ago`
+  return `seen ${Math.round(deltaS / 86400)} d ago`
+}
+
+const pairedClientChips = computed(() => {
+  const chips = pairedClientList.value.slice(0, 3).map((cert) => {
+    const displayName = cert.name || cert.uuid || ''
+    const seen = relativeSeen(cert.last_seen_at)
+    return { name: displayName, label: seen ? `${displayName} · ${seen}` : displayName }
+  }).filter((chip) => chip.name)
+  const extra = pairedClientList.value.length - chips.length
+  if (extra > 0) chips.push({ name: '+extra', label: `+${extra} more` })
+  return chips
+})
+
+// Doctor "Explain": same AI flow Troubleshooting uses, loaded on demand so
+// the initial bundle stays inside budget.
+const doctorExplanation = ref('')
+const doctorExplainPending = ref(false)
+
+async function explainDoctorVerdict() {
+  if (doctorExplainPending.value) return
+  doctorExplainPending.value = true
+  doctorExplanation.value = ''
+  try {
+    const { explainDoctorWithAi } = await import('../ai-doctor-explanation.js')
+    const configRes = await fetch('./api/config', { credentials: 'include' })
+    const config = configRes.ok ? await configRes.json() : {}
+    const result = await explainDoctorWithAi({
+      aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
+      config,
+      supportBundle: { config, stream_stats: stats.value || {}, deterministic_summary: doctor.value || {} },
+      deterministicSummary: doctor.value || {},
+    })
+    const explanation = result.explanation || {}
+    const text = [explanation.likely_cause, (explanation.try_first || [])[0]].filter(Boolean).join(' ')
+    if (text) {
+      doctorExplanation.value = text
+    } else {
+      showToast(result.error || t('dashboard.doctor_explain_unavailable'), 'info')
+    }
+  } catch (e) {
+    showToast(t('dashboard.doctor_explain_unavailable') + ` (${e.message})`, 'error')
+  } finally {
+    doctorExplainPending.value = false
+  }
+}
 
 // ── Doctor: the host's deterministic per-second diagnosis (SSE `doctor`) ──
 const doctor = computed(() => stats.value?.doctor || null)
@@ -1265,18 +1238,24 @@ const doctorRecommendation = computed(() => {
 })
 
 const doctorPanelClass = computed(() => {
+  // Host contract: traffic_light is green | amber | red (never yellow).
+  // The tone paints the verdict stripe on the card left edge.
   switch (doctor.value?.traffic_light) {
-    case 'red': return 'border-danger/30 bg-danger/5'
-    case 'yellow': return 'border-warning/25 bg-warning/5'
-    default: return 'border-success/20 bg-success/5'
+    case 'red': return 'border-l-danger bg-danger/5'
+    case 'amber':
+    case 'yellow': return 'border-l-warning bg-warning/5'
+    case 'green': return 'border-l-success bg-success/5'
+    default: return 'border-l-storm/60 bg-void/20'
   }
 })
 
 const doctorLightClass = computed(() => {
   switch (doctor.value?.traffic_light) {
     case 'red': return 'bg-danger'
+    case 'amber':
     case 'yellow': return 'bg-warning'
-    default: return 'bg-success'
+    case 'green': return 'bg-success'
+    default: return 'bg-storm/60'
   }
 })
 
@@ -1290,8 +1269,10 @@ const doctorConfidenceLabel = computed(() => {
 // endpoints like /polaris/v1/client-settings, which would 404 here), so
 // anything else renders as advice without an execute button.
 const doctorSafeAction = computed(() => {
+  // Endpoint-less actions (export diagnostics, safer-next-launch) are real
+  // host advice and render as advisory pills; only /api/ ones can execute.
   const action = doctor.value?.safe_recovery_action
-  if (!action || action.kind === 'none' || !action.endpoint) return null
+  if (!action || action.kind === 'none' || !action.label) return null
   return action
 })
 
@@ -1335,9 +1316,10 @@ async function launchRecentApp(app) {
       method: 'POST',
       body: JSON.stringify({ uuid: app.uuid }),
     })
-    const result = await response.json()
-    if (result.status) {
+    const result = response.ok ? await response.json() : { status: false, error: `HTTP ${response.status}` }
+    if (result.status === true) {
       showToast(t('dashboard.launched', { name: app.name }), 'success')
+      refreshApps()
     } else {
       showToast(t('dashboard.launch_failed') + (result.error || ''), 'error')
     }
@@ -1345,22 +1327,6 @@ async function launchRecentApp(app) {
     showToast(t('dashboard.launch_failed') + e.message, 'error')
   } finally {
     launchingUuid.value = ''
-  }
-}
-
-async function runRecordingAction(url, successKey, errorKey) {
-  if (recordingActionPending.value) return
-  recordingActionPending.value = true
-  try {
-    const response = await fetch(url, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    await fetchRecordingStatus()
-    showToast(t(successKey), 'success')
-  } catch (error) {
-    console.error(error)
-    showToast(t(errorKey), 'error')
-  } finally {
-    recordingActionPending.value = false
   }
 }
 
@@ -1436,7 +1402,13 @@ const prefersReducedMotion = ref(false)
 let reducedMotionQuery = null
 
 function updateReducedMotionPreference(event) {
-  prefersReducedMotion.value = Boolean(event?.matches)
+  const next = Boolean(event?.matches)
+  if (next !== prefersReducedMotion.value) {
+    // The spark slots remount on this flip; stale uPlot instances would keep
+    // drawing into detached nodes, so drop them and let the next tick rebuild.
+    destroyChartInstances()
+  }
+  prefersReducedMotion.value = next
 }
 
 // Track whether we've gotten at least one stats response
@@ -1459,29 +1431,29 @@ async function fetchSystemInfo() {
 }
 
 // Chart refs
+const qualityChartEl = ref(null)
 const fpsChartEl = ref(null)
 const bitrateChartEl = ref(null)
 const encodeChartEl = ref(null)
 const latencyChartEl = ref(null)
-const gpuChartEl = ref(null)
 const lossChartEl = ref(null)
 
 // Chart instances
+let qualityChart = null
 let fpsChart = null
 let bitrateChart = null
 let encodeChart = null
 let latencyChart = null
-let gpuChart = null
 let lossChart = null
 
 // Rolling data (60 seconds)
 const MAX_POINTS = 60
 const timestamps = ref([])
+const qualityHistory = ref([])
 const fpsHistory = ref([])
 const bitrateHistory = ref([])
 const encodeHistory = ref([])
 const latencyHistory = ref([])
-const gpuHistory = ref([])
 const lossHistory = ref([])
 
 // Chart colors resolve from the active theme's tokens at build time; charts
@@ -1490,32 +1462,47 @@ function makeChartOpts(title, suffix, tokenName = 'ice') {
   const tokens = readThemeTokens(['ice', 'twilight', 'storm', tokenName])
   const color = tokens[tokenName] || tokens.ice
   return {
-    width: 300,
-    height: 96,
+    width: 144,
+    height: 32,
     cursor: { show: false },
     legend: { show: false },
-    axes: [
-      {
-        stroke: tokens.twilight,
-        grid: { stroke: withAlpha(tokens.twilight, 0.125), width: 1 },
-        ticks: { show: false },
-        font: '9px sans-serif',
-        values: () => [],
+    // Sparkline mode: no axes, no grid; the strip label carries the meaning.
+    axes: [{ show: false }, { show: false }],
+    scales: {
+      // Pad the y-range so the line breathes instead of hugging the edges,
+      // and hold a visible centered line when the metric is flat.
+      y: {
+        range: (u, min, max) => {
+          const span = max - min
+          const pad = span > 0 ? span * 0.2 : (Math.abs(max) * 0.15 || 1)
+          return [min - pad, max + pad]
+        },
       },
-      {
-        stroke: tokens.storm,
-        grid: { stroke: withAlpha(tokens.twilight, 0.125), width: 1 },
-        ticks: { stroke: tokens.twilight, width: 1 },
-        font: '9px sans-serif',
-        size: 35,
-      },
-    ],
+    },
     series: [
       {},
       {
-        stroke: color,
-        width: 1.5,
-        fill: withAlpha(color, 0.06),
+        // De-emphasized smooth line with the current value emphasized: the
+        // endpoint dot carries the metric hue at full strength.
+        stroke: withAlpha(color, 0.65),
+        width: 2,
+        ...(uPlotLib?.paths?.spline ? { paths: uPlotLib.paths.spline() } : {}),
+        points: {
+          show: true,
+          filter: (u, seriesIdx) => {
+            const len = u.data[seriesIdx]?.length || 0
+            return len ? [len - 1] : []
+          },
+          size: 6,
+          width: 0,
+          fill: color,
+        },
+        fill: (u) => {
+          const gradient = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height)
+          gradient.addColorStop(0, withAlpha(color, 0.28))
+          gradient.addColorStop(1, withAlpha(color, 0))
+          return gradient
+        },
       },
     ],
   }
@@ -1536,16 +1523,16 @@ function updateChartData(chart, ts, values) {
 
 function resizeCharts() {
   const charts = [
+    { chart: qualityChart, el: qualityChartEl.value },
     { chart: fpsChart, el: fpsChartEl.value },
     { chart: bitrateChart, el: bitrateChartEl.value },
     { chart: encodeChart, el: encodeChartEl.value },
     { chart: latencyChart, el: latencyChartEl.value },
-    { chart: gpuChart, el: gpuChartEl.value },
     { chart: lossChart, el: lossChartEl.value },
   ]
   for (const { chart, el } of charts) {
     if (chart && el) {
-      chart.setSize({ width: el.clientWidth, height: 96 })
+      chart.setSize({ width: el.clientWidth, height: 32 })
     }
   }
 }
@@ -1555,6 +1542,9 @@ let resizeObserver = null
 async function setupCharts() {
   await loadUPlot()
   await nextTick()
+  if (qualityChartEl.value && !qualityChart) {
+    qualityChart = initChart(qualityChartEl.value, makeChartOpts('Quality', '', 'ice'))
+  }
   if (fpsChartEl.value && !fpsChart) {
     fpsChart = initChart(fpsChartEl.value, makeChartOpts('FPS', 'fps', 'success'))
   }
@@ -1563,9 +1553,6 @@ async function setupCharts() {
   }
   if (latencyChartEl.value && !latencyChart) {
     latencyChart = initChart(latencyChartEl.value, makeChartOpts('Latency', 'ms', 'warning'))
-  }
-  if (gpuChartEl.value && !gpuChart) {
-    gpuChart = initChart(gpuChartEl.value, makeChartOpts('GPU', '%', 'accent'))
   }
   if (lossChartEl.value && !lossChart) {
     lossChart = initChart(lossChartEl.value, makeChartOpts('Loss', '%', 'danger'))
@@ -1576,37 +1563,37 @@ async function setupCharts() {
 }
 
 function destroyChartInstances() {
+  if (qualityChart) { qualityChart.destroy(); qualityChart = null }
   if (fpsChart) { fpsChart.destroy(); fpsChart = null }
   if (bitrateChart) { bitrateChart.destroy(); bitrateChart = null }
   if (encodeChart) { encodeChart.destroy(); encodeChart = null }
   if (latencyChart) { latencyChart.destroy(); latencyChart = null }
-  if (gpuChart) { gpuChart.destroy(); gpuChart = null }
   if (lossChart) { lossChart.destroy(); lossChart = null }
 }
 
 function destroyCharts() {
   destroyChartInstances()
   timestamps.value = []
+  qualityHistory.value = []
   fpsHistory.value = []
   bitrateHistory.value = []
   encodeHistory.value = []
   latencyHistory.value = []
-  gpuHistory.value = []
   lossHistory.value = []
 }
 
 // Rebuild live charts with the new theme's colors, keeping their history.
 async function refreshChartTheme() {
-  const hadCharts = Boolean(fpsChart || bitrateChart || encodeChart || latencyChart || gpuChart || lossChart)
+  const hadCharts = Boolean(qualityChart || fpsChart || bitrateChart || encodeChart || latencyChart || lossChart)
   if (!hadCharts) return
   destroyChartInstances()
   await setupCharts()
   const ts = [...timestamps.value]
+  updateChartData(qualityChart, ts, [...qualityHistory.value])
   updateChartData(fpsChart, ts, [...fpsHistory.value])
   updateChartData(bitrateChart, ts, [...bitrateHistory.value])
   updateChartData(encodeChart, ts, [...encodeHistory.value])
   updateChartData(latencyChart, ts, [...latencyHistory.value])
-  updateChartData(gpuChart, ts, [...gpuHistory.value])
   updateChartData(lossChart, ts, [...lossHistory.value])
 }
 
@@ -1622,10 +1609,10 @@ watch(stats, (newStats, oldStats) => {
     return
   }
 
-  // Resolve client UUID, recording status, AI optimization, and auto-show preview when streaming starts
+  // Resolve client UUID, running app, and auto-show preview when streaming starts
   if (newStats.streaming && (!oldStats || !oldStats.streaming)) {
     resolveConnectedClient()
-    fetchRecordingStatus()
+    refreshApps()
     if (!showPreview.value && !prefersReducedMotion.value) startPreview()
   }
 
@@ -1637,37 +1624,37 @@ watch(stats, (newStats, oldStats) => {
   const now = Date.now() / 1000
 
   timestamps.value.push(now)
+  qualityHistory.value.push(qualityScore.value || 0)
   fpsHistory.value.push(newStats.fps)
   bitrateHistory.value.push(newStats.bitrate_kbps / 1000)
   encodeHistory.value.push(newStats.encode_time_ms)
   latencyHistory.value.push(newStats.latency_ms)
-  gpuHistory.value.push(gpu.value?.utilization_pct || 0)
   lossHistory.value.push(newStats.packet_loss || 0)
 
   // Keep rolling window
   while (timestamps.value.length > MAX_POINTS) {
     timestamps.value.shift()
+    qualityHistory.value.shift()
     fpsHistory.value.shift()
     bitrateHistory.value.shift()
     encodeHistory.value.shift()
     latencyHistory.value.shift()
-    gpuHistory.value.shift()
     lossHistory.value.shift()
   }
 
   // Initialize charts if needed
-  if (!fpsChart || !bitrateChart || !encodeChart || !latencyChart || !gpuChart || !lossChart) {
+  if (!qualityChart || !fpsChart || !bitrateChart || !encodeChart || !latencyChart || !lossChart) {
     setupCharts()
   }
 
   // Update chart data
   nextTick(() => {
     const ts = [...timestamps.value]
+    updateChartData(qualityChart, ts, [...qualityHistory.value])
     updateChartData(fpsChart, ts, [...fpsHistory.value])
     updateChartData(bitrateChart, ts, [...bitrateHistory.value])
     updateChartData(encodeChart, ts, [...encodeHistory.value])
     updateChartData(latencyChart, ts, [...latencyHistory.value])
-    updateChartData(gpuChart, ts, [...gpuHistory.value])
     updateChartData(lossChart, ts, [...lossHistory.value])
   })
 })
@@ -1689,6 +1676,7 @@ onMounted(async () => {
     reducedMotionQuery.addEventListener?.('change', updateReducedMotionPreference)
   }
   unsubscribeThemeTokens = onThemeTokensChange(() => { refreshChartTheme() })
+  document.addEventListener('visibilitychange', handlePreviewVisibility)
 
   fetchSystemInfo()
   fetchAiStatus()
@@ -1712,24 +1700,15 @@ onMounted(async () => {
   } catch {}
 
   // Fetch recent games for quick launch
-  try {
-    const res = await fetch('./api/apps', { credentials: 'include' })
-    if (res.ok) {
-      const data = await res.json()
-      const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
-      // Sort by last-launched (most recent first), take top 5
-      apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
-      appCatalogCount.value = apps.length
-      recentApps.value = apps.slice(0, 5)
-    }
-  } catch {}
+  await refreshApps()
 
   // Fetch paired clients count + version
   try {
     const res = await fetch('./api/clients/list', { credentials: 'include' })
     if (res.ok) {
       const data = await res.json()
-      pairedClients.value = (data.named_certs || []).length
+      pairedClientList.value = data.named_certs || []
+      pairedClients.value = pairedClientList.value.length
     }
   } catch {}
   try {
@@ -1755,6 +1734,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  stopPreview()
+  document.removeEventListener('visibilitychange', handlePreviewVisibility)
   destroyCharts()
   if (unsubscribeThemeTokens) {
     unsubscribeThemeTokens()

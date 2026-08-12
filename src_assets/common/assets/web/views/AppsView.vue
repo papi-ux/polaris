@@ -498,7 +498,7 @@
                     <svg class="h-5 w-5 text-storm/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
                   </div>
                   <div v-if="currentApp === app.uuid" class="absolute inset-0 flex items-center justify-center bg-success/20">
-                    <span class="rounded-full border border-success/25 bg-success/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-success-bright">
+                    <span class="rounded-full border border-success/25 bg-success/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-eyebrow text-success-bright">
                       Live
                     </span>
                   </div>
@@ -506,7 +506,7 @@
                 <div class="min-w-0">
                   <div class="flex flex-wrap items-center gap-2">
                     <h3 class="truncate text-base font-semibold text-silver">{{ app.name || 'Untitled app' }}</h3>
-                    <span v-if="app.source && app.source !== 'manual'" class="rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em]" :class="sourceBadgeClass(app.source)">
+                    <span v-if="app.source && app.source !== 'manual'" class="rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow" :class="sourceBadgeClass(app.source)">
                       {{ app.source }}
                     </span>
                     <span v-if="app['game-category'] && app['game-category'] !== 'unknown'" class="control-chip">

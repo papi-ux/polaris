@@ -413,7 +413,7 @@ function updateDisplayPlannerSource(event) {
               <div class="section-kicker">Stream Display Mode</div>
               <div class="mt-2 text-sm text-storm">Choose where Polaris starts and captures Linux sessions.</div>
             </div>
-            <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-ice">
+            <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-ice">
               {{ selectedStreamDisplayMode.title }}
             </span>
           </div>
@@ -436,7 +436,7 @@ function updateDisplayPlannerSource(event) {
               <div class="flex items-start justify-between gap-3">
                 <div class="text-sm font-semibold text-silver">{{ mode.title }}</div>
                 <span
-                  class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                  class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow"
                   :class="mode.id === 'headless_stream'
                     ? 'border-success/30 bg-success/10 text-success'
                     : mode.id === 'windowed_stream'
@@ -568,7 +568,7 @@ function updateDisplayPlannerSource(event) {
               <div v-for="item in linuxStreamingSetupChecklist" :key="item.id" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-3">
                 <div class="flex items-start justify-between gap-3">
                   <div class="text-sm font-semibold text-silver">{{ item.title }}</div>
-                  <span class="rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ item.status }}</span>
+                  <span class="rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ item.status }}</span>
                 </div>
                 <div class="mt-2 text-sm leading-relaxed text-storm">{{ item.copy }}</div>
               </div>
@@ -585,7 +585,7 @@ function updateDisplayPlannerSource(event) {
             </div>
             <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
               <div v-for="row in clientSettingsRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
-                <div class="text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ row.label }}</div>
+                <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ row.label }}</div>
                 <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
                 <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
               </div>
@@ -594,7 +594,7 @@ function updateDisplayPlannerSource(event) {
 
           <div class="grid gap-3 xl:grid-cols-3">
             <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-accent">Isolation</div>
+              <div class="text-xs font-semibold uppercase tracking-eyebrow text-accent">Isolation</div>
               <div class="mt-2 text-sm leading-relaxed text-storm">
                 {{ isGamescopePath
                   ? 'Gamescope Stream isolates paint in gamescope-0 (portal capture).'
@@ -602,7 +602,7 @@ function updateDisplayPlannerSource(event) {
               </div>
             </div>
             <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-success">GPU path</div>
+              <div class="text-xs font-semibold uppercase tracking-eyebrow text-success">GPU path</div>
               <div class="mt-2 text-sm leading-relaxed text-storm">
                 {{ isLabwcPath
                   ? 'GPU-native is a labwc capture preference. Force it only when diagnostics show CPU/SHM fallback.'
@@ -612,7 +612,7 @@ function updateDisplayPlannerSource(event) {
               </div>
             </div>
             <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-warning-bright">FPS target</div>
+              <div class="text-xs font-semibold uppercase tracking-eyebrow text-warning-bright">FPS target</div>
               <div class="mt-2 text-sm leading-relaxed text-storm">A 120 FPS client target still needs the game/output to render above 60 FPS; Polaris will show the live gap on the dashboard.</div>
             </div>
           </div>
@@ -633,7 +633,7 @@ function updateDisplayPlannerSource(event) {
                 <div class="mt-1 text-sm text-storm">Existing headless_mode config key. Enabled by Private Stream and Host Virtual Display.</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_mode</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Requested</span>
+                  <span class="text-xs uppercase tracking-eyebrow text-storm">Requested</span>
                   <input
                     type="checkbox"
                     class="sr-only peer"
@@ -649,7 +649,7 @@ function updateDisplayPlannerSource(event) {
                 <div class="mt-1 text-sm text-storm">Existing linux_use_cage_compositor config key. Enabled by Private Stream and Private Stream (GPU-native).</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_use_cage_compositor</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Use labwc</span>
+                  <span class="text-xs uppercase tracking-eyebrow text-storm">Use labwc</span>
                   <input
                     type="checkbox"
                     class="sr-only peer"
@@ -665,7 +665,7 @@ function updateDisplayPlannerSource(event) {
                 <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by Private Stream (GPU-native). When active, Polaris may force labwc windowed instead of hidden headless so capture can stay on the GPU if Private Stream would otherwise fall back.</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_prefer_gpu_native_capture</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Performance</span>
+                  <span class="text-xs uppercase tracking-eyebrow text-storm">Performance</span>
                   <input
                     type="checkbox"
                     class="sr-only peer"
@@ -681,7 +681,7 @@ function updateDisplayPlannerSource(event) {
                 <div class="mt-1 text-sm text-storm">Emit timing summaries while validating capture backends.</div>
                 <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_capture_profile</div>
                 <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-[0.18em] text-storm">Diagnostics</span>
+                  <span class="text-xs uppercase tracking-eyebrow text-storm">Diagnostics</span>
                   <input
                     type="checkbox"
                     class="sr-only peer"
@@ -758,7 +758,7 @@ function updateDisplayPlannerSource(event) {
 
         <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <div v-for="row in autoQualityRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
-            <div class="text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ row.label }}</div>
+            <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ row.label }}</div>
             <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
             <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
           </div>
@@ -880,7 +880,7 @@ pactl info | grep Source</pre>
               </div>
             </div>
             <div class="rounded-2xl border border-success/25 bg-success/10 px-3 py-2 text-right text-sm text-success-bright">
-              <div class="text-[10px] font-semibold uppercase tracking-[0.16em]">Recommended</div>
+              <div class="text-[10px] font-semibold uppercase tracking-eyebrow">Recommended</div>
               <div class="mt-1 font-medium">{{ displayPlanner.recommendedMode }}</div>
             </div>
           </div>
@@ -896,7 +896,7 @@ pactl info | grep Source</pre>
             >
               <div class="flex items-start justify-between gap-3">
                 <div class="text-sm font-semibold text-silver">{{ choice.title }}</div>
-                <span class="shrink-0 rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-storm">{{ choice.badge }}</span>
+                <span class="shrink-0 rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ choice.badge }}</span>
               </div>
               <div class="mt-3 text-sm leading-relaxed text-storm">{{ choice.reason }}</div>
               <div class="mt-3 rounded-md border border-storm/20 bg-void/25 px-2.5 py-2 font-mono text-xs text-silver">{{ choice.targetMode }}</div>

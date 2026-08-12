@@ -7,7 +7,7 @@
           <div class="flex items-center gap-3">
             <img :src="polarisWordmarkSrc" class="h-11 w-auto" alt="Polaris">
             <div>
-              <div class="text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/85">First-Time Setup</div>
+              <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm/85">First-Time Setup</div>
               <h1 class="mt-1 text-3xl font-bold text-silver">{{ $t('welcome.greeting') }}</h1>
             </div>
           </div>
@@ -32,7 +32,7 @@
 
           <div class="mt-6 rounded-[24px] border border-storm/20 bg-deep/35 p-5 sm:p-6">
             <div class="mb-5">
-              <div class="text-[10px] font-semibold uppercase tracking-[0.22em] text-storm">Step {{ currentStep + 1 }} of {{ steps.length }}</div>
+              <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Step {{ currentStep + 1 }} of {{ steps.length }}</div>
               <h2 class="mt-2 text-2xl font-semibold text-silver">{{ steps[currentStep].title }}</h2>
             </div>
 

@@ -17,10 +17,10 @@
       >
         <div class="flex items-start justify-between gap-4">
           <div>
-            <div class="text-[11px] font-semibold uppercase tracking-[0.2em] text-warning-bright">{{ eyebrow }}</div>
+            <div class="text-[11px] font-semibold uppercase tracking-eyebrow text-warning-bright">{{ eyebrow }}</div>
             <h2 :id="titleId" class="mt-2 text-xl font-semibold text-silver">{{ title }}</h2>
           </div>
-          <span class="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-warning-bright">
+          <span class="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-eyebrow text-warning-bright">
             {{ impactLabel }}
           </span>
         </div>

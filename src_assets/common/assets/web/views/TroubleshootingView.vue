@@ -43,7 +43,7 @@
         <div class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation>
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
+              <div class="text-[11px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
               <p class="mt-1 text-xs leading-relaxed text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation_privacy') }}</p>
               <p class="mt-2 text-[11px] leading-relaxed text-storm">{{ aiDoctorCategoriesText }}</p>
             </div>
@@ -56,7 +56,7 @@
             <ul class="mt-2 list-disc space-y-1 pl-5 text-storm">
               <li v-for="item in aiDoctorExplanation.evidence" :key="item">{{ item }}</li>
             </ul>
-            <div class="mt-3 text-xs uppercase tracking-[0.18em] text-ice">{{ $t('troubleshooting.ai_doctor_try_first') }}</div>
+            <div class="mt-3 text-xs uppercase tracking-eyebrow text-ice">{{ $t('troubleshooting.ai_doctor_try_first') }}</div>
             <ul class="mt-1 list-disc space-y-1 pl-5 text-storm">
               <li v-for="item in aiDoctorExplanation.try_first" :key="item">{{ item }}</li>
             </ul>
@@ -77,7 +77,7 @@
         >
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">{{ item.label }}</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="fixMyStreamBadgeClass(item.status)">
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="fixMyStreamBadgeClass(item.status)">
               {{ fixMyStreamStatusLabel(item.status) }}
             </span>
           </div>
@@ -103,7 +103,7 @@
         <div class="surface-subtle border p-4" :class="selfTestCardClass(networkPathReport.status)">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">Network Path Tester</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="selfTestBadgeClass(networkPathReport.status)">{{ selfTestStatusLabel(networkPathReport.status) }}</span>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="selfTestBadgeClass(networkPathReport.status)">{{ selfTestStatusLabel(networkPathReport.status) }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ networkPathReport.summary }}</p>
           <p class="mt-3 text-xs leading-relaxed text-ice">Recommended ceiling: {{ networkPathReport.recommendedBitrateKbps }} kbps.</p>
@@ -123,7 +123,7 @@
         <div class="surface-subtle border p-4" :class="selfTestCardClass(controllerInputReport.status)">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">Controller/Input Tester</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="selfTestBadgeClass(controllerInputReport.status)">{{ selfTestStatusLabel(controllerInputReport.status) }}</span>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="selfTestBadgeClass(controllerInputReport.status)">{{ selfTestStatusLabel(controllerInputReport.status) }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ controllerInputReport.summary }}</p>
           <div class="mt-3 flex flex-wrap gap-2">
@@ -146,7 +146,7 @@
         <div class="surface-subtle border p-4" :class="selfTestCardClass(postSessionReport.status)">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">Post-session Stream Report</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]" :class="selfTestBadgeClass(postSessionReport.status)">{{ postSessionReport.issueOwner }}</span>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="selfTestBadgeClass(postSessionReport.status)">{{ postSessionReport.issueOwner }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ postSessionReport.mainIssue }}</p>
           <p class="mt-3 text-xs leading-relaxed text-ice">Next launch: {{ postSessionReport.suggestedNextLaunchProfile }}</p>
@@ -172,8 +172,8 @@
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <div class="surface-subtle flex h-full flex-col border-success/15 p-4">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-success">{{ $t('troubleshooting.recovery_rank_1') }}</span>
-            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_1_label') }}</span>
+            <span class="rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-success">{{ $t('troubleshooting.recovery_rank_1') }}</span>
+            <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_1_label') }}</span>
           </div>
           <h3 id="close_apps" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.force_close') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.force_close_desc') }}</p>
@@ -192,8 +192,8 @@
 
         <div class="surface-subtle flex h-full flex-col border-warning/15 p-4">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-warning-bright">{{ $t('troubleshooting.recovery_rank_2') }}</span>
-            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_2_label') }}</span>
+            <span class="rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-warning-bright">{{ $t('troubleshooting.recovery_rank_2') }}</span>
+            <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_2_label') }}</span>
           </div>
           <h3 id="restart" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.restart_polaris') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.restart_polaris_desc') }}</p>
@@ -209,8 +209,8 @@
 
         <div class="surface-subtle flex h-full flex-col border-danger/15 p-4">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-danger/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-danger">{{ $t('troubleshooting.recovery_rank_3') }}</span>
-            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">{{ $t('troubleshooting.recovery_rank_3_label') }}</span>
+            <span class="rounded-full bg-danger/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-danger">{{ $t('troubleshooting.recovery_rank_3') }}</span>
+            <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_3_label') }}</span>
           </div>
           <h3 id="quit" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.quit_polaris') }}</h3>
           <p class="mt-2 flex-1 text-sm text-storm">{{ $t('troubleshooting.quit_polaris_desc') }}</p>
@@ -229,8 +229,8 @@
 
         <div class="surface-subtle flex h-full flex-col border-info/15 p-4" v-if="platform === 'windows'">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-info/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-info-bright">Optional</span>
-            <span class="text-[10px] uppercase tracking-[0.18em] text-storm">Display reset</span>
+            <span class="rounded-full bg-info/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-info-bright">Optional</span>
+            <span class="text-[10px] uppercase tracking-eyebrow text-storm">Display reset</span>
           </div>
           <h3 id="dd_reset" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.dd_reset') }}</h3>
           <p class="mt-2 flex-1 whitespace-pre-line text-sm text-storm">{{ $t('troubleshooting.dd_reset_desc') }}</p>
@@ -295,7 +295,7 @@
           <div class="mt-3 space-y-2">
             <div v-for="(entry, index) in groupedRecentIssues" :key="`${entry.level}-${entry.message}-${index}`" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
               <div class="flex items-start gap-3">
-                <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em]"
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow"
                       :class="entry.level === 'Fatal'
                         ? 'border border-danger/30 bg-danger/10 text-danger-bright'
                         : entry.level === 'Warning'
