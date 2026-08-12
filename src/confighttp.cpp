@@ -3187,6 +3187,101 @@ namespace confighttp {
    * }
    * @endcode
    */
+  /**
+   * @brief Patch a paired client's stream tuning (bitrate, display mode).
+   *
+   * The web Doctor's safe recovery action posts here; unlike
+   * /api/clients/update this route only ever touches the fields it is given,
+   * mirroring the validation the game-stream client-settings endpoint applies.
+   *
+   * The body for the POST request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *  "uuid": "<uuid>",
+   *  "target_bitrate_kbps": 12000,
+   *  "display_mode": "1920x1080x120"
+   * }
+   * @endcode
+   */
+  void patchClientSettings(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    try {
+      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json output_tree;
+      const std::string uuid = input_tree.value("uuid", "");
+      if (uuid.empty()) {
+        output_tree["status"] = false;
+        output_tree["error"] = "uuid is required";
+        send_response(response, output_tree);
+        return;
+      }
+
+      std::optional<int> target_bitrate_kbps;
+      if (input_tree.contains("target_bitrate_kbps")) {
+        if (!input_tree["target_bitrate_kbps"].is_number_integer()) {
+          output_tree["status"] = false;
+          output_tree["error"] = "target_bitrate_kbps must be an integer";
+          send_response(response, output_tree);
+          return;
+        }
+        const int requested = input_tree["target_bitrate_kbps"].get<int>();
+        if (requested != 0 && (requested < 1000 || requested > 300000)) {
+          output_tree["status"] = false;
+          output_tree["error"] = "target_bitrate_kbps must be 0 or between 1000 and 300000";
+          send_response(response, output_tree);
+          return;
+        }
+        target_bitrate_kbps = requested;
+      }
+
+      std::optional<std::string> display_mode;
+      if (input_tree.contains("display_mode")) {
+        if (!input_tree["display_mode"].is_string()) {
+          output_tree["status"] = false;
+          output_tree["error"] = "display_mode must be a string";
+          send_response(response, output_tree);
+          return;
+        }
+        display_mode = input_tree["display_mode"].get<std::string>();
+        int width = 0;
+        int height = 0;
+        double fps = 0.0;
+        if (!display_mode->empty() && !nvhttp::parse_display_mode_selection(*display_mode, width, height, fps)) {
+          output_tree["status"] = false;
+          output_tree["error"] = "display_mode must use WIDTHxHEIGHTxFPS, for example 1920x1080x120";
+          send_response(response, output_tree);
+          return;
+        }
+      }
+
+      if (!target_bitrate_kbps && !display_mode) {
+        output_tree["status"] = false;
+        output_tree["error"] = "provide target_bitrate_kbps or display_mode";
+        send_response(response, output_tree);
+        return;
+      }
+
+      const auto result = nvhttp::patch_client_stream_settings(uuid, target_bitrate_kbps, display_mode);
+      output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
+      if (result == nvhttp::client_mutation_result_t::not_found) {
+        output_tree["error"] = "Paired client was not found";
+      } else if (result == nvhttp::client_mutation_result_t::persistence_failed) {
+        output_tree["error"] = "Client settings patch could not be persisted";
+      }
+      send_response(response, output_tree);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "Patch Client Settings: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
   void updateClient(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
       return;
@@ -6344,6 +6439,8 @@ namespace confighttp {
     server.resource["^/api/clients/unpair-all$"]["POST"] = withCsrf(unpairAll);
     server.resource["^/api/clients/list$"]["GET"] = getClients;
     server.resource["^/api/clients/update$"]["POST"] = withCsrf(updateClient);
+    server.resource["^/api/clients/settings$"]["POST"] = withCsrf(patchClientSettings);
+    server.resource["^/api/clients/settings$"]["POST"] = withCsrf(patchClientSettings);
     server.resource["^/api/clients/unpair$"]["POST"] = withCsrf(unpair);
     server.resource["^/api/clients/disconnect$"]["POST"] = withCsrf(disconnect);
     server.resource["^/api/clients/wol$"]["POST"] = withCsrf(sendWol);

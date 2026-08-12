@@ -354,6 +354,29 @@ namespace nvhttp {
     const bool always_use_virtual_display
   );
 
+  /**
+   * @brief Validate and parse a WIDTHxHEIGHTxFPS display-mode selection.
+   */
+  bool parse_display_mode_selection(const std::string &value, int &width, int &height, double &fps);
+
+  /**
+   * @brief Patch only a paired client's stream tuning fields.
+   *
+   * Unlike update_device_info_result, absent fields keep their current
+   * values, so partial callers (the web Doctor safe action) cannot reset the
+   * client's name, permissions, or commands.
+   */
+  client_mutation_result_t patch_client_stream_settings(
+    const std::string &uuid,
+    const std::optional<int> &target_bitrate_kbps,
+    const std::optional<std::string> &display_mode
+  );
+
+  /**
+   * @brief Validate a WIDTHxHEIGHTxFPS display-mode selection string.
+   */
+  bool parse_display_mode_selection(const std::string &value, int &width, int &height, double &fps);
+
   bool update_device_info(
     const std::string& uuid,
     const std::string& name,

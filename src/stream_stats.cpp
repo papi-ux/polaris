@@ -788,7 +788,10 @@ namespace stream_stats {
         id = "lower_bitrate";
         label = "Apply safer bitrate";
         kind = "live_tuning";
-        endpoint = "/polaris/v1/client-settings";
+        // The Doctor JSON is consumed by the web console, so the action must
+        // be reachable on this server: the scoped client-settings patch. The
+        // web adds the session's client uuid to the payload when executing.
+        endpoint = "/api/clients/settings";
         method = "POST";
         payload["target_bitrate_kbps"] = health.value("safe_bitrate_kbps", 0);
         rollback = "Raise bitrate again from the client or Polaris stream settings.";

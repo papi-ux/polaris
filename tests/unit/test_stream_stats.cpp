@@ -778,6 +778,15 @@ TEST(StreamStatsDoctorTests, SlowEncoderStillFailsOnCpuCopyCapture) {
   const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
 
   EXPECT_EQ(doctor.at("primary_issue"), "encoder_load");
+
+  // The Doctor JSON is consumed by the web console, so an executable safe
+  // action must target the web server's own API surface; the game-stream
+  // server's endpoints are unreachable from a browser session.
+  const auto action = doctor.at("safe_recovery_action");
+  EXPECT_EQ(action.at("id"), "lower_bitrate");
+  EXPECT_EQ(action.at("endpoint"), "/api/clients/settings");
+  EXPECT_EQ(action.at("method"), "POST");
+  EXPECT_TRUE(action.at("payload_preview").contains("target_bitrate_kbps"));
 }
 
 TEST(StreamStatsDoctorTests, CaptureMissingNeedsTelemetryBeforeTuning) {

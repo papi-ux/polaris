@@ -9006,6 +9006,49 @@ namespace nvhttp {
     return client_mutation_result_t::success;
   }
 
+  bool parse_display_mode_selection(const std::string &value, int &width, int &height, double &fps) {
+    return parse_stream_policy_display_mode(value, width, height, fps);
+  }
+
+  bool parse_display_mode_selection(const std::string &value, int &width, int &height, double &fps) {
+    return parse_stream_policy_display_mode(value, width, height, fps);
+  }
+
+  client_mutation_result_t patch_client_stream_settings(
+    const std::string &uuid,
+    const std::optional<int> &target_bitrate_kbps,
+    const std::optional<std::string> &display_mode
+  ) {
+    // Scoped sibling of update_device_info_result: touches only the stream
+    // tuning fields so a caller (the web Doctor action) can never clobber the
+    // client's name, permissions, or commands with defaults.
+    std::lock_guard lock(client_state_mutex);
+    const auto it = std::find_if(
+      client_root.named_devices.begin(),
+      client_root.named_devices.end(),
+      [&](const crypto::p_named_cert_t &client) { return client->uuid == uuid; }
+    );
+    if (it == client_root.named_devices.end()) {
+      return client_mutation_result_t::not_found;
+    }
+
+    const auto previous = *it;
+    auto replacement = clone_named_cert(previous);
+    if (target_bitrate_kbps) {
+      replacement->target_bitrate_kbps = *target_bitrate_kbps;
+    }
+    if (display_mode) {
+      replacement->display_mode = *display_mode;
+    }
+    *it = replacement;
+    if (!save_state()) {
+      *it = previous;
+      return client_mutation_result_t::persistence_failed;
+    }
+    rebuild_cert_chain_locked();
+    return client_mutation_result_t::success;
+  }
+
   bool update_device_info(
     const std::string& uuid,
     const std::string& name,

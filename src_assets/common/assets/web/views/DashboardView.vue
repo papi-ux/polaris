@@ -1291,7 +1291,12 @@ async function runDoctorSafeAction() {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       method: action.method || 'POST',
-      body: JSON.stringify(action.payload_preview || action.payload || {}),
+      // The host's payload names the change; the web supplies which client,
+      // since only this page knows the active session's uuid.
+      body: JSON.stringify({
+        uuid: connectedClientUuid.value || '',
+        ...(action.payload_preview || action.payload || {}),
+      }),
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     showToast(t('dashboard.doctor_action_success') + action.label, 'success')
