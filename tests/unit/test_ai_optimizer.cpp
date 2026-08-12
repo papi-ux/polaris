@@ -570,6 +570,92 @@ TEST(AiOptimizerHistorySafe, KeepsIntentionalThirtyFpsQualityCache) {
   );
 }
 
+TEST(AiOptimizerHistorySafe, RefreshesStaleRecoverySixtyFpsCacheAfterStableTrial) {
+  // A 120-native host downgraded to a recovery-60 profile: the old 45 FPS gate
+  // made this cache unretirable because no stable trial at its own 60 target
+  // could ever qualify.
+  auto session = make_session("A", "disconnect", 414, 404);
+  session.last_target_fps = 60.0;
+  session.last_fps = 59.5;
+  session.last_low_1_percent_fps = 57.5;
+  session.last_min_fps = 55.0;
+  session.last_latency_ms = 3.7;
+
+  device_db::optimization_t optimization;
+  optimization.display_mode = "1920x1080x60";
+  optimization.confidence = "low";
+  optimization.normalization_reason = "Lowered stream FPS from session pacing feedback.";
+
+  EXPECT_TRUE(
+    ai_optimizer::should_refresh_recovery_cache_after_stable_trial(session, optimization)
+  );
+}
+
+TEST(AiOptimizerHistorySafe, RefreshesRecoveryCacheWhenLegacyLossAverageIsModest) {
+  // Legacy history without the tracker's debounced verdict: a 0.5% average on an
+  // ENet reliable channel is ordinary, and the retired 0.35% hair-trigger must
+  // not keep vetoing retirement forever.
+  auto session = make_session("A", "disconnect", 414, 404);
+  session.last_target_fps = 30.0;
+  session.last_fps = 29.7;
+  session.last_low_1_percent_fps = 29.0;
+  session.last_min_fps = 29.1;
+  session.last_latency_ms = 3.7;
+  session.last_packet_loss_pct = 0.5;
+
+  device_db::optimization_t optimization;
+  optimization.display_mode = "1920x1080x30";
+  optimization.confidence = "low";
+  optimization.normalization_reason = "Lowered stream FPS from session pacing feedback.";
+
+  EXPECT_TRUE(
+    ai_optimizer::should_refresh_recovery_cache_after_stable_trial(session, optimization)
+  );
+}
+
+TEST(AiOptimizerHistorySafe, KeepsRecoveryCacheWhenTrackerFlagsNetworkElevated) {
+  // The debounced tracker verdict outranks clean-looking averages: when it says
+  // elevated, the trial does not count as stable no matter the numbers.
+  auto session = make_session("A", "disconnect", 414, 404);
+  session.last_target_fps = 30.0;
+  session.last_fps = 29.7;
+  session.last_low_1_percent_fps = 29.0;
+  session.last_min_fps = 29.1;
+  session.last_latency_ms = 3.7;
+  session.last_network_risk = "elevated";
+
+  device_db::optimization_t optimization;
+  optimization.display_mode = "1920x1080x30";
+  optimization.confidence = "low";
+  optimization.normalization_reason = "Lowered stream FPS from session pacing feedback.";
+
+  EXPECT_FALSE(
+    ai_optimizer::should_refresh_recovery_cache_after_stable_trial(session, optimization)
+  );
+}
+
+TEST(AiOptimizerHistorySafe, GraduatesStaleCapDespiteLegacyLossWhenTrackerSaysNormal) {
+  // Same recalibration for safe-target graduation: the tracker's "normal" beats
+  // a raw average that only the retired hair-trigger would have flagged.
+  auto session = make_session("D", "disconnect", 180, 180);
+  session.avg_fps = 118.0;
+  session.last_fps = 118.0;
+  session.last_target_fps = 120.0;
+  session.last_latency_ms = 3.5;
+  session.last_packet_loss_pct = 0.5;
+  session.last_low_1_percent_fps = 92.0;
+  session.last_min_fps = 72.0;
+  session.last_frame_pacing_bad_pct = 6.0;
+  session.last_capture_path = "headless";
+  session.last_network_risk = "normal";
+  session.last_decoder_risk = "normal";
+  session.last_hdr_risk = "normal";
+
+  EXPECT_TRUE(
+    ai_optimizer::should_graduate_history_safe_target_fps(session, 30.0)
+  );
+}
+
 TEST(AiOptimizerSafeTargetFps, UsesStableFortyForModerateMobilePacingMiss) {
   EXPECT_DOUBLE_EQ(
     40.0,
