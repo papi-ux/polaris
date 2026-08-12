@@ -9010,10 +9010,6 @@ namespace nvhttp {
     return parse_stream_policy_display_mode(value, width, height, fps);
   }
 
-  bool parse_display_mode_selection(const std::string &value, int &width, int &height, double &fps) {
-    return parse_stream_policy_display_mode(value, width, height, fps);
-  }
-
   client_mutation_result_t patch_client_stream_settings(
     const std::string &uuid,
     const std::optional<int> &target_bitrate_kbps,

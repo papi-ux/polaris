@@ -372,11 +372,6 @@ namespace nvhttp {
     const std::optional<std::string> &display_mode
   );
 
-  /**
-   * @brief Validate a WIDTHxHEIGHTxFPS display-mode selection string.
-   */
-  bool parse_display_mode_selection(const std::string &value, int &width, int &height, double &fps);
-
   bool update_device_info(
     const std::string& uuid,
     const std::string& name,

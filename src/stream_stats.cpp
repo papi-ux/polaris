@@ -784,7 +784,10 @@ namespace stream_stats {
       nlohmann::json payload = nlohmann::json::object();
       std::string rollback = "No change is applied by Doctor.";
 
-      if (primary_issue == "network_jitter" || primary_issue == "encoder_load") {
+      const int safe_bitrate_kbps = health.value("safe_bitrate_kbps", 0);
+      if ((primary_issue == "network_jitter" || primary_issue == "encoder_load") && safe_bitrate_kbps > 0) {
+        // Without a computed safe bitrate there is nothing to apply: emitting
+        // 0 would CLEAR the client's bitrate cap, the opposite of safer.
         id = "lower_bitrate";
         label = "Apply safer bitrate";
         kind = "live_tuning";
@@ -793,7 +796,7 @@ namespace stream_stats {
         // web adds the session's client uuid to the payload when executing.
         endpoint = "/api/clients/settings";
         method = "POST";
-        payload["target_bitrate_kbps"] = health.value("safe_bitrate_kbps", 0);
+        payload["target_bitrate_kbps"] = safe_bitrate_kbps;
         rollback = "Raise bitrate again from the client or Polaris stream settings.";
       } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
         id = "export_support_bundle";

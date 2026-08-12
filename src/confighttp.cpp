@@ -3269,6 +3269,11 @@ namespace confighttp {
       }
 
       const auto result = nvhttp::patch_client_stream_settings(uuid, target_bitrate_kbps, display_mode);
+      if (result == nvhttp::client_mutation_result_t::success && target_bitrate_kbps && *target_bitrate_kbps > 0) {
+        // Mirror the game-stream client-settings path: a live_tuning action
+        // must move the running session, not only the persisted record.
+        adaptive_bitrate::set_base_bitrate(*target_bitrate_kbps);
+      }
       output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
       if (result == nvhttp::client_mutation_result_t::not_found) {
         output_tree["error"] = "Paired client was not found";
@@ -6439,7 +6444,6 @@ namespace confighttp {
     server.resource["^/api/clients/unpair-all$"]["POST"] = withCsrf(unpairAll);
     server.resource["^/api/clients/list$"]["GET"] = getClients;
     server.resource["^/api/clients/update$"]["POST"] = withCsrf(updateClient);
-    server.resource["^/api/clients/settings$"]["POST"] = withCsrf(patchClientSettings);
     server.resource["^/api/clients/settings$"]["POST"] = withCsrf(patchClientSettings);
     server.resource["^/api/clients/unpair$"]["POST"] = withCsrf(unpair);
     server.resource["^/api/clients/disconnect$"]["POST"] = withCsrf(disconnect);

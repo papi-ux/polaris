@@ -779,14 +779,19 @@ TEST(StreamStatsDoctorTests, SlowEncoderStillFailsOnCpuCopyCapture) {
 
   EXPECT_EQ(doctor.at("primary_issue"), "encoder_load");
 
-  // The Doctor JSON is consumed by the web console, so an executable safe
-  // action must target the web server's own API surface; the game-stream
-  // server's endpoints are unreachable from a browser session.
-  const auto action = doctor.at("safe_recovery_action");
+  // Without a computed safe bitrate the verdict must NOT offer lower_bitrate:
+  // a zero payload would clear the client's bitrate cap instead of lowering it.
+  EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
+
+  // With a safe bitrate, the action must target the web server's own API
+  // surface; the game-stream server's endpoints are unreachable from a
+  // browser session.
+  const auto doctor_with_target = stream_stats::build_doctor_json(stats, nlohmann::json {{"safe_bitrate_kbps", 12000}});
+  const auto action = doctor_with_target.at("safe_recovery_action");
   EXPECT_EQ(action.at("id"), "lower_bitrate");
   EXPECT_EQ(action.at("endpoint"), "/api/clients/settings");
   EXPECT_EQ(action.at("method"), "POST");
-  EXPECT_TRUE(action.at("payload_preview").contains("target_bitrate_kbps"));
+  EXPECT_EQ(action.at("payload_preview").at("target_bitrate_kbps"), 12000);
 }
 
 TEST(StreamStatsDoctorTests, CaptureMissingNeedsTelemetryBeforeTuning) {

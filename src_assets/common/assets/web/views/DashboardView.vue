@@ -1276,7 +1276,11 @@ const doctorSafeAction = computed(() => {
   return action
 })
 
-const doctorActionExecutable = computed(() => Boolean(doctorSafeAction.value?.endpoint?.startsWith('/api/')))
+const doctorActionExecutable = computed(() => Boolean(
+  doctorSafeAction.value?.endpoint?.startsWith('/api/')
+  // Client-scoped patches need the active session's uuid to address.
+  && (!doctorSafeAction.value.endpoint.startsWith('/api/clients/') || connectedClientUuid.value)
+))
 
 const doctorActionConfirmOpen = ref(false)
 const doctorActionPending = ref(false)
@@ -1299,6 +1303,9 @@ async function runDoctorSafeAction() {
       }),
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    // The settings routes report failures as 200 {status:false, error}.
+    const result = await response.json().catch(() => ({}))
+    if (result.status === false) throw new Error(result.error || 'rejected')
     showToast(t('dashboard.doctor_action_success') + action.label, 'success')
   } catch (e) {
     showToast(t('dashboard.doctor_action_error') + e.message, 'error')
