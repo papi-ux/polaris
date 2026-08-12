@@ -69,7 +69,8 @@
 
   /* ── Typography ── */
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --tracking-eyebrow: 0.18em;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+  --tracking-eyebrow: 0.14em;
 
   /* ── Shadows (glow color follows the theme's ice) ── */
   --shadow-glow: 0 0 20px color-mix(in srgb, var(--color-ice) 8%, transparent);
@@ -347,7 +348,7 @@ textarea {
 }
 
 .stat-kicker {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .stat-value {
@@ -369,13 +370,40 @@ textarea {
 }
 
 .section-kicker {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm/80;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm/80;
 }
 
-/* Hero surfaces lead with the theme accent. */
+/* Hero surfaces lead with the theme accent and carry a soft glow. */
 [data-dashboard-idle-hero] .section-kicker,
 .dashboard-live-shell .section-kicker {
   color: var(--color-accent);
+}
+
+[data-dashboard-idle-hero],
+.dashboard-live-shell {
+  box-shadow: var(--shadow-glow-lg);
+}
+
+/* Doctor verdict card: the traffic light paints the left stripe. */
+.dashboard-doctor-card {
+  @apply rounded-xl border p-4;
+  border-color: var(--edge-card);
+  border-left-width: 3px;
+}
+
+/* Play rail: compact launchable game tiles. */
+.dashboard-play-tile {
+  @apply flex min-w-0 flex-col rounded-xl border p-2.5;
+  background: var(--surface-raised);
+  border-color: var(--edge-raised);
+}
+
+.dashboard-play-cover {
+  @apply h-24 w-full overflow-hidden rounded-lg bg-void/60;
+}
+
+.dashboard-play-launch {
+  @apply mt-2 inline-flex h-7 w-full items-center justify-center rounded-lg border border-accent/40 font-mono text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .section-title {
@@ -413,15 +441,15 @@ textarea {
 }
 
 .eyebrow-label {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .data-pill {
-  @apply rounded-full border border-storm/20 bg-void/40 px-2.5 py-1 text-[11px] text-silver;
+  @apply rounded-full border border-storm/20 bg-void/40 px-2.5 py-1 font-mono text-[11px] text-silver;
 }
 
 .control-chip {
-  @apply rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow text-storm;
+  @apply rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-eyebrow text-storm;
   background: var(--surface-chip);
   border-color: var(--edge-chip);
 }
@@ -1157,23 +1185,24 @@ textarea {
 }
 
 .dashboard-live-summary-grid {
-  @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5;
+  /* Instrument strip: bare figures over mono labels, no tile boxes. */
+  @apply flex flex-wrap items-start gap-x-10 gap-y-4;
 }
 
 .dashboard-live-summary-tile {
-  @apply rounded-2xl border border-storm/20 bg-void/35 px-4 py-3;
+  @apply flex min-w-[5.5rem] flex-col-reverse gap-1 border-0 bg-transparent p-0;
 }
 
 .dashboard-live-summary-tile-primary {
-  @apply border-ice/25 bg-ice/10;
+  @apply border-0 bg-transparent;
 }
 
 .dashboard-live-summary-label {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-live-summary-value {
-  @apply mt-2 truncate text-2xl font-bold leading-tight tracking-tight tabular-nums;
+  @apply truncate font-mono text-[1.65rem] font-bold leading-none tracking-tight tabular-nums;
 }
 
 .dashboard-live-summary-copy {
@@ -1319,7 +1348,7 @@ textarea {
 }
 
 .dashboard-secondary-group-summary {
-  @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-[11px] font-semibold uppercase tracking-eyebrow text-storm transition-colors duration-200 hover:text-silver;
+  @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 font-mono text-[11px] font-semibold uppercase tracking-eyebrow text-storm transition-colors duration-200 hover:text-silver;
 }
 
 .dashboard-secondary-group-summary::-webkit-details-marker {

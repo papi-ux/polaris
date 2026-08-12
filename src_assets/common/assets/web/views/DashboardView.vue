@@ -43,33 +43,28 @@
           <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
             <div class="dashboard-live-summary-label">Quality</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ liveSummary.quality }}</div>
-            <div class="dashboard-live-summary-copy">{{ liveSummary.qualityDetail }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Latency">
             <div class="dashboard-live-summary-label">Latency</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.latencyTone">{{ liveSummary.latency }}</div>
-            <div class="dashboard-live-summary-copy">Round trip</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="FPS">
             <div class="dashboard-live-summary-label">FPS</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.fpsTone">{{ liveSummary.fps }}</div>
-            <div class="dashboard-live-summary-copy">{{ liveSummary.fpsDetail }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Loss">
             <div class="dashboard-live-summary-label">Loss</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.lossTone">{{ liveSummary.loss }}</div>
-            <div class="dashboard-live-summary-copy">Packet loss</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Bitrate">
             <div class="dashboard-live-summary-label">Bitrate</div>
             <div class="dashboard-live-summary-value text-silver">{{ liveSummary.bitrate }}</div>
-            <div class="dashboard-live-summary-copy">{{ stats.codec?.toUpperCase() || '--' }}</div>
           </div>
         </section>
 
         <!-- Doctor: the host's own per-second diagnosis replaces the old
              Auto Quality panel, stream-path notices, and priority guidance. -->
-        <section class="rounded-xl border p-4" :class="doctorPanelClass" data-dashboard-doctor>
+        <section class="dashboard-doctor-card" :class="doctorPanelClass" data-dashboard-doctor>
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div class="min-w-0">
               <div class="section-kicker">{{ $t('dashboard.doctor') }}</div>
@@ -407,13 +402,22 @@
               <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
             </div>
           </div>
-          <router-link
-            v-if="readyCheckDisplay.primaryIssue"
-            :to="readyCheckDisplay.primaryIssue.to"
-            class="focus-ring dashboard-action-button dashboard-action-button-primary shrink-0 no-underline"
-          >
-            {{ $t('dashboard.open_priority_fix') }}
-          </router-link>
+          <div class="flex shrink-0 flex-col items-end gap-3">
+            <span
+              class="inline-flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-eyebrow"
+              :class="readyCheckDisplay.allPassing ? 'border-success/35 text-success' : 'border-warning/35 text-warning'"
+            >
+              <span class="pulse-dot" :class="readyCheckDisplay.allPassing ? '' : '!bg-warning'"></span>
+              {{ readyCheckDisplay.allPassing ? 'READY' : 'ATTENTION' }}
+            </span>
+            <router-link
+              v-if="readyCheckDisplay.primaryIssue"
+              :to="readyCheckDisplay.primaryIssue.to"
+              class="focus-ring dashboard-action-button dashboard-action-button-primary shrink-0 no-underline"
+            >
+              {{ $t('dashboard.open_priority_fix') }}
+            </router-link>
+          </div>
         </div>
       </section>
 
@@ -531,18 +535,18 @@
             {{ $t('navbar.library') }}
           </router-link>
         </div>
-        <div v-if="recentApps.length" class="space-y-1.5">
-          <div v-for="app in recentApps" :key="app.uuid" class="flex items-center gap-3 p-1.5 rounded-lg hover:bg-ice/5 transition-colors">
-            <div class="w-8 h-11 rounded bg-void/60 shrink-0 overflow-hidden">
-              <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="w-full h-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
+        <div v-if="recentApps.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
+          <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
+            <div class="dashboard-play-cover">
+              <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="h-full w-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
             </div>
-            <div class="flex-1 min-w-0">
-              <div class="text-sm text-silver truncate">{{ app.name }}</div>
-              <div class="text-[10px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
+            <div class="mt-2 min-w-0">
+              <div class="truncate text-xs font-semibold text-silver">{{ app.name }}</div>
+              <div class="truncate font-mono text-[9px] uppercase tracking-eyebrow text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
             </div>
             <button
               type="button"
-              class="focus-ring inline-flex h-7 shrink-0 items-center rounded-lg border border-accent/40 px-3 text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50"
+              class="focus-ring dashboard-play-launch"
               :disabled="launchingUuid === app.uuid"
               @click="launchRecentApp(app)"
             >
@@ -1275,12 +1279,13 @@ const doctorRecommendation = computed(() => {
 
 const doctorPanelClass = computed(() => {
   // Host contract: traffic_light is green | amber | red (never yellow).
+  // The tone paints the verdict stripe on the card left edge.
   switch (doctor.value?.traffic_light) {
-    case 'red': return 'border-danger/30 bg-danger/5'
+    case 'red': return 'border-l-danger bg-danger/5'
     case 'amber':
-    case 'yellow': return 'border-warning/25 bg-warning/5'
-    case 'green': return 'border-success/20 bg-success/5'
-    default: return 'border-storm/20 bg-void/20'
+    case 'yellow': return 'border-l-warning bg-warning/5'
+    case 'green': return 'border-l-success bg-success/5'
+    default: return 'border-l-storm/60 bg-void/20'
   }
 })
 
