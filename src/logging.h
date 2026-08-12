@@ -4,13 +4,22 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // lib includes
 #include <boost/log/common.hpp>
 #include <boost/log/sinks.hpp>
 
-using text_sink = boost::log::sinks::asynchronous_sink<boost::log::sinks::text_ostream_backend>;
+inline constexpr std::size_t async_log_queue_capacity = 1024;
+using text_queue = boost::log::sinks::bounded_fifo_queue<
+  async_log_queue_capacity,
+  boost::log::sinks::drop_on_overflow
+>;
+using text_sink = boost::log::sinks::asynchronous_sink<
+  boost::log::sinks::text_ostream_backend,
+  text_queue
+>;
 
 extern boost::log::sources::severity_logger<int> verbose;
 extern boost::log::sources::severity_logger<int> debug;
@@ -81,9 +90,9 @@ namespace logging {
   /**
    * @brief Return the process-local generation of the active log file.
    *
-   * The generation changes after initialization and every successful clear so
-   * incremental readers can distinguish reused byte offsets from the same
-   * logical log generation.
+   * The generation changes after initialization, automatic rotation, and every
+   * successful clear so incremental readers can distinguish reused byte offsets
+   * from the same logical log generation.
    */
   std::uint64_t log_file_generation();
 

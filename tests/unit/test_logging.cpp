@@ -15,6 +15,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <src/bounded_log_file.h>
 #include <src/logging.h>
 
 namespace {
@@ -177,6 +178,28 @@ TEST(LoggingRunaway, GlInfoLogLengthIsInitializedAndGuarded) {
   }
 }
 
+TEST(LoggingRunaway, AsyncQueuesAreBoundedAndConsoleBackpressureDrops) {
+  const auto read_source = [](const std::filesystem::path &path) {
+    std::ifstream file {path};
+    EXPECT_TRUE(file.good()) << "could not read " << path;
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+  };
+  const auto source_root = std::filesystem::path {POLARIS_SOURCE_DIR} / "src";
+  const auto header = read_source(source_root / "logging.h");
+  const auto implementation = read_source(source_root / "logging.cpp");
+
+  EXPECT_NE(header.find("bounded_fifo_queue"), std::string::npos)
+    << "the asynchronous console queue must have a fixed record bound";
+  EXPECT_NE(header.find("drop_on_overflow"), std::string::npos)
+    << "a blocked console consumer must not stall Polaris or grow RSS forever";
+  EXPECT_NE(implementation.find("bounded_file_queue_t = boost::log::sinks::bounded_fifo_queue"), std::string::npos)
+    << "the asynchronous file queue must have a fixed record bound";
+  EXPECT_NE(implementation.find("boost::log::sinks::block_on_overflow"), std::string::npos)
+    << "the file queue must backpressure producers instead of losing diagnostic records";
+}
+
 TEST(LoggingGeneration, SuccessfulClearAdvancesGenerationAndKeepsLoggingUsable) {
   const auto before = logging::log_file_generation();
 
@@ -186,4 +209,36 @@ TEST(LoggingGeneration, SuccessfulClearAdvancesGenerationAndKeepsLoggingUsable) 
   const auto marker = std::format("post-clear-generation-{}", before + 1);
   BOOST_LOG(info) << marker;
   ASSERT_TRUE(log_checker::line_contains(test_paths::log_file().string(), marker));
+}
+
+TEST(LoggingGeneration, AutomaticRotationAdvancesGenerationAndKeepsBothFilesBounded) {
+  ASSERT_TRUE(logging::clear_log_file());
+  const auto before = logging::log_file_generation();
+  const std::string record(16U * 1024U, 'r');
+
+  for (unsigned index = 0; index < 520; ++index) {
+    BOOST_LOG(info) << record;
+  }
+  logging::log_flush();
+
+  EXPECT_GT(logging::log_file_generation(), before);
+  const auto active = test_paths::log_file();
+  const auto backup = std::filesystem::path {active.string() + ".backup"};
+  ASSERT_TRUE(std::filesystem::exists(active));
+  ASSERT_TRUE(std::filesystem::exists(backup));
+  EXPECT_LE(std::filesystem::file_size(active), logging::runtime_log_max_bytes);
+  EXPECT_LE(std::filesystem::file_size(backup), logging::runtime_log_max_bytes);
+
+  for (const auto &path : {active, backup}) {
+    std::ifstream file {path, std::ios::binary};
+    const std::string contents {
+      std::istreambuf_iterator<char> {file},
+      std::istreambuf_iterator<char> {}
+    };
+    EXPECT_EQ(contents.find('\0'), std::string::npos)
+      << "bounded logging introduced NUL corruption in " << path;
+  }
+
+  ASSERT_TRUE(logging::clear_log_file());
+  EXPECT_FALSE(std::filesystem::exists(backup));
 }

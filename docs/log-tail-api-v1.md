@@ -8,6 +8,10 @@ GET /polaris/v1/diagnostics/logs/tail
 
 This endpoint never reads the whole active log. It is intended for the Web UI and diagnostic tooling that needs recent log content without making host or browser memory proportional to the log file's lifetime size.
 
+## Runtime retention
+
+The active runtime log is fixed at 8388608 bytes, with one backup of at most the same size. Polaris rotates only between complete formatted records, replaces the prior backup, and advances the log generation before writing any bytes into the replacement active file. A prior active log that is already oversized is reduced to its newest 8388608 bytes during startup instead of being copied in full. An orphaned oversized backup is reduced the same way when no active log survived. The active and backup logs therefore have a 16777216-byte combined logical bound, apart from filesystem allocation granularity.
+
 ## Request
 
 All query values are strict unsigned decimal integers. Signs, whitespace, trailing characters, duplicate parameters, unknown parameters, zero limits, overflow, and values above the documented maximum return HTTP `400`.
@@ -42,7 +46,7 @@ Successful responses are JSON with `Cache-Control: no-store`:
 }
 ```
 
-Offsets describe the half-open source byte range `[start_offset, end_offset)`. `generation` identifies the active log lifecycle and changes after initialization or a successful clear. `content_bytes` is the decoded byte count, not the Base64 string length. Base64 is mandatory so embedded NULs, invalid text bytes, and platform code pages cannot make the JSON invalid or change the offset contract.
+Offsets describe the half-open source byte range `[start_offset, end_offset)`. `generation` identifies the active log lifecycle and changes after initialization, automatic rotation, or a successful clear. `content_bytes` is the decoded byte count, not the Base64 string length. Base64 is mandatory so embedded NULs, invalid text bytes, and platform code pages cannot make the JSON invalid or change the offset contract.
 
 `truncated` is true when source bytes before `start_offset` were omitted by either the byte or line bound.
 
