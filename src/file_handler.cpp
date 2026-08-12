@@ -4,8 +4,11 @@
  */
 
 // standard includes
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <stdexcept>
 
 // local includes
 #include "file_handler.h"
@@ -40,6 +43,57 @@ namespace file_handler {
 
     std::ifstream in(path);
     return std::string {(std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()};
+  }
+
+  tail_result_t read_file_tail(const char *path, std::size_t max_bytes) {
+    if (max_bytes == 0) {
+      throw std::invalid_argument("max_bytes must be greater than zero");
+    }
+
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) {
+      BOOST_LOG(debug) << "Unable to open file tail: " << path;
+      return {};
+    }
+
+    const std::streampos end_position = in.tellg();
+    if (end_position == std::streampos {-1}) {
+      BOOST_LOG(debug) << "Unable to determine file tail offset: " << path;
+      return {};
+    }
+
+    const auto end_offset = static_cast<std::uintmax_t>(end_position);
+    const auto maximum_stream_read = static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max());
+    const auto requested_bytes = std::min({
+      end_offset,
+      static_cast<std::uintmax_t>(max_bytes),
+      maximum_stream_read,
+    });
+    const auto start_offset = end_offset - requested_bytes;
+
+    tail_result_t result;
+    result.start_offset = start_offset;
+    result.end_offset = end_offset;
+    result.truncated = start_offset != 0;
+
+    if (requested_bytes == 0) {
+      return result;
+    }
+
+    in.seekg(static_cast<std::streamoff>(start_offset), std::ios::beg);
+    if (!in.good()) {
+      BOOST_LOG(debug) << "Unable to seek to file tail: " << path;
+      return {};
+    }
+
+    result.content.resize(static_cast<std::size_t>(requested_bytes));
+    in.read(result.content.data(), static_cast<std::streamsize>(requested_bytes));
+    if (in.gcount() != static_cast<std::streamsize>(requested_bytes)) {
+      BOOST_LOG(debug) << "Unable to read complete file tail: " << path;
+      return {};
+    }
+
+    return result;
   }
 
   int write_file(const char *path, const std::string_view &contents) {
