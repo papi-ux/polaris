@@ -97,13 +97,10 @@
         <div class="dashboard-live-stage" :class="{ 'is-preview-expanded': showPreview && previewExpanded, 'is-preview-hidden': !showPreview }">
           <div class="dashboard-live-main">
             <section class="dashboard-preview-panel">
-              <div class="dashboard-preview-header">
-                <div class="min-w-0">
+              <div class="dashboard-preview-header items-center">
+                <div class="flex min-w-0 items-center gap-2">
                   <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
-                  <div class="mt-2 flex items-center gap-2">
-                    <div class="text-base font-semibold text-silver">{{ previewHeadline }}</div>
-                    <InfoHint size="sm" :label="$t('dashboard.display_preview')">{{ previewSupportCopy }}</InfoHint>
-                  </div>
+                  <InfoHint size="sm" :label="$t('dashboard.display_preview')">{{ previewSupportCopy }}</InfoHint>
                 </div>
                 <div class="dashboard-preview-actions">
                   <button v-if="!showPreview" @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary">
@@ -143,24 +140,20 @@
                       {{ $t('dashboard.preview_retry') }}
                     </button>
                   </div>
-                </div>
-
-                <div class="dashboard-preview-footer">
-                  <div class="dashboard-preview-meta">
-                    <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
-                    <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
-                    <span v-if="hdrChipLabel" class="data-pill text-accent-2" :title="stats.hdr_downgrade_message || ''">{{ hdrChipLabel }}</span>
-                    <span class="data-pill">{{ runtimeBackendLabel }}</span>
-                    <span class="data-pill">{{ capturePathLabel }}</span>
+                  <!-- Stream facts ride the stage as overlays instead of chrome around it. -->
+                  <div v-if="previewLoaded && !previewError" class="dashboard-preview-hud">
+                    <div class="dashboard-preview-meta">
+                      <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
+                      <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
+                      <span v-if="hdrChipLabel" class="data-pill text-accent-2" :title="stats.hdr_downgrade_message || ''">{{ hdrChipLabel }}</span>
+                      <span class="data-pill">{{ capturePathLabel }}</span>
+                    </div>
+                    <span class="dashboard-preview-hud-status">{{ previewStatusText }}</span>
                   </div>
-                  <div class="text-xs text-storm">{{ previewStatusText }}</div>
                 </div>
               </template>
-              <div v-else class="dashboard-preview-empty">
-                <div>
-                  <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_hidden_title') }}</div>
-                  <div class="mt-2 text-sm leading-relaxed text-storm">{{ $t('dashboard.preview_hidden_desc') }}</div>
-                </div>
+              <div v-else class="flex items-center justify-between gap-3 py-1">
+                <span class="text-xs text-storm">{{ $t('dashboard.preview_hidden_title') }}</span>
                 <div class="dashboard-preview-meta">
                   <span class="data-pill">{{ viewerCountLabel }}</span>
                   <span class="data-pill">{{ qualitySummaryLabel }}</span>
@@ -304,6 +297,9 @@
                 <div class="eyebrow-label">Session context</div>
                 <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
               </div>
+              <div v-if="gpu" class="mt-2 font-mono text-[11px] tabular-nums text-storm">
+                {{ gpu.name }} · {{ gpu.temperature_c ?? '--' }}°C · {{ gpu.utilization_pct ?? 0 }}% · {{ gpu.encoder_pct ?? 0 }}% enc · {{ gpu.vram_used_mb ? (gpu.vram_used_mb / 1024).toFixed(1) : '--' }}G
+              </div>
               <div class="dashboard-context-section">
                 <div class="dashboard-context-header">
                   <span>{{ $t('dashboard.connected_clients') }}</span>
@@ -361,24 +357,7 @@
             </section>
 
             <section class="card p-4">
-              <div class="flex items-center justify-between gap-3">
-                <div>
-                  <div class="eyebrow-label">{{ $t('dashboard.quick_controls') }}</div>
-                  <div class="mt-2 flex items-center gap-2">
-                    <div class="text-sm font-medium text-silver">{{ clientSettingsSyncLabel }}</div>
-                    <InfoHint size="sm" :label="$t('dashboard.quick_controls')">{{ clientSettingsSyncCopy }}</InfoHint>
-                  </div>
-                </div>
-                <div class="flex shrink-0 items-center gap-2">
-                  <span class="meta-pill whitespace-nowrap" :class="clientSettingsSyncTone">{{ clientSettingsSyncLabel }}</span>
-                  <router-link to="/config" class="text-[11px] font-medium text-ice no-underline hover:text-ice/80">
-                    Settings
-                  </router-link>
-                </div>
-              </div>
-              <div class="mt-4">
-                <QuickControls compact @change="handleQuickControlChange" />
-              </div>
+              <QuickControls compact @change="handleQuickControlChange" />
             </section>
           </div>
         </div>
@@ -781,29 +760,6 @@ function refreshClientSettingsSync(configPayload) {
   clientSettingsSync.value = resolveClientSettingsSync(configPayload || {})
 }
 
-const clientSettingsSyncLabel = computed(() => {
-  if (!clientSettingsSync.value.available) return 'Sync unavailable'
-  if (clientSettingsSync.value.relaunchRequired) return 'Sync pending'
-  return 'Nova sync ready'
-})
-
-const clientSettingsSyncTone = computed(() => {
-  if (!clientSettingsSync.value.available || clientSettingsSync.value.relaunchRequired) {
-    return 'border-warning/30 bg-warning/10 text-warning-bright'
-  }
-  return 'border-success/30 bg-success/10 text-success'
-})
-
-const clientSettingsSyncCopy = computed(() => {
-  if (!clientSettingsSync.value.available) {
-    return 'Nova-facing client settings are unavailable on this Polaris build.'
-  }
-  if (clientSettingsSync.value.relaunchRequired) {
-    return 'A requested display mode is saved and will become active after the stream relaunches.'
-  }
-  return 'Nova-facing controls are available for live bitrate, Auto Quality, and next-stream display choices.'
-})
-
 const connectedClients = computed(() => {
   if (!stats.value?.streaming) return []
 
@@ -1195,12 +1151,6 @@ function stopPreview() {
 const qualityScore = computed(() => buildQualityScore(stats.value || {}))
 
 const qualityGrade = computed(() => buildQualityGrade(qualityScore.value))
-
-const previewHeadline = computed(() => (
-  previewExpanded.value
-    ? t('dashboard.preview_headline_expanded')
-    : t('dashboard.preview_headline')
-))
 
 const previewSupportCopy = computed(() => (
   previewExpanded.value

@@ -391,6 +391,23 @@ textarea {
   border-left-width: 3px;
 }
 
+/* Preview HUD: stream facts overlaid on the stage. */
+.dashboard-preview-hud {
+  @apply absolute inset-x-3 bottom-3 flex flex-wrap items-center justify-between gap-2;
+}
+
+.dashboard-preview-hud .data-pill {
+  background: rgba(0, 0, 0, 0.55);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #e6ebf2;
+}
+
+.dashboard-preview-hud-status {
+  @apply rounded-full px-2.5 py-1 font-mono text-[10px];
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(230, 235, 242, 0.85);
+}
+
 /* Play rail: compact launchable game tiles. */
 .dashboard-play-tile {
   @apply flex min-w-0 flex-col rounded-xl border p-2.5;
