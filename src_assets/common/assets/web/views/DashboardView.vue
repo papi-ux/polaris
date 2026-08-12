@@ -1455,19 +1455,47 @@ function makeChartOpts(title, suffix, tokenName = 'ice') {
   const tokens = readThemeTokens(['ice', 'twilight', 'storm', tokenName])
   const color = tokens[tokenName] || tokens.ice
   return {
-    width: 128,
+    width: 144,
     height: 32,
     cursor: { show: false },
     legend: { show: false },
     // Sparkline mode: no axes, no grid; the strip label carries the meaning.
     axes: [{ show: false }, { show: false }],
+    scales: {
+      // Pad the y-range so the line breathes instead of hugging the edges,
+      // and hold a visible centered line when the metric is flat.
+      y: {
+        range: (u, min, max) => {
+          const span = max - min
+          const pad = span > 0 ? span * 0.2 : (Math.abs(max) * 0.15 || 1)
+          return [min - pad, max + pad]
+        },
+      },
+    },
     series: [
       {},
       {
-        stroke: color,
-        width: 1.5,
-        points: { show: false },
-        fill: withAlpha(color, 0.12),
+        // De-emphasized smooth line with the current value emphasized: the
+        // endpoint dot carries the metric hue at full strength.
+        stroke: withAlpha(color, 0.65),
+        width: 2,
+        ...(uPlotLib?.paths?.spline ? { paths: uPlotLib.paths.spline() } : {}),
+        points: {
+          show: true,
+          filter: (u, seriesIdx, show) => {
+            const len = u.data[seriesIdx]?.length || 0
+            return len ? [len - 1] : []
+          },
+          size: 6,
+          width: 0,
+          fill: color,
+        },
+        fill: (u) => {
+          const gradient = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height)
+          gradient.addColorStop(0, withAlpha(color, 0.28))
+          gradient.addColorStop(1, withAlpha(color, 0))
+          return gradient
+        },
       },
     ],
   }

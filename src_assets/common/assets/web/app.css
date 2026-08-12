@@ -421,7 +421,7 @@ textarea {
 
 /* Sparkline slot inside each instrument-strip tile. */
 .dashboard-strip-spark {
-  @apply h-8 w-32;
+  @apply h-8 w-36;
 }
 
 /* Inert Doctor advice: unmistakably not a button. */
