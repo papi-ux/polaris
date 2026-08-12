@@ -391,6 +391,17 @@ textarea {
   border-left-width: 3px;
 }
 
+/* Strip grade badge and stage LIVE badge. */
+.dashboard-grade-badge {
+  @apply inline-flex h-9 min-w-9 items-center justify-center rounded-lg border-2 border-current px-2 font-mono text-xl font-bold leading-none;
+}
+
+.dashboard-preview-live-badge {
+  @apply absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-mono text-[10px] font-semibold tracking-eyebrow;
+  background: rgba(0, 0, 0, 0.55);
+  color: #e6ebf2;
+}
+
 /* Preview HUD: stream facts overlaid on the stage. */
 .dashboard-preview-hud {
   @apply absolute inset-x-3 bottom-3 flex flex-wrap items-center justify-between gap-2;

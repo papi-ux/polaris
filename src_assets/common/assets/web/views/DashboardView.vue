@@ -42,7 +42,10 @@
         <section class="dashboard-live-summary-grid" role="status" aria-live="polite" aria-atomic="true" aria-label="Live stream telemetry summary">
           <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
             <div class="dashboard-live-summary-label">Quality</div>
-            <div class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ liveSummary.quality }}</div>
+            <div class="flex items-center gap-2">
+              <span class="dashboard-grade-badge" :class="liveSummary.qualityTone">{{ qualityGrade }}</span>
+              <span class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ qualityScore }}</span>
+            </div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Latency">
             <div class="dashboard-live-summary-label">Latency</div>
@@ -76,6 +79,9 @@
                 <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
               </div>
               <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ doctorRecommendation }}</p>
+              <p v-if="doctorExplanation" class="mt-3 max-w-3xl rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-sm leading-relaxed text-silver">
+                {{ doctorExplanation }}
+              </p>
             </div>
             <div class="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
               <button
@@ -90,6 +96,15 @@
               <span v-else-if="doctorSafeAction" class="data-pill" :title="doctorSafeAction.rollback || ''">
                 {{ doctorSafeAction.label }}
               </span>
+              <button
+                v-if="aiStatus?.enabled && doctor"
+                type="button"
+                class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
+                :disabled="doctorExplainPending"
+                @click="explainDoctorVerdict"
+              >
+                {{ doctorExplainPending ? $t('dashboard.doctor_explaining') : $t('dashboard.doctor_explain') }}
+              </button>
             </div>
           </div>
         </section>
@@ -107,6 +122,22 @@
                     {{ $t('dashboard.show_display') }}
                   </button>
                   <template v-else>
+                    <button
+                      v-if="!recording.active"
+                      :disabled="recordingActionPending"
+                      @click="startRecording"
+                      class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
+                    >
+                      {{ $t('dashboard.record') }}
+                    </button>
+                    <button
+                      v-else
+                      :disabled="recordingActionPending"
+                      @click="stopRecording"
+                      class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
+                    >
+                      {{ $t('dashboard.stop_recording') }}
+                    </button>
                     <button @click="togglePreviewExpanded" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
                       {{ previewExpanded ? $t('dashboard.collapse_display') : $t('dashboard.expand_display') }}
                     </button>
@@ -140,6 +171,10 @@
                       {{ $t('dashboard.preview_retry') }}
                     </button>
                   </div>
+                  <span v-if="previewLoaded && !previewError" class="dashboard-preview-live-badge">
+                    <span :class="recording.active ? 'text-danger' : 'text-success'">●</span>
+                    {{ previewMode === 'mjpeg' ? 'LIVE' : 'PREVIEW' }}<template v-if="recording.active"> · REC</template>
+                  </span>
                   <!-- Stream facts ride the stage as overlays instead of chrome around it. -->
                   <div v-if="previewLoaded && !previewError" class="dashboard-preview-hud">
                     <div class="dashboard-preview-meta">
@@ -375,7 +410,10 @@
             <h2 class="mt-2 text-2xl font-semibold leading-tight" :class="readinessTone">{{ readinessLabel }}</h2>
             <p class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ nextStep.title }} · {{ nextStep.desc }}</p>
             <div class="mt-4 flex flex-wrap gap-2">
-              <span class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
+              <template v-if="pairedClientChips.length">
+                <span v-for="chip in pairedClientChips" :key="chip.name" class="data-pill">{{ chip.label }}</span>
+              </template>
+              <span v-else class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
               <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
               <span class="data-pill" v-if="gpu">{{ gpu.temperature_c || '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
               <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
@@ -552,7 +590,22 @@
       </div>
     </template>
 
-    <!-- Session History (idle) -->
+    <!-- Session History (idle): one list; this browser's rich local history,
+         with the host's session log as the fallback source. -->
+    <div v-if="statsLoaded && !stats?.streaming && !sessions.length && hostHistoryRows.length" class="card p-4">
+      <div class="eyebrow-label mb-3">Session History</div>
+      <div class="space-y-2">
+        <div v-for="(s, i) in hostHistoryRows" :key="i" class="flex items-center gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2">
+          <span class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold" :class="{
+            'bg-success/20 text-success': s.quality_grade === 'A',
+            'bg-info/20 text-info': s.quality_grade === 'B',
+            'bg-warning/20 text-warning': s.quality_grade === 'C' || s.quality_grade === 'D',
+            'bg-danger/20 text-danger': s.quality_grade === 'F'
+          }">{{ s.quality_grade || '·' }}</span>
+          <div class="min-w-0 flex-1 truncate text-sm text-silver">{{ s.key }}</div>
+        </div>
+      </div>
+    </div>
     <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="card p-4">
       <div class="flex items-center justify-between mb-3">
         <div class="text-xs font-semibold text-silver/80 uppercase tracking-wider">Session History</div>
@@ -1207,6 +1260,68 @@ const frameHealth = computed(() => {
   }
 })
 
+// Host-side session log rows, the fallback history source when this browser
+// has no local session records yet.
+const hostHistoryRows = computed(() => (Array.isArray(sessionHistory.value) ? sessionHistory.value.slice(0, 8) : []))
+
+// Paired-client chips with last-seen times (the host records last_seen_at
+// per certificate; epoch seconds, tolerating milliseconds).
+const pairedClientList = ref([])
+
+function relativeSeen(value) {
+  const raw = Number(value)
+  if (!Number.isFinite(raw) || raw <= 0) return ''
+  const ms = raw > 1e12 ? raw : raw * 1000
+  const deltaS = Math.max(0, (Date.now() - ms) / 1000)
+  if (deltaS < 90) return 'seen just now'
+  if (deltaS < 5400) return `seen ${Math.round(deltaS / 60)} min ago`
+  if (deltaS < 129600) return `seen ${Math.round(deltaS / 3600)} h ago`
+  return `seen ${Math.round(deltaS / 86400)} d ago`
+}
+
+const pairedClientChips = computed(() => {
+  const chips = pairedClientList.value.slice(0, 3).map((cert) => {
+    const seen = relativeSeen(cert.last_seen_at)
+    return { name: cert.name || cert.uuid, label: seen ? `${cert.name} · ${seen}` : cert.name }
+  }).filter((chip) => chip.name)
+  const extra = pairedClientList.value.length - chips.length
+  if (extra > 0) chips.push({ name: '+extra', label: `+${extra} more` })
+  return chips
+})
+
+// Doctor "Explain": same AI flow Troubleshooting uses, loaded on demand so
+// the initial bundle stays inside budget.
+const doctorExplanation = ref('')
+const doctorExplainPending = ref(false)
+
+async function explainDoctorVerdict() {
+  if (doctorExplainPending.value) return
+  doctorExplainPending.value = true
+  doctorExplanation.value = ''
+  try {
+    const { explainDoctorWithAi } = await import('../ai-doctor-explanation.js')
+    const configRes = await fetch('./api/config', { credentials: 'include' })
+    const config = configRes.ok ? await configRes.json() : {}
+    const result = await explainDoctorWithAi({
+      aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
+      config,
+      supportBundle: { config, stream_stats: stats.value || {}, deterministic_summary: doctor.value || {} },
+      deterministicSummary: doctor.value || {},
+    })
+    const explanation = result.explanation || {}
+    const text = [explanation.likely_cause, (explanation.try_first || [])[0]].filter(Boolean).join(' ')
+    if (text) {
+      doctorExplanation.value = text
+    } else {
+      showToast(result.error || t('dashboard.doctor_explain_unavailable'), 'info')
+    }
+  } catch (e) {
+    showToast(t('dashboard.doctor_explain_unavailable') + ` (${e.message})`, 'error')
+  } finally {
+    doctorExplainPending.value = false
+  }
+}
+
 // ── Doctor: the host's deterministic per-second diagnosis (SSE `doctor`) ──
 const doctor = computed(() => stats.value?.doctor || null)
 
@@ -1701,7 +1816,8 @@ onMounted(async () => {
     const res = await fetch('./api/clients/list', { credentials: 'include' })
     if (res.ok) {
       const data = await res.json()
-      pairedClients.value = (data.named_certs || []).length
+      pairedClientList.value = data.named_certs || []
+      pairedClients.value = pairedClientList.value.length
     }
   } catch {}
   try {
