@@ -590,12 +590,12 @@
             </div>
             <div class="grid grid-cols-2 gap-4 place-items-center xl:grid-cols-4">
               <GaugeArc v-if="gpu.temperature_c != null" :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
-                        :thresholds="[{ at: 0, color: '#22c55e' }, { at: 70, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
+                        :thresholds="[{ at: 0, color: 'var(--color-success)' }, { at: 70, color: 'var(--color-warning)' }, { at: 85, color: 'var(--color-danger)' }]" />
               <GaugeArc v-if="gpu.utilization_pct != null" :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
               <GaugeArc v-if="gpu.encoder_pct != null" :value="gpu.encoder_pct" :max="100" unit="%" :label="gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN'" :size="112"
-                        :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 60, color: '#eab308' }, { at: 85, color: '#ef4444' }]" />
+                        :thresholds="[{ at: 0, color: 'var(--color-ice)' }, { at: 60, color: 'var(--color-warning)' }, { at: 85, color: 'var(--color-danger)' }]" />
               <GaugeArc v-if="gpu.vram_used_mb != null && gpu.vram_total_mb != null" :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
-                        :thresholds="[{ at: 0, color: '#c8d6e5' }, { at: 70, color: '#eab308' }, { at: 90, color: '#ef4444' }]" />
+                        :thresholds="[{ at: 0, color: 'var(--color-ice)' }, { at: 70, color: 'var(--color-warning)' }, { at: 90, color: 'var(--color-danger)' }]" />
             </div>
           </div>
           <div v-else class="dashboard-degraded-state">
@@ -794,6 +794,7 @@ import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { useFavicon } from '../composables/useFavicon'
 import Skeleton from '../components/Skeleton.vue'
 import GaugeArc from '../components/GaugeArc.vue'
+import { onThemeTokensChange, readThemeTokens, withAlpha } from '../theme-bridge.js'
 import QuickControls from '../components/QuickControls.vue'
 import InfoHint from '../components/InfoHint.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
@@ -1715,10 +1716,11 @@ const latencyHistory = ref([])
 const gpuHistory = ref([])
 const lossHistory = ref([])
 
-function makeChartOpts(title, suffix, color = '#c8d6e5') {
-  const r = parseInt(color.slice(1,3), 16)
-  const g = parseInt(color.slice(3,5), 16)
-  const b = parseInt(color.slice(5,7), 16)
+// Chart colors resolve from the active theme's tokens at build time; charts
+// are rebuilt on theme swaps because canvas cannot follow CSS variables.
+function makeChartOpts(title, suffix, tokenName = 'ice') {
+  const tokens = readThemeTokens(['ice', 'twilight', 'storm', tokenName])
+  const color = tokens[tokenName] || tokens.ice
   return {
     width: 300,
     height: 96,
@@ -1726,16 +1728,16 @@ function makeChartOpts(title, suffix, color = '#c8d6e5') {
     legend: { show: false },
     axes: [
       {
-        stroke: '#4c5265',
-        grid: { stroke: '#4c526520', width: 1 },
+        stroke: tokens.twilight,
+        grid: { stroke: withAlpha(tokens.twilight, 0.125), width: 1 },
         ticks: { show: false },
         font: '9px sans-serif',
         values: () => [],
       },
       {
-        stroke: '#687b81',
-        grid: { stroke: '#4c526520', width: 1 },
-        ticks: { stroke: '#4c5265', width: 1 },
+        stroke: tokens.storm,
+        grid: { stroke: withAlpha(tokens.twilight, 0.125), width: 1 },
+        ticks: { stroke: tokens.twilight, width: 1 },
         font: '9px sans-serif',
         size: 35,
       },
@@ -1745,7 +1747,7 @@ function makeChartOpts(title, suffix, color = '#c8d6e5') {
       {
         stroke: color,
         width: 1.5,
-        fill: `rgba(${r}, ${g}, ${b}, 0.06)`,
+        fill: withAlpha(color, 0.06),
       },
     ],
   }
@@ -1784,35 +1786,38 @@ let resizeObserver = null
 
 async function setupCharts() {
   await loadUPlot()
-  nextTick(() => {
-    if (fpsChartEl.value && !fpsChart) {
-      fpsChart = initChart(fpsChartEl.value, makeChartOpts('FPS', 'fps', '#4ade80'))
-    }
-    if (bitrateChartEl.value && !bitrateChart) {
-      bitrateChart = initChart(bitrateChartEl.value, makeChartOpts('Bitrate', 'Mbps', '#38bdf8'))
-    }
-    if (latencyChartEl.value && !latencyChart) {
-      latencyChart = initChart(latencyChartEl.value, makeChartOpts('Latency', 'ms', '#fbbf24'))
-    }
-    if (gpuChartEl.value && !gpuChart) {
-      gpuChart = initChart(gpuChartEl.value, makeChartOpts('GPU', '%', '#c084fc'))
-    }
-    if (lossChartEl.value && !lossChart) {
-      lossChart = initChart(lossChartEl.value, makeChartOpts('Loss', '%', '#f87171'))
-    }
-    if (encodeChartEl.value && !encodeChart) {
-      encodeChart = initChart(encodeChartEl.value, makeChartOpts('Encode', 'ms'))
-    }
-  })
+  await nextTick()
+  if (fpsChartEl.value && !fpsChart) {
+    fpsChart = initChart(fpsChartEl.value, makeChartOpts('FPS', 'fps', 'success'))
+  }
+  if (bitrateChartEl.value && !bitrateChart) {
+    bitrateChart = initChart(bitrateChartEl.value, makeChartOpts('Bitrate', 'Mbps', 'info'))
+  }
+  if (latencyChartEl.value && !latencyChart) {
+    latencyChart = initChart(latencyChartEl.value, makeChartOpts('Latency', 'ms', 'warning'))
+  }
+  if (gpuChartEl.value && !gpuChart) {
+    gpuChart = initChart(gpuChartEl.value, makeChartOpts('GPU', '%', 'accent'))
+  }
+  if (lossChartEl.value && !lossChart) {
+    lossChart = initChart(lossChartEl.value, makeChartOpts('Loss', '%', 'danger'))
+  }
+  if (encodeChartEl.value && !encodeChart) {
+    encodeChart = initChart(encodeChartEl.value, makeChartOpts('Encode', 'ms'))
+  }
 }
 
-function destroyCharts() {
+function destroyChartInstances() {
   if (fpsChart) { fpsChart.destroy(); fpsChart = null }
   if (bitrateChart) { bitrateChart.destroy(); bitrateChart = null }
   if (encodeChart) { encodeChart.destroy(); encodeChart = null }
   if (latencyChart) { latencyChart.destroy(); latencyChart = null }
   if (gpuChart) { gpuChart.destroy(); gpuChart = null }
   if (lossChart) { lossChart.destroy(); lossChart = null }
+}
+
+function destroyCharts() {
+  destroyChartInstances()
   timestamps.value = []
   fpsHistory.value = []
   bitrateHistory.value = []
@@ -1820,6 +1825,21 @@ function destroyCharts() {
   latencyHistory.value = []
   gpuHistory.value = []
   lossHistory.value = []
+}
+
+// Rebuild live charts with the new theme's colors, keeping their history.
+async function refreshChartTheme() {
+  const hadCharts = Boolean(fpsChart || bitrateChart || encodeChart || latencyChart || gpuChart || lossChart)
+  if (!hadCharts) return
+  destroyChartInstances()
+  await setupCharts()
+  const ts = [...timestamps.value]
+  updateChartData(fpsChart, ts, [...fpsHistory.value])
+  updateChartData(bitrateChart, ts, [...bitrateHistory.value])
+  updateChartData(encodeChart, ts, [...encodeHistory.value])
+  updateChartData(latencyChart, ts, [...latencyHistory.value])
+  updateChartData(gpuChart, ts, [...gpuHistory.value])
+  updateChartData(lossChart, ts, [...lossHistory.value])
 }
 
 watch(stats, (newStats, oldStats) => {
@@ -1899,12 +1919,15 @@ watch(prefersReducedMotion, (isReduced) => {
   }
 })
 
+let unsubscribeThemeTokens = null
+
 onMounted(async () => {
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
     reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
     updateReducedMotionPreference(reducedMotionQuery)
     reducedMotionQuery.addEventListener?.('change', updateReducedMotionPreference)
   }
+  unsubscribeThemeTokens = onThemeTokensChange(() => { refreshChartTheme() })
 
   fetchSystemInfo()
   fetchAiStatus()
@@ -1972,6 +1995,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   destroyCharts()
+  if (unsubscribeThemeTokens) {
+    unsubscribeThemeTokens()
+    unsubscribeThemeTokens = null
+  }
   reducedMotionQuery?.removeEventListener?.('change', updateReducedMotionPreference)
   reducedMotionQuery = null
   if (resizeObserver) {

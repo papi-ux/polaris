@@ -2,17 +2,17 @@
   <div class="flex flex-col items-center gap-1">
     <svg :width="size" :height="size * 0.65" :viewBox="`0 0 ${size} ${size * 0.65}`">
       <!-- Background arc -->
-      <path :d="bgArc" fill="none" :stroke="trackColor" :stroke-width="strokeWidth" stroke-linecap="round" />
+      <path :d="bgArc" fill="none" :style="{ stroke: trackColor }" :stroke-width="strokeWidth" stroke-linecap="round" />
       <!-- Value arc -->
-      <path :d="valueArc" fill="none" :stroke="currentColor" :stroke-width="strokeWidth" stroke-linecap="round"
-            style="transition: d 0.5s ease, stroke 0.3s ease" />
-      <!-- Value text -->
-      <text :x="size / 2" :y="size * 0.48" text-anchor="middle" :fill="currentColor"
-            :font-size="size * 0.22" font-weight="700" font-family="Inter, system-ui, sans-serif">
+      <path :d="valueArc" fill="none" :style="{ stroke: currentColor, transition: 'd 0.5s ease, stroke 0.3s ease' }" :stroke-width="strokeWidth" stroke-linecap="round" />
+      <!-- Value text; SVG fill/stroke are set through style so theme tokens
+           resolve live, and the font family inherits the app stack. -->
+      <text :x="size / 2" :y="size * 0.48" text-anchor="middle" :style="{ fill: currentColor }"
+            :font-size="size * 0.22" font-weight="700">
         {{ displayValue }}
       </text>
-      <text :x="size / 2" :y="size * 0.62" text-anchor="middle" fill="#687b81"
-            :font-size="size * 0.1" font-family="Inter, system-ui, sans-serif">
+      <text :x="size / 2" :y="size * 0.62" text-anchor="middle" style="fill: var(--color-storm)"
+            :font-size="size * 0.1">
         {{ unit }}
       </text>
     </svg>
@@ -33,20 +33,20 @@ const props = defineProps({
   thresholds: {
     type: Array,
     default: () => [
-      { at: 0, color: '#22c55e' },    // green
-      { at: 60, color: '#eab308' },   // yellow
-      { at: 85, color: '#ef4444' },   // red
+      { at: 0, color: 'var(--color-success)' },
+      { at: 60, color: 'var(--color-warning)' },
+      { at: 85, color: 'var(--color-danger)' },
     ]
   }
 })
 
-const trackColor = 'rgba(104, 123, 129, 0.2)'
+const trackColor = 'color-mix(in srgb, var(--color-storm) 20%, transparent)'
 
 const pct = computed(() => Math.min(Math.max(props.value / props.max, 0), 1))
 
 const currentColor = computed(() => {
   const p = pct.value * 100
-  let color = props.thresholds[0]?.color || '#22c55e'
+  let color = props.thresholds[0]?.color || 'var(--color-success)'
   for (const t of props.thresholds) {
     if (p >= t.at) color = t.color
   }

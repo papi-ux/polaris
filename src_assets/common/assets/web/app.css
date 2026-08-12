@@ -5,15 +5,18 @@
 }
 
 /* ── Surface Tokens ──
-   Base surfaces derive from the theme palette via color-mix, so a theme only
-   overrides these when its surfaces are not a straight mix of its core colors
-   (e.g. OLED wants near-black glass regardless of its twilight value). */
+   Surfaces derive from each theme's card base (Nova's card color for that
+   theme) via color-mix, so a theme normally overrides only
+   --surface-card-base. A theme whose surfaces are not a straight mix of its
+   card color (e.g. OLED's near-black glass) overrides the derived tokens
+   directly. */
 :root {
-  --surface-glass: color-mix(in srgb, var(--color-twilight) 50%, transparent);
-  --surface-card: color-mix(in srgb, var(--color-twilight) 70%, transparent);
-  --surface-raised: color-mix(in srgb, var(--color-deep) 40%, transparent);
-  --surface-raised-hover: color-mix(in srgb, var(--color-twilight) 30%, transparent);
-  --surface-pill: color-mix(in srgb, var(--color-deep) 60%, transparent);
+  --surface-card-base: #343150; /* Nova polaris card */
+  --surface-glass: color-mix(in srgb, var(--surface-card-base) 55%, transparent);
+  --surface-card: color-mix(in srgb, var(--surface-card-base) 78%, transparent);
+  --surface-raised: color-mix(in srgb, var(--surface-card-base) 44%, transparent);
+  --surface-raised-hover: color-mix(in srgb, var(--surface-card-base) 62%, transparent);
+  --surface-pill: color-mix(in srgb, var(--surface-card-base) 64%, transparent);
   --surface-chip: color-mix(in srgb, var(--color-void) 50%, transparent);
   --surface-shimmer: var(--color-twilight);
   --edge-glass: color-mix(in srgb, var(--color-ice) 8%, transparent);
@@ -23,21 +26,30 @@
   --edge-pill: color-mix(in srgb, var(--color-storm) 30%, transparent);
   --edge-chip: color-mix(in srgb, var(--color-storm) 25%, transparent);
   --shimmer-sheen: color-mix(in srgb, var(--color-ice) 6%, transparent);
+  /* Sidebar treatment: one shared rule in App.vue consumes these, so a theme
+     restyles the active nav item with token overrides, not selector blocks. */
+  --sidebar-fg: var(--color-storm);
+  --sidebar-active-fg: var(--color-ice);
+  --sidebar-active-bg: color-mix(in srgb, var(--color-twilight) 80%, transparent);
+  --sidebar-active-bar: color-mix(in srgb, var(--color-ice) 85%, transparent);
 }
 
 @theme {
-  /* ── Space Whale Palette ── */
+  /* ── Polaris Aurora (Nova "Space Whale" ramp; values match colors_nova.xml) ── */
   --color-ice: #c8d6e5;
-  --color-silver: #979f9e;
-  --color-storm: #687b81;
+  --color-silver: #a8b0b8;
+  --color-storm: #7a8e95;
   --color-twilight: #4c5265;
   --color-deep: #393c51;
   --color-void: #2a2840;
   --color-accent: #7c73ff;
+  --color-accent-2: var(--color-accent);
 
-  /* ── Semantic Tokens ── */
-  --color-surface: var(--color-twilight);
-  --color-background: var(--color-deep);
+  /* ── Semantic Tokens ──
+     The page ground is each theme's window color (Nova layering: cards sit
+     lighter on the window), surface is its card base. */
+  --color-surface: var(--surface-card-base);
+  --color-background: var(--color-void);
   --color-foreground: var(--color-silver);
 
   /* ── Status Tokens ──
@@ -95,21 +107,23 @@
   }
 }
 
-/* ── OLED Dark Galaxy Theme ── */
+/* ── Console OLED Theme (Nova "oled": OLED black, console glow) ── */
 [data-theme="oled"] {
-  --color-ice: #e8edf3;
-  --color-silver: #c0c8d0;
-  --color-storm: #6f7882;
-  --color-twilight: #111319;
+  --color-ice: #e0e6ed;
+  --color-silver: #a8b0b8;
+  /* Nova's #555e66 sits at 2.99:1 on the solid card base; one step lighter
+     clears the 3:1 large-text floor the theme suite enforces. */
+  --color-storm: #5a636c;
+  --color-twilight: #1a1a22;
   --color-deep: #000000;
   --color-void: #000000;
-  --color-accent: #a8c8ff;
-  --color-surface: #090b10;
-  --color-background: #000000;
-  --color-foreground: #c0c8d0;
-  /* Near-black surfaces regardless of the twilight mix. */
+  --color-accent: #8b80ff;
+  --color-accent-2: var(--color-accent);
+  --color-foreground: #a8b0b8;
+  /* Near-black surfaces regardless of the card-base mix. */
+  --surface-card-base: #0a0a0e;
   --surface-glass: rgba(8, 9, 12, 0.88);
-  --surface-card: rgba(8, 9, 12, 0.92);
+  --surface-card: rgba(10, 10, 14, 0.92);
   --surface-raised: rgba(7, 8, 11, 0.78);
   --surface-raised-hover: rgba(15, 18, 24, 0.78);
   --surface-pill: rgba(255, 255, 255, 0.035);
@@ -118,18 +132,13 @@
   --edge-glass: rgba(255, 255, 255, 0.06);
   --edge-card: rgba(255, 255, 255, 0.06);
   --edge-raised: rgba(255, 255, 255, 0.06);
-  --edge-raised-hover: rgba(232, 237, 243, 0.12);
+  --edge-raised-hover: rgba(224, 230, 237, 0.12);
   --edge-pill: rgba(255, 255, 255, 0.08);
   --edge-chip: rgba(255, 255, 255, 0.08);
   --shimmer-sheen: rgba(255, 255, 255, 0.03);
-}
-[data-theme="oled"] .sidebar-link {
-  color: #c0c8d0;
-}
-[data-theme="oled"] .sidebar-link.active {
-  color: #e8edf3;
-  background: rgba(232, 237, 243, 0.06);
-  box-shadow: inset 2px 0 0 rgba(232, 237, 243, 0.9), inset 0 1px 0 rgba(255,255,255,0.04);
+  --sidebar-fg: var(--color-silver);
+  --sidebar-active-bg: rgba(224, 230, 237, 0.06);
+  --sidebar-active-bar: rgba(224, 230, 237, 0.9);
 }
 [data-theme="oled"] aside {
   border-color: transparent !important;
@@ -399,6 +408,53 @@ textarea {
   @apply rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-storm;
   background: var(--surface-chip);
   border-color: var(--edge-chip);
+}
+
+/* ── Theme Picker ── */
+.theme-picker-panel {
+  @apply absolute bottom-full left-0 z-[120] mb-2 flex min-w-[264px] flex-col gap-1 rounded-xl p-2;
+  background: var(--surface-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--edge-glass);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.theme-picker-option {
+  @apply flex w-full items-center gap-3 rounded-lg px-2.5 py-2 transition-[background-color,border-color] duration-150;
+  border: 1px solid transparent;
+}
+
+.theme-picker-option:hover {
+  background: var(--surface-raised-hover);
+}
+
+.theme-picker-option.is-current {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+.theme-picker-swatch {
+  @apply relative h-[25px] w-[34px] shrink-0 overflow-hidden rounded-md;
+  border: 1px solid color-mix(in srgb, var(--color-ice) 20%, transparent);
+}
+
+.theme-picker-swatch-card {
+  @apply absolute left-1 top-1 h-2.5 w-4 rounded-sm;
+}
+
+.theme-picker-swatch-dot {
+  @apply absolute right-1 top-1 h-2 w-2 rounded-full;
+}
+
+.theme-picker-swatch-bar {
+  @apply absolute bottom-1 left-1 h-[3px] w-5 rounded-sm opacity-40;
+}
+
+.theme-picker-current {
+  @apply shrink-0 rounded border px-1 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em];
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
 }
 
 .icon-action-button {
@@ -1422,164 +1478,90 @@ textarea {
   }
 }
 
-/* ── Miami Nebula Skin ── */
+/* ── Miami Nebula Skin (Nova "miami": flamingo pink lead, cyan water support) ── */
 [data-theme="miami"] {
-  --color-ice: #effdff;
-  --color-silver: #b9fbff;
-  --color-storm: #79d7e3;
-  --color-twilight: #243652;
-  --color-deep: #151529;
-  --color-void: #090611;
-  --color-accent: #47f3ff;
-  --color-surface: #243652;
-  --color-background: #151529;
-  --color-foreground: #dcfbff;
-}
-
-[data-theme="miami"] .glass {
-  background: linear-gradient(135deg, rgba(13, 16, 32, 0.90), rgba(44, 24, 62, 0.78));
-  border-color: rgba(71, 243, 255, 0.24);
-}
-[data-theme="miami"] .card,
-[data-theme="miami"] .section-card,
-[data-theme="miami"] .config-page .settings-section {
-  background: linear-gradient(135deg, rgba(13, 16, 32, 0.92), rgba(31, 33, 62, 0.86));
-  border-color: rgba(71, 243, 255, 0.18);
-}
-[data-theme="miami"] .surface-subtle,
-[data-theme="miami"] .action-tile {
-  background: rgba(17, 25, 44, 0.78);
-  border-color: rgba(71, 243, 255, 0.16);
-}
-[data-theme="miami"] .action-tile:hover {
-  background: rgba(24, 45, 68, 0.84);
-  border-color: rgba(71, 243, 255, 0.36);
-}
-[data-theme="miami"] .sidebar-link.active {
-  color: #effdff;
-  background: linear-gradient(90deg, rgba(71, 243, 255, 0.16), rgba(255, 92, 171, 0.10));
-  box-shadow: inset 2px 0 0 rgba(71, 243, 255, 0.92), inset 0 1px 0 rgba(255,92,171,0.12);
+  --color-ice: #fff1f7;
+  --color-silver: #ffd3e2;
+  --color-storm: #85c7d4;
+  --color-twilight: #6c3c6f;
+  --color-deep: #241429;
+  --color-void: #130817;
+  --color-accent: #ff5cab;
+  --color-accent-2: #47f3ff;
+  --color-info: #47f3ff;
+  --color-foreground: #ffd3e2;
+  --surface-card-base: #241429;
+  /* Nova's Miami panels carry an accent-tinted border (panelBorder = accent at 18%). */
+  --edge-glass: color-mix(in srgb, var(--color-accent) 24%, transparent);
+  --edge-card: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  --sidebar-active-bg: linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 16%, transparent), color-mix(in srgb, var(--color-accent-2) 10%, transparent));
+  --sidebar-active-bar: color-mix(in srgb, var(--color-accent) 92%, transparent);
 }
 [data-theme="miami"] .pulse-dot {
-  background: #47f3ff;
-  box-shadow: 0 0 18px rgba(71, 243, 255, 0.52), 0 0 28px rgba(255, 92, 171, 0.22);
+  background: var(--color-accent);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--color-accent) 52%, transparent), 0 0 28px color-mix(in srgb, var(--color-accent-2) 22%, transparent);
 }
 
 /* ── Portable Chrome Skin ── */
-/* Moonlight-grey early-2000s retro-futurism: pearl silver shell, misty grey panels, subtle PlayStation-symbol glints. */
+/* Nova "portable_chrome": smoked graphite handheld chrome, dim silver shell,
+   PlayStation-symbol accents. Dark, matching Nova's own light-to-dark
+   migration of this theme. */
 [data-theme="portable-chrome"] {
-  color-scheme: light;
-  --color-ice: #17202a;
-  --color-silver: #33404c;
-  /* storm carries caption/body text, so it holds the 4.5:1 AA floor the old
-     --color-muted assertion guarded (that alias was removed as unused). */
-  --color-storm: #4f5d6b;
-  --color-twilight: #a7b2be;
-  --color-deep: #b8c1cc;
-  --color-void: #d6dde5;
-  --color-accent: #2f64b3;
-  --portable-cross: #2f64b3;
-  --portable-square: #9d679d;
-  --portable-circle: #b8575f;
-  --portable-triangle: #4f9a67;
-  --color-surface: #d6dde5;
-  --color-background: #b8c1cc;
-  --color-foreground: #25313d;
-  /* Status colors re-pinned for the light shell: the dark-theme defaults fail
-     contrast on pearl-silver surfaces. Values are WCAG-gated by theme.test.js. */
-  --color-success: #315b45;
-  --color-warning: #92400e;
-  --color-danger: #b91c1c;
-  --color-info: #1d4ed8;
-  --color-success-bright: color-mix(in srgb, var(--color-success) 72%, black);
-  --color-warning-bright: color-mix(in srgb, var(--color-warning) 72%, black);
-  --color-danger-bright: color-mix(in srgb, var(--color-danger) 72%, black);
-  --color-info-bright: color-mix(in srgb, var(--color-info) 72%, black);
-  --color-accent-bright: color-mix(in srgb, var(--color-accent) 72%, black);
+  --color-ice: #c9d1d9;
+  --color-silver: #9aa4af;
+  --color-storm: #838d9c;
+  --color-twilight: #3a424c;
+  --color-deep: #1e2228;
+  --color-void: #14161a;
+  --color-accent: #5a93d6;
+  --color-accent-2: var(--color-accent);
+  --portable-cross: #5a93d6;
+  --portable-square: #b583b5;
+  --portable-circle: #d4838a;
+  --portable-triangle: #6fbf8a;
+  --color-foreground: #9aa4af;
+  /* Nova gives this theme its own softened error red. */
+  --color-danger: #f28b93;
+  --surface-card-base: #1e2228;
+  --sidebar-active-bg: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  --sidebar-active-bar: color-mix(in srgb, var(--color-accent) 90%, transparent);
 }
 
-[data-theme="portable-chrome"] body {
-  background:
-    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.30), transparent 18rem),
-    radial-gradient(circle at 82% 8%, rgba(47, 100, 179, 0.14), transparent 24rem),
-    linear-gradient(135deg, #d7dde5 0%, #b8c1cc 46%, #98a6b5 100%);
+/* ── High Contrast Skin ── */
+/* Nova "high_contrast": maximum contrast, accessibility-first focus states.
+   Near-opaque surfaces, pale solid edges, no glass blur. */
+[data-theme="high-contrast"] {
+  --color-ice: #ffffff;
+  --color-silver: #e5e7eb;
+  --color-storm: #cbd5e1;
+  --color-twilight: #172033;
+  --color-deep: #0f172a;
+  --color-void: #05070c;
+  --color-accent: #60a5fa;
+  --color-accent-2: var(--color-accent);
+  --color-foreground: #e5e7eb;
+  --surface-card-base: #0f172a;
+  --surface-card: rgba(15, 23, 42, 0.97);
+  --surface-glass: rgba(15, 23, 42, 0.94);
+  --surface-raised: rgba(23, 32, 51, 0.96);
+  --surface-raised-hover: rgba(30, 41, 66, 0.98);
+  --surface-pill: rgba(23, 32, 51, 0.96);
+  --surface-chip: rgba(5, 7, 12, 0.9);
+  --edge-glass: color-mix(in srgb, #dbeafe 60%, transparent);
+  --edge-card: color-mix(in srgb, #dbeafe 45%, transparent);
+  --edge-raised: color-mix(in srgb, #dbeafe 40%, transparent);
+  --edge-raised-hover: color-mix(in srgb, #dbeafe 70%, transparent);
+  --edge-pill: color-mix(in srgb, #dbeafe 45%, transparent);
+  --edge-chip: color-mix(in srgb, #dbeafe 40%, transparent);
 }
-
-[data-theme="portable-chrome"] body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background:
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.06) 0, rgba(255, 255, 255, 0.06) 1px, transparent 1px, transparent 5px),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(96, 110, 126, 0.10));
-  opacity: 0.22;
-  mix-blend-mode: soft-light;
-  z-index: 0;
+[data-theme="high-contrast"] .glass,
+[data-theme="high-contrast"] .card,
+[data-theme="high-contrast"] .section-card,
+[data-theme="high-contrast"] .config-page .settings-section,
+[data-theme="high-contrast"] .info-hint-panel {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
-
-[data-theme="portable-chrome"] #app {
-  position: relative;
-  z-index: 1;
-}
-
-[data-theme="portable-chrome"] .glass,
-[data-theme="portable-chrome"] .card,
-[data-theme="portable-chrome"] .section-card,
-[data-theme="portable-chrome"] .config-page .settings-section {
-  background:
-    linear-gradient(180deg, rgba(224, 231, 238, 0.90), rgba(196, 205, 216, 0.88) 46%, rgba(163, 176, 190, 0.92)),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.18), rgba(116, 130, 146, 0.16) 52%, rgba(255, 255, 255, 0.12));
-  border-color: rgba(88, 101, 116, 0.58);
-  color: #25313d;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.74),
-    inset 0 -1px 0 rgba(81, 94, 110, 0.36),
-    inset 0 0 0 1px rgba(74, 86, 101, 0.20),
-    0 22px 48px rgba(54, 65, 79, 0.28),
-    0 3px 10px rgba(255, 255, 255, 0.22);
-}
-
-[data-theme="portable-chrome"] .surface-subtle,
-[data-theme="portable-chrome"] .action-tile,
-[data-theme="portable-chrome"] .meta-pill,
-[data-theme="portable-chrome"] .control-chip {
-  background:
-    linear-gradient(180deg, rgba(215, 223, 232, 0.88), rgba(184, 195, 207, 0.82)),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.16), rgba(112, 126, 143, 0.14));
-  border-color: rgba(96, 111, 128, 0.56);
-  color: #25313d;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66), inset 0 -1px 0 rgba(81, 94, 110, 0.30), 0 8px 20px rgba(72, 84, 99, 0.12);
-}
-
-[data-theme="portable-chrome"] .action-tile:hover {
-  background:
-    linear-gradient(180deg, rgba(224, 231, 238, 0.92), rgba(190, 201, 213, 0.88)),
-    linear-gradient(90deg, rgba(47, 100, 179, 0.16), rgba(157, 103, 157, 0.12));
-  border-color: rgba(47, 100, 179, 0.68);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.70), inset 0 -1px 0 rgba(81, 94, 110, 0.28), 0 10px 24px rgba(72, 84, 99, 0.16), 0 0 18px rgba(157, 103, 157, 0.20);
-}
-
-[data-theme="portable-chrome"] .sidebar-link {
-  color: #536171;
-}
-
-[data-theme="portable-chrome"] .sidebar-link.active {
-  color: #17202a;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.42), rgba(47, 100, 179, 0.18), rgba(184, 87, 95, 0.10));
-  box-shadow: inset 2px 0 0 rgba(47, 100, 179, 0.90), inset 0 1px 0 rgba(255, 255, 255, 0.62), 0 0 18px rgba(157, 103, 157, 0.20);
-}
-
-[data-theme="portable-chrome"] .border-storm {
-  border-color: rgba(92, 106, 123, 0.56);
-}
-
-[data-theme="portable-chrome"] .pulse-dot {
-  background: #4f9a67;
-  box-shadow: 0 0 8px rgba(79, 154, 103, 0.30), 0 0 18px rgba(47, 100, 179, 0.18);
-}
-
-[data-theme="portable-chrome"] .skeleton-shimmer {
-  background: linear-gradient(90deg, rgba(177, 188, 201, 0.86) 25%, rgba(226, 232, 239, 0.56) 50%, rgba(177, 188, 201, 0.86) 75%);
-  background-size: 200% 100%;
+[data-theme="high-contrast"] .focus-ring {
+  @apply focus-visible:ring-accent/80;
 }

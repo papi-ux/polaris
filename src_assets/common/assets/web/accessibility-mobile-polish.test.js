@@ -9,8 +9,15 @@ function webSource(relativePath) {
 describe('cross-cutting accessibility and mobile polish', () => {
   it('gives icon-only app chrome controls explicit accessible names', () => {
     const app = webSource('App.vue')
+    const themeToggle = webSource('ThemeToggle.vue')
 
-    expect(app).toContain(':aria-label="`Switch theme to ${nextThemeLabel}`"')
+    // The theme control is the shared ThemeToggle picker with an explicit
+    // accessible name and listbox semantics.
+    expect(app).toContain('<ThemeToggle :collapsed="sidebarCollapsed" />')
+    expect(themeToggle).toContain('aria-label="Choose theme"')
+    expect(themeToggle).toContain('aria-haspopup="listbox"')
+    expect(themeToggle).toContain('role="listbox"')
+    expect(themeToggle).toContain('role="option"')
     expect(app).toContain(':aria-label="`Open command palette (${paletteShortcut})`"')
     expect(app).toContain(':aria-label="sidebarCollapsed ? \'Expand sidebar\' : \'Collapse sidebar\'"')
     expect(app).toContain('aria-hidden="true" v-html="item.icon"')
