@@ -419,6 +419,16 @@ textarea {
   color: rgba(230, 235, 242, 0.85);
 }
 
+/* Sparkline slot inside each instrument-strip tile. */
+.dashboard-strip-spark {
+  @apply h-8 w-32;
+}
+
+/* Inert Doctor advice: unmistakably not a button. */
+.dashboard-doctor-advice {
+  @apply font-mono text-[11px] text-storm underline decoration-dashed decoration-storm/50 underline-offset-4;
+}
+
 /* Play rail: compact launchable game tiles. */
 .dashboard-play-tile {
   @apply flex min-w-0 flex-col rounded-xl border p-2.5;
@@ -1275,11 +1285,11 @@ textarea {
 }
 
 .dashboard-action-button-secondary {
-  @apply border border-storm/30 bg-transparent text-silver hover:border-ice/35 hover:text-ice;
+  @apply border border-accent/45 bg-accent/10 text-accent hover:border-accent/70 hover:bg-accent/20;
 }
 
 .dashboard-action-button-ghost {
-  @apply border border-storm/20 bg-deep/40 text-storm hover:border-storm/40 hover:text-silver;
+  @apply border border-storm/40 bg-deep/40 text-silver hover:border-accent/50 hover:text-accent;
 }
 
 .dashboard-action-button-danger {

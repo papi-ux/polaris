@@ -23,7 +23,7 @@ describe('DashboardView hierarchy', () => {
 
     // The strip says each stream number exactly once; path and runtime moved
     // to chips and the session context rail.
-    for (const label of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate']) {
+    for (const label of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate', 'Encode']) {
       expect(dashboard).toContain(`data-live-summary-metric="${label}"`)
     }
     expect(dashboard).not.toContain('data-live-summary-metric="Capture path"')
@@ -39,15 +39,6 @@ describe('DashboardView hierarchy', () => {
     expect(dashboard).not.toContain('Priority guidance')
     expect(dashboard).not.toContain('streamPathNotices')
     expect(dashboard).not.toContain('mission-control-strip')
-  })
-
-  it('keeps secondary live panels in collapsible groups below the primary summary', () => {
-    const dashboard = webSource('views/DashboardView.vue')
-    const groupedPanelCount = (dashboard.match(/<details class="dashboard-secondary-group/g) || []).length
-
-    expect(groupedPanelCount).toBeGreaterThanOrEqual(1)
-    expectBefore(dashboard, 'dashboard-live-summary-grid', '<details class="dashboard-secondary-group')
-    expect(dashboard).toContain('dashboard-secondary-group-summary')
   })
 
   it('leads idle mode with the status hero and keeps the play rail launchable', () => {

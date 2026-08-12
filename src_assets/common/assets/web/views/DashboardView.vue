@@ -39,6 +39,8 @@
           </div>
         </div>
 
+        <!-- Instrument cluster: figure, label, and trend per metric; the old
+             Live stream trends drawer lives here now as sparklines. -->
         <section class="dashboard-live-summary-grid" role="status" aria-live="polite" aria-atomic="true" aria-label="Live stream telemetry summary">
           <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
             <div class="dashboard-live-summary-label">Quality</div>
@@ -48,20 +50,37 @@
             </div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Latency">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="latencyChartEl"></div>
             <div class="dashboard-live-summary-label">Latency</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.latencyTone">{{ liveSummary.latency }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="FPS">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="fpsChartEl"></div>
             <div class="dashboard-live-summary-label">FPS</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.fpsTone">{{ liveSummary.fps }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Loss">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="lossChartEl"></div>
             <div class="dashboard-live-summary-label">Loss</div>
             <div class="dashboard-live-summary-value" :class="liveSummary.lossTone">{{ liveSummary.loss }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Bitrate">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="bitrateChartEl"></div>
             <div class="dashboard-live-summary-label">Bitrate</div>
             <div class="dashboard-live-summary-value text-silver">{{ liveSummary.bitrate }}</div>
+          </div>
+          <div class="dashboard-live-summary-tile" data-live-summary-metric="Encode">
+            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="encodeChartEl"></div>
+            <div class="dashboard-live-summary-label">Encode</div>
+            <div class="dashboard-live-summary-value text-silver">{{ stats.encode_time_ms?.toFixed(1) || '--' }} ms</div>
+          </div>
+          <div class="ml-auto flex flex-col items-end justify-end gap-1.5 self-end" data-dashboard-frame-health>
+            <div class="flex flex-wrap justify-end gap-1.5">
+              <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
+              <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
+              <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
+            </div>
+            <span v-if="prefersReducedMotion" class="font-mono text-[10px] text-storm">Live charts are paused while reduced motion is enabled.</span>
           </div>
         </section>
 
@@ -93,8 +112,8 @@
               >
                 {{ doctorSafeAction.label }}
               </button>
-              <span v-else-if="doctorSafeAction" class="data-pill" :title="doctorSafeAction.rollback || ''">
-                {{ doctorSafeAction.label }}
+              <span v-else-if="doctorSafeAction" class="dashboard-doctor-advice" :title="doctorSafeAction.rollback || ''">
+                Suggested: {{ doctorSafeAction.label }}
               </span>
               <button
                 v-if="aiStatus?.enabled && doctor"
@@ -253,79 +272,6 @@
           </div>
         </div>
 
-        <details class="dashboard-secondary-group" open>
-          <summary class="dashboard-secondary-group-summary">
-            <span>{{ $t('dashboard.telemetry_title') }}</span>
-            <span>{{ stats.fps?.toFixed(1) || '--' }} fps · {{ (stats.bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
-          </summary>
-          <section class="dashboard-telemetry-card">
-          <div class="flex flex-wrap items-center justify-between gap-3">
-            <InfoHint size="sm" :label="$t('dashboard.telemetry')">{{ $t('dashboard.telemetry_desc') }}</InfoHint>
-            <!-- Frame health: the numbers that explain "feels stuttery"
-                 when FPS looks fine; the strip already covers the rest. -->
-            <div class="flex flex-wrap gap-2 text-[11px] text-silver" data-dashboard-frame-health>
-              <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
-              <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
-              <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
-            </div>
-          </div>
-
-          <div v-if="!prefersReducedMotion" class="dashboard-telemetry-grid mt-4">
-            <div class="card p-2.5">
-              <div class="text-[10px] font-semibold uppercase tracking-wider text-success/80">FPS</div>
-              <div ref="fpsChartEl" class="h-24 w-full"></div>
-            </div>
-            <div class="card p-2.5">
-              <div class="text-[10px] font-semibold uppercase tracking-wider text-info/80">Bitrate</div>
-              <div ref="bitrateChartEl" class="h-24 w-full"></div>
-            </div>
-            <div class="card p-2.5">
-              <div class="text-[10px] font-semibold uppercase tracking-wider text-silver/60">Encode</div>
-              <div ref="encodeChartEl" class="h-24 w-full"></div>
-            </div>
-            <div class="card p-2.5">
-              <div class="text-[10px] font-semibold uppercase tracking-wider text-warning/80">Latency</div>
-              <div ref="latencyChartEl" class="h-24 w-full"></div>
-            </div>
-            <div class="card p-2.5">
-              <div class="text-[10px] font-semibold uppercase tracking-wider text-accent/80">GPU Load</div>
-              <div ref="gpuChartEl" class="h-24 w-full"></div>
-            </div>
-            <div class="card p-2.5">
-              <div class="text-[10px] font-semibold uppercase tracking-wider text-danger/80">Packet Loss</div>
-              <div ref="lossChartEl" class="h-24 w-full"></div>
-            </div>
-          </div>
-          <div v-else class="dashboard-empty-state mt-4">
-            Live charts are paused while reduced motion is enabled; the summary tiles above keep updating without the extra canvas work.
-          </div>
-
-          <div v-if="gpu" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="dashboard-metric-tile">
-              <div class="dashboard-metric-label">GPU Temp</div>
-              <div class="dashboard-metric-value" :class="gpu.temperature_c != null ? (gpu.temperature_c > 80 ? 'text-danger' : gpu.temperature_c > 65 ? 'text-warning' : 'text-success') : 'text-storm'">
-                {{ gpu.temperature_c != null ? gpu.temperature_c + '°' : '--' }}
-              </div>
-              <div class="mt-1 text-xs text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W draw</div>
-            </div>
-            <div class="dashboard-metric-tile">
-              <div class="dashboard-metric-label">GPU Load</div>
-              <div class="dashboard-metric-value text-accent">{{ gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '--' }}</div>
-              <div class="mt-1 text-xs text-storm">{{ gpu.clock_mhz || gpu.clock_gpu_mhz || '--' }} MHz</div>
-            </div>
-            <div class="dashboard-metric-tile" v-if="gpu.encoder_pct != null">
-              <div class="dashboard-metric-label">Encoder</div>
-              <div class="dashboard-metric-value text-info">{{ gpu.encoder_pct }}%</div>
-              <div class="mt-1 text-xs text-storm">{{ gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN' }} workload</div>
-            </div>
-            <div class="dashboard-metric-tile">
-              <div class="dashboard-metric-label">VRAM</div>
-              <div class="dashboard-metric-value text-silver">{{ gpu.vram_used_mb != null ? (gpu.vram_used_mb / 1024).toFixed(1) + ' GB' : '--' }}</div>
-              <div class="mt-1 text-xs text-storm">{{ gpu.vram_total_mb != null ? '/ ' + (gpu.vram_total_mb / 1024).toFixed(0) + ' GB' : '' }}</div>
-            </div>
-          </div>
-          </section>
-        </details>
       </section>
     </template>
 
@@ -1426,7 +1372,6 @@ const fpsChartEl = ref(null)
 const bitrateChartEl = ref(null)
 const encodeChartEl = ref(null)
 const latencyChartEl = ref(null)
-const gpuChartEl = ref(null)
 const lossChartEl = ref(null)
 
 // Chart instances
@@ -1434,7 +1379,6 @@ let fpsChart = null
 let bitrateChart = null
 let encodeChart = null
 let latencyChart = null
-let gpuChart = null
 let lossChart = null
 
 // Rolling data (60 seconds)
@@ -1444,7 +1388,6 @@ const fpsHistory = ref([])
 const bitrateHistory = ref([])
 const encodeHistory = ref([])
 const latencyHistory = ref([])
-const gpuHistory = ref([])
 const lossHistory = ref([])
 
 // Chart colors resolve from the active theme's tokens at build time; charts
@@ -1453,32 +1396,19 @@ function makeChartOpts(title, suffix, tokenName = 'ice') {
   const tokens = readThemeTokens(['ice', 'twilight', 'storm', tokenName])
   const color = tokens[tokenName] || tokens.ice
   return {
-    width: 300,
-    height: 96,
+    width: 128,
+    height: 32,
     cursor: { show: false },
     legend: { show: false },
-    axes: [
-      {
-        stroke: tokens.twilight,
-        grid: { stroke: withAlpha(tokens.twilight, 0.125), width: 1 },
-        ticks: { show: false },
-        font: '9px sans-serif',
-        values: () => [],
-      },
-      {
-        stroke: tokens.storm,
-        grid: { stroke: withAlpha(tokens.twilight, 0.125), width: 1 },
-        ticks: { stroke: tokens.twilight, width: 1 },
-        font: '9px sans-serif',
-        size: 35,
-      },
-    ],
+    // Sparkline mode: no axes, no grid; the strip label carries the meaning.
+    axes: [{ show: false }, { show: false }],
     series: [
       {},
       {
         stroke: color,
         width: 1.5,
-        fill: withAlpha(color, 0.06),
+        points: { show: false },
+        fill: withAlpha(color, 0.12),
       },
     ],
   }
@@ -1503,12 +1433,11 @@ function resizeCharts() {
     { chart: bitrateChart, el: bitrateChartEl.value },
     { chart: encodeChart, el: encodeChartEl.value },
     { chart: latencyChart, el: latencyChartEl.value },
-    { chart: gpuChart, el: gpuChartEl.value },
     { chart: lossChart, el: lossChartEl.value },
   ]
   for (const { chart, el } of charts) {
     if (chart && el) {
-      chart.setSize({ width: el.clientWidth, height: 96 })
+      chart.setSize({ width: el.clientWidth, height: 32 })
     }
   }
 }
@@ -1527,9 +1456,6 @@ async function setupCharts() {
   if (latencyChartEl.value && !latencyChart) {
     latencyChart = initChart(latencyChartEl.value, makeChartOpts('Latency', 'ms', 'warning'))
   }
-  if (gpuChartEl.value && !gpuChart) {
-    gpuChart = initChart(gpuChartEl.value, makeChartOpts('GPU', '%', 'accent'))
-  }
   if (lossChartEl.value && !lossChart) {
     lossChart = initChart(lossChartEl.value, makeChartOpts('Loss', '%', 'danger'))
   }
@@ -1543,7 +1469,6 @@ function destroyChartInstances() {
   if (bitrateChart) { bitrateChart.destroy(); bitrateChart = null }
   if (encodeChart) { encodeChart.destroy(); encodeChart = null }
   if (latencyChart) { latencyChart.destroy(); latencyChart = null }
-  if (gpuChart) { gpuChart.destroy(); gpuChart = null }
   if (lossChart) { lossChart.destroy(); lossChart = null }
 }
 
@@ -1554,13 +1479,12 @@ function destroyCharts() {
   bitrateHistory.value = []
   encodeHistory.value = []
   latencyHistory.value = []
-  gpuHistory.value = []
   lossHistory.value = []
 }
 
 // Rebuild live charts with the new theme's colors, keeping their history.
 async function refreshChartTheme() {
-  const hadCharts = Boolean(fpsChart || bitrateChart || encodeChart || latencyChart || gpuChart || lossChart)
+  const hadCharts = Boolean(fpsChart || bitrateChart || encodeChart || latencyChart || lossChart)
   if (!hadCharts) return
   destroyChartInstances()
   await setupCharts()
@@ -1569,7 +1493,6 @@ async function refreshChartTheme() {
   updateChartData(bitrateChart, ts, [...bitrateHistory.value])
   updateChartData(encodeChart, ts, [...encodeHistory.value])
   updateChartData(latencyChart, ts, [...latencyHistory.value])
-  updateChartData(gpuChart, ts, [...gpuHistory.value])
   updateChartData(lossChart, ts, [...lossHistory.value])
 }
 
@@ -1603,7 +1526,6 @@ watch(stats, (newStats, oldStats) => {
   bitrateHistory.value.push(newStats.bitrate_kbps / 1000)
   encodeHistory.value.push(newStats.encode_time_ms)
   latencyHistory.value.push(newStats.latency_ms)
-  gpuHistory.value.push(gpu.value?.utilization_pct || 0)
   lossHistory.value.push(newStats.packet_loss || 0)
 
   // Keep rolling window
@@ -1613,12 +1535,11 @@ watch(stats, (newStats, oldStats) => {
     bitrateHistory.value.shift()
     encodeHistory.value.shift()
     latencyHistory.value.shift()
-    gpuHistory.value.shift()
     lossHistory.value.shift()
   }
 
   // Initialize charts if needed
-  if (!fpsChart || !bitrateChart || !encodeChart || !latencyChart || !gpuChart || !lossChart) {
+  if (!fpsChart || !bitrateChart || !encodeChart || !latencyChart || !lossChart) {
     setupCharts()
   }
 
@@ -1629,7 +1550,6 @@ watch(stats, (newStats, oldStats) => {
     updateChartData(bitrateChart, ts, [...bitrateHistory.value])
     updateChartData(encodeChart, ts, [...encodeHistory.value])
     updateChartData(latencyChart, ts, [...latencyHistory.value])
-    updateChartData(gpuChart, ts, [...gpuHistory.value])
     updateChartData(lossChart, ts, [...lossHistory.value])
   })
 })
