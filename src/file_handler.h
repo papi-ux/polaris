@@ -5,12 +5,29 @@
 #pragma once
 
 // standard includes
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <string_view>
 
 /**
  * @brief Responsible for file handling functions.
  */
 namespace file_handler {
+  /**
+   * @brief A bounded byte range read from the end of a file.
+   *
+   * Offsets describe the half-open byte range `[start_offset, end_offset)` in
+   * the file snapshot used for the read. `truncated` is true when bytes before
+   * `start_offset` were omitted.
+   */
+  struct tail_result_t {
+    std::string content;
+    std::uintmax_t start_offset {0};
+    std::uintmax_t end_offset {0};
+    bool truncated {false};
+  };
+
   /**
    * @brief Get the parent directory of a file or directory.
    * @param path The path of the file or directory.
@@ -40,6 +57,16 @@ namespace file_handler {
    * @examples_end
    */
   std::string read_file(const char *path);
+
+  /**
+   * @brief Read at most `max_bytes` from the end of a file.
+   * @param path The path of the file.
+   * @param max_bytes The maximum number of bytes to return. Must be non-zero.
+   * @return The binary-safe tail content and its byte offsets. Missing or
+   * unreadable files return an empty result.
+   * @throws std::invalid_argument when `max_bytes` is zero.
+   */
+  tail_result_t read_file_tail(const char *path, std::size_t max_bytes);
 
   /**
    * @brief Writes a file.
