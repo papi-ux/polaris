@@ -80,7 +80,7 @@
           <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
             <div class="min-w-0">
               <div class="text-sm font-semibold text-silver">{{ change.label }}</div>
-              <div class="mt-1 text-[11px] uppercase tracking-[0.24em] text-storm">{{ change.section }} · {{ change.impact }}</div>
+              <div class="mt-1 text-[11px] uppercase tracking-eyebrow text-storm">{{ change.section }} · {{ change.impact }}</div>
             </div>
             <div class="flex flex-wrap gap-2">
               <button class="focus-ring settings-action-button settings-action-button-secondary" :data-pending-change-jump="change.key" @click="jumpToChangedSetting(change.key)">

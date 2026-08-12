@@ -727,7 +727,7 @@ onBeforeUnmount(() => {
           :class="config.ai_provider === provider.id ? provider.accent : 'border-storm/40 bg-deep hover:border-ice/40 hover:bg-twilight/30'">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <div class="text-[10px] uppercase tracking-[0.22em]" :class="config.ai_provider === provider.id ? 'text-current/80' : 'text-storm'">{{ provider.eyebrow }}</div>
+              <div class="text-[10px] uppercase tracking-eyebrow" :class="config.ai_provider === provider.id ? 'text-current/80' : 'text-storm'">{{ provider.eyebrow }}</div>
               <div class="text-base font-semibold mt-1" :class="config.ai_provider === provider.id ? 'text-current' : 'text-silver'">{{ provider.name }}</div>
             </div>
             <span
@@ -791,7 +791,7 @@ onBeforeUnmount(() => {
 
           <div class="space-y-3">
             <div class="flex items-center justify-between gap-4">
-              <div class="text-xs font-semibold uppercase tracking-[0.2em] text-storm">Profiles</div>
+              <div class="text-xs font-semibold uppercase tracking-eyebrow text-storm">Profiles</div>
               <div class="text-[11px] text-storm">Model + endpoint + auth</div>
             </div>
             <div class="grid gap-2 sm:grid-cols-2">
@@ -811,7 +811,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="space-y-3">
-            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-storm">Authentication</div>
+            <div class="text-xs font-semibold uppercase tracking-eyebrow text-storm">Authentication</div>
             <div class="grid gap-2 sm:grid-cols-2">
               <button
                 v-for="mode in availableAuthModes"
@@ -862,7 +862,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="mt-2 flex items-start justify-between gap-3 text-xs">
                 <div :class="modelDiscoverySummary.tone">{{ modelDiscoverySummary.text }}</div>
-                <span class="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]" :class="providerModelCatalog?.discovered ? 'border-success/20 bg-success/8 text-success-bright' : 'border-storm/40 bg-void/30 text-storm'">
+                <span class="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow" :class="providerModelCatalog?.discovered ? 'border-success/20 bg-success/8 text-success-bright' : 'border-storm/40 bg-void/30 text-storm'">
                   {{ modelDiscoverySummary.badge }}
                 </span>
               </div>
@@ -881,7 +881,7 @@ onBeforeUnmount(() => {
 
           <div v-if="config.ai_auth_mode === 'subscription'" class="rounded-xl border border-warning/20 bg-warning/6 p-4 space-y-3">
             <div>
-              <div class="text-xs uppercase tracking-[0.2em] text-storm">{{ currentSubscriptionLabel }}</div>
+              <div class="text-xs uppercase tracking-eyebrow text-storm">{{ currentSubscriptionLabel }}</div>
               <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-warning-bright">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
               <div class="text-xs text-storm mt-2">The Web UI can test the draft config below, but live sessions still switch over only after save and apply.</div>
               <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
@@ -1016,7 +1016,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="testResult" class="rounded-xl border px-4 py-3" :class="testResult.success ? 'border-success/20 bg-success/8' : 'border-danger/20 bg-danger/8'">
-            <div class="text-[10px] uppercase tracking-[0.2em]" :class="testResult.success ? 'text-success' : 'text-danger'">{{ testResult.label }}</div>
+            <div class="text-[10px] uppercase tracking-eyebrow" :class="testResult.success ? 'text-success' : 'text-danger'">{{ testResult.label }}</div>
             <div class="text-sm font-medium" :class="testResult.success ? 'text-success' : 'text-danger'">{{ testResult.message }}</div>
             <div v-if="testResult.detail" class="text-xs text-silver/70 mt-2">{{ testResult.detail }}</div>
             <div v-if="testResult.action" class="mt-3 rounded-lg border px-3 py-2 text-xs" :class="testResult.success ? 'border-success/20 bg-void/30 text-success-bright' : 'border-danger/20 bg-void/30 text-danger-bright'">

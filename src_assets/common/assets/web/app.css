@@ -13,14 +13,14 @@
 :root {
   --surface-card-base: #343150; /* Nova polaris card */
   --surface-glass: color-mix(in srgb, var(--surface-card-base) 55%, transparent);
-  --surface-card: color-mix(in srgb, var(--surface-card-base) 78%, transparent);
+  --surface-card: color-mix(in srgb, var(--surface-card-base) 86%, transparent);
   --surface-raised: color-mix(in srgb, var(--surface-card-base) 44%, transparent);
   --surface-raised-hover: color-mix(in srgb, var(--surface-card-base) 62%, transparent);
   --surface-pill: color-mix(in srgb, var(--surface-card-base) 64%, transparent);
   --surface-chip: color-mix(in srgb, var(--color-void) 50%, transparent);
   --surface-shimmer: var(--color-twilight);
-  --edge-glass: color-mix(in srgb, var(--color-ice) 8%, transparent);
-  --edge-card: color-mix(in srgb, var(--color-ice) 6%, transparent);
+  --edge-glass: color-mix(in srgb, var(--color-ice) 10%, transparent);
+  --edge-card: color-mix(in srgb, var(--color-ice) 11%, transparent);
   --edge-raised: color-mix(in srgb, var(--color-storm) 20%, transparent);
   --edge-raised-hover: color-mix(in srgb, var(--color-silver) 35%, transparent);
   --edge-pill: color-mix(in srgb, var(--color-storm) 30%, transparent);
@@ -69,6 +69,8 @@
 
   /* ── Typography ── */
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+  --tracking-eyebrow: 0.14em;
 
   /* ── Shadows (glow color follows the theme's ice) ── */
   --shadow-glow: 0 0 20px color-mix(in srgb, var(--color-ice) 8%, transparent);
@@ -230,6 +232,15 @@ textarea {
   background: linear-gradient(90deg, var(--color-success), color-mix(in srgb, var(--color-success) 78%, black));
   opacity: 0.8;
 }
+/* Accent hairline for hero surfaces: picks up each theme's accent pair
+   (Miami runs pink into water cyan, others stay monochrome accent). */
+.gradient-border-top-accent::before {
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--color-accent) 30%, var(--color-accent-2) 70%, transparent);
+  opacity: 0.9;
+}
 
 /* ── Hidden Scrollbar ── */
 .scrollbar-hidden {
@@ -270,7 +281,7 @@ textarea {
 
 /* ── Shared Layout Vocabulary ── */
 .page-shell {
-  @apply my-6 space-y-5;
+  @apply my-5 space-y-4;
 }
 
 .page-header {
@@ -282,7 +293,7 @@ textarea {
 }
 
 .page-title {
-  @apply text-[clamp(1.65rem,2vw,2.15rem)] font-bold text-silver text-balance;
+  @apply text-[clamp(1.65rem,2vw,2.15rem)] font-bold tracking-tight text-ice text-balance;
 }
 
 .page-subtitle {
@@ -337,7 +348,7 @@ textarea {
 }
 
 .stat-kicker {
-  @apply text-[10px] font-semibold uppercase tracking-[0.2em] text-storm;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .stat-value {
@@ -359,7 +370,78 @@ textarea {
 }
 
 .section-kicker {
-  @apply text-[10px] font-semibold uppercase tracking-[0.24em] text-storm/80;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm/80;
+}
+
+/* Hero surfaces lead with the theme accent and carry a soft glow. */
+[data-dashboard-idle-hero] .section-kicker,
+.dashboard-live-shell .section-kicker {
+  color: var(--color-accent);
+}
+
+[data-dashboard-idle-hero],
+.dashboard-live-shell {
+  box-shadow: var(--shadow-glow-lg);
+}
+
+/* Doctor verdict card: the traffic light paints the left stripe. */
+.dashboard-doctor-card {
+  @apply rounded-xl border p-4;
+  border-color: var(--edge-card);
+  border-left-width: 3px;
+}
+
+/* Strip grade badge and stage LIVE badge. */
+.dashboard-grade-badge {
+  @apply inline-flex h-9 min-w-9 items-center justify-center rounded-lg border-2 border-current px-2 font-mono text-xl font-bold leading-none;
+}
+
+.dashboard-preview-live-badge {
+  @apply absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-mono text-[10px] font-semibold tracking-eyebrow;
+  background: rgba(0, 0, 0, 0.55);
+  color: #e6ebf2;
+}
+
+/* Preview HUD: stream facts overlaid on the stage. */
+.dashboard-preview-hud {
+  @apply absolute inset-x-3 bottom-3 flex flex-wrap items-center justify-between gap-2;
+}
+
+.dashboard-preview-hud .data-pill {
+  background: rgba(0, 0, 0, 0.55);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #e6ebf2;
+}
+
+.dashboard-preview-hud-status {
+  @apply rounded-full px-2.5 py-1 font-mono text-[10px];
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(230, 235, 242, 0.85);
+}
+
+/* Sparkline slot inside each instrument-strip tile. */
+.dashboard-strip-spark {
+  @apply h-8 w-36;
+}
+
+/* Inert Doctor advice: unmistakably not a button. */
+.dashboard-doctor-advice {
+  @apply font-mono text-[11px] text-storm underline decoration-dashed decoration-storm/50 underline-offset-4;
+}
+
+/* Play rail: compact launchable game tiles. */
+.dashboard-play-tile {
+  @apply flex min-w-0 flex-col rounded-xl border p-2.5;
+  background: var(--surface-raised);
+  border-color: var(--edge-raised);
+}
+
+.dashboard-play-cover {
+  @apply h-24 w-full overflow-hidden rounded-lg bg-void/60;
+}
+
+.dashboard-play-launch {
+  @apply mt-2 inline-flex h-7 w-full items-center justify-center rounded-lg border border-accent/40 font-mono text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .section-title {
@@ -397,15 +479,15 @@ textarea {
 }
 
 .eyebrow-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .data-pill {
-  @apply rounded-full border border-storm/20 bg-void/40 px-2.5 py-1 text-[11px] text-silver;
+  @apply rounded-full border border-storm/20 bg-void/40 px-2.5 py-1 font-mono text-[11px] text-silver;
 }
 
 .control-chip {
-  @apply rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-storm;
+  @apply rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-eyebrow text-storm;
   background: var(--surface-chip);
   border-color: var(--edge-chip);
 }
@@ -602,12 +684,7 @@ textarea {
 
 .operator-console .dashboard-preview-panel,
 .operator-console .dashboard-preview-frame,
-.operator-console .dashboard-preview-empty,
-.operator-console .dashboard-metric-tile,
-.operator-console .dashboard-list-row,
 .operator-console .dashboard-client-row,
-.operator-console .dashboard-empty-state,
-.operator-console .dashboard-telemetry-card,
 .operator-console .settings-subtle-surface {
   border-radius: 0.5rem;
 }
@@ -622,10 +699,6 @@ textarea {
 
 .operator-console .ready-check-summary-attention {
   @apply border-warning/25 bg-warning/8;
-}
-
-.operator-console .dashboard-telemetry-concern {
-  @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-3;
 }
 
 .operator-console .dashboard-degraded-state {
@@ -1002,7 +1075,7 @@ textarea {
 }
 
 .settings-nav-group-title {
-  @apply text-[10px] font-semibold uppercase tracking-[0.22em] text-storm/85;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm/85;
 }
 
 .settings-nav-list {
@@ -1146,27 +1219,20 @@ textarea {
 }
 
 .dashboard-live-summary-grid {
-  @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5;
+  /* Instrument strip: bare figures over mono labels, no tile boxes. */
+  @apply flex flex-wrap items-start gap-x-10 gap-y-4;
 }
 
 .dashboard-live-summary-tile {
-  @apply rounded-2xl border border-storm/20 bg-void/35 px-4 py-3;
-}
-
-.dashboard-live-summary-tile-primary {
-  @apply border-ice/25 bg-ice/10;
+  @apply flex min-w-[5.5rem] flex-col-reverse gap-1 border-0 bg-transparent p-0;
 }
 
 .dashboard-live-summary-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-live-summary-value {
-  @apply mt-2 truncate text-xl font-semibold leading-tight;
-}
-
-.dashboard-live-summary-copy {
-  @apply mt-1 truncate text-[11px] text-storm;
+  @apply truncate font-mono text-[1.65rem] font-bold leading-none tracking-tight tabular-nums;
 }
 
 .dashboard-live-stage {
@@ -1207,11 +1273,11 @@ textarea {
 }
 
 .dashboard-action-button-secondary {
-  @apply border border-storm/30 bg-transparent text-silver hover:border-ice/35 hover:text-ice;
+  @apply border border-accent/45 bg-accent/10 text-accent hover:border-accent/70 hover:bg-accent/20;
 }
 
 .dashboard-action-button-ghost {
-  @apply border border-storm/20 bg-deep/40 text-storm hover:border-storm/40 hover:text-silver;
+  @apply border border-storm/40 bg-deep/40 text-silver hover:border-accent/50 hover:text-accent;
 }
 
 .dashboard-action-button-danger {
@@ -1246,29 +1312,9 @@ textarea {
   @apply flex flex-wrap gap-2;
 }
 
-.dashboard-preview-empty {
-  @apply mt-4 flex min-h-[280px] flex-col justify-between gap-4 rounded-2xl border border-dashed border-storm/25 bg-void/35 p-5;
-}
-
 .dashboard-live-side {
   @apply space-y-4;
   align-self: start;
-}
-
-.dashboard-metric-grid {
-  @apply mt-3 grid gap-2 sm:grid-cols-2;
-}
-
-.dashboard-metric-tile {
-  @apply rounded-2xl border border-storm/15 bg-void/35 px-3.5 py-3;
-}
-
-.dashboard-metric-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
-}
-
-.dashboard-metric-value {
-  @apply mt-2 text-lg font-semibold text-silver;
 }
 
 .dashboard-runtime-grid {
@@ -1280,7 +1326,7 @@ textarea {
 }
 
 .dashboard-runtime-label {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-runtime-pill-grid {
@@ -1291,57 +1337,12 @@ textarea {
   @apply inline-flex items-center gap-2 rounded-full border border-storm/15 bg-void/35 px-3 py-1.5;
 }
 
-.dashboard-list-row {
-  @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2.5;
-}
-
 .dashboard-client-row {
   @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2;
 }
 
-.dashboard-empty-state {
-  @apply mt-4 rounded-2xl border border-dashed border-storm/25 bg-void/35 px-4 py-5 text-sm leading-relaxed text-storm;
-}
-
 .dashboard-live-support-grid {
   @apply grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)];
-}
-
-.dashboard-secondary-group {
-  @apply rounded-2xl border border-storm/20 bg-deep/20;
-}
-
-.dashboard-secondary-group[open] {
-  @apply bg-deep/30;
-}
-
-.dashboard-secondary-group-summary {
-  @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-storm transition-colors duration-200 hover:text-silver;
-}
-
-.dashboard-secondary-group-summary::-webkit-details-marker {
-  display: none;
-}
-
-.dashboard-secondary-group-summary span:last-child {
-  @apply rounded-full border border-storm/20 bg-void/40 px-2 py-1 text-[10px] normal-case tracking-normal text-silver;
-}
-
-.dashboard-secondary-group > .surface-subtle,
-.dashboard-secondary-group > .dashboard-telemetry-card {
-  @apply rounded-t-none border-x-0 border-b-0;
-}
-
-.dashboard-support-card {
-  @apply space-y-4;
-}
-
-.dashboard-support-subsection {
-  @apply mt-4 space-y-2 border-t border-storm/15 pt-4;
-}
-
-.dashboard-support-subtitle {
-  @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
 }
 
 .dashboard-context-card {
@@ -1353,15 +1354,11 @@ textarea {
 }
 
 .dashboard-context-header {
-  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-storm;
+  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-rail-footnote {
   @apply mt-3 text-[11px] text-storm;
-}
-
-.dashboard-telemetry-card {
-  @apply rounded-2xl border border-storm/20 bg-deep/30 p-4;
 }
 
 .dashboard-telemetry-grid {
@@ -1435,8 +1432,6 @@ textarea {
 
   .dashboard-live-shell,
   .dashboard-preview-panel,
-  .dashboard-telemetry-card,
-  .dashboard-secondary-group,
   .dashboard-live-summary-tile {
     box-shadow: none;
   }

@@ -16,6 +16,9 @@ const MAX_SESSIONS = 50
  */
 export function useSessionHistory(stats) {
   const sessions = ref(loadSessions())
+  // Epoch ms of the in-flight session's start; 0 when idle. Lets views show
+  // a live duration without duplicating the start/end tracking below.
+  const activeStartedAt = ref(0)
 
   let currentSession = null
   let samples = null
@@ -34,7 +37,8 @@ export function useSessionHistory(stats) {
     } catch {}
   }
 
-  function startSession(s) {
+  function startSession(s, witnessedStart = true) {
+    activeStartedAt.value = witnessedStart ? Date.now() : 0
     currentSession = {
       started_at: Date.now(),
       client_name: s.client_name || 'Unknown',
@@ -106,6 +110,7 @@ export function useSessionHistory(stats) {
 
     currentSession = null
     samples = null
+    activeStartedAt.value = 0
   }
 
   function clearHistory() {
@@ -118,7 +123,9 @@ export function useSessionHistory(stats) {
     if (!newStats) return
 
     if (newStats.streaming && (!oldStats || !oldStats.streaming)) {
-      startSession(newStats)
+      // A first tick that is already mid-stream has an unknown start time;
+      // only a witnessed idle-to-streaming transition gets a live duration.
+      startSession(newStats, Boolean(oldStats && !oldStats.streaming))
     }
 
     if (newStats.streaming && currentSession) {
@@ -130,7 +137,7 @@ export function useSessionHistory(stats) {
     }
   })
 
-  return { sessions, clearHistory }
+  return { sessions, clearHistory, activeStartedAt }
 }
 
 /**

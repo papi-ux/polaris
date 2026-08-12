@@ -1,7 +1,7 @@
 <template>
   <div class="relative overflow-hidden rounded-xl border border-storm/20 bg-deep/80" :style="{ height: containerHeight + 'px' }">
     <div class="absolute inset-x-0 top-0 z-10 flex flex-wrap items-center justify-between gap-2 border-b border-storm/15 bg-void/75 px-3 py-2 backdrop-blur-sm">
-      <div class="flex min-w-0 flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-storm">
+      <div class="flex min-w-0 flex-wrap items-center gap-2 text-[11px] uppercase tracking-eyebrow text-storm">
         <span class="truncate">{{ lineCountLabel }}</span>
         <span v-if="severityCounts.fatal" class="rounded-full border border-danger/20 bg-danger/10 px-2 py-0.5 text-danger-bright">Fatal {{ severityCounts.fatal }}</span>
         <span v-if="severityCounts.warning" class="rounded-full border border-warning/20 bg-warning/10 px-2 py-0.5 text-warning-bright">Warn {{ severityCounts.warning }}</span>

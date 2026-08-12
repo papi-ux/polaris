@@ -23,7 +23,7 @@ describe('web performance runtime smoothness guardrails', () => {
 
     expect(dashboard).toContain("await import('uplot')")
     expect(dashboard).toContain("await import('uplot/dist/uPlot.min.css')")
-    expect(dashboard).toContain('v-if="!prefersReducedMotion" class="dashboard-telemetry-grid')
+    expect(dashboard).toContain('v-if="!prefersReducedMotion" class="dashboard-strip-spark')
     expect(dashboard).toContain('Live charts are paused while reduced motion is enabled')
     expect(dashboard).toContain("window.matchMedia('(prefers-reduced-motion: reduce)')")
     expect(dashboard).toContain('!showPreview.value && !prefersReducedMotion.value')
