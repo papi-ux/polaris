@@ -71,6 +71,19 @@ TEST(AdaptiveBitrateController, ClampsBaseToConfiguredBounds) {
   EXPECT_EQ(50000, state.target_bitrate_kbps);
 }
 
+TEST(AdaptiveBitrateController, ExplicitLiveRetryCanRaiseSessionCeilingAndTarget) {
+  enable_controller(7580);
+  adaptive_bitrate::set_max_bitrate(7580);
+  adaptive_bitrate::set_max_bitrate(20000);
+  adaptive_bitrate::set_live_bitrate(9475);
+
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.max_bitrate_kbps, 20000);
+  EXPECT_EQ(state.base_bitrate_kbps, 9475);
+  EXPECT_EQ(state.target_bitrate_kbps, 9475);
+  EXPECT_EQ(state.reason, "doctor_action");
+}
+
 TEST(AdaptiveBitrateController, NormalizesMaxBelowMinBeforeClampingBase) {
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;

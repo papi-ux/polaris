@@ -77,6 +77,7 @@
 #include "adaptive_bitrate.h"
 #include "ai_optimizer.h"
 #include "device_db.h"
+#include "doctor_actions.h"
 #include "confighttp.h"
 #include "stream_stats.h"
 #include "video.h"
@@ -355,6 +356,17 @@ namespace nvhttp {
       return value;
     }
 
+    // Guarantee every launch/resume XML response carries a coherent status,
+    // including non-Linux builds and exception exits from a partially filled
+    // response tree.
+    void ensure_response_status_code(pt::ptree &tree, int fallback_code, const std::string &fallback_message) {
+      if (tree.get_optional<int>("root.<xmlattr>.status_code")) {
+        return;
+      }
+      tree.put("root.<xmlattr>.status_code", fallback_code);
+      tree.put("root.<xmlattr>.status_message", fallback_message);
+    }
+
 #if defined(__linux__)
     bool truthy_query_value(std::string value) {
       value = lower_copy(std::move(value));
@@ -463,26 +475,6 @@ namespace nvhttp {
       );
     }
 #endif
-
-    // Guarantee an XML response ptree carries a status_code before it is written
-    // back to the client. The launch/resume handlers arm a fail_guard that
-    // writes `tree` on *every* exit and set the status_code explicitly on each
-    // known path — but a throw after the tree is partially filled (e.g. the
-    // launchPolicy is already in it) and before a status_code is set would
-    // otherwise ship a <root> with no status_code attribute at all. Older Nova
-    // clients dereferenced that missing attribute and crashed (companion to
-    // nova #225, which now tolerates it); the host must never emit it in the
-    // first place. Explicit status_code puts win because they run before the
-    // guard fires.
-    void ensure_response_status_code(pt::ptree &tree, int fallback_code, const std::string &fallback_message) {
-      if (tree.get_optional<int>("root.<xmlattr>.status_code")) {
-        return;
-      }
-      // No status_code means the handler exited before deciding one (a throw);
-      // a status_message without a code is malformed, so set a coherent pair.
-      tree.put("root.<xmlattr>.status_code", fallback_code);
-      tree.put("root.<xmlattr>.status_message", fallback_message);
-    }
 
     proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy(
       const args_t &args,
@@ -2152,6 +2144,7 @@ namespace nvhttp {
         {"optimizer_sync_reporting", true},
         {"disconnect_resume_timeout_control", true},
         {"diagnostics_doctor_v1", true},
+        {"doctor_actions_v1", true},
         {"doctor_ai_explanation_v1", false}
       };
       settings["sync_status"] = build_client_settings_sync_status(
@@ -6425,6 +6418,7 @@ namespace nvhttp {
       features["optimizer_profiles_v1"] = true;
       features["disconnect_resume_v1"] = true;
       features["diagnostics_doctor_v1"] = true;
+      features["doctor_actions_v1"] = true;
       features["doctor_ai_explanation_v1"] = false;
       features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
@@ -7946,6 +7940,40 @@ namespace nvhttp {
       }
     };
 
+    // Execute the same evidence-gated Doctor action contract as the web UI.
+    auto polarisDoctorAction = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+      if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
+        nlohmann::json err;
+        err["error"] = "Only the active session owner can run Doctor actions";
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(SimpleWeb::StatusCode::client_error_forbidden, err.dump(), headers);
+        return;
+      }
+
+      try {
+        std::string body_str(std::istreambuf_iterator<char>(request->content), {});
+        const auto body = body_str.empty() ? nlohmann::json::object() : nlohmann::json::parse(body_str);
+        const auto output = doctor_actions::execute(body);
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+      } catch (const std::exception &e) {
+        nlohmann::json err;
+        err["status"] = false;
+        err["error"] = e.what();
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+      }
+    };
+
     // Real-time bitrate adjustment from client
     auto polarisSetBitrate = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
@@ -8765,6 +8793,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/client-settings$"]["POST"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/stream-policy$"]["GET"] = polarisStreamPolicy;
     https_server.resource["^/polaris/v1/stream-policy$"]["POST"] = polarisStreamPolicy;
+    https_server.resource["^/polaris/v1/doctor/action$"]["POST"] = polarisDoctorAction;
     https_server.resource["^/polaris/v1/session/bitrate$"]["POST"] = polarisSetBitrate;
     https_server.resource["^/polaris/v1/session/adaptive-bitrate$"]["POST"] = polarisSetAdaptiveBitrate;
     https_server.resource["^/polaris/v1/session/ai-optimizer$"]["POST"] = polarisSetAiOptimizer;

@@ -70,6 +70,23 @@ namespace adaptive_bitrate {
   void set_base_bitrate(int kbps);
 
   /**
+   * @brief Set both the live target and its base immediately.
+   *
+   * Unlike set_base_bitrate(), this is an explicit operator action and does
+   * not preserve a previously reduced target. The value is still clamped to
+   * the configured adaptive bitrate bounds.
+   */
+  void set_live_bitrate(int kbps);
+
+  /**
+   * @brief Change the in-memory adaptive bitrate ceiling for this session.
+   *
+   * Doctor uses this to retry a paired quality target that was capped by a
+   * stale recovery profile. Session teardown restores the pre-launch config.
+   */
+  void set_max_bitrate(int kbps);
+
+  /**
    * @brief Enable or disable adaptive bitrate control.
    * @param enabled True to enable, false to disable.
    */

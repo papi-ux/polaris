@@ -272,6 +272,31 @@ namespace adaptive_bitrate {
     }
   }
 
+  void set_live_bitrate(int kbps) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    const int clamped = std::clamp(kbps, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
+    base_bitrate_kbps.store(clamped, std::memory_order_relaxed);
+    target_bitrate_kbps.store(clamped, std::memory_order_relaxed);
+    set_controller_status("steady", "doctor_action");
+  }
+
+  void set_max_bitrate(int kbps) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    current_config.max_bitrate_kbps = std::max(kbps, current_config.min_bitrate_kbps);
+    config::video.adaptive_bitrate.max_bitrate_kbps = current_config.max_bitrate_kbps;
+
+    const int base = std::min(
+      base_bitrate_kbps.load(std::memory_order_relaxed),
+      current_config.max_bitrate_kbps
+    );
+    const int target = std::min(
+      target_bitrate_kbps.load(std::memory_order_relaxed),
+      current_config.max_bitrate_kbps
+    );
+    base_bitrate_kbps.store(base, std::memory_order_relaxed);
+    target_bitrate_kbps.store(std::min(target, base), std::memory_order_relaxed);
+  }
+
   void set_enabled(bool enable) {
     config::video.adaptive_bitrate.enabled = enable;
     enabled.store(enable, std::memory_order_relaxed);
