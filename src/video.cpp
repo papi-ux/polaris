@@ -223,8 +223,11 @@ namespace video {
       }
 
       av_dict_set_int(options, "split_encode_mode", *decision.ffmpeg_value, 0);
+      // 15 is FFmpeg speak for "explicitly off"; without the annotation the line
+      // reads as split encoding being applied and triggers false config alarms.
       BOOST_LOG(info)
         << "NVENC split-frame encoding: applying split_encode_mode=" << *decision.ffmpeg_value
+        << (config::video.nv.split_encode_mode == nvenc::nvenc_split_encode_mode::disabled ? " (disabled)" : "")
         << " for [" << video_format.name << "]";
     }
 
