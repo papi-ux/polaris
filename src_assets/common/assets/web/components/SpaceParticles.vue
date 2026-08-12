@@ -4,12 +4,13 @@
 
 <script setup>
 import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { getTheme, onThemeChange } from '../theme.js'
+import { readThemeTokens } from '../theme-bridge.js'
 
 const props = defineProps({
   dense: { type: Boolean, default: false },
   absolute: { type: Boolean, default: false },
   mode: { type: String, default: '' },
-  theme: { type: String, default: 'polaris' },
 })
 
 const canvas = ref(null)
@@ -96,37 +97,40 @@ function getModeConfig(mode) {
   }
 }
 
-function getThemePalette(theme) {
-  if (theme === 'oled') {
-    return {
-      starRgb: [245, 249, 255],
-      glowRgb: [120, 188, 255],
-      nebulae: [
-        [40, 90, 196],
-        [62, 124, 255],
-        [23, 63, 150],
-        [158, 219, 255],
-      ],
-      nebulaOpacity: [0.016, 0.036],
-      nebulaRadius: [150, 360],
-      galaxyRadius: [78, 180],
-      galaxyGlow: [0.05, 0.1],
-      galaxyCore: [0.09, 0.18],
-      galaxyRing: [0.14, 0.26],
-      starBloom: 0.16,
-      shootingRgb: [242, 248, 255],
-      headRgb: [255, 255, 255],
-    }
-  }
+// Per-theme particle strength, mirroring Nova's librarySurfaces particle
+// table: OLED disables the field entirely for true black.
+const THEME_PARTICLE_ALPHA = {
+  polaris: 1,
+  'portable-chrome': 0.44,
+  oled: 0,
+  miami: 0.68,
+  'high-contrast': 0.28,
+}
 
-  return {
-    starRgb: [208, 220, 238],
-    glowRgb: [124, 115, 255],
-    nebulae: [
-      [124, 115, 255],
-      [98, 132, 190],
-      [88, 116, 146],
-    ],
+function getThemeParticleAlpha(theme) {
+  return THEME_PARTICLE_ALPHA[theme] ?? 1
+}
+
+function hexTriplet(hex, fallback) {
+  const clean = String(hex || '').replace('#', '')
+  if (!/^[0-9a-f]{6}$/i.test(clean)) return fallback
+  return [
+    parseInt(clean.slice(0, 2), 16),
+    parseInt(clean.slice(2, 4), 16),
+    parseInt(clean.slice(4, 6), 16),
+  ]
+}
+
+function brighten(rgb, factor) {
+  return rgb.map((channel) => Math.round(channel + (255 - channel) * factor))
+}
+
+// Star, glow, and streak colors come from the active theme's tokens so the
+// canvas cannot drift from the palette; only the non-token art direction
+// (nebula hue mixes, radii, intensities) is declared per theme.
+const THEME_ART = {
+  polaris: {
+    nebulae: (glow) => [glow, [98, 132, 190], [88, 116, 146]],
     nebulaOpacity: [0.012, 0.028],
     nebulaRadius: [120, 300],
     galaxyRadius: [66, 150],
@@ -134,8 +138,60 @@ function getThemePalette(theme) {
     galaxyCore: [0.07, 0.14],
     galaxyRing: [0.11, 0.2],
     starBloom: 0.12,
-    shootingRgb: [226, 234, 248],
-    headRgb: [240, 244, 255],
+  },
+  miami: {
+    nebulae: (glow, accent2) => [glow, accent2, [190, 84, 150], [108, 60, 111]],
+    nebulaOpacity: [0.014, 0.032],
+    nebulaRadius: [130, 320],
+    galaxyRadius: [70, 160],
+    galaxyGlow: [0.05, 0.09],
+    galaxyCore: [0.08, 0.16],
+    galaxyRing: [0.12, 0.22],
+    starBloom: 0.14,
+  },
+  'portable-chrome': {
+    // The four PlayStation face-button hues (--portable-* tokens), Nova's
+    // ambient accents for this theme.
+    nebulae: () => [[90, 147, 214], [181, 131, 181], [212, 131, 138], [111, 191, 138]],
+    nebulaOpacity: [0.01, 0.024],
+    nebulaRadius: [120, 280],
+    galaxyRadius: [60, 130],
+    galaxyGlow: [0.03, 0.06],
+    galaxyCore: [0.05, 0.1],
+    galaxyRing: [0.08, 0.15],
+    starBloom: 0.1,
+  },
+  'high-contrast': {
+    nebulae: (glow) => [glow, brighten(glow, 0.4)],
+    nebulaOpacity: [0.008, 0.018],
+    nebulaRadius: [120, 260],
+    galaxyRadius: [56, 120],
+    galaxyGlow: [0.02, 0.05],
+    galaxyCore: [0.04, 0.08],
+    galaxyRing: [0.06, 0.12],
+    starBloom: 0.08,
+  },
+}
+
+function getThemePalette(theme) {
+  const tokens = readThemeTokens(['ice', 'accent', 'accent-2'])
+  const star = hexTriplet(tokens.ice, [200, 214, 229])
+  const glow = hexTriplet(tokens.accent, [124, 115, 255])
+  const accent2 = hexTriplet(tokens['accent-2'], glow)
+  const art = THEME_ART[theme] || THEME_ART.polaris
+  return {
+    starRgb: star,
+    glowRgb: glow,
+    shootingRgb: brighten(star, 0.45),
+    headRgb: brighten(star, 0.75),
+    nebulae: art.nebulae(glow, accent2),
+    nebulaOpacity: art.nebulaOpacity,
+    nebulaRadius: art.nebulaRadius,
+    galaxyRadius: art.galaxyRadius,
+    galaxyGlow: art.galaxyGlow,
+    galaxyCore: art.galaxyCore,
+    galaxyRing: art.galaxyRing,
+    starBloom: art.starBloom,
   }
 }
 
@@ -210,9 +266,14 @@ function rebuild() {
 
 function syncVisualMode() {
   currentMode = resolveMode()
-  currentTheme = props.theme || 'polaris'
+  currentTheme = getTheme()
   currentConfig = getModeConfig(currentMode)
   currentPalette = getThemePalette(currentTheme)
+  if (canvas.value) {
+    const themeAlpha = getThemeParticleAlpha(currentTheme)
+    canvas.value.style.opacity = String(themeAlpha)
+    canvas.value.style.display = themeAlpha === 0 ? 'none' : ''
+  }
 }
 
 function syncReducedMotionPreference() {
@@ -391,6 +452,7 @@ function restartAnimation() {
     animId = null
   }
   if (!pageVisible) return
+  if (getThemeParticleAlpha(currentTheme) === 0) return
   animate(prefersReducedMotion)
 }
 
@@ -406,11 +468,14 @@ function handleVisibilityChange() {
   restartAnimation()
 }
 
-watch(() => [props.dense, props.mode, props.theme], () => {
+watch(() => [props.dense, props.mode], () => {
   syncVisualMode()
   rebuild()
   restartAnimation()
 })
+
+// The field re-skins itself on theme swaps; no prop threading needed.
+let unsubscribeTheme = null
 
 onMounted(() => {
   if (!canvas.value) return
@@ -428,10 +493,16 @@ onMounted(() => {
     resizeObserver = new ResizeObserver(() => resize())
     resizeObserver.observe(canvas.value.parentElement)
   }
+  unsubscribeTheme = onThemeChange(() => {
+    syncVisualMode()
+    rebuild()
+    restartAnimation()
+  })
   restartAnimation()
 })
 
 onUnmounted(() => {
+  if (unsubscribeTheme) unsubscribeTheme()
   if (animId) cancelAnimationFrame(animId)
   window.removeEventListener('resize', resize)
   document.removeEventListener('visibilitychange', handleVisibilityChange)

@@ -77,18 +77,7 @@
         </template>
       </router-link>
       <div class="px-3 mb-1">
-        <button
-          type="button"
-          @click="cycleAppTheme"
-          :aria-label="`Switch theme to ${nextThemeLabel}`"
-          class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-[background-color,color,border-color] duration-200"
-          :class="currentTheme !== 'polaris' ? 'text-ice bg-ice/10' : 'text-storm hover:text-silver hover:bg-twilight/50'"
-          :title="'Switch to ' + nextThemeLabel"
-        >
-          <svg v-if="currentTheme === 'oled'" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
-          <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-          <span v-if="!sidebarCollapsed">{{ currentThemeMeta.shortLabel }}</span>
-        </button>
+        <ThemeToggle :collapsed="sidebarCollapsed" />
       </div>
       <div class="px-3 mb-1">
         <button
@@ -174,7 +163,8 @@ import { useI18n } from 'vue-i18n'
 import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
-import { cycleTheme, getNextTheme, getTheme, getThemeMeta, initTheme } from './theme.js'
+import ThemeToggle from './ThemeToggle.vue'
+import { initTheme } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
 import { webUiAuthenticated } from './auth-state.js'
 import { isPublicRoute } from './router-helpers.js'
@@ -182,11 +172,6 @@ import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-meta
 import { buildUpdateCenterState, updateStatusLightClass } from './update-center.js'
 
 const route = useRoute()
-const currentTheme = ref(getTheme())
-const currentThemeMeta = computed(() => getThemeMeta(currentTheme.value))
-const nextThemeLabel = computed(() => getThemeMeta(getNextTheme(currentTheme.value)).label)
-
-function cycleAppTheme() { currentTheme.value = cycleTheme() }
 const router = useRouter()
 const commandPaletteOpen = ref(false)
 const sidebarOpen = ref(false)
@@ -362,13 +347,15 @@ onUnmounted(() => {
 @reference "./app.css";
 
 .sidebar-link {
-  @apply flex items-center gap-3 px-3 py-2 rounded-lg text-storm no-underline
+  @apply flex items-center gap-3 px-3 py-2 rounded-lg no-underline
          transition-[background-color,color,box-shadow] duration-200 relative
          hover:bg-twilight/60 hover:text-silver;
+  color: var(--sidebar-fg);
 }
 .sidebar-link.active,
 .sidebar-link.router-link-exact-active {
-  @apply bg-twilight/80 text-ice;
-  box-shadow: inset 2px 0 0 rgba(200, 214, 229, 0.85), var(--shadow-inset-glow);
+  color: var(--sidebar-active-fg);
+  background: var(--sidebar-active-bg);
+  box-shadow: inset 2px 0 0 var(--sidebar-active-bar), var(--shadow-inset-glow);
 }
 </style>
