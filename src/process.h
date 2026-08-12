@@ -296,6 +296,50 @@ namespace proc {
     std::chrono::milliseconds interruption_delay
   );
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id);
+  bool exact_generation_transient_capture_failure_retries_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  );
+  bool exact_generation_persistent_capture_failure_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  );
+  bool exact_generation_missing_post_capture_identity_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_missing_identity_pid
+  );
+  bool exact_generation_mixed_capture_failures_fail_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_transient_pid,
+    pid_t forced_hard_pid,
+    int &capture_attempts
+  );
+  bool exact_generation_live_post_capture_ambiguity_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts
+  );
+  bool exact_generation_unreadable_candidate_cannot_disappear_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts
+  );
+  bool exact_generation_missing_pre_capture_identity_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts
+  );
+  bool exact_generation_owned_candidate_survives_other_retry_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_owned_pid,
+    pid_t forced_transient_pid,
+    int &capture_attempts
+  );
+  bool exact_generation_pidfd_esrch_retries_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_esrch_pid,
+    int &capture_attempts
+  );
   bool exact_generation_proc_enumeration_error_fails_closed_for_tests(
     std::string_view session_instance_id
   );
@@ -367,6 +411,12 @@ namespace proc {
     bool has_main_command
   );
   bool unreadable_environ_latches_capture_for_tests(
+    int read_error,
+    std::optional<uid_t> real_uid,
+    uid_t own_uid,
+    std::optional<bool> descends_from_polaris
+  );
+  bool unreadable_environ_capture_failure_may_retry_for_tests(
     int read_error,
     std::optional<uid_t> real_uid,
     uid_t own_uid,

@@ -982,6 +982,21 @@ namespace proc {
       return !descends_from_polaris || *descends_from_polaris;
     }
 
+    bool unreadable_environ_capture_failure_may_retry(
+      int read_error,
+      std::optional<uid_t> real_uid,
+      uid_t own_uid,
+      std::optional<bool> descends_from_polaris
+    ) {
+      return unreadable_environ_latches_capture(
+               read_error,
+               real_uid,
+               own_uid,
+               descends_from_polaris
+             ) &&
+             descends_from_polaris.value_or(false);
+    }
+
     bool isolated_session_cleanup_resets_router(
       bool session_owned_cage,
       bool generation_available,
@@ -1092,6 +1107,8 @@ namespace proc {
 
 #ifdef POLARIS_TESTS
     thread_local pid_t forced_pidfd_open_failure_pid = -1;
+    thread_local pid_t forced_pidfd_open_esrch_pid = -1;
+    thread_local int forced_pidfd_open_esrch_failures_remaining = 0;
     thread_local std::atomic<bool> *pidfd_wait_entered_for_tests = nullptr;
     thread_local bool forced_steam_ownership_descendants_only = false;
     thread_local std::set<pid_t> forced_steam_ownership_test_pids;
@@ -1099,6 +1116,13 @@ namespace proc {
 
     std::optional<pidfd_handle_t> open_process_pidfd(pid_t pid, int &open_error) {
 #ifdef POLARIS_TESTS
+      if (pid == forced_pidfd_open_esrch_pid && forced_pidfd_open_esrch_failures_remaining != 0) {
+        if (forced_pidfd_open_esrch_failures_remaining > 0) {
+          --forced_pidfd_open_esrch_failures_remaining;
+        }
+        open_error = ESRCH;
+        return std::nullopt;
+      }
       if (pid == forced_pidfd_open_failure_pid) {
         open_error = EACCES;
         return std::nullopt;
@@ -1567,7 +1591,27 @@ namespace proc {
 
     struct isolated_session_process_snapshot_t {
       std::vector<pidfd_handle_t> owned;
+      std::vector<pidfd_handle_t> ambiguous;
       bool capture_complete = true;
+      bool retryable_capture_failure = false;
+      bool hard_capture_failure = false;
+
+      void mark_retryable_failure() {
+        capture_complete = false;
+        if (!hard_capture_failure) {
+          retryable_capture_failure = true;
+        }
+      }
+
+      void mark_hard_failure() {
+        capture_complete = false;
+        retryable_capture_failure = false;
+        hard_capture_failure = true;
+      }
+
+      bool may_retry() const {
+        return !capture_complete && retryable_capture_failure && !hard_capture_failure;
+      }
     };
 
 #ifdef POLARIS_TESTS
@@ -1575,6 +1619,17 @@ namespace proc {
     thread_local bool forced_proc_directory_enumeration_error = false;
     thread_local pid_t forced_proc_directory_error_after_capture_pid = -1;
     thread_local pid_t forced_reused_exact_generation_pid = -1;
+    thread_local pid_t forced_missing_post_capture_identity_pid = -1;
+    thread_local int forced_missing_post_capture_identity_failures_remaining = 0;
+    thread_local pid_t forced_live_post_capture_ambiguity_pid = -1;
+    thread_local bool forced_live_post_capture_token_hidden = false;
+    thread_local pid_t forced_unreadable_environ_pid = -1;
+    thread_local int forced_unreadable_environ_failures_remaining = 0;
+    thread_local bool forced_unreadable_environ_token_hidden = false;
+    thread_local pid_t forced_pre_capture_identity_read_error_pid = -1;
+    thread_local pid_t forced_owned_token_hidden_after_capture_pid = -1;
+    thread_local bool forced_owned_token_hidden_after_capture = false;
+    thread_local int *exact_generation_capture_attempt_counter_for_tests = nullptr;
     thread_local pid_t forced_reused_gamescope_attached_pid = -1;
     thread_local pid_t forced_unreadable_gamescope_attached_pid = -1;
     thread_local pid_t forced_steam_ownership_capture_failure_pid = -1;
@@ -1596,14 +1651,19 @@ namespace proc {
       std::string_view session_instance_id
     ) {
       isolated_session_process_snapshot_t snapshot;
+#ifdef POLARIS_TESTS
+      if (exact_generation_capture_attempt_counter_for_tests != nullptr) {
+        ++*exact_generation_capture_attempt_counter_for_tests;
+      }
+#endif
       if (session_instance_id.empty()) {
-        snapshot.capture_complete = false;
+        snapshot.mark_hard_failure();
         return snapshot;
       }
 
       DIR *dir = opendir("/proc");
       if (!dir) {
-        snapshot.capture_complete = false;
+        snapshot.mark_hard_failure();
         return snapshot;
       }
 
@@ -1611,7 +1671,7 @@ namespace proc {
         auto *entry = read_next_proc_entry(dir);
         if (entry == nullptr) {
           if (errno != 0) {
-            snapshot.capture_complete = false;
+            snapshot.mark_hard_failure();
           }
           break;
         }
@@ -1624,44 +1684,106 @@ namespace proc {
           continue;
         }
 
-        const auto environ_before = read_proc_status_file_result(pid, "environ");
+        auto environ_before = read_proc_status_file_result(pid, "environ");
+#ifdef POLARIS_TESTS
+        if (pid == forced_unreadable_environ_pid &&
+            forced_unreadable_environ_failures_remaining != 0) {
+          environ_before = {{}, EACCES};
+          if (forced_unreadable_environ_failures_remaining > 0) {
+            --forced_unreadable_environ_failures_remaining;
+            if (forced_unreadable_environ_failures_remaining == 0) {
+              forced_unreadable_environ_token_hidden = true;
+            }
+          }
+        }
+#endif
         if (!environ_before.ok()) {
           const auto status = read_proc_status_file(pid, "status");
           if (process_vanished_during_proc_read(environ_before.error) ||
               proc_status_is_zombie(status)) {
             continue;
           }
+          const auto real_uid = proc_status_real_uid(status);
           const auto descends_from_polaris = proc_pid_descends_from(pid, getpid());
           if (unreadable_environ_latches_capture(
                 environ_before.error,
-                proc_status_real_uid(status),
+                real_uid,
                 getuid(),
                 descends_from_polaris
               )) {
-            snapshot.capture_complete = false;
+            if (unreadable_environ_capture_failure_may_retry(
+                  environ_before.error,
+                  real_uid,
+                  getuid(),
+                  descends_from_polaris
+                )) {
+              int open_error = 0;
+              auto ambiguous = open_process_pidfd(pid, open_error);
+              if (!ambiguous) {
+                if (process_vanished_during_proc_read(open_error)) {
+                  snapshot.mark_retryable_failure();
+                } else {
+                  snapshot.mark_hard_failure();
+                }
+              } else {
+                snapshot.mark_retryable_failure();
+                if (!pidfd_has_exited(*ambiguous)) {
+                  snapshot.ambiguous.emplace_back(std::move(*ambiguous));
+                }
+              }
+            } else {
+              snapshot.mark_hard_failure();
+            }
           }
           continue;
         }
-        if (!proc_environ_matches_isolated_session(environ_before.bytes, session_instance_id)) {
+        bool environment_before_matches = proc_environ_matches_isolated_session(
+          environ_before.bytes,
+          session_instance_id
+        );
+#ifdef POLARIS_TESTS
+        if ((pid == forced_live_post_capture_ambiguity_pid && forced_live_post_capture_token_hidden) ||
+            (pid == forced_unreadable_environ_pid && forced_unreadable_environ_token_hidden) ||
+            (pid == forced_owned_token_hidden_after_capture_pid && forced_owned_token_hidden_after_capture)) {
+          environment_before_matches = false;
+        }
+#endif
+        if (!environment_before_matches) {
           continue;
         }
 #ifdef POLARIS_TESTS
         if (pid == forced_isolated_session_capture_failure_pid) {
-          snapshot.capture_complete = false;
+          snapshot.mark_hard_failure();
           continue;
         }
 #endif
-        const auto identity_before = proc_start_time_ticks(pid);
+        auto identity_before_result = read_proc_status_file_result(pid, "stat");
+#ifdef POLARIS_TESTS
+        if (pid == forced_pre_capture_identity_read_error_pid) {
+          identity_before_result = {{}, EACCES};
+        }
+#endif
+        if (!identity_before_result.ok()) {
+          if (process_vanished_during_proc_read(identity_before_result.error)) {
+            snapshot.mark_retryable_failure();
+          } else {
+            snapshot.mark_hard_failure();
+          }
+          continue;
+        }
+        const auto identity_before = proc_start_time_from_stat(identity_before_result.bytes);
         if (!identity_before) {
-          snapshot.capture_complete = false;
+          snapshot.mark_hard_failure();
           continue;
         }
 
         int open_error = 0;
         auto handle = open_process_pidfd(pid, open_error);
         if (!handle) {
-          if (open_error != ESRCH) {
-            snapshot.capture_complete = false;
+          if (open_error == ESRCH) {
+            snapshot.mark_retryable_failure();
+          } else {
+            snapshot.mark_hard_failure();
           }
           continue;
         }
@@ -1669,32 +1791,52 @@ namespace proc {
         const auto environ_after = read_proc_status_file_result(pid, "environ");
         auto identity_after = proc_start_time_ticks(pid);
 #ifdef POLARIS_TESTS
+        const bool force_missing_post_capture_identity =
+          pid == forced_missing_post_capture_identity_pid &&
+          forced_missing_post_capture_identity_failures_remaining != 0;
+        if (force_missing_post_capture_identity) {
+          identity_after.reset();
+          if (forced_missing_post_capture_identity_failures_remaining > 0) {
+            --forced_missing_post_capture_identity_failures_remaining;
+          }
+        }
         if (pid == forced_reused_exact_generation_pid && identity_after) {
           ++*identity_after;
         }
 #endif
         const bool identity_matches = steam_pidfd_capture_identity_matches(identity_before, identity_after);
-        const bool environment_matches = environ_after.ok() &&
-                                         proc_environ_matches_isolated_session(
-                                           environ_after.bytes,
-                                           session_instance_id
-                                         );
+        bool environment_matches = environ_after.ok() &&
+                                   proc_environ_matches_isolated_session(
+                                     environ_after.bytes,
+                                     session_instance_id
+                                   );
+#ifdef POLARIS_TESTS
+        if (pid == forced_live_post_capture_ambiguity_pid && !forced_live_post_capture_token_hidden) {
+          environment_matches = false;
+          forced_live_post_capture_token_hidden = true;
+        }
+#endif
         if (!identity_matches || !environment_matches) {
           bool captured_process_exited = pidfd_has_exited(*handle);
 #ifdef POLARIS_TESTS
-          if (pid == forced_reused_exact_generation_pid) {
+          if (pid == forced_reused_exact_generation_pid || force_missing_post_capture_identity) {
             captured_process_exited = true;
           }
 #endif
           const bool replacement_may_be_exact_generation =
-            !identity_matches && identity_after && (!environ_after.ok() || environment_matches);
-          if (!captured_process_exited || replacement_may_be_exact_generation) {
-            snapshot.capture_complete = false;
+            !identity_matches && (!environ_after.ok() || environment_matches);
+          if (!captured_process_exited) {
+            snapshot.mark_hard_failure();
+          } else if (replacement_may_be_exact_generation) {
+            snapshot.mark_retryable_failure();
           }
           continue;
         }
         snapshot.owned.emplace_back(std::move(*handle));
 #ifdef POLARIS_TESTS
+        if (pid == forced_owned_token_hidden_after_capture_pid) {
+          forced_owned_token_hidden_after_capture = true;
+        }
         if (pid == forced_proc_directory_error_after_capture_pid) {
           forced_proc_directory_enumeration_error = true;
         }
@@ -1703,6 +1845,78 @@ namespace proc {
 
       closedir(dir);
       return snapshot;
+    }
+
+    isolated_session_process_snapshot_t isolated_session_process_snapshot_after_quiescence(
+      std::string_view session_instance_id,
+      std::string_view reason
+    ) {
+      constexpr int max_attempts = 4;
+      constexpr auto retry_delay = 50ms;
+      std::vector<pidfd_handle_t> retained_owned;
+      std::vector<pidfd_handle_t> unresolved_ambiguous;
+      for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        auto snapshot = isolated_session_process_snapshot(session_instance_id);
+        for (auto &owned : retained_owned) {
+          if (pidfd_has_exited(owned)) {
+            continue;
+          }
+          const bool recaptured = std::any_of(
+            snapshot.owned.begin(),
+            snapshot.owned.end(),
+            [&owned](const auto &current) {
+              return current.pid == owned.pid && !pidfd_has_exited(current);
+            }
+          );
+          if (!recaptured) {
+            snapshot.owned.emplace_back(std::move(owned));
+          }
+        }
+        retained_owned.clear();
+        for (auto &ambiguous : unresolved_ambiguous) {
+          if (pidfd_has_exited(ambiguous)) {
+            continue;
+          }
+          const bool now_captured = std::any_of(
+            snapshot.owned.begin(),
+            snapshot.owned.end(),
+            [&ambiguous](const auto &owned) {
+              return owned.pid == ambiguous.pid && !pidfd_has_exited(owned);
+            }
+          );
+          if (!now_captured) {
+            snapshot.mark_hard_failure();
+          }
+        }
+        unresolved_ambiguous.clear();
+        if (!snapshot.hard_capture_failure) {
+          for (auto &ambiguous : snapshot.ambiguous) {
+            if (!pidfd_has_exited(ambiguous)) {
+              unresolved_ambiguous.emplace_back(std::move(ambiguous));
+            }
+          }
+        }
+        if (snapshot.capture_complete || !snapshot.may_retry()) {
+          return snapshot;
+        }
+        if (attempt == max_attempts) {
+          BOOST_LOG(warning) << "process: exact-generation capture exhausted "sv << max_attempts
+                             << " transient attempt(s); failing closed "sv << reason;
+          snapshot.mark_hard_failure();
+          return snapshot;
+        }
+        for (auto &owned : snapshot.owned) {
+          if (!pidfd_has_exited(owned)) {
+            retained_owned.emplace_back(std::move(owned));
+          }
+        }
+        BOOST_LOG(info) << "process: retrying transient exact-generation capture (attempt "sv
+                        << (attempt + 1) << '/' << max_attempts << ") "sv << reason;
+        std::this_thread::sleep_for(retry_delay);
+      }
+      isolated_session_process_snapshot_t exhausted;
+      exhausted.mark_hard_failure();
+      return exhausted;
     }
 
     bool terminate_isolated_session_processes(
@@ -1723,7 +1937,7 @@ namespace proc {
         );
       }
       for (int pass = 0; pass < 2; ++pass) {
-        auto snapshot = isolated_session_process_snapshot(session_instance_id);
+        auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
         if (!snapshot.capture_complete) {
           BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
           return false;
@@ -1763,7 +1977,7 @@ namespace proc {
         }
       }
 
-      const auto final_snapshot = isolated_session_process_snapshot(session_instance_id);
+      const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
       if (tracked_detached_children != nullptr) {
         direct_child_reap_complete = reap_tracked_detached_children(
                                        *tracked_detached_children,
@@ -4494,6 +4708,210 @@ namespace proc {
     return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv);
   }
 
+  bool exact_generation_transient_capture_failure_retries_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  ) {
+    const auto previous_pid = forced_missing_post_capture_identity_pid;
+    const auto previous_remaining = forced_missing_post_capture_identity_failures_remaining;
+    auto restore = util::fail_guard([previous_pid, previous_remaining]() {
+      forced_missing_post_capture_identity_pid = previous_pid;
+      forced_missing_post_capture_identity_failures_remaining = previous_remaining;
+    });
+    forced_missing_post_capture_identity_pid = forced_capture_failure_pid;
+    forced_missing_post_capture_identity_failures_remaining = 1;
+    return terminate_isolated_session_processes(session_instance_id, "during transient-capture test"sv);
+  }
+
+  bool exact_generation_persistent_capture_failure_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_capture_failure_pid
+  ) {
+    const auto previous_pid = forced_missing_post_capture_identity_pid;
+    const auto previous_remaining = forced_missing_post_capture_identity_failures_remaining;
+    auto restore = util::fail_guard([previous_pid, previous_remaining]() {
+      forced_missing_post_capture_identity_pid = previous_pid;
+      forced_missing_post_capture_identity_failures_remaining = previous_remaining;
+    });
+    forced_missing_post_capture_identity_pid = forced_capture_failure_pid;
+    forced_missing_post_capture_identity_failures_remaining = -1;
+    return !terminate_isolated_session_processes(session_instance_id, "during persistent-capture test"sv);
+  }
+
+  bool exact_generation_missing_post_capture_identity_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_missing_identity_pid
+  ) {
+    const auto previous_pid = forced_missing_post_capture_identity_pid;
+    const auto previous_remaining = forced_missing_post_capture_identity_failures_remaining;
+    auto restore = util::fail_guard([previous_pid, previous_remaining]() {
+      forced_missing_post_capture_identity_pid = previous_pid;
+      forced_missing_post_capture_identity_failures_remaining = previous_remaining;
+    });
+    forced_missing_post_capture_identity_pid = forced_missing_identity_pid;
+    forced_missing_post_capture_identity_failures_remaining = -1;
+    return !terminate_isolated_session_processes(
+      session_instance_id,
+      "during missing post-capture identity test"sv
+    );
+  }
+
+  bool exact_generation_mixed_capture_failures_fail_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_transient_pid,
+    pid_t forced_hard_pid,
+    int &capture_attempts
+  ) {
+    const auto previous_missing_pid = forced_missing_post_capture_identity_pid;
+    const auto previous_missing_remaining = forced_missing_post_capture_identity_failures_remaining;
+    const auto previous_hard_pid = forced_isolated_session_capture_failure_pid;
+    const auto previous_attempt_counter = exact_generation_capture_attempt_counter_for_tests;
+    auto restore = util::fail_guard([
+      previous_missing_pid,
+      previous_missing_remaining,
+      previous_hard_pid,
+      previous_attempt_counter
+    ]() {
+      forced_missing_post_capture_identity_pid = previous_missing_pid;
+      forced_missing_post_capture_identity_failures_remaining = previous_missing_remaining;
+      forced_isolated_session_capture_failure_pid = previous_hard_pid;
+      exact_generation_capture_attempt_counter_for_tests = previous_attempt_counter;
+    });
+    capture_attempts = 0;
+    forced_missing_post_capture_identity_pid = forced_transient_pid;
+    forced_missing_post_capture_identity_failures_remaining = -1;
+    forced_isolated_session_capture_failure_pid = forced_hard_pid;
+    exact_generation_capture_attempt_counter_for_tests = &capture_attempts;
+    return !terminate_isolated_session_processes(session_instance_id, "during mixed-capture test"sv);
+  }
+
+  bool exact_generation_live_post_capture_ambiguity_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts
+  ) {
+    const auto previous_pid = forced_live_post_capture_ambiguity_pid;
+    const auto previous_hidden = forced_live_post_capture_token_hidden;
+    const auto previous_attempt_counter = exact_generation_capture_attempt_counter_for_tests;
+    auto restore = util::fail_guard([previous_pid, previous_hidden, previous_attempt_counter]() {
+      forced_live_post_capture_ambiguity_pid = previous_pid;
+      forced_live_post_capture_token_hidden = previous_hidden;
+      exact_generation_capture_attempt_counter_for_tests = previous_attempt_counter;
+    });
+    capture_attempts = 0;
+    forced_live_post_capture_ambiguity_pid = forced_ambiguous_pid;
+    forced_live_post_capture_token_hidden = false;
+    exact_generation_capture_attempt_counter_for_tests = &capture_attempts;
+    return !terminate_isolated_session_processes(session_instance_id, "during live-ambiguity test"sv);
+  }
+
+  bool exact_generation_unreadable_candidate_cannot_disappear_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts
+  ) {
+    const auto previous_pid = forced_unreadable_environ_pid;
+    const auto previous_remaining = forced_unreadable_environ_failures_remaining;
+    const auto previous_hidden = forced_unreadable_environ_token_hidden;
+    const auto previous_attempt_counter = exact_generation_capture_attempt_counter_for_tests;
+    auto restore = util::fail_guard([
+      previous_pid,
+      previous_remaining,
+      previous_hidden,
+      previous_attempt_counter
+    ]() {
+      forced_unreadable_environ_pid = previous_pid;
+      forced_unreadable_environ_failures_remaining = previous_remaining;
+      forced_unreadable_environ_token_hidden = previous_hidden;
+      exact_generation_capture_attempt_counter_for_tests = previous_attempt_counter;
+    });
+    capture_attempts = 0;
+    forced_unreadable_environ_pid = forced_ambiguous_pid;
+    forced_unreadable_environ_failures_remaining = 1;
+    forced_unreadable_environ_token_hidden = false;
+    exact_generation_capture_attempt_counter_for_tests = &capture_attempts;
+    return !terminate_isolated_session_processes(
+      session_instance_id,
+      "during unreadable-candidate ambiguity test"sv
+    );
+  }
+
+  bool exact_generation_missing_pre_capture_identity_fails_closed_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts
+  ) {
+    const auto previous_pid = forced_pre_capture_identity_read_error_pid;
+    const auto previous_attempt_counter = exact_generation_capture_attempt_counter_for_tests;
+    auto restore = util::fail_guard([previous_pid, previous_attempt_counter]() {
+      forced_pre_capture_identity_read_error_pid = previous_pid;
+      exact_generation_capture_attempt_counter_for_tests = previous_attempt_counter;
+    });
+    capture_attempts = 0;
+    forced_pre_capture_identity_read_error_pid = forced_ambiguous_pid;
+    exact_generation_capture_attempt_counter_for_tests = &capture_attempts;
+    return !terminate_isolated_session_processes(
+      session_instance_id,
+      "during missing pre-capture identity test"sv
+    );
+  }
+
+  bool exact_generation_owned_candidate_survives_other_retry_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_owned_pid,
+    pid_t forced_transient_pid,
+    int &capture_attempts
+  ) {
+    const auto previous_owned_pid = forced_owned_token_hidden_after_capture_pid;
+    const auto previous_owned_hidden = forced_owned_token_hidden_after_capture;
+    const auto previous_missing_pid = forced_missing_post_capture_identity_pid;
+    const auto previous_missing_remaining = forced_missing_post_capture_identity_failures_remaining;
+    const auto previous_attempt_counter = exact_generation_capture_attempt_counter_for_tests;
+    auto restore = util::fail_guard([
+      previous_owned_pid,
+      previous_owned_hidden,
+      previous_missing_pid,
+      previous_missing_remaining,
+      previous_attempt_counter
+    ]() {
+      forced_owned_token_hidden_after_capture_pid = previous_owned_pid;
+      forced_owned_token_hidden_after_capture = previous_owned_hidden;
+      forced_missing_post_capture_identity_pid = previous_missing_pid;
+      forced_missing_post_capture_identity_failures_remaining = previous_missing_remaining;
+      exact_generation_capture_attempt_counter_for_tests = previous_attempt_counter;
+    });
+    capture_attempts = 0;
+    forced_owned_token_hidden_after_capture_pid = forced_owned_pid;
+    forced_owned_token_hidden_after_capture = false;
+    forced_missing_post_capture_identity_pid = forced_transient_pid;
+    forced_missing_post_capture_identity_failures_remaining = 1;
+    exact_generation_capture_attempt_counter_for_tests = &capture_attempts;
+    return terminate_isolated_session_processes(
+      session_instance_id,
+      "during owned-candidate retention test"sv
+    );
+  }
+
+  bool exact_generation_pidfd_esrch_retries_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_esrch_pid,
+    int &capture_attempts
+  ) {
+    const auto previous_pid = forced_pidfd_open_esrch_pid;
+    const auto previous_remaining = forced_pidfd_open_esrch_failures_remaining;
+    const auto previous_attempt_counter = exact_generation_capture_attempt_counter_for_tests;
+    auto restore = util::fail_guard([previous_pid, previous_remaining, previous_attempt_counter]() {
+      forced_pidfd_open_esrch_pid = previous_pid;
+      forced_pidfd_open_esrch_failures_remaining = previous_remaining;
+      exact_generation_capture_attempt_counter_for_tests = previous_attempt_counter;
+    });
+    capture_attempts = 0;
+    forced_pidfd_open_esrch_pid = forced_esrch_pid;
+    forced_pidfd_open_esrch_failures_remaining = 1;
+    exact_generation_capture_attempt_counter_for_tests = &capture_attempts;
+    return terminate_isolated_session_processes(session_instance_id, "during pidfd ESRCH test"sv);
+  }
+
   bool exact_generation_proc_enumeration_error_fails_closed_for_tests(
     std::string_view session_instance_id
   ) {
@@ -4943,6 +5361,20 @@ namespace proc {
     std::optional<bool> descends_from_polaris
   ) {
     return unreadable_environ_latches_capture(read_error, real_uid, own_uid, descends_from_polaris);
+  }
+
+  bool unreadable_environ_capture_failure_may_retry_for_tests(
+    int read_error,
+    std::optional<uid_t> real_uid,
+    uid_t own_uid,
+    std::optional<bool> descends_from_polaris
+  ) {
+    return unreadable_environ_capture_failure_may_retry(
+      read_error,
+      real_uid,
+      own_uid,
+      descends_from_polaris
+    );
   }
 
   bool isolated_session_cleanup_resets_router_for_tests(
