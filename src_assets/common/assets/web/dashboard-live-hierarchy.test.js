@@ -14,41 +14,47 @@ function expectBefore(source, first, second) {
   expect(firstIndex, `${first} should appear before ${second}`).toBeLessThan(secondIndex)
 }
 
-describe('DashboardView live-session hierarchy', () => {
-  it('starts live mode with a summary strip covering quality, signal, path, and runtime', () => {
+describe('DashboardView hierarchy', () => {
+  it('starts live mode with one metrics strip, then the Doctor verdict, then the preview', () => {
     const dashboard = webSource('views/DashboardView.vue')
 
-    expectBefore(dashboard, 'dashboard-live-summary-grid', 'Auto Quality')
-    expectBefore(dashboard, 'dashboard-live-summary-grid', 'dashboard-preview-panel')
+    expectBefore(dashboard, 'dashboard-live-summary-grid', 'data-dashboard-doctor')
+    expectBefore(dashboard, 'data-dashboard-doctor', 'dashboard-preview-panel')
 
-    for (const label of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate', 'Capture path', 'Runtime mode']) {
+    // The strip says each stream number exactly once; path and runtime moved
+    // to chips and the session context rail.
+    for (const label of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate']) {
       expect(dashboard).toContain(`data-live-summary-metric="${label}"`)
     }
+    expect(dashboard).not.toContain('data-live-summary-metric="Capture path"')
+    expect(dashboard).not.toContain('data-live-summary-metric="Runtime mode"')
+  })
+
+  it('renders the host Doctor verdict instead of client-side guidance panels', () => {
+    const dashboard = webSource('views/DashboardView.vue')
+
+    expect(dashboard).toContain('data-dashboard-doctor')
+    expect(dashboard).toContain('doctorSafeAction')
+    // The replaced trio must stay gone.
+    expect(dashboard).not.toContain('Priority guidance')
+    expect(dashboard).not.toContain('streamPathNotices')
+    expect(dashboard).not.toContain('mission-control-strip')
   })
 
   it('keeps secondary live panels in collapsible groups below the primary summary', () => {
     const dashboard = webSource('views/DashboardView.vue')
     const groupedPanelCount = (dashboard.match(/<details class="dashboard-secondary-group/g) || []).length
 
-    expect(groupedPanelCount).toBeGreaterThanOrEqual(3)
+    expect(groupedPanelCount).toBeGreaterThanOrEqual(2)
     expectBefore(dashboard, 'dashboard-live-summary-grid', '<details class="dashboard-secondary-group')
     expect(dashboard).toContain('dashboard-secondary-group-summary')
   })
 
-  it('places Now Next Fix before standby and live dashboard detail', () => {
+  it('leads idle mode with the status hero and keeps the play rail launchable', () => {
     const dashboard = webSource('views/DashboardView.vue')
 
-    expectBefore(dashboard, 'mission-control-strip', 'dashboard-live-shell')
-    expectBefore(dashboard, 'mission-control-strip', 'dashboard-live-summary-grid')
-    expect(dashboard).toContain('Mission Control Now Next Fix')
-    expect(dashboard).toContain('Open fix')
-  })
-
-  it('keeps second-screen overlay framed as a later local lane', () => {
-    const dashboard = webSource('views/DashboardView.vue')
-
-    expectBefore(dashboard, 'mission-control-overlay-note', 'dashboard-live-shell')
-    expect(dashboard).toContain('Recommended later local lane')
-    expect(dashboard).toContain('secondScreenOverlayRecommendation')
+    expectBefore(dashboard, 'data-dashboard-idle-hero', 'data-dashboard-play-rail')
+    expect(dashboard).toContain('launchRecentApp(app)')
+    expect(dashboard).toContain("$t('dashboard.open_priority_fix')")
   })
 })
