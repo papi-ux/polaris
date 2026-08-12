@@ -824,14 +824,15 @@ const viewerCountLabel = computed(() => {
 
 // First HDR surface in the web UI: state plus downgrade reason on hover.
 const hdrChipLabel = computed(() => {
-  // Host contract: hdr_effective_mode is sdr_8bit|sdr_10bit|hdr10 and
-  // hdr_downgrade_reason is the literal string "none" when nothing degraded.
+  // Host contract: hdr_effective_mode is sdr_8bit|sdr_10bit|hdr10, and a
+  // DOWNGRADED stream reports an sdr_* mode with hdr_downgrade_reason set
+  // (the literal "none" means no downgrade). So: downgrade first, then hdr.
   const s = stats.value || {}
+  const reason = String(s.hdr_downgrade_reason || 'none')
+  if (reason !== 'none') return 'HDR → SDR'
   const mode = String(s.hdr_effective_mode || s.dynamic_range || '').toLowerCase()
   if (!mode || mode.startsWith('sdr')) return ''
-  const label = mode.toUpperCase()
-  const reason = String(s.hdr_downgrade_reason || 'none')
-  return reason !== 'none' ? ` → SDR` : label
+  return mode.toUpperCase()
 })
 const currentClientName = computed(() => connectedClients.value[0]?.name || t('dashboard.unknown_client'))
 
@@ -1108,11 +1109,17 @@ function refreshPreview() {
   // When streaming, crop to the streaming output; otherwise show full display
   const output = streamingOutput.value ? `&output=${encodeURIComponent(streamingOutput.value)}` : ''
   if (previewMode.value === 'mjpeg') {
-    previewUrl.value = `./api/display/stream?t=${Date.now()}${output}`
+    // fps=2 keeps the host's capture loop light (it defaults to 5), and the
+    // 30 s re-issue is a staleness watchdog: a cleanly ended multipart stream
+    // fires neither load nor error, which would otherwise freeze the frame.
+    previewUrl.value = `./api/display/stream?fps=2&t=${Date.now()}${output}`
     // Chromium may never fire img load for multipart streams; clear the
     // spinner once frames have had time to arrive unless an error landed.
     previewTimer = setTimeout(() => {
-      if (previewMode.value === 'mjpeg' && showPreview.value && !previewError.value) previewLoaded.value = true
+      if (previewMode.value === 'mjpeg' && showPreview.value && !previewError.value) {
+        previewLoaded.value = true
+        schedulePreviewRefresh(30000)
+      }
     }, 1500)
   } else {
     previewUrl.value = `./api/display/screenshot?t=${Date.now()}${output}`
@@ -1150,6 +1157,19 @@ function retryPreviewNow() {
   previewBackoffMs.value = PREVIEW_REFRESH_MS
   previewMode.value = prefersReducedMotion.value ? 'poll' : 'mjpeg'
   refreshPreview()
+}
+
+// A backgrounded tab must not keep the host capturing for an MJPEG stream
+// nobody is watching; pause the stream and resume on return.
+function handlePreviewVisibility() {
+  if (!showPreview.value) return
+  if (document.hidden) {
+    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
+    previewUrl.value = ''
+    previewLoaded.value = false
+  } else {
+    refreshPreview()
+  }
 }
 
 function togglePreviewExpanded() {
@@ -1254,18 +1274,23 @@ const doctorRecommendation = computed(() => {
 })
 
 const doctorPanelClass = computed(() => {
+  // Host contract: traffic_light is green | amber | red (never yellow).
   switch (doctor.value?.traffic_light) {
     case 'red': return 'border-danger/30 bg-danger/5'
+    case 'amber':
     case 'yellow': return 'border-warning/25 bg-warning/5'
-    default: return 'border-success/20 bg-success/5'
+    case 'green': return 'border-success/20 bg-success/5'
+    default: return 'border-storm/20 bg-void/20'
   }
 })
 
 const doctorLightClass = computed(() => {
   switch (doctor.value?.traffic_light) {
     case 'red': return 'bg-danger'
+    case 'amber':
     case 'yellow': return 'bg-warning'
-    default: return 'bg-success'
+    case 'green': return 'bg-success'
+    default: return 'bg-storm/60'
   }
 })
 
@@ -1279,8 +1304,10 @@ const doctorConfidenceLabel = computed(() => {
 // endpoints like /polaris/v1/client-settings, which would 404 here), so
 // anything else renders as advice without an execute button.
 const doctorSafeAction = computed(() => {
+  // Endpoint-less actions (export diagnostics, safer-next-launch) are real
+  // host advice and render as advisory pills; only /api/ ones can execute.
   const action = doctor.value?.safe_recovery_action
-  if (!action || action.kind === 'none' || !action.endpoint) return null
+  if (!action || action.kind === 'none' || !action.label) return null
   return action
 })
 
@@ -1324,8 +1351,8 @@ async function launchRecentApp(app) {
       method: 'POST',
       body: JSON.stringify({ uuid: app.uuid }),
     })
-    const result = await response.json()
-    if (result.status) {
+    const result = response.ok ? await response.json() : { status: false, error: `HTTP ${response.status}` }
+    if (result.status === true) {
       showToast(t('dashboard.launched', { name: app.name }), 'success')
     } else {
       showToast(t('dashboard.launch_failed') + (result.error || ''), 'error')
@@ -1678,6 +1705,7 @@ onMounted(async () => {
     reducedMotionQuery.addEventListener?.('change', updateReducedMotionPreference)
   }
   unsubscribeThemeTokens = onThemeTokensChange(() => { refreshChartTheme() })
+  document.addEventListener('visibilitychange', handlePreviewVisibility)
 
   fetchSystemInfo()
   fetchAiStatus()
@@ -1744,6 +1772,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  stopPreview()
+  document.removeEventListener('visibilitychange', handlePreviewVisibility)
   destroyCharts()
   if (unsubscribeThemeTokens) {
     unsubscribeThemeTokens()

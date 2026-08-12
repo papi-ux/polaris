@@ -605,7 +605,6 @@ textarea {
 .operator-console .dashboard-preview-frame,
 .operator-console .dashboard-preview-empty,
 .operator-console .dashboard-metric-tile,
-.operator-console .dashboard-list-row,
 .operator-console .dashboard-client-row,
 .operator-console .dashboard-empty-state,
 .operator-console .dashboard-telemetry-card,
@@ -625,11 +624,7 @@ textarea {
   @apply border-warning/25 bg-warning/8;
 }
 
-.operator-console .dashboard-telemetry-concern {
-  @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-3;
-}
-
-.operator-console .dashboard-degraded-state {
+.operator-console .operator-console .dashboard-degraded-state {
   @apply flex flex-col gap-3 rounded-lg border border-warning/20 bg-warning/6 px-4 py-4 sm:flex-row sm:items-center sm:justify-between;
 }
 
@@ -1256,10 +1251,6 @@ textarea {
   align-self: start;
 }
 
-.dashboard-metric-grid {
-  @apply mt-3 grid gap-2 sm:grid-cols-2;
-}
-
 .dashboard-metric-tile {
   @apply rounded-2xl border border-storm/15 bg-void/35 px-3.5 py-3;
 }
@@ -1290,10 +1281,6 @@ textarea {
 
 .dashboard-runtime-pill {
   @apply inline-flex items-center gap-2 rounded-full border border-storm/15 bg-void/35 px-3 py-1.5;
-}
-
-.dashboard-list-row {
-  @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2.5;
 }
 
 .dashboard-client-row {
