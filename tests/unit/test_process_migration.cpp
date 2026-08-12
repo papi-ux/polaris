@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -24,8 +25,10 @@
 
 #ifdef __linux__
   #include <csignal>
+  #include <poll.h>
   #include <pthread.h>
   #include <sys/prctl.h>
+  #include <sys/syscall.h>
   #include <sys/wait.h>
   #include <unistd.h>
 #endif
@@ -80,6 +83,44 @@ namespace {
     pid_t pid = -1;
     bool reaped = false;
   };
+
+  struct linux_fd_guard_t {
+    explicit linux_fd_guard_t(int descriptor): fd(descriptor) {}
+    linux_fd_guard_t(const linux_fd_guard_t &) = delete;
+    linux_fd_guard_t &operator=(const linux_fd_guard_t &) = delete;
+
+    ~linux_fd_guard_t() {
+      if (fd >= 0) {
+        close(fd);
+      }
+    }
+
+    int fd = -1;
+  };
+
+  bool wait_for_fd_event(int fd, short events, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    pollfd descriptor {fd, events, 0};
+    for (;;) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()
+      );
+      if (remaining.count() <= 0) {
+        return false;
+      }
+      const int result = poll(&descriptor, 1, static_cast<int>(remaining.count()));
+      if (result > 0) {
+        return (descriptor.revents & events) != 0;
+      }
+      if (result == 0 || errno != EINTR) {
+        return false;
+      }
+    }
+  }
+
+  bool wait_for_pidfd_exit(int pidfd, std::chrono::milliseconds timeout) {
+    return wait_for_fd_event(pidfd, POLLIN, timeout);
+  }
 
   struct sigusr1_interrupt_guard_t {
     sigusr1_interrupt_guard_t() {
@@ -1298,31 +1339,64 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsStrippedExactGener
     const std::string fd = std::to_string(ready_pipe[1]);
     const std::string command =
       "trap '' TERM; env -u GAMESCOPE_WAYLAND_DISPLAY -u STEAM_COMPAT_APP_ID "
-      "-u POLARIS_SESSION_INSTANCE_ID /bin/sh -c 'trap \"\" TERM; while :; do sleep 1; done' & "
-      "printf '%s\\n' \"$!\" >&" + fd + "; while :; do sleep 1; done";
+      "-u POLARIS_SESSION_INSTANCE_ID /usr/bin/python3 -c \""
+      "import os,signal; fd=" + fd + "; "
+      "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+      "os.write(fd, (str(os.getpid()) + '\\n').encode()); "
+      "os.close(fd); signal.pause()\" & "
+      "while :; do sleep 1; done";
     execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char *>(nullptr));
     _exit(127);
   }
+  linux_child_guard_t root_guard {root};
+  auto cleanup_group = [root]() {
+    (void) kill(-root, SIGKILL);
+    (void) kill(root, SIGKILL);
+  };
   unsetenv("GAMESCOPE_WAYLAND_DISPLAY");
   unsetenv("STEAM_COMPAT_APP_ID");
   unsetenv("POLARIS_SESSION_INSTANCE_ID");
   close(ready_pipe[1]);
+  if (!wait_for_fd_event(ready_pipe[0], POLLIN, std::chrono::seconds(2))) {
+    close(ready_pipe[0]);
+    cleanup_group();
+    FAIL() << "stripped descendant did not report exec-complete readiness";
+  }
   char descendant_text[32] {};
-  const auto count = read(ready_pipe[0], descendant_text, sizeof(descendant_text) - 1);
-  ASSERT_GT(count, 0);
+  ssize_t count;
+  do {
+    count = read(ready_pipe[0], descendant_text, sizeof(descendant_text) - 1);
+  } while (count < 0 && errno == EINTR);
   close(ready_pipe[0]);
+  if (count <= 0) {
+    cleanup_group();
+    FAIL() << "stripped descendant readiness pipe closed without a pid";
+  }
   const pid_t descendant = static_cast<pid_t>(std::strtol(descendant_text, nullptr, 10));
-  ASSERT_GT(descendant, 1);
+  if (descendant <= 1) {
+    cleanup_group();
+    FAIL() << "stripped descendant reported invalid pid: " << descendant_text;
+  }
+  const int descendant_fd = static_cast<int>(syscall(SYS_pidfd_open, descendant, 0));
+  if (descendant_fd < 0) {
+    const int pidfd_error = errno;
+    cleanup_group();
+    FAIL() << "pidfd_open failed for descendant " << descendant << ": " << std::strerror(pidfd_error);
+  }
+  linux_fd_guard_t descendant_pidfd {descendant_fd};
   const bool terminated = proc::terminate_gamescope_attached_clients_for_tests("4242");
   if (!terminated) {
-    (void) kill(root, SIGKILL);
-    (void) kill(descendant, SIGKILL);
+    cleanup_group();
   }
   EXPECT_TRUE(terminated);
-  EXPECT_EQ(waitpid(root, nullptr, 0), root);
-  errno = 0;
-  EXPECT_EQ(kill(descendant, 0), -1);
-  EXPECT_EQ(errno, ESRCH);
+  if (terminated) {
+    EXPECT_EQ(root_guard.wait(nullptr, 0), root);
+  }
+  const bool descendant_exited = wait_for_pidfd_exit(descendant_pidfd.fd, std::chrono::seconds(2));
+  if (!descendant_exited) {
+    cleanup_group();
+  }
+  EXPECT_TRUE(descendant_exited);
 }
 
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateGroupDescendant) {
