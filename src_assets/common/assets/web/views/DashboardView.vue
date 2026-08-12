@@ -1482,7 +1482,7 @@ function makeChartOpts(title, suffix, tokenName = 'ice') {
         ...(uPlotLib?.paths?.spline ? { paths: uPlotLib.paths.spline() } : {}),
         points: {
           show: true,
-          filter: (u, seriesIdx, show) => {
+          filter: (u, seriesIdx) => {
             const len = u.data[seriesIdx]?.length || 0
             return len ? [len - 1] : []
           },
