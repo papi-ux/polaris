@@ -2,8 +2,6 @@
 
 <img src="docs/screenshots/Polaris_fulllogo_2.svg" width="250" alt="Polaris" />
 
-# Polaris
-
 **Linux-only, self-hosted game streaming that keeps the stream off your desktop.**
 
 Polaris launches games in an isolated Linux compositor, streams them to Nova or
