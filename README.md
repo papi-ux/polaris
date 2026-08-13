@@ -69,6 +69,8 @@ Ultimate Edition leads this representative Aurora capture.
 See motion and compare Portable Chrome, Console OLED, Miami Nebula, and High
 Contrast in the [website theme gallery](https://papi-ux.com/polaris/#themes).
 
+Every capture above and across [papi-ux.com](https://papi-ux.com/polaris/) comes from the tagged public release; the [pixel-level provenance manifest](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json) ships with the site.
+
 ## Install and start a first stream
 
 Use an official package from the [latest GitHub
@@ -106,6 +108,10 @@ capture path, HDR mode, or experimental Browser Stream setup.
 - [Releases](https://github.com/papi-ux/polaris/releases) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 - [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md) · [Source](https://github.com/papi-ux/polaris)
 
+## Acknowledgments
+
+Polaris builds on the Apollo and Sunshine host lineage and stays protocol-compatible with the wider Moonlight ecosystem. Thanks to those maintainers and communities for the foundation.
+
 ## AI Transparency
 
 Polaris is a maintainer-led project. I use AI-assisted tools as research,
@@ -115,6 +121,10 @@ Linux compositor, packaging, and client behavior.
 Those tools do not decide what Polaris is or what ships. I review changes,
 test every aspect, and own the final decisions around validation,
 trust boundaries, and release quality.
+
+## Contributing
+
+Contributions are welcome, especially focused fixes, docs, translations, packaging improvements, real-hardware testing, and careful feature work. Polaris is still a small maintainer-led project, so the easiest pull requests to review are the ones that explain the problem clearly, keep the change scoped, and say what was tested on Linux. See [CONTRIBUTING](.github/CONTRIBUTING.md) for the full workflow.
 
 ## License
 
