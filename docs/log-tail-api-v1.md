@@ -10,7 +10,7 @@ This endpoint never reads the whole active log. It is intended for the Web UI an
 
 ## Runtime retention
 
-The active runtime log is fixed at 8388608 bytes, with one backup of at most the same size. Polaris rotates only between complete formatted records, replaces the prior backup, and advances the log generation before writing any bytes into the replacement active file. A prior active log that is already oversized is reduced to its newest 8388608 bytes during startup instead of being copied in full. An orphaned oversized backup is reduced the same way when no active log survived. The active and backup logs therefore have a 16777216-byte combined logical bound, apart from filesystem allocation granularity.
+The active runtime log is fixed at 8388608 bytes, with one backup of at most the same size. Polaris rotates only between complete formatted records, replaces the prior backup, and advances the log generation before writing any bytes into the replacement active file. A prior active log that is already oversized is reduced to its newest 8388608 bytes during startup instead of being copied in full. An orphaned oversized backup is reduced the same way when no active log survived. The active and backup logs therefore have a 16777216-byte combined logical bound, apart from filesystem allocation granularity. The active log has a single owner per configuration directory: Polaris takes an exclusive advisory lock on a `.lock` sidecar next to the active file at startup, and a second Polaris process that cannot acquire it continues with console-only logging instead of inheriting, rotating, or truncating the owner's files.
 
 ## Request
 

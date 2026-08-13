@@ -227,3 +227,24 @@ TEST_F(BoundedLogFileTest, OversizedOrphanedBackupIsAlsoReducedToItsNewestBounde
   EXPECT_EQ(read(backup_), "89abcdef");
   EXPECT_EQ(fs::file_size(backup_), 8);
 }
+
+TEST(BoundedLogOwnerLock, ExcludesSecondAcquireWhileHeldAndReleasesOnDestruction) {
+  const auto root = std::filesystem::temp_directory_path() / "polaris-bounded-log-owner-lock";
+  std::error_code error;
+  std::filesystem::remove_all(root, error);
+  std::filesystem::create_directories(root);
+  const auto lock_path = root / "polaris.log.lock";
+
+  {
+    logging::bounded_log_owner_lock_t first {lock_path};
+    ASSERT_TRUE(first.owned());
+
+    logging::bounded_log_owner_lock_t second {lock_path};
+    EXPECT_FALSE(second.owned());
+  }
+
+  logging::bounded_log_owner_lock_t third {lock_path};
+  EXPECT_TRUE(third.owned());
+
+  std::filesystem::remove_all(root, error);
+}

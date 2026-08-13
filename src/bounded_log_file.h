@@ -19,6 +19,32 @@ namespace logging {
     rejected,
   };
 
+  /**
+   * @brief Process-lifetime exclusive owner claim on the bounded runtime log.
+   *
+   * Advisory lock on a sidecar path next to the active log. The kernel drops
+   * the lock when the owning process exits, so a crashed owner cannot leave
+   * the log orphaned-locked. A process that fails to acquire it must not
+   * inherit, rotate, truncate, or write the owner's files.
+   */
+  class bounded_log_owner_lock_t {
+  public:
+    explicit bounded_log_owner_lock_t(const std::filesystem::path &lock_path);
+    ~bounded_log_owner_lock_t();
+
+    bounded_log_owner_lock_t(const bounded_log_owner_lock_t &) = delete;
+    bounded_log_owner_lock_t &operator=(const bounded_log_owner_lock_t &) = delete;
+
+    [[nodiscard]] bool owned() const;
+
+  private:
+#ifdef _WIN32
+    void *handle_ = nullptr;
+#else
+    int fd_ = -1;
+#endif
+  };
+
   class bounded_log_file_t {
   public:
     using rotation_callback_t = std::function<void()>;
@@ -52,6 +78,9 @@ namespace logging {
 
     /**
      * @brief Preserve at most the newest max_bytes from a prior active log.
+     *
+     * The caller must hold the bounded log owner lock: this renames and
+     * truncates without further ownership checks.
      */
     static bool preserve_existing(
       const std::filesystem::path &active_path,

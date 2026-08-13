@@ -12,6 +12,17 @@
 #include <system_error>
 #include <utility>
 
+#ifdef _WIN32
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>
+#else
+  #include <fcntl.h>
+  #include <sys/file.h>
+  #include <unistd.h>
+#endif
+
 namespace logging {
   bounded_log_file_t::bounded_log_file_t(
     std::filesystem::path active_path,
@@ -225,5 +236,64 @@ namespace logging {
 
     std::filesystem::remove(active_path, error);
     return !error;
+  }
+
+  bounded_log_owner_lock_t::bounded_log_owner_lock_t(const std::filesystem::path &lock_path) {
+    if (lock_path.empty()) {
+      return;
+    }
+#ifdef _WIN32
+    const auto handle = CreateFileW(
+      lock_path.c_str(),
+      GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE,
+      nullptr,
+      OPEN_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL,
+      nullptr
+    );
+    if (handle == INVALID_HANDLE_VALUE) {
+      return;
+    }
+    OVERLAPPED overlapped {};
+    if (!LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)) {
+      CloseHandle(handle);
+      return;
+    }
+    handle_ = handle;
+#else
+    // O_CLOEXEC keeps spawned session processes from inheriting the lock fd:
+    // flock lives on the open file description, so an inherited descriptor
+    // would keep the claim alive after the owner itself exits.
+    const int fd = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+    if (fd < 0) {
+      return;
+    }
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+      ::close(fd);
+      return;
+    }
+    fd_ = fd;
+#endif
+  }
+
+  bounded_log_owner_lock_t::~bounded_log_owner_lock_t() {
+#ifdef _WIN32
+    if (handle_ != nullptr) {
+      CloseHandle(handle_);
+    }
+#else
+    if (fd_ >= 0) {
+      ::close(fd_);
+    }
+#endif
+  }
+
+  bool bounded_log_owner_lock_t::owned() const {
+#ifdef _WIN32
+    return handle_ != nullptr;
+#else
+    return fd_ >= 0;
+#endif
   }
 }  // namespace logging
