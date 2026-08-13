@@ -13,6 +13,32 @@ root = Path.cwd()
 readme = root / "README.md"
 text = readme.read_text(encoding="utf-8")
 
+if len(re.findall(r"\b[\w'-]+\b", text)) >= 2000:
+    print("README must remain below 2,000 words", file=sys.stderr)
+    sys.exit(1)
+if re.search(r"(?im)^#{1,6}\s+.*(?:what(?:'s| is) new|latest release|release)\s*:?.*v\d", text):
+    print("README must not duplicate a version-specific release section", file=sys.stderr)
+    sys.exit(1)
+
+required_links = (
+    "https://papi-ux.com/polaris/",
+    "https://papi-ux.com/polaris/#themes",
+    "https://papi-ux.com/docs/quickstart/",
+    "https://papi-ux.com/docs/compatibility/",
+    "https://papi-ux.com/docs/faq/",
+    "https://papi-ux.com/docs/runtime/",
+    "https://papi-ux.com/docs/roadmap/",
+    "https://papi-ux.com/docs/changelog/",
+    "https://github.com/papi-ux/polaris/releases/latest",
+    "docs/changelog.md",
+    "SECURITY.md",
+    ".github/CONTRIBUTING.md",
+)
+for link in required_links:
+    if link not in text:
+        print(f"README is missing canonical link: {link}", file=sys.stderr)
+        sys.exit(1)
+
 targets = set()
 
 for match in re.finditer(r'\]\(([^)]+)\)', text):
@@ -37,6 +63,12 @@ if missing:
     for path in missing:
         print(f"  - {path}", file=sys.stderr)
     sys.exit(1)
+
+media = [root / target for target in targets if (root / target).suffix.lower() in {".gif", ".png", ".webp", ".webm", ".mp4"}]
+media_bytes = sum(path.stat().st_size for path in media)
+if media_bytes >= 1_000_000:
+    print(f"README embedded media must remain below 1 MB; found {media_bytes} bytes", file=sys.stderr)
+    sys.exit(1)
 PY
 
 expected_assets=(
@@ -59,14 +91,11 @@ variable_fedora_patterns=(
 )
 
 expected_nova_links=(
+  "https://papi-ux.com/nova/"
   "https://github.com/papi-ux/nova/releases/latest"
-  "https://github-store.org/app?repo=papi-ux/nova"
-  "versionExtractionRegEx%5C%22%3A%5C%22v%28.%2B%29"
-  "app-nonRoot_game-arm64-v8a-release.apk"
 )
 
 files_to_check=(
-  "README.md"
   "docs/building.md"
   "docs/changelog.md"
   ".github/workflows/build.yml"
@@ -1267,28 +1296,13 @@ for fact in required_release_facts:
         print(f"v1.3.8 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
-readme_release_body = markdown_section(
-    readme,
-    "## What is New in v1.3.8",
-    "## Install",
-)
-readme_release_prose = rendered_markdown(readme_release_body)
-required_readme_facts = required_release_facts
-for fact in required_readme_facts:
-    if fact not in readme_release_prose:
-        print(f"README v1.3.8 summary is missing: {fact}", file=sys.stderr)
-        sys.exit(1)
-
 asset_phrase = (
     "`Polaris-arch-x86_64.pkg.tar.zst`, "
     "`Polaris-fedora44-x86_64.rpm`, "
     "`Polaris-steamos3.8-x86_64.pkg.tar.zst`, and "
     "`Polaris-ubuntu24.04-x86_64.deb`"
 )
-for label, section in (
-    ("README v1.3.8 summary", readme_release_prose),
-    ("v1.3.8 changelog", current_release_prose),
-):
+for label, section in (("v1.3.8 changelog", current_release_prose),):
     if section.count(asset_phrase) != 1:
         print(f"{label} must contain the exact visible four-asset phrase", file=sys.stderr)
         sys.exit(1)
@@ -1306,7 +1320,6 @@ building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section in (
     ("docs/building.md Packaging", building_packaging_prose),
-    ("README v1.3.8 summary", readme_release_prose),
     ("v1.3.8 changelog", current_release_prose),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
