@@ -1364,6 +1364,11 @@ if "./scripts/check-public-docs.sh" in contributing:
     sys.exit(1)
 PY
 
+if ! grep -Fq "https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json" README.md; then
+  echo "README must link the published provenance manifest." >&2
+  exit 1
+fi
+
 if ! grep -Fq "## AI Transparency" README.md; then
   echo "README must keep the AI Transparency section." >&2
   exit 1
