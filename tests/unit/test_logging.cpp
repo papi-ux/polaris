@@ -242,3 +242,48 @@ TEST(LoggingGeneration, AutomaticRotationAdvancesGenerationAndKeepsBothFilesBoun
   ASSERT_TRUE(logging::clear_log_file());
   EXPECT_FALSE(std::filesystem::exists(backup));
 }
+
+TEST(LoggingOwnerLock, SecondInitFallsBackToConsoleAndLeavesOwnedFilesUntouched) {
+  namespace fs = std::filesystem;
+  const auto root = fs::temp_directory_path() / "polaris-logging-owner-lock";
+  std::error_code error;
+  fs::remove_all(root, error);
+  fs::create_directories(root);
+  const auto active = root / "polaris.log";
+  const std::string sentinel = "owned-by-another-process\n";
+  {
+    std::ofstream seed {active, std::ios::binary};
+    seed << sentinel;
+  }
+
+  {
+    // Simulate a live owner in another process: hold the sidecar lock.
+    logging::bounded_log_owner_lock_t owner {active.string() + ".lock"};
+    ASSERT_TRUE(owner.owned());
+
+    auto guard = logging::init(2, active.string());
+    ASSERT_TRUE(guard);
+    BOOST_LOG(info) << "must not reach the owned file";
+    logging::log_flush();
+
+    std::ifstream in {active, std::ios::binary};
+    std::stringstream contents;
+    contents << in.rdbuf();
+    EXPECT_EQ(contents.str(), sentinel);
+    EXPECT_FALSE(fs::exists(active.string() + ".backup"));
+  }
+
+  // With the owner gone, the same init inherits the prior log normally.
+  auto guard = logging::init(2, active.string());
+  ASSERT_TRUE(guard);
+  EXPECT_TRUE(fs::exists(active.string() + ".backup"));
+  guard.reset();
+
+  // Restore the harness's file logging for later suites; the environment's
+  // lifetime guard still tears logging down at binary exit, so this init's
+  // own guard is intentionally leaked rather than deinitializing on scope
+  // exit and leaving the shared log file sinkless.
+  (void) logging::init(0, test_paths::log_file().string()).release();
+
+  fs::remove_all(root, error);
+}
