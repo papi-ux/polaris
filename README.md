@@ -106,6 +106,16 @@ capture path, HDR mode, or experimental Browser Stream setup.
 - [Releases](https://github.com/papi-ux/polaris/releases) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 - [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md) · [Source](https://github.com/papi-ux/polaris)
 
+## AI Transparency
+
+Polaris is a maintainer-led project. I use AI-assisted tools as research,
+debugging, comparison, and drafting aids, especially when validating unfamiliar
+Linux compositor, packaging, and client behavior.
+
+Those tools do not decide what Polaris is or what ships. I review changes,
+test every aspect, and own the final decisions around validation,
+trust boundaries, and release quality.
+
 ## License
 
 Polaris is free and open-source software licensed under the [GNU General Public
