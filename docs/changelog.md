@@ -9,15 +9,16 @@ starts at `v1.0.0`.
 
 A safer private-stream daily driver: true-headless GPU-native capture, session-only launch choices, exact process ownership, an evidence-gated Doctor, bounded logs, benchmark controls, and a rebuilt web console.
 
-- Enables a true-headless Vulkan/ext-image-copy path with a prefetched initialization frame; the merged implementation head was exercised on the RTX 4090 host and Retroid Pocket 6 with changing frames and clean teardown, while the exact `v1.3.8` candidate still requires its final hash-bound device smoke
+- Enables a true-headless Vulkan/ext-image-copy path with a prefetched initialization frame
 - Accepts a validated session-only `streamMode` launch override, re-evaluates capture sources around that session, reports display fallback explicitly, and leaves the persisted host default untouched; matching client support is versioned separately in Nova `v1.3.6`
-- Owns detached-only workloads through exact PIDFD identity before detaching, signals and reaps only the captured session generation, stops retained private compositors safely, and hardens portal startup/cancellation and restore-token handling
+- Owns detached-only workloads through exact PIDFD identity before detaching, signals and reaps only the captured session generation, stops retained private compositors safely, recaptures demonstrably transient `/proc` races to bounded quiescence while persistent or ambiguous attribution remains fail-closed, and hardens portal startup/cancellation and restore-token handling
 - Exposes evidence-gated Doctor actions to recheck, perform one guarded bitrate reduction, restore a history-safe profile gradually, verify live telemetry, and Undo through the web console; matching Nova controls are versioned and released independently
 - Caps runtime diagnostics at an 8 MiB active file plus one 8 MiB backup, bounds console/file queues, preserves record-time timestamps, and exposes an authenticated binary-safe tail API with a bounded browser view and truthful truncation state
 - Adds authenticated bounded benchmark-run controls and T0-T2 host-stage evidence while keeping benchmark mode explicitly gated
 - Rebuilds Mission Control around one status hero, one live strip, the Doctor, a safer preview, and five Nova-aligned themes
 - Hardens render-node/GPU pairing, VAAPI-safe device selection, resume refresh restoration, HDR/YUV444 capability probes, virtual-display capture routing, and launch/resume status responses
-- Keeps current field-proof limits visible: the reporter's AMD 4K60 scenario and host-virtual-display route still need current-candidate end-to-end confirmation, and SteamOS remains an experimental Desktop Mode package
+- Records the bounded Retroid Pocket 6 release smoke of the exact source commit tagged as `v1.3.8`: true-headless `HEADLESS-1` capture, changing frames, session-only stream mode, durable Doctor apply/verify/Undo, exact-generation teardown, and clean restoration
+- Keeps the remaining field-proof limits visible: the reporter's AMD 4K60 scenario and host-virtual-display route still need current-`v1.3.8` end-to-end confirmation, and SteamOS remains an experimental Desktop Mode package
 - Keeps `npm audit --audit-level=high` mandatory
 - Retains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
 
