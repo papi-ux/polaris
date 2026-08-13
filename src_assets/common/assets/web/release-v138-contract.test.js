@@ -12,10 +12,8 @@ const sectionBetween = (source, startHeading, endHeading) => {
   return source.slice(start, end)
 }
 
-const releaseSections = () => [
-  sectionBetween(read('README.md'), '## What is New in v1.3.8', '## Install'),
-  sectionBetween(read('docs/changelog.md'), '## v1.3.8 - 2026-08-12', '## v1.3.7'),
-]
+const releaseSection = () =>
+  sectionBetween(read('docs/changelog.md'), '## v1.3.8 - 2026-08-12', '## v1.3.7')
 
 const requiredFacts = [
   'true-headless',
@@ -35,26 +33,24 @@ const expectedAssets = [
 ].sort()
 
 describe('v1.3.8 release contract', () => {
-  it('moves the CMake version and public release headings together', () => {
+  it('moves the CMake version and authoritative changelog heading together', () => {
     expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.3.8')
-    expect(read('README.md')).toContain('## What is New in v1.3.8')
+    expect(read('README.md')).not.toMatch(/^#{1,6}\s+.*(?:release|what is new).*v\d/im)
     expect(read('docs/changelog.md')).toContain('## v1.3.8 - 2026-08-12')
     expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.3.8"')
   })
 
-  it('states the release facts in both public summaries', () => {
-    for (const releaseSection of releaseSections()) {
-      for (const fact of requiredFacts) {
-        expect(releaseSection, `release summary must include: ${fact}`).toContain(fact)
-      }
+  it('states release facts in the authoritative changelog', () => {
+    for (const fact of requiredFacts) {
+      expect(releaseSection(), `release summary must include: ${fact}`).toContain(fact)
     }
   })
 
   it('aligns the public checker with the v1.3.8 release contract', () => {
     const publicDocsGate = read('scripts/check-public-docs.sh')
 
-    expect(publicDocsGate).toContain('"## What is New in v1.3.8"')
-    expect(publicDocsGate).not.toContain('"## What is New in v1.3.7"')
+    expect(publicDocsGate).toContain('README must not duplicate a version-specific release section')
+    expect(publicDocsGate).not.toContain('"## What is New in v1.3.8"')
     expect(publicDocsGate).toContain('"## v1.3.8 - 2026-08-12"')
     for (const asset of expectedAssets) {
       expect(publicDocsGate, `public checker must require: ${asset}`).toContain(asset)
