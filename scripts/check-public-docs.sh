@@ -1364,4 +1364,9 @@ if "./scripts/check-public-docs.sh" in contributing:
     sys.exit(1)
 PY
 
+if ! grep -Fq "## AI Transparency" README.md; then
+  echo "README must keep the AI Transparency section." >&2
+  exit 1
+fi
+
 echo "Public docs and release references look clean."
