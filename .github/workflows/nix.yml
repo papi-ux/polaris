@@ -9,6 +9,10 @@ name: Nix
 #   patch-stacks  needs no nix at all and runs in about a second, so it is also
 #                 wired into Public Hygiene and runs on every push.
 #   eval / build  install nix; scoped to changes that can reach them.
+#   web-ui-deps   just the npm-deps fixed-output derivation: no CUDA, no CMake,
+#                 seconds long. Runs on every package-lock.json move so a stale
+#                 npmDepsHash (see #392) surfaces on the PR that causes it
+#                 instead of waiting for the weekly polaris-stream run.
 #   polaris-stream  the CUDA build, far too heavy for every push: manual, plus a
 #                 weekly run so npm and source drift surfaces on its own.
 
@@ -19,6 +23,8 @@ on:
       - 'nix/**'
       - 'flake.nix'
       - 'flake.lock'
+      - 'package.json'
+      - 'package-lock.json'
       - 'scripts/check-nix-patches.py'
       - '.github/workflows/nix.yml'
   pull_request:
@@ -27,6 +33,8 @@ on:
       - 'nix/**'
       - 'flake.nix'
       - 'flake.lock'
+      - 'package.json'
+      - 'package-lock.json'
       - 'scripts/check-nix-patches.py'
       - '.github/workflows/nix.yml'
   schedule:
@@ -112,6 +120,27 @@ jobs:
         # Log only — the assertion already ran inside the derivation. Worth
         # printing so the stamp a session negotiates against is visible here.
         run: ./result/bin/gamescope --version || true
+
+  web-ui-deps:
+    name: Build polaris-stream npm deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://nixos.org/nix/install -o "$RUNNER_TEMP/install-nix.sh"
+          sh "$RUNNER_TEMP/install-nix.sh" --no-daemon --no-channel-add
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+      - name: Build the npm-deps fixed-output derivation
+        # Just the .ui attribute: npm install + vite build, no CUDA/CMake. This
+        # is the whole surface that npmDepsHash actually pins, so it is what
+        # would have failed on #319's package-lock.json move instead of the
+        # weekly polaris-stream run finding it five days later.
+        run: nix build --print-build-logs '.#polaris-stream.ui'
 
   polaris-stream:
     name: Build polaris-stream
