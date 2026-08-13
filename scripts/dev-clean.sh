@@ -99,14 +99,14 @@ cleanup_candidates() {
     arch-pkgbuild \
     test-results \
     playwright-report \
-    compile_commands.json
+    compile_commands.json \
+    third-party/build-deps
   do
     path_exists "$path" && printf '%s\n' "$path"
   done
 
   shopt -s nullglob
   for path in build-* cmake-*; do
-    [[ "$path" == "build-deps" ]] && continue
     path_exists "$path" && printf '%s\n' "$path"
   done
   shopt -u nullglob

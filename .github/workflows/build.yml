@@ -137,7 +137,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
             git submodule sync --recursive
-            if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
+            # Trees from before the build-deps submodule removal still pin its
+            # dead commit; skip it instead of gambling on the orphaned object.
+            if git -c protocol.version=2 -c submodule.third-party/build-deps.update=none submodule update --init --force --recursive --jobs 1; then
               exit 0
             fi
             echo "submodule update failed on attempt ${attempt}" >&2
@@ -438,7 +440,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
             git submodule sync --recursive
-            if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
+            # Trees from before the build-deps submodule removal still pin its
+            # dead commit; skip it instead of gambling on the orphaned object.
+            if git -c protocol.version=2 -c submodule.third-party/build-deps.update=none submodule update --init --force --recursive --jobs 1; then
               exit 0
             fi
             echo "submodule update failed on attempt ${attempt}" >&2
@@ -539,7 +543,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule sync --recursive
-          git submodule update --init --recursive
+          # Trees from before the build-deps submodule removal still pin its
+          # dead commit; skip it instead of gambling on the orphaned object.
+          git -c submodule.third-party/build-deps.update=none submodule update --init --recursive
 
       - name: Build and validate SteamOS 3.8 package
         run: |
@@ -583,7 +589,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
             git submodule sync --recursive
-            if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
+            # Trees from before the build-deps submodule removal still pin its
+            # dead commit; skip it instead of gambling on the orphaned object.
+            if git -c protocol.version=2 -c submodule.third-party/build-deps.update=none submodule update --init --force --recursive --jobs 1; then
               exit 0
             fi
             echo "submodule update failed on attempt ${attempt}" >&2
@@ -769,7 +777,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for attempt in 1 2 3 4 5; do
             git submodule sync --recursive
-            if git -c protocol.version=2 submodule update --init --force --recursive --jobs 1; then
+            # Trees from before the build-deps submodule removal still pin its
+            # dead commit; skip it instead of gambling on the orphaned object.
+            if git -c protocol.version=2 -c submodule.third-party/build-deps.update=none submodule update --init --force --recursive --jobs 1; then
               exit 0
             fi
             echo "submodule update failed on attempt ${attempt}" >&2

@@ -106,12 +106,12 @@ function(polaris_resolve_prepared_ffmpeg out_var)
 
   set(resolved_dir "")
 
-  if(POLARIS_DOWNLOAD_PREPARED_FFMPEG)
-    set(system_processor "${CMAKE_SYSTEM_PROCESSOR}")
-    if(NOT system_processor)
-      set(system_processor "${CMAKE_HOST_SYSTEM_PROCESSOR}")
-    endif()
+  set(system_processor "${CMAKE_SYSTEM_PROCESSOR}")
+  if(NOT system_processor)
+    set(system_processor "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+  endif()
 
+  if(POLARIS_DOWNLOAD_PREPARED_FFMPEG)
     polaris_prepared_ffmpeg_asset_name(asset_name "${CMAKE_SYSTEM_NAME}" "${system_processor}")
     if(asset_name)
       polaris_prepared_ffmpeg_asset_hash(asset_sha256 "${asset_name}")
@@ -152,8 +152,11 @@ function(polaris_resolve_prepared_ffmpeg out_var)
   endif()
 
   if(NOT resolved_dir)
-    set(resolved_dir
-        "${CMAKE_SOURCE_DIR}/third-party/build-deps/dist/${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+    message(FATAL_ERROR
+        "No prepared FFmpeg for ${CMAKE_SYSTEM_NAME}-${system_processor}: prepared "
+        "archive downloads are disabled or no pinned archive exists for this platform. "
+        "Set FFMPEG_PREPARED_BINARIES to a prepared FFmpeg directory, or enable "
+        "POLARIS_DOWNLOAD_PREPARED_FFMPEG on a platform with a pinned archive.")
   endif()
 
   polaris_validate_prepared_ffmpeg_dir("${resolved_dir}")
