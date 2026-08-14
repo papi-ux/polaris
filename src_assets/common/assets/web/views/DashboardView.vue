@@ -1276,10 +1276,10 @@ const doctorConfidenceLabel = computed(() => {
   return level ? t('dashboard.doctor_confidence', { level }) : ''
 })
 
-// The host describes a safe recovery action. Only /api/ endpoints are
-// reachable from this web server (the host also emits game-stream-server
-// endpoints like /polaris/v1/client-settings, which would 404 here), so
-// anything else renders as advice without an execute button.
+// The host describes a safe recovery action. Every executable action
+// targets this web server's own /api/doctor/action route; the /api/ gate
+// below is a defensive filter so a host emitting an endpoint this web
+// build cannot reach (version skew) degrades to advice, not a dead button.
 const doctorSafeAction = computed(() => {
   // Endpoint-less actions (export diagnostics, safer-next-launch) are real
   // host advice and render as advisory pills; only /api/ ones can execute.
