@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" role="presentation">
+  <style>
+    @keyframes pr{from{transform:scale(.6);opacity:.8}to{transform:scale(1.9);opacity:0}}
+    @media (prefers-reduced-motion: no-preference){.h{animation:pr 2.4s ease-out infinite;transform-origin:7px 7px}}
+  </style>
+  <circle class="h" cx="7" cy="7" r="3.2" fill="none" stroke="#c8d6e5" stroke-width="1.2" opacity="0"/>
+  <circle cx="7" cy="7" r="3.2" fill="#7c73ff"/>
+</svg>
