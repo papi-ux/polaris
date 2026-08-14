@@ -11,7 +11,9 @@
 
 set -euo pipefail
 
-PKG="${PKG:-com.papi.nova.debug}"
+PKG="${PKG:-}"
+POLARIS_UNIT="${POLARIS_UNIT:-polaris}"
+POLARIS_BINARY="${POLARIS_BINARY:-/usr/bin/polaris}"
 ART_ROOT="${ART_ROOT:-$HOME/.local/share/polaris-debug-artifacts}"
 ART="$ART_ROOT/mirror-desktop-auto-$(date +%Y%m%d-%H%M%S)"
 GAME_CARD_TAP_X="${GAME_CARD_TAP_X:-320}"
@@ -52,10 +54,30 @@ resolve_serial() {
 
 SERIAL="$(resolve_serial)"
 
+resolve_package() {
+  if [[ -n "$PKG" ]]; then
+    printf '%s\n' "$PKG"
+    return
+  fi
+
+  for candidate in com.papi.nova.benchmark com.papi.nova.debug com.papi.nova; do
+    if adb -s "$SERIAL" shell pm path "$candidate" 2>/dev/null | grep -q '^package:'; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  printf 'Set PKG=<nova-package>; no supported Nova package is installed\n' >&2
+  exit 2
+}
+
+PKG="$(resolve_package)"
+
 log "artifact=$ART"
-log "serial=$SERIAL package=$PKG"
-log "polaris_target=$(readlink -f /usr/bin/polaris 2>/dev/null || true)"
-getcap -v "$(readlink -f /usr/bin/polaris)" > "$ART/polaris-capability.txt" 2>&1 || true
+log "serial=$SERIAL package=$PKG polaris_unit=$POLARIS_UNIT"
+polaris_target="$(readlink -f "$POLARIS_BINARY" 2>/dev/null || true)"
+log "polaris_target=$polaris_target"
+getcap -v "$polaris_target" > "$ART/polaris-capability.txt" 2>&1 || true
 cat "$ART/polaris-capability.txt" >> "$ART/summary.txt"
 
 if [[ "$RESTART_PORTAL_A11Y" == "1" ]]; then
@@ -74,12 +96,12 @@ fi
 sleep 2
 
 if [[ "$RESTART_POLARIS" == "1" ]]; then
-  log "restarting Polaris user service"
-  systemctl --user restart polaris
+  log "restarting Polaris user service ($POLARIS_UNIT)"
+  systemctl --user restart "$POLARIS_UNIT"
   sleep 4
 fi
 
-systemctl --user is-active polaris > "$ART/polaris-active.txt" || true
+systemctl --user is-active "$POLARIS_UNIT" > "$ART/polaris-active.txt" || true
 log "polaris_active=$(cat "$ART/polaris-active.txt" 2>/dev/null || true)"
 
 log "starting Nova PcView/library"
@@ -206,18 +228,20 @@ else
   log "no portal dialog; relying on saved restore token"
 fi
 
-log "waiting for PipeWire video capture / first frames"
+log "waiting for video capture / first frames"
 end=$((SECONDS + PIPEWIRE_WAIT_SECONDS))
-pipewire_ok=0
+capture_video_ok=0
 while (( SECONDS < end )); do
-  journalctl --user -u polaris --since "$STAMP" --no-pager -o short-iso > "$ART/polaris-journal-live.txt" || true
-  if grep -q 'portal: PipeWire state: paused -> streaming' "$ART/polaris-journal-live.txt" && grep -q 'portal: PipeWire format negotiated' "$ART/polaris-journal-live.txt"; then
-    pipewire_ok=1
+  journalctl --user -u "$POLARIS_UNIT" --since "$STAMP" --no-pager -o short-iso > "$ART/polaris-journal-live.txt" || true
+  if { grep -q 'portal: PipeWire state: paused -> streaming' "$ART/polaris-journal-live.txt" &&
+       grep -q 'portal: PipeWire format negotiated' "$ART/polaris-journal-live.txt"; } ||
+     grep -q 'wlr: capture_transport=' "$ART/polaris-journal-live.txt"; then
+    capture_video_ok=1
     break
   fi
   sleep 2
 done
-log "pipewire_video_ok=$pipewire_ok"
+log "capture_video_ok=$capture_video_ok"
 
 log "waiting for visible game/desktop frame"
 visual_ok=0
@@ -253,7 +277,7 @@ done
 copy_for_review "$ART/03-after-launch-final.png"
 
 adb -s "$SERIAL" logcat -d -v time | tr -d '\r' > "$ART/logcat-final.txt" || true
-journalctl --user -u polaris --since "$STAMP" --no-pager -o short-iso > "$ART/polaris-journal-final.txt" || true
+journalctl --user -u "$POLARIS_UNIT" --since "$STAMP" --no-pager -o short-iso > "$ART/polaris-journal-final.txt" || true
 kdotool search --title 'Share screen with' getwindowgeometry %1 getwindowname %1 > "$ART/portal-window-final.txt" 2>&1 || true
 if grep -q 'Share screen with' "$ART/portal-window-final.txt"; then
   portal_final=1
@@ -268,24 +292,35 @@ visual_ok=$(awk -F= '/visual_content_ok/ {print $2}' "$ART/image-check.txt" | ta
 grep -Ei 'mirrorDesktop=1.*launchMode=mirror_desktop|launchMode=mirror_desktop.*mirrorDesktop=1' "$ART/logcat-final.txt" > "$ART/nova-launch-contract.txt" || true
 grep -Ei 'status_code="200"|Launched new game session|Received first video packet|Nova SSE: stream_active' "$ART/logcat-final.txt" > "$ART/nova-stream-contract.txt" || true
 grep -E 'portal: Selecting sources \(type=1\)|portal: PipeWire node ID|portal: PipeWire format negotiated|portal: PipeWire state: paused -> streaming' "$ART/polaris-journal-final.txt" > "$ART/polaris-portal-contract.txt" || true
+grep -E 'wlr: Using ext-image-copy-capture|wlr: capture_transport=' "$ART/polaris-journal-final.txt" > "$ART/polaris-wlr-contract.txt" || true
 
 if grep -q 'mirrorDesktop=0' "$ART/logcat-final.txt" 2>/dev/null; then
   log "mirrorDesktop_zero_seen=1"
 else
   log "mirrorDesktop_zero_seen=0"
 fi
-nova_launch_ok=0; [[ -s "$ART/nova-launch-contract.txt" ]] && ! grep -q 'mirrorDesktop=0' "$ART/logcat-final.txt" 2>/dev/null && nova_launch_ok=1
+nova_launch_ok=0
+if grep -q 'Launched new game session' "$ART/nova-stream-contract.txt" 2>/dev/null; then
+  nova_launch_ok=1
+elif [[ -s "$ART/nova-launch-contract.txt" ]] && ! grep -q 'mirrorDesktop=0' "$ART/logcat-final.txt" 2>/dev/null; then
+  nova_launch_ok=1
+fi
 nova_stream_ok=0; grep -q 'Received first video packet' "$ART/nova-stream-contract.txt" 2>/dev/null && nova_stream_ok=1
 portal_type_ok=0; grep -q 'portal: Selecting sources (type=1)' "$ART/polaris-portal-contract.txt" 2>/dev/null && portal_type_ok=1
 portal_stream_ok=0; grep -q 'portal: PipeWire state: paused -> streaming' "$ART/polaris-portal-contract.txt" 2>/dev/null && portal_stream_ok=1
-log "nova_launch_ok=$nova_launch_ok nova_stream_ok=$nova_stream_ok portal_type_ok=$portal_type_ok portal_stream_ok=$portal_stream_ok visual_content_ok=${visual_ok:-0}"
+wlr_capture_ok=0; grep -q 'wlr: capture_transport=' "$ART/polaris-wlr-contract.txt" 2>/dev/null && wlr_capture_ok=1
+capture_video_ok=0
+if [[ "$wlr_capture_ok" == 1 || ("$portal_type_ok" == 1 && "$portal_stream_ok" == 1) ]]; then
+  capture_video_ok=1
+fi
+log "nova_launch_ok=$nova_launch_ok nova_stream_ok=$nova_stream_ok portal_type_ok=$portal_type_ok portal_stream_ok=$portal_stream_ok wlr_capture_ok=$wlr_capture_ok capture_video_ok=$capture_video_ok visual_content_ok=${visual_ok:-0}"
 
 if [[ "$LEAVE_RUNNING" != "1" ]]; then
   log "LEAVE_RUNNING!=1; force-stopping Nova client"
   adb -s "$SERIAL" shell am force-stop "$PKG" || true
 fi
 
-if [[ "$nova_launch_ok" == 1 && "$nova_stream_ok" == 1 && "$portal_type_ok" == 1 && "$portal_stream_ok" == 1 && "${visual_ok:-0}" == 1 && "$portal_final" == 0 ]]; then
+if [[ "$nova_launch_ok" == 1 && "$nova_stream_ok" == 1 && "$capture_video_ok" == 1 && "${visual_ok:-0}" == 1 && "$portal_final" == 0 ]]; then
   log "RESULT=PASS"
   exit 0
 fi

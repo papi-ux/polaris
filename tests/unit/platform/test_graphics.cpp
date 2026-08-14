@@ -8,6 +8,7 @@
   #include <glad/gl.h>
   #include <src/platform/linux/graphics.h>
   #include <src/platform/linux/vaapi.h>
+  #include <src/platform/linux/x11grab.h>
 
   #include <filesystem>
   #include <fstream>
@@ -55,6 +56,17 @@ TEST(GraphicsTests, DrainErrorsReportsWhetherAnyErrorWasDrained) {
   EXPECT_TRUE(gl::drain_errors("test"));
 
   gl::ctx.GetError = original_get_error;
+}
+
+TEST(X11GrabTests, SharedMemoryFrameSizeRejectsUnrepresentableDimensions) {
+  const auto full_hd = platf::x11::checked_shm_frame_size(1920, 1080);
+  ASSERT_TRUE(full_hd.has_value());
+  EXPECT_EQ(*full_hd, 1920u * 1080u * 4u);
+
+  EXPECT_FALSE(platf::x11::checked_shm_frame_size(0, 1080).has_value());
+  EXPECT_FALSE(platf::x11::checked_shm_frame_size(1920, -1).has_value());
+  EXPECT_FALSE(platf::x11::checked_shm_frame_size(65536, 1080).has_value());
+  EXPECT_FALSE(platf::x11::checked_shm_frame_size(1920, 65536).has_value());
 }
 
 TEST(VaapiSourceContractTests, ConverterRetainsSurfacesAndPropagatesConversionFailure) {

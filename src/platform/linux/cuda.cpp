@@ -1625,24 +1625,33 @@ namespace cuda {
 
     class ctx_t {
     public:
-      ctx_t(NVFBC_SESSION_HANDLE handle) {
+      ctx_t(NVFBC_SESSION_HANDLE handle):
+          handle {handle} {
         NVFBC_BIND_CONTEXT_PARAMS params {NVFBC_BIND_CONTEXT_PARAMS_VER};
 
         if (func.nvFBCBindContext(handle, &params)) {
           BOOST_LOG(error) << "Couldn't bind NvFBC context to current thread: " << func.nvFBCGetLastErrorStr(handle);
+          return;
         }
-
-        this->handle = handle;
+        bound = true;
       }
 
       ~ctx_t() {
+        if (!bound) {
+          return;
+        }
         NVFBC_RELEASE_CONTEXT_PARAMS params {NVFBC_RELEASE_CONTEXT_PARAMS_VER};
         if (func.nvFBCReleaseContext(handle, &params)) {
           BOOST_LOG(error) << "Couldn't release NvFBC context from current thread: " << func.nvFBCGetLastErrorStr(handle);
         }
       }
 
-      NVFBC_SESSION_HANDLE handle;
+      explicit operator bool() const {
+        return bound;
+      }
+
+      NVFBC_SESSION_HANDLE handle {0};
+      bool bound {false};
     };
 
     class handle_t {
@@ -1772,7 +1781,7 @@ namespace cuda {
 
       std::bitset<MAX_FLAGS> handle_flags;
 
-      NVFBC_SESSION_HANDLE handle;
+      NVFBC_SESSION_HANDLE handle {0};
     };
 
     class display_t: public platf::display_t {
@@ -1784,6 +1793,9 @@ namespace cuda {
         }
 
         ctx_t ctx {handle->handle};
+        if (!ctx) {
+          return -1;
+        }
 
         auto status_params = handle->status();
         if (!status_params) {
@@ -1805,6 +1817,10 @@ namespace cuda {
           }
         }
 
+        if (config.framerate <= 0) {
+          BOOST_LOG(error) << "Invalid NvFBC capture framerate: "sv << config.framerate;
+          return -1;
+        }
         delay = std::chrono::nanoseconds {1s} / config.framerate;
 
         capture_params = NVFBC_CREATE_CAPTURE_SESSION_PARAMS {NVFBC_CREATE_CAPTURE_SESSION_PARAMS_VER};
@@ -1852,6 +1868,9 @@ namespace cuda {
         cursor_visible = !*cursor;
 
         ctx_t ctx {handle.handle};
+        if (!ctx) {
+          return platf::capture_e::error;
+        }
         auto fg = util::fail_guard([&]() {
           handle.reset();
         });
@@ -1920,8 +1939,8 @@ namespace cuda {
 
         // If trying to capture directly, test if it actually does.
         if (capture_params.bAllowDirectCapture) {
-          CUdeviceptr device_ptr;
-          NVFBC_FRAME_GRAB_INFO info;
+          CUdeviceptr device_ptr {};
+          NVFBC_FRAME_GRAB_INFO info {};
 
           NVFBC_TOCUDA_GRAB_FRAME_PARAMS grab {
             NVFBC_TOCUDA_GRAB_FRAME_PARAMS_VER,
@@ -1974,8 +1993,8 @@ namespace cuda {
           }
         }
 
-        CUdeviceptr device_ptr;
-        NVFBC_FRAME_GRAB_INFO info;
+        CUdeviceptr device_ptr {};
+        NVFBC_FRAME_GRAB_INFO info {};
 
         NVFBC_TOCUDA_GRAB_FRAME_PARAMS grab {
           NVFBC_TOCUDA_GRAB_FRAME_PARAMS_VER,
