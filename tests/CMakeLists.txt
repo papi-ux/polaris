@@ -116,6 +116,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_labwc_render_device_source.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_platform_hardening_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_stream_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_prepared_ffmpeg.cpp
@@ -155,6 +156,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_default_render_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_linux_process_argv.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_portal_grab_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_input.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
