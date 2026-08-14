@@ -70,32 +70,52 @@ TEST(VirtualDisplayTests, WaylandProbeAllowsPreInitWaylandEnvironment) {
 
 TEST(VirtualDisplayTests, HyprlandOutputNameIsPolarisOwnedAndProcessScoped) {
   EXPECT_EQ(
-    virtual_display::hyprland_output_name_for_pid(4242),
-    "POLARIS-HEADLESS-4242"
+    virtual_display::hyprland_output_name_for_pid(4242, 0),
+    "POLARIS-HEADLESS-4242-0"
   );
-  EXPECT_TRUE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-4242"));
+  EXPECT_TRUE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-4242-0"));
   EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("HEADLESS-1"));
   EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-"));
   EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-user"));
+  EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-4242-"));
+  EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-4242-a"));
+}
+
+TEST(VirtualDisplayTests, HyprlandSlotSuffixSeparatesConcurrentDisplaysInOneProcess) {
+  // A streaming session and the web UI each create a display in the same
+  // process; distinct slots are what keep them from colliding on one connector.
+  EXPECT_NE(
+    virtual_display::hyprland_output_name_for_pid(4242, 0),
+    virtual_display::hyprland_output_name_for_pid(4242, 1)
+  );
+  EXPECT_TRUE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-4242-1"));
+
+  // An output left behind by a Polaris that predates the slot suffix stays
+  // removable, so an upgrade does not strand it in the compositor.
+  EXPECT_TRUE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-4242"));
 }
 
 TEST(VirtualDisplayTests, HyprlandMonitorLookupDoesNotSelectExistingHeadlessOutput) {
   constexpr auto monitors = R"json([
     {"name":"HEADLESS-1"},
-    {"name":"POLARIS-HEADLESS-4242"}
+    {"name":"POLARIS-HEADLESS-4242-0"}
   ])json";
 
   EXPECT_TRUE(virtual_display::hyprland_monitors_contain_output(
     monitors,
-    "POLARIS-HEADLESS-4242"
+    "POLARIS-HEADLESS-4242-0"
   ));
   EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
     monitors,
-    "POLARIS-HEADLESS-9999"
+    "POLARIS-HEADLESS-4242-1"
+  ));
+  EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
+    monitors,
+    "POLARIS-HEADLESS-9999-0"
   ));
   EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
     "not json",
-    "POLARIS-HEADLESS-4242"
+    "POLARIS-HEADLESS-4242-0"
   ));
 }
 

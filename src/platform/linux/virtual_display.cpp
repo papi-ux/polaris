@@ -23,6 +23,8 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <signal.h>
 #include <sstream>
 #include <thread>
@@ -215,8 +217,8 @@ namespace virtual_display {
     return platform_reports_wayland || !wayland_display.empty();
   }
 
-  std::string hyprland_output_name_for_pid(int pid) {
-    return "POLARIS-HEADLESS-" + std::to_string(pid);
+  std::string hyprland_output_name_for_pid(int pid, int slot) {
+    return "POLARIS-HEADLESS-" + std::to_string(pid) + "-" + std::to_string(slot);
   }
 
   bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name) {
@@ -239,18 +241,45 @@ namespace virtual_display {
 
   bool hyprland_output_is_polaris_owned(std::string_view output_name) {
     constexpr std::string_view prefix = "POLARIS-HEADLESS-";
-    if (!output_name.starts_with(prefix) || output_name.size() == prefix.size()) {
+    if (!output_name.starts_with(prefix)) {
       return false;
     }
 
-    for (const char c : output_name.substr(prefix.size())) {
-      if (c < '0' || c > '9') {
-        return false;
-      }
+    const auto all_digits = [](std::string_view value) {
+      return !value.empty() && value.find_first_not_of("0123456789"sv) == std::string_view::npos;
+    };
+
+    // <pid> is still accepted alongside <pid>-<slot> so an output left behind by
+    // a Polaris that predates the slot suffix stays removable after an upgrade.
+    const auto suffix = output_name.substr(prefix.size());
+    const auto separator = suffix.find('-');
+    if (separator == std::string_view::npos) {
+      return all_digits(suffix);
     }
 
-    return true;
+    return all_digits(suffix.substr(0, separator)) && all_digits(suffix.substr(separator + 1));
   }
+
+  namespace {
+    constexpr int hyprland_max_output_slots = 16;
+
+    // Connector names this process currently has spoken for. A streaming session
+    // (proc::linux_vdisplay) and the web UI (confighttp::ui_vdisplay) each own an
+    // independent virtual display in the same process and cannot see each other,
+    // so the reservation is what stops them requesting the same connector.
+    std::mutex hyprland_reserved_names_mutex;
+    std::set<std::string> hyprland_reserved_names;
+
+    bool hyprland_reserve_output_name(const std::string &output_name) {
+      std::lock_guard lock {hyprland_reserved_names_mutex};
+      return hyprland_reserved_names.insert(output_name).second;
+    }
+
+    void hyprland_release_output_name(const std::string &output_name) {
+      std::lock_guard lock {hyprland_reserved_names_mutex};
+      hyprland_reserved_names.erase(output_name);
+    }
+  }  // namespace
 
   // ---------------------------------------------------------------------------
   // EVDI backend — dynamically loaded libevdi
@@ -953,11 +982,35 @@ namespace virtual_display {
       if (compositor == "hyprland") {
         // Request a process-scoped name so an existing user-owned HEADLESS-N
         // output can never be selected, reconfigured, or removed by Polaris.
-        output_name = hyprland_output_name_for_pid(getpid());
+        // The slot suffix keeps the name unique per display rather than per
+        // process: a session launch and the web UI can hold one each, and a
+        // create that timed out before Hyprland published its output leaves an
+        // orphan that occupies one slot instead of wedging the process.
         const std::string monitors_before = exec_cmd("hyprctl monitors -j 2>/dev/null");
-        if (hyprland_monitors_contain_output(monitors_before, output_name)) {
-          BOOST_LOG(warning) << "Virtual display: refusing to reuse existing Hyprland output ["sv
-                             << output_name << "]"sv;
+        for (int slot = 0; slot < hyprland_max_output_slots && output_name.empty(); ++slot) {
+          std::string candidate = hyprland_output_name_for_pid(getpid(), slot);
+          if (!hyprland_reserve_output_name(candidate)) {
+            // A live display in this process already holds the slot.
+            continue;
+          }
+
+          if (hyprland_monitors_contain_output(monitors_before, candidate)) {
+            // In the compositor but reserved by nothing: an orphan from an
+            // earlier create of ours that materialized after we gave up on it.
+            // The name is ours by construction, so removing it is safe. Take the
+            // next slot either way — removal may not land before we need a name.
+            BOOST_LOG(info) << "Virtual display: removing orphaned Hyprland output ["sv
+                            << candidate << "]"sv;
+            exec_cmd_rc("hyprctl output remove " + candidate + " >/dev/null 2>&1");
+            hyprland_release_output_name(candidate);
+            continue;
+          }
+
+          output_name = std::move(candidate);
+        }
+
+        if (output_name.empty()) {
+          BOOST_LOG(warning) << "Virtual display: no free Hyprland output slot for pid "sv << getpid();
           return std::nullopt;
         }
 
@@ -966,6 +1019,7 @@ namespace virtual_display {
         if (result != "ok") {
           BOOST_LOG(warning) << "Virtual display: Hyprland rejected headless output creation for ["sv
                              << output_name << "]"sv;
+          hyprland_release_output_name(output_name);
           return std::nullopt;
         }
 
@@ -985,7 +1039,11 @@ namespace virtual_display {
         if (!output_appeared) {
           BOOST_LOG(warning) << "Virtual display: created Hyprland output did not appear ["sv
                              << output_name << "]"sv;
+          // Best effort: the output may still materialize after this removal
+          // runs. Releasing the reservation lets the next create recognize it as
+          // an orphan and clear it rather than inheriting a name it cannot use.
           exec_cmd_rc("hyprctl output remove " + output_name + " >/dev/null 2>&1");
+          hyprland_release_output_name(output_name);
           return std::nullopt;
         }
 
@@ -1056,6 +1114,7 @@ namespace virtual_display {
         if (rc != 0) {
           BOOST_LOG(warning) << "Virtual display: hyprctl output remove failed (rc="sv << rc << ")"sv;
         }
+        hyprland_release_output_name(display.output_name);
       }
       else if (compositor == "sway") {
         // Sway doesn't have a direct "remove output" command for headless outputs,

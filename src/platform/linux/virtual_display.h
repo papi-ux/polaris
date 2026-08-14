@@ -96,9 +96,13 @@ namespace virtual_display {
   bool wayland_backend_probe_allowed(bool platform_reports_wayland, std::string_view wayland_display);
 
   /**
-   * @brief Build the process-scoped connector name requested from Hyprland.
+   * @brief Build the connector name requested from Hyprland for one virtual display.
+   *
+   * The pid keeps the name out of the user's HEADLESS-N namespace; the slot keeps
+   * concurrent displays in the same process — a streaming session and the web UI —
+   * from requesting the same connector.
    */
-  std::string hyprland_output_name_for_pid(int pid);
+  std::string hyprland_output_name_for_pid(int pid, int slot);
 
   /**
    * @brief Return whether a Hyprland monitor JSON response contains an exact output name.
