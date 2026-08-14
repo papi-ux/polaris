@@ -79,4 +79,10 @@ namespace platf {
    */
   std::string default_vaapi_render_device();
 
+  /**
+   * @brief Run a program with an explicit argument vector, without a shell.
+   * @return The exit status, or 128 + signal for a signaled child.
+   */
+  int run_process_argv(const std::vector<std::string> &argv);
+
 }  // namespace platf

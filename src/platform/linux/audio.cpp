@@ -789,7 +789,11 @@ namespace platf {
       ctx_t ctx;
       std::string requested_sink;
       // Last time we moved a given sink-input (avoid 1Hz thrash with EasyEffects).
-      std::unordered_map<std::uint32_t, std::chrono::steady_clock::time_point> routed_sink_inputs;
+      struct routed_sink_input_t {
+        pid_t pid;
+        std::chrono::steady_clock::time_point moved_at;
+      };
+      std::unordered_map<std::uint32_t, routed_sink_input_t> routed_sink_inputs;
       // Local hear-through: capture virtual sink.monitor → host default (EE/speakers).
       std::uint32_t local_loopback_module = PA_INVALID_INDEX;
 
@@ -1258,6 +1262,11 @@ namespace platf {
           return;
         }
 
+        const auto routing_started_at = std::chrono::steady_clock::now();
+        std::erase_if(routed_sink_inputs, [&](const auto &entry) {
+          return routing_started_at - entry.second.moved_at >= std::chrono::seconds {10};
+        });
+
         struct sink_input_route_t {
           std::uint32_t index;
           std::uint32_t current_sink;
@@ -1283,14 +1292,6 @@ namespace platf {
           if (input_info->sink == *target_sink) {
             return;
           }
-          // Cooldown: EE reclaim was thrashing at 1Hz (crackle). Re-pin at most every 10s.
-          const auto now = std::chrono::steady_clock::now();
-          if (const auto it = routed_sink_inputs.find(input_info->index); it != routed_sink_inputs.end()) {
-            if (now - it->second < std::chrono::seconds {10}) {
-              return;
-            }
-          }
-
           const char *pid_text = pa_proplist_gets(input_info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
           if (!pid_text || !*pid_text) {
             return;
@@ -1303,6 +1304,12 @@ namespace platf {
           }
 
           const auto pid = static_cast<pid_t>(pid_long);
+          // PulseAudio recycles sink-input indices. Apply the EasyEffects
+          // cooldown only when the index still belongs to the same process.
+          if (const auto it = routed_sink_inputs.find(input_info->index);
+              it != routed_sink_inputs.end() && it->second.pid == pid) {
+            return;
+          }
           if (!process_env_has_session_audio_sink(pid, sink)) {
             return;
           }
@@ -1332,7 +1339,7 @@ namespace platf {
         }
 
         for (const auto &route : routes) {
-          routed_sink_inputs[route.index] = std::chrono::steady_clock::now();
+          routed_sink_inputs[route.index] = routed_sink_input_t {route.pid, std::chrono::steady_clock::now()};
 
           BOOST_LOG(info) << "Linux audio isolation: moving session audio stream ["sv
                           << route.app_name << "] pid="sv << route.pid

@@ -710,7 +710,7 @@ namespace platf {
       display = iter.data;
       seg = xcb::generate_id(xcb.get());
 
-      shm_id.id = shmget(IPC_PRIVATE, frame_size(), IPC_CREAT | 0777);
+      shm_id.id = shmget(IPC_PRIVATE, frame_size(), IPC_CREAT | 0600);
       if (shm_id.id == -1) {
         BOOST_LOG(error) << "shmget failed"sv;
         return -1;

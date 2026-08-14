@@ -130,6 +130,7 @@ namespace wl {
     dmabuf_t &operator=(dmabuf_t &&) = delete;
 
     void listen(zwlr_screencopy_manager_v1 *screencopy_manager, zwp_linux_dmabuf_v1 *dmabuf_interface, wl_output *output, bool blend_cursor = false, wl_shm *shm = nullptr);
+    void cancel();
     void set_feedback(const dmabuf_feedback_t *feedback) {
       this->feedback = feedback;
     }
@@ -161,13 +162,24 @@ namespace wl {
     } shm_info;
 
   private:
+    struct pending_buffer_create_t {
+      dmabuf_t *self {};
+      frame_t *target {};
+      zwlr_screencopy_frame_v1 *frame {};
+      zwp_linux_buffer_params_v1 *params {};
+      int wl_buffer_fd {-1};
+    };
+
     bool init_gbm();
     void cleanup_gbm();
     void create_and_copy_dmabuf(zwlr_screencopy_frame_v1 *frame);
+    void destroy_capture_frame(zwlr_screencopy_frame_v1 *frame);
 
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
     wl_shm *shm_global {nullptr};
     const dmabuf_feedback_t *feedback {nullptr};
+    zwlr_screencopy_frame_v1 *pending_frame {nullptr};
+    pending_buffer_create_t *pending_buffer_create {nullptr};
 
     struct {
       bool supported {false};

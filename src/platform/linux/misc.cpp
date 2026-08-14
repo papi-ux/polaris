@@ -24,8 +24,10 @@
 #include <pthread.h>
 #include <pwd.h>
 #include <sched.h>
+#include <spawn.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 
 // lib includes
 #include <boost/asio/ip/address.hpp>
@@ -242,6 +244,42 @@ namespace dyn {
 namespace platf {
   using ifaddr_t = util::safe_ptr<ifaddrs, freeifaddrs>;
 
+  int run_process_argv(const std::vector<std::string> &argv) {
+    if (argv.empty() || argv.front().empty()) {
+      return 127;
+    }
+
+    std::vector<char *> native_argv;
+    native_argv.reserve(argv.size() + 1);
+    for (const auto &argument : argv) {
+      native_argv.push_back(const_cast<char *>(argument.c_str()));
+    }
+    native_argv.push_back(nullptr);
+
+    pid_t child = -1;
+    const int spawn_result = posix_spawnp(&child, native_argv.front(), nullptr, nullptr, native_argv.data(), environ);
+    if (spawn_result != 0) {
+      BOOST_LOG(warning) << "Failed to launch ["sv << argv.front() << "]: "sv << strerror(spawn_result);
+      return 127;
+    }
+
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      BOOST_LOG(warning) << "Failed to wait for ["sv << argv.front() << "]: "sv << strerror(errno);
+      return 127;
+    }
+    if (WIFEXITED(status)) {
+      return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+      return 128 + WTERMSIG(status);
+    }
+    return 127;
+  }
+
   ifaddr_t get_ifaddrs() {
     ifaddrs *p {nullptr};
 
@@ -416,54 +454,82 @@ std::string get_local_ip_for_gateway() {
     return "";
   }
 
-  char buffer[8192];
-  struct nlmsghdr *nlMsg = (struct nlmsghdr *)buffer;
-  struct rtmsg *rtMsg = (struct rtmsg *)NLMSG_DATA(nlMsg);
-  struct rtattr *rtAttr;
-  int len = 0;
+  struct {
+    nlmsghdr header;
+    rtmsg route;
+  } request {};
+  request.header.nlmsg_len = NLMSG_LENGTH(sizeof(rtmsg));
+  request.header.nlmsg_type = RTM_GETROUTE;
+  request.header.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
+  request.header.nlmsg_seq = 1;
+  request.header.nlmsg_pid = getpid();
+  request.route.rtm_family = AF_INET;
 
-  memset(nlMsg, 0, sizeof(struct nlmsghdr));
-  nlMsg->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
-  nlMsg->nlmsg_type = RTM_GETROUTE;
-  nlMsg->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
-  nlMsg->nlmsg_seq = 1;
-  nlMsg->nlmsg_pid = getpid();
-
-  if (send(fd, nlMsg, nlMsg->nlmsg_len, 0) < 0) {
+  if (::send(fd, &request, request.header.nlmsg_len, 0) < 0) {
     BOOST_LOG(warning) << "Send message failed: " << strerror(errno);
     close(fd);
     return "";
   }
 
   std::string local_ip;
-  bool found = false;
+  bool done = false;
+  alignas(nlmsghdr) char buffer[8192];
 
-  while ((len = recv(fd, nlMsg, sizeof(buffer), 0)) > 0) {
-    for (; NLMSG_OK(nlMsg, len); nlMsg = NLMSG_NEXT(nlMsg, len)) {
-      if (nlMsg->nlmsg_type == NLMSG_DONE) {
-        found = true;
+  while (!done) {
+    const auto bytes = ::recv(fd, buffer, sizeof(buffer), 0);
+    if (bytes < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      BOOST_LOG(warning) << "Route receive failed: " << strerror(errno);
+      break;
+    }
+    if (bytes == 0) {
+      break;
+    }
+
+    int remaining = static_cast<int>(bytes);
+    for (auto *message = reinterpret_cast<nlmsghdr *>(buffer);
+         NLMSG_OK(message, remaining);
+         message = NLMSG_NEXT(message, remaining)) {
+      if (message->nlmsg_type == NLMSG_DONE) {
+        done = true;
         break;
       }
+      if (message->nlmsg_type == NLMSG_ERROR) {
+        BOOST_LOG(warning) << "Route dump returned a netlink error"sv;
+        done = true;
+        break;
+      }
+      if (message->nlmsg_len < NLMSG_LENGTH(sizeof(rtmsg))) {
+        continue;
+      }
 
-      rtMsg = (struct rtmsg *)NLMSG_DATA(nlMsg);
-      if (rtMsg->rtm_family != AF_INET || rtMsg->rtm_table != RT_TABLE_MAIN)
+      auto *route = static_cast<rtmsg *>(NLMSG_DATA(message));
+      if (route->rtm_family != AF_INET || route->rtm_table != RT_TABLE_MAIN)
         continue;
 
-      rtAttr = (struct rtattr *)RTM_RTA(rtMsg);
-      int rtLen = RTM_PAYLOAD(nlMsg);
+      auto *attribute = RTM_RTA(route);
+      int attribute_bytes = RTM_PAYLOAD(message);
 
       in_addr gateway;
       in_addr local;
       memset(&gateway, 0, sizeof(gateway));
       memset(&local, 0, sizeof(local));
 
-      for (; RTA_OK(rtAttr, rtLen); rtAttr = RTA_NEXT(rtAttr, rtLen)) {
-        switch(rtAttr->rta_type) {
+      for (; RTA_OK(attribute, attribute_bytes); attribute = RTA_NEXT(attribute, attribute_bytes)) {
+        if (RTA_PAYLOAD(attribute) < sizeof(std::uint32_t)) {
+          continue;
+        }
+
+        std::uint32_t address = 0;
+        std::memcpy(&address, RTA_DATA(attribute), sizeof(address));
+        switch(attribute->rta_type) {
           case RTA_GATEWAY:
-            gateway.s_addr = *reinterpret_cast<uint32_t *>(RTA_DATA(rtAttr));
+            gateway.s_addr = address;
             break;
           case RTA_PREFSRC:
-            local.s_addr = *reinterpret_cast<uint32_t *>(RTA_DATA(rtAttr));
+            local.s_addr = address;
             break;
           default:
             break;
@@ -472,12 +538,10 @@ std::string get_local_ip_for_gateway() {
 
       if (gateway.s_addr != 0 && local.s_addr != 0) {
         local_ip = inet_ntoa(local);
-        found = true;
+        done = true;
         break;
       }
     }
-
-    if (found) break;
   }
 
   close(fd);

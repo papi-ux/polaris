@@ -1249,26 +1249,33 @@ namespace virtual_display {
       // Set mode and enable the output
       std::string mode_str = std::to_string(width) + "x" + std::to_string(height) +
                              "@" + std::to_string(fps);
-      std::string cmd = "kscreen-doctor output." + output + ".enable "
-                        "output." + output + ".mode." + mode_str + " "
-                        "output." + output + ".priority.1";
+      std::vector<std::string> args {
+        "kscreen-doctor",
+        "output." + output + ".enable",
+        "output." + output + ".mode." + mode_str,
+        "output." + output + ".priority.1",
+      };
 
       if (!cfg.primary_output.empty()) {
-        cmd += " output." + cfg.primary_output + ".priority.2";
+        args.push_back("output." + cfg.primary_output + ".priority.2");
       }
 
-      BOOST_LOG(info) << "Virtual display: kscreen-doctor enable ["sv << cmd << "]"sv;
-      int rc = exec_cmd_rc(cmd);
+      BOOST_LOG(info) << "Virtual display: running kscreen-doctor enable with "sv << args.size() - 1 << " argument(s)"sv;
+      int rc = platf::run_process_argv(args);
       if (rc != 0) {
         BOOST_LOG(warning) << "Virtual display: kscreen-doctor enable failed (rc="sv << rc << ")"sv;
 
         // Try without explicit mode setting (just enable)
-        cmd = "kscreen-doctor output." + output + ".enable output." + output + ".priority.1";
+        args = {
+          "kscreen-doctor",
+          "output." + output + ".enable",
+          "output." + output + ".priority.1",
+        };
         if (!cfg.primary_output.empty()) {
-          cmd += " output." + cfg.primary_output + ".priority.2";
+          args.push_back("output." + cfg.primary_output + ".priority.2");
         }
 
-        rc = exec_cmd_rc(cmd);
+        rc = platf::run_process_argv(args);
         if (rc != 0) {
           BOOST_LOG(error) << "Virtual display: kscreen-doctor fallback enable also failed (rc="sv << rc << ")"sv;
           return std::nullopt;
@@ -1295,15 +1302,15 @@ namespace virtual_display {
     static void destroy(vdisplay_t &display) {
       const auto &cfg = config::video.linux_display;
 
-      std::string cmd = "kscreen-doctor";
+      std::vector<std::string> args {"kscreen-doctor"};
       if (!cfg.primary_output.empty()) {
-        cmd += " output." + cfg.primary_output + ".priority.1";
+        args.push_back("output." + cfg.primary_output + ".priority.1");
       }
-      cmd += " output." + display.output_name + ".priority.2"
-             " output." + display.output_name + ".disable";
+      args.push_back("output." + display.output_name + ".priority.2");
+      args.push_back("output." + display.output_name + ".disable");
 
-      BOOST_LOG(info) << "Virtual display: kscreen-doctor disable ["sv << cmd << "]"sv;
-      int rc = exec_cmd_rc(cmd);
+      BOOST_LOG(info) << "Virtual display: running kscreen-doctor disable with "sv << args.size() - 1 << " argument(s)"sv;
+      int rc = platf::run_process_argv(args);
       if (rc != 0) {
         BOOST_LOG(warning) << "Virtual display: kscreen-doctor disable failed (rc="sv << rc << ")"sv;
       }
