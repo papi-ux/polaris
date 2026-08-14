@@ -15,6 +15,7 @@
 #include "src/video.h"
 #include "vaapi.h"
 #include "wayland.h"
+#include "wlgrab_capture_policy.h"
 #include "wlgrab_frame_source.h"
 #include "wlgrab_pixel_copy.h"
 
@@ -692,6 +693,10 @@ namespace platf {
 
     bool prefer_ram_capture = (hwdevice_type == platf::mem_type_e::system);
     const bool gpu_native_capture_supported = wl::supports_gpu_native_capture(hwdevice_type);
+    const auto direct_capture_path = wlgrab_capture_policy::select_direct_capture_path(
+      hwdevice_type,
+      gpu_native_capture_supported
+    );
     bool prefer_linear_dmabuf = false;
     bool using_headless_ram_capture = false;
     bool try_headless_extcopy_dmabuf = false;
@@ -745,6 +750,15 @@ namespace platf {
       }
     }
 #endif
+
+    if (!prefer_ram_capture &&
+        gpu_native_capture_supported &&
+        (!config::video.linux_display.use_cage_compositor || !stream_runtime::labwc::is_running()) &&
+        direct_capture_path == wlgrab_capture_policy::direct_capture_path_e::ram) {
+      prefer_ram_capture = true;
+      BOOST_LOG(warning)
+        << "wlr: Using RAM capture path for the direct Wayland desktop because GPU-native DMA-BUF is disabled for VAAPI stability"sv;
+    }
 
     if (!prefer_ram_capture && !gpu_native_capture_supported) {
       BOOST_LOG(info)
