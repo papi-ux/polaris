@@ -211,6 +211,47 @@ namespace virtual_display {
     return WEXITSTATUS(ret);
   }
 
+  bool wayland_backend_probe_allowed(bool platform_reports_wayland, std::string_view wayland_display) {
+    return platform_reports_wayland || !wayland_display.empty();
+  }
+
+  std::string hyprland_output_name_for_pid(int pid) {
+    return "POLARIS-HEADLESS-" + std::to_string(pid);
+  }
+
+  bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name) {
+    const auto monitors = nlohmann::json::parse(monitors_json, nullptr, false);
+    if (!monitors.is_array()) {
+      return false;
+    }
+
+    for (const auto &monitor : monitors) {
+      if (monitor.is_object() &&
+          monitor.contains("name") &&
+          monitor["name"].is_string() &&
+          monitor["name"].get_ref<const std::string &>() == output_name) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  bool hyprland_output_is_polaris_owned(std::string_view output_name) {
+    constexpr std::string_view prefix = "POLARIS-HEADLESS-";
+    if (!output_name.starts_with(prefix) || output_name.size() == prefix.size()) {
+      return false;
+    }
+
+    for (const char c : output_name.substr(prefix.size())) {
+      if (c < '0' || c > '9') {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // EVDI backend — dynamically loaded libevdi
   // ---------------------------------------------------------------------------
@@ -868,7 +909,16 @@ namespace virtual_display {
      * @brief Check if the Wayland headless backend is available.
      */
     static bool is_available() {
-      if (window_system != window_system_e::WAYLAND) {
+      std::string_view wayland_display;
+#ifdef POLARIS_BUILD_WAYLAND
+      if (const char *value = std::getenv("WAYLAND_DISPLAY")) {
+        wayland_display = value;
+      }
+#endif
+      if (!wayland_backend_probe_allowed(
+            window_system == window_system_e::WAYLAND,
+            wayland_display
+          )) {
         return false;
       }
 
@@ -901,25 +951,42 @@ namespace virtual_display {
       std::string output_name;
 
       if (compositor == "hyprland") {
-        // Hyprland: create a headless output
-        std::string result = exec_cmd("hyprctl output create headless 2>&1");
-        BOOST_LOG(info) << "Virtual display: hyprctl output create headless: "sv << result;
-
-        // Give compositor time to set up the output
-        std::this_thread::sleep_for(500ms);
-
-        // Find the new HEADLESS output
-        std::string monitors = exec_cmd("hyprctl monitors -j 2>/dev/null");
-        // Parse the output name from the JSON - look for HEADLESS-N
-        // Simple approach: find "HEADLESS-" pattern in output
-        size_t pos = monitors.rfind("HEADLESS-");
-        if (pos != std::string::npos) {
-          size_t end = monitors.find_first_of("\",} \n", pos);
-          output_name = monitors.substr(pos, end - pos);
+        // Request a process-scoped name so an existing user-owned HEADLESS-N
+        // output can never be selected, reconfigured, or removed by Polaris.
+        output_name = hyprland_output_name_for_pid(getpid());
+        const std::string monitors_before = exec_cmd("hyprctl monitors -j 2>/dev/null");
+        if (hyprland_monitors_contain_output(monitors_before, output_name)) {
+          BOOST_LOG(warning) << "Virtual display: refusing to reuse existing Hyprland output ["sv
+                             << output_name << "]"sv;
+          return std::nullopt;
         }
 
-        if (output_name.empty()) {
-          output_name = "HEADLESS-1";
+        std::string result = exec_cmd("hyprctl output create headless " + output_name + " 2>&1");
+        BOOST_LOG(info) << "Virtual display: hyprctl output create headless: "sv << result;
+        if (result != "ok") {
+          BOOST_LOG(warning) << "Virtual display: Hyprland rejected headless output creation for ["sv
+                             << output_name << "]"sv;
+          return std::nullopt;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        bool output_appeared = false;
+        do {
+          if (hyprland_monitors_contain_output(
+                exec_cmd("hyprctl monitors -j 2>/dev/null"),
+                output_name
+              )) {
+            output_appeared = true;
+            break;
+          }
+          std::this_thread::sleep_for(50ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        if (!output_appeared) {
+          BOOST_LOG(warning) << "Virtual display: created Hyprland output did not appear ["sv
+                             << output_name << "]"sv;
+          exec_cmd_rc("hyprctl output remove " + output_name + " >/dev/null 2>&1");
+          return std::nullopt;
         }
 
         // Set resolution and refresh rate
@@ -978,6 +1045,12 @@ namespace virtual_display {
       std::string compositor = detect_compositor();
 
       if (compositor == "hyprland") {
+        if (!hyprland_output_is_polaris_owned(display.output_name)) {
+          BOOST_LOG(warning) << "Virtual display: refusing to remove unowned Hyprland output ["sv
+                             << display.output_name << "]"sv;
+          display.active = false;
+          return;
+        }
         std::string cmd = "hyprctl output remove " + display.output_name;
         int rc = exec_cmd_rc(cmd);
         if (rc != 0) {

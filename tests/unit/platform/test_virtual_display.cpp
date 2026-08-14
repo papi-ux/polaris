@@ -4,6 +4,10 @@
  */
 #include "../../tests_common.h"
 
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
 #ifdef __linux__
   #include <src/platform/linux/virtual_display.h>
 
@@ -56,6 +60,65 @@ TEST(VirtualDisplayTests, KscreenDoctorRequiresConfiguredStreamingOutput) {
   EXPECT_TRUE(virtual_display::backend_has_required_configuration(
     virtual_display::backend_e::KSCREEN_DOCTOR,
     "HDMI-A-1"));
+}
+
+TEST(VirtualDisplayTests, WaylandProbeAllowsPreInitWaylandEnvironment) {
+  EXPECT_TRUE(virtual_display::wayland_backend_probe_allowed(false, "wayland-1"));
+  EXPECT_TRUE(virtual_display::wayland_backend_probe_allowed(true, ""));
+  EXPECT_FALSE(virtual_display::wayland_backend_probe_allowed(false, ""));
+}
+
+TEST(VirtualDisplayTests, HyprlandOutputNameIsPolarisOwnedAndProcessScoped) {
+  EXPECT_EQ(
+    virtual_display::hyprland_output_name_for_pid(4242),
+    "POLARIS-HEADLESS-4242"
+  );
+  EXPECT_TRUE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-4242"));
+  EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("HEADLESS-1"));
+  EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-"));
+  EXPECT_FALSE(virtual_display::hyprland_output_is_polaris_owned("POLARIS-HEADLESS-user"));
+}
+
+TEST(VirtualDisplayTests, HyprlandMonitorLookupDoesNotSelectExistingHeadlessOutput) {
+  constexpr auto monitors = R"json([
+    {"name":"HEADLESS-1"},
+    {"name":"POLARIS-HEADLESS-4242"}
+  ])json";
+
+  EXPECT_TRUE(virtual_display::hyprland_monitors_contain_output(
+    monitors,
+    "POLARIS-HEADLESS-4242"
+  ));
+  EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
+    monitors,
+    "POLARIS-HEADLESS-9999"
+  ));
+  EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
+    "not json",
+    "POLARIS-HEADLESS-4242"
+  ));
+}
+
+TEST(VirtualDisplayTests, FailedVirtualDisplayRequestNeverStreamsPhysicalOutput) {
+  const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/process.cpp";
+  std::ifstream input {path};
+  std::ostringstream buffer;
+  buffer << input.rdbuf();
+  const auto source = buffer.str();
+  ASSERT_FALSE(source.empty());
+
+  const auto request = source.find("const bool should_use_linux_virtual_display");
+  const auto fallback_end = source.find("} else if (using_headless_cage)", request);
+  ASSERT_NE(request, std::string::npos);
+  ASSERT_NE(fallback_end, std::string::npos);
+  const auto launch_path = source.substr(request, fallback_end - request);
+
+  EXPECT_EQ(launch_path.find("streams the host's current output instead"), std::string::npos);
+  EXPECT_NE(launch_path.find("refusing to stream the host's current output"), std::string::npos);
+
+  const auto first_failure = launch_path.find("return 503;");
+  ASSERT_NE(first_failure, std::string::npos);
+  EXPECT_NE(launch_path.find("return 503;", first_failure + 1), std::string::npos);
 }
 #else
 TEST(VirtualDisplayTests, LinuxOnly) {

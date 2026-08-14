@@ -13,6 +13,7 @@
 // standard includes
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace virtual_display {
 
@@ -85,6 +86,29 @@ namespace virtual_display {
    * and then fail launch with a 503 when no output was configured.
    */
   bool backend_has_required_configuration(backend_e backend, const std::string &streaming_output);
+
+  /**
+   * @brief Decide whether the Wayland backend may be probed before or after platform init.
+   *
+   * App discovery runs before platf::init() populates the global window-system
+   * state. WAYLAND_DISPLAY is therefore also authoritative for that early probe.
+   */
+  bool wayland_backend_probe_allowed(bool platform_reports_wayland, std::string_view wayland_display);
+
+  /**
+   * @brief Build the process-scoped connector name requested from Hyprland.
+   */
+  std::string hyprland_output_name_for_pid(int pid);
+
+  /**
+   * @brief Return whether a Hyprland monitor JSON response contains an exact output name.
+   */
+  bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name);
+
+  /**
+   * @brief Return whether an output name belongs to Polaris's Hyprland namespace.
+   */
+  bool hyprland_output_is_polaris_owned(std::string_view output_name);
 
   /**
    * @brief Human-readable reason a virtual display cannot be created right now.
