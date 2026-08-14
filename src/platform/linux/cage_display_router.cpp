@@ -20,6 +20,7 @@
 #include "../../logging.h"
 #include "misc.h"
 #include "private_session_input.h"
+#include "wlgrab_capture_policy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -890,7 +891,7 @@ namespace cage_display_router {
   }
 
   bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type) {
-    return hwdevice_type == platf::mem_type_e::cuda;
+    return wlgrab_capture_policy::gpu_native_dmabuf_is_safe(hwdevice_type);
   }
 
   bool should_attempt_headless_extcopy_dmabuf(
