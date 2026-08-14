@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="docs/screenshots/Polaris_fulllogo_2.svg" width="250" alt="Polaris" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/Polaris_fulllogo_2.svg">
+  <img src="docs/screenshots/Polaris_fulllogo_2_light.svg" width="250" alt="Polaris">
+</picture>
 
 **Linux-only, self-hosted game streaming that keeps the stream off your desktop.**
 
@@ -8,9 +11,9 @@ Polaris launches games in an isolated Linux compositor, streams them to Nova or
 Moonlight-compatible clients, and explains the active capture, encoder, client,
 and runtime path in one web console.
 
-[![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1a1a2e)](https://github.com/papi-ux/polaris/stargazers)
-[![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
+[![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1f1d31)](https://github.com/papi-ux/polaris/stargazers)
+[![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1f1d31)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=c8d6e5&labelColor=1f1d31&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
 [**Explore Polaris**](https://papi-ux.com/polaris/) ·
 [**Download**](https://github.com/papi-ux/polaris/releases/latest) ·
@@ -18,6 +21,8 @@ and runtime path in one web console.
 [Compatibility](https://papi-ux.com/docs/compatibility/)
 
 </div>
+
+<img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
 > [!IMPORTANT]
 > Polaris is a Linux host application by design. Windows and macOS host ports
@@ -28,16 +33,20 @@ and runtime path in one web console.
 
 ## Why Polaris
 
-- **A private streaming desktop.** Headless Stream runs a game in its own
-  compositor instead of changing your physical monitor layout.
-- **Operational truth, not a mystery box.** Mission Control shows the chosen
-  runtime, capture path, encoder, viewers, latency, loss, and Doctor guidance.
-- **A client-aware launch model.** Nova can present available display modes,
-  session ownership, safe disconnects, and host-backed tuning before and during
-  play.
-- **Local-first and open.** Pairing state, permissions, library data, and core
-  streaming remain on your host. Optional AI features use only the provider you
-  configure.
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/screenshots/glyph-isolation.svg" width="22" height="22" alt=""><br>
+<b>A private streaming desktop.</b> Headless Stream runs a game in its own compositor instead of changing your physical monitor layout.</td>
+<td width="50%" valign="top"><img src="docs/screenshots/glyph-truth.svg" width="22" height="22" alt=""><br>
+<b>Operational truth, not a mystery box.</b> Mission Control shows the chosen runtime, capture path, encoder, viewers, latency, loss, and Doctor guidance.</td>
+</tr>
+<tr>
+<td valign="top"><img src="docs/screenshots/glyph-client.svg" width="22" height="22" alt=""><br>
+<b>A client-aware launch model.</b> Nova can present available display modes, session ownership, safe disconnects, and host-backed tuning before and during play.</td>
+<td valign="top"><img src="docs/screenshots/glyph-local.svg" width="22" height="22" alt=""><br>
+<b>Local-first and open.</b> Pairing state, permissions, library data, and core streaming remain on your host. Optional AI features use only the provider you configure.</td>
+</tr>
+</table>
 
 ## How isolation works
 
@@ -51,7 +60,7 @@ and runtime path in one web console.
 Read the [runtime guide](https://papi-ux.com/docs/runtime/) for the detailed
 Headless Stream, virtual-display, and desktop-mirroring behavior.
 
-## Ready, live, and back to the library
+## <img src="docs/screenshots/pulse-ready.svg" width="14" height="14" alt=""> Ready, live, and back to the library
 
 The same Mission Control surface changes from an idle host with a paired client
 to an active stream with live telemetry, Doctor status, and the resolved GPU
@@ -64,10 +73,15 @@ Ultimate Edition leads this representative Aurora capture.
 
 ![Polaris Aurora Library with Control Ultimate Edition and other ready games](docs/screenshots/polaris-library-control-v1.3.8.webp)
 
-See motion and compare Portable Chrome, Console OLED, Miami Nebula, and High
-Contrast in the [website theme gallery](https://papi-ux.com/polaris/#themes).
+<p align="center">
+  <a href="https://papi-ux.com/polaris/#themes"><img src="docs/screenshots/theme-cycle.webp" width="720" alt="Mission Control cycling through the Portable Chrome, Console OLED, Miami Nebula, and High Contrast themes"></a><br>
+  <a href="https://papi-ux.com/polaris/#themes"><img src="docs/screenshots/theme-dots.svg" height="14" alt="Theme accent colors"></a><br>
+  <sub><a href="https://papi-ux.com/polaris/#themes">Compare every theme in the website gallery</a></sub>
+</p>
 
 Every capture above and across [papi-ux.com](https://papi-ux.com/polaris/) comes from the tagged public release; the [pixel-level provenance manifest](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json) ships with the site.
+
+<img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
 ## Install and start a first stream
 
@@ -99,6 +113,8 @@ metadata are naturally limited there. Check the maintained [compatibility
 guide](https://papi-ux.com/docs/compatibility/) before choosing a distro, GPU,
 capture path, HDR mode, or experimental Browser Stream setup.
 
+<img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
+
 ## Documentation and project links
 
 - [Documentation](https://papi-ux.com/docs/) · [FAQ](https://papi-ux.com/docs/faq/) · [Runtime](https://papi-ux.com/docs/runtime/)
@@ -128,3 +144,16 @@ Contributions are welcome, especially focused fixes, docs, translations, packagi
 
 Polaris is free and open-source software licensed under the [GNU General Public
 License v3.0](LICENSE).
+
+<div align="center">
+
+<img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/polaris-icon-darkmode.svg">
+  <img src="docs/screenshots/polaris-icon-lightmode.svg" width="56" alt="Polaris mascot">
+</picture>
+
+<sub>[Website](https://papi-ux.com/polaris/) · [Documentation](https://papi-ux.com/docs/) · [Releases](https://github.com/papi-ux/polaris/releases) · [Security](SECURITY.md)</sub>
+
+</div>
