@@ -421,6 +421,10 @@ namespace platf {
 
       int get_crtc_index_by_id(std::uint32_t crtc_id) {
         auto resources = res();
+        if (!resources) {
+          BOOST_LOG(error) << "Couldn't get CRTC resources"sv;
+          return -1;
+        }
         for (int i = 0; i < resources->count_crtcs; i++) {
           if (resources->crtcs[i] == crtc_id) {
             return i;
@@ -443,6 +447,10 @@ namespace platf {
         std::vector<connector_t> monitors;
         std::for_each_n(resources->connectors, resources->count_connectors, [this, &conn_type_count, &monitors](std::uint32_t id) {
           auto conn = connector(id);
+          if (!conn) {
+            BOOST_LOG(warning) << "DRM connector disappeared while enumerating id="sv << id;
+            return;
+          }
 
           std::uint32_t crtc_id = 0;
 
