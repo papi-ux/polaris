@@ -3553,8 +3553,41 @@ namespace confighttp {
     }
   }
 
+  namespace {
+    // Doctor actions mutate the live stream, but their legitimate cadence is
+    // tiny: one click, a verify re-post every 8 seconds, and possibly an undo.
+    // The house 20-per-10s default (see benchmark_control_rate_limiter) never
+    // brushes that while still bounding a runaway retry loop, and it runs
+    // before authenticate() so unauthenticated floods are bounded too.
+    confighttp::benchmark_auth::rate_limiter_t &doctor_action_rate_limiter() {
+      static confighttp::benchmark_auth::rate_limiter_t limiter(20, std::chrono::seconds(10));
+      return limiter;
+    }
+  }  // namespace
+
   void runDoctorAction(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+    if (!validateContentType(response, request, "application/json")) {
+      return;
+    }
+
+    const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    auto &limiter = doctor_action_rate_limiter();
+    const auto now = std::chrono::steady_clock::now();
+    const bool rate_limited = limiter.is_rate_limited(address, now);
+    limiter.record_request(address, now);
+    if (rate_limited) {
+      BOOST_LOG(warning) << "Doctor action: ["sv << address << "] -- rate limited"sv;
+      nlohmann::json tree;
+      tree["status"] = false;
+      tree["changed"] = false;
+      tree["error"] = "Too many requests. Please try again later.";
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(SimpleWeb::StatusCode::client_error_too_many_requests, tree.dump(), headers);
+      return;
+    }
+
+    if (!authenticate(response, request)) {
       return;
     }
     print_req(request);

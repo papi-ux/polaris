@@ -6,6 +6,7 @@
 #include <src/stream_stats.h>
 #include <src/config.h>
 #include <src/doctor_actions.h>
+#include <src/adaptive_bitrate.h>
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -785,6 +786,84 @@ TEST(DoctorActionTests, QualityRetryClimbsAtMostTwentyFivePercentPerCheck) {
   EXPECT_EQ(doctor_actions::guarded_quality_retry_target(7580, 20000), 9475);
   EXPECT_EQ(doctor_actions::guarded_quality_retry_target(18000, 20000), 20000);
   EXPECT_EQ(doctor_actions::guarded_quality_retry_target(20000, 20000), 20000);
+}
+
+TEST(DoctorActionTests, ExecuteRefusesLiveTuningAndStaleUndoWithoutAStream) {
+  stream_stats::update_stream_active(false);
+
+  const auto blocked = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(blocked.at("status").get<bool>());
+  EXPECT_FALSE(blocked.at("changed").get<bool>());
+  EXPECT_EQ(blocked.at("state"), "needs_stream");
+  EXPECT_EQ(blocked.at("error"), "Start the affected stream before Doctor applies or verifies a live fix.");
+  EXPECT_TRUE(blocked.contains("evidence"));
+
+  const auto stale_undo = doctor_actions::execute({{"action_id", "undo"}, {"run_id", "doctor-run-missing"}});
+  EXPECT_FALSE(stale_undo.at("status").get<bool>());
+  EXPECT_EQ(stale_undo.at("error"), "This Doctor undo is no longer available.");
+}
+
+TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
+  // Earlier suites in this binary leave adaptive_bitrate process state
+  // behind (set_max_bitrate mutates the clamp ceiling itself); normalize
+  // the two pieces this arc depends on before seeding telemetry.
+  adaptive_bitrate::set_max_bitrate(100000);
+  adaptive_bitrate::set_enabled(false);
+
+  stream_stats::update_stream_active(true, "DoctorContractTest", "203.0.113.7");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+  // One calm reading arms the risk tracker past its warm-up grace before the
+  // elevated readings land (network_risk_tracker_t debounces both edges).
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+
+  const auto clean = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(clean.at("status").get<bool>());
+  EXPECT_EQ(clean.at("state"), "evidence_changed");
+
+  const auto unsupported = doctor_actions::execute({{"action_id", "defragment_stream"}});
+  EXPECT_FALSE(unsupported.at("status").get<bool>());
+  EXPECT_EQ(unsupported.at("error"), "Unsupported Doctor action.");
+
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+  ASSERT_TRUE(stream_stats::get_current().network_risk);
+
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  EXPECT_TRUE(applied.at("changed").get<bool>());
+  EXPECT_EQ(applied.at("state"), "watching");
+  EXPECT_EQ(applied.at("applied").at("bitrate_kbps"), 16000);
+  EXPECT_EQ(applied.at("before").at("bitrate_kbps"), 20000);
+  EXPECT_EQ(applied.at("verification").at("delay_seconds"), 8);
+  const auto run_id = applied.at("run_id").get<std::string>();
+  ASSERT_FALSE(run_id.empty());
+  EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 16000);
+
+  const auto wrong_run = doctor_actions::execute({{"action_id", "verify"}, {"run_id", "doctor-run-imposter"}});
+  EXPECT_FALSE(wrong_run.at("status").get<bool>());
+  EXPECT_EQ(wrong_run.at("state"), "expired");
+
+  const auto watching = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  EXPECT_TRUE(watching.at("status").get<bool>());
+  EXPECT_FALSE(watching.at("changed").get<bool>());
+  EXPECT_EQ(watching.at("state"), "watching");
+  EXPECT_TRUE(watching.at("undo").at("available").get<bool>());
+
+  const auto undone = doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  EXPECT_TRUE(undone.at("status").get<bool>());
+  EXPECT_TRUE(undone.at("changed").get<bool>());
+  EXPECT_EQ(undone.at("state"), "undone");
+  EXPECT_EQ(undone.at("restored_bitrate_kbps"), 20000);
+  EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 0);
+
+  const auto replay = doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  EXPECT_FALSE(replay.at("status").get<bool>());
+  EXPECT_EQ(replay.at("error"), "This Doctor undo is no longer available.");
+
+  stream_stats::update_stream_active(false);
 }
 
 TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {
