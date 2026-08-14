@@ -549,10 +549,15 @@ namespace cuda {
       CU_CHECK(cdf->cuGraphicsMapResources(2, resources, stream.get()), "Couldn't map GL textures in CUDA");
 
       // Copy from the GL textures to the target CUDA frame
+      bool copy_failed = false;
       for (int i = 0; i < 2; i++) {
         CUDA_MEMCPY2D cpy = {};
         cpy.srcMemoryType = CU_MEMORYTYPE_ARRAY;
-        CU_CHECK(cdf->cuGraphicsSubResourceGetMappedArray(&cpy.srcArray, resources[i], 0, 0), "Couldn't get mapped plane array");
+        if (check(cdf->cuGraphicsSubResourceGetMappedArray(&cpy.srcArray, resources[i], 0, 0),
+              "Couldn't get mapped plane array: "sv)) {
+          copy_failed = true;
+          break;
+        }
 
         cpy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
         cpy.dstDevice = (CUdeviceptr) frame->data[i];
@@ -560,12 +565,18 @@ namespace cuda {
         cpy.WidthInBytes = (frame->width * fmt_desc->comp[i].step) >> (i ? fmt_desc->log2_chroma_w : 0);
         cpy.Height = frame->height >> (i ? fmt_desc->log2_chroma_h : 0);
 
-        CU_CHECK_IGNORE(cdf->cuMemcpy2DAsync(&cpy, stream.get()), "Couldn't copy texture to CUDA frame");
+        if (check(cdf->cuMemcpy2DAsync(&cpy, stream.get()), "Couldn't copy texture to CUDA frame: "sv)) {
+          copy_failed = true;
+          break;
+        }
       }
 
       // Unmap the textures to allow modification from GL again
-      CU_CHECK(cdf->cuGraphicsUnmapResources(2, resources, stream.get()), "Couldn't unmap GL textures from CUDA");
-      return 0;
+      const bool unmap_failed = check(
+        cdf->cuGraphicsUnmapResources(2, resources, stream.get()),
+        "Couldn't unmap GL textures from CUDA: "sv
+      );
+      return copy_failed || unmap_failed ? -1 : 0;
     }
 
     /**
@@ -1097,7 +1108,11 @@ namespace cuda {
 
     bool ensure_destination(const layout_t &frame_layout) {
       if (destination_buffer) {
-        return destination_copy_size == frame_layout.copy_size && destination_pitch == frame_layout.pitch;
+        if (destination_copy_size == frame_layout.copy_size &&
+            destination_pitch == frame_layout.pitch && destination_texture) {
+          return true;
+        }
+        release_destination();
       }
       VkExternalMemoryBufferCreateInfo external_info {
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
@@ -1313,7 +1328,7 @@ namespace cuda {
       }
       // Recreate destination texture when packed format changes (8-bit vs 10-bit).
       if (source_fourcc && source_fourcc != descriptor.sd.fourcc) {
-        release_cuda_destination();
+        release_destination();
       }
       source_fourcc = descriptor.sd.fourcc;
       if (!device || !ensure_destination(*frame_layout)) {
@@ -1415,17 +1430,27 @@ namespace cuda {
       }
     }
 
+    void release_destination() {
+      release_cuda_destination();
+      if (device && destination_buffer) {
+        vkDestroyBuffer(device, destination_buffer, nullptr);
+      }
+      if (device && destination_memory) {
+        vkFreeMemory(device, destination_memory, nullptr);
+      }
+      destination_buffer = VK_NULL_HANDLE;
+      destination_memory = VK_NULL_HANDLE;
+      destination_allocation_size = 0;
+      destination_copy_size = 0;
+      destination_pitch = 0;
+    }
+
     void release_vulkan() {
       if (device) {
         vkDeviceWaitIdle(device);
+        release_destination();
         for (auto &source : sources) {
           release_source(source);
-        }
-        if (destination_buffer) {
-          vkDestroyBuffer(device, destination_buffer, nullptr);
-        }
-        if (destination_memory) {
-          vkFreeMemory(device, destination_memory, nullptr);
         }
         if (fence) {
           vkDestroyFence(device, fence, nullptr);

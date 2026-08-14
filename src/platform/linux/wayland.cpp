@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 
 // platform includes
 #include <drm_fourcc.h>
@@ -14,6 +15,7 @@
 #include <gbm.h>
 #include <limits.h>
 #include <poll.h>
+#include <utility>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -45,13 +47,6 @@ namespace wl {
       std::uint32_t format;
       std::uint32_t pad;
       std::uint64_t modifier;
-    };
-
-    struct pending_buffer_create_t {
-      dmabuf_t *self {};
-      frame_t *target {};
-      zwlr_screencopy_frame_v1 *frame {};
-      int wl_buffer_fd {-1};
     };
 
     struct pending_extcopy_buffer_create_t {
@@ -665,6 +660,7 @@ namespace wl {
     bool blend_cursor,
     wl_shm *shm
   ) {
+    cancel();
     this->dmabuf_interface = dmabuf_interface;
     this->shm_global = shm;
     // Reset state
@@ -672,22 +668,23 @@ namespace wl {
     dmabuf_info.supported = false;
 
     // Create new frame
-    auto frame = zwlr_screencopy_manager_v1_capture_output(
+    pending_frame = zwlr_screencopy_manager_v1_capture_output(
       screencopy_manager,
       blend_cursor ? 1 : 0,
       output
     );
 
     // Store frame data pointer for callbacks
-    zwlr_screencopy_frame_v1_set_user_data(frame, this);
+    zwlr_screencopy_frame_v1_set_user_data(pending_frame, this);
 
     // Add listener
-    zwlr_screencopy_frame_v1_add_listener(frame, &listener, this);
+    zwlr_screencopy_frame_v1_add_listener(pending_frame, &listener, this);
 
     status = WAITING;
   }
 
   dmabuf_t::~dmabuf_t() {
+    cancel();
     cleanup_gbm();
 
     for (auto &frame : frames) {
@@ -699,6 +696,34 @@ namespace wl {
       gbm_device_destroy(gbm_device);
       gbm_device = nullptr;
     }
+  }
+
+  void dmabuf_t::destroy_capture_frame(zwlr_screencopy_frame_v1 *frame) {
+    if (!frame) {
+      return;
+    }
+    if (pending_frame == frame) {
+      pending_frame = nullptr;
+    }
+    zwlr_screencopy_frame_v1_destroy(frame);
+  }
+
+  void dmabuf_t::cancel() {
+    if (pending_buffer_create) {
+      auto *pending = std::exchange(pending_buffer_create, nullptr);
+      if (pending->params) {
+        zwp_linux_buffer_params_v1_destroy(pending->params);
+      }
+      if (pending->wl_buffer_fd >= 0) {
+        close(pending->wl_buffer_fd);
+      }
+      pending->target->destroy();
+      delete pending;
+    }
+    if (pending_frame) {
+      destroy_capture_frame(pending_frame);
+    }
+    status = READY;
   }
 
   // Buffer format callback
@@ -747,7 +772,7 @@ namespace wl {
   void dmabuf_t::create_and_copy_dmabuf(zwlr_screencopy_frame_v1 *frame) {
     if (!init_gbm()) {
       BOOST_LOG(error) << "Failed to initialize GBM"sv;
-      zwlr_screencopy_frame_v1_destroy(frame);
+      destroy_capture_frame(frame);
       status = REINIT;
       return;
     }
@@ -838,7 +863,7 @@ namespace wl {
     if (!needs_new_buffer) {
       if (!populate_capture_descriptor(*next_frame)) {
         next_frame->destroy();
-        zwlr_screencopy_frame_v1_destroy(frame);
+        destroy_capture_frame(frame);
         status = REINIT;
         return;
       }
@@ -936,7 +961,7 @@ namespace wl {
                        << " format="sv << dmabuf_info.format
                        << " flags="sv << bo_flags
                        << " render_node=["sv << path_for_fd(gbm_device_get_fd(gbm_device)) << ']';
-      zwlr_screencopy_frame_v1_destroy(frame);
+      destroy_capture_frame(frame);
       status = REINIT;
       return;
     }
@@ -956,7 +981,7 @@ namespace wl {
 
     if (!populate_capture_descriptor(*next_frame)) {
       next_frame->destroy();
-      zwlr_screencopy_frame_v1_destroy(frame);
+      destroy_capture_frame(frame);
       status = REINIT;
       return;
     }
@@ -968,7 +993,7 @@ namespace wl {
     if (wl_buffer_fd < 0) {
       BOOST_LOG(error) << "Failed to get buffer FD for wl_buffer creation"sv;
       next_frame->destroy();
-      zwlr_screencopy_frame_v1_destroy(frame);
+      destroy_capture_frame(frame);
       status = REINIT;
       return;
     }
@@ -988,8 +1013,10 @@ namespace wl {
       .self = this,
       .target = next_frame,
       .frame = frame,
+      .params = params,
       .wl_buffer_fd = wl_buffer_fd,
     };
+    pending_buffer_create = pending;
     zwp_linux_buffer_params_v1_add_listener(params, &params_listener, pending);
     zwp_linux_buffer_params_v1_create(params, dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, 0);
   }
@@ -1025,7 +1052,7 @@ namespace wl {
       create_and_copy_shm(frame);
     } else {
       BOOST_LOG(error) << "No supported buffer types"sv;
-      zwlr_screencopy_frame_v1_destroy(frame);
+      destroy_capture_frame(frame);
       status = REINIT;
     }
   }
@@ -1037,7 +1064,9 @@ namespace wl {
     struct wl_buffer *buffer
   ) {
     auto pending = std::unique_ptr<pending_buffer_create_t>(static_cast<pending_buffer_create_t *>(data));
+    pending->self->pending_buffer_create = nullptr;
     zwp_linux_buffer_params_v1_destroy(params);
+    pending->params = nullptr;
 
     pending->target->buffer = buffer;
     if (pending->wl_buffer_fd >= 0) {
@@ -1054,7 +1083,9 @@ namespace wl {
     struct zwp_linux_buffer_params_v1 *params
   ) {
     auto pending = std::unique_ptr<pending_buffer_create_t>(static_cast<pending_buffer_create_t *>(data));
+    pending->self->pending_buffer_create = nullptr;
     zwp_linux_buffer_params_v1_destroy(params);
+    pending->params = nullptr;
     BOOST_LOG(error) << "Failed to create buffer from params"sv;
     if (pending->wl_buffer_fd >= 0) {
       close(pending->wl_buffer_fd);
@@ -1062,7 +1093,7 @@ namespace wl {
     }
     pending->target->destroy();
 
-    zwlr_screencopy_frame_v1_destroy(pending->frame);
+    pending->self->destroy_capture_frame(pending->frame);
     pending->self->status = REINIT;
   }
 
@@ -1070,7 +1101,7 @@ namespace wl {
   void dmabuf_t::create_and_copy_shm(zwlr_screencopy_frame_v1 *frame) {
     if (!shm_global) {
       BOOST_LOG(error) << "SHM: No wl_shm global available"sv;
-      zwlr_screencopy_frame_v1_destroy(frame);
+      destroy_capture_frame(frame);
       status = REINIT;
       return;
     }
@@ -1086,12 +1117,20 @@ namespace wl {
 
     if (needs_new_buffer) {
       cleanup_shm();
-      shm_size = shm_info.stride * shm_info.height;
+      if (shm_info.height == 0 || shm_info.stride == 0 ||
+          static_cast<std::size_t>(shm_info.stride) > std::numeric_limits<std::size_t>::max() / shm_info.height ||
+          static_cast<std::size_t>(shm_info.stride) * shm_info.height > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        BOOST_LOG(error) << "Invalid SHM screencopy buffer size"sv;
+        destroy_capture_frame(frame);
+        status = REINIT;
+        return;
+      }
+      shm_size = static_cast<std::size_t>(shm_info.stride) * shm_info.height;
 
       shm_fd = memfd_create("polaris-screencopy", MFD_CLOEXEC);
       if (shm_fd < 0) {
         BOOST_LOG(error) << "Failed to create memfd for SHM screencopy"sv;
-        zwlr_screencopy_frame_v1_destroy(frame);
+        destroy_capture_frame(frame);
         status = REINIT;
         return;
       }
@@ -1099,7 +1138,7 @@ namespace wl {
       if (ftruncate(shm_fd, shm_size) < 0) {
         BOOST_LOG(error) << "Failed to resize SHM buffer"sv;
         cleanup_shm();
-        zwlr_screencopy_frame_v1_destroy(frame);
+        destroy_capture_frame(frame);
         status = REINIT;
         return;
       }
@@ -1109,7 +1148,7 @@ namespace wl {
         shm_data = nullptr;
         BOOST_LOG(error) << "Failed to mmap SHM buffer"sv;
         cleanup_shm();
-        zwlr_screencopy_frame_v1_destroy(frame);
+        destroy_capture_frame(frame);
         status = REINIT;
         return;
       }
@@ -1118,7 +1157,7 @@ namespace wl {
       if (!shm_pool) {
         BOOST_LOG(error) << "Failed to create wl_shm_pool"sv;
         cleanup_shm();
-        zwlr_screencopy_frame_v1_destroy(frame);
+        destroy_capture_frame(frame);
         status = REINIT;
         return;
       }
@@ -1128,7 +1167,7 @@ namespace wl {
       if (!shm_buffer) {
         BOOST_LOG(error) << "Failed to create wl_buffer from SHM pool"sv;
         cleanup_shm();
-        zwlr_screencopy_frame_v1_destroy(frame);
+        destroy_capture_frame(frame);
         status = REINIT;
         return;
       }
@@ -1192,7 +1231,7 @@ namespace wl {
       current_frame = get_next_frame();
     }
 
-    zwlr_screencopy_frame_v1_destroy(frame);
+    destroy_capture_frame(frame);
     status = READY;
   }
 
@@ -1208,7 +1247,7 @@ namespace wl {
                      << " target_modifier="sv << next_frame->buffer_modifier;
     next_frame->destroy();
 
-    zwlr_screencopy_frame_v1_destroy(frame);
+    destroy_capture_frame(frame);
     status = REINIT;
   }
 
