@@ -5436,19 +5436,16 @@ namespace proc {
 #ifdef __linux__
   // Linux virtual display state — holds the active virtual display instance, if any
   static std::optional<virtual_display::vdisplay_t> linux_vdisplay;
-  static bool linux_vdisplay_available_checked = false;
-  static bool linux_vdisplay_available = false;
 
   /**
-   * @brief Check and cache whether Linux virtual display support is available.
+   * @brief Check whether Linux virtual display support is currently available.
+   *
+   * virtual_display::detect_backend() already owns a short-lived probe cache.
+   * Do not add a process-lifetime cache here: app discovery runs before
+   * platf::init(), and a transient early false result must be recoverable.
    */
   bool isLinuxVDisplayAvailable() {
-    if (!linux_vdisplay_available_checked) {
-      const auto backend = virtual_display::detect_backend();
-      linux_vdisplay_available = (backend != virtual_display::backend_e::NONE);
-      linux_vdisplay_available_checked = true;
-    }
-    return linux_vdisplay_available;
+    return virtual_display::is_available();
   }
 
   namespace linux_display {
@@ -6500,25 +6497,27 @@ namespace proc {
           BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
           launch_session->virtual_display = false;
           {
-            auto warning = std::string {"Host Virtual Display could not be created; this session streams the host's current output instead."};
+            auto warning = std::string {"Host Virtual Display could not be created; refusing to stream the host's current output."};
             const auto reason = virtual_display::unavailable_reason();
             if (!reason.empty()) {
               warning += " " + reason;
             }
             stream_stats::update_runtime_display_warning(warning);
           }
+          return 503;
         }
       } else {
         BOOST_LOG(warning) << "Virtual display requested but no backend available on Linux"sv;
         launch_session->virtual_display = false;
         {
-          auto warning = std::string {"Host Virtual Display is unavailable on this host; this session streams the host's current output instead."};
+          auto warning = std::string {"Host Virtual Display is unavailable on this host; refusing to stream the host's current output."};
           const auto reason = virtual_display::unavailable_reason();
           if (!reason.empty()) {
             warning += " " + reason;
           }
           stream_stats::update_runtime_display_warning(warning);
         }
+        return 503;
       }
     } else if (using_headless_cage) {
       BOOST_LOG(info) << "Linux virtual display: skipped because "sv

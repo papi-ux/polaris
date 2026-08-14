@@ -13,6 +13,8 @@
 // standard includes
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace virtual_display {
 
@@ -61,6 +63,14 @@ namespace virtual_display {
   };
 
   /**
+   * @brief One display recorded in the on-disk state, with the pid that owns it.
+   */
+  struct persisted_display_t {
+    int owner_pid = 0;
+    vdisplay_t display;
+  };
+
+  /**
    * @brief Check if any virtual display backend is available on the system.
    * @return true if at least one backend can create virtual displays.
    *
@@ -85,6 +95,51 @@ namespace virtual_display {
    * and then fail launch with a 503 when no output was configured.
    */
   bool backend_has_required_configuration(backend_e backend, const std::string &streaming_output);
+
+  /**
+   * @brief Decide whether the Wayland backend may be probed before or after platform init.
+   *
+   * App discovery runs before platf::init() populates the global window-system
+   * state. WAYLAND_DISPLAY is therefore also authoritative for that early probe.
+   */
+  bool wayland_backend_probe_allowed(bool platform_reports_wayland, std::string_view wayland_display);
+
+  /**
+   * @brief Build the connector name requested from Hyprland for one virtual display.
+   *
+   * The pid keeps the name out of the user's HEADLESS-N namespace; the slot keeps
+   * concurrent displays in the same process — a streaming session and the web UI —
+   * from requesting the same connector.
+   */
+  std::string hyprland_output_name_for_pid(int pid, int slot);
+
+  /**
+   * @brief Return whether a Hyprland monitor JSON response contains an exact output name.
+   */
+  bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name);
+
+  /**
+   * @brief Return whether an output name belongs to Polaris's Hyprland namespace.
+   */
+  bool hyprland_output_is_polaris_owned(std::string_view output_name);
+
+  /**
+   * @brief Parse the persisted state document into the displays it records.
+   *
+   * Accepts both the list written today and the single bare display object a
+   * Polaris that predates concurrent displays wrote, so an upgrade still cleans
+   * up what the old build left behind. Entries that are inactive, unnamed, or
+   * carry no backend are dropped.
+   */
+  std::vector<persisted_display_t> parse_persisted_displays(std::string_view state_json);
+
+  /**
+   * @brief Pure decision for whether a persisted display is left over from a dead owner.
+   *
+   * A record owned by the running process is never stale: a streaming session
+   * and the web UI each own one, and neither can see the other's.
+   */
+  bool persisted_display_is_stale(int owner_pid, int self_pid, bool owner_alive);
 
   /**
    * @brief Human-readable reason a virtual display cannot be created right now.

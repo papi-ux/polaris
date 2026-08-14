@@ -23,6 +23,8 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <signal.h>
 #include <sstream>
 #include <thread>
@@ -67,91 +69,145 @@ namespace virtual_display {
       return errno == EPERM;
     }
 
-    std::optional<vdisplay_t> load_persisted_state(pid_t &owner_pid) {
-      owner_pid = 0;
-      std::ifstream file(persisted_state_path());
-      if (!file.is_open()) {
-        return std::nullopt;
-      }
+    std::mutex persisted_state_mutex;
 
-      try {
-        nlohmann::json root = nlohmann::json::parse(file);
-        if (!root.is_object()) {
-          return std::nullopt;
-        }
-
-        owner_pid = root.value("pid", 0);
-        vdisplay_t display;
-        display.device_path = root.value("device_path", "");
-        display.output_name = root.value("output_name", "");
-        display.width = root.value("width", 0);
-        display.height = root.value("height", 0);
-        display.fps = root.value("fps", 0);
-        display.active = root.value("active", false);
-
-        const auto backend_name_value = root.value("backend", "none");
-        if (backend_name_value == "evdi") {
-          display.backend = backend_e::EVDI;
-        } else if (backend_name_value == "wayland_wlr") {
-          display.backend = backend_e::WAYLAND_WLR;
-        } else if (backend_name_value == "kscreen_doctor") {
-          display.backend = backend_e::KSCREEN_DOCTOR;
-        } else {
-          display.backend = backend_e::NONE;
-        }
-
-        if (!display.active || display.backend == backend_e::NONE || display.output_name.empty()) {
-          return std::nullopt;
-        }
-
-        return display;
-      } catch (const std::exception &e) {
-        BOOST_LOG(warning) << "Virtual display: failed to parse persisted state: "sv << e.what();
-        return std::nullopt;
-      }
-    }
-
-    void clear_persisted_state() {
-      std::error_code ec;
-      fs::remove(persisted_state_path(), ec);
-    }
-
-    void save_persisted_state(const vdisplay_t &display) {
-      std::error_code ec;
-      fs::create_directories(persisted_state_path().parent_path(), ec);
-
-      nlohmann::json root;
-      root["pid"] = static_cast<int>(getpid());
-      root["device_path"] = display.device_path;
-      root["output_name"] = display.output_name;
-      root["width"] = display.width;
-      root["height"] = display.height;
-      root["fps"] = display.fps;
-      root["active"] = display.active;
-
-      switch (display.backend) {
+    const char *backend_persist_name(backend_e backend) {
+      switch (backend) {
         case backend_e::EVDI:
-          root["backend"] = "evdi";
-          break;
+          return "evdi";
         case backend_e::WAYLAND_WLR:
-          root["backend"] = "wayland_wlr";
-          break;
+          return "wayland_wlr";
         case backend_e::KSCREEN_DOCTOR:
-          root["backend"] = "kscreen_doctor";
-          break;
+          return "kscreen_doctor";
         case backend_e::NONE:
         default:
-          root["backend"] = "none";
-          break;
+          return "none";
+      }
+    }
+
+    backend_e backend_from_persist_name(std::string_view name) {
+      if (name == "evdi"sv) {
+        return backend_e::EVDI;
+      }
+      if (name == "wayland_wlr"sv) {
+        return backend_e::WAYLAND_WLR;
+      }
+      if (name == "kscreen_doctor"sv) {
+        return backend_e::KSCREEN_DOCTOR;
+      }
+      return backend_e::NONE;
+    }
+
+    std::optional<persisted_display_t> parse_persisted_entry(const nlohmann::json &node) {
+      if (!node.is_object()) {
+        return std::nullopt;
       }
 
-      std::ofstream file(persisted_state_path());
+      persisted_display_t entry;
+      entry.owner_pid = node.value("pid", 0);
+      entry.display.device_path = node.value("device_path", "");
+      entry.display.output_name = node.value("output_name", "");
+      entry.display.width = node.value("width", 0);
+      entry.display.height = node.value("height", 0);
+      entry.display.fps = node.value("fps", 0);
+      entry.display.active = node.value("active", false);
+      entry.display.backend = backend_from_persist_name(node.value("backend", "none"));
+
+      if (!entry.display.active || entry.display.backend == backend_e::NONE || entry.display.output_name.empty()) {
+        return std::nullopt;
+      }
+
+      return entry;
+    }
+
+    nlohmann::json serialize_persisted_entry(const persisted_display_t &entry) {
+      nlohmann::json node;
+      node["pid"] = static_cast<int>(entry.owner_pid);
+      node["device_path"] = entry.display.device_path;
+      node["output_name"] = entry.display.output_name;
+      node["width"] = entry.display.width;
+      node["height"] = entry.display.height;
+      node["fps"] = entry.display.fps;
+      node["active"] = entry.display.active;
+      node["backend"] = backend_persist_name(entry.display.backend);
+      return node;
+    }
+
+    /**
+     * @brief Read every persisted display. Callers must hold persisted_state_mutex.
+     */
+    std::vector<persisted_display_t> load_persisted_entries() {
+      std::ifstream file(persisted_state_path());
       if (!file.is_open()) {
-        BOOST_LOG(warning) << "Virtual display: failed to persist state at "sv << persisted_state_path().string();
+        return {};
+      }
+
+      std::ostringstream buffer;
+      buffer << file.rdbuf();
+      return parse_persisted_displays(buffer.str());
+    }
+
+    /**
+     * @brief Replace the persisted state with these displays. Callers must hold persisted_state_mutex.
+     */
+    void write_persisted_entries(const std::vector<persisted_display_t> &entries) {
+      const auto path = persisted_state_path();
+      std::error_code ec;
+
+      if (entries.empty()) {
+        fs::remove(path, ec);
         return;
       }
 
-      file << root.dump(2);
+      fs::create_directories(path.parent_path(), ec);
+
+      nlohmann::json root;
+      root["displays"] = nlohmann::json::array();
+      for (const auto &entry : entries) {
+        root["displays"].push_back(serialize_persisted_entry(entry));
+      }
+
+      // Rename over the live file rather than truncating it: a crash midway
+      // through a write would otherwise strand every display it was tracking.
+      auto temp_path = path;
+      temp_path += ".tmp";
+      {
+        std::ofstream file(temp_path, std::ios::trunc);
+        if (!file.is_open()) {
+          BOOST_LOG(warning) << "Virtual display: failed to persist state at "sv << path.string();
+          return;
+        }
+        file << root.dump(2);
+      }
+
+      fs::rename(temp_path, path, ec);
+      if (ec) {
+        BOOST_LOG(warning) << "Virtual display: failed to persist state at "sv << path.string()
+                           << ": "sv << ec.message();
+        fs::remove(temp_path, ec);
+      }
+    }
+
+    void record_persisted_display(const vdisplay_t &display) {
+      const pid_t self = getpid();
+      std::lock_guard lock {persisted_state_mutex};
+
+      auto entries = load_persisted_entries();
+      std::erase_if(entries, [&](const persisted_display_t &entry) {
+        return entry.owner_pid == self && entry.display.output_name == display.output_name;
+      });
+      entries.push_back({self, display});
+      write_persisted_entries(entries);
+    }
+
+    void forget_persisted_display(const vdisplay_t &display) {
+      std::lock_guard lock {persisted_state_mutex};
+
+      auto entries = load_persisted_entries();
+      std::erase_if(entries, [&](const persisted_display_t &entry) {
+        return entry.display.output_name == display.output_name;
+      });
+      write_persisted_entries(entries);
     }
 
     void log_detected_backend(backend_e backend) {
@@ -176,6 +232,38 @@ namespace virtual_display {
       }
     }
   }  // namespace
+
+  std::vector<persisted_display_t> parse_persisted_displays(std::string_view state_json) {
+    std::vector<persisted_display_t> entries;
+
+    const auto root = nlohmann::json::parse(state_json, nullptr, false);
+    if (root.is_discarded()) {
+      BOOST_LOG(warning) << "Virtual display: failed to parse persisted state"sv;
+      return entries;
+    }
+
+    // A Polaris that predates the list wrote one bare display object per file.
+    // Still read that shape so an upgrade cleans up what the old build left.
+    if (root.is_object() && root.contains("displays") && root["displays"].is_array()) {
+      for (const auto &node : root["displays"]) {
+        if (auto entry = parse_persisted_entry(node)) {
+          entries.push_back(std::move(*entry));
+        }
+      }
+    } else if (auto entry = parse_persisted_entry(root)) {
+      entries.push_back(std::move(*entry));
+    }
+
+    return entries;
+  }
+
+  bool persisted_display_is_stale(int owner_pid, int self_pid, bool owner_alive) {
+    if (owner_pid == self_pid) {
+      return false;
+    }
+
+    return owner_pid <= 0 || !owner_alive;
+  }
 
   // ---------------------------------------------------------------------------
   // Utility: run a shell command and capture stdout
@@ -210,6 +298,74 @@ namespace virtual_display {
     int ret = std::system(cmd.c_str());
     return WEXITSTATUS(ret);
   }
+
+  bool wayland_backend_probe_allowed(bool platform_reports_wayland, std::string_view wayland_display) {
+    return platform_reports_wayland || !wayland_display.empty();
+  }
+
+  std::string hyprland_output_name_for_pid(int pid, int slot) {
+    return "POLARIS-HEADLESS-" + std::to_string(pid) + "-" + std::to_string(slot);
+  }
+
+  bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name) {
+    const auto monitors = nlohmann::json::parse(monitors_json, nullptr, false);
+    if (!monitors.is_array()) {
+      return false;
+    }
+
+    for (const auto &monitor : monitors) {
+      if (monitor.is_object() &&
+          monitor.contains("name") &&
+          monitor["name"].is_string() &&
+          monitor["name"].get_ref<const std::string &>() == output_name) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  bool hyprland_output_is_polaris_owned(std::string_view output_name) {
+    constexpr std::string_view prefix = "POLARIS-HEADLESS-";
+    if (!output_name.starts_with(prefix)) {
+      return false;
+    }
+
+    const auto all_digits = [](std::string_view value) {
+      return !value.empty() && value.find_first_not_of("0123456789"sv) == std::string_view::npos;
+    };
+
+    // <pid> is still accepted alongside <pid>-<slot> so an output left behind by
+    // a Polaris that predates the slot suffix stays removable after an upgrade.
+    const auto suffix = output_name.substr(prefix.size());
+    const auto separator = suffix.find('-');
+    if (separator == std::string_view::npos) {
+      return all_digits(suffix);
+    }
+
+    return all_digits(suffix.substr(0, separator)) && all_digits(suffix.substr(separator + 1));
+  }
+
+  namespace {
+    constexpr int hyprland_max_output_slots = 16;
+
+    // Connector names this process currently has spoken for. A streaming session
+    // (proc::linux_vdisplay) and the web UI (confighttp::ui_vdisplay) each own an
+    // independent virtual display in the same process and cannot see each other,
+    // so the reservation is what stops them requesting the same connector.
+    std::mutex hyprland_reserved_names_mutex;
+    std::set<std::string> hyprland_reserved_names;
+
+    bool hyprland_reserve_output_name(const std::string &output_name) {
+      std::lock_guard lock {hyprland_reserved_names_mutex};
+      return hyprland_reserved_names.insert(output_name).second;
+    }
+
+    void hyprland_release_output_name(const std::string &output_name) {
+      std::lock_guard lock {hyprland_reserved_names_mutex};
+      hyprland_reserved_names.erase(output_name);
+    }
+  }  // namespace
 
   // ---------------------------------------------------------------------------
   // EVDI backend — dynamically loaded libevdi
@@ -868,7 +1024,16 @@ namespace virtual_display {
      * @brief Check if the Wayland headless backend is available.
      */
     static bool is_available() {
-      if (window_system != window_system_e::WAYLAND) {
+      std::string_view wayland_display;
+#ifdef POLARIS_BUILD_WAYLAND
+      if (const char *value = std::getenv("WAYLAND_DISPLAY")) {
+        wayland_display = value;
+      }
+#endif
+      if (!wayland_backend_probe_allowed(
+            window_system == window_system_e::WAYLAND,
+            wayland_display
+          )) {
         return false;
       }
 
@@ -901,25 +1066,71 @@ namespace virtual_display {
       std::string output_name;
 
       if (compositor == "hyprland") {
-        // Hyprland: create a headless output
-        std::string result = exec_cmd("hyprctl output create headless 2>&1");
-        BOOST_LOG(info) << "Virtual display: hyprctl output create headless: "sv << result;
+        // Request a process-scoped name so an existing user-owned HEADLESS-N
+        // output can never be selected, reconfigured, or removed by Polaris.
+        // The slot suffix keeps the name unique per display rather than per
+        // process: a session launch and the web UI can hold one each, and a
+        // create that timed out before Hyprland published its output leaves an
+        // orphan that occupies one slot instead of wedging the process.
+        const std::string monitors_before = exec_cmd("hyprctl monitors -j 2>/dev/null");
+        for (int slot = 0; slot < hyprland_max_output_slots && output_name.empty(); ++slot) {
+          std::string candidate = hyprland_output_name_for_pid(getpid(), slot);
+          if (!hyprland_reserve_output_name(candidate)) {
+            // A live display in this process already holds the slot.
+            continue;
+          }
 
-        // Give compositor time to set up the output
-        std::this_thread::sleep_for(500ms);
+          if (hyprland_monitors_contain_output(monitors_before, candidate)) {
+            // In the compositor but reserved by nothing: an orphan from an
+            // earlier create of ours that materialized after we gave up on it.
+            // The name is ours by construction, so removing it is safe. Take the
+            // next slot either way — removal may not land before we need a name.
+            BOOST_LOG(info) << "Virtual display: removing orphaned Hyprland output ["sv
+                            << candidate << "]"sv;
+            exec_cmd_rc("hyprctl output remove " + candidate + " >/dev/null 2>&1");
+            hyprland_release_output_name(candidate);
+            continue;
+          }
 
-        // Find the new HEADLESS output
-        std::string monitors = exec_cmd("hyprctl monitors -j 2>/dev/null");
-        // Parse the output name from the JSON - look for HEADLESS-N
-        // Simple approach: find "HEADLESS-" pattern in output
-        size_t pos = monitors.rfind("HEADLESS-");
-        if (pos != std::string::npos) {
-          size_t end = monitors.find_first_of("\",} \n", pos);
-          output_name = monitors.substr(pos, end - pos);
+          output_name = std::move(candidate);
         }
 
         if (output_name.empty()) {
-          output_name = "HEADLESS-1";
+          BOOST_LOG(warning) << "Virtual display: no free Hyprland output slot for pid "sv << getpid();
+          return std::nullopt;
+        }
+
+        std::string result = exec_cmd("hyprctl output create headless " + output_name + " 2>&1");
+        BOOST_LOG(info) << "Virtual display: hyprctl output create headless: "sv << result;
+        if (result != "ok") {
+          BOOST_LOG(warning) << "Virtual display: Hyprland rejected headless output creation for ["sv
+                             << output_name << "]"sv;
+          hyprland_release_output_name(output_name);
+          return std::nullopt;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        bool output_appeared = false;
+        do {
+          if (hyprland_monitors_contain_output(
+                exec_cmd("hyprctl monitors -j 2>/dev/null"),
+                output_name
+              )) {
+            output_appeared = true;
+            break;
+          }
+          std::this_thread::sleep_for(50ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        if (!output_appeared) {
+          BOOST_LOG(warning) << "Virtual display: created Hyprland output did not appear ["sv
+                             << output_name << "]"sv;
+          // Best effort: the output may still materialize after this removal
+          // runs. Releasing the reservation lets the next create recognize it as
+          // an orphan and clear it rather than inheriting a name it cannot use.
+          exec_cmd_rc("hyprctl output remove " + output_name + " >/dev/null 2>&1");
+          hyprland_release_output_name(output_name);
+          return std::nullopt;
         }
 
         // Set resolution and refresh rate
@@ -978,11 +1189,18 @@ namespace virtual_display {
       std::string compositor = detect_compositor();
 
       if (compositor == "hyprland") {
+        if (!hyprland_output_is_polaris_owned(display.output_name)) {
+          BOOST_LOG(warning) << "Virtual display: refusing to remove unowned Hyprland output ["sv
+                             << display.output_name << "]"sv;
+          display.active = false;
+          return;
+        }
         std::string cmd = "hyprctl output remove " + display.output_name;
         int rc = exec_cmd_rc(cmd);
         if (rc != 0) {
           BOOST_LOG(warning) << "Virtual display: hyprctl output remove failed (rc="sv << rc << ")"sv;
         }
+        hyprland_release_output_name(display.output_name);
       }
       else if (compositor == "sway") {
         // Sway doesn't have a direct "remove output" command for headless outputs,
@@ -1196,24 +1414,41 @@ namespace virtual_display {
   }
 
   bool cleanup_stale() {
-    pid_t owner_pid = 0;
-    auto stale_display = load_persisted_state(owner_pid);
-    if (!stale_display) {
-      clear_persisted_state();
-      return false;
+    const pid_t self = getpid();
+    std::vector<persisted_display_t> stale;
+
+    {
+      std::lock_guard lock {persisted_state_mutex};
+      auto entries = load_persisted_entries();
+      if (entries.empty()) {
+        // Nothing usable in the file, so drop whatever is left of it.
+        write_persisted_entries({});
+        return false;
+      }
+
+      for (const auto &entry : entries) {
+        // An entry owned by this process backs a display someone here still
+        // holds — the streaming session and the web UI each own one — so it is
+        // never stale no matter how many entries the file carries. Tearing
+        // those down here is what used to kill a live sibling display.
+        if (!persisted_display_is_stale(entry.owner_pid, self, pid_is_alive(entry.owner_pid))) {
+          BOOST_LOG(info) << "Virtual display: persisted display ["sv << entry.display.output_name
+                          << "] belongs to live pid "sv << entry.owner_pid << ", skipping stale cleanup"sv;
+          continue;
+        }
+        stale.push_back(entry);
+      }
     }
 
-    if (owner_pid > 0 && owner_pid != getpid() && pid_is_alive(owner_pid)) {
-      BOOST_LOG(info) << "Virtual display: persisted state belongs to live pid "sv << owner_pid
-                      << ", skipping stale cleanup"sv;
-      return false;
+    // destroy() drops each entry from the file itself, so the lock is released
+    // before it runs.
+    for (auto &entry : stale) {
+      BOOST_LOG(info) << "Virtual display: cleaning up stale persisted display ["sv
+                      << entry.display.output_name << "] from pid "sv << entry.owner_pid;
+      destroy(entry.display);
     }
 
-    BOOST_LOG(info) << "Virtual display: cleaning up stale persisted display ["sv
-                    << stale_display->output_name << "] from pid "sv << owner_pid;
-    destroy(*stale_display);
-    clear_persisted_state();
-    return true;
+    return !stale.empty();
   }
 
   std::optional<vdisplay_t> create(int width, int height, int fps) {
@@ -1227,21 +1462,21 @@ namespace virtual_display {
     switch (backend) {
       case backend_e::EVDI:
         if (auto display = evdi::create(width, height, fps)) {
-          save_persisted_state(*display);
+          record_persisted_display(*display);
           return display;
         }
         return std::nullopt;
 
       case backend_e::WAYLAND_WLR:
         if (auto display = wayland_wlr::create(width, height, fps)) {
-          save_persisted_state(*display);
+          record_persisted_display(*display);
           return display;
         }
         return std::nullopt;
 
       case backend_e::KSCREEN_DOCTOR:
         if (auto display = kscreen::create(width, height, fps)) {
-          save_persisted_state(*display);
+          record_persisted_display(*display);
           return display;
         }
         return std::nullopt;
@@ -1279,7 +1514,9 @@ namespace virtual_display {
         break;
     }
 
-    clear_persisted_state();
+    // Drop only this display's record. Clearing the whole file here used to
+    // strand a sibling display that was still live.
+    forget_persisted_display(display);
   }
 
 }  // namespace virtual_display
