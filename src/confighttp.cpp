@@ -4806,6 +4806,10 @@ namespace confighttp {
           }
 #endif
           auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);
+          if (!launch_session) {
+            bad_request(response, request, "Failed to build a launch session");
+            return;
+          }
           auto err = proc::proc.execute(app, launch_session);
           if (err) {
             nlohmann::json error_tree;

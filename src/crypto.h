@@ -177,6 +177,15 @@ namespace crypto {
   namespace cipher {
     constexpr std::size_t tag_size = 16;
 
+    /**
+     * @brief Bytes every AES cipher here reads from the key buffer.
+     *
+     * The contexts use EVP_aes_128_gcm/cbc/ecb, so OpenSSL reads exactly
+     * this many bytes from key.data() regardless of the aes_t vector's size.
+     * Off-host key material must be validated against this size first.
+     */
+    constexpr std::size_t key_size = 16;
+
     constexpr std::size_t round_to_pkcs7_padded(std::size_t size) {
       return ((size + 15) / 16) * 16;
     }
