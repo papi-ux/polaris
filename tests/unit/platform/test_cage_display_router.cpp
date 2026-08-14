@@ -204,6 +204,10 @@ HEADLESS-1 "Fake headless output"
   Enabled: yes
   Modes:
     1280x720 px, 60.000000 Hz (current)
+WL-1 "Fake windowed output"
+  Enabled: yes
+  Modes:
+    1280x720 px, 60.000000 Hz (current)
 EOF
 fi
 exit 0
@@ -238,6 +242,13 @@ exit 0
       false,
       "external-exit-cycle-" + std::to_string(cycle)
     ));
+
+    const auto runtime_state = cage_display_router::runtime_state();
+    EXPECT_TRUE(runtime_state.requested_headless);
+    EXPECT_TRUE(runtime_state.effective_headless);
+    EXPECT_FALSE(runtime_state.gpu_native_override_active);
+    EXPECT_EQ(runtime_state.backend_name, "labwc");
+    EXPECT_EQ(runtime_state.path_id, "headless_stream");
 
     const auto router_pid = cage_display_router::get_pid();
     ASSERT_GT(router_pid, 0);
@@ -274,10 +285,16 @@ exit 0
     720,
     60,
     "",
-    false,
+    true,
     false,
     "explicit-stop-escalation"
   ));
+  const auto forced_windowed_runtime_state = cage_display_router::runtime_state();
+  EXPECT_TRUE(forced_windowed_runtime_state.requested_headless);
+  EXPECT_FALSE(forced_windowed_runtime_state.effective_headless);
+  EXPECT_TRUE(forced_windowed_runtime_state.gpu_native_override_active);
+  EXPECT_EQ(forced_windowed_runtime_state.backend_name, "labwc");
+  EXPECT_EQ(forced_windowed_runtime_state.path_id, "windowed_stream");
   const auto stopped_compositor_pid = wait_for_pid_file(compositor_pid_file);
   ASSERT_GT(stopped_compositor_pid, 0);
   const auto stopped_worker_pid = wait_for_pid_file(pid_file);
