@@ -65,3 +65,34 @@ TEST(LinuxPlatformHardeningSource, KscreenConfigurationNeverPassesThroughShell) 
   ASSERT_NE(kscreen, std::string::npos);
   EXPECT_NE(virtual_display.find("platf::run_process_argv(args)", kscreen), std::string::npos);
 }
+
+TEST(LinuxPlatformHardeningSource, VaapiValidatesExportedDescriptorBeforeIndexing) {
+  const auto source = read_source("src/platform/linux/vaapi.cpp");
+  EXPECT_NE(source.find("DRMPRIMESurfaceDescriptor prime {}"), std::string::npos);
+  EXPECT_NE(source.find("prime.num_objects > max_objects"), std::string::npos);
+  EXPECT_NE(source.find("layer.num_planes > max_planes"), std::string::npos);
+  EXPECT_NE(source.find("layer.object_index[x] >= prime.num_objects"), std::string::npos);
+  EXPECT_NE(source.find("vaSetInfoCallback"), std::string::npos);
+  EXPECT_NE(source.find("bytes > 0"), std::string::npos);
+}
+
+TEST(LinuxPlatformHardeningSource, X11ShmRefreshStaysOnCaptureThread) {
+  const auto source = read_source("src/platform/linux/x11grab.cpp");
+  EXPECT_EQ(source.find("task_pool.pushDelayed"), std::string::npos);
+  EXPECT_EQ(source.find("task_pool.cancel"), std::string::npos);
+  EXPECT_NE(source.find("now >= next_refresh"), std::string::npos);
+  EXPECT_NE(source.find("if (!x_img)"), std::string::npos);
+}
+
+TEST(LinuxPlatformHardeningSource, EglRejectsMissingDriverMetadata) {
+  const auto source = read_source("src/platform/linux/graphics.cpp");
+  EXPECT_NE(source.find("if (!extension_st)"), std::string::npos);
+  EXPECT_NE(source.find("count == 0 || !conf"), std::string::npos);
+}
+
+TEST(LinuxPlatformHardeningSource, NvfbcOutputsStartInitialized) {
+  const auto source = read_source("src/platform/linux/cuda.cpp");
+  EXPECT_NE(source.find("NVFBC_SESSION_HANDLE handle {0}"), std::string::npos);
+  EXPECT_NE(source.find("CUdeviceptr device_ptr {}"), std::string::npos);
+  EXPECT_NE(source.find("NVFBC_FRAME_GRAB_INFO info {}"), std::string::npos);
+}
