@@ -424,8 +424,13 @@ namespace egl {
     const char *vendor = eglQueryString(display.get(), EGL_VENDOR);
     const char *apis = eglQueryString(display.get(), EGL_CLIENT_APIS);
 
-    BOOST_LOG(debug) << "EGL: ["sv << vendor << "]: version ["sv << version << ']';
-    BOOST_LOG(debug) << "API's supported: ["sv << apis << ']';
+    BOOST_LOG(debug) << "EGL: ["sv << (vendor ? vendor : "<unknown>") << "]: version ["sv << (version ? version : "<unknown>") << ']';
+    BOOST_LOG(debug) << "API's supported: ["sv << (apis ? apis : "<unknown>") << ']';
+
+    if (!extension_st) {
+      BOOST_LOG(error) << "Couldn't query EGL extensions: ["sv << util::hex(eglGetError()).to_string_view() << ']';
+      return nullptr;
+    }
 
     const char *extensions[] {
       "EGL_KHR_create_context",
@@ -451,9 +456,9 @@ namespace egl {
       EGL_NONE
     };
 
-    int count;
-    EGLConfig conf;
-    if (!eglChooseConfig(display, conf_attr, &conf, 1, &count)) {
+    int count = 0;
+    EGLConfig conf = nullptr;
+    if (!eglChooseConfig(display, conf_attr, &conf, 1, &count) || count == 0 || !conf) {
       BOOST_LOG(error) << "Couldn't set config attributes: ["sv << util::hex(eglGetError()).to_string_view() << ']';
       return std::nullopt;
     }
@@ -711,6 +716,10 @@ namespace egl {
 
     // Determine the size of each plane element
     auto fmt_desc = av_pix_fmt_desc_get(format);
+    if (!fmt_desc) {
+      BOOST_LOG(error) << "Unknown target pixel format: "sv << format;
+      return std::nullopt;
+    }
     if (fmt_desc->comp[0].depth <= 8) {
       y_format = GL_R8;
       uv_format = GL_RG8;
@@ -918,6 +927,10 @@ namespace egl {
 
     // Decide the bit depth format of the backing texture based the target frame format
     auto fmt_desc = av_pix_fmt_desc_get(format);
+    if (!fmt_desc) {
+      BOOST_LOG(error) << "Unknown pixel format for EGL frame: "sv << (int) format;
+      return std::nullopt;
+    }
     switch (fmt_desc->comp[0].depth) {
       case 8:
         gl_format = GL_RGBA8;

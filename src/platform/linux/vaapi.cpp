@@ -349,7 +349,7 @@ namespace va {
         }
       }
 
-      va::DRMPRIMESurfaceDescriptor prime;
+      va::DRMPRIMESurfaceDescriptor prime {};
       va::VASurfaceID surface = (std::uintptr_t) frame->data[3];
       auto hw_frames_ctx = (AVHWFramesContext *) hw_frames_ctx_buf->data;
 
@@ -366,21 +366,51 @@ namespace va {
         return -1;
       }
 
-      // Keep track of file descriptors
+      // Adopt every descriptor the fixed-size export structure can hold before
+      // validating the driver-provided counts. This keeps malformed exports
+      // from leaking the descriptors they did return.
       std::array<file_t, egl::nv12_img_t::num_fds> fds;
-      for (int x = 0; x < prime.num_objects; ++x) {
+      constexpr std::size_t max_objects = std::size(prime.objects);
+      const auto adopted_objects = std::min<std::size_t>(prime.num_objects, max_objects);
+      for (std::size_t x = 0; x < adopted_objects; ++x) {
         fds[x] = prime.objects[x].fd;
       }
 
-      if (prime.num_layers != 2) {
-        BOOST_LOG(error) << "Invalid layer count for VA surface: expected 2, got "sv << prime.num_layers;
+      if (prime.num_objects == 0 || prime.num_objects > max_objects) {
+        BOOST_LOG(error) << "Invalid object count for VA surface: expected 1-"sv << max_objects << ", got "sv << prime.num_objects;
+        return -1;
+      }
+      for (std::size_t x = 0; x < prime.num_objects; ++x) {
+        if (prime.objects[x].fd < 0) {
+          BOOST_LOG(error) << "Invalid object fd for VA surface at index "sv << x;
+          return -1;
+        }
+      }
+
+      constexpr std::size_t expected_layers = 2;
+      if (prime.num_layers != expected_layers || prime.width == 0 || prime.height == 0) {
+        BOOST_LOG(error) << "Invalid VA surface geometry: layers="sv << prime.num_layers
+                         << " width="sv << prime.width << " height="sv << prime.height;
         return -1;
       }
 
-      egl::surface_descriptor_t sds[2] = {};
-      for (int plane = 0; plane < 2; ++plane) {
+      egl::surface_descriptor_t sds[expected_layers] = {};
+      for (std::size_t plane = 0; plane < expected_layers; ++plane) {
         auto &sd = sds[plane];
         auto &layer = prime.layers[plane];
+
+        const std::size_t max_planes = std::size(layer.object_index);
+        if (layer.num_planes == 0 || layer.num_planes > max_planes) {
+          BOOST_LOG(error) << "Invalid plane count for VA surface layer "sv << plane << ": "sv << layer.num_planes;
+          return -1;
+        }
+        for (std::size_t x = 0; x < layer.num_planes; ++x) {
+          if (layer.object_index[x] >= prime.num_objects) {
+            BOOST_LOG(error) << "Invalid object index for VA surface layer "sv << plane
+                             << " plane "sv << x << ": "sv << layer.object_index[x];
+            return -1;
+          }
+        }
 
         sd.fourcc = layer.drm_format;
 
@@ -392,7 +422,7 @@ namespace va {
         sd.modifier = prime.objects[layer.object_index[0]].drm_format_modifier;
 
         std::fill_n(sd.fds, 4, -1);
-        for (int x = 0; x < layer.num_planes; ++x) {
+        for (std::size_t x = 0; x < layer.num_planes; ++x) {
           sd.fds[x] = prime.objects[layer.object_index[x]].fd;
           sd.pitches[x] = layer.pitch[x];
           sd.offsets[x] = layer.offset[x];
@@ -604,7 +634,7 @@ namespace va {
     va->va_display = display.get();
 
     vaSetErrorCallback(display.get(), __log, &error);
-    vaSetErrorCallback(display.get(), __log, &info);
+    vaSetInfoCallback(display.get(), __log, &info);
 
     int major, minor;
     auto status = vaInitialize(display.get(), &major, &minor);
@@ -617,7 +647,7 @@ namespace va {
     // crash report that names the driver generation is worth more than one that
     // makes the reader guess from a GPU model.
     const auto *vendor = vaQueryVendorString(display.get());
-    BOOST_LOG(info) << "vaapi vendor: "sv << vendor;
+    BOOST_LOG(info) << "vaapi vendor: "sv << (vendor ? vendor : "<unknown>");
     stream_stats::update_vaapi_vendor(vendor ? vendor : "");
 
     *hw_device_buf = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VAAPI);
@@ -665,11 +695,11 @@ namespace va {
   bool validate(int fd) {
     va::display_t display {vaGetDisplayDRM(fd)};
     if (!display) {
-      char string[1024];
-
-      auto bytes = readlink(std::format("/proc/self/fd/{}", fd).c_str(), string, sizeof(string));
-
-      std::string_view render_device {string, (std::size_t) bytes};
+      std::array<char, 1024> path {};
+      const auto bytes = readlink(std::format("/proc/self/fd/{}", fd).c_str(), path.data(), path.size() - 1);
+      const std::string_view render_device = bytes > 0 ?
+                                               std::string_view {path.data(), static_cast<std::size_t>(bytes)} :
+                                               "<unavailable>"sv;
 
       BOOST_LOG(error) << "Couldn't open a va display from DRM with device: "sv << render_device;
       return false;

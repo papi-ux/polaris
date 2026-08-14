@@ -25,7 +25,6 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
-#include "src/task_pool.h"
 #include "src/video.h"
 #include "vaapi.h"
 #include "x11grab.h"
@@ -148,6 +147,13 @@ namespace platf {
       };
 
       if (dyn::load(handle, funcs)) {
+        return -1;
+      }
+
+      // XInitThreads must be the first Xlib call in the process. Loading the
+      // symbols is harmless; opening a display before this point is not.
+      if (!InitThreads()) {
+        BOOST_LOG(error) << "Couldn't initialize Xlib thread support"sv;
         return -1;
       }
 
@@ -382,7 +388,6 @@ namespace platf {
         xwindow {},
         xattr {},
         mem_type {mem_type} {
-      x11::InitThreads();
     }
 
     int init(const std::string &display_name, const ::video::config_t &config) {
@@ -391,11 +396,17 @@ namespace platf {
         return -1;
       }
 
+      if (config.framerate <= 0) {
+        BOOST_LOG(error) << "Invalid X11 capture framerate: "sv << config.framerate;
+        return -1;
+      }
       delay = std::chrono::nanoseconds {1s} / config.framerate;
 
       xwindow = DefaultRootWindow(xdisplay.get());
 
-      refresh();
+      if (!refresh()) {
+        return 1;
+      }
 
       int streamedMonitor = -1;
       if (!display_name.empty()) {
@@ -405,6 +416,10 @@ namespace platf {
       if (streamedMonitor != -1) {
         BOOST_LOG(info) << "Configuring selected display ("sv << streamedMonitor << ") to stream"sv;
         screen_res_t screenr {x11::rr::GetScreenResources(xdisplay.get(), xwindow)};
+        if (!screenr) {
+          BOOST_LOG(error) << "Could not query XRandR screen resources"sv;
+          return -1;
+        }
         int output = screenr->noutput;
 
         output_info_t result;
@@ -426,6 +441,10 @@ namespace platf {
 
         if (result->crtc) {
           crtc_info_t crt_info {x11::rr::GetCrtcInfo(xdisplay.get(), screenr.get(), result->crtc)};
+          if (!crt_info) {
+            BOOST_LOG(error) << "Could not query XRandR CRTC for display ["sv << result->name << ']';
+            return -1;
+          }
           BOOST_LOG(info)
             << "Streaming display: "sv << result->name << " with res "sv << crt_info->width << 'x' << crt_info->height << " offset by "sv << crt_info->x << 'x' << crt_info->y;
 
@@ -452,8 +471,12 @@ namespace platf {
     /**
      * Called when the display attributes should change.
      */
-    void refresh() {
-      x11::GetWindowAttributes(xdisplay.get(), xwindow, &xattr);  // Update xattr's
+    bool refresh() {
+      if (!x11::GetWindowAttributes(xdisplay.get(), xwindow, &xattr)) {
+        BOOST_LOG(error) << "Could not refresh X11 root-window attributes"sv;
+        return false;
+      }
+      return true;
     }
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
@@ -502,7 +525,9 @@ namespace platf {
     }
 
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor) {
-      refresh();
+      if (!refresh()) {
+        return capture_e::reinit;
+      }
 
       // The whole X server changed, so we must reinit everything
       if (xattr.width != env_width || xattr.height != env_height) {
@@ -516,6 +541,10 @@ namespace platf {
       auto img = (x11_img_t *) img_out.get();
 
       XImage *x_img {x11::GetImage(xdisplay.get(), xwindow, offset_x, offset_y, width, height, AllPlanes, ZPixmap)};
+      if (!x_img) {
+        BOOST_LOG(error) << "Could not capture X11 image"sv;
+        return capture_e::reinit;
+      }
       img->frame_timestamp = std::chrono::steady_clock::now();
 
       img->width = x_img->width;
@@ -574,29 +603,18 @@ namespace platf {
   struct shm_attr_t: public x11_attr_t {
     x11::xdisplay_t shm_xdisplay;  // Prevent race condition with x11_attr_t::xdisplay
     xcb_connect_t xcb;
-    xcb_screen_t *display;
-    std::uint32_t seg;
+    xcb_screen_t *display {nullptr};
+    std::uint32_t seg {0};
 
     shm_id_t shm_id;
 
     shm_data_t data;
 
-    task_pool_util::TaskPool::task_id_t refresh_task_id;
-
-    void delayed_refresh() {
-      refresh();
-
-      refresh_task_id = task_pool.pushDelayed(&shm_attr_t::delayed_refresh, 2s, this).task_id;
-    }
+    std::size_t shm_frame_size {0};
+    std::chrono::steady_clock::time_point next_refresh {};
 
     shm_attr_t(mem_type_e mem_type):
-        x11_attr_t(mem_type),
-        shm_xdisplay {x11::OpenDisplay(nullptr)} {
-      refresh_task_id = task_pool.pushDelayed(&shm_attr_t::delayed_refresh, 2s, this).task_id;
-    }
-
-    ~shm_attr_t() override {
-      while (!task_pool.cancel(refresh_task_id));
+        x11_attr_t(mem_type) {
     }
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
@@ -645,6 +663,14 @@ namespace platf {
     }
 
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_refresh) {
+        next_refresh = now + 2s;
+        if (!refresh()) {
+          return capture_e::reinit;
+        }
+      }
+
       // The whole X server changed, so we must reinit everything
       if (xattr.width != env_width || xattr.height != env_height) {
         BOOST_LOG(warning) << "X dimensions changed in SHM mode, request reinit"sv;
@@ -663,7 +689,7 @@ namespace platf {
           return platf::capture_e::interrupted;
         }
 
-        std::copy_n((std::uint8_t *) data.data, frame_size(), img_out->data);
+        std::copy_n((std::uint8_t *) data.data, shm_frame_size, img_out->data);
         img_out->frame_timestamp = frame_timestamp;
 
         if (cursor) {
@@ -680,7 +706,7 @@ namespace platf {
       img->height = height;
       img->pixel_pitch = 4;
       img->row_pitch = img->pixel_pitch * width;
-      img->data = new std::uint8_t[height * img->row_pitch];
+      img->data = new std::uint8_t[shm_frame_size];
 
       return img;
     }
@@ -696,21 +722,39 @@ namespace platf {
 
       shm_xdisplay.reset(x11::OpenDisplay(nullptr));
       xcb.reset(xcb::connect(nullptr, nullptr));
-      if (xcb::connection_has_error(xcb.get())) {
+      if (!shm_xdisplay || !xcb || xcb::connection_has_error(xcb.get())) {
+        BOOST_LOG(error) << "Could not open X11 SHM capture connections"sv;
         return -1;
       }
 
-      if (!xcb::get_extension_data(xcb.get(), xcb::shm_id)->present) {
+      const auto *extension = xcb::get_extension_data(xcb.get(), xcb::shm_id);
+      if (!extension || !extension->present) {
         BOOST_LOG(error) << "Missing SHM extension"sv;
 
         return -1;
       }
 
-      auto iter = xcb::setup_roots_iterator(xcb::get_setup(xcb.get()));
+      const auto *setup = xcb::get_setup(xcb.get());
+      if (!setup) {
+        BOOST_LOG(error) << "Could not query XCB setup"sv;
+        return -1;
+      }
+      auto iter = xcb::setup_roots_iterator(setup);
       display = iter.data;
+      if (!display) {
+        BOOST_LOG(error) << "Could not query XCB root screen"sv;
+        return -1;
+      }
       seg = xcb::generate_id(xcb.get());
 
-      shm_id.id = shmget(IPC_PRIVATE, frame_size(), IPC_CREAT | 0600);
+      const auto frame_size = x11::checked_shm_frame_size(width, height);
+      if (!frame_size) {
+        BOOST_LOG(error) << "Invalid X11 SHM frame dimensions: "sv << width << 'x' << height;
+        return -1;
+      }
+      shm_frame_size = *frame_size;
+
+      shm_id.id = shmget(IPC_PRIVATE, shm_frame_size, IPC_CREAT | 0600);
       if (shm_id.id == -1) {
         BOOST_LOG(error) << "shmget failed"sv;
         return -1;
@@ -725,11 +769,8 @@ namespace platf {
         return -1;
       }
 
+      next_refresh = std::chrono::steady_clock::now() + 2s;
       return 0;
-    }
-
-    std::uint32_t frame_size() {
-      return width * height * 4;
     }
   };
 
@@ -783,6 +824,10 @@ namespace platf {
 
     auto xwindow = DefaultRootWindow(xdisplay.get());
     screen_res_t screenr {x11::rr::GetScreenResources(xdisplay.get(), xwindow)};
+    if (!screenr) {
+      BOOST_LOG(error) << "Could not query XRandR screen resources"sv;
+      return {};
+    }
     int output = screenr->noutput;
 
     int monitor = 0;
@@ -837,6 +882,9 @@ namespace platf {
       cursor_t cursor;
 
       cursor.ctx.reset((cursor_ctx_t::pointer) x11::OpenDisplay(nullptr));
+      if (!cursor.ctx) {
+        return std::nullopt;
+      }
 
       return cursor;
     }
@@ -845,15 +893,30 @@ namespace platf {
       auto display = (xdisplay_t::pointer) ctx.get();
 
       xcursor_t xcursor = fix::GetCursorImage(display);
+      if (!xcursor) {
+        BOOST_LOG(error) << "Couldn't get cursor from XFixesGetCursorImage"sv;
+        return;
+      }
 
       if (img.serial != xcursor->cursor_serial) {
-        auto buf_size = xcursor->width * xcursor->height * sizeof(int);
+        const auto cursor_width = static_cast<std::size_t>(xcursor->width);
+        const auto cursor_height = static_cast<std::size_t>(xcursor->height);
+        if (cursor_width != 0 && cursor_height > std::numeric_limits<std::size_t>::max() / cursor_width) {
+          BOOST_LOG(error) << "XFixes cursor dimensions overflow addressable memory"sv;
+          return;
+        }
+        const auto pixel_count = cursor_width * cursor_height;
+        if (pixel_count > std::numeric_limits<std::size_t>::max() / sizeof(int)) {
+          BOOST_LOG(error) << "XFixes cursor buffer size overflows addressable memory"sv;
+          return;
+        }
+        const auto buf_size = pixel_count * sizeof(int);
 
         if (img.buffer.size() < buf_size) {
           img.buffer.resize(buf_size);
         }
 
-        std::transform(xcursor->pixels, xcursor->pixels + buf_size / 4, (int *) img.buffer.data(), [](long pixel) -> int {
+        std::transform(xcursor->pixels, xcursor->pixels + pixel_count, (int *) img.buffer.data(), [](long pixel) -> int {
           return pixel;
         });
       }
