@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="docs/screenshots/Polaris_fulllogo_2.svg" width="250" alt="Polaris" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/Polaris_fulllogo_2.svg">
+  <img src="docs/screenshots/Polaris_fulllogo_2_light.svg" width="250" alt="Polaris">
+</picture>
 
 **Linux-only, self-hosted game streaming that keeps the stream off your desktop.**
 
@@ -8,9 +11,9 @@ Polaris launches games in an isolated Linux compositor, streams them to Nova or
 Moonlight-compatible clients, and explains the active capture, encoder, client,
 and runtime path in one web console.
 
-[![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1a1a2e)](https://github.com/papi-ux/polaris/stargazers)
-[![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1a1a2e)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=4ade80&labelColor=1a1a2e&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
+[![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1f1d31)](https://github.com/papi-ux/polaris/stargazers)
+[![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1f1d31)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=c8d6e5&labelColor=1f1d31&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
 [**Explore Polaris**](https://papi-ux.com/polaris/) ·
 [**Download**](https://github.com/papi-ux/polaris/releases/latest) ·
