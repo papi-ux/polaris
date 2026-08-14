@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace virtual_display {
 
@@ -59,6 +60,14 @@ namespace virtual_display {
 
     // EVDI-specific state (opaque handle, managed internally)
     void *evdi_handle = nullptr;
+  };
+
+  /**
+   * @brief One display recorded in the on-disk state, with the pid that owns it.
+   */
+  struct persisted_display_t {
+    int owner_pid = 0;
+    vdisplay_t display;
   };
 
   /**
@@ -113,6 +122,24 @@ namespace virtual_display {
    * @brief Return whether an output name belongs to Polaris's Hyprland namespace.
    */
   bool hyprland_output_is_polaris_owned(std::string_view output_name);
+
+  /**
+   * @brief Parse the persisted state document into the displays it records.
+   *
+   * Accepts both the list written today and the single bare display object a
+   * Polaris that predates concurrent displays wrote, so an upgrade still cleans
+   * up what the old build left behind. Entries that are inactive, unnamed, or
+   * carry no backend are dropped.
+   */
+  std::vector<persisted_display_t> parse_persisted_displays(std::string_view state_json);
+
+  /**
+   * @brief Pure decision for whether a persisted display is left over from a dead owner.
+   *
+   * A record owned by the running process is never stale: a streaming session
+   * and the web UI each own one, and neither can see the other's.
+   */
+  bool persisted_display_is_stale(int owner_pid, int self_pid, bool owner_alive);
 
   /**
    * @brief Human-readable reason a virtual display cannot be created right now.

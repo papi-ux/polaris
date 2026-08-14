@@ -119,6 +119,78 @@ TEST(VirtualDisplayTests, HyprlandMonitorLookupDoesNotSelectExistingHeadlessOutp
   ));
 }
 
+TEST(VirtualDisplayTests, PersistedStateTracksEveryConcurrentDisplay) {
+  // A streaming session and the web UI each own a display in one process, so
+  // both have to survive a round trip through the state file.
+  constexpr auto state = R"json({
+    "displays": [
+      {"pid":4242,"output_name":"POLARIS-HEADLESS-4242-0","width":1920,"height":1080,
+       "fps":60,"active":true,"backend":"wayland_wlr","device_path":""},
+      {"pid":4242,"output_name":"POLARIS-HEADLESS-4242-1","width":2560,"height":1440,
+       "fps":120,"active":true,"backend":"wayland_wlr","device_path":""}
+    ]
+  })json";
+
+  const auto displays = virtual_display::parse_persisted_displays(state);
+  ASSERT_EQ(displays.size(), 2u);
+  EXPECT_EQ(displays[0].owner_pid, 4242);
+  EXPECT_EQ(displays[0].display.output_name, "POLARIS-HEADLESS-4242-0");
+  EXPECT_EQ(displays[0].display.width, 1920);
+  EXPECT_EQ(displays[0].display.backend, virtual_display::backend_e::WAYLAND_WLR);
+  EXPECT_EQ(displays[1].display.output_name, "POLARIS-HEADLESS-4242-1");
+  EXPECT_EQ(displays[1].display.fps, 120);
+}
+
+TEST(VirtualDisplayTests, PersistedStateStillReadsPreListSingleDisplayDocument) {
+  // Written by a Polaris that predates concurrent displays; an upgrade has to
+  // keep reading it or the output it recorded is never cleaned up.
+  constexpr auto legacy = R"json({
+    "pid":1234,"output_name":"POLARIS-HEADLESS-1234","width":1920,"height":1080,
+    "fps":60,"active":true,"backend":"wayland_wlr","device_path":""
+  })json";
+
+  const auto displays = virtual_display::parse_persisted_displays(legacy);
+  ASSERT_EQ(displays.size(), 1u);
+  EXPECT_EQ(displays[0].owner_pid, 1234);
+  EXPECT_EQ(displays[0].display.output_name, "POLARIS-HEADLESS-1234");
+}
+
+TEST(VirtualDisplayTests, PersistedStateDropsUnusableRecords) {
+  constexpr auto state = R"json({
+    "displays": [
+      {"pid":1,"output_name":"POLARIS-HEADLESS-1-0","active":false,"backend":"wayland_wlr"},
+      {"pid":2,"output_name":"","active":true,"backend":"wayland_wlr"},
+      {"pid":3,"output_name":"POLARIS-HEADLESS-3-0","active":true,"backend":"none"},
+      {"pid":4,"output_name":"POLARIS-HEADLESS-4-0","active":true,"backend":"evdi"}
+    ]
+  })json";
+
+  const auto displays = virtual_display::parse_persisted_displays(state);
+  ASSERT_EQ(displays.size(), 1u);
+  EXPECT_EQ(displays[0].owner_pid, 4);
+  EXPECT_EQ(displays[0].display.backend, virtual_display::backend_e::EVDI);
+
+  EXPECT_TRUE(virtual_display::parse_persisted_displays("not json").empty());
+  EXPECT_TRUE(virtual_display::parse_persisted_displays("").empty());
+  EXPECT_TRUE(virtual_display::parse_persisted_displays("[]").empty());
+}
+
+TEST(VirtualDisplayTests, PersistedDisplayOwnedByThisProcessIsNeverStale) {
+  using virtual_display::persisted_display_is_stale;
+
+  // The live sibling case: our own record backs a display someone in this
+  // process still holds, so cleanup must leave it alone.
+  EXPECT_FALSE(persisted_display_is_stale(4242, 4242, false));
+  EXPECT_FALSE(persisted_display_is_stale(4242, 4242, true));
+
+  // Another Polaris is still running with it.
+  EXPECT_FALSE(persisted_display_is_stale(1234, 4242, true));
+
+  // Left behind by a process that died.
+  EXPECT_TRUE(persisted_display_is_stale(1234, 4242, false));
+  EXPECT_TRUE(persisted_display_is_stale(0, 4242, false));
+}
+
 TEST(VirtualDisplayTests, FailedVirtualDisplayRequestNeverStreamsPhysicalOutput) {
   const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/process.cpp";
   std::ifstream input {path};
