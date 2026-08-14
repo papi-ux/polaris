@@ -10,6 +10,7 @@
   #include "src/config.h"
   #include "src/logging.h"
   #include "src/platform/common.h"
+  #include "src/platform/linux/misc.h"
   #include "stream_display_policy.h"
 
   #include <algorithm>
@@ -313,12 +314,15 @@ namespace display_topology {
     return false;
   }
 
-  int run_kscreen(const std::string &args) {
+  int run_kscreen(std::vector<std::string> args) {
     // QT_QPA_PLATFORM=wayland avoids kscreen-doctor aborting under a tty agent
     // session; timeout guards against hangs on some hosts.
-    const std::string cmd = "timeout 8 env QT_QPA_PLATFORM=wayland kscreen-doctor " + args;
-    BOOST_LOG(info) << "display_topology: ["sv << cmd << "]"sv;
-    return std::system(cmd.c_str());
+    std::vector<std::string> argv {
+      "timeout", "8", "env", "QT_QPA_PLATFORM=wayland", "kscreen-doctor"
+    };
+    argv.insert(argv.end(), args.begin(), args.end());
+    BOOST_LOG(info) << "display_topology: running kscreen-doctor with "sv << args.size() << " argument(s)"sv;
+    return platf::run_process_argv(argv);
   }
 
 
@@ -344,7 +348,7 @@ namespace display_topology {
       return false;
     }
 
-    const int rc = run_kscreen("output." + output_name + ".mode." + mode_arg);
+    const int rc = run_kscreen({"output." + output_name + ".mode." + mode_arg});
     if (rc != 0) {
       BOOST_LOG(warning) << "display_topology: failed to request mode ["sv << mode_arg
                          << "] on output ["sv << output_name << "] code="sv << rc;
@@ -428,7 +432,7 @@ namespace display_topology {
     // Staged prepare: enable dongle first and let KWin enumerate it before
     // blanking the desk. Atomic enable+disable races to "There are no outputs"
     // and KDE ScreenCast Start hangs on a placeholder 0x0 screen.
-    int ret = run_kscreen("output." + cfg.streaming_output + ".enable");
+    int ret = run_kscreen({"output." + cfg.streaming_output + ".enable"});
     if (ret != 0) {
       BOOST_LOG(error) << "display_topology: enable streaming output failed code="sv << ret;
     }
@@ -444,15 +448,17 @@ namespace display_topology {
     // Host portal ScreenCast is 8-bit SDR. Leave the streaming output in SDR so
     // KWin dumps tone-mapped BGRx instead of an HDR compositor view.
     if (portal_capture) {
-      ret = run_kscreen("output." + cfg.streaming_output + ".hdr.disable output." +
-                        cfg.streaming_output + ".wcg.disable");
+      ret = run_kscreen({
+        "output." + cfg.streaming_output + ".hdr.disable",
+        "output." + cfg.streaming_output + ".wcg.disable",
+      });
       if (ret != 0) {
         BOOST_LOG(warning) << "display_topology: could not disable HDR/WCG on streaming output code="sv << ret;
       }
     }
 
     if (privacy && distinct) {
-      ret = run_kscreen("output." + cfg.streaming_output + ".priority.1");
+      ret = run_kscreen({"output." + cfg.streaming_output + ".priority.1"});
       if (ret != 0) {
         BOOST_LOG(error) << "display_topology: set streaming priority failed code="sv << ret;
       }
@@ -464,7 +470,7 @@ namespace display_topology {
       // token guarantees no video.
       const bool blank_primary = !portal_capture || host_portal_restore_token_present();
       if (blank_primary) {
-        ret = run_kscreen("output." + cfg.primary_output + ".disable");
+        ret = run_kscreen({"output." + cfg.primary_output + ".disable"});
         if (ret != 0) {
           BOOST_LOG(error) << "display_topology: disable primary failed code="sv << ret
                            << " (KDE may refuse if streaming output is not yet active)"sv;
@@ -479,8 +485,10 @@ namespace display_topology {
       }
     }
     else if (distinct) {
-      ret = run_kscreen("output." + cfg.primary_output + ".priority.1 output." +
-                        cfg.streaming_output + ".priority.2");
+      ret = run_kscreen({
+        "output." + cfg.primary_output + ".priority.1",
+        "output." + cfg.streaming_output + ".priority.2",
+      });
       if (ret != 0) {
         BOOST_LOG(error) << "display_topology: extended layout failed code="sv << ret;
       }
@@ -500,17 +508,20 @@ namespace display_topology {
       return;
     }
 
-    std::string args;
+    std::vector<std::string> args;
     if (privacy && distinct) {
-      args = "output." + cfg.primary_output + ".enable output." + cfg.primary_output +
-             ".priority.1 output." + cfg.streaming_output + ".disable";
+      args = {
+        "output." + cfg.primary_output + ".enable",
+        "output." + cfg.primary_output + ".priority.1",
+        "output." + cfg.streaming_output + ".disable",
+      };
     }
     else {
       if (distinct) {
-        args = "output." + cfg.primary_output + ".priority.1 ";
+        args.push_back("output." + cfg.primary_output + ".priority.1");
       }
-      args += "output." + cfg.streaming_output + ".priority.2 output." +
-              cfg.streaming_output + ".disable";
+      args.push_back("output." + cfg.streaming_output + ".priority.2");
+      args.push_back("output." + cfg.streaming_output + ".disable");
     }
 
     const int ret = run_kscreen(args);

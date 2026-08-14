@@ -28,6 +28,8 @@
 
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "src/config.h"
@@ -219,7 +221,19 @@ namespace portal {
   }
 
   static std::string load_restore_token() {
-    std::ifstream f(token_path());
+    const auto path = token_path();
+    std::error_code ec;
+    std::filesystem::permissions(
+      path,
+      std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+      std::filesystem::perm_options::replace,
+      ec
+    );
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+      BOOST_LOG(warning) << "portal: Failed to secure existing restore token: "sv << ec.message();
+    }
+
+    std::ifstream f(path);
     if (!f.good()) return "";
     std::string token;
     std::getline(f, token);
@@ -228,8 +242,36 @@ namespace portal {
 
   static void save_restore_token(const std::string &token) {
     if (token.empty()) return;
-    std::ofstream f(token_path());
-    f << token;
+
+    const auto path = token_path();
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+      BOOST_LOG(warning) << "portal: Failed to open restore token file: "sv << strerror(errno);
+      return;
+    }
+
+    // open(2)'s mode only applies to newly-created files. Correct permissions
+    // on an existing token that may have been written by an older build.
+    if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+      BOOST_LOG(warning) << "portal: Failed to secure restore token file: "sv << strerror(errno);
+      ::close(fd);
+      return;
+    }
+
+    std::size_t written = 0;
+    while (written < token.size()) {
+      const auto result = ::write(fd, token.data() + written, token.size() - written);
+      if (result < 0 && errno == EINTR) {
+        continue;
+      }
+      if (result <= 0) {
+        BOOST_LOG(warning) << "portal: Failed to write restore token: "sv << strerror(errno);
+        ::close(fd);
+        return;
+      }
+      written += static_cast<std::size_t>(result);
+    }
+    ::close(fd);
     BOOST_LOG(info) << "portal: Saved restore token for future sessions"sv;
   }
 
