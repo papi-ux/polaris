@@ -298,7 +298,8 @@ namespace proc {
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id);
   bool exact_generation_transient_capture_failure_retries_for_tests(
     std::string_view session_instance_id,
-    pid_t forced_capture_failure_pid
+    pid_t forced_capture_failure_pid,
+    int *runtime_quiescence_requests = nullptr
   );
   bool exact_generation_persistent_capture_failure_fails_closed_for_tests(
     std::string_view session_instance_id,
@@ -323,6 +324,12 @@ namespace proc {
     std::string_view session_instance_id,
     pid_t forced_ambiguous_pid,
     int &capture_attempts
+  );
+  bool exact_generation_unreadable_candidate_quiesces_with_runtime_authority_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts,
+    int &quiescence_requests
   );
   bool exact_generation_missing_pre_capture_identity_fails_closed_for_tests(
     std::string_view session_instance_id,

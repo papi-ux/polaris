@@ -2613,7 +2613,14 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationTransientCaptureFailureRetriesBef
   }
   ASSERT_TRUE(token_visible);
 
-  EXPECT_TRUE(proc::exact_generation_transient_capture_failure_retries_for_tests(token, child));
+  int runtime_quiescence_requests = 0;
+  EXPECT_TRUE(proc::exact_generation_transient_capture_failure_retries_for_tests(
+    token,
+    child,
+    &runtime_quiescence_requests
+  ));
+  EXPECT_EQ(runtime_quiescence_requests, 0)
+    << "a transient identity race must not stop the independently owned runtime";
   int status = 0;
   EXPECT_EQ(child_guard.wait(&status, 0), child);
   EXPECT_TRUE(WIFSIGNALED(status));
@@ -2831,6 +2838,52 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationUnreadableLiveCandidateCannotDisa
     << "an unreadable live candidate must not be signaled or forgotten";
 #else
   GTEST_SKIP() << "Linux-only unreadable exact-generation ambiguity";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationUnreadableCandidateCanQuiesceThroughRuntimeAuthority) {
+#ifdef __linux__
+  const std::string token = "unreadable-runtime-owned-candidate";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+  bool token_visible = false;
+  for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+    std::ifstream environ_file("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+    const std::string environ(
+      (std::istreambuf_iterator<char>(environ_file)),
+      std::istreambuf_iterator<char>()
+    );
+    token_visible = environ.find(expected) != std::string::npos;
+    if (!token_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(token_visible);
+
+  int capture_attempts = 0;
+  int quiescence_requests = 0;
+  EXPECT_TRUE(proc::exact_generation_unreadable_candidate_quiesces_with_runtime_authority_for_tests(
+    token,
+    child,
+    capture_attempts,
+    quiescence_requests
+  ));
+  EXPECT_EQ(capture_attempts, 2);
+  EXPECT_EQ(quiescence_requests, 1)
+    << "the independently owned runtime should be quiesced at most once per cleanup";
+  int status = 0;
+  EXPECT_EQ(child_guard.wait(&status, 0), child);
+  EXPECT_TRUE(WIFSIGNALED(status));
+#else
+  GTEST_SKIP() << "Linux-only runtime-authority quiescence";
 #endif
 }
 
@@ -3337,6 +3390,11 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
     generation_finish_start,
     generation_finish_end - generation_finish_start
   );
+  const auto retry_quiescence = generation_cleanup.find("quiesce_cage_on_retryable_capture");
+  const auto retry_quiescence_stops_cage = generation_cleanup.find(
+    "stream_runtime::labwc::stop()",
+    retry_quiescence
+  );
   const auto cleanup_result = generation_cleanup.find(
     "const bool isolated_cleanup_complete = terminate_isolated_session_processes("
   );
@@ -3355,7 +3413,17 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   // (via the labwc facade, whose stop() carries its own ownership proof).
   // Without this, an incompletely attributable teardown leaves labwc running
   // as an orphan compositor and its supervisor as a zombie until restart.
-  const auto retention_stops_cage = generation_cleanup.find("stream_runtime::labwc::stop()");
+  const auto retention_stops_cage = generation_cleanup.find(
+    "stream_runtime::labwc::stop()",
+    retain_generation
+  );
+  ASSERT_NE(retry_quiescence, std::string::npos);
+  ASSERT_NE(retry_quiescence_stops_cage, std::string::npos)
+    << "a retryable cage capture must be allowed to quiesce the independently pidfd-owned runtime";
+  EXPECT_NE(
+    generation_cleanup.find("_session_used_cage_compositor && !_session_used_gamescope_runtime"),
+    std::string::npos
+  ) << "labwc runtime quiescence must never stop an attached Gamescope runtime";
   ASSERT_NE(cleanup_result, std::string::npos);
   ASSERT_NE(cleanup_success_gate, std::string::npos);
   ASSERT_NE(reset_cage, std::string::npos);
@@ -3365,6 +3433,8 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
        "the session cage rather than orphan it";
   ASSERT_NE(cleanup_clear_gate, std::string::npos);
   ASSERT_NE(clear_generation, std::string::npos);
+  EXPECT_LT(retry_quiescence, retry_quiescence_stops_cage);
+  EXPECT_LT(retry_quiescence_stops_cage, cleanup_result);
   EXPECT_LT(cleanup_result, cleanup_success_gate);
   EXPECT_LT(cleanup_success_gate, reset_cage);
   EXPECT_LT(reset_cage, retain_generation);

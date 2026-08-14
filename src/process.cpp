@@ -1717,6 +1717,9 @@ namespace proc {
                   getuid(),
                   descends_from_polaris
                 )) {
+              BOOST_LOG(warning) << "process: exact-generation capture found unreadable live descendant pid="sv
+                                 << pid << " error="sv << std::strerror(environ_before.error)
+                                 << "; retaining pidfd and requesting bounded quiescence"sv;
               int open_error = 0;
               auto ambiguous = open_process_pidfd(pid, open_error);
               if (!ambiguous) {
@@ -1849,7 +1852,8 @@ namespace proc {
 
     isolated_session_process_snapshot_t isolated_session_process_snapshot_after_quiescence(
       std::string_view session_instance_id,
-      std::string_view reason
+      std::string_view reason,
+      const std::function<void()> &quiesce_owned_runtime = {}
     ) {
       constexpr int max_attempts = 4;
       constexpr auto retry_delay = 50ms;
@@ -1885,10 +1889,13 @@ namespace proc {
             }
           );
           if (!now_captured) {
+            BOOST_LOG(error) << "process: exact-generation unreadable candidate remained live without ownership proof pid="sv
+                             << ambiguous.pid << "; failing closed "sv << reason;
             snapshot.mark_hard_failure();
           }
         }
         unresolved_ambiguous.clear();
+        const bool has_unreadable_live_candidate = !snapshot.ambiguous.empty();
         if (!snapshot.hard_capture_failure) {
           for (auto &ambiguous : snapshot.ambiguous) {
             if (!pidfd_has_exited(ambiguous)) {
@@ -1910,6 +1917,9 @@ namespace proc {
             retained_owned.emplace_back(std::move(owned));
           }
         }
+        if (has_unreadable_live_candidate && quiesce_owned_runtime) {
+          quiesce_owned_runtime();
+        }
         BOOST_LOG(info) << "process: retrying transient exact-generation capture (attempt "sv
                         << (attempt + 1) << '/' << max_attempts << ") "sv << reason;
         std::this_thread::sleep_for(retry_delay);
@@ -1922,13 +1932,22 @@ namespace proc {
     bool terminate_isolated_session_processes(
       std::string_view session_instance_id,
       std::string_view reason,
-      std::vector<pidfd_handle_t> *tracked_detached_children = nullptr
+      std::vector<pidfd_handle_t> *tracked_detached_children = nullptr,
+      const std::function<void()> &quiesce_owned_runtime = {}
     ) {
       if (session_instance_id.empty()) {
         return false;
       }
 
       bool direct_child_reap_complete = true;
+      bool owned_runtime_quiescence_requested = false;
+      const auto request_owned_runtime_quiescence = [&]() {
+        if (owned_runtime_quiescence_requested || !quiesce_owned_runtime) {
+          return;
+        }
+        owned_runtime_quiescence_requested = true;
+        quiesce_owned_runtime();
+      };
       if (tracked_detached_children != nullptr) {
         direct_child_reap_complete = reap_tracked_detached_children(
           *tracked_detached_children,
@@ -1937,7 +1956,11 @@ namespace proc {
         );
       }
       for (int pass = 0; pass < 2; ++pass) {
-        auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
+        auto snapshot = isolated_session_process_snapshot_after_quiescence(
+          session_instance_id,
+          reason,
+          request_owned_runtime_quiescence
+        );
         if (!snapshot.capture_complete) {
           BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
           return false;
@@ -1977,7 +2000,11 @@ namespace proc {
         }
       }
 
-      const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
+      const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(
+        session_instance_id,
+        reason,
+        request_owned_runtime_quiescence
+      );
       if (tracked_detached_children != nullptr) {
         direct_child_reap_complete = reap_tracked_detached_children(
                                        *tracked_detached_children,
@@ -4710,7 +4737,8 @@ namespace proc {
 
   bool exact_generation_transient_capture_failure_retries_for_tests(
     std::string_view session_instance_id,
-    pid_t forced_capture_failure_pid
+    pid_t forced_capture_failure_pid,
+    int *runtime_quiescence_requests
   ) {
     const auto previous_pid = forced_missing_post_capture_identity_pid;
     const auto previous_remaining = forced_missing_post_capture_identity_failures_remaining;
@@ -4720,7 +4748,19 @@ namespace proc {
     });
     forced_missing_post_capture_identity_pid = forced_capture_failure_pid;
     forced_missing_post_capture_identity_failures_remaining = 1;
-    return terminate_isolated_session_processes(session_instance_id, "during transient-capture test"sv);
+    std::function<void()> quiesce_owned_runtime;
+    if (runtime_quiescence_requests != nullptr) {
+      *runtime_quiescence_requests = 0;
+      quiesce_owned_runtime = [runtime_quiescence_requests]() {
+        ++*runtime_quiescence_requests;
+      };
+    }
+    return terminate_isolated_session_processes(
+      session_instance_id,
+      "during transient-capture test"sv,
+      nullptr,
+      quiesce_owned_runtime
+    );
   }
 
   bool exact_generation_persistent_capture_failure_fails_closed_for_tests(
@@ -4833,6 +4873,44 @@ namespace proc {
     return !terminate_isolated_session_processes(
       session_instance_id,
       "during unreadable-candidate ambiguity test"sv
+    );
+  }
+
+  bool exact_generation_unreadable_candidate_quiesces_with_runtime_authority_for_tests(
+    std::string_view session_instance_id,
+    pid_t forced_ambiguous_pid,
+    int &capture_attempts,
+    int &quiescence_requests
+  ) {
+    const auto previous_pid = forced_unreadable_environ_pid;
+    const auto previous_remaining = forced_unreadable_environ_failures_remaining;
+    const auto previous_hidden = forced_unreadable_environ_token_hidden;
+    const auto previous_attempt_counter = exact_generation_capture_attempt_counter_for_tests;
+    auto restore = util::fail_guard([
+      previous_pid,
+      previous_remaining,
+      previous_hidden,
+      previous_attempt_counter
+    ]() {
+      forced_unreadable_environ_pid = previous_pid;
+      forced_unreadable_environ_failures_remaining = previous_remaining;
+      forced_unreadable_environ_token_hidden = previous_hidden;
+      exact_generation_capture_attempt_counter_for_tests = previous_attempt_counter;
+    });
+    capture_attempts = 0;
+    quiescence_requests = 0;
+    forced_unreadable_environ_pid = forced_ambiguous_pid;
+    forced_unreadable_environ_failures_remaining = 1;
+    forced_unreadable_environ_token_hidden = false;
+    exact_generation_capture_attempt_counter_for_tests = &capture_attempts;
+    return terminate_isolated_session_processes(
+      session_instance_id,
+      "during runtime-authority quiescence test"sv,
+      nullptr,
+      [forced_ambiguous_pid, &quiescence_requests]() {
+        ++quiescence_requests;
+        (void) kill(forced_ambiguous_pid, SIGTERM);
+      }
     );
   }
 
@@ -7914,10 +7992,16 @@ namespace proc {
     const auto reason = _session_used_cage_compositor ?
                           "after private Steam pre-cage termination"sv :
                           "during non-cage detached-only shutdown"sv;
+    const auto quiesce_cage_on_retryable_capture = []() {
+      BOOST_LOG(info) << "process: quiescing pidfd-owned labwc runtime before exact-generation capture retry"sv;
+      stream_runtime::labwc::stop();
+    };
     const bool isolated_cleanup_complete = terminate_isolated_session_processes(
       _session_instance_id,
       reason,
-      (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr
+      (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr,
+      (_session_used_cage_compositor && !_session_used_gamescope_runtime) ?
+        std::function<void()> {quiesce_cage_on_retryable_capture} : std::function<void()> {}
     );
     const bool detached_authority_complete =
       _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;
