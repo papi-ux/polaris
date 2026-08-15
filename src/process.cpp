@@ -8727,6 +8727,14 @@ namespace proc {
   }
 
   boost::process::environment proc_t::get_env() {
+    // _env is rewritten across a session's life -- every POLARIS_* var at
+    // launch, then STATUS on resume, pause, and terminate -- always under this
+    // lock. Callers run on other threads: the server-command and undo-command
+    // runners in stream.cpp copy it while terminate_impl is writing STATUS.
+    // boost's environment owns a native block, so an unlocked copy can read
+    // pointers that operator[] just reallocated.
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _env;
   }
 
