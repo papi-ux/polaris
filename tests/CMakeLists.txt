@@ -103,6 +103,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_benchmark_control_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_benchmark_auth.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_download_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_client_settings_advertisement.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_browser_stream_protocol.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
