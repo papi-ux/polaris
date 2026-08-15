@@ -519,6 +519,8 @@ namespace confighttp {
           " WAYLAND_DISPLAY=" + shell_escape(socket_name) +
           " XDG_RUNTIME_DIR=" + shell_escape(xdg) + " ";
         // Nudge a frame then screenshot (async write inside gamescope).
+        // shell-escape-checked: env is built above from shell_escape'd values,
+        // and everything concatenated here is a literal.
         std::system((env + "gamescopectl debug_force_repaint >/dev/null 2>&1").c_str());
         std::ostringstream cmd;
         cmd << env << "gamescopectl screenshot " << shell_escape(outfile)
@@ -5861,7 +5863,9 @@ namespace confighttp {
       std::string ln;
       while (std::getline(ue, ln)) {
         if (ln.substr(0, 14) != "PCI_SLOT_NAME=") continue;
-        FILE *lp = popen(("lspci -vmm -s " + ln.substr(14) + " 2>/dev/null").c_str(), "r");
+        // Kernel-supplied, but escaped anyway so every concatenated shell call
+        // in the tree escapes and the contract below needs no exception for it.
+        FILE *lp = popen(("lspci -vmm -s " + shell_escape(ln.substr(14)) + " 2>/dev/null").c_str(), "r");
         if (lp) {
           char buf[256] = {};
           std::string dev_name, sdev_name;
