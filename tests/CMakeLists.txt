@@ -182,6 +182,7 @@ set(TEST_CONFIG_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_entry_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launcher_identity.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_proc_env_locking.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_process_migration.cpp
 )
 
