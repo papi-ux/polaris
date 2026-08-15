@@ -69,6 +69,7 @@
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/private_session_attach.h"
   #include "platform/linux/session_launch_linux.h"
   #include "platform/linux/display_topology.h"
   #include "platform/linux/gamescope_process.h"
@@ -7313,6 +7314,23 @@ namespace proc {
       private_runtime &&
       private_runtime->backend_id() == stream_display_policy::k_runtime_gamescope;
 
+    // Issue #234: the Flatpak portal builds each sandbox from its own service
+    // environment, so it overwrites DISPLAY with the login session's and binds
+    // only that X socket. Nothing Polaris exports survives the hop, so the most
+    // useful thing it can do is name the hazard at launch instead of leaving a
+    // black stream behind.
+    auto warn_on_portal_display_hop = [](const std::string &cmd) {
+      if (!private_session_attach::may_lose_display_to_flatpak_portal(cmd)) {
+        return;
+      }
+      BOOST_LOG(warning) << "private_session: ["sv << cmd
+                         << "] launches through Flatpak. The Flatpak portal replaces DISPLAY with the "sv
+                         << "host session's and binds only that X socket, so X11 clients such as Proton "sv
+                         << "and Wine can render to the host desktop instead of the private session "sv
+                         << "(issue #234). A native, non-Flatpak launcher avoids the hop. See "sv
+                         << "docs/troubleshooting.md."sv;
+    };
+
     auto spawn_detached_into_runtime = [&](const std::string &raw_cmd) {
       const auto cmd = session_launch_linux::sanitize_cage_command(raw_cmd);
       auto cmd_env = _env;
@@ -7329,6 +7347,7 @@ namespace proc {
       }
       else {
         session_launch_linux::apply_labwc_child_env(cmd_env, private_runtime);
+        warn_on_portal_display_hop(raw_cmd);
       }
       const auto launch_cmd = command_with_gamepad_isolation(cmd);
       boost::filesystem::path working_dir = _app.working_dir.empty() ?
@@ -7369,6 +7388,10 @@ namespace proc {
         }
       }
       else {
+        // The kiosk primary client is launched by the runtime rather than by
+        // spawn_detached_into_runtime, and it is the entry most likely to name a
+        // Flatpak launcher, so it needs the same warning at its own launch site.
+        warn_on_portal_display_hop(_app.detached[0]);
         const std::string game_cmd = session_launch_linux::sanitize_cage_command(_app.detached[0]);
         if (!start_cage_with_runtime_fallback(game_cmd)) {
           BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
@@ -7486,6 +7509,7 @@ namespace proc {
       }
       else {
         session_launch_linux::apply_labwc_child_env(launch_env, private_runtime);
+        warn_on_portal_display_hop(_app.cmd);
       }
     }
     if (app_command_uses_cage_runtime) {
@@ -7524,6 +7548,67 @@ namespace proc {
 #endif
 
     _app_launch_time = std::chrono::steady_clock::now();
+
+#ifdef __linux__
+    // A launch that lands on the host session instead of the private one still
+    // connects, still streams, and still reports healthy; the client just sees an
+    // empty compositor. Watch for a window and say so when none ever arrives, so
+    // this surfaces as a stated failure rather than an unexplained black stream.
+    if (use_cage_compositor_for_session && private_runtime && !gamescope_private_runtime) {
+      std::string private_socket = private_runtime->wayland_socket();
+      const pid_t private_compositor_pid = private_runtime->pid();
+      if (!private_socket.empty() && private_compositor_pid > 0) {
+        std::thread attach_watch(
+          [socket = std::move(private_socket), compositor_pid = private_compositor_pid, app_name = _app.name]() {
+            const auto started = std::chrono::steady_clock::now();
+            for (;;) {
+              std::this_thread::sleep_for(private_session_attach::k_default_attach_poll);
+              // Watching a pid rather than the shared runtime keeps this thread
+              // off session state the main thread owns, and stops the watch dead
+              // once the session it was launched for is gone.
+              if (kill(compositor_pid, 0) != 0) {
+                return;
+              }
+              const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started
+              );
+              const auto probe = private_session_attach::probe_toplevels(socket);
+              const auto verdict = private_session_attach::evaluate(
+                probe,
+                elapsed,
+                private_session_attach::k_default_attach_grace
+              );
+              if (verdict == private_session_attach::verdict_e::waiting) {
+                continue;
+              }
+              if (verdict == private_session_attach::verdict_e::attached) {
+                BOOST_LOG(info) << "private_session: ["sv << app_name
+                                << "] attached to the private session with "sv
+                                << probe.toplevel_count << " window(s)"sv;
+                return;
+              }
+              if (verdict == private_session_attach::verdict_e::skipped) {
+                BOOST_LOG(debug) << "private_session: attach watch ended without a measurement for ["sv
+                                 << app_name << ']';
+                return;
+              }
+              BOOST_LOG(error) << "private_session: ["sv << app_name
+                               << "] never opened a window in the private session after "sv
+                               << std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()
+                               << "s. The stream is showing an empty compositor and the app most likely "sv
+                               << "rendered to the host desktop instead. See docs/troubleshooting.md."sv;
+              confighttp::emit_session_event(
+                "warning",
+                app_name + " did not open a window in the private session; the stream is showing an empty compositor"
+              );
+              return;
+            }
+          }
+        );
+        attach_watch.detach();
+      }
+    }
+#endif
 
   #ifdef _WIN32
     auto resetHDRThread = std::thread([this, enable_hdr = launch_session->enable_hdr]{

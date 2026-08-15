@@ -159,6 +159,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_linux_process_argv.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_portal_grab_policy.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_attach.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_input.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
