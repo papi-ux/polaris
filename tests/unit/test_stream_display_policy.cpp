@@ -15,23 +15,41 @@ namespace {
         headless_mode {config::video.linux_display.headless_mode},
         use_cage_compositor {config::video.linux_display.use_cage_compositor},
         prefer_gpu_native_capture {config::video.linux_display.prefer_gpu_native_capture},
+        auto_manage_displays {config::video.linux_display.auto_manage_displays},
         stream_mode {config::video.linux_display.stream_mode},
-        private_runtime {config::video.linux_display.private_runtime} {
+        private_runtime {config::video.linux_display.private_runtime},
+        headless_swap_mode {config::video.linux_display.headless_swap_mode},
+        streaming_output {config::video.linux_display.streaming_output},
+        primary_output {config::video.linux_display.primary_output},
+        capture {config::video.capture},
+        output_name {config::video.output_name} {
     }
 
     ~LinuxDisplayPolicyGuard() {
       config::video.linux_display.headless_mode = headless_mode;
       config::video.linux_display.use_cage_compositor = use_cage_compositor;
       config::video.linux_display.prefer_gpu_native_capture = prefer_gpu_native_capture;
+      config::video.linux_display.auto_manage_displays = auto_manage_displays;
       config::video.linux_display.stream_mode = stream_mode;
       config::video.linux_display.private_runtime = private_runtime;
+      config::video.linux_display.headless_swap_mode = headless_swap_mode;
+      config::video.linux_display.streaming_output = streaming_output;
+      config::video.linux_display.primary_output = primary_output;
+      config::video.capture = capture;
+      config::video.output_name = output_name;
     }
 
     bool headless_mode;
     bool use_cage_compositor;
     bool prefer_gpu_native_capture;
+    bool auto_manage_displays;
     std::string stream_mode;
     std::string private_runtime;
+    std::string headless_swap_mode;
+    std::string streaming_output;
+    std::string primary_output;
+    std::string capture;
+    std::string output_name;
   };
 
   void configure_headless_cage(bool prefer_gpu_native_capture) {
@@ -116,6 +134,116 @@ TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
   EXPECT_EQ(config::video.linux_display.stream_mode, "desktop_display");
   EXPECT_FALSE(config::video.linux_display.headless_mode);
   EXPECT_FALSE(config::video.linux_display.use_cage_compositor);
+}
+
+TEST(StreamDisplayPolicyTests, ReapplyingHeadlessSelectionClearsStaleCompanionState) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+
+  linux_display.stream_mode = "headless_stream";
+  linux_display.headless_mode = true;
+  linux_display.use_cage_compositor = true;
+  linux_display.prefer_gpu_native_capture = true;
+  linux_display.private_runtime = "labwc";
+
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_stream"));
+
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  EXPECT_EQ(linux_display.stream_mode, "headless_stream");
+  EXPECT_TRUE(linux_display.headless_mode);
+  EXPECT_TRUE(linux_display.use_cage_compositor);
+  EXPECT_FALSE(linux_display.prefer_gpu_native_capture);
+  EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("headless_stream"));
+  linux_display.stream_mode = "HEADLESS_STREAM";
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_stream"));
+  linux_display.stream_mode = "headless_stream";
+
+  const auto resolved = stream_display_policy::resolve(stream_display_policy::input_t {});
+  EXPECT_EQ(resolved.selection, "headless_stream");
+}
+
+TEST(StreamDisplayPolicyTests, CommonModeCompanionStateMatchesAllRegisteredSelections) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  struct mode_case_t {
+    const char *selection;
+    const char *runtime;
+  };
+  const mode_case_t cases[] = {
+    {"headless_stream", "labwc"},
+    {"windowed_stream", "labwc"},
+    {"desktop_display", ""},
+    {"host_virtual_display", ""},
+  };
+
+  for (const auto &test_case : cases) {
+    SCOPED_TRACE(test_case.selection);
+    const auto expected = stream_display_policy::legacy_booleans_for_selection(test_case.selection);
+    linux_display.stream_mode = test_case.selection;
+    linux_display.headless_mode = expected.headless_mode;
+    linux_display.use_cage_compositor = expected.use_cage_compositor;
+    linux_display.prefer_gpu_native_capture = expected.prefer_gpu_native_capture;
+    linux_display.private_runtime = test_case.runtime;
+    EXPECT_TRUE(stream_display_policy::selection_companion_state_matches(test_case.selection));
+
+    linux_display.prefer_gpu_native_capture = !expected.prefer_gpu_native_capture;
+    EXPECT_FALSE(stream_display_policy::selection_companion_state_matches(test_case.selection));
+  }
+}
+
+TEST(StreamDisplayPolicyTests, GamescopeCompanionStateIncludesCaptureDefault) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+
+  linux_display.stream_mode = "gamescope_stream";
+  linux_display.headless_mode = true;
+  linux_display.use_cage_compositor = false;
+  linux_display.prefer_gpu_native_capture = false;
+  linux_display.private_runtime = "gamescope";
+  config::video.capture.clear();
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("gamescope_stream"));
+
+  config::video.capture = "portal";
+  EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("gamescope_stream"));
+}
+
+TEST(StreamDisplayPolicyTests, HeadlessDongleCompanionStateIncludesConditionalDefaults) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+
+  linux_display.stream_mode = "headless_dongle";
+  linux_display.headless_mode = true;
+  linux_display.use_cage_compositor = false;
+  linux_display.prefer_gpu_native_capture = false;
+  linux_display.private_runtime.clear();
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+  EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+
+  linux_display.auto_manage_displays = false;
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode.clear();
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output.clear();
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output.clear();
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+  linux_display.primary_output = "DP-1";
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "auto";
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+  config::video.capture = "portal";
+  config::video.output_name.clear();
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
 }
 
 TEST(StreamDisplayPolicyTests, GamescopeStreamRegisteredWithGamescopeRuntime) {

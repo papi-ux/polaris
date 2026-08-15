@@ -388,6 +388,35 @@ TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunc
   EXPECT_NE(body.find("platf::unset_env(\"POLARIS_SESSION_INSTANCE_ID\")", app_env_loop), std::string::npos);
 }
 
+TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionState) {
+  // An explicit headless_stream request may match the current stream_mode ID
+  // while legacy companion state (for example prefer_gpu_native_capture) is
+  // stale. Skipping apply_selection in that case can resolve the session as
+  // windowed_stream even though the launch requested headless_stream.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(", execute_start);
+  ASSERT_NE(execute_start, std::string::npos);
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto body = source.substr(execute_start, terminate_start - execute_start);
+
+  const auto guard_start = body.find("if (!session_mode.empty()");
+  const auto apply_start = body.find("stream_display_policy::apply_selection(session_mode", guard_start);
+  ASSERT_NE(guard_start, std::string::npos);
+  ASSERT_NE(apply_start, std::string::npos);
+  const auto guard = body.substr(guard_start, apply_start - guard_start);
+
+  EXPECT_NE(guard.find("!(launch_session && launch_session->mirror_desktop)"), std::string::npos);
+  EXPECT_NE(
+    guard.find("!stream_display_policy::selection_companion_state_matches(session_mode)"),
+    std::string::npos
+  );
+  EXPECT_EQ(guard.find("session_mode != linux_display.stream_mode"), std::string::npos)
+    << "same-ID explicit overrides must still normalize companion state";
+}
+
 TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWithoutCrossLockingRtsp) {
   const auto header = read_source_file_for_contract("src/process.h");
   const auto source = read_source_file_for_contract("src/process.cpp");
