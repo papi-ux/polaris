@@ -77,6 +77,20 @@ namespace nvhttp {
   constexpr auto OTP_EXPIRE_DURATION = 180s;
 
   /**
+   * @brief What an accepted one-time pin authorizes, lifted out under the lock.
+   *
+   * The OTP state itself is shared between the confighttp and nvhttp threads,
+   * so a caller gets a copy taken while the lock is held rather than a view of
+   * globals that the other thread can replace mid-use.
+   */
+  struct otp_claim_t {
+    bool matched = false;
+    std::string pin;
+    std::string device_name;
+    std::optional<crypto::PERM> pairing_perm;
+  };
+
+  /**
    * @brief Start the nvhttp server.
    * @examples
    * nvhttp::start();
@@ -408,6 +422,7 @@ namespace nvhttp {
   );
 #endif
   void reset_pairing_state_for_tests();
+  otp_claim_t claim_one_time_pin_for_tests(const std::string &salt, std::string_view presented_hash);
   void add_legacy_authorized_client_for_tests(const crypto::p_named_cert_t &named_cert_p);
   bool add_authorized_client_for_tests(
     const crypto::p_named_cert_t &named_cert_p,
