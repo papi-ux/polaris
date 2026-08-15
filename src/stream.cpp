@@ -1066,6 +1066,17 @@ namespace stream {
     return 0;
   }
 
+  void record_network_stats(const std::string &client_ip,
+                            double latency_ms,
+                            double packet_loss,
+                            std::uint64_t bytes_sent) {
+    if (client_ip.empty()) {
+      stream_stats::update_network_stats(latency_ms, packet_loss, bytes_sent);
+    } else {
+      stream_stats::update_network_stats(client_ip, latency_ms, packet_loss, bytes_sent);
+    }
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1087,10 +1098,7 @@ namespace stream {
       }
 
       const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
-      if (!client_ip.empty()) {
-        stream_stats::update_network_stats(client_ip, rtt_ms, loss_pct, 0);
-      }
-      stream_stats::update_network_stats(rtt_ms, loss_pct, 0);
+      record_network_stats(client_ip, rtt_ms, loss_pct, 0);
     });
 
     server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
@@ -1133,10 +1141,7 @@ namespace stream {
         adaptive_bitrate::update_network_stats(loss_pct, rtt_ms);
       }
 
-      if (!client_ip.empty()) {
-        stream_stats::update_network_stats(client_ip, rtt_ms, loss_pct, 0);
-      }
-      stream_stats::update_network_stats(rtt_ms, loss_pct, 0);
+      record_network_stats(client_ip, rtt_ms, loss_pct, 0);
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
