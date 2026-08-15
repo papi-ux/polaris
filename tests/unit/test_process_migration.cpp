@@ -4314,3 +4314,42 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   std::filesystem::remove(file_path);
 }
 #endif
+
+TEST(ProcConfiguredCommandWaitContract, CommandsRunUnderTheLifecycleLockWaitWithABound) {
+  // Prep and undo commands run synchronously on the thread holding the session
+  // lifecycle lock, so a bare child.wait() on either freezes launch, resume,
+  // stop, and every status query behind it. Both go through a bounded helper.
+  // The resume and pause state commands deliberately do not: they run on a
+  // detached thread holding no lock, where taking a long time blocks nothing.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+
+  const auto helper = source.find("void wait_for_configured_command(");
+  ASSERT_NE(helper, std::string::npos);
+
+  // The helper polls rather than calling child::wait_for(), which Boost marks
+  // deprecated as unreliable and which -Werror builds reject outright.
+  EXPECT_EQ(source.find("child.wait_for("), std::string::npos);
+  EXPECT_NE(source.find("child.running()", helper), std::string::npos);
+
+  const auto prep_loop = source.find("Executing Do Cmd:");
+  ASSERT_NE(prep_loop, std::string::npos);
+  const auto undo_loop = source.find("Executing Undo Cmd:");
+  ASSERT_NE(undo_loop, std::string::npos);
+
+  // Each locked site reaches the helper before the next command's log line.
+  const auto prep_wait = source.find("wait_for_configured_command(child, cmd.do_cmd", prep_loop);
+  ASSERT_NE(prep_wait, std::string::npos);
+  EXPECT_LT(prep_wait, source.find("Executing", prep_loop + 1));
+
+  const auto undo_wait = source.find("wait_for_configured_command(child, cmd.undo_cmd", undo_loop);
+  ASSERT_NE(undo_wait, std::string::npos);
+
+  // Every bare wait that remains is explained as deliberately unbounded.
+  for (auto at = source.find("child.wait()"); at != std::string::npos; at = source.find("child.wait()", at + 1)) {
+    const auto line_start = source.rfind('\n', at);
+    const auto preceding = source.substr(line_start > 200 ? line_start - 200 : 0, 200);
+    const bool is_helper_reap = at > helper && at < source.find("void terminate_process_group(");
+    EXPECT_TRUE(is_helper_reap || preceding.find("Unbounded on purpose") != std::string::npos)
+      << "unexplained bare child.wait() at offset " << at;
+  }
+}

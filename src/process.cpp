@@ -5475,6 +5475,51 @@ namespace proc {
     return std::make_unique<deinit_t>();
   }
 
+  /**
+   * @brief Wait for a configured command to exit, bounded by the app's exit_timeout.
+   *
+   * Prep commands in execute_impl and undo commands in terminate_impl run
+   * synchronously on the thread that holds the session lifecycle lock, so an
+   * unbounded wait on either freezes launch, resume, stop, and every status
+   * query behind it until the host is killed. Long-running work belongs in an
+   * app's detached commands.
+   *
+   * The resume and pause state commands deliberately do not use this: they run
+   * on a detached thread holding no lock, where taking a long time is fine.
+   *
+   * A configured 0 means "kill the process group at once" for the app itself,
+   * which would be a surprising thing to do to a configured command, so that
+   * falls back to the 5s default rather than killing instantly.
+   *
+   * child::wait_for() is deprecated as unreliable, so this polls the same way
+   * terminate_process_group() below does.
+   */
+  void wait_for_configured_command(
+    boost::process::v1::child &child,
+    std::string_view command,
+    std::chrono::seconds exit_timeout
+  ) {
+    const auto timeout = exit_timeout.count() > 0 ? exit_timeout : std::chrono::seconds {5};
+
+    auto remaining = timeout;
+    while (child.running() && (--remaining).count() >= 0) {
+      std::this_thread::sleep_for(1s);
+    }
+
+    if (child.running()) {
+      BOOST_LOG(warning) << "Command ["sv << command << "] did not exit within "sv
+                         << timeout.count() << "s; terminating it"sv;
+      std::error_code terminate_ec;
+      child.terminate(terminate_ec);
+      if (terminate_ec) {
+        BOOST_LOG(warning) << "Couldn't terminate ["sv << command << "]: "sv << terminate_ec.message();
+      }
+    }
+
+    // Reaps whether it exited on its own or was just killed.
+    child.wait();
+  }
+
   void terminate_process_group(boost::process::v1::child &proc, boost::process::v1::group &group, std::chrono::seconds exit_timeout) {
     if (group.valid() && platf::process_group_running((std::uintptr_t) group.native_handle())) {
       if (exit_timeout.count() > 0) {
@@ -6728,7 +6773,7 @@ namespace proc {
         continue;
       }
 
-      child.wait();
+      wait_for_configured_command(child, cmd.do_cmd, _app.exit_timeout);
       auto ret = child.exit_code();
       if (ret != 0) {
         BOOST_LOG(warning) << '[' << cmd.do_cmd << "] returned code ["sv << ret << ']';
@@ -7753,6 +7798,8 @@ namespace proc {
             break;
           }
 
+          // Unbounded on purpose: this loop runs on a detached thread that
+          // holds no lock, so a long-running resume command blocks nothing.
           child.wait();
 
           auto ret = child.exit_code();
@@ -7914,6 +7961,8 @@ namespace proc {
             break;
           }
 
+          // Unbounded on purpose: this loop runs on a detached thread that
+          // holds no lock, so a long-running pause command blocks nothing.
           child.wait();
 
           auto ret = child.exit_code();
@@ -8226,33 +8275,7 @@ namespace proc {
         BOOST_LOG(warning) << "System: "sv << ec.message();
       }
 
-      // An unbounded wait here holds the session lifecycle lock for as long as
-      // the undo command runs, which freezes launch, resume, stop, and every
-      // status query behind it. The app's exit_timeout bounds the app itself;
-      // bound its undo commands the same way. A configured 0 means "kill the
-      // app at once" for the process group, which would be a surprising thing
-      // to do to an undo command, so fall back to the 5s default there.
-      const auto undo_timeout = _app.exit_timeout.count() > 0 ? _app.exit_timeout : std::chrono::seconds {5};
-
-      // child::wait_for() is deprecated as unreliable, so poll like
-      // terminate_process_group() above does.
-      auto undo_remaining = undo_timeout;
-      while (child.running() && (--undo_remaining).count() >= 0) {
-        std::this_thread::sleep_for(1s);
-      }
-
-      if (child.running()) {
-        BOOST_LOG(warning) << "Undo command ["sv << cmd.undo_cmd << "] did not exit within "sv
-                           << undo_timeout.count() << "s; terminating it"sv;
-        std::error_code terminate_ec;
-        child.terminate(terminate_ec);
-        if (terminate_ec) {
-          BOOST_LOG(warning) << "Couldn't terminate undo command ["sv << cmd.undo_cmd
-                             << "]: "sv << terminate_ec.message();
-        }
-      }
-
-      child.wait();
+      wait_for_configured_command(child, cmd.undo_cmd, _app.exit_timeout);
       auto ret = child.exit_code();
 
       if (ret != 0) {
