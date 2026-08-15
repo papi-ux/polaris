@@ -419,6 +419,33 @@ namespace stream_runtime::gamescope_process {
              pid_it->second.pgid == root;
     }
 
+    std::optional<std::string> process_env_value(const fs::path &process_dir, std::string_view key) {
+      std::ifstream environ_file(process_dir / "environ", std::ios::binary);
+      if (!environ_file) {
+        return std::nullopt;
+      }
+      const std::string bytes {
+        std::istreambuf_iterator<char> {environ_file},
+        std::istreambuf_iterator<char> {},
+      };
+
+      const std::string prefix = std::string {key} + "=";
+      std::size_t offset = 0;
+      while (offset < bytes.size()) {
+        const auto end = bytes.find('\0', offset);
+        const auto length = (end == std::string::npos ? bytes.size() : end) - offset;
+        const std::string_view entry {bytes.data() + offset, length};
+        if (entry.starts_with(prefix)) {
+          return std::string {entry.substr(prefix.size())};
+        }
+        if (end == std::string::npos) {
+          break;
+        }
+        offset = end + 1;
+      }
+      return std::nullopt;
+    }
+
     std::optional<std::uint64_t> inode_for_path(
       const socket_inode_map_t &inodes,
       const fs::path &path
@@ -754,6 +781,42 @@ namespace stream_runtime::gamescope_process {
       return std::nullopt;
     }
     return ":" + std::to_string(best->display);
+  }
+
+  std::optional<int> nested_gamescope_client(
+    std::string_view wayland_socket,
+    const lookup_paths_t &paths
+  ) {
+    if (wayland_socket.empty()) {
+      return std::nullopt;
+    }
+
+    // Runs on a session watch thread every couple of seconds, so the scan reads
+    // one symlink per process and only opens environ for a gamescope.
+    std::error_code ec;
+    fs::directory_iterator iterator(paths.proc_root, fs::directory_options::skip_permission_denied, ec);
+    if (ec) {
+      return std::nullopt;
+    }
+
+    for (const auto &entry : iterator) {
+      const auto pid = parse_integer<int>(entry.path().filename().string());
+      if (!pid) {
+        continue;
+      }
+
+      std::error_code link_ec;
+      const auto executable = fs::read_symlink(entry.path() / "exe", link_ec);
+      if (link_ec || !gamescope_executable_name(executable)) {
+        continue;
+      }
+
+      if (process_env_value(entry.path(), "WAYLAND_DISPLAY") == wayland_socket) {
+        return *pid;
+      }
+    }
+
+    return std::nullopt;
   }
 
 }  // namespace stream_runtime::gamescope_process
