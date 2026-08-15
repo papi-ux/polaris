@@ -7137,13 +7137,18 @@ namespace proc {
       if (!stream_runtime::labwc::headless_extcopy_dmabuf_probe_succeeded(extcopy_initialized, live_gpu_frame_converted)) {
         stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
         if (!extcopy_initialized) {
-          const auto gpu_profile = stream_stats::linux_gpu_profile_json(stream_stats::get_current());
-          if (encoder_label.find("vaapi") != std::string::npos) {
-            stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "policy", "vaapi_headless_dmabuf_disabled_for_stability");
-          } else if (gpu_profile.value("adapter_pairing_status", std::string {}) == "mismatched") {
-            stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "device_pairing", "cross_gpu_adapter_mismatch");
+          const auto current_stats = stream_stats::get_current();
+          const auto &headless_attempt = current_stats.gpu_native_probe.headless_extcopy;
+          if (!headless_attempt.failure_reason.empty()) {
+            BOOST_LOG(info) << "session_manager: Retaining headless extcopy failure reason ["
+                            << headless_attempt.failure_reason << "] from capture initialization";
           } else {
-            stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "capture_init", "dmabuf_capture_not_initialized");
+            const auto gpu_profile = stream_stats::linux_gpu_profile_json(current_stats);
+            if (gpu_profile.value("adapter_pairing_status", std::string {}) == "mismatched") {
+              stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "device_pairing", "cross_gpu_adapter_mismatch");
+            } else {
+              stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "capture_init", "dmabuf_capture_not_initialized");
+            }
           }
           BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe did not initialize DMA-BUF capture"sv;
         } else {
@@ -7211,7 +7216,11 @@ namespace proc {
       // gate covers the rest, by which point the encoder is always chosen.
       const auto encoder_mem_type = video::active_encoder_mem_type();
       if (encoder_mem_type != platf::mem_type_e::unknown &&
-          !stream_runtime::labwc::gpu_native_dmabuf_is_safe(encoder_mem_type)) {
+          !stream_runtime::labwc::gpu_native_dmabuf_is_safe(
+            encoder_mem_type,
+            wlgrab_capture_policy::gpu_native_capture_route_e::windowed_nested,
+            std::nullopt
+          )) {
         stream_stats::update_gpu_native_probe_attempt("windowed", "ineligible", "policy", "vaapi_gpu_native_dmabuf_disabled_for_stability");
         BOOST_LOG(info) << "session_manager: Skipping the windowed GPU-native fallback for encoder ["
                         << (video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name())

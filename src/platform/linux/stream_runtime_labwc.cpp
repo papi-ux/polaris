@@ -89,8 +89,12 @@ namespace stream_runtime {
       return requested_headless && prefer_gpu_native_capture && encoder_requires_gpu_native_capture;
     }
 
-    bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type) {
-      return cage_display_router::gpu_native_dmabuf_is_safe(hwdevice_type);
+    bool gpu_native_dmabuf_is_safe(
+      platf::mem_type_e hwdevice_type,
+      wlgrab_capture_policy::gpu_native_capture_route_e route,
+      std::optional<std::uint64_t> modifier
+    ) {
+      return cage_display_router::gpu_native_dmabuf_is_safe(hwdevice_type, route, modifier);
     }
 
     bool should_attempt_gpu_native_cage_capture(
