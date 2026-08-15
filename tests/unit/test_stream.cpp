@@ -4,6 +4,7 @@
  */
 
 #include <cstdint>
+#include <limits>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -14,6 +15,10 @@
 
 namespace stream {
   void concat_and_insert_into(std::vector<uint8_t> &result, uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2);
+  bool control_packet_carries_type(std::size_t data_length);
+  bool encrypted_control_header_present(std::size_t payload_size);
+  bool encrypted_control_cipher_fits(std::size_t payload_size, std::uint16_t declared_length);
+  bool input_control_cipher_fits(std::size_t payload_size, std::int32_t declared_cipher_length);
 }
 
 namespace nvhttp {
@@ -176,4 +181,48 @@ TEST(ProcSessionLifecycleTests, AlreadyIdleTerminateDoesNotPublishDuplicateStrea
 
 TEST(ProcSessionLifecycleTests, StreamingTerminateWaitsForStreamJoinToPublishStreamEnded) {
   EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "streaming"));
+}
+
+// Peer-supplied lengths on the control channel. Everything below arrives off
+// the wire from a client that has established a session, so each of these
+// bounds is the only thing standing between a declared size and a read.
+
+TEST(ControlPacketBounds, APacketShorterThanItsTypeFieldIsRejected) {
+  // dataLength - sizeof(type) wraps below 2, so the payload view would claim
+  // the entire address space.
+  EXPECT_FALSE(stream::control_packet_carries_type(0));
+  EXPECT_FALSE(stream::control_packet_carries_type(1));
+  EXPECT_TRUE(stream::control_packet_carries_type(2));
+  EXPECT_TRUE(stream::control_packet_carries_type(1024));
+}
+
+TEST(ControlPacketBounds, EncryptedHeaderMustHaveArrived) {
+  // The dispatcher consumed the 2-byte type, so 6 payload bytes complete the
+  // 8-byte header the handler reads length and seq from.
+  EXPECT_FALSE(stream::encrypted_control_header_present(0));
+  EXPECT_FALSE(stream::encrypted_control_header_present(5));
+  EXPECT_TRUE(stream::encrypted_control_header_present(6));
+}
+
+TEST(ControlPacketBounds, EncryptedCipherLengthIsBoundedByWhatArrived) {
+  // 24 is the runt floor; the cipher is length - 4 bytes past the header.
+  EXPECT_FALSE(stream::encrypted_control_cipher_fits(6, 23));  // below the floor
+  EXPECT_FALSE(stream::encrypted_control_cipher_fits(6, 24));  // declares 20, none arrived
+  EXPECT_TRUE(stream::encrypted_control_cipher_fits(26, 24));  // declares 20, 20 arrived
+  EXPECT_TRUE(stream::encrypted_control_cipher_fits(1024, 24));
+
+  // A uint16 maxes out at 65535, so the over-read was bounded but real.
+  EXPECT_FALSE(stream::encrypted_control_cipher_fits(64, 65535));
+}
+
+TEST(ControlPacketBounds, InputCipherLengthRejectsNegativeAndOverlongClaims) {
+  EXPECT_FALSE(stream::input_control_cipher_fits(3, 0));   // no room for the length itself
+  EXPECT_TRUE(stream::input_control_cipher_fits(4, 0));
+  EXPECT_TRUE(stream::input_control_cipher_fits(20, 16));
+  EXPECT_FALSE(stream::input_control_cipher_fits(20, 17));  // one byte past the buffer
+
+  // Signed off the wire: -1 would widen to SIZE_MAX as a view length.
+  EXPECT_FALSE(stream::input_control_cipher_fits(1024, -1));
+  EXPECT_FALSE(stream::input_control_cipher_fits(1024, std::numeric_limits<std::int32_t>::min()));
+  EXPECT_FALSE(stream::input_control_cipher_fits(1024, std::numeric_limits<std::int32_t>::max()));
 }

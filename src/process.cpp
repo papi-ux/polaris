@@ -8226,6 +8226,32 @@ namespace proc {
         BOOST_LOG(warning) << "System: "sv << ec.message();
       }
 
+      // An unbounded wait here holds the session lifecycle lock for as long as
+      // the undo command runs, which freezes launch, resume, stop, and every
+      // status query behind it. The app's exit_timeout bounds the app itself;
+      // bound its undo commands the same way. A configured 0 means "kill the
+      // app at once" for the process group, which would be a surprising thing
+      // to do to an undo command, so fall back to the 5s default there.
+      const auto undo_timeout = _app.exit_timeout.count() > 0 ? _app.exit_timeout : std::chrono::seconds {5};
+
+      // child::wait_for() is deprecated as unreliable, so poll like
+      // terminate_process_group() above does.
+      auto undo_remaining = undo_timeout;
+      while (child.running() && (--undo_remaining).count() >= 0) {
+        std::this_thread::sleep_for(1s);
+      }
+
+      if (child.running()) {
+        BOOST_LOG(warning) << "Undo command ["sv << cmd.undo_cmd << "] did not exit within "sv
+                           << undo_timeout.count() << "s; terminating it"sv;
+        std::error_code terminate_ec;
+        child.terminate(terminate_ec);
+        if (terminate_ec) {
+          BOOST_LOG(warning) << "Couldn't terminate undo command ["sv << cmd.undo_cmd
+                             << "]: "sv << terminate_ec.message();
+        }
+      }
+
       child.wait();
       auto ret = child.exit_code();
 
