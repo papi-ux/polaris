@@ -2836,6 +2836,11 @@ namespace confighttp {
         if (seen_appids.count(fields["appid"])) continue;
         seen_appids.insert(fields["appid"]);
 
+        // stoi stops at the first non-digit, so "99999 rm -rf" would pass the
+        // range filter below with the junk still attached. The appid reaches a
+        // launch command and a cover filename, so require it to be digits.
+        if (!game_artwork::is_valid_steam_appid(fields["appid"])) continue;
+
         // Skip tools/redistributables (appid < 100000 or name contains "Redistributable" or "Proton")
         int appid_int = 0;
         try { appid_int = std::stoi(fields["appid"]); } catch (...) {}
@@ -3058,6 +3063,17 @@ namespace confighttp {
         std::string appid = game.value("appid", "");
 
         if (name.empty()) continue;
+
+        // A Steam appid is digits. It is interpolated into the launch command
+        // bash -lc runs and into the cover filename, so anything else silently
+        // writes outside the covers directory or changes what that shell line
+        // means. Nothing here grants a caller more than the app API already
+        // does -- "cmd" is a free-form string by design -- but the endpoint
+        // should not depend on that to stay well behaved.
+        if (source == "steam" && !appid.empty() && !game_artwork::is_valid_steam_appid(appid)) {
+          bad_request(response, request, "Steam appid must be numeric: " + appid);
+          return;
+        }
 
         // Build the app entry
         nlohmann::json app;
