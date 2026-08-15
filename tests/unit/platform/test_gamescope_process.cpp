@@ -47,7 +47,8 @@ namespace {
       const std::vector<std::uint64_t> &socket_inodes = {},
       const fs::path &executable_override = {},
       int pgid = -1,
-      int session = -1
+      int session = -1,
+      const std::vector<std::pair<std::string, std::string>> &environment = {}
     ) {
       const auto dir = proc / std::to_string(pid);
       fs::remove_all(dir);
@@ -78,6 +79,15 @@ namespace {
       for (const auto &arg : argv) {
         cmdline.write(arg.data(), static_cast<std::streamsize>(arg.size()));
         cmdline.put('\0');
+      }
+
+      if (!environment.empty()) {
+        std::ofstream environ_file(dir / "environ", std::ios::binary);
+        for (const auto &[key, value] : environment) {
+          const auto entry = key + "=" + value;
+          environ_file.write(entry.data(), static_cast<std::streamsize>(entry.size()));
+          environ_file.put('\0');
+        }
       }
 
       int fd = 3;
@@ -436,3 +446,63 @@ TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {
   EXPECT_TRUE(fs::exists(gamescope_socket));
 }
 #endif
+
+// Nested gamescope detection for issue #422. A gamescope launched inside the
+// private compositor connects to it as a client. The reported game then stalled
+// behind a Gamescope WSI dialog that was outside the captured surface, making
+// the session look alive but unresponsive. Detection reads the running process
+// because the app's configured command may be a wrapper script that never
+// mentions gamescope.
+
+TEST(GamescopeProcessNestingTests, FindsAGamescopeClientOfThePrivateCompositor) {
+  fake_proc_tree_t tree;
+  tree.add_process(4242, 1, 100, {"gamescope", "--steam", "-W", "1920", "-H", "1080"}, {}, {}, -1, -1,
+                   {{"WAYLAND_DISPLAY", "wayland-1"}});
+
+  const auto nested = gp::nested_gamescope_client("wayland-1", paths_for(tree));
+  ASSERT_TRUE(nested.has_value());
+  EXPECT_EQ(*nested, 4242);
+}
+
+TEST(GamescopeProcessNestingTests, IgnoresAGamescopeOnADifferentDisplay) {
+  fake_proc_tree_t tree;
+  // Polaris' own gamescope owns its display rather than connecting to the
+  // private compositor's, which is what makes the supported case distinguishable.
+  tree.add_process(4242, 1, 100, {"gamescope", "--backend=headless"}, {}, {}, -1, -1,
+                   {{"WAYLAND_DISPLAY", "gamescope-0"}});
+
+  EXPECT_FALSE(gp::nested_gamescope_client("wayland-1", paths_for(tree)).has_value());
+}
+
+TEST(GamescopeProcessNestingTests, IgnoresNonGamescopeClientsOfTheSameDisplay) {
+  fake_proc_tree_t tree;
+  tree.add_process(4242, 1, 100, {"steam", "-gamepadui"}, {}, {}, -1, -1,
+                   {{"WAYLAND_DISPLAY", "wayland-1"}});
+
+  EXPECT_FALSE(gp::nested_gamescope_client("wayland-1", paths_for(tree)).has_value());
+}
+
+TEST(GamescopeProcessNestingTests, FindsAWrapperLaunchedNixWrappedGamescope) {
+  fake_proc_tree_t tree;
+  // The reported configuration pointed the app's detached command at a shell
+  // script, so argv carries the script rather than gamescope. Identifying by
+  // executable is what makes that case visible.
+  tree.add_process(4242, 1, 100, {"/opt/launchers/big-picture.sh"}, {},
+                   "/nix/store/abc/bin/.gamescope-wrapped", -1, -1,
+                   {{"WAYLAND_DISPLAY", "wayland-1"}});
+
+  const auto nested = gp::nested_gamescope_client("wayland-1", paths_for(tree));
+  ASSERT_TRUE(nested.has_value());
+  EXPECT_EQ(*nested, 4242);
+}
+
+TEST(GamescopeProcessNestingTests, ReportsNothingWithoutASocketOrProcTree) {
+  fake_proc_tree_t tree;
+  tree.add_process(4242, 1, 100, {"gamescope"}, {}, {}, -1, -1, {{"WAYLAND_DISPLAY", "wayland-1"}});
+
+  EXPECT_FALSE(gp::nested_gamescope_client("", paths_for(tree)).has_value());
+
+  auto missing = paths_for(tree);
+  missing.proc_root = tree.root / "missing-proc";
+  EXPECT_FALSE(gp::nested_gamescope_client("wayland-1", missing).has_value());
+}
