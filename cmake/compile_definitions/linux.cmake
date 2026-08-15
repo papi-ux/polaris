@@ -228,6 +228,7 @@ if(GIO_FOUND AND GIO_UNIX_FOUND AND PIPEWIRE_FOUND)
     add_compile_definitions(POLARIS_BUILD_PORTAL)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_grab.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_capability.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire_capture.cpp")
     message(STATUS "XDG Desktop Portal capture support enabled")
