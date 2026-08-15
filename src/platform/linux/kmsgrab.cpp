@@ -324,6 +324,14 @@ namespace platf {
           render_fd.el = dup(fd.el);
         }
 
+        // dup() fails once the process is out of descriptors. Reporting success
+        // with render_fd at -1 hands that -1 to every consumer of the render
+        // node, starting with va::validate().
+        if (render_fd.el < 0) {
+          BOOST_LOG(error) << "Couldn't obtain a render descriptor for: "sv << path << ": "sv << strerror(errno);
+          return -1;
+        }
+
         if (drmSetClientCap(fd.el, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)) {
           BOOST_LOG(error) << "GPU driver doesn't support universal planes: "sv << path;
           return -1;
