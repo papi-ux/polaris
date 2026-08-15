@@ -19,6 +19,7 @@ namespace stream {
   bool encrypted_control_header_present(std::size_t payload_size);
   bool encrypted_control_cipher_fits(std::size_t payload_size, std::uint16_t declared_length);
   bool input_control_cipher_fits(std::size_t payload_size, std::int32_t declared_cipher_length);
+  void record_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, std::uint64_t bytes_sent);
 }
 
 namespace nvhttp {
@@ -141,6 +142,76 @@ TEST(NvhttpSessionHealthTests, MeaningfulTargetMissRemainsHostRenderLimited) {
   EXPECT_EQ(health.at("primary_issue"), "host_render_limited");
   EXPECT_EQ(health.at("limiting_factor"), "host_render");
   EXPECT_TRUE(health.at("host_render_limited").get<bool>());
+}
+
+TEST(StreamNetworkStatsTests, OneTransientReportDoesNotClassifyCleanStreamAsNetworkLimited) {
+  constexpr auto client_ip = "203.0.113.120";
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client(client_ip, "RetroidPocket6");
+
+  for (int i = 0; i < 6; ++i) {
+    stream::record_network_stats(client_ip, 3.0, 0.0, 0);
+  }
+
+  // One ENet control-channel estimate above the cut is noise, not sustained
+  // pressure. The old handler submitted this same report twice and defeated
+  // the tracker's two-report debounce.
+  stream::record_network_stats(client_ip, 3.0, 3.0, 0);
+  auto stats = stream_stats::get_current();
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.fps = 120.0;
+  stats.encode_target_fps = 120.0;
+  stats.codec = "hevc";
+
+  EXPECT_FALSE(stats.network_risk);
+  const auto health = nvhttp::build_session_health_json_for_tests(
+    stats,
+    false,
+    "RetroidPocket6",
+    "Synthetic Frame Counter"
+  );
+  EXPECT_EQ(health.at("grade"), "good");
+  EXPECT_EQ(health.at("primary_issue"), "steady");
+  EXPECT_EQ(health.at("limiting_factor"), "none");
+
+  // A second distinct elevated report still confirms real pressure promptly.
+  stream::record_network_stats(client_ip, 3.0, 3.0, 0);
+  EXPECT_TRUE(stream_stats::get_current().network_risk);
+
+  stream_stats::remove_client(client_ip);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamNetworkStatsTests, SecondaryClientReportDoesNotReplacePrimaryTelemetry) {
+  constexpr auto primary_ip = "203.0.113.121";
+  constexpr auto secondary_ip = "203.0.113.122";
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client(primary_ip, "Primary client");
+  stream_stats::add_client(secondary_ip, "Secondary client");
+
+  stream::record_network_stats(primary_ip, 3.0, 0.0, 1000);
+  stream::record_network_stats(secondary_ip, 9.0, 1.0, 2000);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_DOUBLE_EQ(stats.latency_ms, 3.0);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+  EXPECT_EQ(stats.bytes_sent, 1000u);
+  EXPECT_EQ(stats.clients.size(), 2u);
+  if (stats.clients.size() == 2u) {
+    EXPECT_DOUBLE_EQ(stats.clients[0].latency_ms, 3.0);
+    EXPECT_DOUBLE_EQ(stats.clients[0].packet_loss, 0.0);
+    EXPECT_EQ(stats.clients[0].bytes_sent, 1000u);
+    EXPECT_DOUBLE_EQ(stats.clients[1].latency_ms, 9.0);
+    EXPECT_DOUBLE_EQ(stats.clients[1].packet_loss, 1.0);
+    EXPECT_EQ(stats.clients[1].bytes_sent, 2000u);
+  }
+
+  stream_stats::remove_client(primary_ip);
+  stream_stats::remove_client(secondary_ip);
+  stream_stats::update_stream_active(false);
 }
 
 TEST(ProcHostPauseClassificationTests, HighRefreshNearTargetDeliveryRemainsSteady) {

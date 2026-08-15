@@ -7604,10 +7604,14 @@ namespace proc {
     // this surfaces as a stated failure rather than an unexplained black stream.
     if (use_cage_compositor_for_session && private_runtime && !gamescope_private_runtime) {
       std::string private_socket = private_runtime->wayland_socket();
+      std::string private_x11_display = private_runtime->x11_display();
       const pid_t private_compositor_pid = private_runtime->pid();
       if (!private_socket.empty() && private_compositor_pid > 0) {
         std::thread attach_watch(
-          [socket = std::move(private_socket), compositor_pid = private_compositor_pid, app_name = _app.name]() {
+          [socket = std::move(private_socket),
+           x11_display = std::move(private_x11_display),
+           compositor_pid = private_compositor_pid,
+           app_name = _app.name]() {
             const auto started = std::chrono::steady_clock::now();
             for (;;) {
               std::this_thread::sleep_for(private_session_attach::k_default_attach_poll);
@@ -7620,7 +7624,7 @@ namespace proc {
               const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started
               );
-              const auto probe = private_session_attach::probe_toplevels(socket);
+              const auto probe = private_session_attach::probe_private_session(socket, x11_display);
               const auto verdict = private_session_attach::evaluate(
                 probe,
                 elapsed,
@@ -7631,7 +7635,7 @@ namespace proc {
               }
               if (verdict == private_session_attach::verdict_e::attached) {
                 BOOST_LOG(info) << "private_session: ["sv << app_name
-                                << "] attached to the private session with "sv
+                                << "] attached to the private session with at least "sv
                                 << probe.toplevel_count << " window(s)"sv;
                 return;
               }

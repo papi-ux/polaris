@@ -163,6 +163,13 @@ jobs:
           key: polaris-arch-npm-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             polaris-arch-npm-
+      - name: Cache Go module downloads
+        uses: actions/cache@v6
+        with:
+          path: /github/home/go/pkg/mod
+          key: polaris-arch-gomod-${{ hashFiles('browser_stream_helper/go.sum') }}
+          restore-keys: |
+            polaris-arch-gomod-
 
       - name: Install dependencies
         run: |
@@ -466,6 +473,13 @@ jobs:
           key: polaris-fedora-44-npm-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             polaris-fedora-44-npm-
+      - name: Cache Go module downloads
+        uses: actions/cache@v6
+        with:
+          path: /github/home/go/pkg/mod
+          key: polaris-fedora-44-clang-gomod-${{ hashFiles('browser_stream_helper/go.sum') }}
+          restore-keys: |
+            polaris-fedora-44-clang-gomod-
 
       - name: Install Fedora build dependencies
         run: |
@@ -613,6 +627,13 @@ jobs:
           key: polaris-ubuntu-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
           restore-keys: |
             polaris-ubuntu-ccache-
+      - name: Cache Go module downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/go/pkg/mod
+          key: polaris-ubuntu-gomod-${{ hashFiles('browser_stream_helper/go.sum') }}
+          restore-keys: |
+            polaris-ubuntu-gomod-
 
       - name: Install dependencies
         run: |
@@ -803,6 +824,13 @@ jobs:
           key: polaris-fedora-${{ matrix.fedora }}-npm-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             polaris-fedora-${{ matrix.fedora }}-npm-
+      - name: Cache Go module downloads
+        uses: actions/cache@v6
+        with:
+          path: /github/home/go/pkg/mod
+          key: polaris-fedora-${{ matrix.fedora }}-gomod-${{ hashFiles('browser_stream_helper/go.sum') }}
+          restore-keys: |
+            polaris-fedora-${{ matrix.fedora }}-gomod-
 
       - name: Install Fedora build dependencies
         run: |
