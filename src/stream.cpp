@@ -283,6 +283,54 @@ namespace stream {
     // encrypted control_header_v2 and payload data follow
   } *control_encrypted_p;
 
+  // Length checks for peer-supplied control packets. Free functions with
+  // external linkage so tests can drive them directly; every one is total, so
+  // a caller can hand them any value that arrived off the wire.
+
+  /**
+   * @brief Whether an ENet packet is long enough to hold the type field.
+   *
+   * Below this, `dataLength - sizeof(type)` wraps and yields a payload view
+   * claiming the whole address space.
+   */
+  bool control_packet_carries_type(std::size_t data_length) {
+    return data_length >= sizeof(std::uint16_t);
+  }
+
+  /**
+   * @brief Whether the encrypted control header itself is present.
+   *
+   * The dispatcher consumes the leading type field before the handler sees the
+   * payload, so the header starts two bytes behind it.
+   */
+  bool encrypted_control_header_present(std::size_t payload_size) {
+    return payload_size + sizeof(std::uint16_t) >= sizeof(control_encrypted_t);
+  }
+
+  /**
+   * @brief Whether a declared cipher length fits in the bytes that arrived.
+   */
+  bool encrypted_control_cipher_fits(std::size_t payload_size, std::uint16_t declared_length) {
+    if (!encrypted_control_header_present(payload_size) || declared_length < (16 + 4 + 4)) {
+      return false;
+    }
+    const auto available = payload_size + sizeof(std::uint16_t) - sizeof(control_encrypted_t);
+    return static_cast<std::size_t>(declared_length - 4) <= available;
+  }
+
+  /**
+   * @brief Whether an IDX_INPUT_DATA packet's declared cipher length is usable.
+   *
+   * The length arrives as a signed 32-bit value, so a negative one would widen
+   * to SIZE_MAX when used as a view length.
+   */
+  bool input_control_cipher_fits(std::size_t payload_size, std::int32_t declared_cipher_length) {
+    if (payload_size < sizeof(std::int32_t) || declared_cipher_length < 0) {
+      return false;
+    }
+    return static_cast<std::size_t>(declared_cipher_length) <= payload_size - sizeof(std::int32_t);
+  }
+
   struct audio_fec_packet_t {
     RTP_PACKET rtp;
     AUDIO_FEC_HEADER fecHeader;
@@ -661,6 +709,11 @@ namespace stream {
         case ENET_EVENT_TYPE_RECEIVE:
           {
             net::packet_t packet {event.packet};
+
+            if (!control_packet_carries_type(packet->dataLength)) {
+              BOOST_LOG(warning) << "Control: dropping packet too short to carry a type"sv;
+              break;
+            }
 
             auto type = *(std::uint16_t *) packet->data;
             std::string_view payload {(char *) packet->data + sizeof(type), packet->dataLength - sizeof(type)};
@@ -1110,7 +1163,21 @@ namespace stream {
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
 
+      if (payload.size() < sizeof(std::int32_t)) {
+        BOOST_LOG(warning) << "Control: input packet is too small to carry a cipher length"sv;
+        return;
+      }
+
       auto tagged_cipher_length = util::endian::big(*(int32_t *) payload.data());
+
+      // Signed, and straight off the wire: a negative value widens to SIZE_MAX
+      // and an overlong one runs off the end of the receive buffer.
+      if (!input_control_cipher_fits(payload.size(), tagged_cipher_length)) {
+        BOOST_LOG(warning) << "Control: input packet declares "sv << tagged_cipher_length
+                           << " cipher bytes but only "sv << payload.size() << " arrived"sv;
+        return;
+      }
+
       std::string_view tagged_cipher {payload.data() + sizeof(tagged_cipher_length), (size_t) tagged_cipher_length};
 
       std::vector<uint8_t> plaintext;
@@ -1126,7 +1193,9 @@ namespace stream {
         return;
       }
 
-      if (tagged_cipher_length >= 16 + iv.size()) {
+      // Guarded by the arrived size too: the declared length alone would let a
+      // short packet copy from before the start of the buffer.
+      if (payload.size() >= 16 && tagged_cipher_length >= 16 + static_cast<std::int32_t>(iv.size())) {
         std::copy(payload.end() - 16, payload.end(), std::begin(iv));
       }
 
@@ -1187,6 +1256,13 @@ namespace stream {
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_ENCRYPTED]"sv;
 
+      // The header starts two bytes before the payload: the dispatcher already
+      // consumed the type field that opens it. Check it is there before reading.
+      if (!encrypted_control_header_present(payload.size())) {
+        BOOST_LOG(warning) << "Control: encrypted packet is too small for its own header"sv;
+        return;
+      }
+
       auto header = (control_encrypted_p) (payload.data() - 2);
 
       auto length = util::endian::little(header->length);
@@ -1194,6 +1270,15 @@ namespace stream {
 
       if (length < (16 + 4 + 4)) {
         BOOST_LOG(warning) << "Control: Runt packet"sv;
+        return;
+      }
+
+      // length is the peer's claim about its own packet. Without bounding it by
+      // what actually arrived, the decrypt below runs off the receive buffer
+      // before the tag check can reject anything.
+      if (!encrypted_control_cipher_fits(payload.size(), length)) {
+        BOOST_LOG(warning) << "Control: encrypted packet declares "sv << length
+                           << " bytes but only "sv << payload.size() << " arrived"sv;
         return;
       }
 
