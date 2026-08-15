@@ -71,5 +71,6 @@ TEST(CoverDownloadContract, TheUploadHandlerStillEscapesItsKey) {
   const auto body = source.substr(handler, source.find("\n  void ", handler + 1) - handler);
 
   EXPECT_NE(body.find("http::url_escape(key)"), std::string::npos);
-  EXPECT_NE(body.find("http::url_get_host(url)"), std::string::npos);
+  EXPECT_NE(source.find(R"(return http::url_is_https_host(url, "images.igdb.com");)"), std::string::npos);
+  EXPECT_NE(body.find("http::download_file(url, path, igdb_image_url_allowed)"), std::string::npos);
 }
