@@ -5,6 +5,23 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.9 - 2026-08-15
+
+A Linux reliability and security patch for private-stream capture, compositor ownership, high-refresh cadence, and hostile-input boundaries.
+
+- Enables VAAPI GPU-native capture only for the private headless ext-image-copy route when the captured DMA-BUF is explicitly `DRM_FORMAT_MOD_LINEAR`; tiled, invalid, missing, windowed-private, and direct-monitor modifiers remain on the SHM fallback, and Doctor preserves the exact fallback reason
+- Makes capability-enabled Polaris work with `xdg-desktop-portal` by dropping capabilities before worker threads start and restoring ordinary same-user `/proc` access; explicit DRM/KMS capture retains its required capability on a separate process start
+- Accepts capability-enabled owned Gamescope generations, warns when unsupported nested Gamescope WSI can hide a blocking dialog, and prevents owned Gamescope/Xwayland descendants from retaining Polaris listener sockets after host exit
+- Creates and owns only an exact process-scoped Hyprland virtual output, verifies it before use, and fails closed instead of silently capturing a physical display
+- Preserves high-refresh private-stream cadence, exposes launches that never attach, sees override-redirect windows during attach, and bounds preparation commands without releasing lifecycle ownership early
+- Reapplies an explicit same-mode session choice when deterministic runtime, capture, or display companion state has drifted, while retaining the normalized no-op and teardown restoration paths
+- Hardens Wayland frame ownership, VAAPI DRM PRIME descriptors, KMS render descriptors, portal/capture shutdown, session environment snapshots, and exact-generation cleanup boundaries
+- Validates every client launch key, peer-declared control length, Steam app id, artwork URL/redirect hop, pairing PIN claim, and Doctor mutation boundary before use
+- Keeps secondary-client telemetry while preventing duplicate control-channel network-risk samples
+- Keeps `npm audit --audit-level=high` mandatory
+- Retains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+- Records the remaining field gates without treating CI as hardware proof: linear VAAPI headless capture still needs affected AMD 4K validation, Hyprland virtual-display ownership and same-mode session normalization need affected-host confirmation, and the supported Gamescope Stream route needs an end-to-end portal retest
+
 ## v1.3.8 - 2026-08-12
 
 A safer private-stream daily driver: true-headless GPU-native capture, session-only launch choices, exact process ownership, an evidence-gated Doctor, bounded logs, benchmark controls, and a rebuilt web console.
