@@ -444,6 +444,10 @@ namespace browser_stream {
       args.emplace("displayModeExplicit", "1");
 
       auto launch_session = nvhttp::make_launch_session(true, false, args, &named_cert);
+      if (!launch_session) {
+        BOOST_LOG(error) << "Browser Stream could not build a launch session"sv;
+        return nullptr;
+      }
       launch_session->virtual_display = false;
       launch_session->user_locked_virtual_display = true;
       return launch_session;
@@ -582,6 +586,10 @@ namespace browser_stream {
       BOOST_LOG(info) << "Launching Browser Stream app session ["sv << app.name
                       << "] runtime=" << private_runtime_backend();
       auto launch_session = browser_launch_session();
+      if (!launch_session) {
+        error_out = "Browser Stream could not build a launch session";
+        return false;
+      }
       const auto err = proc::proc.execute(app, launch_session);
       if (err) {
         error_out = err == 503 ?

@@ -4435,8 +4435,17 @@ namespace nvhttp {
 
     // If launched from client
     if (named_cert_p->uuid != http::unique_id) {
-      auto rikey = util::from_hex_vec(get_arg(args, "rikey"), true);
-      std::copy(rikey.cbegin(), rikey.cend(), std::back_inserter(launch_session->gcm_key));
+      // OpenSSL's AES-128 contexts read a full key from key.data() regardless
+      // of the vector's size, so reject malformed client key material before
+      // it can become a session cipher.
+      const auto rikey = util::from_hex_vec(get_arg(args, "rikey"), true);
+      if (rikey.size() != crypto::cipher::key_size) {
+        BOOST_LOG(warning) << "Rejecting launch from ["sv << named_cert_p->name
+                           << "]: rikey decoded to "sv << rikey.size()
+                           << " bytes, expected "sv << crypto::cipher::key_size;
+        return nullptr;
+      }
+      launch_session->gcm_key.assign(rikey.cbegin(), rikey.cend());
 
       launch_session->host_audio = host_audio;
 
@@ -5611,6 +5620,12 @@ namespace nvhttp {
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p.get());
+    if (!launch_session) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "A launch parameter is malformed");
+      return;
+    }
     const bool watch_only = launch_session->watch_only;
     bool launch_session_raised = false;
 
@@ -5910,6 +5925,12 @@ namespace nvhttp {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
     auto launch_session = make_launch_session(host_audio, false, args, named_cert_p.get());
+    if (!launch_session) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "A resume parameter is malformed");
+      return;
+    }
     const bool watch_only = launch_session->watch_only;
 
     if (watch_only && no_active_sessions) {
