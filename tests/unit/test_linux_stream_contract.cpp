@@ -64,6 +64,12 @@ TEST(LinuxStreamContractTests, GamescopeOwnershipTransitionsUseOneCrossProcessLo
   EXPECT_NE(runtime.find("owner_transition_lock_t"), std::string::npos);
   EXPECT_NE(runtime.find("polaris-gamescope.lock"), std::string::npos);
   EXPECT_NE(runtime.find("POLARIS_GAMESCOPE_EXECUTABLE"), std::string::npos);
+  const auto child_branch = runtime.find("if (child == 0)");
+  const auto child_exec = runtime.find("execv(gamescope_executable.c_str()", child_branch);
+  ASSERT_NE(child_branch, std::string::npos);
+  ASSERT_NE(child_exec, std::string::npos);
+  const auto child_body = runtime.substr(child_branch, child_exec - child_branch);
+  EXPECT_NE(child_body.find("close_inherited_descriptors(inherited_fd_limit)"), std::string::npos);
 
   const auto marker_failure = runtime.find("if (!marker_written)");
   ASSERT_NE(marker_failure, std::string::npos);
@@ -75,6 +81,16 @@ TEST(LinuxStreamContractTests, GamescopeOwnershipTransitionsUseOneCrossProcessLo
   EXPECT_LT(rollback, clear_state);
   EXPECT_NE(runtime.find("drain_private_process_group(child"), std::string::npos);
   EXPECT_NE(failure_body.find("preserving state"), std::string::npos);
+}
+
+TEST(LinuxStreamContractTests, PortalCapabilityDropRunsBeforeWorkerThreads) {
+  const auto main = read_source("src/main.cpp");
+  ASSERT_FALSE(main.empty());
+  const auto prepare = main.find("portal_capability::prepare_process_for_capture(");
+  const auto workers = main.find("task_pool.start(1)");
+  ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(workers, std::string::npos);
+  EXPECT_LT(prepare, workers);
 }
 
 TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {
