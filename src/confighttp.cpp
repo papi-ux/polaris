@@ -47,6 +47,7 @@
 #include "display_device.h"
 #include "entry_handler.h"
 #include "file_handler.h"
+#include "game_artwork.h"
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -4238,18 +4239,36 @@ namespace confighttp {
         return;
       }
 
-      // Only allow SteamGridDB URLs
-      if (url.find("steamgriddb.com") == std::string::npos &&
-          url.find("steamcdn") == std::string::npos) {
+      // Only allow SteamGridDB / Steam CDN URLs. A substring match let anything
+      // through that merely contained the name -- "http://10.0.0.1/?x=steamgriddb.com"
+      // passed, and download_file follows redirects. game_artwork already keeps
+      // the parsed, exact-host allowlist for these two providers.
+      if (!game_artwork::is_allowed_provider_url(game_artwork::provider_e::steamgriddb, url) &&
+          !game_artwork::is_allowed_provider_url(game_artwork::provider_e::steam, url)) {
         output["status"] = false;
         output["error"] = "Only SteamGridDB/Steam CDN URLs allowed";
         send_response(response, output);
         return;
       }
 
+      // The uuid becomes part of a filesystem path, so resolve it against the
+      // app list and build from the stored value rather than the request's.
+      // uploadCover escapes its key for this reason; this handler pasted the
+      // request body straight in, so "../.." escaped the covers directory.
+      const auto apps = proc::proc.get_apps();
+      const auto app_entry = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+        return boost::iequals(candidate.uuid, app_uuid);
+      });
+      if (app_entry == apps.end()) {
+        output["status"] = false;
+        output["error"] = "Unknown app_uuid";
+        send_response(response, output);
+        return;
+      }
+
       const std::string coverdir = platf::appdata().string() + "/covers/";
       file_handler::make_directory(coverdir);
-      std::string cover_path = coverdir + app_uuid + safe_cover_extension_from_url(url);
+      std::string cover_path = coverdir + http::url_escape(app_entry->uuid) + safe_cover_extension_from_url(url);
 
       if (!http::download_file(url, cover_path)) {
         output["status"] = false;
