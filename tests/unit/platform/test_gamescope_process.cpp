@@ -8,6 +8,7 @@
   #include "src/platform/linux/gamescope_process.h"
 
   #include <chrono>
+  #include <cstring>
   #include <filesystem>
   #include <fstream>
   #include <string>
@@ -15,6 +16,8 @@
 
   #include <fcntl.h>
   #include <sys/file.h>
+  #include <sys/socket.h>
+  #include <sys/un.h>
   #include <unistd.h>
 
 namespace {
@@ -196,6 +199,70 @@ TEST(GamescopeProcessOwnershipTests, CapturesGenerationFromProcAndReadsExactArgu
   }));
   EXPECT_TRUE(gp::process_has_argument(*marker, "--hdr-enabled", paths_for(tree)));
   EXPECT_FALSE(gp::process_has_argument(*marker, "--hdr-debug-force-output", paths_for(tree)));
+}
+
+TEST(GamescopeProcessOwnershipTests, PinsAbsoluteArgvWhenFileCapabilitiesHideProcExe) {
+  fake_proc_tree_t tree;
+  const auto executable = tree.root / "bin" / "gamescope";
+  fs::create_directories(executable.parent_path());
+  std::ofstream(executable).put('\n');
+  fs::permissions(
+    executable,
+    fs::perms::owner_read | fs::perms::owner_exec |
+      fs::perms::group_read | fs::perms::group_exec |
+      fs::perms::others_read | fs::perms::others_exec
+  );
+  tree.add_process(410, 1, 9001, {executable.string(), "--backend", "headless"}, {}, executable);
+
+  auto paths = paths_for(tree);
+  paths.read_executable_for_tests = [](int, std::error_code &ec) -> std::optional<fs::path> {
+    ec = std::make_error_code(std::errc::permission_denied);
+    return std::nullopt;
+  };
+  const auto marker = gp::marker_for_pid(410, "runtime", paths);
+  ASSERT_TRUE(marker.has_value());
+  EXPECT_EQ(marker->executable, fs::canonical(executable));
+
+  const auto marker_path = tree.runtime / "polaris-gamescope.pid";
+  ASSERT_TRUE(gp::write_marker(marker_path, *marker));
+  EXPECT_TRUE(gp::validated_marker(marker_path, "runtime", paths).has_value());
+
+  // argv[0] is the fallback authority only when the launcher supplied an
+  // absolute executable. A forgeable relative process title still fails.
+  tree.add_process(410, 1, 9001, {"gamescope", "--backend", "headless"}, {}, executable);
+  EXPECT_FALSE(gp::marker_for_pid(410, "runtime", paths).has_value());
+}
+
+TEST(GamescopeProcessOwnershipTests, UsesUnixPeerCredentialsWhenProcFdLinksAreHidden) {
+  fake_proc_tree_t tree;
+  const auto gamescope_socket = tree.runtime / "gamescope-0";
+  tree.add_unix_socket(500, gamescope_socket);
+  tree.flush_unix_sockets();
+  fs::remove(gamescope_socket);
+
+  const int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(listener, 0);
+  sockaddr_un address {};
+  address.sun_family = AF_UNIX;
+  const auto socket_path = gamescope_socket.string();
+  ASSERT_LT(socket_path.size(), sizeof(address.sun_path));
+  std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
+  ASSERT_EQ(bind(listener, reinterpret_cast<const sockaddr *>(&address), sizeof(address)), 0);
+  ASSERT_EQ(listen(listener, 4), 0);
+
+  const int peer_pid = getpid();
+  const int root_pid = peer_pid == 410 ? 411 : 410;
+  tree.add_process(root_pid, 1, 9001, {"/usr/bin/gamescope", "--backend=headless"});
+  tree.add_process(peer_pid, root_pid, 9002, {"/usr/bin/socket-server"});
+
+  const gp::marker_t marker {
+    .pid = root_pid, .start_time = 9001, .role = "runtime", .executable = "/usr/bin/gamescope"
+  };
+  EXPECT_TRUE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
+
+  tree.add_process(peer_pid, 1, 9002, {"/usr/bin/socket-server"});
+  EXPECT_FALSE(gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree)));
+  EXPECT_EQ(close(listener), 0);
 }
 
 TEST(GamescopeProcessOwnershipTests, SelectsOnlyXwaylandDescendedFromMarkedRuntimeAndPreservesHostXZero) {

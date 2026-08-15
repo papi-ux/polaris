@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace stream_runtime::gamescope_process {
 
@@ -26,6 +27,7 @@ namespace stream_runtime::gamescope_process {
     std::filesystem::path proc_root = "/proc";
     std::filesystem::path proc_net_unix = "/proc/net/unix";
     std::filesystem::path x11_socket_dir = "/tmp/.X11-unix";
+    std::function<std::optional<std::filesystem::path>(int, std::error_code &)> read_executable_for_tests;
     std::function<void()> before_socket_unlink_for_tests;
     std::function<void()> before_x11_return_for_tests;
     std::function<void()> before_socket_ownership_return_for_tests;
