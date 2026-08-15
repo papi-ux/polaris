@@ -448,10 +448,11 @@ TEST(GamescopeProcessOwnershipTests, RefusesLiveUnownedSocketReclaim) {
 #endif
 
 // Nested gamescope detection for issue #422. A gamescope launched inside the
-// private compositor connects to it as a client, and games launched inside that
-// nesting receive no keyboard or controller input. Detection reads the running
-// process because the app's configured command may be a wrapper script that
-// never mentions gamescope.
+// private compositor connects to it as a client. The reported game then stalled
+// behind a Gamescope WSI dialog that was outside the captured surface, making
+// the session look alive but unresponsive. Detection reads the running process
+// because the app's configured command may be a wrapper script that never
+// mentions gamescope.
 
 TEST(GamescopeProcessNestingTests, FindsAGamescopeClientOfThePrivateCompositor) {
   fake_proc_tree_t tree;

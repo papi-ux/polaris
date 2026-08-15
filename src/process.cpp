@@ -7628,14 +7628,14 @@ namespace proc {
                   reported_nested_gamescope = true;
                   BOOST_LOG(error) << "private_session: a gamescope (pid "sv << *nested
                                    << ") is running as a client of the private compositor for ["sv
-                                   << app_name << "]. Input does not reach games launched inside a "sv
-                                   << "nested gamescope, so the stream will render but the keyboard "sv
-                                   << "and controller will appear dead. Launch the app without "sv
-                                   << "gamescope, or switch the session to the gamescope stream mode "sv
-                                   << "so Polaris owns the gamescope instead of nesting one."sv;
+                                   << app_name << "]. This unsupported nesting can leave games blocked "sv
+                                   << "behind Gamescope WSI errors or native dialogs that are not visible "sv
+                                   << "in the stream. Launch the app without gamescope, or switch the "sv
+                                   << "session to the gamescope stream mode so Polaris owns the gamescope "sv
+                                   << "instead of nesting one."sv;
                   confighttp::emit_session_event(
                     "warning",
-                    app_name + " is running inside a nested gamescope; keyboard and controller input will not reach it"
+                    app_name + " is using an unsupported nested gamescope; games may stall behind an invisible Gamescope WSI error"
                   );
                 }
               }
