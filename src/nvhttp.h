@@ -119,6 +119,14 @@ namespace nvhttp {
   cmd_list_t
   extract_command_entries(const nlohmann::json& j, const std::string& key);
 
+  /**
+   * @brief Build the session a launch or resume will run under.
+   * @return The session, or nullptr when client-supplied key material is malformed.
+   *
+   * Callers must check for nullptr before dereferencing or passing the session
+   * to proc::execute. Host-built arguments use the host identity and do not
+   * carry client key material.
+   */
   std::shared_ptr<rtsp_stream::launch_session_t>
   make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p);
 

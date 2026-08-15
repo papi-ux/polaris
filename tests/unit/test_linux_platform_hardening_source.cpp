@@ -55,6 +55,17 @@ TEST(LinuxPlatformHardeningSource, NetlinkReadsAlwaysStartAtBufferBase) {
   EXPECT_EQ(source.find("recv(fd, nlMsg"), std::string::npos);
 }
 
+TEST(LinuxPlatformHardeningSource, KmsCardRejectsAnUnusableRenderDescriptor) {
+  const auto source = read_source("src/platform/linux/kmsgrab.cpp");
+  const auto dup_fallback = source.find("render_fd.el = dup(fd.el);");
+  ASSERT_NE(dup_fallback, std::string::npos);
+
+  // init() must fail rather than publish render_fd == -1 to va::validate().
+  const auto guard = source.find("if (render_fd.el < 0) {", dup_fallback);
+  ASSERT_NE(guard, std::string::npos);
+  EXPECT_NE(source.find("return -1;", guard), std::string::npos);
+}
+
 TEST(LinuxPlatformHardeningSource, KscreenConfigurationNeverPassesThroughShell) {
   const auto topology = read_source("src/platform/linux/display_topology.cpp");
   EXPECT_EQ(topology.find("std::system"), std::string::npos);
