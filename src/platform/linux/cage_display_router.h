@@ -8,6 +8,7 @@
 #ifdef __linux__
 
 #include "src/platform/common.h"
+#include "wlgrab_capture_policy.h"
 
 #include <optional>
 #include <string>
@@ -148,8 +149,8 @@ namespace cage_display_router {
   platf::runtime_state_t runtime_state();
 
   /**
-   * @brief Returns whether an encoder memory type has a known-safe GPU-native
-   *        DMA-BUF import/convert path.
+   * @brief Returns whether a specific encoder, route, and modifier combination
+   *        has a known-safe GPU-native DMA-BUF import/convert path.
    *
    * This is the stability policy behind every GPU-native capture route, and it
    * belongs in one place: it used to be applied only to the true-headless
@@ -157,15 +158,18 @@ namespace cage_display_router {
    * reached the same conversion boundary the headless path was refusing, and
    * segfaulted at stream start.
    */
-  bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type);
+  bool gpu_native_dmabuf_is_safe(
+    platf::mem_type_e hwdevice_type,
+    wlgrab_capture_policy::gpu_native_capture_route_e route,
+    std::optional<std::uint64_t> modifier
+  );
 
   /**
    * @brief Returns whether a headless labwc runtime should try the
    *        ext-image-copy-capture DMA-BUF path before falling back to SHM.
    *
-   * The true-headless extcopy DMA-BUF path is only enabled for encoder memory
-   * types with a known-safe import/convert path. VAAPI stacks have proven
-   * crash-prone here, so they stay on the conservative SHM path.
+   * VAAPI may probe only this private headless route. Its captured buffer still
+   * has to pass the modifier policy before it reaches the encoder.
    */
   bool should_attempt_headless_extcopy_dmabuf(
     const platf::runtime_state_t &runtime_state,

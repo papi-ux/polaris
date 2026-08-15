@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bitset>
 #include <cstdint>
+#include <optional>
 #include <sys/types.h>
 #include <string>
 #include <string_view>
@@ -257,6 +258,14 @@ namespace wl {
 
     std::string capture_render_node() const {
       return render_node;
+    }
+
+    std::optional<std::uint64_t> capture_modifier() const {
+      if (status != READY || !current_frame || !current_frame->bo || !current_frame->buffer) {
+        return std::nullopt;
+      }
+
+      return current_frame->sd.modifier;
     }
 
     const extcopy_timing_sample_t &last_timing_sample() const {
