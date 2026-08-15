@@ -26,6 +26,7 @@ struct gbm_device;
 
 // local includes
 #include "graphics.h"
+#include "wlgrab_timing.h"
 
 namespace wl {
   class output_registry_state_t {
@@ -258,6 +259,10 @@ namespace wl {
       return render_node;
     }
 
+    const extcopy_timing_sample_t &last_timing_sample() const {
+      return timing_tracker.last_sample();
+    }
+
     status_e status;
     std::array<frame_t, 2> frames;
     frame_t *current_frame;
@@ -313,12 +318,14 @@ namespace wl {
     bool buffer_create_done {false};
     bool buffer_create_success {false};
     bool probe_failed_unknown_ {false};  ///< frame_failed(reason=0) fired during init probe
+    bool invalid_presentation_timestamp_logged {false};
     std::uint32_t frame_width {0};
     std::uint32_t frame_height {0};
     dev_t device_id {};
     format_constraints_t chosen_format;
     std::vector<format_constraints_t> dmabuf_formats;
     std::uint64_t next_buffer_key {1};
+    extcopy_timing_tracker_t timing_tracker;
   };
 
   class monitor_t {

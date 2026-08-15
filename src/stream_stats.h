@@ -62,6 +62,8 @@ namespace stream_stats {
     std::chrono::microseconds dispatch_time {};
     std::chrono::microseconds ingest_time {};
     std::chrono::microseconds total_time {};
+    std::optional<std::chrono::microseconds> source_interval;
+    std::optional<std::chrono::microseconds> ready_to_handoff;
   };
 
   struct gpu_native_probe_attempt_t {
