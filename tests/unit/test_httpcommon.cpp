@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <vector>
 
 // local imports
 #include <src/config.h>
@@ -50,13 +51,140 @@ INSTANTIATE_TEST_SUITE_P(
   )
 );
 
+struct UrlIsHttpsHostTest: testing::TestWithParam<std::tuple<std::string, std::string, bool>> {};
+
+TEST_P(UrlIsHttpsHostTest, Run) {
+  const auto &[url, host, expected] = GetParam();
+  EXPECT_EQ(http::url_is_https_host(url, host), expected);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  UrlIsHttpsHostTests,
+  UrlIsHttpsHostTest,
+  testing::Values(
+    std::make_tuple("https://images.igdb.com/cover.png", "images.igdb.com", true),
+    std::make_tuple("HTTPS://IMAGES.IGDB.COM/cover.png", "images.igdb.com", true),
+    std::make_tuple("http://images.igdb.com/cover.png", "images.igdb.com", false),
+    std::make_tuple("https://images.igdb.com.evil.example/cover.png", "images.igdb.com", false),
+    std::make_tuple("https://user@images.igdb.com/cover.png", "images.igdb.com", false),
+    std::make_tuple("https://images.igdb.com:8443/cover.png", "images.igdb.com", false),
+    std::make_tuple("not a URL", "images.igdb.com", false)
+  )
+);
+
+TEST(HttpCommonRedirectPolicy, RejectsInitialUrlBeforeRequestingIt) {
+  int request_count = 0;
+  const auto allowed = [](std::string_view url) {
+    return http::url_is_https_host(url, "cdn.example");
+  };
+
+  EXPECT_FALSE(http::redirect::follow(
+    "http://cdn.example/asset.jpg",
+    allowed,
+    [&](const std::string &) {
+      ++request_count;
+      return http::redirect::hop_result_t {true, 200, std::nullopt};
+    }
+  ));
+  EXPECT_EQ(request_count, 0);
+}
+
+TEST(HttpCommonRedirectPolicy, RejectsRedirectBeforeRequestingDisallowedHost) {
+  std::vector<std::string> requested;
+  const auto allowed = [](std::string_view url) {
+    return http::url_is_https_host(url, "cdn.example");
+  };
+
+  EXPECT_FALSE(http::redirect::follow(
+    "https://cdn.example/asset.jpg",
+    allowed,
+    [&](const std::string &url) {
+      requested.push_back(url);
+      return http::redirect::hop_result_t {
+        true,
+        302,
+        "https://metadata.internal/latest",
+      };
+    }
+  ));
+  EXPECT_EQ(requested, (std::vector<std::string> {"https://cdn.example/asset.jpg"}));
+}
+
+TEST(HttpCommonRedirectPolicy, AllowsFiveValidatedRedirects) {
+  std::vector<std::string> requested;
+  const auto allowed = [](std::string_view url) {
+    return http::url_is_https_host(url, "cdn.example");
+  };
+
+  EXPECT_TRUE(http::redirect::follow(
+    "https://cdn.example/0",
+    allowed,
+    [&](const std::string &url) {
+      requested.push_back(url);
+      if (requested.size() == 6) {
+        return http::redirect::hop_result_t {true, 200, std::nullopt};
+      }
+      return http::redirect::hop_result_t {
+        true,
+        302,
+        "https://cdn.example/" + std::to_string(requested.size()),
+      };
+    }
+  ));
+  EXPECT_EQ(requested.size(), 6);
+}
+
+TEST(HttpCommonRedirectPolicy, RejectsTheSixthRedirectWithoutRequestingItsTarget) {
+  std::vector<std::string> requested;
+  const auto allowed = [](std::string_view url) {
+    return http::url_is_https_host(url, "cdn.example");
+  };
+
+  EXPECT_FALSE(http::redirect::follow(
+    "https://cdn.example/0",
+    allowed,
+    [&](const std::string &url) {
+      requested.push_back(url);
+      return http::redirect::hop_result_t {
+        true,
+        302,
+        "https://cdn.example/" + std::to_string(requested.size()),
+      };
+    }
+  ));
+  EXPECT_EQ(requested.size(), 6);
+}
+
+TEST(HttpCommonRedirectPolicy, RejectsTransportErrorsAndNonSuccessResponses) {
+  const auto allowed = [](std::string_view url) {
+    return http::url_is_https_host(url, "cdn.example");
+  };
+  EXPECT_FALSE(http::redirect::follow(
+    "https://cdn.example/asset.jpg",
+    allowed,
+    [](const std::string &) {
+      return http::redirect::hop_result_t {false, 0, std::nullopt};
+    }
+  ));
+  EXPECT_FALSE(http::redirect::follow(
+    "https://cdn.example/asset.jpg",
+    allowed,
+    [](const std::string &) {
+      return http::redirect::hop_result_t {true, 404, std::nullopt};
+    }
+  ));
+}
+
 struct DownloadFileTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 
 TEST_P(DownloadFileTest, Run) {
   const auto &[url, filename] = GetParam();
   const std::string test_dir = platf::appdata().string() + "/tests/";
   std::string path = test_dir + filename;
-  if (!http::download_file(url, path, CURL_SSLVERSION_TLSv1_0)) {
+  const auto allowed = [](std::string_view candidate) {
+    return http::url_is_https_host(candidate, "httpbin.org");
+  };
+  if (!http::download_file(url, path, allowed, CURL_SSLVERSION_TLSv1_0)) {
     GTEST_SKIP() << "External download dependency unavailable for " << url;
   }
 }

@@ -724,6 +724,19 @@ namespace confighttp {
       std::string background_raw;
     };
 
+    bool steam_artwork_url_allowed(std::string_view url) {
+      return game_artwork::is_allowed_provider_url(game_artwork::provider_e::steam, url);
+    }
+
+    bool cover_download_url_allowed(std::string_view url) {
+      return steam_artwork_url_allowed(url) ||
+             game_artwork::is_allowed_provider_url(game_artwork::provider_e::steamgriddb, url);
+    }
+
+    bool igdb_image_url_allowed(std::string_view url) {
+      return http::url_is_https_host(url, "images.igdb.com");
+    }
+
     std::optional<steam_store_assets_t> fetch_steam_store_assets(const std::string &appid) {
       const std::string url = "https://store.steampowered.com/api/appdetails?appids=" + appid;
       CURL *curl = curl_easy_init();
@@ -732,18 +745,41 @@ namespace confighttp {
       }
 
       std::string response;
-      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
       curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
       curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
       curl_easy_setopt(curl, CURLOPT_USERAGENT, "Polaris/1.0");
+#if LIBCURL_VERSION_NUM >= 0x075500
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+#else
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
 
-      const CURLcode res = curl_easy_perform(curl);
+      const bool downloaded = http::redirect::follow(
+        url,
+        steam_artwork_url_allowed,
+        [&](const std::string &current_url) {
+          response.clear();
+          curl_easy_setopt(curl, CURLOPT_URL, current_url.c_str());
+          const CURLcode result = curl_easy_perform(curl);
+          long response_code = 0;
+          char *redirect_url = nullptr;
+          if (result == CURLE_OK) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+            curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redirect_url);
+          }
+          return http::redirect::hop_result_t {
+            result == CURLE_OK,
+            response_code,
+            redirect_url && *redirect_url ? std::optional<std::string> {redirect_url} : std::nullopt,
+          };
+        }
+      );
       curl_easy_cleanup(curl);
 
-      if (res != CURLE_OK) {
+      if (!downloaded) {
         return std::nullopt;
       }
 
@@ -812,7 +848,7 @@ namespace confighttp {
 
       const std::string portrait_url = "https://steamcdn-a.akamaihd.net/steam/apps/" + appid + "/library_600x900_2x.jpg";
       const fs::path portrait_path = coverdir / (stem + safe_cover_extension_from_url(portrait_url));
-      if (http::download_file(portrait_url, portrait_path.string())) {
+      if (http::download_file(portrait_url, portrait_path.string(), steam_artwork_url_allowed)) {
         return portrait_path.string();
       }
 
@@ -824,7 +860,7 @@ namespace confighttp {
       if (!assets->header_image.empty()) {
         const auto tmp_stem = "steam_header_" + appid + "_" + uuid_util::uuid_t::generate().string();
         const fs::path header_tmp_path = fs::temp_directory_path() / (tmp_stem + safe_cover_extension_from_url(assets->header_image));
-        if (http::download_file(assets->header_image, header_tmp_path.string())) {
+        if (http::download_file(assets->header_image, header_tmp_path.string(), steam_artwork_url_allowed)) {
           const fs::path generated_path = coverdir / (stem + ".jpg");
           if (synthesize_steam_cover_from_header(header_tmp_path, generated_path)) {
             std::error_code ec;
@@ -850,7 +886,7 @@ namespace confighttp {
         }
 
         const fs::path candidate_path = coverdir / (stem + safe_cover_extension_from_url(candidate_url));
-        if (http::download_file(candidate_url, candidate_path.string())) {
+        if (http::download_file(candidate_url, candidate_path.string(), steam_artwork_url_allowed)) {
           BOOST_LOG(info) << "Fell back to Steam capsule art for [" << appid << "]";
           return candidate_path.string();
         }
@@ -4032,11 +4068,11 @@ namespace confighttp {
       file_handler::make_directory(coverdir);
       std::string path = coverdir + http::url_escape(key) + ".png";
       if (!url.empty()) {
-        if (http::url_get_host(url) != "images.igdb.com") {
+        if (!igdb_image_url_allowed(url)) {
           bad_request(response, request, "Only images.igdb.com is allowed");
           return;
         }
-        if (!http::download_file(url, path)) {
+        if (!http::download_file(url, path, igdb_image_url_allowed)) {
           bad_request(response, request, "Failed to download cover");
           return;
         }
@@ -4291,7 +4327,7 @@ namespace confighttp {
       file_handler::make_directory(coverdir);
       std::string cover_path = coverdir + http::url_escape(app_entry->uuid) + safe_cover_extension_from_url(url);
 
-      if (!http::download_file(url, cover_path)) {
+      if (!http::download_file(url, cover_path, cover_download_url_allowed)) {
         output["status"] = false;
         output["error"] = "Failed to download cover";
         send_response(response, output);

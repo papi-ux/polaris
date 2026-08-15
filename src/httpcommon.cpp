@@ -283,7 +283,58 @@ namespace http {
     return 0;
   }
 
-  bool download_file(const std::string &url, const std::string &file, long ssl_version) {
+  namespace redirect {
+    bool follow(
+      const std::string &initial_url,
+      const download_url_validator_t &url_allowed,
+      const request_t &request
+    ) {
+      constexpr std::size_t maximum_redirects = 5;
+      if (!url_allowed || !request || !url_allowed(initial_url)) {
+        return false;
+      }
+
+      std::string current_url = initial_url;
+      std::size_t redirect_count = 0;
+      while (true) {
+        const auto result = request(current_url);
+        if (!result.transport_ok) {
+          return false;
+        }
+        if (result.response_code >= 200 && result.response_code < 300) {
+          return true;
+        }
+        if (result.response_code < 300 || result.response_code >= 400 ||
+            !result.redirect_url || result.redirect_url->empty()) {
+          return false;
+        }
+        if (redirect_count >= maximum_redirects) {
+          BOOST_LOG(warning) << "Download exceeded the five-redirect limit";
+          return false;
+        }
+        if (!url_allowed(*result.redirect_url)) {
+          BOOST_LOG(warning) << "Refused download redirect to non-allowlisted host ["sv
+                             << url_get_host(*result.redirect_url) << ']';
+          return false;
+        }
+
+        current_url = *result.redirect_url;
+        ++redirect_count;
+      }
+    }
+  }  // namespace redirect
+
+  bool download_file(
+    const std::string &url,
+    const std::string &file,
+    const download_url_validator_t &url_allowed,
+    long ssl_version
+  ) {
+    if (!url_allowed || !url_allowed(url)) {
+      BOOST_LOG(warning) << "Refused non-allowlisted download URL host ["sv << url_get_host(url) << ']';
+      return false;
+    }
+
     // sonar complains about weak ssl and tls versions; however sonar cannot detect the fix
     CURL *curl = curl_easy_init();  // NOSONAR
     if (!curl) {
@@ -297,46 +348,53 @@ namespace http {
       return false;
     }
 
-    FILE *fp = fopen(file.c_str(), "wb");
-    if (!fp) {
-      BOOST_LOG(error) << "Couldn't open ["sv << file << ']';
-      curl_easy_cleanup(curl);
-      return false;
-    }
-
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, ssl_version);  // NOSONAR
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-    curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    // Callers vet the host of the URL they pass, but a redirect is a second
-    // URL nobody vetted. Steam's CDNs do redirect, so following is kept -- but
-    // only over https and only a few hops, so a redirect cannot drop to
-    // plaintext, reach a non-http scheme, or loop.
-    // CURLOPT_REDIR_PROTOCOLS is deprecated in 7.85; the _STR form replaces it.
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
 #if LIBCURL_VERSION_NUM >= 0x075500
-    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+#else
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
 #endif
-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
 #ifdef _WIN32
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #endif
-    CURLcode result = curl_easy_perform(curl);
-    long response_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-    if (result != CURLE_OK) {
-      BOOST_LOG(error) << "Couldn't download ["sv << url << ", code:" << result << ']';
-    }
-    curl_easy_cleanup(curl);
-    fclose(fp);
 
-    const bool http_ok = response_code >= 200 && response_code < 300;
-    if (result != CURLE_OK || !http_ok) {
-      if (!http_ok) {
-        BOOST_LOG(error) << "Download returned unexpected HTTP status for ["sv << url << "]: "sv << response_code;
+    const bool downloaded = redirect::follow(
+      url,
+      url_allowed,
+      [&](const std::string &current_url) {
+        FILE *fp = fopen(file.c_str(), "wb");
+        if (!fp) {
+          BOOST_LOG(error) << "Couldn't open ["sv << file << ']';
+          return redirect::hop_result_t {false, 0, std::nullopt};
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, current_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        const CURLcode result = curl_easy_perform(curl);
+        long response_code = 0;
+        char *redirect_url = nullptr;
+        if (result == CURLE_OK) {
+          curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+          curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redirect_url);
+        }
+        fclose(fp);
+
+        if (result != CURLE_OK) {
+          BOOST_LOG(error) << "Couldn't download from host ["sv << url_get_host(current_url)
+                           << "], code:"sv << result;
+        }
+        return redirect::hop_result_t {
+          result == CURLE_OK,
+          response_code,
+          redirect_url && *redirect_url ? std::optional<std::string> {redirect_url} : std::nullopt,
+        };
       }
+    );
+    curl_easy_cleanup(curl);
+
+    if (!downloaded) {
       std::error_code err_code;
       fs::remove(file, err_code);
       if (err_code) {
@@ -357,8 +415,11 @@ namespace http {
 
   std::string url_get_host(const std::string &url) {
     CURLU *curlu = curl_url();
-    curl_url_set(curlu, CURLUPART_URL, url.c_str(), static_cast<unsigned int>(url.length()));
-    char *host;
+    if (!curlu || curl_url_set(curlu, CURLUPART_URL, url.c_str(), 0) != CURLUE_OK) {
+      if (curlu) curl_url_cleanup(curlu);
+      return "";
+    }
+    char *host = nullptr;
     if (curl_url_get(curlu, CURLUPART_HOST, &host, 0) != CURLUE_OK) {
       curl_url_cleanup(curlu);
       return "";
@@ -367,5 +428,35 @@ namespace http {
     curl_free(host);
     curl_url_cleanup(curlu);
     return result;
+  }
+
+  bool url_is_https_host(std::string_view url, std::string_view expected_host) {
+    if (url.empty() || expected_host.empty()) {
+      return false;
+    }
+
+    CURLU *curlu = curl_url();
+    const std::string owned_url {url};
+    if (!curlu || curl_url_set(curlu, CURLUPART_URL, owned_url.c_str(), 0) != CURLUE_OK) {
+      if (curlu) curl_url_cleanup(curlu);
+      return false;
+    }
+
+    char *scheme = nullptr;
+    char *host = nullptr;
+    char *forbidden = nullptr;
+    const bool valid =
+      curl_url_get(curlu, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK &&
+      curl_url_get(curlu, CURLUPART_HOST, &host, 0) == CURLUE_OK &&
+      boost::iequals(scheme, "https") && boost::iequals(host, expected_host) &&
+      curl_url_get(curlu, CURLUPART_PORT, &forbidden, 0) != CURLUE_OK &&
+      curl_url_get(curlu, CURLUPART_USER, &forbidden, 0) != CURLUE_OK &&
+      curl_url_get(curlu, CURLUPART_PASSWORD, &forbidden, 0) != CURLUE_OK;
+
+    if (scheme) curl_free(scheme);
+    if (host) curl_free(host);
+    if (forbidden) curl_free(forbidden);
+    curl_url_cleanup(curlu);
+    return valid;
   }
 }  // namespace http
