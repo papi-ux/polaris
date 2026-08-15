@@ -310,6 +310,16 @@ namespace http {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    // Callers vet the host of the URL they pass, but a redirect is a second
+    // URL nobody vetted. Steam's CDNs do redirect, so following is kept -- but
+    // only over https and only a few hops, so a redirect cannot drop to
+    // plaintext, reach a non-http scheme, or loop.
+    // CURLOPT_REDIR_PROTOCOLS is deprecated in 7.85; the _STR form replaces it.
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#endif
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
 #ifdef _WIN32
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #endif
