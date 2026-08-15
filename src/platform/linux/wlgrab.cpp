@@ -749,11 +749,21 @@ namespace platf {
         try_headless_extcopy_dmabuf =
           stream_runtime::labwc::should_attempt_headless_extcopy_dmabuf(runtime_state, hwdevice_type);
         if (!try_headless_extcopy_dmabuf && hwdevice_type == platf::mem_type_e::vaapi) {
-          stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "ineligible", "policy", "vaapi_headless_dmabuf_disabled_for_stability");
+          const auto cached_result =
+            stream_runtime::labwc::cached_headless_extcopy_dmabuf_probe_result();
+          if (cached_result == std::optional<bool> {false}) {
+            stream_stats::update_gpu_native_probe_attempt(
+              "headless_extcopy",
+              "ineligible",
+              "cache",
+              "cached_unsupported",
+              true
+            );
+          }
           stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
           if (stream_runtime::labwc::should_log_headless_ram_capture_warning()) {
             BOOST_LOG(info)
-              << "wlr: Using RAM capture path for headless labwc because true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"sv;
+              << "wlr: Using RAM capture path for headless labwc because its GPU-native probe is unavailable or cached unsupported"sv;
           }
         }
       } else {
@@ -796,45 +806,71 @@ namespace platf {
 
     if (try_headless_extcopy_dmabuf && gpu_native_capture_supported) {
       bool device_pairing_failed = false;
+      bool modifier_policy_failed = false;
       auto wlr = std::make_shared<wl::wlr_extcopy_vram_t>();
       if (!wlr->init(hwdevice_type, display_name, config)) {
-        const auto capture_render_node = wlr->extcopy.capture_render_node();
-        const auto adapter_pairing = stream_stats::device_nodes_match(capture_render_node, config::video.adapter_name);
-        if (!config::video.adapter_name.empty() &&
-            !capture_render_node.empty() &&
-            (!adapter_pairing.has_value() || !*adapter_pairing)) {
-          device_pairing_failed = true;
-          const bool identity_resolved = adapter_pairing.has_value();
+        const auto capture_modifier = wlr->extcopy.capture_modifier();
+        if (!stream_runtime::labwc::gpu_native_dmabuf_is_safe(
+              hwdevice_type,
+              wlgrab_capture_policy::gpu_native_capture_route_e::headless_extcopy,
+              capture_modifier
+            )) {
+          modifier_policy_failed = true;
+          const auto failure_reason = capture_modifier.has_value() ?
+                                        "vaapi_headless_modifier_not_linear" :
+                                        "vaapi_headless_modifier_unavailable";
           BOOST_LOG(warning)
-            << "wlr: Disabling true-headless ext-image-copy-capture DMA-BUF because capture render_node=["sv
-            << capture_render_node
-            << (identity_resolved ? "] differs from encoder adapter=["sv : "] could not be identity-matched to encoder adapter=["sv)
-            << config::video.adapter_name
-            << "]; using SHM/system-memory fallback to avoid unsafe cross-GPU import"sv;
+            << "wlr: Disabling VAAPI headless ext-image-copy-capture DMA-BUF because the captured buffer modifier is "sv
+            << (capture_modifier.has_value() ? std::to_string(*capture_modifier) : "unavailable")
+            << "; only an actual linear modifier is accepted; using SHM fallback"sv;
 #ifdef __linux__
           stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
           stream_stats::update_gpu_native_probe_attempt(
             "headless_extcopy",
             "failed",
-            "device_pairing",
-            identity_resolved ? "cross_gpu_adapter_mismatch" : "device_identity_unresolved"
+            "modifier_policy",
+            failure_reason
           );
         } else {
+          const auto capture_render_node = wlr->extcopy.capture_render_node();
+          const auto adapter_pairing = stream_stats::device_nodes_match(capture_render_node, config::video.adapter_name);
+          if (!config::video.adapter_name.empty() &&
+              !capture_render_node.empty() &&
+              (!adapter_pairing.has_value() || !*adapter_pairing)) {
+            device_pairing_failed = true;
+            const bool identity_resolved = adapter_pairing.has_value();
+            BOOST_LOG(warning)
+              << "wlr: Disabling true-headless ext-image-copy-capture DMA-BUF because capture render_node=["sv
+              << capture_render_node
+              << (identity_resolved ? "] differs from encoder adapter=["sv : "] could not be identity-matched to encoder adapter=["sv)
+              << config::video.adapter_name
+              << "]; using SHM/system-memory fallback to avoid unsafe cross-GPU import"sv;
 #ifdef __linux__
-          stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(true);
+            stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
-          stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "succeeded");
-          stream_stats::update_gpu_native_probe_selection("headless_extcopy_dmabuf");
-          BOOST_LOG(info) << "wlr: Using ext-image-copy-capture DMA-BUF for headless labwc"sv;
-          return wlr;
+            stream_stats::update_gpu_native_probe_attempt(
+              "headless_extcopy",
+              "failed",
+              "device_pairing",
+              identity_resolved ? "cross_gpu_adapter_mismatch" : "device_identity_unresolved"
+            );
+          } else {
+#ifdef __linux__
+            stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(true);
+#endif
+            stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "succeeded");
+            stream_stats::update_gpu_native_probe_selection("headless_extcopy_dmabuf");
+            BOOST_LOG(info) << "wlr: Using ext-image-copy-capture DMA-BUF for headless labwc"sv;
+            return wlr;
+          }
         }
       }
 
 #ifdef __linux__
       stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
 #endif
-      if (!device_pairing_failed) {
+      if (!device_pairing_failed && !modifier_policy_failed) {
         stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "capture_init", "dmabuf_capture_not_initialized");
       }
       stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");

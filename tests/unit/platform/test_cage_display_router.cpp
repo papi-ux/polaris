@@ -399,7 +399,7 @@ TEST(WaylandInterfaceTests, RemovedOutputMarksDirtyButKeepsMonitorStorageUntilRe
 // windowed_ram_fallback, headless_extcopy_probe_succeeded) live only under
 // stream_runtime::labwc as one-liners — no dual cage export / matrix tests.
 
-TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiSkipsExtcopyDmabufForShmFallback) {
+TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiMayProbeExtcopyDmabuf) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,
     .effective_headless = true,
@@ -407,7 +407,7 @@ TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiSkipsExtcopyDmabufForSh
     .backend_name = "labwc",
   };
 
-  EXPECT_FALSE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+  EXPECT_TRUE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
     runtime_state,
     platf::mem_type_e::vaapi
   ));
@@ -486,42 +486,55 @@ TEST(CageDisplayRouterPolicyTests, GpuNativeCaptureNeedsTheOverrideRegardlessOfE
   ));
 }
 
-TEST(CageDisplayRouterPolicyTests, BothGpuNativeRoutesShareOneStabilityPolicy) {
-  // Keeping the two routes' policies independent is what let a VAAPI host
-  // crash through one while the other was refusing the same buffers, so this
-  // pins them to the same answer rather than to a literal.
-  for (const auto hwdevice_type : {
-         platf::mem_type_e::cuda,
-         platf::mem_type_e::vaapi,
-         platf::mem_type_e::system,
-         platf::mem_type_e::unknown,
-       }) {
-    const platf::runtime_state_t headless {
-      .requested_headless = true,
-      .effective_headless = true,
-      .gpu_native_override_active = false,
-      .backend_name = "labwc",
-    };
-    const platf::runtime_state_t overridden {
-      .requested_headless = true,
-      .effective_headless = false,
-      .gpu_native_override_active = true,
-      .backend_name = "labwc",
-    };
+TEST(CageDisplayRouterPolicyTests, VaapiSafetyIsLimitedToLinearHeadlessExtcopy) {
+  using route_e = wlgrab_capture_policy::gpu_native_capture_route_e;
+  constexpr std::uint64_t tiled_modifier = 0x0100000000000002ULL;
 
-    EXPECT_EQ(
-      cage_display_router::should_attempt_headless_extcopy_dmabuf(headless, hwdevice_type),
-      cage_display_router::should_attempt_gpu_native_cage_capture(overridden, hwdevice_type)
-    ) << "hwdevice_type=" << static_cast<int>(hwdevice_type);
-  }
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vaapi,
+    route_e::headless_extcopy,
+    DRM_FORMAT_MOD_LINEAR
+  ));
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vaapi,
+    route_e::headless_extcopy,
+    tiled_modifier
+  ));
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vaapi,
+    route_e::headless_extcopy,
+    std::nullopt
+  ));
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vaapi,
+    route_e::windowed_nested,
+    DRM_FORMAT_MOD_LINEAR
+  ));
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vaapi,
+    route_e::direct_wayland,
+    DRM_FORMAT_MOD_LINEAR
+  ));
 }
 
-TEST(CageDisplayRouterPolicyTests, OnlyCudaHasASafeGpuNativeDmabufPath) {
-  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::cuda));
-  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::vaapi));
-  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::system));
-  // An encoder that has not resolved yet must not read as safe.
-  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(platf::mem_type_e::unknown));
+TEST(CageDisplayRouterPolicyTests, CudaRemainsSafeWithoutAModifier) {
+  using route_e = wlgrab_capture_policy::gpu_native_capture_route_e;
+
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::cuda,
+    route_e::headless_extcopy,
+    std::nullopt
+  ));
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::cuda,
+    route_e::windowed_nested,
+    std::nullopt
+  ));
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::cuda,
+    route_e::direct_wayland,
+    std::nullopt
+  ));
 }
 
 TEST(CageDisplayRouterPolicyTests, HeadlessDmabufGpuConversionFailureDisablesExtcopyFallback) {

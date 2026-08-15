@@ -890,8 +890,12 @@ namespace cage_display_router {
     return mode;
   }
 
-  bool gpu_native_dmabuf_is_safe(platf::mem_type_e hwdevice_type) {
-    return wlgrab_capture_policy::gpu_native_dmabuf_is_safe(hwdevice_type);
+  bool gpu_native_dmabuf_is_safe(
+    platf::mem_type_e hwdevice_type,
+    wlgrab_capture_policy::gpu_native_capture_route_e route,
+    std::optional<std::uint64_t> modifier
+  ) {
+    return wlgrab_capture_policy::gpu_native_dmabuf_is_safe(hwdevice_type, route, modifier);
   }
 
   bool should_attempt_headless_extcopy_dmabuf(
@@ -907,7 +911,10 @@ namespace cage_display_router {
       return false;
     }
 
-    return gpu_native_dmabuf_is_safe(hwdevice_type);
+    return wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
+      hwdevice_type,
+      wlgrab_capture_policy::gpu_native_capture_route_e::headless_extcopy
+    );
   }
 
   bool should_attempt_gpu_native_cage_capture(
@@ -928,7 +935,11 @@ namespace cage_display_router {
       return false;
     }
 
-    return gpu_native_dmabuf_is_safe(hwdevice_type);
+    return cage_display_router::gpu_native_dmabuf_is_safe(
+      hwdevice_type,
+      wlgrab_capture_policy::gpu_native_capture_route_e::windowed_nested,
+      std::nullopt
+    );
   }
 
   bool should_disable_headless_extcopy_after_conversion_failure(
