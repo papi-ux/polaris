@@ -70,6 +70,42 @@ private compositor. If the client connects but shows an empty or black desktop w
 that usually means the headless runtime is alive but nothing visible has been launched in it. Use
 Desktop Display mode when you want to stream the already-running host desktop session.
 
+## Fullscreen Proton or Wine game renders on the physical monitor
+
+The stream connects, audio and input reach the private session correctly, and the client shows an
+empty compositor while the game appears on your real desktop instead.
+
+If the app is launched through Flatpak, this is the Flatpak portal replacing `DISPLAY`. Polaris
+exports the private session's display to the command it launches, but when that command spawns back
+out through the portal (`org.freedesktop.portal.Flatpak`), the portal builds the new sandbox from
+the *portal service's own* environment. The portal service is D-Bus activated and holds the display
+your desktop session had at login, so it overwrites `DISPLAY` and binds only that one X socket into
+the container. Wine and Proton use the X11 driver by default, follow the substituted `DISPLAY`, and
+land on the host desktop.
+
+Nothing set at any layer above the portal survives this. Passing the variable explicitly does not
+help either, because the portal applies its own X11 arguments after the caller's environment.
+
+Confirm it in one command while the game is running, using the game's own mount namespace:
+
+```bash
+GAME=<game-pid>
+sudo ls -la /proc/$GAME/root/tmp/.X11-unix/
+sudo tr '\0' '\n' < /proc/$GAME/environ | grep -E '^(DISPLAY|WAYLAND_DISPLAY)='
+```
+
+If the only socket present is the one for your desktop session rather than the private session's,
+the container never had a path to the private display.
+
+**Workaround:** launch through a native, non-Flatpak build of your launcher (umu-launcher, Lutris,
+Heroic, Steam). The Steam Runtime container itself honors `DISPLAY` correctly, so removing the
+portal hop is enough. A direct `flatpak run` also passes the display through correctly; it is
+specifically the portal spawn underneath a Flatpak launcher that does not.
+
+Polaris logs a warning at launch when an app command can reach the portal, and reports
+`never opened a window in the private session` when a launch produces no window at all, rather than
+streaming an empty compositor silently.
+
 ## Steam Big Picture black screen or tiny window
 
 Clear Steam's HTML cache:
