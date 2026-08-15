@@ -409,6 +409,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_input.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_input.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_attach.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_attach.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input/input_group_access.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input/input_group_access.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.h"
