@@ -454,7 +454,10 @@ namespace confighttp {
           << " WAYLAND_DISPLAY=" << shell_escape(socket_name)
           << " grim ";
       if (!output_name.empty()) {
-        cmd << "-o " << output_name << ' ';
+        // preview_output_is_safe already restricts this to [alnum-_.:], so
+        // nothing can escape today -- but its siblings above are escaped and
+        // this one being the exception is how the restriction stops holding.
+        cmd << "-o " << shell_escape(output_name) << ' ';
       }
       cmd << shell_escape(outfile) << " 2>/dev/null";
       return cmd.str();
