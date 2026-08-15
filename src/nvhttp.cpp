@@ -3294,11 +3294,56 @@ namespace nvhttp {
   struct pair_session_t;
 
   crypto::cert_chain_t cert_chain;
+  // Written by request_otp() on the confighttp thread and consumed by pair() on
+  // the nvhttp one (main.cpp starts a thread for each server), so every access
+  // has to hold otp_state_mutex. Unsynchronized, request_otp() reallocating
+  // otp_passphrase while pair() hashes it is a use-after-free, and a torn read
+  // of otp_pairing_perm grants a client permissions nobody approved.
+  static std::mutex otp_state_mutex;
   static std::string one_time_pin;
   static std::string otp_passphrase;
   static std::string otp_device_name;
   static std::optional<PERM> otp_pairing_perm;
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
+
+  /**
+   * @brief Match a presented OTP hash and consume the pin behind it.
+   *
+   * Does the whole read-compare-clear under one lock so the values cannot be
+   * replaced by a concurrent request_otp() partway through. An outstanding pin
+   * is dropped whether it matched or expired; a miss is reported as no claim
+   * rather than a distinct status, matching how callers answer every failure
+   * identically.
+   */
+  static otp_claim_t claim_one_time_pin(const std::string &salt, std::string_view presented_hash) {
+    std::lock_guard lock {otp_state_mutex};
+
+    const auto expired = std::chrono::steady_clock::now() - otp_creation_time > OTP_EXPIRE_DURATION;
+    if (one_time_pin.empty() || expired) {
+      one_time_pin.clear();
+      otp_passphrase.clear();
+      otp_device_name.clear();
+      otp_pairing_perm.reset();
+      return {};
+    }
+
+    const auto expected = util::hex(crypto::hash(one_time_pin + salt + otp_passphrase), true);
+    if (!crypto::constant_time_equals(expected.to_string_view(), presented_hash)) {
+      return {};
+    }
+
+    otp_claim_t claim;
+    claim.matched = true;
+    claim.pin = one_time_pin;
+    claim.device_name = std::move(otp_device_name);
+    claim.pairing_perm = otp_pairing_perm;
+
+    one_time_pin.clear();
+    otp_passphrase.clear();
+    otp_device_name.clear();
+    otp_pairing_perm.reset();
+    return claim;
+  }
 
   class PolarisHTTPSServer: public SimpleWeb::ServerBase<PolarisHTTPS> {
   public:
@@ -5066,31 +5111,15 @@ namespace nvhttp {
 
         auto it = args.find("otpauth");
         if (it != std::end(args)) {
-          if (one_time_pin.empty() || (std::chrono::steady_clock::now() - otp_creation_time > OTP_EXPIRE_DURATION)) {
-            one_time_pin.clear();
-            otp_passphrase.clear();
-            otp_device_name.clear();
-            otp_pairing_perm.reset();
-            tree.put("root.<xmlattr>.status_code", 503);
-            tree.put("root.<xmlattr>.status_message", "OTP auth not available.");
-          } else {
-            auto hash = util::hex(crypto::hash(one_time_pin + ptr->second.async_insert_pin.salt + otp_passphrase), true);
-
-            if (hash.to_string_view() == it->second) {
-
-              if (!otp_device_name.empty()) {
-                ptr->second.client.name = std::move(otp_device_name);
-              }
-              ptr->second.pairing_perm = otp_pairing_perm;
-
-              getservercert(ptr->second, tree, one_time_pin);
-
-              one_time_pin.clear();
-              otp_passphrase.clear();
-              otp_device_name.clear();
-              otp_pairing_perm.reset();
-              return;
+          const auto claim = claim_one_time_pin(ptr->second.async_insert_pin.salt, it->second);
+          if (claim.matched) {
+            if (!claim.device_name.empty()) {
+              ptr->second.client.name = claim.device_name;
             }
+            ptr->second.pairing_perm = claim.pairing_perm;
+
+            getservercert(ptr->second, tree, claim.pin);
+            return;
           }
 
           // Always return positive, attackers will fail in the next steps.
@@ -8865,13 +8894,15 @@ namespace nvhttp {
     // Wait for any event
     shutdown_event->view();
 
-    map_id_sess.clear();
-
     https_server.stop();
     http_server.stop();
 
     ssl.join();
     tcp.join();
+
+    // Only once the server threads are joined: an in-flight pair() holds a
+    // reference into this map for the rest of its handler.
+    map_id_sess.clear();
   }
 
   std::string request_otp(
@@ -8883,12 +8914,16 @@ namespace nvhttp {
       return "";
     }
 
+    std::lock_guard lock {otp_state_mutex};
+
     one_time_pin = crypto::rand_alphabet(4, "0123456789"sv);
     otp_passphrase = passphrase;
     otp_device_name = deviceName;
     otp_pairing_perm = pairing_perm;
     otp_creation_time = std::chrono::steady_clock::now();
 
+    // Copied while the lock is held: the return object is initialized before
+    // the guard runs.
     return one_time_pin;
   }
 
@@ -8898,11 +8933,17 @@ namespace nvhttp {
     map_id_sess.clear();
     client_root.named_devices.clear();
     cert_chain.clear();
+
+    std::lock_guard otp_lock {otp_state_mutex};
     one_time_pin.clear();
     otp_passphrase.clear();
     otp_device_name.clear();
     otp_pairing_perm.reset();
     otp_creation_time = {};
+  }
+
+  otp_claim_t claim_one_time_pin_for_tests(const std::string &salt, std::string_view presented_hash) {
+    return claim_one_time_pin(salt, presented_hash);
   }
 
   void add_legacy_authorized_client_for_tests(const crypto::p_named_cert_t &named_cert_p) {
