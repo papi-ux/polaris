@@ -67,6 +67,58 @@ TEST(PrivateSessionAttachTests, ProbingAnEmptySocketNameIsUnavailable) {
   EXPECT_EQ(private_session_attach::probe_toplevels("").status, probe_status_e::unavailable);
 }
 
+TEST(PrivateSessionAttachTests, EitherSignalSeeingAWindowIsAnAttach) {
+  // Issue #415: a fullscreen game can map an override-redirect window, which the
+  // Wayland toplevel list never reports but the X root does. Either signal alone
+  // is enough to prove the app arrived.
+  using private_session_attach::combine;
+  const probe_result_t none {.status = probe_status_e::ok, .toplevel_count = 0};
+
+  EXPECT_EQ(combine(measured(1), none).toplevel_count, 1);
+  EXPECT_EQ(combine(none, measured(1)).toplevel_count, 1);
+  // Overlapping signals: one managed window shows up in both, so the count is a
+  // lower bound rather than a sum. Reporting 5 here would mean logging one window
+  // as two on every ordinary launch.
+  EXPECT_EQ(combine(measured(2), measured(3)).toplevel_count, 3);
+  EXPECT_EQ(combine(measured(1), measured(1)).toplevel_count, 1);
+  EXPECT_EQ(combine(none, none).status, probe_status_e::ok);
+  EXPECT_EQ(evaluate(combine(none, measured(1)), 0ms, k_grace), verdict_e::attached);
+}
+
+TEST(PrivateSessionAttachTests, OneWorkingSignalIsNotSuppressedByTheOtherFailing) {
+  // A session with no Xwayland at all must not lose the Wayland verdict, and an
+  // unreachable compositor must not erase a window the X root already reported.
+  using private_session_attach::combine;
+  const probe_result_t dead {.status = probe_status_e::unavailable, .toplevel_count = 0};
+  const probe_result_t absent {.status = probe_status_e::unsupported, .toplevel_count = 0};
+
+  EXPECT_EQ(combine(measured(1), dead).status, probe_status_e::ok);
+  EXPECT_EQ(combine(measured(1), dead).toplevel_count, 1);
+  EXPECT_EQ(combine(absent, measured(2)).toplevel_count, 2);
+  EXPECT_EQ(evaluate(combine(measured(0), dead), k_grace, k_grace), verdict_e::never_attached);
+}
+
+TEST(PrivateSessionAttachTests, TwoFailedMeasurementsStayFailedMeasurements) {
+  using private_session_attach::combine;
+  const probe_result_t dead {.status = probe_status_e::unavailable, .toplevel_count = 0};
+  const probe_result_t absent {.status = probe_status_e::unsupported, .toplevel_count = 0};
+
+  EXPECT_EQ(combine(dead, dead).status, probe_status_e::unavailable);
+  EXPECT_EQ(combine(absent, dead).status, probe_status_e::unsupported);
+  EXPECT_EQ(combine(dead, absent).status, probe_status_e::unsupported);
+  // Neither combination may ever read as a launch that failed to attach.
+  EXPECT_EQ(evaluate(combine(dead, dead), k_grace * 2, k_grace), verdict_e::skipped);
+  EXPECT_EQ(evaluate(combine(absent, dead), k_grace * 2, k_grace), verdict_e::skipped);
+}
+
+TEST(PrivateSessionAttachTests, ProbingAnAbsentXDisplayReportsUnavailable) {
+  EXPECT_EQ(private_session_attach::probe_x11_windows("").status, probe_status_e::unavailable);
+  EXPECT_EQ(
+    private_session_attach::probe_x11_windows(":no-such-polaris-display").status,
+    probe_status_e::unavailable
+  );
+}
+
 TEST(PrivateSessionAttachTests, FlatpakLaunchersAreFlaggedForThePortalDisplayHop) {
   EXPECT_TRUE(may_lose_display_to_flatpak_portal("flatpak run io.github.Faugus.faugus-launcher"));
   EXPECT_TRUE(may_lose_display_to_flatpak_portal("/usr/bin/flatpak run net.lutris.Lutris"));
