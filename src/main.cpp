@@ -35,6 +35,9 @@
 #elif __linux__
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
+  #ifdef POLARIS_BUILD_PORTAL
+    #include "platform/linux/portal_capability.h"
+  #endif
 #endif
 
 #define PROBE_DISPLAY_UUID "38F72B96-B00C-4F21-8B6C-E1BFF1602B0E"
@@ -248,6 +251,16 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "config: '"sv << name << "' = "sv << config::redact_config_value(name, val);
   }
   config::modified_config_settings.clear();
+
+#if defined(__linux__) && defined(POLARIS_BUILD_PORTAL)
+  // File capabilities are inherited by every thread. Drop capabilities that
+  // portal-oriented capture paths cannot use before any workers are started,
+  // then restore ordinary same-user /proc access for portal authorization.
+  (void) portal_capability::prepare_process_for_capture(
+    config::video.capture,
+    config::video.linux_display.stream_mode
+  );
+#endif
 
   // Initialize stream recorder from config
   stream_recorder::load_config();

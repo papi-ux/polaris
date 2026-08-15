@@ -16,12 +16,17 @@
 
 #include <unistd.h>
 
+#include <fcntl.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+
 #include <drm_fourcc.h>
 #include <spa/param/video/raw.h>
 
 #include "src/config.h"
 #include "src/platform/common.h"
 #include "src/platform/linux/pipewire_capture.h"
+#include "src/platform/linux/portal_capability.h"
 #include "src/platform/linux/portal_session.h"
 #include "src/platform/linux/session_media.h"
 
@@ -34,6 +39,47 @@ namespace portal {
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
   bool portal_cancel_source_wakes_wait_for_tests();
+}
+
+TEST(PortalCapabilityPolicyTests, ExplicitCaptureSelectionWinsOverStreamModeDefault) {
+  EXPECT_TRUE(portal_capability::requires_unprivileged_process("portal", "headless_stream"));
+  EXPECT_TRUE(portal_capability::requires_unprivileged_process("PoRtAl", "headless_stream"));
+  EXPECT_FALSE(portal_capability::requires_unprivileged_process("kms", "gamescope_stream"));
+  EXPECT_FALSE(portal_capability::requires_unprivileged_process("wlr", "gamescope_stream"));
+}
+
+TEST(PortalCapabilityPolicyTests, PortalOrientedModesDropCapabilitiesForImplicitCapture) {
+  for (const char *mode : {"desktop_display", "gamescope_stream", "headless_dongle"}) {
+    EXPECT_TRUE(portal_capability::requires_unprivileged_process("", mode)) << mode;
+    EXPECT_TRUE(portal_capability::requires_unprivileged_process("auto", mode)) << mode;
+  }
+
+  EXPECT_FALSE(portal_capability::requires_unprivileged_process("", "headless_stream"));
+  EXPECT_FALSE(portal_capability::requires_unprivileged_process("auto", "windowed_stream"));
+}
+
+TEST(PortalCapabilityPolicyTests, PreparationLeavesProcRootReadableToSameUserPortalPeer) {
+  const auto result = portal_capability::prepare_process_for_capture("portal", "gamescope_stream");
+  ASSERT_NE(result, portal_capability::prepare_result_e::failed);
+  EXPECT_EQ(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 1);
+
+  const auto parent = getpid();
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    const auto path = "/proc/" + std::to_string(parent) + "/root";
+    const int fd = open(path.c_str(), O_PATH | O_CLOEXEC);
+    if (fd >= 0) {
+      close(fd);
+      _exit(0);
+    }
+    _exit(1);
+  }
+
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
 TEST(PortalGrabPolicyTests, DesktopDisplayRequestsMonitorSource) {

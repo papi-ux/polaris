@@ -49,6 +49,21 @@ namespace stream_runtime {
 
     std::string xdg_runtime_dir();
 
+    void close_inherited_descriptors(long fallback_limit) {
+#ifdef SYS_close_range
+      // No descriptor is intentionally passed to an owned gamescope. Use the
+      // kernel primitive when available so a high RLIMIT_NOFILE does not turn
+      // every launch into a million close(2) calls.
+      if (syscall(SYS_close_range, static_cast<unsigned int>(STDERR_FILENO + 1), ~0U, 0) == 0) {
+        return;
+      }
+#endif
+      const auto limit = fallback_limit > STDERR_FILENO ? fallback_limit : 1024;
+      for (long fd = STDERR_FILENO + 1; fd < limit; ++fd) {
+        (void) close(static_cast<int>(fd));
+      }
+    }
+
     class owner_transition_lock_t {
     public:
       explicit owner_transition_lock_t(bool acquire = true) {
@@ -482,6 +497,7 @@ namespace stream_runtime {
         }
         argv.push_back(nullptr);
 
+        const long inherited_fd_limit = sysconf(_SC_OPEN_MAX);
         const pid_t child = fork();
         if (child < 0) {
           BOOST_LOG(error) << "gamescope_runtime: fork failed: "sv << std::strerror(errno);
@@ -496,6 +512,10 @@ namespace stream_runtime {
           unsetenv("ENABLE_HDR_WSI");
           // Prefer gamescope-0 naming when the compositor honors it.
           setenv("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0", 1);
+          // The owned runtime is forked after Polaris starts its RTSP/HTTPS
+          // listeners. Without this boundary, gamescope and its Xwayland
+          // children keep those sockets bound after Polaris is killed.
+          close_inherited_descriptors(inherited_fd_limit);
           execv(gamescope_executable.c_str(), argv.data());
           _exit(127);
         }
@@ -1021,6 +1041,36 @@ namespace stream_runtime {
   bool gamescope_runtime_acquisition_allowed_for_tests() {
     owner_transition_lock_t owner_lock;
     return owner_lock && runtime_acquisition_allowed_locked();
+  }
+
+  bool gamescope_runtime_closes_inherited_descriptors_for_tests() {
+    int descriptors[2] = {-1, -1};
+    if (pipe2(descriptors, O_CLOEXEC) != 0) {
+      return false;
+    }
+    const long fallback_limit = sysconf(_SC_OPEN_MAX);
+    const pid_t child = fork();
+    if (child < 0) {
+      close(descriptors[0]);
+      close(descriptors[1]);
+      return false;
+    }
+    if (child == 0) {
+      const int probe_fd = descriptors[0];
+      close_inherited_descriptors(fallback_limit);
+      const bool closed = fcntl(probe_fd, F_GETFD) == -1 && errno == EBADF;
+      _exit(closed ? 0 : 1);
+    }
+
+    close(descriptors[0]);
+    close(descriptors[1]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+      if (errno != EINTR) {
+        return false;
+      }
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
   }
 
   stream_runtime_t *gamescope_runtime_instance() {
