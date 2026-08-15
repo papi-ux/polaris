@@ -114,6 +114,11 @@ namespace stream_display_policy {
                                bool runtime_effective_headless);
 
   /**
+   * @brief Whether a selection ID and its deterministic companion state agree.
+   */
+  bool selection_companion_state_matches(std::string_view selection);
+
+  /**
    * @brief Apply a user/API selection into config (stream_mode + legacy bools + runtime).
    *
    * @return false and sets error on failure.

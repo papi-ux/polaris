@@ -222,6 +222,48 @@ namespace stream_display_policy {
     return true;
   }
 
+  bool selection_companion_state_matches(std::string_view selection) {
+    const auto key = to_lower_copy(selection);
+    const auto &linux_display = config::video.linux_display;
+    if (linux_display.stream_mode != key) {
+      return false;
+    }
+
+    const auto expected = legacy_booleans_for_selection(key);
+    if (linux_display.headless_mode != expected.headless_mode ||
+        linux_display.use_cage_compositor != expected.use_cage_compositor ||
+        linux_display.prefer_gpu_native_capture != expected.prefer_gpu_native_capture) {
+      return false;
+    }
+
+    if (const auto *path = stream_path::find(key)) {
+      auto expected_runtime = std::string {stream_path::runtime_kind_id(path->runtime)};
+      if (expected_runtime.empty() && expected.use_cage_compositor) {
+        expected_runtime = std::string {k_runtime_labwc};
+      }
+      if (linux_display.private_runtime != expected_runtime) {
+        return false;
+      }
+
+      if (key == stream_path::k_gamescope_stream && config::video.capture.empty()) {
+        return false;
+      }
+      if (key == stream_path::k_headless_dongle) {
+        return linux_display.auto_manage_displays &&
+               !linux_display.headless_swap_mode.empty() &&
+               !linux_display.streaming_output.empty() &&
+               !linux_display.primary_output.empty() &&
+               linux_display.streaming_output != linux_display.primary_output &&
+               config::video.capture != "auto" &&
+               !config::video.capture.empty() &&
+               !config::video.output_name.empty();
+      }
+      return true;
+    }
+
+    return key == k_desktop_display;
+  }
+
   bool apply_selection(std::string_view selection, std::string &error) {
     if (!selection_valid(selection, error)) {
       return false;

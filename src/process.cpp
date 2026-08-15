@@ -5845,7 +5845,7 @@ namespace proc {
       const std::string session_mode = launch_session ? launch_session->stream_mode : std::string {};
       if (!session_mode.empty() &&
           !(launch_session && launch_session->mirror_desktop) &&
-          session_mode != linux_display.stream_mode) {
+          !stream_display_policy::selection_companion_state_matches(session_mode)) {
         std::string mode_error;
         if (stream_display_policy::apply_selection(session_mode, mode_error)) {
           // Saved-state restore is armed only when a mode was actually applied,
