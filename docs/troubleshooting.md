@@ -102,6 +102,26 @@ Heroic, Steam). The Steam Runtime container itself honors `DISPLAY` correctly, s
 portal hop is enough. A direct `flatpak run` also passes the display through correctly; it is
 specifically the portal spawn underneath a Flatpak launcher that does not.
 
+Two things commonly trip up the switch from a launcher's Flatpak build to its native one:
+
+- **Re-add the game rather than reusing its old ID.** Heroic gives sideload entries a new
+  `app_name` per install, so an identifier copied from the Flatpak install will not resolve in the
+  native one. Read the current value out of `~/.config/heroic/sideload_apps/library.json`, or your
+  launcher's equivalent.
+- **Let the launcher finish starting before handing it a launch URL.** Native Heroic given a
+  `heroic://launch?...` URL on a cold start throws
+  `Cannot read properties of undefined (reading 'getGame')` rather than queuing the request. Start
+  the launcher on its own first and send the launch as a separate command.
+
+A working app entry on the reporting host ended up as:
+
+```
+WAYLAND_DISPLAY=wayland-1 DISPLAY=:2 heroic --no-gui "heroic://launch?appName=<id>&runner=sideload"
+```
+
+Polaris exports both of those variables into the private session already, so setting them by hand
+is redundant rather than required. They are shown here because that is the entry that was verified.
+
 Polaris logs a warning at launch when an app command can reach the portal, and reports
 `never opened a window in the private session` when a launch produces no window at all, rather than
 streaming an empty compositor silently.
