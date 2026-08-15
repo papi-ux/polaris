@@ -5,9 +5,11 @@
 #include "gamescope_process.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -18,8 +20,11 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace stream_runtime::gamescope_process {
@@ -167,12 +172,69 @@ namespace stream_runtime::gamescope_process {
       return words;
     }
 
-    std::optional<process_t> read_process(const fs::path &proc_root, int pid) {
+    bool gamescope_executable_name(const fs::path &path) {
+      const auto name = path.filename();
+      return name == "gamescope" || name == ".gamescope-wrapped";
+    }
+
+    std::optional<fs::path> read_process_executable(
+      const lookup_paths_t &paths,
+      int pid,
+      const std::vector<std::string> &argv
+    ) {
+      std::error_code executable_ec;
+      std::optional<fs::path> executable;
+      if (paths.read_executable_for_tests) {
+        executable = paths.read_executable_for_tests(pid, executable_ec);
+      }
+      else {
+        auto path = fs::read_symlink(
+          paths.proc_root / std::to_string(pid) / "exe",
+          executable_ec
+        );
+        if (!executable_ec) {
+          executable = std::move(path);
+        }
+      }
+      if (executable && !executable->empty()) {
+        return executable;
+      }
+      if (executable_ec != std::errc::permission_denied || argv.empty()) {
+        return std::nullopt;
+      }
+
+      // Executing a file-capability gamescope can make it non-dumpable. Linux
+      // then denies a same-user parent readlink(/proc/<pid>/exe), even though
+      // stat and cmdline remain readable. The launcher supplies an absolute
+      // argv[0]; pin its canonical executable only for this procfs denial.
+      const fs::path requested {argv.front()};
+      if (!requested.is_absolute()) {
+        return std::nullopt;
+      }
+      std::error_code canonical_ec;
+      const auto canonical = fs::canonical(requested, canonical_ec);
+      if (canonical_ec || !gamescope_executable_name(canonical)) {
+        return std::nullopt;
+      }
+      struct stat executable_stat {};
+      if (stat(canonical.c_str(), &executable_stat) != 0 || !S_ISREG(executable_stat.st_mode) ||
+          access(canonical.c_str(), X_OK) != 0) {
+        return std::nullopt;
+      }
+      struct stat process_stat {};
+      if (stat((paths.proc_root / std::to_string(pid)).c_str(), &process_stat) != 0 ||
+          process_stat.st_uid != getuid()) {
+        return std::nullopt;
+      }
+      return canonical;
+    }
+
+    std::optional<process_t> read_process(const lookup_paths_t &paths, int pid) {
       if (pid <= 0) {
         return std::nullopt;
       }
 
-      std::ifstream stat_file(proc_root / std::to_string(pid) / "stat");
+      std::ifstream stat_file(paths.proc_root / std::to_string(pid) / "stat");
       std::string stat;
       if (!std::getline(stat_file, stat)) {
         return std::nullopt;
@@ -196,7 +258,7 @@ namespace stream_runtime::gamescope_process {
         return std::nullopt;
       }
 
-      std::ifstream cmdline_file(proc_root / std::to_string(pid) / "cmdline", std::ios::binary);
+      std::ifstream cmdline_file(paths.proc_root / std::to_string(pid) / "cmdline", std::ios::binary);
       if (!cmdline_file) {
         return std::nullopt;
       }
@@ -221,12 +283,8 @@ namespace stream_runtime::gamescope_process {
         return std::nullopt;
       }
 
-      std::error_code executable_ec;
-      const auto executable = fs::read_symlink(
-        proc_root / std::to_string(pid) / "exe",
-        executable_ec
-      );
-      if (executable_ec || executable.empty()) {
+      const auto executable = read_process_executable(paths, pid, argv);
+      if (!executable) {
         return std::nullopt;
       }
 
@@ -236,14 +294,9 @@ namespace stream_runtime::gamescope_process {
         .pgid = *pgid,
         .session = *session,
         .start_time = *start_time,
-        .executable = executable,
+        .executable = *executable,
         .argv = std::move(argv),
       };
-    }
-
-    bool gamescope_executable_name(const fs::path &path) {
-      const auto name = path.filename();
-      return name == "gamescope" || name == ".gamescope-wrapped";
     }
 
     bool executable_named(const process_t &process, std::string_view expected) {
@@ -286,7 +339,7 @@ namespace stream_runtime::gamescope_process {
       if (!marker.executable.is_absolute() || !gamescope_executable_name(marker.executable)) {
         return std::nullopt;
       }
-      const auto process = read_process(paths.proc_root, marker.pid);
+      const auto process = read_process(paths, marker.pid);
       if (!process || process->start_time != marker.start_time ||
           process->executable != marker.executable || !is_headless_gamescope(*process)) {
         return std::nullopt;
@@ -294,10 +347,10 @@ namespace stream_runtime::gamescope_process {
       return process;
     }
 
-    std::map<int, process_t> read_processes(const fs::path &proc_root) {
+    std::map<int, process_t> read_processes(const lookup_paths_t &paths) {
       std::map<int, process_t> processes;
       std::error_code ec;
-      fs::directory_iterator iterator(proc_root, fs::directory_options::skip_permission_denied, ec);
+      fs::directory_iterator iterator(paths.proc_root, fs::directory_options::skip_permission_denied, ec);
       for (const auto &entry : iterator) {
         if (ec) {
           break;
@@ -306,7 +359,7 @@ namespace stream_runtime::gamescope_process {
         if (!pid) {
           continue;
         }
-        if (auto process = read_process(proc_root, *pid)) {
+        if (auto process = read_process(paths, *pid)) {
           processes.emplace(*pid, std::move(*process));
         }
       }
@@ -392,6 +445,47 @@ namespace stream_runtime::gamescope_process {
         }
       }
       return false;
+    }
+
+    std::optional<int> socket_peer_pid(const fs::path &socket_path) {
+      const auto path = socket_path.string();
+      sockaddr_un address {};
+      if (path.empty() || path.size() >= sizeof(address.sun_path)) {
+        return std::nullopt;
+      }
+      address.sun_family = AF_UNIX;
+      std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+
+      const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+      if (fd < 0) {
+        return std::nullopt;
+      }
+      locked_fd_t connection {fd};
+      int connected;
+      do {
+        connected = connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address));
+      } while (connected != 0 && errno == EINTR);
+      if (connected != 0 && errno == EINPROGRESS) {
+        pollfd descriptor {.fd = fd, .events = POLLOUT, .revents = 0};
+        if (poll(&descriptor, 1, 100) == 1 && (descriptor.revents & POLLOUT) != 0) {
+          int socket_error = 0;
+          socklen_t socket_error_size = sizeof(socket_error);
+          if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_size) == 0 &&
+              socket_error == 0) {
+            connected = 0;
+          }
+        }
+      }
+      if (connected != 0) {
+        return std::nullopt;
+      }
+      struct ucred peer {};
+      socklen_t peer_size = sizeof(peer);
+      if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
+          peer_size != sizeof(peer) || peer.pid <= 1 || peer.uid != getuid()) {
+        return std::nullopt;
+      }
+      return peer.pid;
     }
 
     bool related_to_root(
@@ -525,7 +619,7 @@ namespace stream_runtime::gamescope_process {
     if (!valid_role(role)) {
       return std::nullopt;
     }
-    const auto process = read_process(paths.proc_root, pid);
+    const auto process = read_process(paths, pid);
     if (!process || !is_headless_gamescope(*process)) {
       return std::nullopt;
     }
@@ -582,8 +676,9 @@ namespace stream_runtime::gamescope_process {
     if (!inode) {
       return false;
     }
-    const auto processes = read_processes(paths.proc_root);
+    const auto processes = read_processes(paths);
     std::optional<pid_t> holder_pid;
+    bool peer_credential_proof = false;
     for (const auto &[pid, process] : processes) {
       (void) process;
       if (is_descendant_of(pid, marker.pid, processes) && process_holds_inode(paths, pid, *inode)) {
@@ -592,7 +687,14 @@ namespace stream_runtime::gamescope_process {
       }
     }
     if (!holder_pid) {
-      return false;
+      // File capabilities can make gamescope non-dumpable, which hides every
+      // /proc/<pid>/fd symlink from the same-user launcher. A connection to the
+      // live Unix listener still exposes its kernel-authenticated peer PID.
+      holder_pid = socket_peer_pid(socket_path);
+      if (!holder_pid || !is_descendant_of(*holder_pid, marker.pid, processes)) {
+        return false;
+      }
+      peer_credential_proof = true;
     }
     if (paths.before_socket_ownership_return_for_tests) {
       paths.before_socket_ownership_return_for_tests();
@@ -605,9 +707,15 @@ namespace stream_runtime::gamescope_process {
     if (!final_inode || *final_inode != *inode) {
       return false;
     }
-    const auto final_processes = read_processes(paths.proc_root);
-    return is_descendant_of(*holder_pid, marker.pid, final_processes) &&
-           process_holds_inode(paths, *holder_pid, *inode);
+    const auto final_processes = read_processes(paths);
+    if (!is_descendant_of(*holder_pid, marker.pid, final_processes)) {
+      return false;
+    }
+    if (peer_credential_proof) {
+      const auto final_peer = socket_peer_pid(socket_path);
+      return final_peer && *final_peer == *holder_pid;
+    }
+    return process_holds_inode(paths, *holder_pid, *inode);
   }
 
   bool socket_has_live_holder(
@@ -696,7 +804,7 @@ namespace stream_runtime::gamescope_process {
     if (!validate_process(marker, paths)) {
       return std::nullopt;
     }
-    const auto processes = read_processes(paths.proc_root);
+    const auto processes = read_processes(paths);
     const auto x11_inodes = read_unix_socket_inodes(paths.proc_net_unix);
     if (!x11_inodes) {
       return std::nullopt;
@@ -758,7 +866,7 @@ namespace stream_runtime::gamescope_process {
     if (!validate_process(marker, paths)) {
       return std::nullopt;
     }
-    const auto final_processes = read_processes(paths.proc_root);
+    const auto final_processes = read_processes(paths);
     const auto root = final_processes.find(marker.pid);
     if (root == final_processes.end() ||
         root->second.start_time != marker.start_time ||

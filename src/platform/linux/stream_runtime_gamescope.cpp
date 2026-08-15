@@ -10,7 +10,7 @@
 
 #ifdef __linux__
 
-  #include "stream_path.h"
+  #include "executable_path.h"
   #include "gamescope_process.h"
   #include "src/logging.h"
 
@@ -405,10 +405,19 @@ namespace stream_runtime {
           return true;
         }
 
-        if (!stream_path::binary_on_path("gamescope")) {
+        const auto gamescope_on_path = platf::linux_util::find_executable_in_path("gamescope");
+        if (gamescope_on_path.empty()) {
           BOOST_LOG(error) << "gamescope_runtime: gamescope not found on PATH"sv;
           return false;
         }
+        std::error_code executable_ec;
+        const auto absolute_gamescope = fs::absolute(gamescope_on_path, executable_ec);
+        if (executable_ec) {
+          BOOST_LOG(error) << "gamescope_runtime: could not resolve gamescope executable: "sv
+                           << executable_ec.message();
+          return false;
+        }
+        const auto gamescope_executable = absolute_gamescope.lexically_normal().string();
 
         // 3) Spawn owned headless gamescope only inside the same ownership lock
         // and after proving no durable nested transition/recovery claim exists.
@@ -437,7 +446,7 @@ namespace stream_runtime {
         const auto refresh = std::max(params.refresh_hz, 30);
 
         std::vector<std::string> args {
-          "gamescope",
+          gamescope_executable,
           "--backend",
           "headless",
           "--expose-wayland",
@@ -487,7 +496,7 @@ namespace stream_runtime {
           unsetenv("ENABLE_HDR_WSI");
           // Prefer gamescope-0 naming when the compositor honors it.
           setenv("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0", 1);
-          execvp("gamescope", argv.data());
+          execv(gamescope_executable.c_str(), argv.data());
           _exit(127);
         }
 
