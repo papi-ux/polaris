@@ -94,4 +94,23 @@ namespace stream_runtime::gamescope_process {
     const lookup_paths_t &paths = {}
   );
 
+  /**
+   * @brief PID of a gamescope running as a client of @p wayland_socket.
+   *
+   * Polaris' own gamescope owns a display; a gamescope nested inside the
+   * private compositor connects to one, so its WAYLAND_DISPLAY names that
+   * socket. That difference is what separates the supported arrangement from
+   * the unsupported one, and it holds however the nesting was launched -- from
+   * the app's command directly or from a wrapper script that never mentions
+   * gamescope, which is why this reads the running process rather than config.
+   *
+   * Identifies gamescope by its executable, so a nix-wrapped
+   * .gamescope-wrapped counts, and reads environ only for the processes that
+   * clear that check.
+   */
+  std::optional<int> nested_gamescope_client(
+    std::string_view wayland_socket,
+    const lookup_paths_t &paths = {}
+  );
+
 }  // namespace stream_runtime::gamescope_process

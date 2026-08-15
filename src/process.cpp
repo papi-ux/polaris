@@ -7610,6 +7610,7 @@ namespace proc {
            compositor_pid = private_compositor_pid,
            app_name = _app.name]() {
             const auto started = std::chrono::steady_clock::now();
+            bool reported_nested_gamescope = false;
             for (;;) {
               std::this_thread::sleep_for(private_session_attach::k_default_attach_poll);
               // Watching a pid rather than the shared runtime keeps this thread
@@ -7617,6 +7618,26 @@ namespace proc {
               // once the session it was launched for is gone.
               if (kill(compositor_pid, 0) != 0) {
                 return;
+              }
+
+              // Checked before the attach verdict below, which returns as soon
+              // as a window exists -- and a nested gamescope is what maps that
+              // window, so its presence is observable on the same poll.
+              if (!reported_nested_gamescope) {
+                if (const auto nested = stream_runtime::gamescope_process::nested_gamescope_client(socket)) {
+                  reported_nested_gamescope = true;
+                  BOOST_LOG(error) << "private_session: a gamescope (pid "sv << *nested
+                                   << ") is running as a client of the private compositor for ["sv
+                                   << app_name << "]. This unsupported nesting can leave games blocked "sv
+                                   << "behind Gamescope WSI errors or native dialogs that are not visible "sv
+                                   << "in the stream. Launch the app without gamescope, or switch the "sv
+                                   << "session to the gamescope stream mode so Polaris owns the gamescope "sv
+                                   << "instead of nesting one."sv;
+                  confighttp::emit_session_event(
+                    "warning",
+                    app_name + " is using an unsupported nested gamescope; games may stall behind an invisible Gamescope WSI error"
+                  );
+                }
               }
               const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started
