@@ -7051,7 +7051,7 @@ namespace proc {
       log_runtime_state();
     }
 
-    auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed, bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
+    auto start_cage_session = [&](const std::string &startup_cmd, bool force_windowed, bool strict_configured_encoder = false, bool save_successful_cache = true, bool probe_only = false) -> bool {
       if (!private_runtime) {
         return false;
       }
@@ -7080,8 +7080,11 @@ namespace proc {
 
       log_runtime_state();
       const auto runtime_state = private_runtime->runtime_state();
-      if (!runtime_state.effective_headless) {
-        // KDE edit mode only matters when the private compositor is a visible nested window.
+      if (!runtime_state.effective_headless && !probe_only) {
+        // KDE edit mode only matters when the private compositor is a visible
+        // nested window. A probe cage is torn down immediately, and the probe's
+        // own guard stops the cage but not this watchdog, which would then poll
+        // D-Bus at 2Hz for the rest of the session for nothing.
         session_manager::start_edit_mode_watchdog();
       }
       return true;
@@ -7104,7 +7107,7 @@ namespace proc {
         }
       });
 
-      if (!start_cage_session("", false, true, false)) {
+      if (!start_cage_session("", false, true, false, true)) {
         stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "compositor_encoder_init", "compositor_or_encoder_init_failed");
         BOOST_LOG(info) << "session_manager: headless_extcopy_dmabuf probe could not initialize the compositor/encoder path"sv;
@@ -7174,7 +7177,7 @@ namespace proc {
         }
       });
 
-      if (!start_cage_session("", true, true, false)) {
+      if (!start_cage_session("", true, true, false, true)) {
         stream_runtime::labwc::update_windowed_gpu_native_probe_result(false);
         stream_stats::update_gpu_native_probe_attempt("windowed", "failed", "compositor_encoder_init", "compositor_or_encoder_init_failed");
         BOOST_LOG(info) << "session_manager: Windowed GPU-native cage probe could not initialize the compositor/encoder path; staying headless"sv;
@@ -8824,9 +8827,10 @@ namespace proc {
   std::string_view::iterator find_match(std::string_view::iterator begin, std::string_view::iterator end) {
     int stack = 0;
 
-    --begin;
-    do {
-      ++begin;
+    // The bound is tested before the dereference. The previous do/while
+    // incremented first and read *begin before checking it against end, so an
+    // unmatched bracket read one past the view on its way to the throw.
+    for (; begin != end; ++begin) {
       switch (*begin) {
         case '(':
           ++stack;
@@ -8834,12 +8838,12 @@ namespace proc {
         case ')':
           --stack;
       }
-    } while (begin != end && stack != 0);
-
-    if (begin == end) {
-      throw std::out_of_range("Missing closing bracket \')\'");
+      if (stack == 0) {
+        return begin;
+      }
     }
-    return begin;
+
+    throw std::out_of_range("Missing closing bracket \')\'");
   }
 
   std::string parse_env_val(boost::process::v1::native_environment &env, const std::string_view &val_raw) {
