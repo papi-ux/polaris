@@ -152,6 +152,8 @@ namespace stream_stats {
       std::vector<long long> dispatch_us;
       std::vector<long long> ingest_us;
       std::vector<long long> total_us;
+      std::vector<long long> source_interval_us;
+      std::vector<long long> ready_to_handoff_us;
     };
 
     std::array<capture_profile_bucket_t, CAPTURE_PROFILE_BUCKET_COUNT> capture_profile_buckets;
@@ -169,6 +171,8 @@ namespace stream_stats {
         bucket.dispatch_us.clear();
         bucket.ingest_us.clear();
         bucket.total_us.clear();
+        bucket.source_interval_us.clear();
+        bucket.ready_to_handoff_us.clear();
       }
     }
 
@@ -1393,6 +1397,12 @@ namespace stream_stats {
     bucket.dispatch_us.push_back(sample.dispatch_time.count());
     bucket.ingest_us.push_back(sample.ingest_time.count());
     bucket.total_us.push_back(sample.total_time.count());
+    if (sample.source_interval) {
+      bucket.source_interval_us.push_back(sample.source_interval->count());
+    }
+    if (sample.ready_to_handoff) {
+      bucket.ready_to_handoff_us.push_back(sample.ready_to_handoff->count());
+    }
 
     if (bucket.total_us.size() < CAPTURE_PROFILE_SUMMARY_FRAMES) {
       return;
@@ -1405,11 +1415,23 @@ namespace stream_stats {
                     << " ingest_us_p50="sv << percentile_value(bucket.ingest_us, 0.50)
                     << " ingest_us_p99="sv << percentile_value(bucket.ingest_us, 0.99)
                     << " total_us_p50="sv << percentile_value(bucket.total_us, 0.50)
-                    << " total_us_p99="sv << percentile_value(bucket.total_us, 0.99);
+                    << " total_us_p99="sv << percentile_value(bucket.total_us, 0.99)
+                    << " source_interval_samples="sv << bucket.source_interval_us.size()
+                    << " source_interval_us_p50="sv
+                    << (bucket.source_interval_us.empty() ? -1 : percentile_value(bucket.source_interval_us, 0.50))
+                    << " source_interval_us_p99="sv
+                    << (bucket.source_interval_us.empty() ? -1 : percentile_value(bucket.source_interval_us, 0.99))
+                    << " ready_to_handoff_samples="sv << bucket.ready_to_handoff_us.size()
+                    << " ready_to_handoff_us_p50="sv
+                    << (bucket.ready_to_handoff_us.empty() ? -1 : percentile_value(bucket.ready_to_handoff_us, 0.50))
+                    << " ready_to_handoff_us_p99="sv
+                    << (bucket.ready_to_handoff_us.empty() ? -1 : percentile_value(bucket.ready_to_handoff_us, 0.99));
 
     bucket.dispatch_us.clear();
     bucket.ingest_us.clear();
     bucket.total_us.clear();
+    bucket.source_interval_us.clear();
+    bucket.ready_to_handoff_us.clear();
   }
 
   void start_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {

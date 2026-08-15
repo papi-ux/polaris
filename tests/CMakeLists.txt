@@ -125,6 +125,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_media_gate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_update_status.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)

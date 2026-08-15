@@ -17,6 +17,7 @@
 #include "wayland.h"
 #include "wlgrab_capture_policy.h"
 #include "wlgrab_frame_source.h"
+#include "wlgrab_pacing.h"
 #include "wlgrab_pixel_copy.h"
 
 using namespace std::literals;
@@ -199,6 +200,7 @@ namespace wl {
 
     /**
      * @brief Shared capture pacing loop for RAM / VRAM / extcopy backends.
+     * @param pacing_policy Chooses timer pacing or compositor-driven pacing.
      * @param snapshot_fn Called each tick: (pull_cb, img_out, cursor) → capture_e
      */
     template <class SnapshotFn>
@@ -206,24 +208,24 @@ namespace wl {
       const push_captured_image_cb_t &push_captured_image_cb,
       const pull_free_image_cb_t &pull_free_image_cb,
       bool *cursor,
+      capture_pacing_policy_e pacing_policy,
       SnapshotFn &&snapshot_fn
     ) {
-      auto next_frame = std::chrono::steady_clock::now();
+      capture_pacer_t pacer {pacing_policy, delay, std::chrono::steady_clock::now()};
       sleep_overshoot_logger.reset();
 
       while (true) {
         auto now = std::chrono::steady_clock::now();
+        auto wait_duration = pacer.wait_duration(now);
 
-        if (next_frame > now) {
-          std::this_thread::sleep_for(next_frame - now);
-          sleep_overshoot_logger.first_point(next_frame);
+        if (wait_duration > std::chrono::steady_clock::duration::zero()) {
+          auto wake_time = now + wait_duration;
+          std::this_thread::sleep_for(wait_duration);
+          sleep_overshoot_logger.first_point(wake_time);
           sleep_overshoot_logger.second_point_now_and_log();
         }
 
-        next_frame += delay;
-        if (next_frame < now) {  // some major slowdown happened; we couldn't keep up
-          next_frame = now + delay;
-        }
+        pacer.advance(now);
 
         std::shared_ptr<platf::img_t> img_out;
         auto status = snapshot_fn(pull_free_image_cb, img_out, cursor);
@@ -270,6 +272,7 @@ namespace wl {
   public:
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
       return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
+        capture_pacing_policy_e::fixed_interval,
         [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
           return snapshot(pull, img, 1000ms, c && *c);
         });
@@ -450,6 +453,7 @@ namespace wl {
   public:
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
       return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
+        capture_pacing_policy_e::fixed_interval,
         [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
           return snapshot(pull, img, 1000ms, c && *c);
         });
@@ -546,7 +550,9 @@ namespace wl {
   class wlr_extcopy_vram_t: public wlr_t {
   public:
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+      BOOST_LOG(info) << "wlr: ext-image-copy capture pacing=source_driven"sv;
       return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
+        capture_pacing_policy_e::source_driven,
         [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
           return snapshot(pull, img, c);
         });
@@ -611,14 +617,23 @@ namespace wl {
       stream_stats::update_capture_metadata(img->frame_metadata);
       log_capture_metadata(img->frame_metadata);
       if (capture_profile_enabled()) {
-        auto total_time = std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now() - capture_start
+        const auto handoff_end = std::chrono::steady_clock::now();
+        const auto &timing = extcopy.last_timing_sample();
+        const auto snapshot_time = std::chrono::duration_cast<std::chrono::microseconds>(
+          handoff_end - capture_start
         );
+        const auto dispatch_time = timing.request_to_ready.value_or(snapshot_time);
+        const auto ready_to_handoff = timing.ready_at ?
+          std::optional {std::chrono::duration_cast<std::chrono::microseconds>(handoff_end - *timing.ready_at)} :
+          std::nullopt;
+        const auto handoff_time = ready_to_handoff.value_or(0us);
         stream_stats::update_capture_profile({
           .transport = img->frame_metadata.transport,
-          .dispatch_time = total_time,
-          .ingest_time = 0us,
-          .total_time = total_time,
+          .dispatch_time = dispatch_time,
+          .ingest_time = handoff_time,
+          .total_time = dispatch_time + handoff_time,
+          .source_interval = timing.presentation_interval,
+          .ready_to_handoff = ready_to_handoff,
         });
       }
 

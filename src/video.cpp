@@ -40,6 +40,7 @@ extern "C" {
 #include "stream_stats.h"
 #include "sync.h"
 #include "video.h"
+#include "video_frame_pacing.h"
 
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
@@ -3084,9 +3085,9 @@ namespace video {
     auto max_frametime = std::chrono::nanoseconds(1000ms) * 1000 / minimum_fps_target;
     auto encode_frame_threshold = std::chrono::nanoseconds(1000ms) * 1000 / config.encodingFramerate;
     auto frame_variation_threshold = encode_frame_threshold / 4;
-    auto min_frame_diff = encode_frame_threshold - frame_variation_threshold;
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2000) << "fps ("sv << max_frametime * 2 << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
+    frame_timestamp_pacer_t frame_timestamp_pacer {encode_frame_threshold, frame_variation_threshold};
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto idr_events = mail->event<bool>(mail::idr);
@@ -3139,7 +3140,6 @@ namespace video {
       }
     }
 
-    std::chrono::steady_clock::time_point encode_frame_timestamp;
     bool missing_frame_timestamp_warning_logged = false;
     auto fps_window_start = std::chrono::steady_clock::now();
     int fps_window_frames = 0;
@@ -3205,10 +3205,8 @@ namespace video {
           }
 
           auto current_timestamp = *frame_timestamp;
-          auto time_diff = current_timestamp - encode_frame_timestamp;
-
-          // If new frame comes in way too fast, just drop
-          if (time_diff < -frame_variation_threshold) {
+          const auto pacing_decision = frame_timestamp_pacer.evaluate(current_timestamp);
+          if (!pacing_decision.should_encode) {
             dropped_frames++;
             continue;
           }
@@ -3246,13 +3244,7 @@ namespace video {
             break;
           }
 
-          if (time_diff < frame_variation_threshold) {
-            *frame_timestamp = encode_frame_timestamp;
-          } else {
-            encode_frame_timestamp = current_timestamp;
-          }
-
-          encode_frame_timestamp += encode_frame_threshold;
+          *frame_timestamp = pacing_decision.timestamp;
         } else if (!images->running()) {
           break;
         }

@@ -1354,6 +1354,8 @@ namespace wl {
     device_id = {};
     chosen_format = {};
     dmabuf_formats.clear();
+    timing_tracker.reset();
+    invalid_presentation_timestamp_logged = false;
   }
 
   void extcopy_t::destroy_session() {
@@ -1743,6 +1745,7 @@ namespace wl {
     ext_image_copy_capture_frame_v1_add_listener(capture_frame_object, &frame_listener, this);
     ext_image_copy_capture_frame_v1_attach_buffer(capture_frame_object, next_frame->buffer);
     ext_image_copy_capture_frame_v1_damage_buffer(capture_frame_object, 0, 0, frame_width, frame_height);
+    timing_tracker.mark_requested(std::chrono::steady_clock::now());
     ext_image_copy_capture_frame_v1_capture(capture_frame_object);
     status = WAITING;
     wait_for_status(display, 1000ms);
@@ -1849,9 +1852,15 @@ namespace wl {
     std::uint32_t tv_sec_lo,
     std::uint32_t tv_nsec
   ) {
+    if (!timing_tracker.mark_presentation(tv_sec_hi, tv_sec_lo, tv_nsec) &&
+        !invalid_presentation_timestamp_logged) {
+      BOOST_LOG(warning) << "Extcopy frame supplied an invalid presentation timestamp"sv;
+      invalid_presentation_timestamp_logged = true;
+    }
   }
 
   void extcopy_t::frame_ready(ext_image_copy_capture_frame_v1 *frame) {
+    timing_tracker.mark_ready(std::chrono::steady_clock::now());
     current_frame->reset_capture_descriptor();
     current_frame = get_next_frame();
     destroy_capture_frame();
