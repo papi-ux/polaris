@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -23,6 +24,19 @@ namespace stream {
   constexpr auto AUDIO_STREAM_PORT = 11;
 
   struct session_t;
+
+  /**
+   * Record one control-channel network report in stream telemetry.
+   *
+   * A report with a client address updates that client's mirror and the
+   * top-level fields when it is the primary client. An address-less report
+   * updates only the top-level fields. In either case, the network-risk
+   * debounce consumes the report exactly once.
+   */
+  void record_network_stats(const std::string &client_ip,
+                            double latency_ms,
+                            double packet_loss,
+                            std::uint64_t bytes_sent);
 
   struct session_profile_t {
     std::string device_name;
