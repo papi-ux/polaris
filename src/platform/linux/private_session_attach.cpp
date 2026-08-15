@@ -7,6 +7,8 @@
 
 #ifdef __linux__
 
+  #include <algorithm>
+  #include <cstdlib>
   #include <filesystem>
   #include <sstream>
   #include <string_view>
@@ -17,6 +19,12 @@
     #include <sys/socket.h>
     #include <sys/time.h>
     #include <wayland-client.h>
+  #endif
+
+  #ifdef POLARIS_BUILD_X11_XCB
+    #include <vector>
+
+    #include <xcb/xcb.h>
   #endif
 
 using namespace std::literals;
@@ -166,6 +174,100 @@ namespace private_session_attach {
   #endif
 
     return result;
+  }
+
+  probe_result_t probe_x11_windows(const std::string &x11_display) {
+    probe_result_t result {};
+    if (x11_display.empty()) {
+      return result;
+    }
+
+  #ifdef POLARIS_BUILD_X11_XCB
+    xcb_connection_t *conn = xcb_connect(x11_display.c_str(), nullptr);
+    if (!conn || xcb_connection_has_error(conn)) {
+      xcb_disconnect(conn);
+      return result;  // unavailable
+    }
+
+    const xcb_setup_t *setup = xcb_get_setup(conn);
+    xcb_screen_iterator_t screen = xcb_setup_roots_iterator(setup);
+    if (!screen.data) {
+      xcb_disconnect(conn);
+      return result;
+    }
+
+    auto *tree = xcb_query_tree_reply(conn, xcb_query_tree(conn, screen.data->root), nullptr);
+    if (!tree) {
+      xcb_disconnect(conn);
+      return result;
+    }
+
+    const xcb_window_t *children = xcb_query_tree_children(tree);
+    const int count = xcb_query_tree_children_length(tree);
+
+    // Send every attribute request before reading any reply: one round trip for
+    // the whole tree instead of one per window.
+    std::vector<xcb_get_window_attributes_cookie_t> cookies;
+    cookies.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+      cookies.push_back(xcb_get_window_attributes(conn, children[i]));
+    }
+
+    int viewable = 0;
+    for (auto &cookie : cookies) {
+      auto *attrs = xcb_get_window_attributes_reply(conn, cookie, nullptr);
+      if (!attrs) {
+        // The window went away between the tree query and this reply. Not an
+        // error, and not a window either.
+        continue;
+      }
+      if (attrs->map_state == XCB_MAP_STATE_VIEWABLE) {
+        ++viewable;
+      }
+      free(attrs);
+    }
+
+    free(tree);
+    xcb_disconnect(conn);
+
+    result.status = probe_status_e::ok;
+    result.toplevel_count = viewable;
+  #endif
+
+    return result;
+  }
+
+  probe_result_t combine(const probe_result_t &wayland, const probe_result_t &x11) {
+    const bool wayland_measured = wayland.status == probe_status_e::ok;
+    const bool x11_measured = x11.status == probe_status_e::ok;
+
+    if (wayland_measured || x11_measured) {
+      probe_result_t result {};
+      result.status = probe_status_e::ok;
+      // The signals overlap: a managed X11 window is both a Wayland toplevel and a
+      // viewable child of the X root. Adding them would report one window as two,
+      // so take the larger and treat the count as a lower bound.
+      result.toplevel_count = std::max(
+        wayland_measured ? wayland.toplevel_count : 0,
+        x11_measured ? x11.toplevel_count : 0
+      );
+      return result;
+    }
+
+    // Neither measured. Prefer unsupported over unavailable, so a compositor that
+    // simply cannot answer is skipped rather than retried to no purpose.
+    if (wayland.status == probe_status_e::unsupported ||
+        x11.status == probe_status_e::unsupported) {
+      return probe_result_t {.status = probe_status_e::unsupported, .toplevel_count = 0};
+    }
+    return probe_result_t {.status = probe_status_e::unavailable, .toplevel_count = 0};
+  }
+
+  probe_result_t probe_private_session(
+    const std::string &wayland_socket,
+    const std::string &x11_display
+  ) {
+    return combine(probe_toplevels(wayland_socket), probe_x11_windows(x11_display));
   }
 
   verdict_e evaluate(

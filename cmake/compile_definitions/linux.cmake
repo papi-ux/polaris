@@ -326,6 +326,15 @@ if(X11_FOUND)
     add_compile_definitions(POLARIS_BUILD_X11)
     include_directories(SYSTEM ${X11_INCLUDE_DIR})
     list(APPEND PLATFORM_LIBRARIES ${X11_LIBRARIES})
+    # The private-session attach probe talks to Xwayland over xcb rather than
+    # Xlib, whose default I/O error handler exits the process when a display
+    # goes away (issue #415).
+    if(X11_xcb_FOUND)
+        add_compile_definitions(POLARIS_BUILD_X11_XCB)
+        list(APPEND PLATFORM_LIBRARIES ${X11_xcb_LIB})
+    else()
+        message(STATUS "libxcb not found; private-session Xwayland attach signal disabled")
+    endif()
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/x11grab.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/x11grab.cpp")
