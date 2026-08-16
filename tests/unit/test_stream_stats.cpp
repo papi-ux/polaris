@@ -644,6 +644,51 @@ TEST(StreamStatsDoctorTests, KeepsNearTargetHighRefreshPacingGreen) {
   EXPECT_EQ(doctor.at("primary_issue"), "none");
 }
 
+TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkEvidence) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 120.0;
+  stats.frame_jitter_ms = 8.3333;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 2.0;
+  stats.packet_loss = 0.0;
+  stats.latency_ms = 4.0;
+  stats.network_risk = false;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "frame_pacing");
+  EXPECT_EQ(doctor.at("summary"), "Frame pacing telemetry needs attention.");
+  EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
+
+  bool saw_fps_gap = false;
+  bool saw_interval_error = false;
+  for (const auto &item : doctor.at("evidence")) {
+    if (item.at("id") == "target_fps_gap") {
+      saw_fps_gap = true;
+      EXPECT_DOUBLE_EQ(item.at("value"), 60.0);
+      EXPECT_EQ(item.at("status"), "watch");
+    }
+    if (item.at("id") == "frame_pacing") {
+      saw_interval_error = true;
+      EXPECT_EQ(item.at("label"), "Mean target interval error");
+      EXPECT_EQ(item.at("unit"), "ms");
+    }
+  }
+  EXPECT_TRUE(saw_fps_gap);
+  EXPECT_TRUE(saw_interval_error);
+
+  const auto serialized = nlohmann::json::parse(stats.to_json());
+  EXPECT_DOUBLE_EQ(serialized.at("frame_interval_error_ms"), 8.3333);
+  EXPECT_DOUBLE_EQ(serialized.at("frame_jitter_ms"), 8.3333);
+}
+
 TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClean) {
   stream_stats::stats_t stats {};
   stats.streaming = true;

@@ -358,6 +358,7 @@ import PolarisVersion from '../polaris_version'
 import { buildUpdateCenterState, updateStatusLightClass } from '../update-center.js'
 import InfoHint from '../components/InfoHint.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
+import { groupRecentIssueLogs } from '../recent-issues.js'
 
 const { gpu, displays, audio, sessionType, displaySession, loading: systemLoading } = useSystemStats(3000)
 
@@ -418,48 +419,7 @@ const buildVersionIsDirty = computed(() => {
     version.value.version.includes('dirty')
 })
 
-const fancyLogs = computed(() => {
-  if (!logs.value) return []
-  const regex = /(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}]):\s/g
-  const rawLogLines = logs.value.split(regex).splice(1)
-  const logLines = []
-  for (let i = 0; i < rawLogLines.length; i += 2) {
-    logLines.push({ timestamp: rawLogLines[i], level: rawLogLines[i + 1].split(':')[0], value: rawLogLines[i + 1] })
-  }
-  return logLines
-})
-
-const issueLogs = computed(() => {
-  return fancyLogs.value.filter((entry) => ['Fatal', 'Warning', 'Error'].includes(entry.level))
-})
-
-function normalizeIssueMessage(value) {
-  return value.trim().replace(/^\w+:\s*/, '').replace(/\s+/g, ' ')
-}
-
-const groupedIssueLogs = computed(() => {
-  const grouped = new Map()
-
-  issueLogs.value
-    .slice(-200)
-    .reverse()
-    .forEach((entry) => {
-      const message = normalizeIssueMessage(entry.value)
-      const key = `${entry.level}:${message}`
-      if (!grouped.has(key)) {
-        grouped.set(key, {
-          ...entry,
-          message,
-          count: 1
-        })
-        return
-      }
-
-      grouped.get(key).count += 1
-    })
-
-  return Array.from(grouped.values())
-})
+const groupedIssueLogs = computed(() => groupRecentIssueLogs(logs.value, { maxSourceLines: 200 }))
 
 const fatalCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Fatal').length)
 const warningCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Warning').length)

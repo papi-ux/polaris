@@ -333,6 +333,10 @@ namespace stream_stats {
     j["duplicate_frame_ratio"] = duplicate_frame_ratio;
     j["dropped_frame_ratio"] = dropped_frame_ratio;
     j["avg_frame_age_ms"] = avg_frame_age_ms;
+    // Compatibility: frame_jitter_ms predates the metric's precise name. The
+    // value is mean absolute error from the requested frame interval, not the
+    // variance of otherwise on-target delivery intervals.
+    j["frame_interval_error_ms"] = frame_jitter_ms;
     j["frame_jitter_ms"] = frame_jitter_ms;
     j["codec"] = codec;
     j["pacing_policy"] = pacing_policy;
@@ -898,6 +902,7 @@ namespace stream_stats {
     const bool capture_gpu_native = capture_path_is_gpu_native(stats);
     const bool capture_known = doctor_has_capture_metadata(stats);
     const double target_fps = doctor_target_fps(stats);
+    const double target_fps_gap = std::max(0.0, target_fps - stats.fps);
     const bool meaningful_fps_shortfall = is_meaningful_fps_shortfall(target_fps, stats.fps);
     // The network verdict consumes the debounced flag the session status
     // serves (network_risk_tracker_t). The raw one-sample cuts this replaced
@@ -1003,10 +1008,11 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "latency", "Network latency", stats.latency_ms, "ms", stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Round-trip latency reported by the active client control channel.");
     append_doctor_evidence(evidence, "bitrate", "Live bitrate", stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps, "kbps", "pass", "stream_stats", "Current live encoder target; Doctor changes it only for confirmed pressure or a guarded recovery-profile retry.");
     append_doctor_evidence(evidence, "paired_bitrate_target", "Paired quality target", stats.paired_target_bitrate_kbps, "kbps", quality_capped_by_history ? "watch" : stats.paired_target_bitrate_kbps > 0 ? "pass" : "unknown", "session_profile", quality_capped_by_history ? "A history-safe recovery layer is keeping the live bitrate below the paired target." : "Saved bitrate preference for the active paired client.");
-    append_doctor_evidence(evidence, "frame_pacing", "Frame pacing", stats.frame_jitter_ms, "ms jitter", pacing_watch ? "watch" : "pass", "stream_stats", "Frame jitter, duplicate/drop ratios, and target FPS gap classify pacing risk.");
+    append_doctor_evidence(evidence, "target_fps_gap", "Target FPS gap", target_fps_gap, "FPS", meaningful_fps_shortfall ? "watch" : "pass", "stream_stats", "Encoded FPS below the requested cadence is a source or compositor pacing gap, not network jitter by itself.");
+    append_doctor_evidence(evidence, "frame_pacing", "Mean target interval error", stats.frame_jitter_ms, "ms", pacing_watch ? "watch" : "pass", "stream_stats", "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter.");
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "frame_jitter_ms"});
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "frame_interval_error_ms", "frame_jitter_ms"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["health"] = health;
