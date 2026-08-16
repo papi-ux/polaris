@@ -8,6 +8,8 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Paces private-compositor screencopy capture from the compositor's own frame callbacks instead of placing a second fixed timer in front of it, so a private 120 Hz output no longer settles at a capture source below its own refresh, and reports output refresh, capture-source FPS, encoded FPS, and capture pacing as separate values
+- Gives Steam games and Steam Big Picture their own nested Gamescope session for both SDR and HDR clients, keeping the streamed picture and controller focus under the same compositor
+- Gives nested Gamescope startup a dedicated 120-second timeout with service-journal diagnostics, and removes the unused Nix `injectApps` option instead of advertising a no-op
 
 ## v1.3.9 - 2026-08-15
 

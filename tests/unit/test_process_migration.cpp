@@ -1059,6 +1059,38 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsScopedToPrivateCompat
   EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(compatibility_game, true, false));
 }
 
+TEST(ProcessRuntimeConfigTests, GamescopeNestedSessionTargetsSteamGamesAndBigPictureWithoutAnHdrGate) {
+  proc::ctx_t steam_game {};
+  steam_game.name = "Palworld";
+  steam_game.source = "steam";
+  steam_game.steam_appid = "1623730";
+  steam_game.detached = {"setsid steam steam://rungameid/1623730"};
+
+  const auto game_target = proc::resolve_nested_gamescope_session_target_for_tests(
+    true,
+    steam_game
+  );
+  ASSERT_TRUE(game_target.has_value());
+  EXPECT_EQ(*game_target, "1623730");
+
+  proc::ctx_t big_picture {};
+  big_picture.name = "Steam Big Picture";
+  big_picture.detached = {"setsid steam -gamepadui"};
+
+  const auto big_picture_target = proc::resolve_nested_gamescope_session_target_for_tests(
+    true,
+    big_picture
+  );
+  ASSERT_TRUE(big_picture_target.has_value());
+  EXPECT_TRUE(big_picture_target->empty())
+    << "an empty appid selects the helper's supported Big Picture start mode";
+
+  proc::ctx_t non_steam {};
+  non_steam.name = "Desktop";
+  EXPECT_FALSE(proc::resolve_nested_gamescope_session_target_for_tests(true, non_steam).has_value());
+  EXPECT_FALSE(proc::resolve_nested_gamescope_session_target_for_tests(false, steam_game).has_value());
+}
+
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardUsesAppHomeForLogPath) {
   proc::ctx_t app {};
   app.env_vars["HOME"] = "/tmp/polaris-app-home";
@@ -4381,4 +4413,25 @@ TEST(ProcConfiguredCommandWaitContract, CommandsRunUnderTheLifecycleLockWaitWith
     EXPECT_TRUE(is_helper_reap || preceding.find("Unbounded on purpose") != std::string::npos)
       << "unexplained bare child.wait() at offset " << at;
   }
+}
+
+TEST(GamescopeNestedSessionContract, StartupUsesItsOwnVisibleTimeoutAndTheNixModuleExposesNoDeadOption) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto collapsed_source = collapse_whitespace(source);
+  const auto options = read_source_file_for_contract("nix/modules/options.nix");
+
+  EXPECT_EQ(
+    source.find("if (gamescope_stream_session && launch_session->enable_hdr)"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("constexpr auto nested_gamescope_start_timeout = 120s;"), std::string::npos);
+  EXPECT_NE(
+    collapsed_source.find(
+      "const auto prep_timeout = critical_nested_session_prep ? nested_gamescope_start_timeout : _app.exit_timeout;"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("prep_output = stderr;"), std::string::npos);
+  EXPECT_NE(source.find("Nested gamescope startup timed out after "), std::string::npos);
+  EXPECT_EQ(options.find("injectApps"), std::string::npos);
 }

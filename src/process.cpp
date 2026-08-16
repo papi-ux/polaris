@@ -109,6 +109,8 @@ namespace proc {
   int terminate_app_id = -1;
   std::string terminate_app_id_str;
 
+  constexpr auto nested_gamescope_start_timeout = 120s;
+
   session_stop_outcome_t evaluate_session_stop_request(
     bool can_launch,
     bool has_running_app,
@@ -890,6 +892,33 @@ namespace proc {
         if (auto appid = extract_steam_appid_from_command(cmd)) {
           return *appid;
         }
+      }
+
+      return {};
+    }
+
+    struct nested_gamescope_session_target_t {
+      bool eligible = false;
+      std::string appid;
+    };
+
+    nested_gamescope_session_target_t resolve_nested_gamescope_session_target(
+      bool gamescope_stream_session,
+      const proc::ctx_t &ctx
+    ) {
+      if (!gamescope_stream_session) {
+        return {};
+      }
+
+      if (auto appid = steam_appid_for_context(ctx); !appid.empty()) {
+        return {true, std::move(appid)};
+      }
+
+      // Big Picture is itself a valid nested-session target. The session
+      // helper intentionally accepts `start` without an app id and keeps the
+      // stream alive until the client disconnects or explicitly stops it.
+      if (is_steam_big_picture_app(ctx)) {
+        return {true, {}};
       }
 
       return {};
@@ -4444,6 +4473,17 @@ namespace proc {
 #endif
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
+  std::optional<std::string> resolve_nested_gamescope_session_target_for_tests(
+    bool gamescope_stream_session,
+    const proc::ctx_t &app
+  ) {
+    auto target = resolve_nested_gamescope_session_target(gamescope_stream_session, app);
+    if (!target.eligible) {
+      return std::nullopt;
+    }
+    return target.appid;
+  }
+
   desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_for_tests(
     bool private_stream_requested,
     bool mirror_desktop_explicit,
@@ -5476,7 +5516,7 @@ namespace proc {
   }
 
   /**
-   * @brief Wait for a configured command to exit, bounded by the app's exit_timeout.
+   * @brief Wait for a configured command to exit within a caller-selected bound.
    *
    * Prep commands in execute_impl and undo commands in terminate_impl run
    * synchronously on the thread that holds the session lifecycle lock, so an
@@ -5487,26 +5527,28 @@ namespace proc {
    * The resume and pause state commands deliberately do not use this: they run
    * on a detached thread holding no lock, where taking a long time is fine.
    *
-   * A configured 0 means "kill the process group at once" for the app itself,
-   * which would be a surprising thing to do to a configured command, so that
-   * falls back to the 5s default rather than killing instantly.
+   * A configured 0 means "kill the process group at once" for the app itself.
+   * When it reaches this helper, it falls back to the 5s configured-command
+   * default rather than killing the command instantly. Infrastructure callers
+   * may provide their own timeout instead of inheriting the app's exit policy.
    *
    * child::wait_for() is deprecated as unreliable, so this polls the same way
    * terminate_process_group() below does.
    */
-  void wait_for_configured_command(
+  bool wait_for_configured_command(
     boost::process::v1::child &child,
     std::string_view command,
-    std::chrono::seconds exit_timeout
+    std::chrono::seconds command_timeout
   ) {
-    const auto timeout = exit_timeout.count() > 0 ? exit_timeout : std::chrono::seconds {5};
+    const auto timeout = command_timeout.count() > 0 ? command_timeout : std::chrono::seconds {5};
 
     auto remaining = timeout;
     while (child.running() && (--remaining).count() >= 0) {
       std::this_thread::sleep_for(1s);
     }
 
-    if (child.running()) {
+    const bool timed_out = child.running();
+    if (timed_out) {
       BOOST_LOG(warning) << "Command ["sv << command << "] did not exit within "sv
                          << timeout.count() << "s; terminating it"sv;
       std::error_code terminate_ec;
@@ -5518,6 +5560,7 @@ namespace proc {
 
     // Reaps whether it exited on its own or was just killed.
     child.wait();
+    return timed_out;
   }
 
   void terminate_process_group(boost::process::v1::child &proc, boost::process::v1::group &group, std::chrono::seconds exit_timeout) {
@@ -5865,8 +5908,9 @@ namespace proc {
       config::video.linux_display.stream_mode == "gamescope_stream" ||
       config::video.linux_display.private_runtime == "gamescope";
     _session_used_gamescope_runtime = gamescope_stream_session;
-    // Set true after enable_hdr when rewiring to polaris-gamescope-session nested WSI.
-    bool nested_wsi_hdr_session = false;
+    // Set true when a Steam title or Big Picture is rewired to its own
+    // polaris-gamescope-session compositor.
+    bool nested_wsi_session = false;
     // Private nested runtime: labwc cage and/or owned/attach gamescope.
     const bool use_cage_compositor_for_session =
       !mirror_desktop_session &&
@@ -6141,25 +6185,22 @@ namespace proc {
       }
     }
 
-    // Nested WSI is the proven game-HDR present path (FROG layer + DXVK HDR10
-    // swapchain). SB-5 unwrapped polaris-gamescope-session into attach+X11, which
-    // cannot register Gamescope surfaces — BG3 etc. stay SDR despite stream PQ.
-    // For gamescope_stream + client HDR + Steam appid, rewire to nested session.
-    if (gamescope_stream_session && launch_session->enable_hdr) {
-      std::string appid = _app.steam_appid;
-      if (appid.empty()) {
-        if (const auto detected = extract_steam_appid_from_command(_app.cmd); detected) {
-          appid = *detected;
-        }
-      }
-      if (appid.empty()) {
-        for (const auto &cmd : _app.detached) {
-          if (const auto detected = extract_steam_appid_from_command(cmd); detected) {
-            appid = *detected;
-            break;
-          }
-        }
-      }
+    // Nested WSI gives one compositor ownership of both the visible game and
+    // its input focus. That ownership boundary is required for SDR and HDR:
+    // attaching Steam and the game to the idle compositor lets Big Picture
+    // remain focused while the game is also focusable. The session helper
+    // supports both a per-game app id and a no-id Big Picture session.
+    const auto nested_target = resolve_nested_gamescope_session_target(
+      gamescope_stream_session,
+      _app
+    );
+    if (nested_target.eligible) {
+      const auto start_arg = nested_target.appid.empty() ?
+        std::string {} :
+        " " + nested_target.appid;
+      const auto target_label = nested_target.appid.empty() ?
+        "Steam Big Picture"s :
+        "Steam appid=" + nested_target.appid;
       boost::filesystem::path session_bin;
       try {
         session_bin = boost::process::v1::search_path("polaris-gamescope-session");
@@ -6167,10 +6208,12 @@ namespace proc {
       catch (...) {
         session_bin.clear();
       }
-      if (!appid.empty() && !session_bin.empty()) {
-        nested_wsi_hdr_session = true;
-        _app.steam_appid = appid;
-        const auto start_cmd = session_bin.string() + " start " + appid;
+      if (!session_bin.empty()) {
+        nested_wsi_session = true;
+        if (!nested_target.appid.empty()) {
+          _app.steam_appid = nested_target.appid;
+        }
+        const auto start_cmd = session_bin.string() + " start" + start_arg;
         const auto wait_cmd = session_bin.string() + " wait";
         const auto stop_cmd = session_bin.string() + " stop";
         // Drop attach-era steam launches; nested session owns Steam as gamescope child.
@@ -6193,12 +6236,15 @@ namespace proc {
           proc::cmd_t {std::string {start_cmd}, std::string {stop_cmd}, false}
         );
         _app.prep_cmds = std::move(kept_prep);
-        BOOST_LOG(info) << "session_manager: nested WSI HDR path — polaris-gamescope-session start "
-                        << appid << " (Steam primary child; not attach/X11)"sv;
+        BOOST_LOG(info) << "session_manager: nested WSI "
+                        << (launch_session->enable_hdr ? "HDR"sv : "SDR"sv)
+                        << " path — polaris-gamescope-session start"
+                        << start_arg << " (" << target_label
+                        << " primary child; not attach/X11)"sv;
       }
-      else if (launch_session->enable_hdr) {
-        BOOST_LOG(warning) << "session_manager: HDR client but cannot nest WSI "
-                              "(need steam-appid + polaris-gamescope-session on PATH); using attach"sv;
+      else {
+        BOOST_LOG(warning) << "session_manager: cannot nest " << target_label
+                           << " because polaris-gamescope-session is not on PATH; using attach"sv;
       }
     }
 #endif
@@ -6750,7 +6796,7 @@ namespace proc {
 
 #ifdef __linux__
       const bool critical_nested_session_prep =
-        nested_wsi_hdr_session && command_uses_polaris_gamescope_session(cmd.do_cmd);
+        nested_wsi_session && command_uses_polaris_gamescope_session(cmd.do_cmd);
 #else
       const bool critical_nested_session_prep = false;
 #endif
@@ -6759,7 +6805,25 @@ namespace proc {
                                               find_working_directory(cmd.do_cmd, _env) :
                                               boost::filesystem::path(_app.working_dir);
       BOOST_LOG(info) << "Executing Do Cmd: ["sv << cmd.do_cmd << "] elevated: " << cmd.elevated;
-      auto child = platf::run_command(cmd.elevated, true, cmd.do_cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+      FILE *prep_output = _pipe.get();
+#ifdef __linux__
+      // Session-helper diagnostics are infrastructure logs, not app output.
+      // Keep them visible in the Polaris service journal even when the app has
+      // no output file configured.
+      if (critical_nested_session_prep) {
+        prep_output = stderr;
+      }
+#endif
+      auto child = platf::run_command(
+        cmd.elevated,
+        true,
+        cmd.do_cmd,
+        working_dir,
+        _env,
+        prep_output,
+        ec,
+        nullptr
+      );
 
       if (ec) {
         BOOST_LOG(warning) << "Couldn't run ["sv << cmd.do_cmd << "]: System: "sv << ec.message();
@@ -6773,7 +6837,27 @@ namespace proc {
         continue;
       }
 
-      wait_for_configured_command(child, cmd.do_cmd, _app.exit_timeout);
+      const auto prep_timeout = critical_nested_session_prep ?
+        nested_gamescope_start_timeout :
+        _app.exit_timeout;
+      if (critical_nested_session_prep) {
+        BOOST_LOG(info) << "session_manager: waiting up to "sv
+                        << prep_timeout.count() << "s for nested gamescope startup"sv;
+      }
+      const bool prep_timed_out = wait_for_configured_command(child, cmd.do_cmd, prep_timeout);
+      if (prep_timed_out && critical_nested_session_prep) {
+        // The command may have published durable recovery state before timing
+        // out. Mark its undo as eligible so terminate_impl drives stop.
+        ++_app_prep_it;
+        BOOST_LOG(error) << "session_manager: nested gamescope startup timed out after "sv
+                         << prep_timeout.count() << "s"sv;
+        confighttp::emit_session_event(
+          "warning",
+          "Nested gamescope startup timed out after " + std::to_string(prep_timeout.count()) + "s"
+        );
+        confighttp::emit_session_event("error", "Nested gamescope session failed to start");
+        return 503;
+      }
       auto ret = child.exit_code();
       if (ret != 0) {
         BOOST_LOG(warning) << '[' << cmd.do_cmd << "] returned code ["sv << ret << ']';
@@ -7007,9 +7091,9 @@ namespace proc {
       false
     );
     // Nested WSI owns gamescope-0 (Steam as primary child). Do not attach/spawn a
-    // second idle compositor — that was the SB-5 path that lost FROG HDR present.
+    // second idle compositor; that loses the game surface and input-focus boundary.
     const bool need_private_runtime =
-      use_cage_compositor_for_session && !nested_wsi_hdr_session;
+      use_cage_compositor_for_session && !nested_wsi_session;
     const bool prefer_gamescope =
       path_policy.runtime == stream_path::runtime_kind_e::GAMESCOPE ||
       gamescope_stream_session;
@@ -7465,14 +7549,14 @@ namespace proc {
           spawn_detached_into_runtime(_app.detached[i]);
         }
       }
-    } else if (use_cage_compositor_for_session && !nested_wsi_hdr_session) {
+    } else if (use_cage_compositor_for_session && !nested_wsi_session) {
       // No detached commands — start cage empty, game will use _app.cmd
       if (!start_cage_with_runtime_fallback("")) {
         BOOST_LOG(error) << "session_manager: Failed to start cage compositor"sv;
         return 503;
       }
       _session_used_cage_compositor = true;
-    } else if (nested_wsi_hdr_session) {
+    } else if (nested_wsi_session) {
       // polaris-gamescope-session start already owns nested gamescope + Steam (prep-cmd).
       // _app.cmd is "wait"; do not attach idle or spawn a second compositor.
       _session_used_cage_compositor = false;
