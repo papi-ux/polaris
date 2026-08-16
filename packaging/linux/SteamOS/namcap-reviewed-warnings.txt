@@ -3,7 +3,6 @@ polaris W: ELF file ('usr/bin/polaris-browser-stream-helper') lacks GNU_PROPERTY
 polaris W: Unused shared library '/usr/lib/libresolv.so.2' by file ('usr/bin/polaris-browser-stream-helper')
 polaris W: Dependency included, but may not be needed ('avahi')
 polaris W: Dependency included, but may not be needed ('grim')
-polaris W: Dependency included, but may not be needed ('labwc')
 polaris W: Dependency included, but may not be needed ('libmfx')
 polaris W: Dependency included, but may not be needed ('libx11')
 polaris W: Dependency included, but may not be needed ('libxfixes')
