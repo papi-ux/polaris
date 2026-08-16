@@ -759,11 +759,18 @@ namespace platf {
               "cached_unsupported",
               true
             );
+          } else {
+            stream_stats::update_gpu_native_probe_attempt(
+              "headless_extcopy",
+              "ineligible",
+              "policy",
+              "vaapi_headless_dmabuf_disabled_for_stability"
+            );
           }
           stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
           if (stream_runtime::labwc::should_log_headless_ram_capture_warning()) {
             BOOST_LOG(info)
-              << "wlr: Using RAM capture path for headless labwc because its GPU-native probe is unavailable or cached unsupported"sv;
+              << "wlr: Using RAM capture path for headless labwc because true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"sv;
           }
         }
       } else {
