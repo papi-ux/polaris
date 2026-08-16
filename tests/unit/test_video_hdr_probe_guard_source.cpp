@@ -56,4 +56,9 @@ TEST(VideoHdrProbeGuardSource, HdrCapabilityProbeCannotFailTheEncoder) {
   // The H.264 YUV444 capability probe (outside the lambda) must be guarded too.
   EXPECT_NE(source.find("H.264 YUV444 capability probe raised"), std::string::npos)
     << "the H.264 YUV444 capability probe must catch and downgrade a raised exception";
+
+  EXPECT_NE(source.find("if (result && !encoder_probe_in_progress)"), std::string::npos)
+    << "capability probes must not demote their requested 10-bit input to the live-session 8-bit path";
+  EXPECT_NE(source.find("hevc_profile_for_input(colorspace.bit_depth"), std::string::npos)
+    << "HEVC profile selection must follow the actual encoder input depth";
 }
