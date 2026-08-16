@@ -37,28 +37,17 @@ TEST(LinuxPlatformHardeningSource, TimedOutWlrCaptureCancelsItsRequest) {
   EXPECT_NE(capture.find("dmabuf.cancel()"), std::string::npos);
 }
 
-TEST(LinuxPlatformHardeningSource, HeadlessVaapiChecksActualModifierBeforeGpuNativeSelection) {
-  const auto header = read_source("src/platform/linux/wayland.h");
+TEST(LinuxPlatformHardeningSource, HeadlessVaapiFailsClosedBeforeDmabufInitialization) {
+  const auto policy = read_source("src/platform/linux/wlgrab_capture_policy.h");
   const auto capture = read_source("src/platform/linux/wlgrab.cpp");
   const auto process = read_source("src/process.cpp");
 
-  EXPECT_NE(header.find("std::optional<std::uint64_t> capture_modifier() const"), std::string::npos);
-
-  const auto headless_probe = capture.find("if (try_headless_extcopy_dmabuf && gpu_native_capture_supported)");
-  ASSERT_NE(headless_probe, std::string::npos);
-  const auto modifier = capture.find("wlr->extcopy.capture_modifier()", headless_probe);
-  const auto policy = capture.find("gpu_native_dmabuf_is_safe(", modifier);
-  const auto accepted = capture.find("update_headless_extcopy_dmabuf_probe_result(true)", policy);
-  ASSERT_NE(modifier, std::string::npos);
-  ASSERT_NE(policy, std::string::npos);
-  ASSERT_NE(accepted, std::string::npos);
-  EXPECT_LT(modifier, policy);
-  EXPECT_LT(policy, accepted);
-  EXPECT_NE(capture.find("vaapi_headless_modifier_not_linear", policy), std::string::npos);
-  EXPECT_NE(capture.find("vaapi_headless_modifier_unavailable", policy), std::string::npos);
+  EXPECT_NE(policy.find("return hwdevice_type == platf::mem_type_e::cuda;"), std::string::npos);
+  EXPECT_EQ(policy.find("hwdevice_type == platf::mem_type_e::vaapi"), std::string::npos);
+  EXPECT_NE(capture.find("vaapi_headless_dmabuf_disabled_for_stability"), std::string::npos);
+  EXPECT_NE(capture.find("true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"), std::string::npos);
   EXPECT_NE(process.find("if (!headless_attempt.failure_reason.empty())"), std::string::npos);
   EXPECT_NE(process.find("Retaining headless extcopy failure reason"), std::string::npos);
-  EXPECT_EQ(process.find("vaapi_headless_dmabuf_disabled_for_stability"), std::string::npos);
 }
 
 TEST(LinuxPlatformHardeningSource, CudaFormatTransitionReleasesCompleteDestination) {
