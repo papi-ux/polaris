@@ -82,7 +82,7 @@
             <div class="flex flex-wrap justify-end gap-1.5">
               <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
               <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
-              <span class="data-pill" :class="frameHealth.jitterTone">{{ frameHealth.jitter }} jitter</span>
+              <span class="data-pill" :class="frameHealth.intervalErrorTone">{{ frameHealth.intervalError }} target interval error</span>
             </div>
             <span v-if="prefersReducedMotion" class="font-mono text-[10px] text-storm">Live charts are paused while reduced motion is enabled.</span>
           </div>
@@ -1148,21 +1148,21 @@ const previewStatusText = computed(() => {
 
 
 
-// Frame health: dropped/duplicate ratios and jitter arrive on every SSE tick
-// but were never surfaced; they explain stutter that FPS alone hides.
+// Frame health: dropped/duplicate ratios and mean target-interval error arrive
+// on every SSE tick. The interval metric is not statistical network jitter.
 const frameHealth = computed(() => {
   const s = stats.value || {}
   const dropped = Number(s.dropped_frame_ratio)
   const duplicate = Number(s.duplicate_frame_ratio)
-  const jitter = Number(s.frame_jitter_ms)
+  const intervalError = Number(s.frame_interval_error_ms ?? s.frame_jitter_ms)
   const pct = (v) => (Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : '--')
   return {
     dropped: pct(dropped),
     droppedTone: Number.isFinite(dropped) && dropped > 0.02 ? 'text-danger' : Number.isFinite(dropped) && dropped > 0.005 ? 'text-warning' : '',
     duplicate: pct(duplicate),
     duplicateTone: Number.isFinite(duplicate) && duplicate > 0.05 ? 'text-warning' : '',
-    jitter: Number.isFinite(jitter) ? `${jitter.toFixed(1)} ms` : '--',
-    jitterTone: Number.isFinite(jitter) && jitter > 4 ? 'text-warning' : '',
+    intervalError: Number.isFinite(intervalError) ? `${intervalError.toFixed(1)} ms` : '--',
+    intervalErrorTone: Number.isFinite(intervalError) && intervalError > 4 ? 'text-warning' : '',
   }
 })
 

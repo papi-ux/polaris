@@ -446,6 +446,7 @@ import {
 } from '../diagnostics-export.js'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
+import { groupRecentIssueLogs } from '../recent-issues.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -631,49 +632,10 @@ function fpsTargetGapDescription(s) {
   return `${formatFps(encoded)} encoded against ${formatFps(target)} target`
 }
 
-function normalizeIssueLine(line) {
-  return line.replace(/^\[[^\]]+\]:\s*/, '').replace(/^\w+:\s*/, '').replace(/\s+/g, ' ').trim()
-}
-
-function lineLevel(line) {
-  if (line.includes('Fatal:')) return 'Fatal'
-  if (line.includes('Warning:')) return 'Warning'
-  return 'Error'
-}
-
-function lineTimestamp(line) {
-  const match = line.match(/^\[([^\]]+)\]/)
-  return match ? `[${match[1]}]` : ''
-}
-
-const groupedRecentIssues = computed(() => {
-  const grouped = new Map()
-
-  ;(logs.value || '')
-    .split('\n')
-    .filter(line => /(Error|Warning|Fatal):/.test(line))
-    .slice(-300)
-    .reverse()
-    .forEach((line) => {
-      const level = lineLevel(line)
-      const message = normalizeIssueLine(line)
-      const key = `${level}:${message}`
-
-      if (!grouped.has(key)) {
-        grouped.set(key, {
-          level,
-          message,
-          timestamp: lineTimestamp(line),
-          count: 1
-        })
-        return
-      }
-
-      grouped.get(key).count += 1
-    })
-
-  return Array.from(grouped.values()).slice(0, 8)
-})
+const groupedRecentIssues = computed(() => groupRecentIssueLogs(logs.value, {
+  maxSourceLines: 300,
+  maxGroups: 8,
+}))
 
 const recentIssueSummaryText = computed(() => groupedRecentIssues.value
   .map((entry) => `${entry.timestamp} ${entry.level}: ${entry.message}${entry.count > 1 ? ` (${entry.count}x)` : ''}`.trim())
@@ -876,7 +838,7 @@ const sessionSnapshotItems = computed(() => {
     { label: 'Optimization Source', value: s.optimization_source || 'default' },
     { label: 'Network', value: `${formatNumber(s.latency_ms, 1)} ms latency / ${formatNumber(s.packet_loss, 2)}% loss` },
     { label: 'Frame Delivery', value: `${formatNumber((s.duplicate_frame_ratio || 0) * 100, 2)}% duplicate / ${formatNumber((s.dropped_frame_ratio || 0) * 100, 2)}% dropped` },
-    { label: 'Frame Timing', value: `${formatNumber(s.avg_frame_age_ms, 2)} ms age / ${formatNumber(s.frame_jitter_ms, 2)} ms jitter` }
+    { label: 'Frame Timing', value: `${formatNumber(s.avg_frame_age_ms, 2)} ms age / ${formatNumber(s.frame_interval_error_ms ?? s.frame_jitter_ms, 2)} ms target interval error` }
   ]
 })
 
