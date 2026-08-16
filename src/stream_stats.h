@@ -141,6 +141,8 @@ namespace stream_stats {
 
     // Adaptive bitrate
     int adaptive_target_bitrate_kbps = 0;
+    bool adaptive_bitrate_active = false;
+    bool adaptive_runtime_update_supported = false;
 
     // System
     double gpu_usage = 0;
