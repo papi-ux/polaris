@@ -544,6 +544,8 @@ namespace video {
   bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config);
 
 #ifdef POLARIS_TESTS
+  int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type);
+
   struct encoder_probe_cache_snapshot_t {
     std::string encoder_name;
     codec_capability_state_t capability_state {};

@@ -94,6 +94,13 @@ TEST(VideoColorSpaceTests, ClientHdrRequestWithDisplayMetadataEnablesTrueHdr) {
   EXPECT_EQ(colorspace.bit_depth, 10);
 }
 
+TEST(VideoCodecProfileTests, HevcProfileFollowsActualEncoderInputDepth) {
+  EXPECT_EQ(video::hevc_profile_for_input_for_tests(8, 0), AV_PROFILE_HEVC_MAIN);
+  EXPECT_EQ(video::hevc_profile_for_input_for_tests(10, 0), AV_PROFILE_HEVC_MAIN_10);
+  EXPECT_EQ(video::hevc_profile_for_input_for_tests(8, 1), AV_PROFILE_HEVC_REXT);
+  EXPECT_EQ(video::hevc_profile_for_input_for_tests(10, 1), AV_PROFILE_HEVC_REXT);
+}
+
 namespace {
   SS_HDR_METADATA usable_hdr_metadata() {
     SS_HDR_METADATA metadata {};
