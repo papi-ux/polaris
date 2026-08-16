@@ -5381,7 +5381,11 @@ namespace confighttp {
     nlohmann::json output_tree;
     output_tree["status"] = true;
 
-    bool available = cached_backend != virtual_display::backend_e::NONE;
+    const bool backend_detected = cached_backend != virtual_display::backend_e::NONE;
+    const bool available = virtual_display::backend_has_required_configuration(
+      cached_backend,
+      config::video.linux_display.streaming_output
+    );
     output_tree["available"] = available;
     const auto labwc = snapshot_labwc();
     const auto display_policy = stream_display_policy::resolve(stream_display_policy::input_t {
@@ -5391,6 +5395,9 @@ namespace confighttp {
     });
     output_tree["backend"] = virtual_display::backend_name(cached_backend);
     output_tree["backend_id"] = static_cast<int>(cached_backend);
+    output_tree["backend_detected"] = backend_detected;
+    output_tree["configuration_ready"] = available;
+    output_tree["unavailable_reason"] = available ? "" : virtual_display::unavailable_reason();
     output_tree["configured_adapter"] = config::video.adapter_name;
     output_tree["policy_mode"] = display_policy.selection;
     output_tree["policy_label"] = display_policy.label;
