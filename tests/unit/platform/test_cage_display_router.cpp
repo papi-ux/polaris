@@ -11,6 +11,7 @@
 
   #include <cerrno>
   #include <csignal>
+  #include <drm_fourcc.h>
   #include <filesystem>
   #include <fstream>
   #include <sstream>
