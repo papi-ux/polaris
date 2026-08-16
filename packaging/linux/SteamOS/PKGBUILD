@@ -14,6 +14,10 @@ install=polaris.install
 # Split a polaris-debug package so crash reports from this build are debuggable.
 options=('debug' 'strip')
 
+# labwc is deliberately absent. Polaris links nothing from it, and on SteamOS 3.8 it
+# resolves to labwc 0.9.0 -> wlroots0.19 -> libdisplay-info.so=2, which downgrades the
+# libdisplay-info 0.3.0 that holo-3.8.1x ships and KWin, Mesa, and Vulkan link against.
+# It is an optdepend instead; see docs/steamos.md.
 depends=(
   'avahi'
   'boost-libs'
@@ -24,7 +28,6 @@ depends=(
   'grim'
   'gtk3'
   'hicolor-icon-theme'
-  'labwc'
   'libayatana-appindicator'
   'libcap'
   'libdrm'
@@ -73,6 +76,7 @@ makedepends=(
 )
 
 optdepends=(
+  'labwc: Private Stream paths; not installable on SteamOS 3.8, see docs/steamos.md'
   'libva-mesa-driver: AMD GPU encoding support'
 )
 
