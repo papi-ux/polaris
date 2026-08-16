@@ -42,13 +42,18 @@ namespace doctor_actions {
     std::mutex action_mutex;
     action_run_t action_run;
 
+    int current_live_bitrate(const stream_stats::stats_t &stats) {
+      return stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
+        stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    }
+
     nlohmann::json network_evidence(const stream_stats::stats_t &stats) {
       return {
         {"streaming", stats.streaming},
         {"network_risk", stats.network_risk},
         {"packet_loss_pct", stats.packet_loss},
         {"latency_ms", stats.latency_ms},
-        {"bitrate_kbps", stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps},
+        {"bitrate_kbps", current_live_bitrate(stats)},
         {"paired_target_bitrate_kbps", stats.paired_target_bitrate_kbps},
         {"optimization_source", stats.optimization_source}
       };
@@ -106,6 +111,14 @@ namespace doctor_actions {
       std::lock_guard<std::mutex> lock(action_mutex);
       if (!action_run.active || run_id.empty() || run_id != action_run.run_id) {
         return {{"status", false}, {"changed", false}, {"error", "This Doctor undo is no longer available."}};
+      }
+      if (!adaptive_bitrate::get_state().runtime_update_supported) {
+        return {
+          {"status", false},
+          {"changed", false},
+          {"state", "runtime_update_unavailable"},
+          {"error", "The active encoder cannot apply a live bitrate change."}
+        };
       }
 
       const int restore_live_bitrate_kbps = action_run.previous_live_bitrate_kbps > 0 ?
@@ -169,6 +182,16 @@ namespace doctor_actions {
       std::lock_guard<std::mutex> lock(action_mutex);
       if (!action_run.active || run_id.empty() || run_id != action_run.run_id) {
         return {{"status", false}, {"changed", false}, {"state", "expired"}, {"error", "Doctor run not found."}};
+      }
+      if (!adaptive_bitrate::get_state().runtime_update_supported) {
+        return {
+          {"status", false},
+          {"changed", false},
+          {"run_id", run_id},
+          {"state", "runtime_update_unavailable"},
+          {"error", "The active encoder can no longer apply live bitrate changes."},
+          {"evidence", evidence}
+        };
       }
       const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - action_run.applied_at
@@ -250,8 +273,16 @@ namespace doctor_actions {
       }
 
       const auto adaptive_state = adaptive_bitrate::get_state();
-      const int current_bitrate_kbps = stats.adaptive_target_bitrate_kbps > 0 ?
-        stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+      if (!adaptive_state.runtime_update_supported) {
+        return {
+          {"status", false},
+          {"changed", false},
+          {"state", "runtime_update_unavailable"},
+          {"error", "The active encoder cannot restore bitrate during a live stream."},
+          {"evidence", evidence}
+        };
+      }
+      const int current_bitrate_kbps = current_live_bitrate(stats);
       const int goal_bitrate_kbps = stats.paired_target_bitrate_kbps;
       const int target_bitrate_kbps = guarded_quality_retry_target(
         current_bitrate_kbps,
@@ -320,8 +351,16 @@ namespace doctor_actions {
     }
 
     const auto adaptive_state = adaptive_bitrate::get_state();
-    const int current_bitrate_kbps = stats.adaptive_target_bitrate_kbps > 0 ?
-      stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    if (!adaptive_state.runtime_update_supported) {
+      return {
+        {"status", false},
+        {"changed", false},
+        {"state", "runtime_update_unavailable"},
+        {"error", "The active encoder cannot lower bitrate during a live stream."},
+        {"evidence", evidence}
+      };
+    }
+    const int current_bitrate_kbps = current_live_bitrate(stats);
     const int target_bitrate_kbps = guarded_bitrate_target(
       current_bitrate_kbps,
       request.value("target_bitrate_kbps", 0),

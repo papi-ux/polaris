@@ -2453,15 +2453,17 @@ namespace stream {
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
+      // Initialize controller state before the encoder thread publishes its
+      // runtime-update capability. Resetting after the thread starts can erase
+      // that capability and silently leave a supported encoder inactive.
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+      adaptive_bitrate::set_base_bitrate(session.config.monitor.bitrate);
+
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
-
-      // Initialize adaptive bitrate for this session
-      adaptive_bitrate::load_config();
-      adaptive_bitrate::reset();
-      adaptive_bitrate::set_base_bitrate(session.config.monitor.bitrate);
 
       auto codec_name = session.config.monitor.videoFormat == 2 ? "av1" :
                          session.config.monitor.videoFormat == 1 ? "hevc" : "h264";

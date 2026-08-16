@@ -1408,6 +1408,10 @@ namespace video {
       return encode_device->nvenc->update_bitrate(new_bitrate_kbps);
     }
 
+    bool supports_runtime_bitrate_update() const override {
+      return true;
+    }
+
   private:
     std::unique_ptr<encode_device_frame_converter_t<platf::nvenc_encode_device_t>> converter;
     conversion_request_t conversion_request;
@@ -3070,6 +3074,11 @@ namespace video {
       return;
     }
 
+    adaptive_bitrate::set_runtime_update_supported(session->supports_runtime_bitrate_update());
+    auto runtime_bitrate_guard = util::fail_guard([] {
+      adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
+    });
+
     // As a workaround for NVENC hangs and to generally speed up encoder reinit,
     // we will complete the encoder teardown in a separate thread if supported.
     // This will move expensive processing off the encoder thread to allow us
@@ -3330,6 +3339,9 @@ namespace video {
               if (session->update_bitrate(target)) {
                 applied_adaptive_bitrate = target;
                 effective_bitrate = target;
+              } else {
+                BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
+                adaptive_bitrate::set_runtime_update_supported(false, "runtime_bitrate_update_failed");
               }
             } else if (target > 0) {
               effective_bitrate = applied_adaptive_bitrate;

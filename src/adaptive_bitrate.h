@@ -25,6 +25,8 @@ namespace adaptive_bitrate {
 
   struct state_t {
     bool enabled = false;
+    bool active = false;
+    bool runtime_update_supported = false;
     int base_bitrate_kbps = 0;
     int target_bitrate_kbps = 0;
     int min_bitrate_kbps = 0;
@@ -97,6 +99,19 @@ namespace adaptive_bitrate {
    * @return True if enabled.
    */
   bool is_enabled();
+
+  /**
+   * @brief Report whether the active encoder can apply bitrate changes live.
+   *
+   * The controller remains configured when this is false, but it must not
+   * consume telemetry or publish an encoder target that was never applied.
+   */
+  void set_runtime_update_supported(bool supported, const std::string &reason = {});
+
+  /**
+   * @brief Check whether adaptive bitrate is configured and usable live.
+   */
+  bool is_active();
 
   /**
    * @brief Load configuration from polaris config system.

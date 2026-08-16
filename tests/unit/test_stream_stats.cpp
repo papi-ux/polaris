@@ -755,6 +755,7 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   stats.network_risk = true;
   stats.packet_loss = 3.4;
   stats.latency_ms = 52.0;
+  stats.adaptive_runtime_update_supported = true;
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -769,6 +770,45 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   EXPECT_EQ(action.at("payload_preview").at("source_result_id"), doctor.at("result_id"));
   EXPECT_FALSE(action.at("requires_confirmation"));
   EXPECT_TRUE(action.at("undo").at("supported"));
+}
+
+TEST(StreamStatsDoctorTests, UnsupportedRuntimeBitrateUsesAppliedRateAndOffersNoLiveFix) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 120.0;
+  stats.bitrate_kbps = 26000;
+  stats.adaptive_target_bitrate_kbps = 2000;
+  stats.adaptive_bitrate_active = false;
+  stats.adaptive_runtime_update_supported = false;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.network_risk = true;
+  stats.packet_loss = 21.8;
+  stats.latency_ms = 52.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
+  EXPECT_EQ(
+    doctor.at("safe_recovery_action").at("unavailable_reason"),
+    "The active encoder does not support runtime bitrate updates."
+  );
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Lower next-stream bitrate");
+
+  for (const auto &item : doctor.at("evidence")) {
+    if (item.at("id") == "bitrate") {
+      EXPECT_EQ(item.at("value"), 26000);
+    }
+    if (item.at("id") == "live_bitrate_control") {
+      EXPECT_FALSE(item.at("value").get<bool>());
+    }
+  }
 }
 
 TEST(StreamStatsDoctorTests, CleanHistorySafeCapOffersGraduatedQualityRestore) {
@@ -787,6 +827,7 @@ TEST(StreamStatsDoctorTests, CleanHistorySafeCapOffersGraduatedQualityRestore) {
   stats.packet_loss = 0.0;
   stats.latency_ms = 3.8;
   stats.network_risk = false;
+  stats.adaptive_runtime_update_supported = true;
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -854,6 +895,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   // the two pieces this arc depends on before seeding telemetry.
   adaptive_bitrate::set_max_bitrate(100000);
   adaptive_bitrate::set_enabled(false);
+  adaptive_bitrate::set_runtime_update_supported(true);
 
   stream_stats::update_stream_active(true, "DoctorContractTest", "203.0.113.7");
   stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
@@ -875,6 +917,14 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
     stream_stats::update_network_stats(52.0, 3.4, 1000);
   }
   ASSERT_TRUE(stream_stats::get_current().network_risk);
+
+  adaptive_bitrate::set_runtime_update_supported(false);
+  const auto unavailable = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(unavailable.at("status").get<bool>());
+  EXPECT_FALSE(unavailable.at("changed").get<bool>());
+  EXPECT_EQ(unavailable.at("state"), "runtime_update_unavailable");
+
+  adaptive_bitrate::set_runtime_update_supported(true);
 
   const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
