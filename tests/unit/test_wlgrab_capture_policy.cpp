@@ -39,57 +39,41 @@ TEST(WlgrabCapturePolicy, SystemMemoryEncoderUsesRamCapture) {
   );
 }
 
-TEST(WlgrabCapturePolicy, VaapiMayProbeOnlyTheHeadlessPrivateRoute) {
-  EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
-    platf::mem_type_e::vaapi,
-    route_e::headless_extcopy
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
-    platf::mem_type_e::vaapi,
-    route_e::windowed_nested
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
-    platf::mem_type_e::vaapi,
-    route_e::direct_wayland
-  ));
+TEST(WlgrabCapturePolicy, VaapiGpuNativeProbeIsFailClosedAcrossAllRoutes) {
+  for (const auto route : {
+         route_e::headless_extcopy,
+         route_e::windowed_nested,
+         route_e::direct_wayland,
+       }) {
+    EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
+      platf::mem_type_e::vaapi,
+      route
+    ));
+  }
 }
 
-TEST(WlgrabCapturePolicy, VaapiHeadlessCaptureRequiresAnActualLinearModifier) {
+TEST(WlgrabCapturePolicy, VaapiGpuNativeCaptureIsFailClosedRegardlessOfModifier) {
   constexpr std::uint64_t tiled_modifier = 0x0100000000000002ULL;
+  const std::optional<std::uint64_t> modifiers[] = {
+    std::nullopt,
+    DRM_FORMAT_MOD_LINEAR,
+    DRM_FORMAT_MOD_INVALID,
+    tiled_modifier,
+  };
 
-  EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
-    platf::mem_type_e::vaapi,
-    route_e::headless_extcopy,
-    DRM_FORMAT_MOD_LINEAR
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
-    platf::mem_type_e::vaapi,
-    route_e::headless_extcopy,
-    std::nullopt
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
-    platf::mem_type_e::vaapi,
-    route_e::headless_extcopy,
-    DRM_FORMAT_MOD_INVALID
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
-    platf::mem_type_e::vaapi,
-    route_e::headless_extcopy,
-    tiled_modifier
-  ));
-}
-
-TEST(WlgrabCapturePolicy, LinearVaapiBuffersRemainRefusedOutsideHeadlessPrivateCapture) {
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
-    platf::mem_type_e::vaapi,
-    route_e::windowed_nested,
-    DRM_FORMAT_MOD_LINEAR
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
-    platf::mem_type_e::vaapi,
-    route_e::direct_wayland,
-    DRM_FORMAT_MOD_LINEAR
-  ));
+  for (const auto route : {
+         route_e::headless_extcopy,
+         route_e::windowed_nested,
+         route_e::direct_wayland,
+       }) {
+    for (const auto modifier : modifiers) {
+      EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
+        platf::mem_type_e::vaapi,
+        route,
+        modifier
+      ));
+    }
+  }
 }
 
 TEST(WlgrabCapturePolicy, CudaSafetyDoesNotDependOnRouteOrModifier) {

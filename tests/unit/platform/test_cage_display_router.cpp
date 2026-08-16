@@ -399,7 +399,7 @@ TEST(WaylandInterfaceTests, RemovedOutputMarksDirtyButKeepsMonitorStorageUntilRe
 // windowed_ram_fallback, headless_extcopy_probe_succeeded) live only under
 // stream_runtime::labwc as one-liners — no dual cage export / matrix tests.
 
-TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiMayProbeExtcopyDmabuf) {
+TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiExtcopyProbeIsFailClosed) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,
     .effective_headless = true,
@@ -407,7 +407,7 @@ TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVaapiMayProbeExtcopyDmabuf) 
     .backend_name = "labwc",
   };
 
-  EXPECT_TRUE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+  EXPECT_FALSE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
     runtime_state,
     platf::mem_type_e::vaapi
   ));
@@ -486,11 +486,11 @@ TEST(CageDisplayRouterPolicyTests, GpuNativeCaptureNeedsTheOverrideRegardlessOfE
   ));
 }
 
-TEST(CageDisplayRouterPolicyTests, VaapiSafetyIsLimitedToLinearHeadlessExtcopy) {
+TEST(CageDisplayRouterPolicyTests, VaapiSafetyIsFailClosedDuringContainment) {
   using route_e = wlgrab_capture_policy::gpu_native_capture_route_e;
   constexpr std::uint64_t tiled_modifier = 0x0100000000000002ULL;
 
-  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+  EXPECT_FALSE(cage_display_router::gpu_native_dmabuf_is_safe(
     platf::mem_type_e::vaapi,
     route_e::headless_extcopy,
     DRM_FORMAT_MOD_LINEAR

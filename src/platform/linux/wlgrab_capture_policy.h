@@ -24,28 +24,21 @@ namespace wlgrab_capture_policy {
 
   inline bool gpu_native_dmabuf_probe_is_allowed(
     platf::mem_type_e hwdevice_type,
-    gpu_native_capture_route_e route
+    gpu_native_capture_route_e
   ) {
-    if (hwdevice_type == platf::mem_type_e::cuda) {
-      return true;
-    }
-
-    return hwdevice_type == platf::mem_type_e::vaapi &&
-           route == gpu_native_capture_route_e::headless_extcopy;
+    // Release containment: the linear-modifier policy alone did not prevent a
+    // VAAPI host from crashing while the headless probe imported its first
+    // live DMA-BUF. Keep VAAPI fail-closed on every route until affected AMD
+    // hardware proves a stronger import/conversion guard.
+    return hwdevice_type == platf::mem_type_e::cuda;
   }
 
   inline bool gpu_native_dmabuf_is_safe(
     platf::mem_type_e hwdevice_type,
-    gpu_native_capture_route_e route,
-    std::optional<std::uint64_t> modifier
+    gpu_native_capture_route_e,
+    std::optional<std::uint64_t>
   ) {
-    if (hwdevice_type == platf::mem_type_e::cuda) {
-      return true;
-    }
-
-    return hwdevice_type == platf::mem_type_e::vaapi &&
-           route == gpu_native_capture_route_e::headless_extcopy &&
-           modifier == DRM_FORMAT_MOD_LINEAR;
+    return hwdevice_type == platf::mem_type_e::cuda;
   }
 
   inline direct_capture_path_e select_direct_capture_path(

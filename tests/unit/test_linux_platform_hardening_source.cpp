@@ -37,7 +37,7 @@ TEST(LinuxPlatformHardeningSource, TimedOutWlrCaptureCancelsItsRequest) {
   EXPECT_NE(capture.find("dmabuf.cancel()"), std::string::npos);
 }
 
-TEST(LinuxPlatformHardeningSource, HeadlessVaapiChecksActualModifierBeforeGpuNativeSelection) {
+TEST(LinuxPlatformHardeningSource, HeadlessGpuNativeRetainsModifierGuardBehindVaapiContainment) {
   const auto header = read_source("src/platform/linux/wayland.h");
   const auto capture = read_source("src/platform/linux/wlgrab.cpp");
   const auto process = read_source("src/process.cpp");
@@ -58,7 +58,7 @@ TEST(LinuxPlatformHardeningSource, HeadlessVaapiChecksActualModifierBeforeGpuNat
   EXPECT_NE(capture.find("vaapi_headless_modifier_unavailable", policy), std::string::npos);
   EXPECT_NE(process.find("if (!headless_attempt.failure_reason.empty())"), std::string::npos);
   EXPECT_NE(process.find("Retaining headless extcopy failure reason"), std::string::npos);
-  EXPECT_EQ(process.find("vaapi_headless_dmabuf_disabled_for_stability"), std::string::npos);
+  EXPECT_NE(capture.find("vaapi_headless_dmabuf_disabled_for_stability"), std::string::npos);
 }
 
 TEST(LinuxPlatformHardeningSource, CudaFormatTransitionReleasesCompleteDestination) {
