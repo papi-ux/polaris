@@ -39,25 +39,25 @@ TEST(WlgrabCapturePolicy, SystemMemoryEncoderUsesRamCapture) {
   );
 }
 
-TEST(WlgrabCapturePolicy, VaapiMayProbeOnlyTheHeadlessPrivateRoute) {
-  EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
-    platf::mem_type_e::vaapi,
-    route_e::headless_extcopy
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
-    platf::mem_type_e::vaapi,
-    route_e::windowed_nested
-  ));
-  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
-    platf::mem_type_e::vaapi,
-    route_e::direct_wayland
-  ));
+TEST(WlgrabCapturePolicy, VaapiNeverProbesGpuNativeDmabuf) {
+  for (const auto route : {
+         route_e::headless_extcopy,
+         route_e::windowed_nested,
+         route_e::direct_wayland,
+       }) {
+    EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
+      platf::mem_type_e::vaapi,
+      route
+    ));
+  }
 }
 
-TEST(WlgrabCapturePolicy, VaapiHeadlessCaptureRequiresAnActualLinearModifier) {
+TEST(WlgrabCapturePolicy, LinearVaapiHeadlessCaptureStillUsesShmFallback) {
   constexpr std::uint64_t tiled_modifier = 0x0100000000000002ULL;
 
-  EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
+  // #111 and #367 both reached the first-frame failure with modifier 0, so
+  // DRM_FORMAT_MOD_LINEAR is not sufficient evidence of a safe VAAPI import.
+  EXPECT_FALSE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
     platf::mem_type_e::vaapi,
     route_e::headless_extcopy,
     DRM_FORMAT_MOD_LINEAR

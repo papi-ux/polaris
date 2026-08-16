@@ -168,8 +168,9 @@ namespace cage_display_router {
    * @brief Returns whether a headless labwc runtime should try the
    *        ext-image-copy-capture DMA-BUF path before falling back to SHM.
    *
-   * VAAPI may probe only this private headless route. Its captured buffer still
-   * has to pass the modifier policy before it reaches the encoder.
+   * VAAPI stays on the conservative SHM path even when the private headless
+   * route exports a linear buffer: modifier layout alone did not prevent the
+   * historical first-frame import crash from recurring on affected hardware.
    */
   bool should_attempt_headless_extcopy_dmabuf(
     const platf::runtime_state_t &runtime_state,
