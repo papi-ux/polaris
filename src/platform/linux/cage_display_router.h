@@ -268,6 +268,13 @@ namespace cage_display_router {
     int refresh_hz = 0
   );
 
+  std::optional<double> output_current_refresh_hz_for_tests(
+    std::string_view wlr_randr_output,
+    std::string_view output_name,
+    int width,
+    int height
+  );
+
   /**
    * @brief Test helper for formatting a wlr-randr custom mode string.
    */

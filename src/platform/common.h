@@ -364,6 +364,7 @@ namespace platf {
     bool gpu_native_override_active = false;
     std::string backend_name;  ///< labwc | gamescope | portal | host | virtual_display | …
     std::string path_id;  ///< stream path selection id (headless_stream, desktop_display, …)
+    double reported_output_refresh_hz = 0.0;  ///< Current mode reported by the private runtime.
   };
 
   // Dimensions for touchscreen input

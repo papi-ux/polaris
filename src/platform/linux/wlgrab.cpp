@@ -85,6 +85,7 @@ namespace wl {
         cached_socket = stream_runtime::labwc::wayland_socket();
         if (!cached_socket.empty()) {
           wayland_target = cached_socket.c_str();
+          private_compositor_capture = true;
           BOOST_LOG(info) << "wlr: Targeting cage compositor on "sv << cached_socket;
         }
       }
@@ -212,6 +213,9 @@ namespace wl {
       SnapshotFn &&snapshot_fn
     ) {
       capture_pacer_t pacer {pacing_policy, delay, std::chrono::steady_clock::now()};
+      capture_source_rate_tracker_t source_rate;
+      stream_stats::update_capture_pacing(capture_pacing_policy_name(pacing_policy));
+      stream_stats::update_capture_source_fps(0.0);
       sleep_overshoot_logger.reset();
 
       while (true) {
@@ -240,6 +244,9 @@ namespace wl {
             }
             break;
           case platf::capture_e::ok:
+            if (const auto source_fps = source_rate.note_frame(std::chrono::steady_clock::now())) {
+              stream_stats::update_capture_source_fps(*source_fps);
+            }
             if (!push_captured_image_cb(std::move(img_out), true)) {
               return platf::capture_e::ok;
             }
@@ -256,6 +263,7 @@ namespace wl {
     platf::mem_type_e mem_type;
     bool capture_transport_logged = false;
     bool prefer_shm_screencopy = false;
+    bool private_compositor_capture = false;
     std::string reported_wayland_main_device;
     std::chrono::microseconds last_dispatch_time {};
 
@@ -271,8 +279,11 @@ namespace wl {
   class wlr_ram_t: public wlr_t {
   public:
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+      const auto pacing = screencopy_pacing_policy(private_compositor_capture);
+      BOOST_LOG(info) << "wlr: screencopy capture pacing="sv << capture_pacing_policy_name(pacing)
+                      << " private_compositor="sv << private_compositor_capture;
       return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
-        capture_pacing_policy_e::fixed_interval,
+        pacing,
         [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
           return snapshot(pull, img, 1000ms, c && *c);
         });
@@ -332,8 +343,10 @@ namespace wl {
         stream_stats::update_capture_metadata(img_out->frame_metadata);
         log_capture_metadata(img_out->frame_metadata);
         if (capture_profile_enabled()) {
+          const auto &timing = dmabuf.last_timing_sample();
+          const auto handoff_end = std::chrono::steady_clock::now();
           auto total_time = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - capture_start
+            handoff_end - capture_start
           );
           auto ingest_time = total_time - last_dispatch_time;
           stream_stats::update_capture_profile({
@@ -341,6 +354,10 @@ namespace wl {
             .dispatch_time = last_dispatch_time,
             .ingest_time = ingest_time,
             .total_time = total_time,
+            .source_interval = timing.presentation_interval,
+            .ready_to_handoff = timing.ready_at ?
+              std::optional {std::chrono::duration_cast<std::chrono::microseconds>(handoff_end - *timing.ready_at)} :
+              std::nullopt,
           });
         }
         dmabuf.shm_frame_ready = false;
@@ -379,8 +396,10 @@ namespace wl {
       stream_stats::update_capture_metadata(img_out->frame_metadata);
       log_capture_metadata(img_out->frame_metadata);
       if (capture_profile_enabled()) {
+        const auto &timing = dmabuf.last_timing_sample();
+        const auto handoff_end = std::chrono::steady_clock::now();
         auto total_time = std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now() - capture_start
+          handoff_end - capture_start
         );
         auto ingest_time = total_time - last_dispatch_time;
         stream_stats::update_capture_profile({
@@ -388,6 +407,10 @@ namespace wl {
           .dispatch_time = last_dispatch_time,
           .ingest_time = ingest_time,
           .total_time = total_time,
+          .source_interval = timing.presentation_interval,
+          .ready_to_handoff = timing.ready_at ?
+            std::optional {std::chrono::duration_cast<std::chrono::microseconds>(handoff_end - *timing.ready_at)} :
+            std::nullopt,
         });
       }
 
@@ -452,8 +475,11 @@ namespace wl {
   class wlr_vram_t: public wlr_t {
   public:
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+      const auto pacing = screencopy_pacing_policy(private_compositor_capture);
+      BOOST_LOG(info) << "wlr: screencopy capture pacing="sv << capture_pacing_policy_name(pacing)
+                      << " private_compositor="sv << private_compositor_capture;
       return capture_loop(push_captured_image_cb, pull_free_image_cb, cursor,
-        capture_pacing_policy_e::fixed_interval,
+        pacing,
         [this](const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &img, bool *c) {
           return snapshot(pull, img, 1000ms, c && *c);
         });
@@ -489,8 +515,10 @@ namespace wl {
       stream_stats::update_capture_metadata(img->frame_metadata);
       log_capture_metadata(img->frame_metadata);
       if (capture_profile_enabled()) {
+        const auto &timing = dmabuf.last_timing_sample();
+        const auto handoff_end = std::chrono::steady_clock::now();
         auto total_time = std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now() - capture_start
+          handoff_end - capture_start
         );
         auto ingest_time = total_time - last_dispatch_time;
         stream_stats::update_capture_profile({
@@ -498,6 +526,10 @@ namespace wl {
           .dispatch_time = last_dispatch_time,
           .ingest_time = ingest_time,
           .total_time = total_time,
+          .source_interval = timing.presentation_interval,
+          .ready_to_handoff = timing.ready_at ?
+            std::optional {std::chrono::duration_cast<std::chrono::microseconds>(handoff_end - *timing.ready_at)} :
+            std::nullopt,
         });
       }
 

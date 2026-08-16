@@ -91,6 +91,7 @@ namespace stream_stats {
     bool runtime_requested_headless = false;
     bool runtime_effective_headless = false;
     bool runtime_gpu_native_override_active = false;
+    double runtime_reported_refresh_hz = 0.0;
     /** Why this session is not on the display the client asked for; empty when it is. */
     std::string runtime_display_warning;
     platf::frame_transport_e capture_transport = platf::frame_transport_e::unknown;
@@ -120,6 +121,8 @@ namespace stream_stats {
     double dropped_frame_ratio = 0;
     double avg_frame_age_ms = 0;
     double frame_jitter_ms = 0;
+    double capture_source_fps = 0;
+    std::string capture_pacing;
     std::string codec;
     std::string pacing_policy;
     std::string optimization_source;
@@ -423,6 +426,12 @@ namespace stream_stats {
    * @param state Current runtime state for the active backend.
    */
   void update_runtime_state(const platf::runtime_state_t &state);
+
+  /** @brief Publish the capture protocol's successful source-frame rate. */
+  void update_capture_source_fps(double fps);
+
+  /** @brief Publish whether capture is timer-paced or compositor/source-driven. */
+  void update_capture_pacing(const std::string &pacing);
 
   /**
    * @brief Record why the session fell back from the display mode the client asked for.
