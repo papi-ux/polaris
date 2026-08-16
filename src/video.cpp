@@ -426,6 +426,15 @@ namespace video {
                encoder.platform_formats->pix_fmt_8bit;
     }
 
+    int hevc_profile_for_input(int bit_depth, int chroma_sampling_type) {
+      if (chroma_sampling_type == 1) {
+        // HEVC uses the same RExt profile for both 8- and 10-bit YUV 4:4:4.
+        return AV_PROFILE_HEVC_REXT;
+      }
+
+      return bit_depth == 10 ? AV_PROFILE_HEVC_MAIN_10 : AV_PROFILE_HEVC_MAIN;
+    }
+
     std::optional<conversion_request_t> make_conversion_request(const encoder_t &encoder, const config_t &config, const sunshine_colorspace_t &colorspace, platf::mem_type_e target_device) {
       auto pix_fmt = select_encoder_output_pix_fmt(encoder, config, colorspace);
       if (!pix_fmt) {
@@ -2620,12 +2629,10 @@ namespace video {
           break;
 
         case 1:
-          if (config.chromaSamplingType == 1) {
-            // HEVC uses the same RExt profile for both 8 and 10 bit YUV 4:4:4 encoding
-            ctx->profile = AV_PROFILE_HEVC_REXT;
-          } else {
-            ctx->profile = config.dynamicRange ? AV_PROFILE_HEVC_MAIN_10 : AV_PROFILE_HEVC_MAIN;
-          }
+          // The client flag describes its request, but the capture path can
+          // legitimately demote a live SDR session to 8-bit. Keep the codec
+          // profile consistent with the frames the encoder actually receives.
+          ctx->profile = hevc_profile_for_input(colorspace.bit_depth, config.chromaSamplingType);
           break;
 
         case 2:
@@ -3419,44 +3426,50 @@ namespace video {
       // If the capture path is 8-bit-only but colorspace is still HDR PQ, demote to
       // full SDR — bit_depth=8 alone still attaches Rec.2020+PQ metadata and the
       // client shows dark/red "HDR garbage" over SDR pixels.
-      if (result && result->prefer_8bit_encode && colorspace_is_hdr(colorspace)) {
-        // Probe / host-portal SHM paths demote often; gamescope_stream still gets real
-        // 10-bit later via dmabuf — keep that path at info to avoid session spam.
-        const bool gamescope_stream =
-          config::video.linux_display.stream_mode == "gamescope_stream";
-        if (gamescope_stream) {
-          BOOST_LOG(info)
-            << "Forcing SDR colorspace for this encode device: capture path reported "
-               "8-bit-only frames (common during portal probe); gamescope_stream HDR "
-               "may still negotiate 10-bit on the live capture path."sv;
-        } else {
-          BOOST_LOG(warning)
-            << "Forcing SDR colorspace: capture path cannot produce 10-bit HDR frames "
-               "(host portal SHM/MemFd is 8-bit BGRx). Use gamescope_stream for real HDR."sv;
-        }
-        colorspace = colorspace_from_client_config(config, /*hdr_metadata_available=*/false);
-        colorspace.bit_depth = 8;
-        if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
-          result = disp.make_avcodec_encode_device(*pix8);
-          if (result) {
-            result->prefer_8bit_encode = true;
+      // Capability probes must exercise the requested 10-bit path. Applying
+      // the live-session SDR optimization here turns the HEVC Main10 probe
+      // into Main10-over-NV12 (or, if the profile follows NV12, a false-positive
+      // 8-bit "HDR" probe). Let a genuinely unsupported P010 path fail the
+      // trial encode and be recorded as unsupported instead.
+      if (result && !encoder_probe_in_progress) {
+        if (result->prefer_8bit_encode && colorspace_is_hdr(colorspace)) {
+          // Probe / host-portal SHM paths demote often; gamescope_stream still gets real
+          // 10-bit later via dmabuf — keep that path at info to avoid session spam.
+          const bool gamescope_stream =
+            config::video.linux_display.stream_mode == "gamescope_stream";
+          if (gamescope_stream) {
+            BOOST_LOG(info)
+              << "Forcing SDR colorspace for this encode device: capture path reported "
+                 "8-bit-only frames (common during portal probe); gamescope_stream HDR "
+                 "may still negotiate 10-bit on the live capture path."sv;
+          } else {
+            BOOST_LOG(warning)
+              << "Forcing SDR colorspace: capture path cannot produce 10-bit HDR frames "
+                 "(host portal SHM/MemFd is 8-bit BGRx). Use gamescope_stream for real HDR."sv;
           }
-        }
-        BOOST_LOG(info) << "Color coding (after 8-bit capture demote): " << color_coding_label(colorspace);
-        BOOST_LOG(info) << "HDR decision (after 8-bit capture demote): stream_hdr_enabled=false";
-      }
-      else if (result && colorspace.bit_depth == 10 &&
-               (result->prefer_8bit_encode || !colorspace_is_hdr(colorspace))) {
-        if (result->prefer_8bit_encode) {
-          BOOST_LOG(info) << "Using 8-bit NV12 CUDA upload for capture path that cannot do 10-bit GPU frames"sv;
-        } else {
-          BOOST_LOG(info) << "Using 8-bit NV12 encode for non-HDR stream (avoid p010 cost for 10-bit SDR)"sv;
-        }
-        colorspace.bit_depth = 8;
-        if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
-          result = disp.make_avcodec_encode_device(*pix8);
-          if (result) {
-            result->prefer_8bit_encode = true;
+          colorspace = colorspace_from_client_config(config, /*hdr_metadata_available=*/false);
+          colorspace.bit_depth = 8;
+          if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
+            result = disp.make_avcodec_encode_device(*pix8);
+            if (result) {
+              result->prefer_8bit_encode = true;
+            }
+          }
+          BOOST_LOG(info) << "Color coding (after 8-bit capture demote): " << color_coding_label(colorspace);
+          BOOST_LOG(info) << "HDR decision (after 8-bit capture demote): stream_hdr_enabled=false";
+        } else if (colorspace.bit_depth == 10 &&
+                   (result->prefer_8bit_encode || !colorspace_is_hdr(colorspace))) {
+          if (result->prefer_8bit_encode) {
+            BOOST_LOG(info) << "Using 8-bit NV12 CUDA upload for capture path that cannot do 10-bit GPU frames"sv;
+          } else {
+            BOOST_LOG(info) << "Using 8-bit NV12 encode for non-HDR stream (avoid p010 cost for 10-bit SDR)"sv;
+          }
+          colorspace.bit_depth = 8;
+          if (auto pix8 = select_encoder_output_pix_fmt(encoder, config, colorspace)) {
+            result = disp.make_avcodec_encode_device(*pix8);
+            if (result) {
+              result->prefer_8bit_encode = true;
+            }
           }
         }
       }
@@ -4906,6 +4919,10 @@ namespace video {
   }
 
 #ifdef POLARIS_TESTS
+  int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type) {
+    return hevc_profile_for_input(bit_depth, chroma_sampling_type);
+  }
+
   bool write_driver_version_cache_for_tests(
     const std::filesystem::path &cache_path,
     const std::filesystem::path &binary_path,
