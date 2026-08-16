@@ -685,9 +685,13 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('namcap emitted unreviewed warnings or a reviewed warning disappeared')
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
-    // 19 since the attach guard started linking libxcb for real: namcap stopped
-    // calling that dependency unneeded, so its reviewed line was retired (#415).
-    expect(reviewedWarnings).toHaveLength(19)
+    // 18 since labwc left depends for optdepends: it pulled wlroots0.19, which pins
+    // libdisplay-info.so=2 and downgraded the libdisplay-info 0.3.0 that SteamOS runs
+    // KWin, Mesa, and Vulkan on, so no install could succeed. With the dependency gone
+    // namcap has nothing unneeded to report and its reviewed line retired with it (#442).
+    // It was 19 after the attach guard started linking libxcb for real, which retired
+    // that dependency's line the same way (#415).
+    expect(reviewedWarnings).toHaveLength(18)
     expect(new Set(reviewedWarnings).size).toBe(reviewedWarnings.length)
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"')
