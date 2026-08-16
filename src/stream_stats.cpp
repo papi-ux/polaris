@@ -354,6 +354,8 @@ namespace stream_stats {
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
+    j["adaptive_bitrate_active"] = adaptive_bitrate_active;
+    j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
     j["idr_requests_total"] = idr_requests_total;
     j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
     j["headless_mode"] = config::video.linux_display.headless_mode;
@@ -733,7 +735,8 @@ namespace stream_stats {
 
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
                                          const std::string &summary,
-                                         const nlohmann::json &health) {
+                                         const nlohmann::json &health,
+                                         bool live_bitrate_tunable) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -745,17 +748,29 @@ namespace stream_stats {
         next_step = "Keep monitoring";
         expected = "No recovery action should be needed right now.";
       } else if (primary_issue == "network_jitter") {
-        body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
-        next_step = "Fix and verify";
-        expected = "Packet loss and latency should return to the stable range without changing encoder or display settings.";
+        if (live_bitrate_tunable) {
+          body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
+          next_step = "Fix and verify";
+          expected = "Packet loss and latency should return to the stable range without changing encoder or display settings.";
+        } else {
+          body = "Current sustained loss or latency evidence confirms network pressure, but this encoder cannot change bitrate during a live stream. Lower the paired or client bitrate for the next launch.";
+          next_step = "Lower next-stream bitrate";
+          expected = "The next stream should start at a bitrate the network can sustain.";
+        }
       } else if (primary_issue == "network_observation") {
         body = "Doctor sees a debounced network warning, but current loss and latency do not justify reducing quality. Recheck the live path before changing bitrate.";
         next_step = "Recheck network";
         expected = "Doctor will either clear the warning or gather direct evidence before offering a bitrate change.";
       } else if (primary_issue == "quality_capped_by_history") {
-        body = "The current network is clean, but an older recovery profile is holding bitrate below this paired device's saved target. Doctor can retry quality gradually and verify every step.";
-        next_step = "Restore and verify";
-        expected = "Bitrate should climb toward the paired target while Doctor stops immediately if live loss or latency returns.";
+        if (live_bitrate_tunable) {
+          body = "The current network is clean, but an older recovery profile is holding bitrate below this paired device's saved target. Doctor can retry quality gradually and verify every step.";
+          next_step = "Restore and verify";
+          expected = "Bitrate should climb toward the paired target while Doctor stops immediately if live loss or latency returns.";
+        } else {
+          body = "The current network is clean, but this encoder cannot restore bitrate during a live stream. Relaunch to apply the paired quality target.";
+          next_step = "Relaunch with paired target";
+          expected = "The next stream should start at the saved paired bitrate.";
+        }
       } else if (primary_issue == "encoder_load") {
         body = "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
         next_step = "Lower stream load";
@@ -794,6 +809,7 @@ namespace stream_stats {
                                       const nlohmann::json &health,
                                       int current_bitrate_kbps,
                                       int paired_target_bitrate_kbps,
+                                      bool live_bitrate_tunable,
                                       const std::string &source_result_id) {
       std::string id = "none";
       std::string label = "No automatic action";
@@ -802,6 +818,7 @@ namespace stream_stats {
       std::string method;
       nlohmann::json payload = nlohmann::json::object();
       std::string rollback = "No change is applied by Doctor.";
+      std::string unavailable_reason;
 
       nlohmann::json verification = {
         {"mode", "none"},
@@ -810,7 +827,7 @@ namespace stream_stats {
         {"success_when", nlohmann::json::array()}
       };
 
-      if (primary_issue == "network_jitter") {
+      if (primary_issue == "network_jitter" && live_bitrate_tunable) {
         id = "lower_bitrate";
         label = "Fix and verify";
         kind = "live_tuning";
@@ -844,7 +861,7 @@ namespace stream_stats {
           {"endpoint", "/api/doctor/action"},
           {"success_when", nlohmann::json::array({"current network evidence remains below the action threshold"})}
         };
-      } else if (primary_issue == "quality_capped_by_history") {
+      } else if (primary_issue == "quality_capped_by_history" && live_bitrate_tunable) {
         id = "restore_quality";
         label = "Restore and verify";
         kind = "live_tuning";
@@ -860,6 +877,8 @@ namespace stream_stats {
           {"endpoint", "/api/doctor/action"},
           {"success_when", nlohmann::json::array({"network_risk stays clear", "packet_loss_pct <= 2", "latency_ms < 45", "paired bitrate target is reached"})}
         };
+      } else if ((primary_issue == "network_jitter" || primary_issue == "quality_capped_by_history") && !live_bitrate_tunable) {
+        unavailable_reason = "The active encoder does not support runtime bitrate updates.";
       } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
         id = "export_support_bundle";
         label = "Export diagnostics";
@@ -887,6 +906,7 @@ namespace stream_stats {
         {"allowed_in_viewer_mode", id == "export_support_bundle"},
         {"endpoint", endpoint},
         {"method", method},
+        {"unavailable_reason", unavailable_reason},
         {"payload_preview", payload},
         {"rollback", rollback},
         {"verification", verification},
@@ -911,7 +931,7 @@ namespace stream_stats {
     // noise, so Doctor said "network jitter" over perfect streams.
     const bool network_fail = stats.network_risk && (stats.packet_loss > 2.0 || stats.latency_ms >= 45.0);
     const bool network_watch = stats.network_risk && !network_fail;
-    const int live_bitrate_kbps = stats.adaptive_target_bitrate_kbps > 0 ?
+    const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
     const bool history_safe_source = stats.optimization_source.find("history_safe") != std::string::npos;
     const bool quality_capped_by_history =
@@ -1006,7 +1026,19 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
     append_doctor_evidence(evidence, "packet_loss", "Packet loss", stats.packet_loss, "%", network_fail ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Packet loss reported by current stream telemetry.");
     append_doctor_evidence(evidence, "latency", "Network latency", stats.latency_ms, "ms", stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Round-trip latency reported by the active client control channel.");
-    append_doctor_evidence(evidence, "bitrate", "Live bitrate", stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps, "kbps", "pass", "stream_stats", "Current live encoder target; Doctor changes it only for confirmed pressure or a guarded recovery-profile retry.");
+    append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a guarded recovery-profile retry." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
+    append_doctor_evidence(
+      evidence,
+      "live_bitrate_control",
+      "Live bitrate control",
+      stats.adaptive_runtime_update_supported,
+      "",
+      !stats.streaming ? "unknown" : stats.adaptive_runtime_update_supported ? "pass" : "watch",
+      "encoder_capability",
+      !stats.streaming ? "Start a stream before checking encoder bitrate controls." :
+      stats.adaptive_runtime_update_supported ? "The active encoder accepts runtime bitrate updates." :
+                                                "The active encoder does not support runtime bitrate updates; bitrate changes require a new stream."
+    );
     append_doctor_evidence(evidence, "paired_bitrate_target", "Paired quality target", stats.paired_target_bitrate_kbps, "kbps", quality_capped_by_history ? "watch" : stats.paired_target_bitrate_kbps > 0 ? "pass" : "unknown", "session_profile", quality_capped_by_history ? "A history-safe recovery layer is keeping the live bitrate below the paired target." : "Saved bitrate preference for the active paired client.");
     append_doctor_evidence(evidence, "target_fps_gap", "Target FPS gap", target_fps_gap, "FPS", meaningful_fps_shortfall ? "watch" : "pass", "stream_stats", "Encoded FPS below the requested cadence is a source or compositor pacing gap, not network jitter by itself.");
     append_doctor_evidence(evidence, "frame_pacing", "Mean target interval error", stats.frame_jitter_ms, "ms", pacing_watch ? "watch" : "pass", "stream_stats", "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter.");
@@ -1060,14 +1092,15 @@ namespace stream_stats {
     doctor["primary_issue"] = primary_issue;
     doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.streaming ? 1 : 0}, {"seconds", stats.streaming ? 1 : 0}}}};
     doctor["summary"] = summary;
-    doctor["recommendation"] = doctor_recommendation(primary_issue, summary, health);
+    doctor["recommendation"] = doctor_recommendation(primary_issue, summary, health, stats.adaptive_runtime_update_supported);
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
     doctor["safe_recovery_action"] = doctor_safe_action(
       primary_issue,
       health,
-      stats.adaptive_target_bitrate_kbps > 0 ? stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps,
+      live_bitrate_kbps,
       stats.paired_target_bitrate_kbps,
+      stats.adaptive_runtime_update_supported,
       doctor["result_id"].get<std::string>()
     );
     doctor["suppressed_findings"] = nlohmann::json::array();
@@ -2055,10 +2088,13 @@ namespace stream_stats {
 
   stats_t get_current() {
     stats_t result;
+    const auto adaptive_state = adaptive_bitrate::get_state();
     {
       std::lock_guard<std::mutex> lock(stats_mutex);
-      auto target_bitrate = adaptive_bitrate::get_target_bitrate_kbps();
+      const auto target_bitrate = adaptive_state.target_bitrate_kbps;
       current_stats.adaptive_target_bitrate_kbps = target_bitrate;
+      current_stats.adaptive_bitrate_active = adaptive_state.active;
+      current_stats.adaptive_runtime_update_supported = adaptive_state.runtime_update_supported;
 
       // Also update adaptive bitrate for all clients
       for (auto &c : current_stats.clients) {

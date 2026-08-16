@@ -315,6 +315,13 @@ namespace video {
     virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
 
     /**
+     * @brief Whether this encoder session can apply bitrate changes at runtime.
+     */
+    virtual bool supports_runtime_bitrate_update() const {
+      return false;
+    }
+
+    /**
      * @brief Dynamically update the encoder bitrate at runtime.
      * @param new_bitrate_kbps New target bitrate in kilobits per second.
      * @return `true` if the encoder supports runtime bitrate update and it succeeded.

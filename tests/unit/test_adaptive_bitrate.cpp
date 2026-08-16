@@ -20,6 +20,7 @@ namespace {
     config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
     adaptive_bitrate::load_config();
     adaptive_bitrate::reset();
+    adaptive_bitrate::set_runtime_update_supported(true);
     adaptive_bitrate::set_base_bitrate(base_bitrate_kbps);
   }
 }
@@ -82,6 +83,22 @@ TEST(AdaptiveBitrateController, ExplicitLiveRetryCanRaiseSessionCeilingAndTarget
   EXPECT_EQ(state.base_bitrate_kbps, 9475);
   EXPECT_EQ(state.target_bitrate_kbps, 9475);
   EXPECT_EQ(state.reason, "doctor_action");
+}
+
+TEST(AdaptiveBitrateController, HidesTargetsWhenEncoderCannotApplyRuntimeUpdates) {
+  enable_controller(26000);
+  adaptive_bitrate::set_runtime_update_supported(false);
+
+  adaptive_bitrate::update_network_stats(21.8, 12.0);
+
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_TRUE(state.enabled);
+  EXPECT_FALSE(state.active);
+  EXPECT_FALSE(state.runtime_update_supported);
+  EXPECT_EQ(0, state.target_bitrate_kbps);
+  EXPECT_EQ(0, adaptive_bitrate::get_target_bitrate_kbps());
+  EXPECT_EQ("unavailable", state.state);
+  EXPECT_EQ("encoder_runtime_update_unsupported", state.reason);
 }
 
 TEST(AdaptiveBitrateController, NormalizesMaxBelowMinBeforeClampingBase) {

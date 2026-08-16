@@ -769,7 +769,7 @@ namespace nvhttp {
       policy["detail"] = health.value("summary", summary);
       policy["components"] = {
         {"optimizer_active", ai_optimizer::is_enabled()},
-        {"adaptive_bitrate_active", adaptive_bitrate::is_enabled()},
+        {"adaptive_bitrate_active", adaptive_bitrate::is_active()},
         {"adaptive_state", adaptive_state.state},
         {"adaptive_reason", adaptive_state.reason},
         {"target_bitrate_kbps", live_bitrate_kbps}
@@ -6609,6 +6609,8 @@ namespace nvhttp {
       hdr["downgrade_reason"] = stream_stats::hdr_downgrade_reason(stats);
       hdr["downgrade_message"] = stream_stats::hdr_downgrade_message(stats);
       output["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
+      output["adaptive_bitrate_active"] = adaptive_state.active;
+      output["adaptive_runtime_update_supported"] = adaptive_state.runtime_update_supported;
       output["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
       output["adaptive_bitrate_state"] = adaptive_state.state;
       output["adaptive_bitrate_reason"] = adaptive_state.reason;
@@ -6627,6 +6629,8 @@ namespace nvhttp {
 
       auto &tuning = output["tuning"];
       tuning["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
+      tuning["adaptive_bitrate_active"] = adaptive_state.active;
+      tuning["adaptive_runtime_update_supported"] = adaptive_state.runtime_update_supported;
       tuning["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
       tuning["adaptive_base_bitrate_kbps"] = adaptive_state.base_bitrate_kbps;
       tuning["adaptive_min_bitrate_kbps"] = adaptive_state.min_bitrate_kbps;

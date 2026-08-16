@@ -24,6 +24,7 @@ namespace adaptive_bitrate {
 
   static config_t current_config;
   static std::atomic<bool> enabled {false};
+  static std::atomic<bool> runtime_update_supported {false};
   static std::atomic<int> base_bitrate_kbps {0};
   static std::atomic<int> target_bitrate_kbps {0};
 
@@ -41,6 +42,7 @@ namespace adaptive_bitrate {
   static bool initialized = false;
   static std::string controller_state = "disabled";
   static std::string controller_reason = "disabled";
+  static std::string runtime_update_reason = "encoder_not_initialized";
 
   static void set_controller_status(const std::string &state, const std::string &reason) {
     controller_state = state;
@@ -73,7 +75,7 @@ namespace adaptive_bitrate {
   }
 
   void update_network_stats(double packet_loss_percent, double rtt_ms) {
-    if (!enabled.load(std::memory_order_relaxed)) {
+    if (!is_active()) {
       return;
     }
 
@@ -185,7 +187,7 @@ namespace adaptive_bitrate {
                             double frame_jitter_ms,
                             double encode_time_ms,
                             double avg_frame_age_ms) {
-    if (!enabled.load(std::memory_order_relaxed)) {
+    if (!is_active()) {
       return;
     }
 
@@ -239,7 +241,7 @@ namespace adaptive_bitrate {
   }
 
   int get_target_bitrate_kbps() {
-    if (!enabled.load(std::memory_order_relaxed)) {
+    if (!is_active()) {
       return 0;
     }
     return target_bitrate_kbps.load(std::memory_order_relaxed);
@@ -249,14 +251,16 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     state_t state;
     state.enabled = enabled.load(std::memory_order_relaxed);
+    state.runtime_update_supported = runtime_update_supported.load(std::memory_order_relaxed);
+    state.active = state.enabled && state.runtime_update_supported;
     state.base_bitrate_kbps = base_bitrate_kbps.load(std::memory_order_relaxed);
-    state.target_bitrate_kbps = state.enabled ? target_bitrate_kbps.load(std::memory_order_relaxed) : 0;
+    state.target_bitrate_kbps = state.active ? target_bitrate_kbps.load(std::memory_order_relaxed) : 0;
     state.min_bitrate_kbps = current_config.min_bitrate_kbps;
     state.max_bitrate_kbps = current_config.max_bitrate_kbps;
     state.ewma_packet_loss = ewma_packet_loss;
     state.ewma_rtt_ms = ewma_rtt;
-    state.state = state.enabled ? controller_state : "disabled";
-    state.reason = state.enabled ? controller_reason : "disabled";
+    state.state = !state.enabled ? "disabled" : state.active ? controller_state : "unavailable";
+    state.reason = !state.enabled ? "disabled" : state.active ? controller_reason : runtime_update_reason;
     return state;
   }
 
@@ -306,6 +310,21 @@ namespace adaptive_bitrate {
     return enabled.load(std::memory_order_relaxed);
   }
 
+  void set_runtime_update_supported(bool supported, const std::string &reason) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    runtime_update_supported.store(supported, std::memory_order_relaxed);
+    runtime_update_reason = supported ? "supported" :
+      (reason.empty() ? "encoder_runtime_update_unsupported" : reason);
+    if (supported) {
+      set_controller_status("steady", "encoder_ready");
+    }
+  }
+
+  bool is_active() {
+    return enabled.load(std::memory_order_relaxed) &&
+      runtime_update_supported.load(std::memory_order_relaxed);
+  }
+
   void load_config() {
     std::lock_guard<std::mutex> lock(state_mutex);
 
@@ -331,6 +350,8 @@ namespace adaptive_bitrate {
     avg_rtt = 0.0;
     rtt_sample_count = 0;
     initialized = false;
+    runtime_update_supported.store(false, std::memory_order_relaxed);
+    runtime_update_reason = "encoder_not_initialized";
     set_controller_status(enabled.load(std::memory_order_relaxed) ? "steady" : "disabled",
                           enabled.load(std::memory_order_relaxed) ? "reset" : "disabled");
 
