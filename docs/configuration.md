@@ -13,6 +13,11 @@ you want to script setup, review current values, or recover from a broken UI sta
 
 If you change `port` in `polaris.conf`, the web UI moves to `https://localhost:<port + 1>`.
 
+Add installed Steam titles from the web UI's Applications library scan. The Nix modules do not
+generate or replace `apps.json`; Polaris stores each imported title with its Steam app id and applies
+the selected Linux stream runtime when that title launches. Steam Big Picture remains available as
+the browse-first entry and does not require an app id.
+
 ## Recommended first settings
 
 ```ini

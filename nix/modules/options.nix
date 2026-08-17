@@ -77,12 +77,6 @@
     description = "Optional After= ready target (null → same as desktopUserTarget).";
   };
 
-  injectApps = lib.mkOption {
-    type = lib.types.bool;
-    default = true;
-    description = "Wire Steam library launches through polaris-gamescope-session when inject is enabled.";
-  };
-
   preferVkDevice = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;

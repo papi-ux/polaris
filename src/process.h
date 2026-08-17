@@ -237,6 +237,10 @@ namespace proc {
   bool desktop_steam_proc_enumeration_error_fails_closed_for_tests();
   bool desktop_steam_proc_read_error_fails_closed_for_tests(pid_t forced_pid);
   bool steam_instance_pipe_listener_active_for_tests(const std::string &pipe_path);
+  std::optional<std::string> resolve_nested_gamescope_session_target_for_tests(
+    bool gamescope_stream_session,
+    const struct ctx_t &app
+  );
 
   bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
                                                    bool use_cage_compositor,
