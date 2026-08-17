@@ -1,22 +1,253 @@
-const SENSITIVE_FIELD_PATTERN = /(password|token|secret|key|cookie|auth|credential)/i
-const SENSITIVE_ASSIGNMENT_PATTERN = /\b(password|token|secret|key|cookie|auth|credential)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;})\]]+)/gi
+// Words that mean "secret" wherever they appear as a whole segment of a name.
+const SENSITIVE_SEGMENT_WORDS = [
+  'password', 'passwd', 'token', 'secret', 'cookie', 'auth', 'authorization', 'credential',
+]
+// Qualifiers that make a separator-less segment a credential name. `apikey` and
+// `authtoken` carry no separator and no camelCase hump, so there is nothing
+// structural to split on, and English gives no way to tell `apikey` from
+// `monkey`: both are a qualifier followed by "key". The list is explicit because
+// the distinction is semantic, not structural.
+//
+// Polaris already made this call for the same string. The artwork request
+// sanitiser in src/game_artwork_manual.cpp treats a bare "apikey" header as
+// sensitive, so the redactor agreeing with it is the point.
+const CREDENTIAL_QUALIFIERS = [
+  'api', 'app', 'access', 'auth', 'bearer', 'client', 'db', 'master', 'oauth',
+  'private', 'public', 'refresh', 'secret', 'session', 'user',
+]
+// "key" is different. On its own it is a map key or a label far more often than
+// a credential, and treating it as secret blanked the diagnostic labels the
+// bundle exists to carry. It counts only when something qualifies it and that
+// qualifier comes first: api_key and apiKey are credentials, keyName and keyCode
+// are labels.
+const QUALIFIED_ONLY_WORDS = ['key']
+// Any `name = value` or `name: value` pair. Which names are sensitive is decided
+// by isSensitiveIdentifier rather than by a second list encoded in this regex.
+// Two independent definitions is what let apiKey= leak from log text while a
+// field named apiKey was correctly redacted.
+//
+// Built fresh per call rather than kept as one global regex, because the scan
+// recurses into values and a shared /g regex carries lastIndex between them.
+// A name immediately followed by a separator. The value is deliberately NOT part
+// of this pattern: consuming it made an innocent pair swallow a sensitive one,
+// and truncating it at a `]` left a stray bracket behind that accumulated on
+// every pass. The scan below reads the value without consuming it instead.
+// A closing delimiter may sit between the name and its separator, which is
+// what every quoted JSON key looks like. Requiring the name to reach its
+// separator directly meant {"api_key": "..."} was never recognised at all,
+// and JSON always quotes its keys.
+const NAME_BEFORE_SEPARATOR_SOURCE = String.raw`\b([A-Za-z][\w.-]*)["')\]]?\s*[:=]\s*`
+// A value that is not a quoted string or a structure. Structures are measured by
+// balancing rather than by pattern, because a regex cannot see where a nested
+// object ends and stopping early is worse than not matching at all: it replaces
+// the opening fragment and leaves the secret behind, while reading as though the
+// whole subtree was handled.
+const BARE_VALUE_AT_START = /^[^\s,;})\]]+/
+const STRUCTURE_CLOSERS = { '{': '}', '[': ']' }
+
+/**
+ * Length of a quoted string starting at `start`, or 0 if it never closes.
+ */
+function quotedExtent(source, start) {
+  const quote = source[start]
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (source[index] === quote) return index - start + 1
+  }
+  return 0
+}
+
+/**
+ * Length of a balanced object or array starting at `start`, or 0 if unbalanced.
+ *
+ * Quoted spans are skipped so a brace inside a string cannot unbalance it.
+ */
+function structuredExtent(source, start) {
+  const stack = []
+  let quote = ''
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index]
+    if (quote) {
+      if (character === '\\') index += 1
+      else if (character === quote) quote = ''
+      continue
+    }
+    if (character === '"' || character === "'") {
+      quote = character
+      continue
+    }
+    if (STRUCTURE_CLOSERS[character]) {
+      stack.push(STRUCTURE_CLOSERS[character])
+      continue
+    }
+    if (character === stack[stack.length - 1]) {
+      stack.pop()
+      if (stack.length === 0) return index - start + 1
+    }
+  }
+  return 0
+}
+
+/**
+ * The value that follows a separator, as text.
+ *
+ * A value that opens a quote or a structure and never closes it is taken to run
+ * to the end of the line. That is deliberate: the usual cause is a truncated log
+ * line, where everything after the opener is still part of the value, and
+ * stopping at the first bare token would leave most of the secret in place.
+ * Over-redacting a malformed line is the safe direction.
+ */
+function valueAt(source, start) {
+  const first = source[start]
+  if (first === undefined) return ''
+
+  const opensSomething = first === '"' || first === "'" || Boolean(STRUCTURE_CLOSERS[first])
+  if (opensSomething) {
+    const extent = first === '"' || first === "'"
+      ? quotedExtent(source, start)
+      : structuredExtent(source, start)
+    if (extent > 0) return source.slice(start, start + extent)
+
+    const lineEnd = source.indexOf('\n', start)
+    return source.slice(start, lineEnd === -1 ? source.length : lineEnd)
+  }
+
+  const bare = BARE_VALUE_AT_START.exec(source.slice(start))
+  return bare ? bare[0] : ''
+}
 const AUTH_HEADER_PATTERN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi
+const AUTH_SCHEME_VALUE_PATTERN = /^(Bearer|Basic)$/i
 const COOKIE_HEADER_PATTERN = /\b(cookie|set-cookie)(\s*[:=]\s*)[^\n;]+/gi
 const URL_CREDENTIAL_PATTERN = /(https?:\/\/)([^\s/@:]+):([^\s/@]+)@/gi
 
 export const REDACTED_VALUE = '[redacted]'
 
+/**
+ * Split an identifier into lowercase words across camelCase and . _ - breaks.
+ */
+function identifierSegments(name) {
+  return String(name || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((segment) => segment.toLowerCase())
+}
+
+/**
+ * Whether a segment is one of `words`, tolerating a plural.
+ *
+ * Field names in the wild are as often `credentials` and `tokens` as they are
+ * singular, and a stem match would drag in `keyboard` again.
+ */
+function segmentMatches(segment, words) {
+  return words.some((word) => segment === word || segment === `${word}s`)
+}
+
+/**
+ * Whether a separator-less segment is a qualifier glued to a sensitive word.
+ *
+ * Deliberately requires a known qualifier rather than any prefix, so `apikey`
+ * is a credential and `monkey` is not.
+ */
+function isConcatenatedCredential(segment) {
+  return [...SENSITIVE_SEGMENT_WORDS, ...QUALIFIED_ONLY_WORDS].some((word) => (
+    [word, `${word}s`].some((ending) => (
+      segment.length > ending.length &&
+      segment.endsWith(ending) &&
+      CREDENTIAL_QUALIFIERS.includes(segment.slice(0, segment.length - ending.length))
+    ))
+  ))
+}
+
+function segmentIsSensitive(segment) {
+  return segmentMatches(segment, SENSITIVE_SEGMENT_WORDS) || isConcatenatedCredential(segment)
+}
+
+/**
+ * Whether an identifier names something secret.
+ *
+ * @param name Identifier to classify.
+ * @param bareQualifiedCounts Whether a lone qualified-only word such as `key`
+ *   counts on its own. Structured field names say no, free log text says yes;
+ *   see isSensitiveFieldName and redactSensitiveText for why they differ.
+ */
+function isSensitiveIdentifier(name, bareQualifiedCounts) {
+  const segments = identifierSegments(name)
+  if (segments.length === 0) return false
+  if (segments.some(segmentIsSensitive)) return true
+  if (bareQualifiedCounts && segments.length === 1) {
+    return segmentMatches(segments[0], QUALIFIED_ONLY_WORDS)
+  }
+  // Qualified, and never as the leading segment: `apiKey` is a credential,
+  // `keyName` names one.
+  return segments.slice(1).some((segment) => segmentMatches(segment, QUALIFIED_ONLY_WORDS))
+}
+
+/**
+ * Whether an object field should have its value replaced.
+ *
+ * A bare `key` is a label here. Both checklistItem() and the network probe emit
+ * a `key` field as a plain identifier, and blanking those removed the labels
+ * that make a bundle readable while protecting nothing.
+ */
 export function isSensitiveFieldName(key) {
-  return SENSITIVE_FIELD_PATTERN.test(String(key || ''))
+  return isSensitiveIdentifier(key, false)
+}
+
+/**
+ * Redact the value of every `name = value` pair whose name reads as a credential.
+ *
+ * Walks names without consuming their values, so an innocent pair cannot swallow
+ * a sensitive one that follows it: `Error: auth_token=abc` is the ordinary shape
+ * of a log line, and the credential has to still be visible to the scan after
+ * the label in front of it has been considered and skipped.
+ *
+ * Leaving values unconsumed also makes this idempotent. Nova redacts before it
+ * posts a report and the host redacts again on export, so two passes over the
+ * same bytes is the normal path rather than an edge case, and a user should not
+ * be able to tell how many times it ran by counting brackets.
+ *
+ * Free text is the one place a bare `key=` counts as a credential. In a
+ * structured payload the surrounding object says what a `key` field is; in a log
+ * line nothing does, and losing one diagnostic line costs far less than
+ * exporting a secret.
+ */
+function redactAssignments(text) {
+  const source = String(text)
+  const scanner = new RegExp(NAME_BEFORE_SEPARATOR_SOURCE, 'g')
+  let output = ''
+  let cursor = 0
+  let match
+
+  while ((match = scanner.exec(source)) !== null) {
+    const [whole, label] = match
+    const valueStart = match.index + whole.length
+    const value = valueAt(source, valueStart)
+    if (!value) continue
+    // Already redacted, or an auth scheme whose credential the header pattern
+    // has already taken. Both are left exactly as found.
+    if (value === REDACTED_VALUE || AUTH_SCHEME_VALUE_PATTERN.test(value)) continue
+    if (!isSensitiveIdentifier(label, true)) continue
+
+    output += source.slice(cursor, valueStart) + REDACTED_VALUE
+    cursor = valueStart + value.length
+    scanner.lastIndex = cursor
+  }
+
+  return output + source.slice(cursor)
 }
 
 export function redactSensitiveText(value) {
-  return String(value || '')
+  return redactAssignments(String(value || '')
     .replace(URL_CREDENTIAL_PATTERN, `$1${REDACTED_VALUE}:${REDACTED_VALUE}@`)
     .replace(AUTH_HEADER_PATTERN, (_, scheme) => `${scheme} ${REDACTED_VALUE}`)
-    .replace(COOKIE_HEADER_PATTERN, (_, label, separator) => `${label}${separator}${REDACTED_VALUE}`)
-    .replace(SENSITIVE_ASSIGNMENT_PATTERN, (_, label, separator) => `${label}${separator}${REDACTED_VALUE}`)
+    .replace(COOKIE_HEADER_PATTERN, (_, label, separator) => `${label}${separator}${REDACTED_VALUE}`))
 }
+
+
 
 export function sanitizeDiagnosticsValue(value, seen = new WeakSet()) {
   if (value === null || value === undefined) return value
@@ -666,7 +897,19 @@ export function buildAnonymizedDiagnosticsBundle(input = {}) {
   return sanitizeDiagnosticsValue({
     generated_at: input.generated_at || new Date().toISOString(),
     export_kind: 'polaris-anonymized-diagnostics',
-    redaction_notice: 'Fields containing password, token, secret, key, cookie, auth, or credential are redacted client-side before export.',
+    // The user-facing promise, and the thing someone reads before posting a
+    // bundle publicly. It has to describe what the code does rather than what an
+    // earlier version did: this is whole-word matching, not substring matching,
+    // and `key` alone is a label here.
+    redaction_notice: [
+      'Values are redacted client-side before export when their name reads as a credential.',
+      'Whole words such as password, passwd, token, secret, cookie, auth, authorization and',
+      'credential count, as do run-together forms such as apikey. The word key counts only when',
+      'something qualifies it, as in api_key or apiKey. Names that merely contain one of those,',
+      'such as keyboard or monkey, stay readable so the bundle remains useful. In raw log text a',
+      'bare key assignment is also redacted, because a log line carries no surrounding context to',
+      'say whether it names a label or a secret.',
+    ].join(' '),
     support_bundle_version: 2,
     ...input,
     stream_evidence: streamEvidence,
