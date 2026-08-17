@@ -153,6 +153,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # third-party/* are git submodules that cmake's wayland-scanner step
+          # needs. Checking them out puts them on disk; the ?submodules=1 flake
+          # ref below is what actually carries them into the nix build, because
+          # the flake source is `self` and nix does not descend into submodules
+          # on its own even when the files are present.
+          submodules: recursive
 
       - name: Free runner disk space
         # A CUDA-enabled closure does not fit next to the runner's preinstalled
@@ -170,4 +177,4 @@ jobs:
       - name: Build polaris-stream
         # npmDepsHash pins the npm dependency set by content, so this is also
         # what catches package-lock.json moving without the flake following.
-        run: nix build --print-build-logs .#polaris-stream
+        run: nix build --print-build-logs '.?submodules=1#polaris-stream'
