@@ -4435,3 +4435,31 @@ TEST(GamescopeNestedSessionContract, StartupUsesItsOwnVisibleTimeoutAndTheNixMod
   EXPECT_NE(source.find("Nested gamescope startup timed out after "), std::string::npos);
   EXPECT_EQ(options.find("injectApps"), std::string::npos);
 }
+
+TEST(GamescopeNestedSessionContract, TeardownGetsTheSameBudgetAndVisibilityAsStartup) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto collapsed_source = collapse_whitespace(source);
+
+  // Startup got a dedicated budget. Teardown was left on the app's exit-timeout,
+  // which defaults to 5s, while the stop path in polaris-gamescope-session.sh
+  // waits up to about 15s of its own accord (POLARIS_IDLE_WAIT_STEPS plus
+  // POLARIS_PORTAL_WAIT_STEPS). A 5s caller could terminate it mid-drain and
+  // leave the session needing manual recovery. Both halves of the lifecycle get
+  // their own visible budget, or neither should.
+  EXPECT_NE(source.find("constexpr auto nested_gamescope_stop_timeout = 30s;"), std::string::npos);
+  EXPECT_NE(
+    collapsed_source.find(
+      "const auto undo_timeout = critical_nested_session_undo ? nested_gamescope_stop_timeout : _app.exit_timeout;"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    collapsed_source.find("wait_for_configured_command(child, cmd.undo_cmd, undo_timeout)"),
+    std::string::npos
+  );
+
+  // A failed teardown must be as diagnosable as a failed startup. Without this
+  // the undo inherits the app's output pipe and a nested stop failure is silent.
+  EXPECT_NE(source.find("undo_output = stderr;"), std::string::npos);
+  EXPECT_NE(source.find("nested gamescope teardown timed out after "), std::string::npos);
+}

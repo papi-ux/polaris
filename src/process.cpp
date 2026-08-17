@@ -111,6 +111,15 @@ namespace proc {
 
   constexpr auto nested_gamescope_start_timeout = 120s;
 
+  // Teardown gets its own, much shorter budget than startup. The stop path in
+  // polaris-gamescope-session.sh waits up to about 15s of its own accord
+  // (POLARIS_IDLE_WAIT_STEPS and POLARIS_PORTAL_WAIT_STEPS, both at 0.1s), so a
+  // 5s caller can terminate it mid-drain. This leaves headroom over that budget
+  // while staying far below the startup timeout, because undo runs while the
+  // session lifecycle lock is held and a two-minute teardown would be worse than
+  // the stall it prevents.
+  constexpr auto nested_gamescope_stop_timeout = 30s;
+
   session_stop_outcome_t evaluate_session_stop_request(
     bool can_launch,
     bool has_running_app,
@@ -8390,13 +8399,41 @@ namespace proc {
                                               find_working_directory(cmd.undo_cmd, _env) :
                                               boost::filesystem::path(_app.working_dir);
       BOOST_LOG(info) << "Executing Undo Cmd: ["sv << cmd.undo_cmd << ']';
-      auto child = platf::run_command(cmd.elevated, true, cmd.undo_cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+#ifdef __linux__
+      const bool critical_nested_session_undo = command_uses_polaris_gamescope_session(cmd.undo_cmd);
+#else
+      const bool critical_nested_session_undo = false;
+#endif
+      FILE *undo_output = _pipe.get();
+#ifdef __linux__
+      // Same reasoning as the prep side: session-helper diagnostics are
+      // infrastructure logs, not app output. Without this a failed teardown is
+      // silent even though a failed startup is not.
+      if (critical_nested_session_undo) {
+        undo_output = stderr;
+      }
+#endif
+      auto child = platf::run_command(cmd.elevated, true, cmd.undo_cmd, working_dir, _env, undo_output, ec, nullptr);
 
       if (ec) {
         BOOST_LOG(warning) << "System: "sv << ec.message();
       }
 
-      wait_for_configured_command(child, cmd.undo_cmd, _app.exit_timeout);
+      const auto undo_timeout = critical_nested_session_undo ?
+        nested_gamescope_stop_timeout :
+        _app.exit_timeout;
+      if (critical_nested_session_undo) {
+        BOOST_LOG(info) << "session_manager: waiting up to "sv
+                        << undo_timeout.count() << "s for nested gamescope teardown"sv;
+      }
+      const bool undo_timed_out = wait_for_configured_command(child, cmd.undo_cmd, undo_timeout);
+      if (undo_timed_out && critical_nested_session_undo) {
+        // The stop path is written to fail into a recoverable state, so this is
+        // reported rather than escalated: the durable claim files are published
+        // before the risky operations precisely so a retry can resume.
+        BOOST_LOG(error) << "session_manager: nested gamescope teardown timed out after "sv
+                         << undo_timeout.count() << "s; session may need manual recovery"sv;
+      }
       auto ret = child.exit_code();
 
       if (ret != 0) {
