@@ -120,6 +120,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/config.cpp"
         "${CMAKE_SOURCE_DIR}/src/crash_report.cpp"
         "${CMAKE_SOURCE_DIR}/src/crash_report.h"
+        "${CMAKE_SOURCE_DIR}/src/client_support_report.cpp"
+        "${CMAKE_SOURCE_DIR}/src/client_support_report.h"
         "${CMAKE_SOURCE_DIR}/src/display_device.h"
         "${CMAKE_SOURCE_DIR}/src/display_device.cpp"
         "${CMAKE_SOURCE_DIR}/src/display_planner.h"
