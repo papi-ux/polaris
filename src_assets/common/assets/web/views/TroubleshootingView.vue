@@ -443,6 +443,7 @@ import {
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
+  redactSensitiveText,
 } from '../diagnostics-export.js'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
@@ -964,7 +965,10 @@ function copyLogs() {
     showToast(i18n.t('troubleshooting.copy_logs_empty') || 'No visible logs to copy.', 'info')
     return
   }
-  navigator.clipboard.writeText(actualLogs.value)
+  // Every other export path redacts. This one did not, so a log line
+  // holding a credential went to the clipboard intact and straight into
+  // wherever it was pasted.
+  navigator.clipboard.writeText(redactSensitiveText(actualLogs.value))
   showToast(i18n.t('troubleshooting.copy_logs_success') || 'Visible log lines copied.', 'success')
 }
 

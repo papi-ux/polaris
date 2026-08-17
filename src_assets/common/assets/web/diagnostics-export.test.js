@@ -9,6 +9,7 @@ import {
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
   describeLinuxGpuProfile,
+  isSensitiveFieldName,
   redactSensitiveText,
   sanitizeDiagnosticsValue,
 } from './diagnostics-export.js'
@@ -547,5 +548,310 @@ describe('support self-service reports', () => {
     expect(copy).toContain('Post-session Stream Report')
     expect(copy).toContain(`token=${REDACTED_VALUE}`)
     expect(copy).not.toContain('abc123')
+  })
+})
+
+describe('redaction defects closed', () => {
+  it('redacts a credential whose name carries a prefix', () => {
+    // A word-boundary anchor matched token= and missed auth_token=, because an
+    // underscore is a word character. Prefixed names are the common shape in a
+    // log line, so every one of them was exported verbatim.
+    const redacted = redactSensitiveText(
+      'auth_token=hunter2 api-key=abc123 session.secret=xyz789 X-Auth-Token: qqq111'
+    )
+
+    expect(redacted).not.toContain('hunter2')
+    expect(redacted).not.toContain('abc123')
+    expect(redacted).not.toContain('xyz789')
+    expect(redacted).not.toContain('qqq111')
+    expect(redacted).toContain(`auth_token=${REDACTED_VALUE}`)
+  })
+
+  it('leaves ordinary words that merely contain a keyword alone', () => {
+    // Over-redaction is not free: it eats the diagnostics the bundle exists for.
+    const redacted = redactSensitiveText('keyboard=us monkey=banana capture_path=dmabuf packet_loss=2.5')
+
+    expect(redacted).toBe('keyboard=us monkey=banana capture_path=dmabuf packet_loss=2.5')
+  })
+
+  it('treats a field named exactly key as a label, not a credential', () => {
+    // checklistItem() and the network probe both use a `key` field as an
+    // identifier. Blanking those removed the labels that make a bundle readable
+    // while protecting nothing.
+    expect(isSensitiveFieldName('key')).toBe(false)
+    expect(isSensitiveFieldName('monkey')).toBe(false)
+    expect(isSensitiveFieldName('keyboard')).toBe(false)
+  })
+
+  it('still treats a qualified key as a credential', () => {
+    expect(isSensitiveFieldName('api_key')).toBe(true)
+    expect(isSensitiveFieldName('apiKey')).toBe(true)
+    expect(isSensitiveFieldName('private-key')).toBe(true)
+  })
+
+  it('still redacts every field name it protected before', () => {
+    for (const name of ['password', 'token', 'api_token', 'accessToken', 'secret', 'cookie', 'auth', 'credential']) {
+      expect(isSensitiveFieldName(name)).toBe(true)
+    }
+    for (const name of ['bitrate', 'capture_path', 'client_ip', 'fps', '']) {
+      expect(isSensitiveFieldName(name)).toBe(false)
+    }
+  })
+
+  it('keeps checklist labels readable through a real export', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      fix_my_stream_checklist: [
+        { key: 'capture-path', label: 'Capture path', status: 'warning', detail: 'fell back to SHM' },
+      ],
+      config: { api_key: 'tok_live_secret' },
+    })
+
+    expect(bundle.fix_my_stream_checklist[0].key).toBe('capture-path')
+    expect(bundle.config.api_key).toBe(REDACTED_VALUE)
+  })
+})
+
+describe('redaction across naming conventions', () => {
+  it('redacts camelCase credential names in free text', () => {
+    // The first fix handled snake and kebab and missed camelCase entirely, which
+    // is the house style of this codebase's own JavaScript.
+    const redacted = redactSensitiveText(
+      'apiKey=abc123 authToken=tok_1 accessToken: at_2 clientSecret=cs_3 userPassword=pw_5'
+    )
+
+    for (const leaked of ['abc123', 'tok_1', 'at_2', 'cs_3', 'pw_5']) {
+      expect(redacted).not.toContain(leaked)
+    }
+  })
+
+  it('redacts plural and spelled-out credential names', () => {
+    const redacted = redactSensitiveText('credentials=zzz tokens=ttt authorization=xyz passwd=ppp')
+
+    for (const leaked of ['zzz', 'ttt', 'xyz', 'ppp']) {
+      expect(redacted).not.toContain(leaked)
+    }
+  })
+
+  it('agrees between a structured field and the same name in log text', () => {
+    // Two independent definitions is what let apiKey= leak from a log line while
+    // a field named apiKey was correctly redacted.
+    for (const name of ['apiKey', 'auth_token', 'accessToken', 'credentials', 'authorization']) {
+      expect(isSensitiveFieldName(name)).toBe(true)
+      expect(redactSensitiveText(`${name}=zzz999`)).not.toContain('zzz999')
+    }
+    for (const name of ['keyboard', 'monkey', 'capture_path', 'keyName']) {
+      expect(isSensitiveFieldName(name)).toBe(false)
+      expect(redactSensitiveText(`${name}=zzz999`)).toContain('zzz999')
+    }
+  })
+
+  it('treats a bare key as a label in a field and as a credential in free text', () => {
+    // The one place the two paths differ, on purpose. A surrounding object says
+    // what a `key` field is; a log line says nothing, so free text stays
+    // conservative.
+    expect(isSensitiveFieldName('key')).toBe(false)
+    expect(redactSensitiveText('key=barevalue')).not.toContain('barevalue')
+  })
+
+  it('does not treat key as a credential when it leads the name', () => {
+    expect(isSensitiveFieldName('keyName')).toBe(false)
+    expect(isSensitiveFieldName('keyCode')).toBe(false)
+    expect(isSensitiveFieldName('apiKey')).toBe(true)
+    expect(isSensitiveFieldName('publicKey')).toBe(true)
+  })
+})
+
+describe('separator-less credential names', () => {
+  it('redacts a qualifier glued to a sensitive word', () => {
+    // apikey has no separator and no camelCase hump, so segmentation alone
+    // cannot see it. Polaris already treats a bare "apikey" header as sensitive
+    // in the artwork request sanitiser; the redactor now agrees with it.
+    const redacted = redactSensitiveText(
+      'apikey=aaa111 apisecret=bbb222 authtoken=ccc333 accesstoken=ddd444 clientsecret=eee555 privatekey=fff666'
+    )
+
+    for (const leaked of ['aaa111', 'bbb222', 'ccc333', 'ddd444', 'eee555', 'fff666']) {
+      expect(redacted).not.toContain(leaked)
+    }
+  })
+
+  it('recognises the same names as fields', () => {
+    for (const name of ['apikey', 'apisecret', 'authtoken', 'accesstoken', 'dbpassword', 'apikeys']) {
+      expect(isSensitiveFieldName(name)).toBe(true)
+    }
+  })
+
+  it('still leaves words that merely end in a sensitive word alone', () => {
+    // monkey and apikey are structurally identical: a prefix followed by "key".
+    // Only a known qualifier makes the difference, which is why the list is
+    // explicit rather than a substring test.
+    for (const name of ['monkey', 'keyboard', 'turnkey', 'passwordless']) {
+      expect(isSensitiveFieldName(name)).toBe(false)
+      expect(redactSensitiveText(`${name}=zzz999`)).toContain('zzz999')
+    }
+  })
+})
+
+describe('credentials inside another pair', () => {
+  it('redacts a credential that follows an innocent label', () => {
+    // The ordinary shape of a log line is "Something: detail". Matching the
+    // outer pair and stopping consumed the credential as someone else's value
+    // and left it in the output, which made this the most common leak of all.
+    const redacted = redactSensitiveText([
+      'java.io.IOException: auth_token=hunter2',
+      'Error at Foo.bar: apikey=abc123',
+      'WARN [stream]: clientSecret=cs9',
+      'a: b: c: token=deep',
+    ].join('\n'))
+
+    for (const leaked of ['hunter2', 'abc123', 'cs9', 'deep']) {
+      expect(redacted).not.toContain(leaked)
+    }
+  })
+
+  it('leaves an innocent pair intact when nothing inside it is sensitive', () => {
+    const survives = 'Info: capture_path=dmabuf\nWarning: packet_loss=2.5\nlevel: info'
+
+    expect(redactSensitiveText(survives)).toBe(survives)
+  })
+
+  it('still keeps the auth scheme when the header follows a label', () => {
+    expect(redactSensitiveText('Request failed, Authorization: Bearer ey.secret'))
+      .toContain(`Bearer ${REDACTED_VALUE}`)
+  })
+})
+
+describe('redaction is idempotent', () => {
+  it('does not accumulate on repeated passes', () => {
+    // Nova redacts before it posts a report and the host redacts again on
+    // export, so two passes over the same bytes is the normal path. A user
+    // should not be able to tell how many times it ran by counting brackets.
+    let text = 'Warning: auth_token=hunter2 apiKey=abc123'
+    const passes = []
+    for (let index = 0; index < 5; index += 1) {
+      text = redactSensitiveText(text)
+      passes.push(text)
+    }
+
+    expect(new Set(passes).size).toBe(1)
+    expect(passes[0]).not.toContain('hunter2')
+    expect(passes[0]).not.toContain(']]')
+  })
+
+  it('captures a bracketed value whole instead of leaving the bracket behind', () => {
+    expect(redactSensitiveText('token=[abc]')).toBe(`token=${REDACTED_VALUE}`)
+    expect(redactSensitiveText('note=[abc]')).toBe('note=[abc]')
+  })
+
+  it('leaves an already redacted document untouched', () => {
+    const already = 'Info: capture_path=dmabuf\nWarning: auth_token=[redacted]\nlevel: info'
+
+    expect(redactSensitiveText(already)).toBe(already)
+  })
+})
+
+describe('quoted and delimited names', () => {
+  it('redacts a credential behind a quoted JSON key', () => {
+    // JSON always quotes its keys, and Polaris logs JSON response bodies, so
+    // requiring the name to reach its separator directly missed every one of
+    // them. This is the same family as the two defects above: the scan failing
+    // to see a name that is right there.
+    const redacted = redactSensitiveText([
+      '{"api_key": "abc123"}',
+      "{'apiKey': 'x9'}",
+      '{"auth_token":"t1"}',
+      '"client_secret": cs9',
+    ].join('\n'))
+
+    for (const leaked of ['abc123', 'x9', 't1', 'cs9']) {
+      expect(redacted).not.toContain(leaked)
+    }
+  })
+
+  it('redacts through a closing paren or bracket before the separator', () => {
+    expect(redactSensitiveText('(api_key): abc123')).not.toContain('abc123')
+    expect(redactSensitiveText('[auth_token]: t1')).not.toContain('t1')
+  })
+
+  it('leaves innocent quoted keys and their values alone', () => {
+    const survives = '{"level": "info", "capture_path": "dmabuf", "keyName": "readable"}'
+
+    expect(redactSensitiveText(survives)).toBe(survives)
+  })
+
+  it('stays idempotent on a redacted json document', () => {
+    const once = redactSensitiveText('{"api_key": "abc123"}')
+
+    expect(redactSensitiveText(once)).toBe(once)
+  })
+})
+
+describe('a sensitive name whose value is a structure', () => {
+  it('redacts the whole object, not its opening fragment', () => {
+    // Stopping early is worse than not matching: it leaves the secret behind
+    // while "auth": [redacted] reads as though the subtree was handled, so a
+    // human skimming the bundle would sign it off.
+    expect(redactSensitiveText('{"auth": {"api_key": "abc123"}}')).toBe(`{"auth": ${REDACTED_VALUE}}`)
+    expect(redactSensitiveText('{"secret": {"inner": "s1"}}')).toBe(`{"secret": ${REDACTED_VALUE}}`)
+    expect(redactSensitiveText('{auth: {api_key: "a1"}}')).toBe(`{auth: ${REDACTED_VALUE}}`)
+  })
+
+  it('redacts an arbitrarily nested structure whole', () => {
+    expect(redactSensitiveText('{"cfg": {"auth": {"api_key": "x9"}}}')).not.toContain('x9')
+  })
+
+  it('redacts an array value whole', () => {
+    expect(redactSensitiveText('{"tokens": ["t1", "t2"]}')).toBe(`{"tokens": ${REDACTED_VALUE}}`)
+  })
+
+  it('still reaches a credential nested under an innocent name', () => {
+    expect(redactSensitiveText('{"cfg": {"api_key": "x"}}')).toBe(`{"cfg": {"api_key": ${REDACTED_VALUE}}}`)
+  })
+
+  it('is not confused by a brace inside a quoted string', () => {
+    expect(redactSensitiveText('{"auth": {"note": "a } brace", "api_key": "k1"}}'))
+      .toBe(`{"auth": ${REDACTED_VALUE}}`)
+  })
+
+  it('still redacts when the structure never closes', () => {
+    // Degenerate input must not become a reason to leave a secret alone.
+    expect(redactSensitiveText('api_key={"a": "b"')).not.toContain('"b"')
+    expect(redactSensitiveText('token=[')).toBe(`token=${REDACTED_VALUE}`)
+  })
+
+  it('stays idempotent over a redacted structure', () => {
+    const once = redactSensitiveText('{"auth": {"api_key": "a"}}')
+
+    expect(redactSensitiveText(once)).toBe(once)
+  })
+})
+
+describe('the redaction notice describes what the code does', () => {
+  it('does not promise substring matching the code no longer does', () => {
+    const notice = buildAnonymizedDiagnosticsBundle({}).redaction_notice
+
+    // It used to say "fields containing ... key", which claimed keyboard and
+    // monkey were redacted and that a bare key field was. Neither is true, and
+    // this is the promise someone reads before posting a bundle publicly.
+    expect(notice).not.toContain('Fields containing')
+    expect(notice).toContain('Whole words')
+    expect(notice).toContain('qualifies it')
+  })
+
+  it('survives its own rules', () => {
+    // The first attempt at rewording tripped them: "credential: password" and
+    // "key=" inside the notice were themselves redacted.
+    expect(buildAnonymizedDiagnosticsBundle({}).redaction_notice).not.toContain(REDACTED_VALUE)
+  })
+
+  it('keeps discriminator keys readable in a real bundle', () => {
+    // browser-stream-support.js uses key: 'touch', key: 'keyboard' and seven
+    // more as capability discriminators. Redacting those destroyed the table.
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      capabilities: [{ key: 'keyboard', supported: true }, { key: 'gamepad', supported: false }],
+    })
+
+    expect(bundle.capabilities[0].key).toBe('keyboard')
+    expect(bundle.capabilities[1].key).toBe('gamepad')
   })
 })
