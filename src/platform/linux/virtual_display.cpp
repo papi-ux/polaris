@@ -325,6 +325,44 @@ namespace virtual_display {
     return false;
   }
 
+  std::optional<hyprland_mode_t> hyprland_monitor_mode(
+    std::string_view monitors_json,
+    std::string_view output_name
+  ) {
+    const auto monitors = nlohmann::json::parse(monitors_json, nullptr, false);
+    if (!monitors.is_array()) {
+      return std::nullopt;
+    }
+
+    for (const auto &monitor : monitors) {
+      if (!monitor.is_object() ||
+          !monitor.contains("name") ||
+          !monitor["name"].is_string() ||
+          monitor["name"].get_ref<const std::string &>() != output_name) {
+        continue;
+      }
+
+      hyprland_mode_t mode;
+      if (monitor.contains("width") && monitor["width"].is_number()) {
+        mode.width = monitor["width"].get<int>();
+      }
+      if (monitor.contains("height") && monitor["height"].is_number()) {
+        mode.height = monitor["height"].get<int>();
+      }
+      if (monitor.contains("refreshRate") && monitor["refreshRate"].is_number()) {
+        mode.refresh_hz = monitor["refreshRate"].get<double>();
+      }
+
+      // A named output with no usable geometry is not an answer, it is a gap.
+      if (mode.width <= 0 || mode.height <= 0) {
+        return std::nullopt;
+      }
+      return mode;
+    }
+
+    return std::nullopt;
+  }
+
   bool hyprland_output_is_polaris_owned(std::string_view output_name) {
     constexpr std::string_view prefix = "POLARIS-HEADLESS-";
     if (!output_name.starts_with(prefix)) {
@@ -1133,13 +1171,63 @@ namespace virtual_display {
           return std::nullopt;
         }
 
-        // Set resolution and refresh rate
-        std::string mode_cmd = "hyprctl keyword monitor " + output_name + "," +
-                               std::to_string(width) + "x" + std::to_string(height) +
-                               "@" + std::to_string(fps) + ",auto,1";
-        int rc = exec_cmd_rc(mode_cmd);
-        if (rc != 0) {
-          BOOST_LOG(warning) << "Virtual display: failed to set Hyprland monitor mode (rc="sv << rc << ")"sv;
+        // Set resolution and refresh rate.
+        //
+        // hyprctl's exit status does not mean the request was honored. Hyprland
+        // 0.56 answers `hyprctl keyword` with "unknown request" and still exits
+        // 0 (#444), so trusting rc left Polaris logging the client's geometry
+        // while the output stayed at the compositor's default. Capture then ran
+        // at the wrong size and was silently scaled, with nothing in the log to
+        // explain the wrong-aspect stream. Read the mode back and believe that.
+        const std::string mode_spec = std::to_string(width) + "x" + std::to_string(height) +
+                                      "@" + std::to_string(fps);
+
+        const auto mode_landed = [&]() {
+          // The set is not always instant; give it the same short settle budget
+          // the output-creation poll above uses.
+          const auto settle = std::chrono::steady_clock::now() + 1s;
+          do {
+            const auto actual = hyprland_monitor_mode(
+              exec_cmd("hyprctl monitors -j 2>/dev/null"),
+              output_name
+            );
+            if (actual && actual->width == width && actual->height == height) {
+              return true;
+            }
+            std::this_thread::sleep_for(50ms);
+          } while (std::chrono::steady_clock::now() < settle);
+          return false;
+        };
+
+        const std::string keyword_result = exec_cmd(
+          "hyprctl keyword monitor " + output_name + "," + mode_spec + ",auto,1 2>&1"
+        );
+
+        if (!mode_landed()) {
+          BOOST_LOG(info) << "Virtual display: hyprctl keyword did not apply the mode ["sv
+                          << keyword_result << "]; trying the Lua monitor form"sv;
+
+          // Hyprland 0.56 moved config/IPC to Lua. hl.monitor takes a table and
+          // the field is `output`, not `name`.
+          const std::string eval_result = exec_cmd(
+            "hyprctl eval 'hl.monitor({output=\"" + output_name + "\", mode=\"" + mode_spec +
+            "\", position=\"auto\", scale=1})' 2>&1"
+          );
+
+          if (!mode_landed()) {
+            const auto actual = hyprland_monitor_mode(
+              exec_cmd("hyprctl monitors -j 2>/dev/null"),
+              output_name
+            );
+            BOOST_LOG(warning) << "Virtual display: Hyprland did not apply mode ["sv << mode_spec
+                               << "] on ["sv << output_name << "]; it reports ["sv
+                               << (actual ? std::to_string(actual->width) + "x" + std::to_string(actual->height) : std::string {"unknown"})
+                               << "]. The stream will be captured at that size and scaled. keyword=["sv
+                               << keyword_result << "] eval=["sv << eval_result << ']';
+          } else {
+            BOOST_LOG(info) << "Virtual display: Lua monitor form applied ["sv << mode_spec
+                            << "] on ["sv << output_name << ']';
+          }
         }
       }
       else if (compositor == "sway") {
