@@ -438,18 +438,22 @@ namespace nvhttp {
   #if defined(__linux__)
     // Session-scoped stream-mode override gate: returns the requested mode when
     // it may drive this session, empty otherwise (the host default applies).
-    // headless_dongle swaps host output topology, so it stays host-default-only.
+    // Which modes qualify is derived from the path registry rather than listed
+    // here, and the same rule is served to clients as session_overridable so a
+    // client does not offer a choice this gate will drop.
     std::string accepted_session_stream_mode(const std::string &requested, std::string &reject_reason) {
       if (requested.empty()) {
         return {};
       }
-      if (requested == "headless_dongle") {
-        reject_reason = "headless_dongle is not supported as a per-session override";
-        return {};
-      }
+      // Validity first: an unknown or unavailable id deserves its own reason
+      // rather than being reported as a per-session restriction.
       std::string error;
       if (!stream_display_policy::selection_valid(requested, error)) {
         reject_reason = error;
+        return {};
+      }
+      if (!stream_display_policy::selection_session_overridable(requested)) {
+        reject_reason = requested + " swaps host display topology, so it is host-default only";
         return {};
       }
       return requested;
@@ -1344,6 +1348,11 @@ namespace nvhttp {
           {"runtime", option.runtime},
           {"capture", option.capture},
           {"topology", option.topology},
+          // Available and session-overridable are different questions. A dongle
+          // swap is a perfectly valid host default while still being something a
+          // single client must not switch on for one launch, and a client that
+          // cannot see the difference offers a choice the host will silently drop.
+          {"session_overridable", stream_display_policy::selection_session_overridable(option.value)},
         });
       }
 #else

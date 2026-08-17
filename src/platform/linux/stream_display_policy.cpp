@@ -64,6 +64,15 @@ namespace stream_display_policy {
     return false;
   }
 
+  bool selection_session_overridable(std::string_view selection) {
+    if (const auto *path = stream_path::find(selection)) {
+      // Swapping the host's primary output rearranges the machine itself, so it
+      // is a host decision rather than something one client turns on per launch.
+      return path->topology != stream_path::topology_kind_e::SWAP_PRIMARY;
+    }
+    return false;
+  }
+
   std::string selection_unavailable_reason(std::string_view selection) {
     if (const auto *path = stream_path::find(selection)) {
       // Probe-dependent reasons are not in the static registry entry; mirror
