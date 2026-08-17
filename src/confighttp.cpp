@@ -2656,61 +2656,11 @@ namespace confighttp {
    * @brief Scan for installed Steam, Lutris, and Heroic games.
    */
   std::vector<fs::path> lutris_game_config_dirs() {
-    std::vector<fs::path> dirs;
-    std::set<fs::path> seen_dirs;
-    auto append_dir = [&](fs::path path) {
-      if (path.empty()) {
-        return;
-      }
-      path = path.lexically_normal();
-      if (seen_dirs.insert(path).second) {
-        dirs.push_back(std::move(path));
-      }
-    };
-
-    const char *xdg_config_home = std::getenv("XDG_CONFIG_HOME");
-    const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
-    if (xdg_config_home && *xdg_config_home) {
-      append_dir(fs::path(xdg_config_home) / "lutris/games");
-    }
-    if (xdg_data_home && *xdg_data_home) {
-      append_dir(fs::path(xdg_data_home) / "lutris/games");
-    }
-    for (const auto &home : game_library::library_home_roots()) {
-      append_dir(home / ".config/lutris/games");
-      append_dir(home / ".local/share/lutris/games");
-    }
-
-    return dirs;
+    return game_library::lutris_game_config_dirs(game_library::library_home_roots());
   }
 
   std::vector<fs::path> lutris_art_roots() {
-    std::vector<fs::path> roots;
-    std::set<fs::path> seen_roots;
-    auto append_root = [&](fs::path path) {
-      if (path.empty()) {
-        return;
-      }
-      path = path.lexically_normal();
-      if (seen_roots.insert(path).second) {
-        roots.push_back(std::move(path));
-      }
-    };
-
-    const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
-    const char *xdg_cache_home = std::getenv("XDG_CACHE_HOME");
-    if (xdg_data_home && *xdg_data_home) {
-      append_root(fs::path(xdg_data_home) / "lutris");
-    }
-    if (xdg_cache_home && *xdg_cache_home) {
-      append_root(fs::path(xdg_cache_home) / "lutris");
-    }
-    for (const auto &home : game_library::library_home_roots()) {
-      append_root(home / ".local/share/lutris");
-      append_root(home / ".cache/lutris");
-    }
-
-    return roots;
+    return game_library::lutris_art_roots(game_library::library_home_roots());
   }
 
   std::string lutris_image_path_for_app_node(const nlohmann::json &app) {
@@ -2958,19 +2908,26 @@ namespace confighttp {
       }
     }
 
-    // Scan Heroic Games Launcher (GOG + Epic via Legendary)
+    // Scan Heroic Games Launcher (GOG + Epic via Legendary), native and Flatpak installs
     nlohmann::json heroic_games = nlohmann::json::array();
-    if (!home_roots.empty()) {
-      std::vector<std::pair<std::string, std::string>> heroic_paths;
-      for (const auto &home : home_roots) {
-        heroic_paths.emplace_back((home / ".config/heroic/gog_store/installed.json").string(), "gog");
-        heroic_paths.emplace_back((home / ".config/heroic/legendaryConfig/legendary/installed.json").string(), "epic");
+    std::set<std::string> seen_heroic_keys;
+    const auto heroic_already_imported = [&existing_cmds](const std::string &store, const std::string &app_name) {
+      // A title can already be published under either install's command form, including one
+      // a user typed by hand before this scan could find their Flatpak.
+      for (const auto &candidate : game_library::heroic_launch_commands(store, app_name)) {
+        if (existing_cmds.count(candidate) > 0) {
+          return true;
+        }
       }
 
-      for (const auto &[path, store] : heroic_paths) {
-        if (!std::filesystem::exists(path)) continue;
+      return false;
+    };
+
+    if (!home_roots.empty()) {
+      for (const auto &[library_path, store, install] : game_library::heroic_installed_files(home_roots)) {
+        if (!std::filesystem::exists(library_path)) continue;
         try {
-          std::ifstream f(path);
+          std::ifstream f(library_path);
           auto data = nlohmann::json::parse(f);
 
           // Heroic installed.json: { "installed": [ { "app_name": "...", "title": "...", ... } ] }
@@ -2993,8 +2950,15 @@ namespace confighttp {
             // Skip DLC / tools
             if (entry.contains("is_dlc") && entry["is_dlc"].get<bool>()) continue;
 
-            std::string launch_cmd = "setsid heroic heroic://launch/" + store + "/" + app_name;
-            bool already = existing_cmds.count(launch_cmd) > 0;
+            // Both installs can hold the same title, and the launch command follows the
+            // install this entry came from.
+            if (!seen_heroic_keys.insert(store + "/" + app_name).second) continue;
+
+            std::string launch_cmd = game_library::heroic_launch_command(store, app_name, install);
+            if (launch_cmd.empty()) {
+              BOOST_LOG(warning) << "Skipped Heroic title [" << title << "]: app name is not safe to launch";
+              continue;
+            }
 
             nlohmann::json game;
             game["name"] = title;
@@ -3002,24 +2966,19 @@ namespace confighttp {
             game["store"] = store;
             game["cmd"] = launch_cmd;
             game["source"] = "heroic";
-            game["already_imported"] = already;
+            game["already_imported"] = heroic_already_imported(store, app_name);
             heroic_games.push_back(game);
           }
         } catch (const std::exception &e) {
-          BOOST_LOG(warning) << "Failed to parse Heroic library at " << path << ": " << e.what();
+          BOOST_LOG(warning) << "Failed to parse Heroic library at " << library_path.string() << ": " << e.what();
         }
       }
 
       // Also check Heroic library.json (a combined library cache)
-      std::vector<std::pair<std::string, std::string>> heroic_cache_paths;
-      for (const auto &home : home_roots) {
-        heroic_cache_paths.emplace_back((home / ".config/heroic/store_cache/gog_library.json").string(), "gog");
-        heroic_cache_paths.emplace_back((home / ".config/heroic/store_cache/egs_library.json").string(), "epic");
-      }
-      for (const auto &[path, store] : heroic_cache_paths) {
-        if (!std::filesystem::exists(path)) continue;
+      for (const auto &[library_path, store, install] : game_library::heroic_cache_files(home_roots)) {
+        if (!std::filesystem::exists(library_path)) continue;
         try {
-          std::ifstream f(path);
+          std::ifstream f(library_path);
           auto data = nlohmann::json::parse(f);
           auto &lib = data.contains("library") ? data["library"] : data;
           if (!lib.is_array()) continue;
@@ -3027,16 +2986,15 @@ namespace confighttp {
             std::string app_name = entry.value("app_name", "");
             std::string title = entry.value("title", entry.value("app_name", ""));
             if (title.empty() || app_name.empty()) continue;
-            // Skip if already found from installed.json
-            bool dup = false;
-            for (const auto &existing : heroic_games) {
-              if (existing["app_name"] == app_name) { dup = true; break; }
-            }
-            if (dup) continue;
             if (!entry.value("is_installed", false)) continue;
+            // Skip what installed.json or the other install already provided
+            if (!seen_heroic_keys.insert(store + "/" + app_name).second) continue;
 
-            std::string launch_cmd = "setsid heroic heroic://launch/" + store + "/" + app_name;
-            bool already = existing_cmds.count(launch_cmd) > 0;
+            std::string launch_cmd = game_library::heroic_launch_command(store, app_name, install);
+            if (launch_cmd.empty()) {
+              BOOST_LOG(warning) << "Skipped Heroic title [" << title << "]: app name is not safe to launch";
+              continue;
+            }
 
             nlohmann::json game;
             game["name"] = title;
@@ -3044,7 +3002,7 @@ namespace confighttp {
             game["store"] = store;
             game["cmd"] = launch_cmd;
             game["source"] = "heroic";
-            game["already_imported"] = already;
+            game["already_imported"] = heroic_already_imported(store, app_name);
             heroic_games.push_back(game);
           }
         } catch (...) {}

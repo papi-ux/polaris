@@ -191,8 +191,87 @@ namespace game_library {
       }
     }
 
+    constexpr std::string_view heroic_flatpak_app_id = "com.heroicgameslauncher.hgl";
+    constexpr std::string_view lutris_flatpak_app_id = "net.lutris.Lutris";
+
+    /**
+     * @brief Whether PATH holds an executable by this name.
+     *
+     * A Flatpak-only host has the launcher installed and no such binary, and asking before
+     * spawning keeps the scan from paying for a shell that can only fail.
+     */
+    bool binary_on_path(std::string_view name) {
+    #if defined(_WIN32)
+      (void) name;
+      return false;
+    #else
+      const char *path_env = std::getenv("PATH");
+      if (!path_env || !*path_env) {
+        return false;
+      }
+
+      std::string_view remaining(path_env);
+      while (true) {
+        const auto separator = remaining.find(':');
+        const auto entry = remaining.substr(0, separator);
+        if (!entry.empty()) {
+          const auto candidate = (std::filesystem::path(entry) / name).string();
+          if (::access(candidate.c_str(), X_OK) == 0) {
+            return true;
+          }
+        }
+
+        if (separator == std::string_view::npos) {
+          return false;
+        }
+        remaining.remove_prefix(separator + 1);
+      }
+    #endif
+    }
+
+    struct heroic_config_root_t {
+      std::filesystem::path path;
+      launcher_install_t install = launcher_install_t::native;
+    };
+
+    /** @brief Heroic's config directory for every install we can see, native first. */
+    std::vector<heroic_config_root_t> heroic_config_roots(const std::vector<std::filesystem::path> &home_roots) {
+      std::vector<heroic_config_root_t> roots;
+      std::set<std::filesystem::path> seen;
+      const auto append = [&roots, &seen](std::filesystem::path path, launcher_install_t install) {
+        if (path.empty()) {
+          return;
+        }
+
+        path = path.lexically_normal();
+        if (seen.insert(path).second) {
+          roots.push_back(heroic_config_root_t {std::move(path), install});
+        }
+      };
+
+      for (const auto &home : home_roots) {
+        if (home.empty()) {
+          continue;
+        }
+
+        append(home / ".config" / "heroic", launcher_install_t::native);
+        append(
+          home / ".var" / "app" / std::filesystem::path(heroic_flatpak_app_id) / "config" / "heroic",
+          launcher_install_t::flatpak
+        );
+      }
+
+      return roots;
+    }
+
     std::string read_lutris_list_games_json() {
     #ifdef __linux__
+      // Flatpak-only hosts have no lutris binary. Their games come from the directory scan,
+      // which reads the same YAML out of the Flatpak home instead of shelling out.
+      if (!binary_on_path("lutris")) {
+        return {};
+      }
+
       std::string output;
       std::array<char, 4096> buffer {};
       FILE *pipe = popen("lutris --list-games --json 2>/dev/null", "r");
@@ -234,7 +313,156 @@ namespace game_library {
   }
 
   std::string lutris_launch_command(const std::string &slug) {
-    return "setsid lutris lutris:rungame/" + slug;
+    return lutris_launch_command(slug, launcher_install_t::native);
+  }
+
+  std::string lutris_launch_command(const std::string &slug, launcher_install_t install) {
+    const auto uri = "lutris:rungame/" + slug;
+    if (install == launcher_install_t::flatpak) {
+      return "setsid flatpak run " + std::string(lutris_flatpak_app_id) + " " + uri;
+    }
+
+    return "setsid lutris " + uri;
+  }
+
+  std::vector<std::filesystem::path> lutris_game_config_dirs(const std::vector<std::filesystem::path> &home_roots) {
+    std::vector<std::filesystem::path> dirs;
+    const char *xdg_config_home = std::getenv("XDG_CONFIG_HOME");
+    const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
+    if (xdg_config_home && *xdg_config_home) {
+      append_unique_path(dirs, std::filesystem::path(xdg_config_home) / "lutris" / "games");
+    }
+    if (xdg_data_home && *xdg_data_home) {
+      append_unique_path(dirs, std::filesystem::path(xdg_data_home) / "lutris" / "games");
+    }
+
+    for (const auto &home : home_roots) {
+      if (home.empty()) {
+        continue;
+      }
+
+      append_unique_path(dirs, home / ".config" / "lutris" / "games");
+      append_unique_path(dirs, home / ".local" / "share" / "lutris" / "games");
+
+      const auto flatpak_home = home / ".var" / "app" / std::filesystem::path(lutris_flatpak_app_id);
+      append_unique_path(dirs, flatpak_home / "config" / "lutris" / "games");
+      append_unique_path(dirs, flatpak_home / "data" / "lutris" / "games");
+    }
+
+    return dirs;
+  }
+
+  std::vector<std::filesystem::path> lutris_art_roots(const std::vector<std::filesystem::path> &home_roots) {
+    std::vector<std::filesystem::path> roots;
+    const char *xdg_data_home = std::getenv("XDG_DATA_HOME");
+    const char *xdg_cache_home = std::getenv("XDG_CACHE_HOME");
+    if (xdg_data_home && *xdg_data_home) {
+      append_unique_path(roots, std::filesystem::path(xdg_data_home) / "lutris");
+    }
+    if (xdg_cache_home && *xdg_cache_home) {
+      append_unique_path(roots, std::filesystem::path(xdg_cache_home) / "lutris");
+    }
+
+    for (const auto &home : home_roots) {
+      if (home.empty()) {
+        continue;
+      }
+
+      append_unique_path(roots, home / ".local" / "share" / "lutris");
+      append_unique_path(roots, home / ".cache" / "lutris");
+
+      const auto flatpak_home = home / ".var" / "app" / std::filesystem::path(lutris_flatpak_app_id);
+      append_unique_path(roots, flatpak_home / "data" / "lutris");
+      append_unique_path(roots, flatpak_home / "cache" / "lutris");
+    }
+
+    return roots;
+  }
+
+  bool path_is_under_flatpak_app(const std::filesystem::path &path, std::string_view app_id) {
+    if (app_id.empty()) {
+      return false;
+    }
+
+    const auto normalized = path.lexically_normal();
+    for (auto part = normalized.begin(); part != normalized.end(); ++part) {
+      if (part->string() != ".var") {
+        continue;
+      }
+
+      const auto app_dir = std::next(part);
+      if (app_dir == normalized.end() || app_dir->string() != "app") {
+        continue;
+      }
+
+      const auto id = std::next(app_dir);
+      if (id != normalized.end() && id->string() == app_id) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  std::vector<heroic_library_file_t> heroic_installed_files(const std::vector<std::filesystem::path> &home_roots) {
+    std::vector<heroic_library_file_t> files;
+    for (const auto &root : heroic_config_roots(home_roots)) {
+      files.push_back(heroic_library_file_t {root.path / "gog_store" / "installed.json", "gog", root.install});
+      files.push_back(heroic_library_file_t {
+        root.path / "legendaryConfig" / "legendary" / "installed.json",
+        "epic",
+        root.install
+      });
+    }
+
+    return files;
+  }
+
+  std::vector<heroic_library_file_t> heroic_cache_files(const std::vector<std::filesystem::path> &home_roots) {
+    std::vector<heroic_library_file_t> files;
+    for (const auto &root : heroic_config_roots(home_roots)) {
+      files.push_back(heroic_library_file_t {root.path / "store_cache" / "gog_library.json", "gog", root.install});
+      files.push_back(heroic_library_file_t {root.path / "store_cache" / "egs_library.json", "epic", root.install});
+    }
+
+    return files;
+  }
+
+  bool is_heroic_app_name_safe(const std::string &app_name) {
+    if (app_name.empty()) {
+      return false;
+    }
+
+    return std::all_of(app_name.begin(), app_name.end(), [](unsigned char ch) {
+      return std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.';
+    });
+  }
+
+  std::string heroic_launch_command(const std::string &store, const std::string &app_name, launcher_install_t install) {
+    // Both halves reach a shell through the app's launch command, the same exposure the
+    // Steam app id and the Lutris slug are already checked for.
+    if (!is_heroic_app_name_safe(store) || !is_heroic_app_name_safe(app_name)) {
+      return {};
+    }
+
+    const auto uri = "heroic://launch/" + store + "/" + app_name;
+    if (install == launcher_install_t::flatpak) {
+      return "setsid flatpak run " + std::string(heroic_flatpak_app_id) + " " + uri;
+    }
+
+    return "setsid heroic " + uri;
+  }
+
+  std::vector<std::string> heroic_launch_commands(const std::string &store, const std::string &app_name) {
+    std::vector<std::string> commands;
+    for (const auto install : {launcher_install_t::native, launcher_install_t::flatpak}) {
+      auto command = heroic_launch_command(store, app_name, install);
+      if (!command.empty()) {
+        commands.push_back(std::move(command));
+      }
+    }
+
+    return commands;
   }
 
   std::string find_lutris_image_path(const std::string &slug, const std::vector<std::filesystem::path> &lutris_roots) {
@@ -537,11 +765,17 @@ namespace game_library {
       name = slug_to_name(slug);
     }
 
+    // Where the config was found is what says how to launch it: a config under
+    // ~/.var/app/net.lutris.Lutris belongs to a Flatpak install that has no lutris on PATH.
+    const auto install = path_is_under_flatpak_app(path, lutris_flatpak_app_id) ?
+      launcher_install_t::flatpak :
+      launcher_install_t::native;
+
     return lutris_game_t {
       .name = name,
       .slug = slug,
       .runner = runner,
-      .command = lutris_launch_command(slug),
+      .command = lutris_launch_command(slug, install),
     };
   }
 
