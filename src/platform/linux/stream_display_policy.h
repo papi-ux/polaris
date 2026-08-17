@@ -68,6 +68,16 @@ namespace stream_display_policy {
    */
   bool selection_available(std::string_view selection);
 
+  /**
+   * @brief Whether a client may drive this selection for one session.
+   *
+   * A path that swaps host output topology changes the machine's physical display
+   * arrangement, so it stays host-default-only rather than something a single
+   * client can turn on for one launch. Derived from the path's topology rather
+   * than an id list, so a future swapping path inherits the rule.
+   */
+  bool selection_session_overridable(std::string_view selection);
+
   std::string selection_unavailable_reason(std::string_view selection);
 
   /**
