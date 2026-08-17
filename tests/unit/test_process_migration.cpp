@@ -4436,6 +4436,29 @@ TEST(GamescopeNestedSessionContract, StartupUsesItsOwnVisibleTimeoutAndTheNixMod
   EXPECT_EQ(options.find("injectApps"), std::string::npos);
 }
 
+TEST(HeadlessDongleContract, HeadlessDongleReachesTopologyPrepareWithoutAutoManageAlreadyOn) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto collapsed_source = collapse_whitespace(source);
+
+  // headless_dongle self-configures inside prepare_for_stream(): that path calls
+  // ensure_dongle_outputs_configured(), which auto-detects the connectors and is
+  // what sets auto_manage_displays. Gating the call solely on auto_manage_displays
+  // therefore made the mode unconfigurable from polaris.conf, because
+  // apply_selection() is the only other place that sets the flag and the mode is
+  // refused as a per-session override. The session still streamed, so the failure
+  // was silent: no topology swap and no blanked panel.
+  const auto guard = collapsed_source.find(
+    "if (config::video.linux_display.auto_manage_displays || "
+    "config::video.linux_display.stream_mode == \"headless_dongle\") {"
+  );
+  EXPECT_NE(guard, std::string::npos)
+    << "headless_dongle must reach enable_streaming_display even when "
+       "auto_manage_displays is still false, or the mode cannot self-configure";
+
+  const auto call = collapsed_source.find("linux_display::enable_streaming_display(", guard);
+  EXPECT_NE(call, std::string::npos);
+}
+
 TEST(GamescopeNestedSessionContract, TeardownGetsTheSameBudgetAndVisibilityAsStartup) {
   const auto source = read_source_file_for_contract("src/process.cpp");
   const auto collapsed_source = collapse_whitespace(source);

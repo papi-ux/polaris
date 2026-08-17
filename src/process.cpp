@@ -6641,8 +6641,20 @@ namespace proc {
 #endif
 
 #ifdef __linux__
-    // Enable streaming display BEFORE encoder probe so HDMI-A-1 is available
-    if (config::video.linux_display.auto_manage_displays) {
+    // Enable streaming display BEFORE encoder probe so the dongle is available.
+    //
+    // headless_dongle has to reach prepare_for_stream() even while
+    // auto_manage_displays is still false, because that path self-configures
+    // through ensure_dongle_outputs_configured(): it auto-detects the connectors,
+    // sets output_name, and is what turns auto_manage_displays on in the first
+    // place. Gating solely on the flag made the mode unconfigurable from
+    // polaris.conf, since apply_selection() is the only other place that sets it
+    // and headless_dongle is refused as a per-session override. The result was a
+    // session that streamed whatever the portal happened to grab, performed no
+    // topology swap, and never blanked the panel the mode promises to blank,
+    // without logging why.
+    if (config::video.linux_display.auto_manage_displays ||
+        config::video.linux_display.stream_mode == "headless_dongle") {
       int target_fps = launch_session->fps ? launch_session->fps : 60000;
       if (target_fps >= 1000) {
         target_fps /= 1000;
