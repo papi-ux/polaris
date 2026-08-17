@@ -92,6 +92,23 @@ TEST(SessionStreamMode, AcceptsRegistryModesItCanRunPerSession) {
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("desktop_display"), "desktop_display");
 }
 
+TEST(SessionStreamMode, DerivesSessionOverridabilityFromTopologyNotAnIdList) {
+  // The rule a client is told and the rule the gate enforces have to be the
+  // same rule, or the client offers a mode the host silently drops. It is
+  // derived from the path's topology so a future swapping path inherits it
+  // without editing a list: swapping the host's primary output rearranges the
+  // machine itself, which is a host decision rather than a per-launch one.
+  EXPECT_FALSE(stream_display_policy::selection_session_overridable("headless_dongle"));
+
+  EXPECT_TRUE(stream_display_policy::selection_session_overridable("headless_stream"));
+  EXPECT_TRUE(stream_display_policy::selection_session_overridable("windowed_stream"));
+  EXPECT_TRUE(stream_display_policy::selection_session_overridable("desktop_display"));
+
+  // Unknown ids are not "restricted", they are simply not paths. The gate
+  // checks validity first so they report as unknown rather than as reserved.
+  EXPECT_FALSE(stream_display_policy::selection_session_overridable("garbage_mode"));
+}
+
 TEST(SessionStreamMode, RejectsDongleReservedUnknownAndEmpty) {
   // headless_dongle swaps host output topology: host-default-only by design.
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("headless_dongle"), "");
