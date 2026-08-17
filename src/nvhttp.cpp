@@ -6012,6 +6012,7 @@ namespace nvhttp {
       // refresh stayed capped at the previous session's rate (issue #367:
       // a 120 FPS client resuming a 60 Hz session could never get past 60).
       stream_runtime::labwc::ensure_output_refresh(launch_session->fps);
+      stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
     }
 #endif
 

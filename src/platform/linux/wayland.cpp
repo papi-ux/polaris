@@ -680,6 +680,7 @@ namespace wl {
     // Add listener
     zwlr_screencopy_frame_v1_add_listener(pending_frame, &listener, this);
 
+    timing_tracker.mark_requested(std::chrono::steady_clock::now());
     status = WAITING;
   }
 
@@ -1222,6 +1223,13 @@ namespace wl {
   ) {
     BOOST_LOG(verbose) << "Frame ready"sv;
 
+    if (!timing_tracker.mark_presentation(tv_sec_hi, tv_sec_lo, tv_nsec) &&
+        !invalid_presentation_timestamp_logged) {
+      BOOST_LOG(warning) << "Screencopy frame supplied an invalid presentation timestamp"sv;
+      invalid_presentation_timestamp_logged = true;
+    }
+    timing_tracker.mark_ready(std::chrono::steady_clock::now());
+
     if (shm_data && shm_size > 0) {
       // SHM frame is ready — data is in shm_data
       shm_frame_ready = true;
@@ -1246,6 +1254,7 @@ namespace wl {
                      << " target_format="sv << next_frame->buffer_format
                      << " target_modifier="sv << next_frame->buffer_modifier;
     next_frame->destroy();
+    timing_tracker.reset();
 
     destroy_capture_frame(frame);
     status = REINIT;

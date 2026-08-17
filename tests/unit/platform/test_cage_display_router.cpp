@@ -853,6 +853,14 @@ TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentRef
     1080,
     120
   ));
+  const auto reported_refresh = cage_display_router::output_current_refresh_hz_for_tests(
+    output,
+    "HEADLESS-1",
+    1920,
+    1080
+  );
+  ASSERT_TRUE(reported_refresh);
+  EXPECT_DOUBLE_EQ(*reported_refresh, 120.0);
 }
 
 TEST(CageDisplayRouterPolicyTests, OutputModeParserRejectsWrongCurrentRefresh) {
