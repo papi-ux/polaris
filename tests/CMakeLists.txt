@@ -77,6 +77,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
     ${CMAKE_SOURCE_DIR}/src/update_status.cpp
+    ${CMAKE_SOURCE_DIR}/src/verified_action.cpp
     ${CMAKE_SOURCE_DIR}/src/rswrapper.c
 )
 
@@ -112,6 +113,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_private_state_file.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_verified_action.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_web_session_store.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_beat_times.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_planner.cpp
@@ -159,6 +161,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_common.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cage_display_router.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_default_render_device.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_display_topology.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_linux_process_argv.cpp
