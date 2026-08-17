@@ -127,7 +127,6 @@ namespace cage_display_router {
     .effective_headless = false,
     .gpu_native_override_active = false,
     .backend_name = "labwc",
-    .path_id = "headless_stream",
   };
 
   // -----------------------------------------------------------------------
@@ -1102,6 +1101,7 @@ namespace cage_display_router {
     cage_runtime_state.effective_headless = headless;
     cage_runtime_state.gpu_native_override_active = requested_headless && force_windowed;
     cage_runtime_state.backend_name = "labwc";
+    cage_runtime_state.path_id = headless ? "headless_stream" : "windowed_stream";
     cage_runtime_state.reported_output_refresh_hz = 0.0;
 
     BOOST_LOG(info) << "labwc: requested_headless=" << requested_headless
