@@ -365,6 +365,7 @@
         "reason",
         "restart_required",
         "runtime",
+        "session_overridable",
         "topology",
         "unavailable_reason",
         "value"

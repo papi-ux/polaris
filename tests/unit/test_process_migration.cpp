@@ -3467,7 +3467,10 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsi
   const auto execute = source.substr(execute_start, execute_end - execute_start);
   const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
   const auto snapshot_guard = execute.find("snapshot_steam_big_picture_input_guard(");
-  const auto first_prep_launch = execute.find("platf::run_command(cmd.elevated, true, cmd.do_cmd");
+  // Pinned to the prep loop rather than to that call's argument list: #450
+  // reformatted the launch across lines and added a prep_output argument, which
+  // broke the old literal without changing the ordering this test guards.
+  const auto first_prep_launch = execute.find("for (; _app_prep_it != std::end(_app.prep_cmds); ++_app_prep_it)");
   const auto failed_launch_guard = execute.find("stop_guard_on_failed_launch = util::fail_guard");
   const auto failed_launch_stop = execute.find("stop_steam_big_picture_input_guard();", failed_launch_guard);
   const auto first_cage_launch = execute.find("start_cage_with_runtime_fallback(game_cmd)");
@@ -4384,7 +4387,10 @@ TEST(ProcConfiguredCommandWaitContract, CommandsRunUnderTheLifecycleLockWaitWith
   // detached thread holding no lock, where taking a long time blocks nothing.
   const auto source = read_source_file_for_contract("src/process.cpp");
 
-  const auto helper = source.find("void wait_for_configured_command(");
+  // Pinned on the helper's name alone. #450 changed it from void to bool so
+  // callers can see a timeout, and the old pin carried the return type, so
+  // reporting more about the wait read here as having removed the wait.
+  const auto helper = source.find("wait_for_configured_command(");
   ASSERT_NE(helper, std::string::npos);
 
   // The helper polls rather than calling child::wait_for(), which Boost marks
