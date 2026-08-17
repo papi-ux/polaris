@@ -110,6 +110,9 @@ TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
   stats.runtime_backend = "labwc";
   stats.runtime_requested_headless = true;
   stats.runtime_effective_headless = true;
+  stats.runtime_reported_refresh_hz = 120.0;
+  stats.capture_source_fps = 119.7;
+  stats.capture_pacing = "source_driven";
   stats.capture_transport = platf::frame_transport_e::shm;
   stats.capture_residency = platf::frame_residency_e::cpu;
   stats.capture_format = platf::frame_format_e::bgra8;
@@ -130,6 +133,9 @@ TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
   EXPECT_EQ(json.at("runtime_backend"), "labwc");
   EXPECT_TRUE(json.at("runtime_requested_headless"));
   EXPECT_TRUE(json.at("runtime_effective_headless"));
+  EXPECT_DOUBLE_EQ(json.at("runtime_reported_refresh_hz"), 120.0);
+  EXPECT_DOUBLE_EQ(json.at("capture_source_fps"), 119.7);
+  EXPECT_EQ(json.at("capture_pacing"), "source_driven");
   EXPECT_FALSE(json.at("runtime_gpu_native_override_active"));
 }
 
@@ -1166,6 +1172,29 @@ TEST(StreamStatsHotFieldTests, UpdateFrameDeliveryIsVisibleThroughGetCurrent) {
   EXPECT_DOUBLE_EQ(stats.dropped_frame_ratio, 0.01);
   EXPECT_DOUBLE_EQ(stats.avg_frame_age_ms, 6.5);
   EXPECT_DOUBLE_EQ(stats.frame_jitter_ms, 1.2);
+
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, CaptureCadenceTelemetrySeparatesSourceFromEncoder) {
+  stream_stats::update_video_stats(118.9, 24000, 3.25, "hevc", 1920, 1080);
+  stream_stats::update_capture_source_fps(119.7);
+  stream_stats::update_capture_pacing("source_driven");
+  stream_stats::update_runtime_state({
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+    .path_id = "headless_stream",
+    .reported_output_refresh_hz = 120.0,
+  });
+
+  const auto stats = stream_stats::get_current();
+
+  EXPECT_DOUBLE_EQ(stats.runtime_reported_refresh_hz, 120.0);
+  EXPECT_DOUBLE_EQ(stats.capture_source_fps, 119.7);
+  EXPECT_DOUBLE_EQ(stats.fps, 118.9);
+  EXPECT_EQ(stats.capture_pacing, "source_driven");
 
   stream_stats::update_stream_active(false);
 }

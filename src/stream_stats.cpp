@@ -71,6 +71,7 @@ namespace stream_stats {
     std::atomic<double> hot_dropped_frame_ratio {0.0};
     std::atomic<double> hot_avg_frame_age_ms {0.0};
     std::atomic<double> hot_frame_jitter_ms {0.0};
+    std::atomic<double> hot_capture_source_fps {0.0};
     std::atomic<double> hot_latency_ms {0.0};
     std::atomic<double> hot_packet_loss {0.0};
     std::atomic<bool> hot_network_risk {false};
@@ -117,6 +118,7 @@ namespace stream_stats {
       hot_dropped_frame_ratio.store(0.0, std::memory_order_relaxed);
       hot_avg_frame_age_ms.store(0.0, std::memory_order_relaxed);
       hot_frame_jitter_ms.store(0.0, std::memory_order_relaxed);
+      hot_capture_source_fps.store(0.0, std::memory_order_relaxed);
       hot_latency_ms.store(0.0, std::memory_order_relaxed);
       hot_packet_loss.store(0.0, std::memory_order_relaxed);
       {
@@ -292,6 +294,7 @@ namespace stream_stats {
     j["runtime_requested_headless"] = runtime_requested_headless;
     j["runtime_effective_headless"] = runtime_effective_headless;
     j["runtime_gpu_native_override_active"] = runtime_gpu_native_override_active;
+    j["runtime_reported_refresh_hz"] = runtime_reported_refresh_hz;
     j["runtime_display_warning"] = runtime_display_warning;
     j["capture_transport"] = platf::from_frame_transport(capture_transport);
     j["capture_residency"] = platf::from_frame_residency(capture_residency);
@@ -338,6 +341,8 @@ namespace stream_stats {
     // variance of otherwise on-target delivery intervals.
     j["frame_interval_error_ms"] = frame_jitter_ms;
     j["frame_jitter_ms"] = frame_jitter_ms;
+    j["capture_source_fps"] = capture_source_fps;
+    j["capture_pacing"] = capture_pacing;
     j["codec"] = codec;
     j["pacing_policy"] = pacing_policy;
     j["optimization_source"] = optimization_source;
@@ -1319,6 +1324,16 @@ namespace stream_stats {
     current_stats.runtime_requested_headless = state.requested_headless;
     current_stats.runtime_effective_headless = state.effective_headless;
     current_stats.runtime_gpu_native_override_active = state.gpu_native_override_active;
+    current_stats.runtime_reported_refresh_hz = state.reported_output_refresh_hz;
+  }
+
+  void update_capture_source_fps(double fps) {
+    hot_capture_source_fps.store(std::max(0.0, fps), std::memory_order_relaxed);
+  }
+
+  void update_capture_pacing(const std::string &pacing) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.capture_pacing = pacing;
   }
 
   void update_runtime_display_warning(const std::string &warning) {
@@ -2116,6 +2131,7 @@ namespace stream_stats {
     result.dropped_frame_ratio = hot_dropped_frame_ratio.load(std::memory_order_relaxed);
     result.avg_frame_age_ms = hot_avg_frame_age_ms.load(std::memory_order_relaxed);
     result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
+    result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
     result.latency_ms = hot_latency_ms.load(std::memory_order_relaxed);
     result.packet_loss = hot_packet_loss.load(std::memory_order_relaxed);
     result.network_risk = hot_network_risk.load(std::memory_order_relaxed);

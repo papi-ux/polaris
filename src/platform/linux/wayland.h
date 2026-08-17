@@ -146,6 +146,10 @@ namespace wl {
     void ready(zwlr_screencopy_frame_v1 *frame, std::uint32_t tv_sec_hi, std::uint32_t tv_sec_lo, std::uint32_t tv_nsec);
     void failed(zwlr_screencopy_frame_v1 *frame);
 
+    const extcopy_timing_sample_t &last_timing_sample() const {
+      return timing_tracker.last_sample();
+    }
+
     frame_t *get_next_frame() {
       return current_frame == &frames[0] ? &frames[1] : &frames[0];
     }
@@ -217,6 +221,8 @@ namespace wl {
     bool logged_linear_dmabuf_attempt {false};
     bool logged_linear_dmabuf_unsupported {false};
     std::uint64_t next_buffer_key {1};
+    bool invalid_presentation_timestamp_logged {false};
+    extcopy_timing_tracker_t timing_tracker;
 
     void create_and_copy_shm(zwlr_screencopy_frame_v1 *frame);
     void cleanup_shm();

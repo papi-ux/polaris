@@ -808,12 +808,11 @@ namespace cage_display_router {
     );
   }
 
-  static bool output_reports_current_mode(
+  static std::optional<double> output_current_refresh_hz(
     std::string_view wlr_randr_output,
     std::string_view output_name,
     int width,
-    int height,
-    int refresh_hz = 0
+    int height
   ) {
     const std::string mode = std::to_string(width) + "x" + std::to_string(height);
     std::istringstream stream(std::string {wlr_randr_output});
@@ -840,10 +839,6 @@ namespace cage_display_router {
 
       if (line.find(mode) != std::string::npos &&
           (line.find("current") != std::string::npos || line.find('*') != std::string::npos)) {
-        if (refresh_hz <= 0) {
-          return true;
-        }
-
         const auto hz_pos = line.find(" Hz");
         const auto comma_pos = line.rfind(',', hz_pos);
         if (hz_pos == std::string::npos || comma_pos == std::string::npos || comma_pos >= hz_pos) {
@@ -851,16 +846,34 @@ namespace cage_display_router {
         }
 
         try {
-          const auto refresh_value = std::stod(line.substr(comma_pos + 1, hz_pos - comma_pos - 1));
-          if (std::abs(refresh_value - static_cast<double>(refresh_hz)) < 0.5) {
-            return true;
-          }
+          return std::stod(line.substr(comma_pos + 1, hz_pos - comma_pos - 1));
         } catch (...) {
+          return std::nullopt;
         }
       }
     }
 
-    return false;
+    return std::nullopt;
+  }
+
+  static bool output_reports_current_mode(
+    std::string_view wlr_randr_output,
+    std::string_view output_name,
+    int width,
+    int height,
+    int refresh_hz = 0
+  ) {
+    const auto current_refresh = output_current_refresh_hz(
+      wlr_randr_output,
+      output_name,
+      width,
+      height
+    );
+
+    if (!current_refresh) {
+      return false;
+    }
+    return refresh_hz <= 0 || std::abs(*current_refresh - static_cast<double>(refresh_hz)) < 0.5;
   }
 
   static bool wait_for_requested_mode(
@@ -1008,6 +1021,15 @@ namespace cage_display_router {
     return output_reports_current_mode(wlr_randr_output, output_name, width, height, refresh_hz);
   }
 
+  std::optional<double> output_current_refresh_hz_for_tests(
+    std::string_view wlr_randr_output,
+    std::string_view output_name,
+    int width,
+    int height
+  ) {
+    return output_current_refresh_hz(wlr_randr_output, output_name, width, height);
+  }
+
   std::string format_wlr_custom_mode_for_tests(int width, int height, int refresh_hz) {
     return format_wlr_custom_mode(width, height, refresh_hz);
   }
@@ -1080,6 +1102,7 @@ namespace cage_display_router {
     cage_runtime_state.effective_headless = headless;
     cage_runtime_state.gpu_native_override_active = requested_headless && force_windowed;
     cage_runtime_state.backend_name = "labwc";
+    cage_runtime_state.reported_output_refresh_hz = 0.0;
 
     BOOST_LOG(info) << "labwc: requested_headless=" << requested_headless
                     << " effective_headless=" << headless
@@ -1300,6 +1323,15 @@ namespace cage_display_router {
     cage_mode_width = width;
     cage_mode_height = height;
     cage_mode_refresh_hz = refresh_hz;
+    const auto reported_refresh = output_current_refresh_hz(
+      exec_capture("WAYLAND_DISPLAY=" + cage_wayland_socket + " wlr-randr 2>/dev/null"),
+      output_name,
+      width,
+      height
+    );
+    cage_runtime_state.reported_output_refresh_hz = reported_refresh.value_or(0.0);
+    BOOST_LOG(reported_refresh ? info : warning) << "labwc: Output ["sv << output_name
+      << "] reported_refresh_hz="sv << cage_runtime_state.reported_output_refresh_hz;
     // If the launch deliberately ran below the client's request (optimizer or
     // runtime policy clamp), record the effective rate as a ceiling so a
     // resume cannot re-apply the raw request over that decision.
@@ -1360,15 +1392,26 @@ namespace cage_display_router {
     if (refresh_hz <= 0) {
       return false;
     }
+    const std::string output_name = cage_runtime_state.effective_headless ? "HEADLESS-1" : "WL-1";
     if (refresh_hz == current_refresh_hz) {
-      return true;
+      const auto reported_refresh = output_current_refresh_hz(
+        exec_capture("WAYLAND_DISPLAY=" + cage_wayland_socket + " wlr-randr 2>/dev/null"),
+        output_name,
+        mode_width,
+        mode_height
+      );
+      cage_runtime_state.reported_output_refresh_hz = reported_refresh.value_or(0.0);
+      if (reported_refresh && std::abs(*reported_refresh - static_cast<double>(refresh_hz)) < 0.5) {
+        return true;
+      }
+      BOOST_LOG(warning) << "labwc: Cached output refresh was "sv << current_refresh_hz
+                         << "Hz but wlr-randr no longer reports that mode; re-applying"sv;
     }
 
     // The cage outlives the launch that started it, and the mode is otherwise
     // only ever set from the startup command — a resume carrying a different
     // refresh must re-apply it or the output stays at the old rate for the
     // whole session (issue #367).
-    const std::string output_name = cage_runtime_state.effective_headless ? "HEADLESS-1" : "WL-1";
     const std::string mode = format_wlr_custom_mode(mode_width, mode_height, refresh_hz);
     exec_capture(
       "WAYLAND_DISPLAY=" + cage_wayland_socket +
@@ -1382,6 +1425,12 @@ namespace cage_display_router {
     BOOST_LOG(info) << "labwc: Output ["sv << output_name << "] refresh re-applied for resume — "sv
                     << mode << " (was "sv << current_refresh_hz << "Hz)"sv;
     cage_mode_refresh_hz = refresh_hz;
+    cage_runtime_state.reported_output_refresh_hz = output_current_refresh_hz(
+      exec_capture("WAYLAND_DISPLAY=" + cage_wayland_socket + " wlr-randr 2>/dev/null"),
+      output_name,
+      mode_width,
+      mode_height
+    ).value_or(static_cast<double>(refresh_hz));
     return true;
   }
 

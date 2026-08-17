@@ -89,6 +89,30 @@ TEST(WlgrabCapturePacing, SourceDrivenNeverAddsASecondClock) {
   EXPECT_EQ(pacer.wait_duration(start + 25ms), 0ns);
 }
 
+TEST(WlgrabCapturePacing, PrivateScreencopyUsesOnlyTheCompositorClock) {
+  EXPECT_EQ(
+    wl::screencopy_pacing_policy(true),
+    wl::capture_pacing_policy_e::source_driven
+  );
+  EXPECT_EQ(
+    wl::screencopy_pacing_policy(false),
+    wl::capture_pacing_policy_e::fixed_interval
+  );
+}
+
+TEST(WlgrabCapturePacing, MeasuresSuccessfulSourceFrameRateFromIntervals) {
+  wl::capture_source_rate_tracker_t tracker;
+  const wl::capture_source_rate_tracker_t::time_point_t start {10s};
+
+  EXPECT_FALSE(tracker.note_frame(start));
+  for (int frame = 1; frame < 120; ++frame) {
+    EXPECT_FALSE(tracker.note_frame(start + frame * (1s / 120)));
+  }
+  const auto fps = tracker.note_frame(start + 1s);
+  ASSERT_TRUE(fps);
+  EXPECT_NEAR(*fps, 120.0, 0.01);
+}
+
 TEST(ExtcopyTiming, RecordsRequestReadyAndPresentationIntervals) {
   wl::extcopy_timing_tracker_t timing;
   const wl::extcopy_timing_tracker_t::time_point_t start {10s};
