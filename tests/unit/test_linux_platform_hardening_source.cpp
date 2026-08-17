@@ -50,6 +50,26 @@ TEST(LinuxPlatformHardeningSource, HeadlessVaapiFailsClosedBeforeDmabufInitializ
   EXPECT_NE(process.find("Retaining headless extcopy failure reason"), std::string::npos);
 }
 
+TEST(LinuxPlatformHardeningSource, HeadlessModifierGuardRemainsBehindVaapiContainment) {
+  const auto header = read_source("src/platform/linux/wayland.h");
+  const auto capture = read_source("src/platform/linux/wlgrab.cpp");
+
+  EXPECT_NE(header.find("std::optional<std::uint64_t> capture_modifier() const"), std::string::npos);
+
+  const auto headless_probe = capture.find("if (try_headless_extcopy_dmabuf && gpu_native_capture_supported)");
+  ASSERT_NE(headless_probe, std::string::npos);
+  const auto modifier = capture.find("wlr->extcopy.capture_modifier()", headless_probe);
+  const auto policy = capture.find("gpu_native_dmabuf_is_safe(", modifier);
+  const auto accepted = capture.find("update_headless_extcopy_dmabuf_probe_result(true)", policy);
+  ASSERT_NE(modifier, std::string::npos);
+  ASSERT_NE(policy, std::string::npos);
+  ASSERT_NE(accepted, std::string::npos);
+  EXPECT_LT(modifier, policy);
+  EXPECT_LT(policy, accepted);
+  EXPECT_NE(capture.find("vaapi_headless_modifier_not_linear", policy), std::string::npos);
+  EXPECT_NE(capture.find("vaapi_headless_modifier_unavailable", policy), std::string::npos);
+}
+
 TEST(LinuxPlatformHardeningSource, CudaFormatTransitionReleasesCompleteDestination) {
   const auto source = read_source("src/platform/linux/cuda.cpp");
   const auto transition = source.find("source_fourcc != descriptor.sd.fourcc");
