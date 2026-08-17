@@ -1084,6 +1084,8 @@
     "warning_msg": "Only pair devices you control. A trusted client can launch apps, watch streams, or control the host depending on the permissions you give it."
   },
   "resource_card": {
+    "documentation": "Documentation",
+    "troubleshooting_guide": "Troubleshooting Guide",
     "github_discussions": "GitHub Discussions",
     "github_wiki": "GitHub WiKi",
     "github_stuttering_clinic": "Stuttering Clinic",
