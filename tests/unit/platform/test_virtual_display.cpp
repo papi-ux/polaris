@@ -11,6 +11,51 @@
 #ifdef __linux__
   #include <src/platform/linux/virtual_display.h>
 
+TEST(VirtualDisplayTests, HyprlandMonitorModeReadsBackTheGeometryTheCompositorActuallyHas) {
+  // The whole point of reading this back is that hyprctl's exit status lies:
+  // Hyprland 0.56 answers `hyprctl keyword` with "unknown request" and still
+  // exits 0, so a rejected mode set looked like success and the stream was
+  // captured at the compositor default and scaled (#444).
+  constexpr std::string_view monitors = R"([
+    {"name":"DP-1","width":3440,"height":1440,"refreshRate":99.982},
+    {"name":"POLARIS-HEADLESS-4242-0","width":1920,"height":1080,"refreshRate":60.0}
+  ])";
+
+  const auto actual = virtual_display::hyprland_monitor_mode(monitors, "POLARIS-HEADLESS-4242-0");
+  ASSERT_TRUE(actual.has_value());
+  EXPECT_EQ(actual->width, 1920);
+  EXPECT_EQ(actual->height, 1080);
+  EXPECT_NEAR(actual->refresh_hz, 60.0, 0.001);
+
+  // This is the reported failure in miniature: 2400x1080 was requested and the
+  // output is still 1920x1080, which the caller must be able to notice.
+  EXPECT_NE(actual->width, 2400);
+
+  const auto other = virtual_display::hyprland_monitor_mode(monitors, "DP-1");
+  ASSERT_TRUE(other.has_value());
+  EXPECT_EQ(other->width, 3440);
+}
+
+TEST(VirtualDisplayTests, HyprlandMonitorModeRefusesAbsentOutputsAndUnusableGeometry) {
+  constexpr std::string_view monitors = R"([{"name":"DP-1","width":3440,"height":1440}])";
+
+  // Absent output: no answer, not a zero-sized one.
+  EXPECT_FALSE(virtual_display::hyprland_monitor_mode(monitors, "POLARIS-HEADLESS-4242-0").has_value());
+
+  // Present but unusable geometry must not read as a successful mode set.
+  EXPECT_FALSE(
+    virtual_display::hyprland_monitor_mode(R"([{"name":"X","width":0,"height":0}])", "X").has_value()
+  );
+  EXPECT_FALSE(
+    virtual_display::hyprland_monitor_mode(R"([{"name":"X"}])", "X").has_value()
+  );
+
+  // Malformed or non-array input is a gap, not a match.
+  EXPECT_FALSE(virtual_display::hyprland_monitor_mode("not json", "X").has_value());
+  EXPECT_FALSE(virtual_display::hyprland_monitor_mode("{}", "X").has_value());
+  EXPECT_FALSE(virtual_display::hyprland_monitor_mode("", "X").has_value());
+}
+
 TEST(VirtualDisplayTests, BackendDetectionLogCacheOnlySignalsOnFirstObservationAndChanges) {
   virtual_display::backend_detection_log_cache_t cache;
 

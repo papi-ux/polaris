@@ -118,6 +118,26 @@ namespace virtual_display {
    */
   bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name);
 
+  /// An output's active mode as the compositor reports it.
+  struct hyprland_mode_t {
+    int width = 0;
+    int height = 0;
+    double refresh_hz = 0.0;
+  };
+
+  /**
+   * @brief Read an output's active mode out of `hyprctl monitors -j`.
+   *
+   * The compositor's own answer is the only trustworthy signal that a mode set
+   * landed: `hyprctl keyword` exits 0 on Hyprland 0.56 even when it rejects the
+   * request outright (#444). Returns nullopt when the output is absent or its
+   * geometry is unusable.
+   */
+  std::optional<hyprland_mode_t> hyprland_monitor_mode(
+    std::string_view monitors_json,
+    std::string_view output_name
+  );
+
   /**
    * @brief Return whether an output name belongs to Polaris's Hyprland namespace.
    */
