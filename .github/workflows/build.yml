@@ -172,8 +172,15 @@ jobs:
             polaris-arch-gomod-
 
       - name: Install dependencies
+        # -Syu, not -S: the bootstrap sync happens before checkout, submodules
+        # and cache restore, so by the time this runs the package database can
+        # be minutes stale against rolling mirrors. That gap produced repeated
+        # 404s for packages the database still believed in (elfutils-0.195-8 on
+        # 2026-08-17), failing the job on unrelated PRs. Refresh and upgrade in
+        # the same transaction that installs, and never -Sy alone, which would
+        # leave a partial upgrade.
         run: |
-          pacman -S --noconfirm --needed \
+          pacman -Syu --noconfirm --needed \
             appstream appstream-glib avahi base-devel boost boost-libs ccache cmake curl \
             desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
             gcc go libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
@@ -249,7 +256,7 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           useradd -m builder
-          pacman -S --noconfirm --needed cuda
+          pacman -Syu --noconfirm --needed cuda
 
           # CUDA 13 supports GCC up to 15.x. Arch rolling moved to GCC 16,
           # so use Arch's cuda-provided gcc15 toolchain when present. Older
