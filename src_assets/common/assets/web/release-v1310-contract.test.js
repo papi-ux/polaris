@@ -26,6 +26,9 @@ const requiredFacts = [
   'capture_transport=shm',
   'frame_residency=cpu',
   'npm audit --audit-level=high',
+  'nested Gamescope',
+  'exit-timeout',
+  'capture pacing',
 ]
 
 const expectedAssets = [
@@ -127,6 +130,46 @@ describe('v1.3.10 release contract', () => {
     expect(releaseNotes).toContain(
       'must not be described as affected-host validated until that evidence arrives',
     )
+  })
+
+  it('pins the prep-timeout regression fix so it cannot silently return', () => {
+    // v1.3.9 bounded prep commands by the app's exit-timeout, default 5s, while
+    // polaris-gamescope-session needs roughly 40s to come up. Every nested launch
+    // 503'd. The fix is a dedicated budget on both halves of the lifecycle; if a
+    // later change puts either back on _app.exit_timeout, this release contract
+    // is the thing that notices.
+    const process = read('src/process.cpp')
+
+    expect(process).toContain('constexpr auto nested_gamescope_start_timeout = 120s;')
+    expect(process).toContain('constexpr auto nested_gamescope_stop_timeout = 30s;')
+
+    const collapsed = process.replace(/\s+/g, ' ')
+    expect(collapsed).toContain(
+      'const auto prep_timeout = critical_nested_session_prep ? nested_gamescope_start_timeout : _app.exit_timeout;',
+    )
+    expect(collapsed).toContain(
+      'const auto undo_timeout = critical_nested_session_undo ? nested_gamescope_stop_timeout : _app.exit_timeout;',
+    )
+
+    // Both halves must stay diagnosable, not just bounded.
+    expect(process).toContain('prep_output = stderr;')
+    expect(process).toContain('undo_output = stderr;')
+
+    // And the release has to tell the user, because it is a regression they hit.
+    const notes = read('docs/release-notes/v1.3.10.md')
+    expect(notes).toContain('### Nested Steam session launches')
+    expect(notes).toContain('regression')
+  })
+
+  it('describes the high-refresh pacing fix without claiming affected-host validation', () => {
+    const notes = read('docs/release-notes/v1.3.10.md')
+
+    expect(notes).toContain('### Private high-refresh capture cadence')
+    expect(notes).toContain('#434')
+    // The measurement host does not reproduce the reported ~60 FPS symptom, so the
+    // notes must not imply the reporter confirmed it.
+    expect(notes).toContain('does **not** reproduce the reported fault')
+    expect(notes).toContain('not affected-host validation')
   })
 
   it('keeps the exact four-asset set in the release notes', () => {
