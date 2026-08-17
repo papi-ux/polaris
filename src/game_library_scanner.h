@@ -14,6 +14,18 @@
 
 namespace game_library {
 
+  /**
+   * @brief Which packaging of a launcher a library entry was discovered through.
+   *
+   * The launch command has to follow the install that produced the entry: a Flatpak-only
+   * host has no `heroic` or `lutris` on PATH, and a native host should keep the command it
+   * already has.
+   */
+  enum class launcher_install_t {
+    native,
+    flatpak,
+  };
+
   struct lutris_game_t {
     std::string name;
     std::string slug;
@@ -39,11 +51,53 @@ namespace game_library {
   std::vector<std::filesystem::path> library_home_roots();
   std::string find_lutris_image_path(const std::string &slug, const std::vector<std::filesystem::path> &lutris_roots);
   std::string lutris_launch_command(const std::string &slug);
+  std::string lutris_launch_command(const std::string &slug, launcher_install_t install);
   std::vector<lutris_game_t> parse_lutris_list_games_json(std::string_view json_payload);
   std::optional<lutris_game_t> parse_lutris_game_config(const std::filesystem::path &path);
   std::vector<lutris_game_t> scan_lutris_games(const std::filesystem::path &games_dir);
   std::vector<lutris_game_t> scan_lutris_games(const std::vector<std::filesystem::path> &games_dirs);
   std::vector<lutris_game_t> scan_lutris_library(const std::vector<std::filesystem::path> &games_dirs);
+
+  /** @brief Where Lutris keeps its per-game YAML, for each install we can see. */
+  std::vector<std::filesystem::path> lutris_game_config_dirs(const std::vector<std::filesystem::path> &home_roots);
+
+  /** @brief Where Lutris keeps its artwork, for each install we can see. */
+  std::vector<std::filesystem::path> lutris_art_roots(const std::vector<std::filesystem::path> &home_roots);
+
+  /**
+   * @brief True when the path lives inside a Flatpak application's per-app home.
+   *
+   * Flatpak maps `XDG_CONFIG_HOME` and friends into `~/.var/app/<app-id>/`, so where a
+   * library file was found is what tells us how to launch it.
+   */
+  bool path_is_under_flatpak_app(const std::filesystem::path &path, std::string_view app_id);
+
+  /** @brief One Heroic library file, and the install it belongs to. */
+  struct heroic_library_file_t {
+    std::filesystem::path path;
+    std::string store;  // the segment Heroic expects in heroic://launch/<store>/<app_name>
+    launcher_install_t install = launcher_install_t::native;
+  };
+
+  /** @brief Heroic's installed-games manifests, native install first. */
+  std::vector<heroic_library_file_t> heroic_installed_files(const std::vector<std::filesystem::path> &home_roots);
+
+  /** @brief Heroic's cached store libraries, used when a manifest is missing. */
+  std::vector<heroic_library_file_t> heroic_cache_files(const std::vector<std::filesystem::path> &home_roots);
+
+  /**
+   * @brief True when a Heroic app name or store is safe to place in a launch command.
+   *
+   * Both come out of a file on disk and end up in a shell command, the same exposure the
+   * Steam app id and the Lutris slug are already checked for.
+   */
+  bool is_heroic_app_name_safe(const std::string &app_name);
+
+  /** @brief The `heroic://launch` command for one title, for the install that has it. */
+  std::string heroic_launch_command(const std::string &store, const std::string &app_name, launcher_install_t install);
+
+  /** @brief Every command form that could launch one Heroic title, for import dedup. */
+  std::vector<std::string> heroic_launch_commands(const std::string &store, const std::string &app_name);
 
   /**
    * @brief Steam app id to playtime, read from one localconfig.vdf payload.

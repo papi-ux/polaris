@@ -3,6 +3,7 @@
 
 #include <src/game_library_scanner.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
@@ -297,4 +298,109 @@ TEST(LutrisLibraryScannerTests, CarriesPlaytimeSecondsFromTheListingJson) {
 
   ASSERT_EQ(games.size(), 1u);
   EXPECT_EQ(games.front().playtime_seconds, 73);
+}
+
+TEST(FlatpakLibraryTests, RecognisesPathsInsideAFlatpakApplicationHome) {
+  EXPECT_TRUE(game_library::path_is_under_flatpak_app(
+    "/tmp/library-home/.var/app/net.lutris.Lutris/config/lutris/games/game.yml",
+    "net.lutris.Lutris"));
+  EXPECT_TRUE(game_library::path_is_under_flatpak_app(
+    "/tmp/library-home/.var/app/com.heroicgameslauncher.hgl/config/heroic",
+    "com.heroicgameslauncher.hgl"));
+
+  // A different application's home, the native home, and a lookalike prefix are not it.
+  EXPECT_FALSE(game_library::path_is_under_flatpak_app(
+    "/tmp/library-home/.var/app/com.valvesoftware.Steam/config/lutris/games/game.yml",
+    "net.lutris.Lutris"));
+  EXPECT_FALSE(game_library::path_is_under_flatpak_app(
+    "/tmp/library-home/.config/lutris/games/game.yml",
+    "net.lutris.Lutris"));
+  EXPECT_FALSE(game_library::path_is_under_flatpak_app(
+    "/tmp/library-home/.var/app/net.lutris.Lutris.backup/config/lutris/games/game.yml",
+    "net.lutris.Lutris"));
+}
+
+TEST(LutrisLibraryScannerTests, IncludesFlatpakGameAndArtDirectories) {
+  const std::filesystem::path home = "/tmp/library-home";
+  const auto dirs = game_library::lutris_game_config_dirs({home});
+  const auto roots = game_library::lutris_art_roots({home});
+
+  const auto contains = [](const auto &haystack, const std::filesystem::path &needle) {
+    return std::find(haystack.begin(), haystack.end(), needle) != haystack.end();
+  };
+
+  EXPECT_TRUE(contains(dirs, home / ".config/lutris/games"));
+  EXPECT_TRUE(contains(dirs, home / ".local/share/lutris/games"));
+  EXPECT_TRUE(contains(dirs, home / ".var/app/net.lutris.Lutris/config/lutris/games"));
+  EXPECT_TRUE(contains(dirs, home / ".var/app/net.lutris.Lutris/data/lutris/games"));
+
+  EXPECT_TRUE(contains(roots, home / ".local/share/lutris"));
+  EXPECT_TRUE(contains(roots, home / ".cache/lutris"));
+  EXPECT_TRUE(contains(roots, home / ".var/app/net.lutris.Lutris/data/lutris"));
+  EXPECT_TRUE(contains(roots, home / ".var/app/net.lutris.Lutris/cache/lutris"));
+}
+
+TEST(LutrisLibraryScannerTests, LaunchesAFlatpakConfigThroughFlatpak) {
+  const auto root = lutris_test_root("flatpak_config");
+  const auto games_dir = root / ".var/app/net.lutris.Lutris/config/lutris/games";
+  std::filesystem::create_directories(games_dir);
+  write_text(games_dir / "vintage-story.yml",
+    "name: Vintage Story\n"
+    "slug: vintage-story\n"
+    "runner: linux\n");
+
+  const auto game = game_library::parse_lutris_game_config(games_dir / "vintage-story.yml");
+  ASSERT_TRUE(game.has_value());
+  EXPECT_EQ(game->command, "setsid flatpak run net.lutris.Lutris lutris:rungame/vintage-story");
+
+  // The same slug from a native install keeps the command it already had.
+  EXPECT_EQ(game_library::lutris_launch_command("vintage-story"), "setsid lutris lutris:rungame/vintage-story");
+}
+
+TEST(HeroicLibraryScannerTests, ListsBothInstallsForEveryStoreFile) {
+  const std::filesystem::path home = "/tmp/library-home";
+  const auto installed = game_library::heroic_installed_files({home});
+  const auto cached = game_library::heroic_cache_files({home});
+
+  ASSERT_EQ(installed.size(), 4u);
+  EXPECT_EQ(installed[0].path, home / ".config/heroic/gog_store/installed.json");
+  EXPECT_EQ(installed[0].store, "gog");
+  EXPECT_EQ(installed[0].install, game_library::launcher_install_t::native);
+  EXPECT_EQ(installed[1].path, home / ".config/heroic/legendaryConfig/legendary/installed.json");
+  EXPECT_EQ(installed[1].store, "epic");
+  EXPECT_EQ(installed[2].path, home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/gog_store/installed.json");
+  EXPECT_EQ(installed[2].install, game_library::launcher_install_t::flatpak);
+  EXPECT_EQ(installed[3].path,
+    home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/legendaryConfig/legendary/installed.json");
+
+  ASSERT_EQ(cached.size(), 4u);
+  EXPECT_EQ(cached[0].path, home / ".config/heroic/store_cache/gog_library.json");
+  EXPECT_EQ(cached[1].path, home / ".config/heroic/store_cache/egs_library.json");
+  EXPECT_EQ(cached[2].path, home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache/gog_library.json");
+  EXPECT_EQ(cached[2].install, game_library::launcher_install_t::flatpak);
+}
+
+TEST(HeroicLibraryScannerTests, BuildsTheCommandForTheInstallThatHasTheTitle) {
+  EXPECT_EQ(
+    game_library::heroic_launch_command("gog", "1207658930", game_library::launcher_install_t::native),
+    "setsid heroic heroic://launch/gog/1207658930");
+  EXPECT_EQ(
+    game_library::heroic_launch_command("gog", "1207658930", game_library::launcher_install_t::flatpak),
+    "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/gog/1207658930");
+
+  const auto both = game_library::heroic_launch_commands("epic", "Snow");
+  ASSERT_EQ(both.size(), 2u);
+  EXPECT_EQ(both[0], "setsid heroic heroic://launch/epic/Snow");
+  EXPECT_EQ(both[1], "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/epic/Snow");
+}
+
+TEST(HeroicLibraryScannerTests, RefusesAppNamesThatWouldReachTheShell) {
+  EXPECT_TRUE(game_library::is_heroic_app_name_safe("Grimoire.Manastone_1207658930"));
+  EXPECT_FALSE(game_library::is_heroic_app_name_safe(""));
+  EXPECT_FALSE(game_library::is_heroic_app_name_safe("app; rm -rf ~"));
+  EXPECT_FALSE(game_library::is_heroic_app_name_safe("app$(id)"));
+
+  EXPECT_TRUE(game_library::heroic_launch_command("gog", "app; rm -rf ~", game_library::launcher_install_t::native).empty());
+  EXPECT_TRUE(game_library::heroic_launch_command("gog && id", "1207658930", game_library::launcher_install_t::native).empty());
+  EXPECT_TRUE(game_library::heroic_launch_commands("gog", "app; rm -rf ~").empty());
 }
