@@ -275,7 +275,11 @@ TEST(NovaContractTests, EveryObjectNamesTheFunctionScopingItsNovaReads) {
   // consumer (display_planner did this before papi-ux/nova#197; session_timing
   // does it now). That is a real, documented state, not something this test
   // should fail on - it only pins scope for objects that claim a reader.
-  for (const auto &[name, object] : manifest()["objects"].items()) {
+  // items() holds a proxy into the json it was called on. manifest() returns by
+  // value, so iterating its result directly walks a container that is destroyed at
+  // the end of the full expression. Bind it first, as the tests above already do.
+  const auto contract = manifest();
+  for (const auto &[name, object] : contract["objects"].items()) {
     SCOPED_TRACE(name);
     if (!object.contains("nova_reader")) {
       continue;
