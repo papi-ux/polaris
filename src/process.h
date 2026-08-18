@@ -232,10 +232,13 @@ namespace proc {
   bool desktop_steam_client_process_for_tests(std::string_view comm,
                                                std::string_view argv0_path,
                                                std::string_view cmdline,
-                                               std::string_view status = {});
+                                               std::string_view status = {},
+                                               std::string_view environ = {});
   bool desktop_steam_proc_open_error_fails_closed_for_tests();
   bool desktop_steam_proc_enumeration_error_fails_closed_for_tests();
   bool desktop_steam_proc_read_error_fails_closed_for_tests(pid_t forced_pid);
+  bool desktop_steam_proc_environ_read_error_fails_closed_for_tests(pid_t forced_pid);
+  bool desktop_steam_proc_scan_only_pid_for_tests(pid_t forced_pid);
   bool steam_instance_pipe_listener_active_for_tests(const std::string &pipe_path);
   std::optional<std::string> resolve_nested_gamescope_session_target_for_tests(
     bool gamescope_stream_session,
