@@ -98,7 +98,11 @@ body:
     id: logs
     attributes:
       label: Relevant log output
-      description: Paste relevant Polaris logs or error output.
+      description: >-
+        Paste relevant Polaris logs or error output. Better still, attach the support bundle from
+        the Troubleshooting screen: it carries the logs, how the previous run ended, and the host
+        configuration, with credentials already redacted. Report a problem on that screen fills
+        this form in for you.
       render: Shell
     validations:
       required: false

@@ -330,24 +330,63 @@ static metadata such as display primaries or max display luminance was missing.
 
 ## Support bundle and logs
 
-When reporting a bug:
+The Troubleshooting screen in the Polaris web UI inspects **this host**. It is the place to go
+when something is wrong and you want to know what Polaris thinks happened. The
+[Troubleshooting guide](https://papi-ux.com/docs/troubleshooting/) on papi-ux.com explains the
+problems themselves and is the place to go when you know what is wrong and want to fix it.
 
-1. Export the support bundle from the Troubleshooting screen.
-2. Include the active route, capture backend, encoder, and client device.
-3. Mention whether the session was headless, host-display, or virtual-display.
+When reporting a bug, open Troubleshooting and use **Report a problem**. It downloads a redacted
+support bundle and opens a pre-filled GitHub issue with your host OS, GPU and driver, client, and
+runtime already answered. Attach the bundle to that issue.
 
-If the UI is unavailable, the main host config lives in `~/.config/polaris` and the service logs
-can be captured with your systemd user journal.
+Nothing is sent anywhere on its own. The bundle lands on your machine and the issue opens as a
+draft you complete, so you see exactly what you are sharing before anyone else does.
+
+If you would rather assemble it yourself, the same screen offers the bundle and the issue draft as
+separate downloads, and describing the active route, capture backend, encoder, and client device by
+hand is still useful.
+
+### What is redacted
+
+Values whose name reads as a credential are replaced before anything leaves the browser: whole
+words such as password, token, secret, cookie, auth and credential, run-together forms such as
+apikey, and key when something qualifies it, as in api_key. Names that merely contain one of those,
+such as keyboard, stay readable so the bundle remains worth reading. The exact rule is stated in
+the bundle itself under `redaction_notice`.
+
+Redaction is not a promise that a bundle is safe to publish unread. Look at it first.
 
 ### Reporting a crash
 
-Released builds are stripped, so a backtrace needs the matching debug package. On Arch:
+Polaris records how each run ended, so the first question is already answered for you. Open
+Troubleshooting after restarting: if the previous run did not shut down normally, the page says so
+at the top, and reports one of
+
+- **crashed**, meaning it died on a named fatal signal, with the captured backtrace,
+- **unclean**, meaning it never recorded an exit and left no crash evidence, which usually means
+  the OOM killer, a `SIGKILL`, or power loss rather than a fault in Polaris.
+
+That distinction matters and is hard to make by hand, which is why Polaris makes it.
+
+The log of the run that crashed is preserved too. The active log describes the run you are looking
+at now, so the interesting one is the retained copy from the previous run, and the support bundle
+carries it.
+
+#### Getting a symbolised backtrace
+
+The backtrace Polaris captures comes from a stripped binary, so it names addresses more than
+functions. For a symbolised one, the matching debug package and `coredumpctl` still work exactly as
+before, because the crash handler re-raises rather than swallowing the signal:
 
 ```bash
 sudo pacman -S polaris-debug
 coredumpctl info polaris
 ```
 
-`coredumpctl` prints a symbolised backtrace for the most recent crash. Include it verbatim, along
-with the Polaris log lines from the same session — the shutdown line names what asked Polaris to
-stop, which distinguishes a crash from an ordinary exit.
+Include that verbatim alongside the bundle when a maintainer asks for it.
+
+### When the web UI is unavailable
+
+The host config lives in `~/.config/polaris`, the service logs can be captured from your systemd
+user journal, and the run-state and crash evidence sit next to the config as `last_run.json` and
+`last_crash.txt`.
