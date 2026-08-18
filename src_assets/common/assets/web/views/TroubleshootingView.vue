@@ -15,6 +15,27 @@
       </div>
     </section>
 
+    <section v-if="showCrashBanner" class="section-card space-y-3" data-previous-run-banner>
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div class="section-kicker">{{ $t('troubleshooting.previous_run') }}</div>
+          <h2 class="section-title">{{ $t('troubleshooting.previous_run_title') }}</h2>
+          <p class="section-copy">{{ previousRunSummary }}</p>
+          <p v-if="lastRun?.started_at" class="mt-1 text-xs text-storm">
+            {{ $t('troubleshooting.previous_run_started') }} {{ lastRun.started_at }}
+          </p>
+        </div>
+        <div class="flex flex-shrink-0 flex-col gap-2 sm:flex-row">
+          <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="generatingIssueDraft" @click="openPrefilledIssue">
+            {{ $t('troubleshooting.report_problem') }}
+          </button>
+          <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="dismissCrashBanner">
+            {{ $t('troubleshooting.previous_run_dismiss') }}
+          </button>
+        </div>
+      </div>
+    </section>
+
     <section class="section-card space-y-4" data-fix-my-stream>
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
@@ -320,6 +341,20 @@
         <div class="mt-4 rounded-xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
           {{ $t('troubleshooting.support_redaction_notice') }}
         </div>
+        <div class="mt-4 space-y-2" data-report-a-problem>
+          <label class="section-kicker block" for="support-user-notes">{{ $t('troubleshooting.report_problem_notes') }}</label>
+          <textarea
+            id="support-user-notes"
+            v-model="userNotes"
+            rows="3"
+            class="w-full rounded-xl border border-storm/25 bg-deep/35 px-3 py-2 text-sm text-silver"
+            :placeholder="$t('troubleshooting.report_problem_notes_placeholder')"
+          ></textarea>
+          <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary w-full sm:w-auto" :disabled="generatingIssueDraft" @click="openPrefilledIssue">
+            {{ $t('troubleshooting.report_problem') }}
+          </button>
+          <p class="text-xs text-storm">{{ $t('troubleshooting.report_problem_desc') }}</p>
+        </div>
         <div class="mt-4 grid gap-2 sm:grid-cols-2">
           <button class="focus-ring troubleshooting-action-card" @click="copyIssueDraft" :disabled="generatingIssueDraft">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.copy_issue_draft') }}</div>
@@ -440,9 +475,11 @@ import {
   buildControllerInputTestReport,
   buildFixMyStreamChecklist,
   buildGithubIssueDraft,
+  buildGithubIssueUrl,
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
+  describePreviousRun,
   redactSensitiveText,
 } from '../diagnostics-export.js'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
@@ -467,6 +504,9 @@ const clearingAiCache = ref(false)
 const cleaningStaleVirtualDisplay = ref(false)
 const downloadingSupportBundle = ref(false)
 const generatingIssueDraft = ref(false)
+const lastRun = ref(null)
+const crashBannerDismissed = ref(false)
+const userNotes = ref('')
 const requestingAiDoctorExplanation = ref(false)
 const aiDoctorExplanation = ref(null)
 const logFilter = ref(null)
@@ -1020,6 +1060,49 @@ async function safeFetchJson(url) {
   }
 }
 
+async function safeFetchText(url) {
+  try {
+    const response = await fetch(url, { credentials: 'include' })
+    if (!response.ok) {
+      return ''
+    }
+    return await response.text()
+  } catch (error) {
+    return ''
+  }
+}
+
+async function refreshLastRun() {
+  const result = await safeFetchJson('./polaris/v1/diagnostics/last-run')
+  lastRun.value = result && !result._error ? result : null
+}
+
+const previousRunSummary = computed(() => describePreviousRun(lastRun.value || {}))
+const showCrashBanner = computed(() => Boolean(previousRunSummary.value) && !crashBannerDismissed.value)
+
+function dismissCrashBanner() {
+  crashBannerDismissed.value = true
+}
+
+async function openPrefilledIssue() {
+  generatingIssueDraft.value = true
+  try {
+    const context = await collectSupportContext()
+    // The bundle is downloaded first so the user has the attachment in hand by
+    // the time the form opens. Nothing is submitted for them.
+    const bundle = buildAnonymizedDiagnosticsBundle(context)
+    const timestamp = new Date().toISOString().replace(/[:]/g, '-')
+    triggerDownload(`polaris-anonymized-diagnostics-${timestamp}.json`, JSON.stringify(bundle, null, 2), 'application/json;charset=utf-8')
+    window.open(buildGithubIssueUrl(context), '_blank', 'noopener')
+    showToast(i18n.t('troubleshooting.report_problem_success') || 'Support bundle downloaded. Attach it to the issue that just opened.', 'success')
+  } catch (error) {
+    console.error(error)
+    showToast(i18n.t('troubleshooting.report_problem_error') || 'Failed to prepare the report.', 'error')
+  } finally {
+    generatingIssueDraft.value = false
+  }
+}
+
 function triggerDownload(filename, content, mimeType) {
   const blob = new Blob([content], { type: mimeType })
   const url = URL.createObjectURL(blob)
@@ -1085,15 +1168,21 @@ function cleanupStaleVirtualDisplay() {
 }
 
 async function collectSupportContext() {
-  const [systemStats, aiStatus, aiCache, aiHistory, config] = await Promise.all([
+  const [systemStats, aiStatus, aiCache, aiHistory, config, previousRunLogs] = await Promise.all([
     safeFetchJson('./api/stats/system'),
     safeFetchJson('./api/ai/status'),
     safeFetchJson('./api/ai/cache'),
     safeFetchJson('./api/ai/history'),
-    safeFetchJson('./api/config')
+    safeFetchJson('./api/config'),
+    // The run that crashed cannot serve its own log. This is the retained copy.
+    safeFetchText('./polaris/v1/diagnostics/logs/previous')
   ])
 
   return {
+    crash: lastRun.value || {},
+    previous_run_logs: previousRunLogs,
+    silent_failures: streamStats.value?.doctor?.silent_failures || [],
+    user_notes: userNotes.value,
     generated_at: new Date().toISOString(),
     platform: platform.value || config.platform || 'unknown',
     version: version.value || config.version || 'unknown',
@@ -1263,6 +1352,7 @@ fetch("/api/config")
 logInterval = setInterval(() => { refreshLogs() }, 5000)
 refreshLogs()
 refreshNetworkPathProbe()
+refreshLastRun()
 
 onBeforeUnmount(() => {
   clearInterval(logInterval)

@@ -10,6 +10,7 @@ test.describe('troubleshooting', () => {
     await expect(loggedInPage.getByText('Advanced / raw diagnostics', { exact: true })).toBeVisible()
     await expect(loggedInPage.getByRole('button', { name: /copy issue draft/i })).toBeVisible()
     await expect(loggedInPage.getByRole('button', { name: /download issue draft/i })).toBeVisible()
+    await expect(loggedInPage.getByRole('button', { name: /report a problem/i }).first()).toBeVisible()
     await expect(loggedInPage.getByText(/nothing was submitted automatically|will not submit it/i)).toBeVisible()
     await expect(loggedInPage.getByText(/no passwords, tokens, cookies, auth headers, or credentials/i)).toBeVisible()
   })
