@@ -126,12 +126,21 @@ jobs:
     needs: web-checks
     runs-on: ubuntu-24.04
     container:
-      image: archlinux:latest
+      # Match the package snapshot below. Keeping both immutable prevents a
+      # future base image from being mixed with an older userspace.
+      image: archlinux@sha256:4bf33b21a715aac0b48ce6e9eaed4782a898eae96f88f5da3635572129c2584a
     env:
+      ARCH_REPOSITORY_SNAPSHOT: 2026/08/17
       CCACHE_DIR: /github/home/.cache/ccache
       CCACHE_COMPILERCHECK: content
 
     steps:
+      - name: Pin Arch package snapshot
+        run: |
+          printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' \
+            "$ARCH_REPOSITORY_SNAPSHOT" > /etc/pacman.d/mirrorlist
+          pacman -Syy --noconfirm
+
       - name: Bootstrap Arch container
         run: pacman -Syu --noconfirm --needed archlinux-keyring git
 
@@ -180,43 +189,22 @@ jobs:
             polaris-arch-gomod-
 
       - name: Install dependencies
-        # Two problems live here and the first fix only closed one.
-        #
-        # -Syu rather than -S: the bootstrap sync runs before checkout,
-        # submodules and cache restore, so an install using -S resolved against
-        # a database that had gone stale in the meantime.
-        #
-        # The retry is for the part syncing does not fix. A mirror can serve a
-        # database referencing a package its own pool has not published yet, so
-        # that download 404s however fresh the database is. That is what kept
-        # failing after the -Syu change (elfutils-0.195-8 on 2026-08-17, on
-        # both pkgbuild mirrors). -Syy on retry forces a full database
-        # re-download, since a plain -Sy will not refetch one it considers
-        # current. Same retry shape as the submodule step above.
-        #
+        # The archive snapshot is immutable, so the database fetched before
+        # bootstrap and the package pool used here describe the same instant.
+        # Do not add mirror retries: they cannot repair a live mirror serving a
+        # database and package pool from different sync generations.
         # The list stays a backslash continuation rather than moving into a
         # variable: check-release-package-dependencies.py reads these tokens
         # out of this step to enforce the Vulkan contract, and a quoted string
         # hides them from its shlex pass.
         run: |
-          install_dependencies() {
-            pacman -Syu --noconfirm --needed \
-              appstream appstream-glib avahi base-devel boost boost-libs ccache cmake curl \
-              desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
-              gcc go libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
-              libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
-              nlohmann-json npm numactl openssl opus pipewire python vulkan-headers vulkan-icd-loader \
-              wayland wayland-protocols which
-          }
-          for attempt in 1 2 3; do
-            if install_dependencies; then
-              exit 0
-            fi
-            echo "pacman install failed on attempt ${attempt}" >&2
-            pacman -Syy --noconfirm || true
-            sleep $((attempt * 15))
-          done
-          exit 1
+          pacman -Syu --noconfirm --needed \
+            appstream appstream-glib avahi base-devel boost boost-libs ccache cmake curl \
+            desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
+            gcc go libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
+            libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
+            nlohmann-json npm numactl openssl opus pipewire python vulkan-headers vulkan-icd-loader \
+            wayland wayland-protocols which
 
       - name: Configure
         if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
