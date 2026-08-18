@@ -13,13 +13,15 @@ const SENSITIVE_SEGMENT_WORDS = [
 // nothing. `certificate` and `pem` carry the public half of pairing, while the
 // private half is already caught as a qualified `key`. `client_id` names the
 // paired device, which is the one thing a support bundle about a paired device
-// has to be able to say.
+// has to be able to say. Non-string scalars also stay unchanged unless their
+// field name is sensitive, preserving numeric diagnostics such as bitrate and
+// packet loss.
 //
-// `session_id` is the genuinely open one. A session id is a bearer credential
-// where the Web UI is concerned, but reaching it through this list means treating
-// `id` as qualified-only, and that blanks user_id, app_id and client_id with it.
-// It needs a narrower rule than a word, so it is left for the decision about
-// non-string scalars generally rather than bolted on here.
+// Exact multi-word identifiers cover credentials whose individual words are too
+// broad to classify. `session_id` is a Web UI bearer credential, but making `id`
+// sensitive would also blank client_id, user_id and app_id. Normalize separators
+// and camel case so the same exact name cannot evade the rule by changing style.
+const SENSITIVE_EXACT_IDENTIFIERS = ['session_id']
 
 // Qualifiers that make a separator-less segment a credential name. `apikey` and
 // `authtoken` carry no separator and no camelCase hump, so there is nothing
@@ -196,6 +198,7 @@ function segmentIsSensitive(segment) {
 function isSensitiveIdentifier(name, bareQualifiedCounts) {
   const segments = identifierSegments(name)
   if (segments.length === 0) return false
+  if (SENSITIVE_EXACT_IDENTIFIERS.includes(segments.join('_'))) return true
   if (segments.some(segmentIsSensitive)) return true
   if (bareQualifiedCounts && segments.length === 1) {
     return segmentMatches(segments[0], QUALIFIED_ONLY_WORDS)
@@ -1109,7 +1112,8 @@ export function buildAnonymizedDiagnosticsBundle(input = {}) {
       'Values are redacted client-side before export when their name reads as a credential.',
       'Whole words such as password, passwd, token, secret, cookie, auth, authorization and',
       'credential count, as do run-together forms such as apikey. The word key counts only when',
-      'something qualifies it, as in api_key or apiKey. Names that merely contain one of those,',
+      'something qualifies it, as in api_key or apiKey. The exact name session_id also counts',
+      'because Web UI access depends on keeping it private. Names that merely contain one of those,',
       'such as keyboard or monkey, stay readable so the bundle remains useful. In raw log text a',
       'bare key assignment is also redacted, because a log line carries no surrounding context to',
       'say whether it names a label or a secret.',
