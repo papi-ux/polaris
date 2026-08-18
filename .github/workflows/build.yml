@@ -16,6 +16,8 @@ on:
 env:
   POLARIS_CHECKOUT_REF: ${{ inputs.release_tag || github.ref }}
   POLARIS_PACKAGE_REF_NAME: ${{ inputs.release_tag || github.ref_name }}
+  # Advance deliberately only after the full matrix proves a newer snapshot.
+  UBUNTU_APT_SNAPSHOT: 20260818T000000Z
 
 jobs:
   web-checks:
@@ -78,9 +80,33 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        # This suite installs the larger dependency set; the pinned snapshot
+        # completed in 18m03s on the first protected run, so retain margin while
+        # still turning a mirror stall into a bounded failure.
+        timeout-minutes: 30
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
+          snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
+          snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
+          mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial"
+          cat > "$snapshot_sources" <<EOF
+          Types: deb
+          URIs: https://snapshot.ubuntu.com/ubuntu/$UBUNTU_APT_SNAPSHOT/
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$snapshot_sources"
+            -o "Dir::Etc::sourceparts=$snapshot_source_parts"
+            -o "Dir::State::Lists=$snapshot_lists"
+            -o APT::Update::Error-Mode=any
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y \
             build-essential cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev libcurl4-openssl-dev \
@@ -661,9 +687,30 @@ jobs:
             polaris-ubuntu-gomod-
 
       - name: Install dependencies
+        timeout-minutes: 20
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
+          snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
+          snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
+          mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial"
+          cat > "$snapshot_sources" <<EOF
+          Types: deb
+          URIs: https://snapshot.ubuntu.com/ubuntu/$UBUNTU_APT_SNAPSHOT/
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$snapshot_sources"
+            -o "Dir::Etc::sourceparts=$snapshot_source_parts"
+            -o "Dir::State::Lists=$snapshot_lists"
+            -o APT::Update::Error-Mode=any
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y \
             build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev libcurl4-openssl-dev \
@@ -714,6 +761,7 @@ jobs:
         run: cpack -G DEB --config ./build/CPackConfig.cmake
 
       - name: Smoke test Ubuntu DEB package
+        timeout-minutes: 5
         run: |
           set -euo pipefail
 
@@ -727,7 +775,21 @@ jobs:
           dpkg-deb --field "$deb_path" Depends | tee build/cpack_artifacts/package-depends.txt
           dpkg-deb --contents "$deb_path" | tee build/cpack_artifacts/package-files.txt
 
-          sudo apt-get install -y "./$deb_path"
+          snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
+          snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
+          snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
+          test -s "$snapshot_sources"
+          test -d "$snapshot_source_parts"
+          test -d "$snapshot_lists/partial"
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$snapshot_sources"
+            -o "Dir::Etc::sourceparts=$snapshot_source_parts"
+            -o "Dir::State::Lists=$snapshot_lists"
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_options[@]}" install -y "./$deb_path"
           package_name="$(dpkg-deb --field "$deb_path" Package)"
           binary="$(dpkg -L "$package_name" | awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }')"
           if [ -z "$binary" ]; then
