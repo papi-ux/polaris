@@ -1,7 +1,26 @@
 // Words that mean "secret" wherever they appear as a whole segment of a name.
 const SENSITIVE_SEGMENT_WORDS = [
   'password', 'passwd', 'token', 'secret', 'cookie', 'auth', 'authorization', 'credential',
+  // Credentials that usually arrive as something other than text. A field name is
+  // the only protection these get: sanitizeDiagnosticsValue offers strings to the
+  // text redactor and returns every other scalar untouched, so a numeric pin was
+  // exported verbatim. Polaris pairing uses a numeric PIN, so that is this
+  // project's shape rather than a hypothetical one.
+  'pin', 'passcode', 'passphrase', 'otp', 'totp', 'bearer',
 ]
+// Names raised alongside those and deliberately left off the list. `salt` and
+// `nonce` are public by design, and blanking them costs a diagnostic to protect
+// nothing. `certificate` and `pem` carry the public half of pairing, while the
+// private half is already caught as a qualified `key`. `client_id` names the
+// paired device, which is the one thing a support bundle about a paired device
+// has to be able to say.
+//
+// `session_id` is the genuinely open one. A session id is a bearer credential
+// where the Web UI is concerned, but reaching it through this list means treating
+// `id` as qualified-only, and that blanks user_id, app_id and client_id with it.
+// It needs a narrower rule than a word, so it is left for the decision about
+// non-string scalars generally rather than bolted on here.
+
 // Qualifiers that make a separator-less segment a credential name. `apikey` and
 // `authtoken` carry no separator and no camelCase hump, so there is nothing
 // structural to split on, and English gives no way to tell `apikey` from
