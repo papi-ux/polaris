@@ -35,6 +35,31 @@
 
 namespace {
 #ifdef __linux__
+  // std::filesystem::equivalent needs both paths to exist before it will answer.
+  // A hardcoded /dev node cannot carry a pairing assertion: CI runners have no
+  // /dev/dri, equivalent fails with an error_code, and device_nodes_match then
+  // correctly reports "unknown" rather than true. The JSON field is null in that
+  // case, and EXPECT_TRUE throws type_error.302 on a null.
+  struct TempFileGuard {
+    explicit TempFileGuard(const std::string &label) {
+      static int counter = 0;
+      path = std::filesystem::temp_directory_path() /
+        ("polaris-process-migration-" + label + "-" + std::to_string(++counter));
+      std::ofstream(path).close();
+    }
+
+    ~TempFileGuard() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+
+    std::string string() const {
+      return path.string();
+    }
+
+    std::filesystem::path path;
+  };
+
   volatile std::sig_atomic_t sigusr1_interruptions = 0;
 
   void record_sigusr1_interrupt(int) {
@@ -960,7 +985,8 @@ TEST(ProcessRuntimeConfigTests, SessionHealthFlagsHeadlessHdrUnavailableSeparate
 #ifdef __linux__
 TEST(ProcessRuntimeConfigTests, MissionControlPolicyIncludesLinuxGpuProfileForVaapiCaptureTruth) {
   linux_cage_compositor_guard_t linux_guard;
-  config::video.adapter_name = "/dev/dri/renderD128";
+  TempFileGuard render_node("vaapi-capture-truth");
+  config::video.adapter_name = render_node.string();
   config::video.linux_display.use_cage_compositor = true;
   config::video.linux_display.prefer_gpu_native_capture = true;
 
@@ -973,7 +999,7 @@ TEST(ProcessRuntimeConfigTests, MissionControlPolicyIncludesLinuxGpuProfileForVa
   stats.capture_transport = platf::frame_transport_e::shm;
   stats.capture_residency = platf::frame_residency_e::cpu;
   stats.capture_format = platf::frame_format_e::bgra8;
-  stats.capture_device = "/dev/dri/renderD128";
+  stats.capture_device = render_node.string();
   stats.encode_target_device = "vaapi";
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.encode_target_format = platf::frame_format_e::nv12;
@@ -987,8 +1013,8 @@ TEST(ProcessRuntimeConfigTests, MissionControlPolicyIncludesLinuxGpuProfileForVa
   ASSERT_TRUE(policy.contains("linux_gpu_profile"));
   const auto &profile = policy.at("linux_gpu_profile");
   EXPECT_EQ(profile.at("encoder_api"), "vaapi");
-  EXPECT_EQ(profile.at("encoder_adapter"), "/dev/dri/renderD128");
-  EXPECT_EQ(profile.at("capture_device"), "/dev/dri/renderD128");
+  EXPECT_EQ(profile.at("encoder_adapter"), render_node.string());
+  EXPECT_EQ(profile.at("capture_device"), render_node.string());
   EXPECT_TRUE(profile.at("adapter_matches_capture_device"));
   EXPECT_TRUE(profile.at("gpu_native_requested"));
   EXPECT_FALSE(profile.at("gpu_native_succeeded"));
