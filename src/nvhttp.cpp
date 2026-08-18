@@ -78,6 +78,7 @@
 #include "ai_optimizer.h"
 #include "device_db.h"
 #include "doctor_actions.h"
+#include "client_support_report.h"
 #include "confighttp.h"
 #include "stream_stats.h"
 #include "video.h"
@@ -6469,6 +6470,7 @@ namespace nvhttp {
       features["artwork_manifest_v1"] = true;
       features["artwork_manual_match_v1"] = nonblank_artwork_api_key(
         config::sunshine.steamgriddb_api_key);
+      features["support_client_report_v1"] = true;
       features["session_lifecycle"] = true;
       features["session_stop_v1"] = true;
       features["device_profiles"] = true;
@@ -8844,7 +8846,65 @@ namespace nvhttp {
       response->write(output.dump(), headers);
     };
 
+    // Support report from a paired client. A streaming bug has a host half and a
+    // client half, and only the host can hold both. Asking a user to export from
+    // two devices and keep the two matched is how a bug report turns into a
+    // conversation instead of a fix.
+    auto polarisClientSupportReport = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert = get_verified_cert(request);
+      if (!named_cert) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      const auto reply = [&response](SimpleWeb::StatusCode code, const std::string &error) {
+        nlohmann::json output;
+        output["status"] = error.empty();
+        if (!error.empty()) {
+          output["error"] = error;
+        }
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(code, output.dump(), headers);
+      };
+
+      // Checked before the body is read: a client submitting too fast should not
+      // be able to make the host parse a quarter megabyte to find that out.
+      if (!client_support_report::rate_limit_allows(named_cert->uuid, std::chrono::steady_clock::now())) {
+        reply(SimpleWeb::StatusCode::client_error_too_many_requests, "Wait before submitting another report.");
+        return;
+      }
+
+      const std::string body {std::istreambuf_iterator<char>(request->content), std::istreambuf_iterator<char>()};
+      auto parsed = client_support_report::parse_submission(
+        body,
+        named_cert->uuid,
+        client_support_report::utc_timestamp_now()
+      );
+
+      if (parsed.status == client_support_report::accept_e::too_large) {
+        reply(SimpleWeb::StatusCode::client_error_payload_too_large, parsed.error);
+        return;
+      }
+      if (parsed.status != client_support_report::accept_e::accepted) {
+        reply(SimpleWeb::StatusCode::client_error_bad_request, parsed.error);
+        return;
+      }
+
+      // The paired name is the host's own record of this device, so it is a
+      // better answer than whatever the body claimed.
+      if (parsed.report.device.empty()) {
+        parsed.report.device = named_cert->name;
+      }
+
+      BOOST_LOG(info) << "Support report received from client ["sv << named_cert->name << "]"sv;
+      client_support_report::store(std::move(parsed.report));
+      reply(SimpleWeb::StatusCode::success_ok, {});
+    };
+
     https_server.resource["^/polaris/v1/session/report$"]["POST"] = polarisSessionReport;
+    https_server.resource["^/polaris/v1/support/client-report$"]["POST"] = polarisClientSupportReport;
     https_server.resource["^/polaris/v1/optimizer/profile/clear$"]["POST"] = polarisClearOptimizerProfile;
     https_server.resource["^/polaris/v1/optimizer/profiles$"]["GET"] = polarisOptimizerProfiles;
     https_server.resource["^/polaris/v1/optimizer/profiles/clear$"]["POST"] = polarisClearOptimizerProfiles;

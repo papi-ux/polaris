@@ -223,7 +223,7 @@ TEST(NovaContractTests, NewLibraryFeaturesAreDeclaredInCapabilities) {
   // expected to render conditionally has to be announced rather than inferred.
   const auto source = read_source_file("src/nvhttp.cpp");
 
-  for (const auto flag : {"library_playtime_v1", "library_beat_times_v1", "display_planner_v1"}) {
+  for (const auto flag : {"library_playtime_v1", "library_beat_times_v1", "display_planner_v1", "support_client_report_v1"}) {
     SCOPED_TRACE(flag);
     EXPECT_NE(source.find(std::string {"features[\""} + flag + "\"]"), std::string::npos);
   }
