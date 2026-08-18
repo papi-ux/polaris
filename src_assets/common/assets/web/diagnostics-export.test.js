@@ -957,6 +957,67 @@ describe('silent failure reporting', () => {
   })
 })
 
+describe('credentials that are not strings', () => {
+  it('redacts a numeric pairing pin', () => {
+    expect(sanitizeDiagnosticsValue({ pin: 1234 })).toEqual({ pin: REDACTED_VALUE })
+    expect(sanitizeDiagnosticsValue({ pairing_pin: 987654 })).toEqual({ pairing_pin: REDACTED_VALUE })
+    expect(sanitizeDiagnosticsValue({ pairingPin: 987654 })).toEqual({ pairingPin: REDACTED_VALUE })
+  })
+
+  it('redacts a pin whether it arrives as a number or as a string', () => {
+    // The string form leaked too, for a different reason: redactSensitiveText
+    // rewrites name=value pairs it can see inside the text, and a value sitting
+    // alone in a field carries no name for it to find.
+    expect(sanitizeDiagnosticsValue({ pin: '1234' })).toEqual({ pin: REDACTED_VALUE })
+  })
+
+  it('redacts one-time codes and passphrases', () => {
+    expect(sanitizeDiagnosticsValue({ otp: 123456, totp: 654321, passphrase: 'correct horse' }))
+      .toEqual({ otp: REDACTED_VALUE, totp: REDACTED_VALUE, passphrase: REDACTED_VALUE })
+  })
+
+  it('redacts a bearer field that holds the credential itself', () => {
+    expect(sanitizeDiagnosticsValue({ bearer: 'abc.def.ghi' })).toEqual({ bearer: REDACTED_VALUE })
+  })
+
+  it('recognises the same names in free log text', () => {
+    expect(redactSensitiveText('pairing rejected pin=1234 otp=123456'))
+      .toBe(`pairing rejected pin=${REDACTED_VALUE} otp=${REDACTED_VALUE}`)
+  })
+
+  it('agrees between a structured field and the same name in log text', () => {
+    expect(isSensitiveFieldName('pin')).toBe(true)
+    expect(redactSensitiveText('pin=1234')).toBe(`pin=${REDACTED_VALUE}`)
+  })
+
+  it('leaves numeric diagnostics alone', () => {
+    // The other half of this defect is what not to do about it. Passing every
+    // scalar through the text redactor would start rewriting the numbers a
+    // bundle exists to carry, so the field name stays the only thing that decides.
+    const measurements = { port: 47989, fps: 120, bitrate_kbps: 20000, packet_loss: 0.4, gpu_index: 0 }
+
+    expect(sanitizeDiagnosticsValue(measurements)).toEqual(measurements)
+  })
+
+  it('keeps the identifiers that say which device the bundle is about', () => {
+    // client_id and session_id were both raised with this defect and are
+    // deliberately not redacted. Reaching them through the word list means
+    // treating `id` as a credential, which blanks user_id and app_id with it, and
+    // a support bundle about a paired device has to be able to name the device.
+    const identifiers = { client_id: 'nova-rp6-01', session_id: 99887766 }
+
+    expect(sanitizeDiagnosticsValue(identifiers)).toEqual(identifiers)
+  })
+
+  it('does not treat words that merely end in a credential name as one', () => {
+    // `pin` is short and lives inside ordinary words. Only a whole segment counts,
+    // so spin and pinned stay readable.
+    const ordinary = { spin: 3, pinned_apps: 12, pinning: 'manual' }
+
+    expect(sanitizeDiagnosticsValue(ordinary)).toEqual(ordinary)
+  })
+})
+
 describe('prefilled github issue url', () => {
   const context = {
     version: '1.3.11',
