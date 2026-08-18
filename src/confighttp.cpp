@@ -41,6 +41,7 @@
 #include "adaptive_bitrate.h"
 #include "browser_stream.h"
 #include "confighttp.h"
+#include "client_support_report.h"
 #include "confighttp_benchmark_auth.h"
 #include "confighttp_validation.h"
 #include "crash_report.h"
@@ -4513,6 +4514,38 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get support reports submitted by paired clients.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * Held in memory only and never written to host disk: this is content a paired
+   * device supplied, and a support feature should not double as a way for one to
+   * leave files behind.
+   *
+   * Values are passed through as the client sent them. The client redacts before
+   * sending and the export layer redacts again on the way out, so this is not the
+   * place for a third copy of those rules; it is the place that must not assume
+   * the client got it right.
+   *
+   * @api_examples{/polaris/v1/diagnostics/client-reports| GET| null}
+   */
+  void getClientSupportReports(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["reports"] = client_support_report::to_json();
+
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Cache-Control", "no-store");
+    append_json_security_headers(headers);
+    response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+  }
+
+  /**
    * @brief Clear the active log file.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -6605,6 +6638,7 @@ namespace confighttp {
     server.resource["^/polaris/v1/diagnostics/logs/tail$"]["GET"] = getLogTail;
     server.resource["^/polaris/v1/diagnostics/logs/previous$"]["GET"] = getPreviousLogs;
     server.resource["^/polaris/v1/diagnostics/last-run$"]["GET"] = getLastRun;
+    server.resource["^/polaris/v1/diagnostics/client-reports$"]["GET"] = getClientSupportReports;
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/logs/clear$"]["POST"] = withCsrf(clearLogs);
     server.resource["^/api/config$"]["GET"] = getConfig;
