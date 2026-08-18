@@ -67,6 +67,21 @@ namespace display_topology {
    */
   bool output_present(const std::string &name);
 
+  /**
+   * @brief Read an output's current mode out of `kscreen-doctor -j` output.
+   *
+   * Pure so the read-back can be tested without a compositor. Resolves the
+   * output's currentModeId against its mode list and renders the result in the
+   * same `WxH@RHz` form the mode request is built in, so the two are directly
+   * comparable. Refresh is rounded, because kscreen reports 59.987 for a mode
+   * it names 60.
+   *
+   * @param kscreen_json Raw stdout of `kscreen-doctor -j`.
+   * @param output_name Connector name, for example "DP-2".
+   * @return The current mode, or an empty string when it cannot be determined.
+   */
+  std::string current_output_mode(std::string_view kscreen_json, std::string_view output_name);
+
 }  // namespace display_topology
 
 #endif

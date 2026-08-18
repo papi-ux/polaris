@@ -40,6 +40,7 @@ extern "C" {
 #include "stream_stats.h"
 #include "sync.h"
 #include "video.h"
+#include "verified_action.h"
 #include "video_frame_pacing.h"
 
 #ifdef __linux__
@@ -4529,6 +4530,18 @@ namespace video {
     BOOST_LOG(info);
 
     auto &encoder = *chosen_encoder;
+
+    // A configured encoder that fails validation is quietly replaced by the
+    // fallback search above, and the stream still comes up. The user set an
+    // encoder, got a different one, and only a log line ever said so.
+    if (!config::video.encoder.empty()) {
+      verified_action::confirm(
+        "video.configured_encoder",
+        "Encode with the encoder this host is configured to use",
+        config::video.encoder,
+        encoder.name
+      );
+    }
 
     last_encoder_probe_supported_ref_frames_invalidation = (encoder.flags & REF_FRAMES_INVALIDATION);
     last_encoder_probe_supported_yuv444_for_codec[0] = encoder.h264[encoder_t::PASSED] &&
