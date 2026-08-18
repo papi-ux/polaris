@@ -106,18 +106,20 @@ jobs:
             -DCUDA_FAIL_ON_MISSING=OFF
 
       - name: Build sanitizer unit tests
-        run: cmake --build build-sanitize --target test_polaris test_polaris_audit test_polaris_config test_polaris_http test_polaris_platform test_polaris_steam_shutdown test_polaris_stream -j"$(nproc)"
+        run: |
+          cmake --build build-sanitize --target \
+            test_polaris test_polaris_audio test_polaris_audit test_polaris_config \
+            test_polaris_http test_polaris_input test_polaris_network test_polaris_pairing \
+            test_polaris_platform test_polaris_steam_shutdown test_polaris_stream test_polaris_video \
+            -j"$(nproc)"
 
       - name: Run sanitizer and gamescope ownership tests
         # Coverage here grew one target at a time, each fix adding only what it
-        # needed, so suites that existed were never run: test_polaris_audit and
-        # test_polaris_platform were built by nobody, and test_polaris_config ran
-        # a single GamescopeAttached* filter. Three tests were red on master
-        # under all-green checks because of it, including the Nova contract
-        # manifest guard whose entire job is catching that class of drift.
-        # Run the suites that exist; narrow deliberately if one earns it.
+        # needed, so suites that existed were never run. Keep every BUILD_FULL_TESTS
+        # executable in both this build list and the anchored ctest expression;
+        # narrow deliberately only if a suite earns it.
         run: |
-          ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_audit|test_polaris_config|test_polaris_http|test_polaris_platform|test_polaris_steam_shutdown|test_polaris_stream|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell)$'
+          ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_audio|test_polaris_audit|test_polaris_config|test_polaris_http|test_polaris_input|test_polaris_network|test_polaris_pairing|test_polaris_platform|test_polaris_steam_shutdown|test_polaris_stream|test_polaris_video|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell)$'
 
   arch-build:
     name: Arch build
