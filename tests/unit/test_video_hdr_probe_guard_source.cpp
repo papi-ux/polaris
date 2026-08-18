@@ -62,3 +62,99 @@ TEST(VideoHdrProbeGuardSource, HdrCapabilityProbeCannotFailTheEncoder) {
   EXPECT_NE(source.find("hevc_profile_for_input(colorspace.bit_depth"), std::string::npos)
     << "HEVC profile selection must follow the actual encoder input depth";
 }
+
+TEST(VideoHdrDiagnosticsSource, WarnsWhenAClientHdrRequestBecomesAnSdrStream) {
+  const auto source = read_video_source();
+  ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";
+
+  const auto encode_device_pos = source.find(
+    "std::unique_ptr<platf::encode_device_t> make_encode_device("
+  );
+  ASSERT_NE(encode_device_pos, std::string::npos) << "make_encode_device not found";
+
+  const auto decision = source.substr(encode_device_pos, 8192);
+  const auto result_pos = decision.find(
+    "if (result) {\n      result->colorspace = colorspace;"
+  );
+  ASSERT_NE(result_pos, std::string::npos)
+    << "successful encode-device finalization and final colorspace assignment not found";
+
+  const auto colorspace_assignment_pos = decision.find(
+    "result->colorspace = colorspace;",
+    result_pos
+  );
+  ASSERT_NE(colorspace_assignment_pos, std::string::npos)
+    << "final encode-device colorspace assignment not found";
+
+  const auto find_matching_brace = [&](const std::size_t open_brace_pos) {
+    if (open_brace_pos == std::string::npos || decision[open_brace_pos] != '{') {
+      return std::string::npos;
+    }
+
+    std::size_t depth = 0;
+    for (auto pos = open_brace_pos; pos < decision.size(); ++pos) {
+      if (decision[pos] == '{') {
+        ++depth;
+      } else if (decision[pos] == '}' && --depth == 0) {
+        return pos;
+      }
+    }
+    return std::string::npos;
+  };
+
+  const auto result_open_brace_pos = decision.find('{', result_pos);
+  const auto result_block_end_pos = find_matching_brace(result_open_brace_pos);
+  ASSERT_NE(result_block_end_pos, std::string::npos)
+    << "successful encode-device finalization block is malformed";
+
+  const auto return_pos = decision.find("return result;", result_block_end_pos);
+  ASSERT_NE(return_pos, std::string::npos) << "make_encode_device return not found";
+  const auto after_finalization = decision.substr(
+    result_block_end_pos + 1,
+    return_pos - result_block_end_pos - 1
+  );
+  EXPECT_EQ(after_finalization.find_first_not_of(" \t\r\n"), std::string::npos)
+    << "successful result finalization must remain the last operation before return";
+
+  const auto warning_guard_pos = decision.find(
+    "!encoder_probe_in_progress && config.dynamicRange > 0 && !colorspace_is_hdr(colorspace)",
+    colorspace_assignment_pos
+  );
+  ASSERT_NE(warning_guard_pos, std::string::npos)
+    << "the warning must be limited to live requested HDR that was downgraded to SDR";
+  EXPECT_GT(warning_guard_pos, colorspace_assignment_pos)
+    << "the warning must use the final encode-device colorspace";
+  EXPECT_LT(warning_guard_pos, result_block_end_pos)
+    << "the warning must not escape successful encode-device finalization";
+  const auto later_colorspace_assignment_pos = decision.find("colorspace =", warning_guard_pos);
+  EXPECT_TRUE(
+    later_colorspace_assignment_pos == std::string::npos ||
+    later_colorspace_assignment_pos > result_block_end_pos
+  ) << "the warning must follow the final colorspace mutation";
+  const auto later_colorspace_member_pos = decision.find("colorspace.", warning_guard_pos);
+  EXPECT_TRUE(
+    later_colorspace_member_pos == std::string::npos ||
+    later_colorspace_member_pos > result_block_end_pos
+  ) << "the warning must follow final colorspace member mutations";
+
+  const auto warning_open_brace_pos = decision.find('{', warning_guard_pos);
+  const auto warning_block_end_pos = find_matching_brace(warning_open_brace_pos);
+  ASSERT_NE(warning_block_end_pos, std::string::npos)
+    << "the diagnostic warning block is malformed";
+  EXPECT_LT(warning_block_end_pos, result_block_end_pos)
+    << "the warning guard itself must remain inside successful encode-device finalization";
+
+  const auto warning_log_pos = decision.find("BOOST_LOG(warning)", warning_guard_pos);
+  ASSERT_NE(warning_log_pos, std::string::npos)
+    << "an HDR-to-SDR downgrade must be visible at warning severity";
+  EXPECT_LT(warning_log_pos, warning_block_end_pos)
+    << "the diagnostic warning must be controlled by the live HDR-to-SDR guard";
+
+  const auto warning = decision.substr(warning_log_pos, warning_block_end_pos - warning_log_pos);
+  EXPECT_NE(warning.find("display or capture path"), std::string::npos)
+    << "the warning must cover both metadata and 8-bit capture demotions";
+  EXPECT_NE(warning.find("black video with working audio"), std::string::npos)
+    << "the warning must identify the distinctive client symptom";
+  EXPECT_NE(warning.find("disable HDR on the client"), std::string::npos)
+    << "the warning must include the immediate recovery action";
+}

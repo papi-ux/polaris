@@ -3429,6 +3429,7 @@ namespace video {
         << " display_hdr="sv << (hdr_probe.display_hdr ? "true" : "false")
         << " hdr_metadata_available="sv << (hdr_probe.metadata ? "true" : "false")
         << " stream_hdr_enabled="sv << (colorspace_is_hdr(colorspace) ? "true" : "false");
+
     }
 
     if (dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get())) {
@@ -3515,6 +3516,11 @@ namespace video {
         colorspace_is_hdr(colorspace),
         std::string {color_coding_label(colorspace)}
       );
+      if (!encoder_probe_in_progress && config.dynamicRange > 0 && !colorspace_is_hdr(colorspace)) {
+        BOOST_LOG(warning)
+          << "Client requested HDR, but Polaris is streaming SDR because the active display or capture path could not produce a usable HDR stream. "
+             "Some clients may show black video with working audio; disable HDR on the client or use an HDR-capable display path."sv;
+      }
     }
 
     return result;
