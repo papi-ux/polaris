@@ -11,14 +11,20 @@
   #include "src/logging.h"
   #include "src/platform/common.h"
   #include "src/platform/linux/misc.h"
+  #include "src/verified_action.h"
   #include "stream_display_policy.h"
 
   #include <algorithm>
+  #include <array>
 #include <cctype>
   #include <chrono>
+  #include <cmath>
+  #include <cstdio>
   #include <cstdlib>
   #include <filesystem>
   #include <fstream>
+  #include <memory>
+  #include <nlohmann/json.hpp>
   #include <string>
   #include <system_error>
   #include <thread>
@@ -326,6 +332,92 @@ namespace display_topology {
   }
 
 
+  /**
+   * @brief Capture stdout of a fixed command.
+   */
+  std::string exec_capture(const char *cmd) {
+    auto pipe_closer = [](FILE *pipe) {
+      if (pipe) {
+        pclose(pipe);
+      }
+    };
+    std::unique_ptr<FILE, decltype(pipe_closer)> pipe(popen(cmd, "r"), pipe_closer);
+    if (!pipe) {
+      return {};
+    }
+
+    std::array<char, 4096> buffer {};
+    std::string result;
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+      result += buffer.data();
+    }
+    return result;
+  }
+
+  /**
+   * @brief Ask kscreen what the display layout actually is right now.
+   *
+   * The argument list is fixed with no interpolation. This must not become a
+   * place where a configured output name reaches a shell.
+   */
+  std::string read_kscreen_json() {
+    return exec_capture("timeout 8 env QT_QPA_PLATFORM=wayland kscreen-doctor -j 2>/dev/null");
+  }
+
+  std::string current_output_mode(std::string_view kscreen_json, std::string_view output_name) {
+    if (kscreen_json.empty() || output_name.empty()) {
+      return {};
+    }
+
+    const auto document = nlohmann::json::parse(kscreen_json, nullptr, false);
+    if (document.is_discarded() || !document.is_object()) {
+      return {};
+    }
+    const auto outputs = document.find("outputs");
+    if (outputs == document.end() || !outputs->is_array()) {
+      return {};
+    }
+
+    for (const auto &output : *outputs) {
+      if (!output.is_object() || output.value("name", std::string {}) != output_name) {
+        continue;
+      }
+
+      const auto current_id = output.value("currentModeId", std::string {});
+      const auto modes = output.find("modes");
+      if (current_id.empty() || modes == output.end() || !modes->is_array()) {
+        return {};
+      }
+
+      for (const auto &mode : *modes) {
+        if (!mode.is_object() || mode.value("id", std::string {}) != current_id) {
+          continue;
+        }
+
+        const auto size = mode.find("size");
+        if (size == mode.end() || !size->is_object()) {
+          return {};
+        }
+        const auto width = size->value("width", 0);
+        const auto height = size->value("height", 0);
+        if (width <= 0 || height <= 0) {
+          return {};
+        }
+
+        const auto geometry = std::to_string(width) + "x" + std::to_string(height);
+        const auto refresh = mode.value("refreshRate", 0.0);
+        if (refresh <= 0.0) {
+          return geometry;
+        }
+        return geometry + "@" + std::to_string(std::llround(refresh)) + "Hz";
+      }
+
+      return {};
+    }
+
+    return {};
+  }
+
   std::string format_output_mode_arg(int width, int height, int refresh_hz) {
     if (width <= 0 || height <= 0) {
       return {};
@@ -348,15 +440,40 @@ namespace display_topology {
       return false;
     }
 
+    static constexpr auto check_id = "display_topology.output_mode";
+    static constexpr auto check_description = "Set the streaming output to the mode the session asked for";
+
     const int rc = run_kscreen({"output." + output_name + ".mode." + mode_arg});
     if (rc != 0) {
       BOOST_LOG(warning) << "display_topology: failed to request mode ["sv << mode_arg
                          << "] on output ["sv << output_name << "] code="sv << rc;
+      verified_action::confirm(check_id, check_description, mode_arg, "kscreen-doctor exited " + std::to_string(rc));
       return false;
     }
 
-    BOOST_LOG(info) << "display_topology: requested mode ["sv << mode_arg << "] on output ["
-                   << output_name << "]"sv;
+    // A zero exit means the request was accepted, not that the mode changed.
+    // Ask the compositor what it is actually running instead of believing the
+    // tool that just reported success.
+    const auto actual = current_output_mode(read_kscreen_json(), output_name);
+    if (actual.empty()) {
+      BOOST_LOG(info) << "display_topology: requested mode ["sv << mode_arg << "] on output ["sv
+                      << output_name << "]; could not read the mode back to confirm it"sv;
+      // Not recorded as a silent failure: an unreadable read-back is unknown,
+      // and claiming a mismatch we did not observe would be its own lie.
+      return true;
+    }
+
+    // A request without a refresh rate says nothing about refresh, so compare
+    // only what was actually asked for.
+    const auto comparable = mode_arg.find('@') == std::string::npos ?
+                              actual.substr(0, actual.find('@')) :
+                              actual;
+    if (!verified_action::confirm(check_id, check_description, mode_arg, comparable)) {
+      return false;
+    }
+
+    BOOST_LOG(info) << "display_topology: mode ["sv << mode_arg << "] confirmed active on output ["sv
+                    << output_name << "]"sv;
     return true;
   }
 
@@ -411,7 +528,14 @@ namespace display_topology {
   void prepare_for_stream(int width, int height, int refresh_hz) {
     if (config::video.linux_display.stream_mode == "headless_dongle" ||
         config::video.linux_display.stream_mode.empty()) {
-      ensure_dongle_outputs_configured();
+      // This step reports whether it configured anything and that answer was
+      // being dropped. A dongle setup that quietly did not run is invisible
+      // until the stream comes up on the wrong output.
+      verified_action::confirm(
+        "display_topology.dongle_outputs_configured",
+        "Configure the dongle outputs before the stream starts",
+        ensure_dongle_outputs_configured()
+      );
     }
     if (!should_manage_host_topology()) {
       return;
@@ -437,7 +561,13 @@ namespace display_topology {
       BOOST_LOG(error) << "display_topology: enable streaming output failed code="sv << ret;
     }
     // Was fixed 1500ms sleep; poll enabled state with same overall budget.
-    wait_output_state(cfg.streaming_output, true, std::chrono::milliseconds(1500), "enable_streaming");
+    // The poll reads the truth out of sysfs and its verdict was being discarded,
+    // so an output that never came up produced a warning and nothing else.
+    verified_action::confirm(
+      "display_topology.streaming_output_enabled",
+      "Bring the streaming output up before capture starts",
+      wait_output_state(cfg.streaming_output, true, std::chrono::milliseconds(1500), "enable_streaming")
+    );
     if (width > 0 && height > 0) {
       apply_requested_display_mode(cfg.streaming_output, width, height, refresh_hz);
     }

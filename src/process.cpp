@@ -55,6 +55,7 @@
 #include "utility.h"
 #include "video.h"
 #include "uuid.h"
+#include "verified_action.h"
 
 #ifdef _WIN32
   // from_utf8() string conversion function
@@ -6891,7 +6892,16 @@ namespace proc {
           confighttp::emit_session_event("error", "Nested gamescope session failed to start");
           return 503;
         }
-        // Non-fatal: continue session for ordinary prep commands
+        // Non-fatal: continue session for ordinary prep commands. Continuing is
+        // the right call and also the reason this needs recording: nothing
+        // downstream will mention that a setup step the app depends on did not
+        // succeed, so the session looks healthy while being half-prepared.
+        verified_action::confirm(
+          "process.prep_command",
+          "Run the app's prep commands before launching it",
+          "exit 0",
+          "exit " + std::to_string(ret)
+        );
       }
     }
 

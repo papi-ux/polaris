@@ -21,6 +21,7 @@
 #include "config.h"
 #include "logging.h"
 #include "stream_stats.h"
+#include "verified_action.h"
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
@@ -1115,6 +1116,11 @@ namespace stream_stats {
         {"reason", "Current debounced packet-loss and latency evidence is clean; the older health label cannot trigger a bitrate change."}
       });
     }
+    // Actions that reported success and did not land. These are not stream
+    // health, so they do not move status or traffic light, but they belong in
+    // the same payload: they are the evidence a user cannot see any other way,
+    // and the export path already carries this object.
+    doctor["silent_failures"] = verified_action::to_json();
     doctor["redaction"] = {{"policy", "polaris-diagnostics-redaction-v1"}, {"applied", true}, {"redacted_fields", nlohmann::json::array()}, {"notice", "Tokens, cookies, credentials, auth headers, client IPs, and sensitive config fields are redacted before export or AI explanation."}};
     doctor["ai_explanation"] = {{"enabled", false}, {"provider", "none"}, {"model", ""}, {"generated_at", nullptr}, {"input_redacted", true}, {"source_result_id", doctor["result_id"]}, {"summary", ""}, {"limits", nlohmann::json::array({"AI can explain only; deterministic Doctor owns status, evidence, and actions."})}, {"error", ""}};
     return doctor;
