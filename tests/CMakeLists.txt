@@ -66,6 +66,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/confighttp_benchmark_auth.cpp
     ${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.cpp
+    ${CMAKE_SOURCE_DIR}/src/crash_report.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
@@ -106,6 +107,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_download_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_client_settings_advertisement.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_browser_stream_protocol.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_crash_report.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_log_tail_api.cpp

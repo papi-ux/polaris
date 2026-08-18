@@ -245,6 +245,13 @@ namespace logging {
   };
 #endif
 
+  std::string backup_log_path(const std::string &log_file) {
+    if (log_file.empty()) {
+      return {};
+    }
+    return log_file + ".backup";
+  }
+
   [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file) {
     if (sink || file_sink) {
       // Deinitialize the logging system before reinitializing it. This can probably only ever be hit in tests.
@@ -253,10 +260,7 @@ namespace logging {
 
     // Check if the log file exists and handle backup. An empty path requests
     // console-only logging for commands that must not initialize user state.
-    std::string backup_log_file;
-    if (!log_file.empty()) {
-      backup_log_file = log_file + ".backup";
-    }
+    const std::string backup_log_file = backup_log_path(log_file);
     auto file_logging_ready = !log_file.empty();
     if (file_logging_ready) {
       // Single owner per config directory: a second Polaris reaching this init

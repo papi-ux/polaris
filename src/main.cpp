@@ -14,6 +14,7 @@
 #include "beat_times.h"
 #include "client_profiles.h"
 #include "confighttp.h"
+#include "crash_report.h"
 #include "display_device.h"
 #include "entry_handler.h"
 #include "globals.h"
@@ -234,6 +235,14 @@ int main(int argc, char *argv[]) {
   // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
   // the version should be printed to the log before anything else
   BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
+
+  // Classify how the previous run ended and record that this one is live, then
+  // arm the handlers that leave evidence if it is not. This has to happen after
+  // logging is up, so the verdict on the previous run reaches the log, and
+  // before anything that can fault.
+  crash_report::begin_run(platf::appdata(), config::sunshine.log_file, PROJECT_VERSION);
+  crash_report::install_fatal_handlers();
+
 #ifdef __linux__
   #ifdef POLARIS_BUILD_CUDA
   constexpr auto linux_cuda_build_feature = "enabled"sv;
@@ -597,6 +606,10 @@ int main(int argc, char *argv[]) {
     system_tray::end_tray_threaded();
   }
 #endif
+
+  // Reached only by ordinary control flow, which is exactly what makes it
+  // meaningful: a run killed before this point is recorded as unclean.
+  crash_report::note_clean_exit(lifetime::desired_exit_code, lifetime::shutdown_reason());
 
   return lifetime::desired_exit_code;
 }

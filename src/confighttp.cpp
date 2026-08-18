@@ -43,6 +43,7 @@
 #include "confighttp.h"
 #include "confighttp_benchmark_auth.h"
 #include "confighttp_validation.h"
+#include "crash_report.h"
 #include "crypto.h"
 #include "display_device.h"
 #include "entry_handler.h"
@@ -4436,6 +4437,82 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get the retained log of the run before this one.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * A run that crashed cannot serve its own log: by the time anyone asks, the
+   * process has restarted and the active log describes the new run. The bounded
+   * backup preserved at startup is the only copy of what the failing run said,
+   * which is what makes this the log a crash report needs.
+   *
+   * Served as plain bytes rather than the Base64 JSON of the tail endpoint,
+   * matching `/api/logs`, because this is a whole-file fetch for an export
+   * rather than an incremental reader that has to track offsets.
+   *
+   * @api_examples{/polaris/v1/diagnostics/logs/previous| GET| null}
+   */
+  void getPreviousLogs(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    const auto backup_path = logging::backup_log_path(config::sunshine.log_file);
+    std::error_code exists_error;
+    const bool present = !backup_path.empty() && std::filesystem::exists(backup_path, exists_error);
+
+    file_handler::tail_result_t tail;
+    if (present) {
+      tail = file_handler::read_file_tail(backup_path.c_str(), log_tail_api::legacy_max_bytes);
+    }
+
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    std::string contentType = "text/plain";
+  #ifdef _WIN32
+    contentType += "; charset=";
+    contentType += currentCodePageToCharset();
+  #endif
+    headers.emplace("Content-Type", contentType);
+    headers.emplace("Cache-Control", "no-store");
+    // An absent backup and an empty one are different states: the first means
+    // there was no prior run to preserve, the second that it logged nothing.
+    headers.emplace("X-Polaris-Log-Present", present ? "true" : "false");
+    headers.emplace("X-Polaris-Log-Start-Offset", std::to_string(tail.start_offset));
+    headers.emplace("X-Polaris-Log-End-Offset", std::to_string(tail.end_offset));
+    headers.emplace("X-Polaris-Log-Truncated", tail.truncated ? "true" : "false");
+    append_common_security_headers(headers);
+    response->write(SimpleWeb::StatusCode::success_ok, tail.content, headers);
+  }
+
+  /**
+   * @brief Get how the run before this one ended.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * Reports `clean`, `crashed`, `unclean`, or `unknown`, with the fatal signal
+   * and captured backtrace when there was one. This is what lets a support
+   * report state that Polaris crashed instead of leaving the user to work it
+   * out from `coredumpctl` by hand.
+   *
+   * @api_examples{/polaris/v1/diagnostics/last-run| GET| null}
+   */
+  void getLastRun(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    auto output = crash_report::to_json(crash_report::previous_run());
+    output["status"] = true;
+
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Cache-Control", "no-store");
+    append_json_security_headers(headers);
+    response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+  }
+
+  /**
    * @brief Clear the active log file.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -6526,6 +6603,8 @@ namespace confighttp {
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
     server.resource["^/polaris/v1/diagnostics/logs/tail$"]["GET"] = getLogTail;
+    server.resource["^/polaris/v1/diagnostics/logs/previous$"]["GET"] = getPreviousLogs;
+    server.resource["^/polaris/v1/diagnostics/last-run$"]["GET"] = getLastRun;
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/logs/clear$"]["POST"] = withCsrf(clearLogs);
     server.resource["^/api/config$"]["GET"] = getConfig;

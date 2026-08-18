@@ -103,6 +103,18 @@ namespace logging {
   bool clear_log_file();
 
   /**
+   * @brief Path of the retained bounded backup of the prior run's log.
+   *
+   * The backup is what survives a run that crashed, so readers outside the
+   * logging system need to name it. Deriving it in one place keeps the suffix
+   * from drifting between the writer and its readers.
+   *
+   * @param log_file Active log path, or empty for console-only logging.
+   * @return The backup path, or an empty string when there is no file logging.
+   */
+  std::string backup_log_path(const std::string &log_file);
+
+  /**
    * @brief Print help to stdout.
    * @param name The name of the program.
    * @examples
