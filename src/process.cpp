@@ -889,6 +889,18 @@ namespace proc {
       );
     }
 
+    // This reserved marker records Polaris private-session provenance. It is
+    // not authentication against another same-user process deliberately
+    // forging its environment. Unknown or unreadable ownership still fails
+    // closed in the desktop launch guard below.
+    bool proc_environ_is_polaris_private_session(std::string_view environ) {
+      return proc_environ_contains_exact_entry(
+        environ,
+        "POLARIS_PRIVATE_SESSION"sv,
+        "1"sv
+      );
+    }
+
     std::string steam_appid_for_context(const proc::ctx_t &ctx) {
       if (!ctx.steam_appid.empty()) {
         return ctx.steam_appid;
@@ -2665,6 +2677,7 @@ namespace proc {
 #ifdef POLARIS_TESTS
     thread_local bool forced_desktop_steam_proc_open_error = false;
     thread_local pid_t forced_desktop_steam_proc_read_error_pid = -1;
+    thread_local pid_t forced_desktop_steam_proc_environ_read_error_pid = -1;
     thread_local pid_t forced_desktop_steam_scan_only_pid = -1;
 #endif
 
@@ -2842,6 +2855,25 @@ namespace proc {
           continue;
         }
         if (is_active_desktop_steam_client_process(comm, argv0, cmdline, status)) {
+          auto environ_result = read_proc_status_file_result(pid, "environ");
+#ifdef POLARIS_TESTS
+          if (pid == forced_desktop_steam_proc_environ_read_error_pid) {
+            environ_result = {{}, EACCES};
+          }
+#endif
+          if (!environ_result.ok()) {
+            if (process_vanished_during_proc_read(environ_result.error)) {
+              continue;
+            }
+            // The guard protects the physical desktop. If ownership cannot be
+            // read, keep treating this Steam process as desktop-owned.
+            return true;
+          }
+          if (proc_environ_is_polaris_private_session(environ_result.bytes)) {
+            BOOST_LOG(debug) << "process: ignoring private-session-marked Steam in desktop launch guard pid="sv
+                             << pid;
+            continue;
+          }
           return true;
         }
       }
@@ -3442,7 +3474,8 @@ namespace proc {
     }
 
     bool is_reserved_session_env_key(std::string_view key) {
-      return key == "POLARIS_SESSION_INSTANCE_ID"sv;
+      return key == "POLARIS_SESSION_INSTANCE_ID"sv ||
+             key == "POLARIS_PRIVATE_SESSION"sv;
     }
 
     void set_child_only_session_env_var(boost::process::v1::environment &env,
@@ -4570,8 +4603,10 @@ namespace proc {
   bool desktop_steam_client_process_for_tests(std::string_view comm,
                                                std::string_view argv0_path,
                                                std::string_view cmdline,
-                                               std::string_view status) {
-    return is_active_desktop_steam_client_process(comm, argv0_path, cmdline, status);
+                                               std::string_view status,
+                                               std::string_view environ) {
+    return is_active_desktop_steam_client_process(comm, argv0_path, cmdline, status) &&
+           !proc_environ_is_polaris_private_session(environ);
   }
 
   bool steam_instance_pipe_listener_active_for_tests(const std::string &pipe_path) {
@@ -4604,6 +4639,27 @@ namespace proc {
       forced_desktop_steam_scan_only_pid = previous_only_pid;
     });
     forced_desktop_steam_proc_read_error_pid = forced_pid;
+    forced_desktop_steam_scan_only_pid = forced_pid;
+    return desktop_steam_client_active_impl();
+  }
+
+  bool desktop_steam_proc_environ_read_error_fails_closed_for_tests(pid_t forced_pid) {
+    const auto previous_error_pid = forced_desktop_steam_proc_environ_read_error_pid;
+    const auto previous_only_pid = forced_desktop_steam_scan_only_pid;
+    auto restore = util::fail_guard([previous_error_pid, previous_only_pid]() {
+      forced_desktop_steam_proc_environ_read_error_pid = previous_error_pid;
+      forced_desktop_steam_scan_only_pid = previous_only_pid;
+    });
+    forced_desktop_steam_proc_environ_read_error_pid = forced_pid;
+    forced_desktop_steam_scan_only_pid = forced_pid;
+    return desktop_steam_client_active_impl();
+  }
+
+  bool desktop_steam_proc_scan_only_pid_for_tests(pid_t forced_pid) {
+    const auto previous_only_pid = forced_desktop_steam_scan_only_pid;
+    auto restore = util::fail_guard([previous_only_pid]() {
+      forced_desktop_steam_scan_only_pid = previous_only_pid;
+    });
     forced_desktop_steam_scan_only_pid = forced_pid;
     return desktop_steam_client_active_impl();
   }
@@ -6793,6 +6849,10 @@ namespace proc {
 
     _session_env_keys.clear();
 #ifdef __linux__
+    // This marker is applied only to processes launched into a Polaris-owned
+    // private compositor. Never let the daemon environment or app config leak
+    // it into a desktop-mirror launch.
+    _env.erase("POLARIS_PRIVATE_SESSION");
     // Prep commands are child processes too. Publish the immutable session
     // credential before the nested gamescope start command executes, while
     // keeping it out of the daemon's real environment.

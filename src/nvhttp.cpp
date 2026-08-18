@@ -5825,6 +5825,10 @@ namespace nvhttp {
           put_desktop_launch_policy(tree, launch_policy);
         }
         if (launch_policy.recommendedAction == "refuse_private_stream") {
+          BOOST_LOG(warning) << "launch_policy: refusing private stream; desktop_steam_active="sv
+                             << launch_policy.desktopSteamActive
+                             << " physical_display_risk="sv
+                             << launch_policy.physicalDisplayRisk;
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 409);
           tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.");
@@ -7805,6 +7809,10 @@ namespace nvhttp {
           launch_policy_json = proc::desktop_launch_safety_policy_to_json(launch_policy);
         }
         if (launch_policy.recommendedAction == "refuse_private_stream") {
+          BOOST_LOG(warning) << "launch_policy: refusing private stream; desktop_steam_active="sv
+                             << launch_policy.desktopSteamActive
+                             << " physical_display_risk="sv
+                             << launch_policy.physicalDisplayRisk;
           nlohmann::json err;
           err["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.";
           err["error_code"] = "desktop_active_private_stream_refused";

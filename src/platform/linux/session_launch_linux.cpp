@@ -69,6 +69,9 @@ namespace session_launch_linux {
     if (cage_socket.empty()) {
       return;
     }
+    // Ownership marker for the desktop-Steam launch guard. This is deliberately
+    // absent from desktop-mirror launches.
+    env["POLARIS_PRIVATE_SESSION"] = "1";
     env["WAYLAND_DISPLAY"] = cage_socket;
     env["AT_SPI_BUS_ADDRESS"] = "";
     if (!cage_display.empty()) {
@@ -101,6 +104,10 @@ namespace session_launch_linux {
       // Steam base XWayland; STEAM_MULTIPLE_XWAYLANDS places games on base+1.
       cage_display = ":0";
     }
+
+    // Ownership marker for the desktop-Steam launch guard. Pressure-vessel may
+    // strip other session variables, so apply it at the final attach boundary.
+    env["POLARIS_PRIVATE_SESSION"] = "1";
 
     // Prefer XWayland into gamescope for Proton; still pin GAMESCOPE_WAYLAND_DISPLAY
     // so nested helpers and steam find the right compositor. Unset host WAYLAND_DISPLAY
