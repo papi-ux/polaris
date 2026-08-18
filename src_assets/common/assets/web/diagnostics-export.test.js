@@ -624,6 +624,92 @@ describe('redaction defects closed', () => {
   })
 })
 
+describe('container shapes the walk used to drop', () => {
+  it('reports a second reference to the same object as the object, not as a cycle', () => {
+    const shared = { capture_path: 'dmabuf', frame_residency: 'gpu' }
+
+    expect(sanitizeDiagnosticsValue({ first: shared, second: shared })).toEqual({
+      first: { capture_path: 'dmabuf', frame_residency: 'gpu' },
+      second: { capture_path: 'dmabuf', frame_residency: 'gpu' },
+    })
+  })
+
+  it('reports the same shared value at any depth and in arrays', () => {
+    const shared = { encoder: 'nvenc' }
+
+    expect(sanitizeDiagnosticsValue({ a: { deep: shared }, b: [shared, shared] })).toEqual({
+      a: { deep: { encoder: 'nvenc' } },
+      b: [{ encoder: 'nvenc' }, { encoder: 'nvenc' }],
+    })
+  })
+
+  it('still terminates on a genuine self-reference', () => {
+    const cyclic = { name: 'session' }
+    cyclic.self = cyclic
+
+    expect(sanitizeDiagnosticsValue(cyclic)).toEqual({ name: 'session', self: '[circular]' })
+  })
+
+  it('still terminates on a cycle that runs through several objects', () => {
+    const first = { label: 'first' }
+    const second = { label: 'second', back: first }
+    first.forward = second
+
+    expect(sanitizeDiagnosticsValue(first)).toEqual({
+      label: 'first',
+      forward: { label: 'second', back: '[circular]' },
+    })
+  })
+
+  it('carries the contents of a Map instead of an empty object', () => {
+    const value = { limits: new Map([['fps', 120], ['bitrate_kbps', 20000]]) }
+
+    expect(sanitizeDiagnosticsValue(value)).toEqual({ limits: { fps: 120, bitrate_kbps: 20000 } })
+  })
+
+  it('applies the field-name rule to Map keys', () => {
+    const value = { headers: new Map([['authorization', 'Bearer abc'], ['accept', 'application/json']]) }
+
+    expect(sanitizeDiagnosticsValue(value)).toEqual({
+      headers: { authorization: REDACTED_VALUE, accept: 'application/json' },
+    })
+  })
+
+  it('carries the contents of a Set as a list', () => {
+    const value = { codecs: new Set(['h264', 'hevc', 'av1']) }
+
+    expect(sanitizeDiagnosticsValue(value)).toEqual({ codecs: ['h264', 'hevc', 'av1'] })
+  })
+
+  it('carries a Date as an ISO timestamp', () => {
+    expect(sanitizeDiagnosticsValue({ started_at: new Date(0) }))
+      .toEqual({ started_at: '1970-01-01T00:00:00.000Z' })
+  })
+
+  it('survives an invalid Date rather than throwing the export away', () => {
+    // toISOString throws on an invalid date, which would take the whole bundle
+    // down over one bad field.
+    expect(sanitizeDiagnosticsValue({ started_at: new Date('nonsense') })).toEqual({ started_at: null })
+  })
+
+  it('keeps the error message, which is the line a support bundle needs most', () => {
+    const value = { failure: new Error('capture failed on /dev/dri/renderD128') }
+
+    expect(sanitizeDiagnosticsValue(value)).toEqual({
+      failure: { name: 'Error', message: 'capture failed on /dev/dri/renderD128' },
+    })
+  })
+
+  it('redacts an error message and keeps the fields riding along with it', () => {
+    const failure = new Error('pairing rejected auth_token=hunter2')
+    failure.code = 'EAUTH'
+
+    expect(sanitizeDiagnosticsValue({ failure })).toEqual({
+      failure: { name: 'Error', message: `pairing rejected auth_token=${REDACTED_VALUE}`, code: 'EAUTH' },
+    })
+  })
+})
+
 describe('redaction across naming conventions', () => {
   it('redacts camelCase credential names in free text', () => {
     // The first fix handled snake and kebab and missed camelCase entirely, which

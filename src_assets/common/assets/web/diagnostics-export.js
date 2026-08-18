@@ -268,21 +268,75 @@ export function redactSensitiveText(value) {
 
 
 
+/**
+ * Sanitise `entries` into a plain object, applying the field-name rule to keys.
+ *
+ * Keys are stringified because a Map may key on anything, and an exported bundle
+ * is JSON either way. Which names count as credentials stays with
+ * isSensitiveFieldName rather than becoming a second definition here.
+ */
+function sanitizeEntries(entries, seen) {
+  return Object.fromEntries(entries.map(([key, item]) => [
+    String(key),
+    isSensitiveFieldName(String(key)) ? REDACTED_VALUE : sanitizeDiagnosticsValue(item, seen),
+  ]))
+}
+
+/**
+ * An error as diagnostics rather than as an empty object.
+ *
+ * `message` and `name` are non-enumerable, so Object.entries cannot see them and
+ * the whole error collapsed to `{}` on the way into a bundle. The message is
+ * usually the most useful line in a support report, so it is named explicitly
+ * and redacted like any other text. Enumerable own fields are kept after it,
+ * since that is where a code or an errno rides along.
+ *
+ * The stack is deliberately not carried. The bundle already ships log text, and
+ * a stack adds host paths without adding much a maintainer cannot get there.
+ */
+function sanitizeError(error, seen) {
+  return {
+    name: String(error.name || 'Error'),
+    message: redactSensitiveText(error.message || ''),
+    ...sanitizeEntries(Object.entries(error), seen),
+  }
+}
+
+/**
+ * Sanitise a value that is known to be an object, by what kind of object it is.
+ *
+ * Map, Set, Date and Error all have their contents somewhere Object.entries
+ * cannot reach, so the generic path turned each of them into `{}`. That is the
+ * safe direction and the useless one: the bundle still opened and still read as
+ * complete while carrying nothing.
+ */
+function sanitizeObjectLike(value, seen) {
+  if (Array.isArray(value)) return value.map((item) => sanitizeDiagnosticsValue(item, seen))
+  // An invalid date has no ISO form and toISOString throws on it, which would
+  // take the whole export down over one bad field.
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null
+  if (value instanceof Error) return sanitizeError(value, seen)
+  if (value instanceof Map) return sanitizeEntries([...value.entries()], seen)
+  if (value instanceof Set) return [...value].map((item) => sanitizeDiagnosticsValue(item, seen))
+  return sanitizeEntries(Object.entries(value), seen)
+}
+
 export function sanitizeDiagnosticsValue(value, seen = new WeakSet()) {
   if (value === null || value === undefined) return value
   if (typeof value === 'string') return redactSensitiveText(value)
   if (typeof value !== 'object') return value
+  // Only an ancestor is a cycle. `seen` used to keep every object the walk had
+  // ever visited, so the second reference to a shared object was reported as
+  // circular and whichever branch happened to be walked second lost its
+  // contents. Genuine cycles still terminate, because an ancestor is still in
+  // the set while its own subtree is being walked.
   if (seen.has(value)) return '[circular]'
   seen.add(value)
-
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeDiagnosticsValue(item, seen))
+  try {
+    return sanitizeObjectLike(value, seen)
+  } finally {
+    seen.delete(value)
   }
-
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-    key,
-    isSensitiveFieldName(key) ? REDACTED_VALUE : sanitizeDiagnosticsValue(item, seen),
-  ]))
 }
 
 function issueTermPattern(term) {
