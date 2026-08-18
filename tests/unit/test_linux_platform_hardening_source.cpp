@@ -50,6 +50,26 @@ TEST(LinuxPlatformHardeningSource, HeadlessVaapiFailsClosedBeforeDmabufInitializ
   EXPECT_NE(process.find("Retaining headless extcopy failure reason"), std::string::npos);
 }
 
+TEST(LinuxPlatformHardeningSource, PipeWireVaapiDefaultsToShmWithExplicitOptInAndForcedCpuPrecedence) {
+  const auto policy = read_source("src/platform/linux/pipewire_capture.cpp");
+  const auto capture = read_source("src/platform/linux/portal_grab.cpp");
+
+  EXPECT_NE(policy.find("override == dmabuf_override_e::allow_vaapi && eligibility.mem_type == platf::mem_type_e::vaapi"), std::string::npos);
+  EXPECT_NE(policy.find("dmabuf_override_from_env(std::getenv(\"POLARIS_PORTAL_DMABUF\"))"), std::string::npos);
+  EXPECT_NE(capture.find("portal_dmabuf_override"), std::string::npos);
+  EXPECT_NE(capture.find("vaapi_pipewire_dmabuf_disabled_for_stability"), std::string::npos);
+  EXPECT_NE(capture.find("vaapi_pipewire_dmabuf_explicitly_enabled"), std::string::npos);
+
+  const std::string offer_call = "may_offer_dmabuf(eligibility, dmabuf_override)";
+  const auto local_offer = capture.find(offer_call);
+  ASSERT_NE(local_offer, std::string::npos);
+  EXPECT_NE(capture.find(offer_call, local_offer + offer_call.size()), std::string::npos)
+    << "both local-graph and portal-remote capture must apply the same explicit policy";
+
+  EXPECT_NE(capture.find("query_egl_dmabuf_import_formats(*encoder_render_node)"), std::string::npos)
+    << "the explicit VAAPI opt-in must retain the existing EGL modifier capability gate";
+}
+
 TEST(LinuxPlatformHardeningSource, HeadlessModifierGuardRemainsBehindVaapiContainment) {
   const auto header = read_source("src/platform/linux/wayland.h");
   const auto capture = read_source("src/platform/linux/wlgrab.cpp");

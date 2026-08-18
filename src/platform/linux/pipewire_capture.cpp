@@ -78,10 +78,6 @@ namespace pipewire_capture {
              spa_format == SPA_VIDEO_FORMAT_RGBA;
     }
 
-    bool gpu_encoder_mem_type(platf::mem_type_e mem_type) {
-      return mem_type == platf::mem_type_e::vaapi || mem_type == platf::mem_type_e::cuda;
-    }
-
     bool contains_modifier(const std::vector<std::uint64_t> &modifiers, std::uint64_t modifier) {
       return std::find(modifiers.begin(), modifiers.end(), modifier) != modifiers.end();
     }
@@ -147,7 +143,28 @@ namespace pipewire_capture {
     return canonical_render_node(nodes.front());
   }
 
-  bool may_offer_dmabuf(const dmabuf_eligibility_t &eligibility) {
+  dmabuf_override_e dmabuf_override_from_env(const char *value) {
+    if (value && std::strcmp(value, "0") == 0) {
+      return dmabuf_override_e::force_cpu;
+    }
+    if (value && std::strcmp(value, "1") == 0) {
+      return dmabuf_override_e::allow_vaapi;
+    }
+    return dmabuf_override_e::default_safe;
+  }
+
+  bool may_offer_dmabuf(const dmabuf_eligibility_t &eligibility, dmabuf_override_e override) {
+    // #367 and #480 reached the first-frame VAAPI failure boundary on different
+    // capture backends. A matching render node and importable modifier prove
+    // layout compatibility, not driver-safe import/conversion lifetime. Keep
+    // every unproven VAAPI PipeWire route on SHM by default. CUDA remains the
+    // validated GPU-native path; VAAPI is available only as an explicit field-
+    // testing opt-in on hosts where the operator has already proved it works.
+    const bool supported_encoder = eligibility.mem_type == platf::mem_type_e::cuda ||
+                                   (override == dmabuf_override_e::allow_vaapi && eligibility.mem_type == platf::mem_type_e::vaapi);
+    if (override == dmabuf_override_e::force_cpu || !supported_encoder) {
+      return false;
+    }
     if (!eligibility.capture_render_node) {
       return false;
     }
@@ -155,7 +172,6 @@ namespace pipewire_capture {
     const auto encoder_node = canonical_render_node(eligibility.encoder_render_node);
     return capture_node && encoder_node &&
            *capture_node == *encoder_node &&
-           gpu_encoder_mem_type(eligibility.mem_type) &&
            eligibility.egl_import_supported;
   }
 
@@ -1064,8 +1080,8 @@ namespace pipewire_capture {
       cap->set_terminal(wait_result_e::reinit);
       return;
     }
-    const char *dmabuf_env = std::getenv("POLARIS_PORTAL_DMABUF");
-    const bool force_cpu = dmabuf_env && dmabuf_env[0] == '0' && dmabuf_env[1] == '\0';
+    const auto dmabuf_override = dmabuf_override_from_env(std::getenv("POLARIS_PORTAL_DMABUF"));
+    const bool force_cpu = dmabuf_override == dmabuf_override_e::force_cpu;
     const bool want_dmabuf = cap->options_.may_use_dmabuf && !force_cpu;
     const auto has_modifier = (raw_info.flags & SPA_VIDEO_FLAG_MODIFIER) &&
                               raw_info.modifier != DRM_FORMAT_MOD_INVALID;
