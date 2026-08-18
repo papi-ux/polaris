@@ -8,6 +8,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -23,6 +24,63 @@
 
 using namespace nvhttp;
 using namespace std::literals;
+
+struct TrustedSubnetTest: testing::Test {
+  void SetUp() override {
+    previous_trusted_subnets = config::nvhttp.trusted_subnets;
+  }
+
+  void TearDown() override {
+    config::nvhttp.trusted_subnets = std::move(previous_trusted_subnets);
+  }
+
+  bool matches(std::initializer_list<std::string> subnets) {
+    config::nvhttp.trusted_subnets = subnets;
+    return is_in_trusted_subnet_for_tests(boost::asio::ip::make_address("192.168.18.248"));
+  }
+
+  std::vector<std::string> previous_trusted_subnets;
+};
+
+TEST_F(TrustedSubnetTest, AcceptsQuotedIpv4CidrsFromListStyleConfig) {
+  EXPECT_TRUE(matches({R"("192.168.18.0/24")"}));
+  EXPECT_TRUE(matches({"  '192.168.18.0/24'  "}));
+}
+
+TEST_F(TrustedSubnetTest, PreservesBareCidrsAndRejectsNonMatchingOrMalformedEntries) {
+  EXPECT_TRUE(matches({"192.168.18.0/24"}));
+  EXPECT_FALSE(matches({"192.168.19.0/24"}));
+  EXPECT_FALSE(matches({R"("not-a-subnet")"}));
+}
+
+TEST(PairingRequestValidationTest, RejectsOnlyEmptyUniqueIdsAtThisBoundary) {
+  EXPECT_FALSE(pairing_unique_id_valid_for_tests(""));
+  EXPECT_TRUE(pairing_unique_id_valid_for_tests("0123456789ABCDEF"));
+
+  // Existing clients own the identifier format. Keep this change scoped to the
+  // observed empty value instead of inventing a new protocol restriction.
+  EXPECT_TRUE(pairing_unique_id_valid_for_tests("client-defined-id"));
+}
+
+TEST(PairingRequestValidationTest, LogsTheStoredUniqueIdAfterMovingTheRequestValue) {
+  const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/nvhttp.cpp";
+  std::ifstream file {path};
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  const auto source = buffer.str();
+  ASSERT_FALSE(source.empty()) << "could not read src/nvhttp.cpp via POLARIS_SOURCE_DIR";
+
+  const auto move_pos = source.find("sess.client.uniqueID = std::move(uniqID)");
+  ASSERT_NE(move_pos, std::string::npos) << "pairing uniqueid move not found";
+
+  const auto log_pos = source.find("pair: getservercert uniqueid=", move_pos);
+  ASSERT_NE(log_pos, std::string::npos) << "getservercert diagnostic not found";
+  const auto diagnostic = source.substr(log_pos, 512);
+  EXPECT_NE(diagnostic.find("ptr->second.client.uniqueID"), std::string::npos)
+    << "the diagnostic must read the stored id, not the moved-from request value";
+  EXPECT_EQ(diagnostic.find("<< uniqID"), std::string::npos)
+    << "logging the moved-from request value makes valid clients appear to have an empty id";
+}
 
 namespace confighttp {
   bool config_request_authorized_for_tests(

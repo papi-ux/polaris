@@ -3491,12 +3491,37 @@ namespace nvhttp {
    * @brief Check if an IP address falls within any configured trusted subnet.
    * Used for TOFU (Trust-on-First-Use) LAN pairing.
    */
+  namespace {
+    std::string_view normalize_trusted_subnet(std::string_view subnet) {
+      const auto first = subnet.find_first_not_of(" \t\r\n");
+      if (first == std::string_view::npos) {
+        return {};
+      }
+
+      subnet.remove_prefix(first);
+      subnet.remove_suffix(subnet.size() - subnet.find_last_not_of(" \t\r\n") - 1);
+      if (subnet.size() >= 2 &&
+          ((subnet.front() == '"' && subnet.back() == '"') ||
+           (subnet.front() == '\'' && subnet.back() == '\''))) {
+        subnet.remove_prefix(1);
+        subnet.remove_suffix(1);
+      }
+
+      return subnet;
+    }
+
+    bool pairing_unique_id_valid(std::string_view unique_id) {
+      return !unique_id.empty();
+    }
+  }  // namespace
+
   bool is_in_trusted_subnet(const boost::asio::ip::address &addr) {
     if (config::nvhttp.trusted_subnets.empty()) {
       return false;
     }
 
-    for (const auto &subnet_str : config::nvhttp.trusted_subnets) {
+    for (const auto &configured_subnet : config::nvhttp.trusted_subnets) {
+      const std::string subnet_str {normalize_trusted_subnet(configured_subnet)};
       auto slash = subnet_str.find('/');
       if (slash == std::string::npos) {
         continue;
@@ -3545,7 +3570,7 @@ namespace nvhttp {
         }
       }
       catch (...) {
-        BOOST_LOG(warning) << "TOFU: Failed to parse trusted subnet: " << subnet_str;
+        BOOST_LOG(warning) << "TOFU: Failed to parse trusted subnet: " << configured_subnet;
         continue;
       }
     }
@@ -5082,6 +5107,12 @@ namespace nvhttp {
     }
 
     auto uniqID {get_arg(args, "uniqueid")};
+    if (!pairing_unique_id_valid(uniqID)) {
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Invalid uniqueid");
+
+      return;
+    }
 
     args_t::const_iterator it;
     if (it = args.find("phrase"); it != std::end(args)) {
@@ -5113,7 +5144,7 @@ namespace nvhttp {
         auto ptr = map_id_sess.emplace(sess.client.uniqueID, std::move(sess)).first;
 
         ptr->second.async_insert_pin.salt = std::move(get_arg(args, "salt"));
-        BOOST_LOG(info) << "pair: getservercert uniqueid="sv << uniqID
+        BOOST_LOG(info) << "pair: getservercert uniqueid="sv << ptr->second.client.uniqueID
                         << " device=\""sv << ptr->second.client.name << "\""
                         << " remote="sv << remote_addr_str
                         << " trustedpair="sv << trusted_pair_requested
@@ -9010,6 +9041,14 @@ namespace nvhttp {
   }
 
 #ifdef POLARIS_TESTS
+  bool is_in_trusted_subnet_for_tests(const boost::asio::ip::address &addr) {
+    return is_in_trusted_subnet(addr);
+  }
+
+  bool pairing_unique_id_valid_for_tests(std::string_view unique_id) {
+    return pairing_unique_id_valid(unique_id);
+  }
+
   void reset_pairing_state_for_tests() {
     std::lock_guard lock(client_state_mutex);
     map_id_sess.clear();
