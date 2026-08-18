@@ -3576,6 +3576,108 @@ TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresZombieShutdownRemnant
   ));
 }
 
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorDistinguishesPolarisPrivateSessionOwnership) {
+  const auto process_source = read_source_file_for_contract("src/process.cpp");
+  const auto launch_source = read_source_file_for_contract("src/platform/linux/session_launch_linux.cpp");
+  const auto cage_source = read_source_file_for_contract("src/platform/linux/cage_display_router.cpp");
+  ASSERT_FALSE(process_source.empty());
+  ASSERT_FALSE(launch_source.empty());
+  ASSERT_FALSE(cage_source.empty());
+
+  const auto detector_start = process_source.find("bool desktop_steam_client_active_impl()");
+  const auto detector_end = process_source.find(
+    "desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy_impl(",
+    detector_start
+  );
+  ASSERT_NE(detector_start, std::string::npos);
+  ASSERT_NE(detector_end, std::string::npos);
+  const auto detector = process_source.substr(detector_start, detector_end - detector_start);
+
+  EXPECT_NE(detector.find("read_proc_status_file_result(pid, \"environ\")"), std::string::npos);
+  EXPECT_NE(detector.find("proc_environ_is_polaris_private_session"), std::string::npos);
+  EXPECT_NE(
+    launch_source.find("env[\"POLARIS_PRIVATE_SESSION\"] = \"1\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    cage_source.find("setenv(\"POLARIS_PRIVATE_SESSION\", \"1\", 1)"),
+    std::string::npos
+  );
+  EXPECT_NE(process_source.find("key == \"POLARIS_PRIVATE_SESSION\"sv"), std::string::npos);
+  EXPECT_NE(process_source.find("_env.erase(\"POLARIS_PRIVATE_SESSION\")"), std::string::npos);
+}
+
+TEST(ProcessRuntimeConfigTests, PrivateLaunchRefusalLogsTheAggregatePhysicalDisplayRisk) {
+  const auto nvhttp_source = read_source_file_for_contract("src/nvhttp.cpp");
+  const auto confighttp_source = read_source_file_for_contract("src/confighttp.cpp");
+  ASSERT_FALSE(nvhttp_source.empty());
+  ASSERT_FALSE(confighttp_source.empty());
+
+  EXPECT_EQ(nvhttp_source.find(" desktop_game_active="), std::string::npos);
+  EXPECT_EQ(confighttp_source.find(" desktop_game_active="), std::string::npos);
+  EXPECT_NE(nvhttp_source.find(" physical_display_risk="), std::string::npos);
+  EXPECT_NE(confighttp_source.find(" physical_display_risk="), std::string::npos);
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresExactPolarisPrivateSessionMarker) {
+  const std::string running_status = "Name:\tsteam\nState:\tS (sleeping)\n";
+  const std::string private_session = std::string("POLARIS_PRIVATE_SESSION=1") + char(0);
+
+  EXPECT_FALSE(proc::desktop_steam_client_process_for_tests(
+    "steam",
+    "/opt/steam/ubuntu12_32/steam",
+    "/opt/steam/ubuntu12_32/steam",
+    running_status,
+    private_session
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorKeepsUnmarkedAndMalformedMarkersBlocked) {
+  const std::string running_status = "Name:\tsteam\nState:\tS (sleeping)\n";
+  const std::string false_marker = std::string("POLARIS_PRIVATE_SESSION=0") + char(0);
+  const std::string unterminated_marker = "POLARIS_PRIVATE_SESSION=1";
+
+  EXPECT_TRUE(proc::desktop_steam_client_process_for_tests(
+    "steam", "/opt/steam/ubuntu12_32/steam", "/opt/steam/ubuntu12_32/steam", running_status, ""
+  ));
+  EXPECT_TRUE(proc::desktop_steam_client_process_for_tests(
+    "steam", "/opt/steam/ubuntu12_32/steam", "/opt/steam/ubuntu12_32/steam", running_status, false_marker
+  ));
+  EXPECT_TRUE(proc::desktop_steam_client_process_for_tests(
+    "steam", "/opt/steam/ubuntu12_32/steam", "/opt/steam/ubuntu12_32/steam", running_status, unterminated_marker
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamProcScannerIgnoresMarkedPrivateSessionProcess) {
+#ifdef __linux__
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_PRIVATE_SESSION", "1", 1);
+    execl("/bin/sleep", "steam", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  bool observed = false;
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    std::ifstream cmdline("/proc/" + std::to_string(child) + "/cmdline", std::ios::binary);
+    const std::string bytes {
+      std::istreambuf_iterator<char> {cmdline}, std::istreambuf_iterator<char> {}
+    };
+    if (bytes.starts_with(std::string("steam") + char(0))) {
+      observed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  ASSERT_TRUE(observed);
+  EXPECT_FALSE(proc::desktop_steam_proc_scan_only_pid_for_tests(child));
+#else
+  GTEST_SKIP() << "Linux-only desktop Steam proc scanner";
+#endif
+}
+
 TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorFailsClosedOnProcOpenError) {
 #ifdef __linux__
   EXPECT_TRUE(proc::desktop_steam_proc_open_error_fails_closed_for_tests());
@@ -3609,6 +3711,35 @@ TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorFailsClosedOnProcReadError) 
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
   EXPECT_TRUE(proc::desktop_steam_proc_read_error_fails_closed_for_tests(child));
+#else
+  GTEST_SKIP() << "Linux-only desktop Steam proc scanner";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorFailsClosedOnProcEnvironReadError) {
+#ifdef __linux__
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    execl("/bin/sleep", "steam", "60", nullptr);
+    _exit(127);
+  }
+  linux_child_guard_t child_guard {child};
+
+  bool observed = false;
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    std::ifstream cmdline("/proc/" + std::to_string(child) + "/cmdline", std::ios::binary);
+    const std::string bytes {
+      std::istreambuf_iterator<char> {cmdline}, std::istreambuf_iterator<char> {}
+    };
+    if (bytes.starts_with(std::string("steam") + char(0))) {
+      observed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  ASSERT_TRUE(observed);
+  EXPECT_TRUE(proc::desktop_steam_proc_environ_read_error_fails_closed_for_tests(child));
 #else
   GTEST_SKIP() << "Linux-only desktop Steam proc scanner";
 #endif

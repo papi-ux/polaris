@@ -1238,6 +1238,7 @@ namespace cage_display_router {
       } else {
         unsetenv("POLARIS_SESSION_INSTANCE_ID");
       }
+      setenv("POLARIS_PRIVATE_SESSION", "1", 1);
       set_labwc_process_environment(headless);
       if (headless) {
         // Headless mode: no visible window on desktop, no parent display needed.

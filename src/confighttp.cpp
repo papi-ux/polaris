@@ -4939,6 +4939,10 @@ namespace confighttp {
           );
           const auto launch_policy_json = proc::desktop_launch_safety_policy_to_json(launch_policy);
           if (launch_policy.recommendedAction == "refuse_private_stream") {
+            BOOST_LOG(warning) << "launch_policy: refusing private stream; desktop_steam_active="sv
+                               << launch_policy.desktopSteamActive
+                               << " physical_display_risk="sv
+                               << launch_policy.physicalDisplayRisk;
             nlohmann::json error_tree;
             error_tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_conflict);
             error_tree["status"] = false;
