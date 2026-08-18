@@ -5,6 +5,30 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.11 - 2026-08-18
+
+A support, private-runtime recovery, display-truth, and reproducibility patch. Polaris can now preserve the evidence around crashes and silent failures, accept a bounded report from an authenticated paired client, recover private Steam and owned Gamescope reconnects, find Flatpak Heroic and Lutris libraries, and stop describing requested display state as applied until the compositor reports it back.
+
+- Reports the effective Private Stream path instead of only the configured choice, so a fallback or pending relaunch is visible in status and support evidence
+- Finds Heroic and Lutris libraries in both native and Flatpak homes, emits the matching launch command, deduplicates the two sources, and validates launcher-controlled identifiers before placing them in a command
+- Lets `linux_stream_mode = headless_dongle` auto-detect and configure its display topology even when display auto-management was initially disabled; this path was validated on a real 4K dummy-plug host with panel blanking and teardown restoration
+- Publishes `session_overridable` in the mode catalog, keeping topology-swapping modes valid as host defaults while telling clients they cannot select them for one session
+- Verifies Hyprland mode changes from compositor read-back, tries the Hyprland 0.56-compatible fallback when the first command reports success without applying, and reports requested versus actual geometry if neither form lands
+- Records abnormal termination and actions that reported success without taking effect, then carries them into the redacted support bundle and pre-filled issue handoff
+- Accepts a size- and rate-bounded client report only from its authenticated paired-client certificate and stores it beside host evidence for the next bundle
+- Redacts credential names across separated, camel-case, run-together, quoted, structured, numeric, and Web UI `session_id` forms while keeping ordinary labels and numeric diagnostics readable; shared references and `Map`, `Set`, `Date`, and `Error` contents are preserved without weakening cycle handling
+- Normalizes one quoting layer around trusted-subnet CIDRs, rejects an empty pairing identifier before session creation, and logs the stored identifier rather than the moved-from request value without claiming the separate VoidLink stall fixed
+- Marks only compositor-private Steam with `POLARIS_PRIVATE_SESSION=1`, so that exact workload cannot be mistaken for desktop Steam and block a reconnect while missing or unreadable provenance remains fail-closed
+- Ships `polaris-gamescope-session` and its shared runtime library in all four Linux package families with Bash dependencies and executable package receipts
+- Finalizes the immutable runtime chosen by each launch generation, drains only Gamescope authority owned by Polaris, and reclaims only the proven-owned `gamescope-0` / `gamescope-0-ei` socket pair while ambiguous cleanup remains retryable and fail-closed
+- Warns when a client HDR request reaches a final live SDR stream, outside encoder probes and after final colorspace selection, naming the black-video/working-audio symptom and immediate SDR recovery without changing protocol behavior
+- Runs every sanitizer suite the repository defines, including the five audio, input, network, pairing, and video suites that had still been omitted after the first CI expansion
+- Pins the Arch build container and package repositories to the immutable `2026/08/17` archive snapshot, removing live mirror database/package-pool skew from release builds
+- Pins sanitizer and Ubuntu APT resolution plus the DEB smoke to snapshot `20260818T000000Z`, isolated from runner sources and stale indexes, with partial updates and exceeded deadlines failing closed
+- Keeps `npm audit --audit-level=high` mandatory
+- Retains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+- Keeps the evidence limits explicit: the maintainer host is KWin rather than Hyprland, native/Flatpak discovery is contract-tested without a live Flatpak launcher install, Nova's user-facing report action opens Android's share sheet and does not yet automatically post to the paired-host endpoint, the known 4K dummy-plug SHM capture ceiling remains performance follow-up, and draft PR #481 still needs affected RX 7800 XT default/forced-SHM proof before it can join this release
+
 ## v1.3.10 - 2026-08-16
 
 An install, launch, and crash-containment patch: SteamOS 3.8 becomes installable, nested Steam sessions start again after a v1.3.9 regression, VAAPI private-headless capture returns to the stable SHM path after a v1.3.9 crash report, private high-refresh capture holds its output rate, HDR advertisement returns on capable Mesa hosts, and Doctor stops reporting values the encoder never applied.
