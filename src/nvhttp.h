@@ -390,6 +390,8 @@ namespace nvhttp {
   );
 
 #ifdef POLARIS_TESTS
+  bool is_in_trusted_subnet_for_tests(const boost::asio::ip::address &addr);
+  bool pairing_unique_id_valid_for_tests(std::string_view unique_id);
   enum class pairing_state_write_fault_t {
     none,
     open,
