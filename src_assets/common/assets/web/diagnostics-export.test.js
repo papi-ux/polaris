@@ -1,18 +1,31 @@
 import { describe, expect, it } from 'vitest'
 import {
+  MAX_ISSUE_URL_LENGTH,
   REDACTED_VALUE,
   buildAnonymizedDiagnosticsBundle,
   buildControllerInputTestReport,
   buildFixMyStreamChecklist,
   buildGithubIssueDraft,
+  buildGithubIssueUrl,
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
   describeLinuxGpuProfile,
+  describePreviousRun,
   isSensitiveFieldName,
   redactSensitiveText,
   sanitizeDiagnosticsValue,
 } from './diagnostics-export.js'
+
+const crashedRun = {
+  recorded: true,
+  outcome: 'crashed',
+  version: '1.3.11',
+  started_at: '2026-08-17T10:00:00Z',
+  signal_name: 'SIGSEGV',
+  signal_number: 11,
+  evidence: 'polaris-crash-v1\nrun_id: r1\nsignal: 11 SIGSEGV\nbacktrace:\npolaris(+0x1234)',
+}
 
 describe('diagnostics export redaction', () => {
   it('redacts sensitive field names recursively before export', () => {
@@ -853,5 +866,169 @@ describe('the redaction notice describes what the code does', () => {
 
     expect(bundle.capabilities[0].key).toBe('keyboard')
     expect(bundle.capabilities[1].key).toBe('gamepad')
+  })
+})
+
+describe('previous run reporting', () => {
+  it('names the signal a crashed run died on', () => {
+    expect(describePreviousRun(crashedRun)).toContain('SIGSEGV')
+  })
+
+  it('separates a kill from a fault instead of calling both a crash', () => {
+    const summary = describePreviousRun({ recorded: true, outcome: 'unclean' })
+
+    expect(summary).toContain('killed')
+    expect(summary).not.toContain('crashed')
+  })
+
+  it('says nothing about a run that ended cleanly or was never recorded', () => {
+    expect(describePreviousRun({ recorded: true, outcome: 'clean' })).toBe('')
+    expect(describePreviousRun({ recorded: false, outcome: 'unknown' })).toBe('')
+    expect(describePreviousRun()).toBe('')
+  })
+
+  it('puts the crash and its backtrace in the issue draft', () => {
+    const draft = buildGithubIssueDraft({ version: '1.3.11', crash: crashedRun })
+
+    expect(draft).toContain('## How the previous run ended')
+    expect(draft).toContain('SIGSEGV')
+    expect(draft).toContain('polaris(+0x1234)')
+  })
+
+  it('leaves the crash section out entirely when there was no crash', () => {
+    const draft = buildGithubIssueDraft({ version: '1.3.11', crash: { recorded: true, outcome: 'clean' } })
+
+    expect(draft).not.toContain('## How the previous run ended')
+  })
+
+  it('redacts a token that appears inside a backtrace', () => {
+    const draft = buildGithubIssueDraft({
+      version: '1.3.11',
+      crash: { ...crashedRun, evidence: 'polaris-crash-v1\nbacktrace:\npolaris(auth_token=hunter2)' },
+    })
+
+    expect(draft).not.toContain('hunter2')
+    expect(draft).toContain(REDACTED_VALUE)
+  })
+})
+
+describe('silent failure reporting', () => {
+  const silentFailures = [{
+    id: 'display_topology.output_mode',
+    description: 'Set the streaming output to the mode the session asked for',
+    requested: '2560x1440@120Hz',
+    actual: '2560x1440@60Hz',
+    observed_at: '2026-08-17T10:05:00Z',
+  }]
+
+  it('reports what was requested next to what the system actually did', () => {
+    const draft = buildGithubIssueDraft({ version: '1.3.11', silent_failures: silentFailures })
+
+    expect(draft).toContain('## Actions that reported success and did not land')
+    expect(draft).toContain('requested [2560x1440@120Hz]')
+    expect(draft).toContain('system reported [2560x1440@60Hz]')
+  })
+
+  it('reads them from the doctor payload when they arrive that way', () => {
+    const draft = buildGithubIssueDraft({
+      version: '1.3.11',
+      session_snapshot: { doctor: { silent_failures: silentFailures } },
+    })
+
+    expect(draft).toContain('## Actions that reported success and did not land')
+  })
+
+  it('leaves the section out when nothing failed silently', () => {
+    expect(buildGithubIssueDraft({ version: '1.3.11', silent_failures: [] }))
+      .not.toContain('## Actions that reported success and did not land')
+  })
+
+  it('carries crash and silent failures into the bundle at version 3', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      version: '1.3.11',
+      crash: crashedRun,
+      silent_failures: silentFailures,
+    })
+
+    expect(bundle.support_bundle_version).toBe(3)
+    expect(bundle.crash.outcome).toBe('crashed')
+    expect(bundle.silent_failures).toHaveLength(1)
+    expect(bundle.issue_draft).toContain('SIGSEGV')
+  })
+})
+
+describe('prefilled github issue url', () => {
+  const context = {
+    version: '1.3.11',
+    platform: 'Fedora 44',
+    system_stats: { gpu: { name: 'RTX 4090', driver: '580.95' } },
+    client: { type: 'Nova', name: 'Retroid Pocket 6' },
+    session_snapshot: { launch_mode: 'headless_stream', capture_path: 'dmabuf', encoder: 'nvenc' },
+    crash: crashedRun,
+  }
+
+  it('prefills the issue form fields by their own ids', () => {
+    const url = new URL(buildGithubIssueUrl(context))
+
+    expect(url.pathname).toBe('/papi-ux/polaris/issues/new')
+    expect(url.searchParams.get('template')).toBe('bug_report.yml')
+    expect(url.searchParams.get('host-os')).toBe('Fedora 44')
+    expect(url.searchParams.get('gpu')).toContain('RTX 4090')
+    expect(url.searchParams.get('client')).toContain('Nova')
+    expect(url.searchParams.get('runtime')).toContain('headless_stream')
+    expect(url.searchParams.get('describe-bug')).toContain('SIGSEGV')
+  })
+
+  it('does not guess the install method', () => {
+    // The dropdown takes exact option strings and Polaris cannot know the
+    // answer. A wrong guess in that field is worse than an empty one.
+    expect(new URL(buildGithubIssueUrl(context)).searchParams.get('install-method')).toBeNull()
+  })
+
+  it('carries the user note through to the description', () => {
+    const url = new URL(buildGithubIssueUrl({ ...context, user_notes: 'Happens only after resume.' }))
+
+    expect(url.searchParams.get('describe-bug')).toContain('Happens only after resume.')
+  })
+
+  it('truncates the evidence rather than dropping the environment answers', () => {
+    const noisy = {
+      ...context,
+      recent_issues: Array.from({ length: 8 }, (_, index) => ({
+        timestamp: '2026-08-17T10:00:00Z',
+        level: 'Error',
+        message: `failure ${index} ${'padding '.repeat(60)}`,
+      })),
+    }
+
+    const maxLength = 900
+    const url = buildGithubIssueUrl(noisy, { maxLength })
+    const parsed = new URL(url)
+
+    expect(url.length).toBeLessThanOrEqual(maxLength)
+    // The environment answers are the part a maintainer cannot reconstruct, so
+    // they must survive a squeeze that the log excerpt does not.
+    expect(parsed.searchParams.get('host-os')).toBe('Fedora 44')
+    expect(parsed.searchParams.get('gpu')).toContain('RTX 4090')
+    expect(parsed.searchParams.get('logs')).toContain('truncated')
+  })
+
+  it('stays within the default length cap without being asked', () => {
+    expect(buildGithubIssueUrl(context).length).toBeLessThanOrEqual(MAX_ISSUE_URL_LENGTH)
+  })
+
+  it('redacts secrets before they can reach a url', () => {
+    const url = buildGithubIssueUrl({
+      ...context,
+      recent_issues: [{ timestamp: '2026-08-17T10:00:00Z', level: 'Error', message: 'auth_token=hunter2 failed' }],
+    })
+
+    expect(url).not.toContain('hunter2')
+  })
+
+  it('targets an overridden repository when one is given', () => {
+    const url = buildGithubIssueUrl(context, { repositoryUrl: 'https://github.com/papi-ux/nova/' })
+
+    expect(new URL(url).pathname).toBe('/papi-ux/nova/issues/new')
   })
 })

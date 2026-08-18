@@ -517,6 +517,48 @@ function formatChecklist(checklist = []) {
   return checklist.map((item) => `- ${formatIssueValue(item.label, 'Check')}: ${formatIssueValue(item.status, 'unknown')} — ${formatIssueValue(item.detail, '')}${item.action ? ` Next: ${formatIssueValue(item.action, '')}` : ''}`).join('\n')
 }
 
+export function describePreviousRun(crash = {}) {
+  const outcome = lower(crash?.outcome)
+  if (!crash?.recorded || outcome === '' || outcome === 'unknown') return ''
+  if (outcome === 'clean') return ''
+
+  if (outcome === 'crashed') {
+    const signal = [crash.signal_name, crash.signal_number ? `(${crash.signal_number})` : '']
+      .filter(Boolean)
+      .join(' ')
+    return `The previous run crashed on ${signal || 'a fatal signal'}.`
+  }
+
+  // Not a crash and not a clean exit. Saying so plainly matters: it points at
+  // the OOM killer, a SIGKILL, or power loss rather than at a Polaris fault.
+  return 'The previous run did not record an exit and left no crash evidence, which usually means it was killed rather than that it faulted.'
+}
+
+function formatCrashSection(crash = {}) {
+  const summary = describePreviousRun(crash)
+  if (!summary) return ''
+
+  const lines = [summary]
+  if (crash.version) lines.push(issueDraftLine('Version that ended', crash.version))
+  if (crash.started_at) lines.push(issueDraftLine('Run started', crash.started_at))
+  if (crash.shutdown_reason) lines.push(issueDraftLine('Recorded shutdown reason', crash.shutdown_reason))
+
+  const evidence = redactSensitiveText(crash.evidence || '')
+  if (evidence.trim()) {
+    lines.push('', '```', evidence.trim(), '```')
+  }
+  return lines.join('\n')
+}
+
+function formatSilentFailures(records = []) {
+  if (!Array.isArray(records) || records.length === 0) return ''
+  return records.slice(0, 12).map((entry) => {
+    const when = entry.observed_at ? ` (${entry.observed_at})` : ''
+    return `- ${formatIssueValue(entry.id, 'check')}: requested [${formatIssueValue(entry.requested, 'unknown')}], ` +
+      `system reported [${formatIssueValue(entry.actual, 'unknown')}]${when}. ${formatIssueValue(entry.description, '')}`.trimEnd()
+  }).join('\n')
+}
+
 function formatDoctorEvidence(doctor = {}) {
   if (!doctor || !Array.isArray(doctor.evidence) || doctor.evidence.length === 0) return '- No Doctor evidence was included.'
   return doctor.evidence.slice(0, 8).map((entry) => `- ${formatIssueValue(entry.id || entry.label, 'evidence')}: ${formatIssueValue(entry.detail || entry.value || entry.reason, '')}`).join('\n')
@@ -576,6 +618,8 @@ export function buildGithubIssueDraft(input = {}) {
   if (encoderAdapter && adapterPairingDevice && adapterPairing) gpuDiagnosticLines.push(issueDraftLine('Adapter pairing', adapterPairing))
   if (Object.keys(gpuNativeProbe).length > 0) gpuDiagnosticLines.push(issueDraftLine('GPU-native probe', probeSummary))
   const doctorSummary = firstNonEmpty(doctor.simple_state, doctor.summary, doctor.diagnosis, doctor.primary_issue, 'Polaris did not include a Doctor diagnosis yet.')
+  const crashSection = formatCrashSection(safeInput.crash || {})
+  const silentFailureSection = formatSilentFailures(safeInput.silent_failures || doctor.silent_failures || [])
 
   return redactSensitiveText([
     '# Polaris support report',
@@ -589,6 +633,7 @@ export function buildGithubIssueDraft(input = {}) {
     issueDraftLine('Driver', driver),
     issueDraftLine('Session/compositor', `${formatIssueValue(sessionType)} / ${formatIssueValue(compositor)}`),
     issueDraftLine('Client', `${formatIssueValue(clientType)}${clientName ? ` (${formatIssueValue(clientName)})` : ''}`),
+    ...(crashSection ? ['', '## How the previous run ended', crashSection] : []),
     '',
     '## Stream evidence',
     issueDraftLine('Launch mode', firstNonEmpty(stats.launch_mode, stats.stream_display_mode, stats.runtime_backend)),
@@ -609,6 +654,7 @@ Suggested safe action: ${formatIssueValue(doctor.safe_recovery_action.id)}${doct
     '',
     '## Doctor evidence',
     formatDoctorEvidence(doctor),
+    ...(silentFailureSection ? ['', '## Actions that reported success and did not land', silentFailureSection] : []),
     '',
     '## Recent warnings/errors',
     formatRecentIssues(safeInput.recent_issues),
@@ -891,6 +937,91 @@ export function buildSupportSelfTestCopy({ network, controller, postSession } = 
   return redactSensitiveText(sections.join('\n\n'))
 }
 
+export const DEFAULT_REPOSITORY_URL = 'https://github.com/papi-ux/polaris'
+export const ISSUE_FORM_TEMPLATE = 'bug_report.yml'
+// Browsers and GitHub both stop honouring very long URLs. The bundle is the
+// attachment; this is only the head start on the form.
+export const MAX_ISSUE_URL_LENGTH = 6000
+const TRUNCATION_NOTICE = '[truncated, see the attached support bundle for the full evidence]'
+
+function issueEvidenceSummary(input = {}, crash = {}, silentFailures = []) {
+  const stats = input.session_snapshot || input.stream_stats || {}
+  const lines = []
+  const crashSummary = describePreviousRun(crash)
+  if (crashSummary) lines.push(crashSummary)
+  for (const entry of (Array.isArray(silentFailures) ? silentFailures : []).slice(0, 6)) {
+    lines.push(`Silent failure ${formatIssueValue(entry.id, 'check')}: requested [${formatIssueValue(entry.requested, 'unknown')}], system reported [${formatIssueValue(entry.actual, 'unknown')}].`)
+  }
+  for (const entry of (Array.isArray(input.recent_issues) ? input.recent_issues : []).slice(0, 8)) {
+    lines.push(`${[entry.timestamp, entry.level].filter(Boolean).join(' ')}: ${entry.message || entry.detail || ''}`.trim())
+  }
+  if (!lines.length && stats.capture_path_reason) lines.push(`Capture path reason: ${stats.capture_path_reason}`)
+  return redactSensitiveText(lines.join('\n'))
+}
+
+/**
+ * Build a prefilled GitHub issue URL for the repository's issue form.
+ *
+ * The fields are prefilled by the form's own ids, so the environment section
+ * arrives already answered. The full bundle cannot ride along in a URL and
+ * stays an attachment the user adds, which is also what keeps this a handoff
+ * the user completes rather than an automatic submission.
+ */
+export function buildGithubIssueUrl(input = {}, options = {}) {
+  const safeInput = sanitizeDiagnosticsValue(input)
+  const stats = safeInput.session_snapshot || safeInput.stream_stats || {}
+  const config = safeInput.config || {}
+  const system = safeInput.system_stats || {}
+  const crash = safeInput.crash || {}
+  const silentFailures = safeInput.silent_failures || stats?.doctor?.silent_failures || []
+  const client = safeInput.client || {}
+
+  const repositoryUrl = String(options.repositoryUrl || DEFAULT_REPOSITORY_URL).replace(/\/+$/, '')
+  const maxLength = Number(options.maxLength) > 0 ? Number(options.maxLength) : MAX_ISSUE_URL_LENGTH
+
+  const crashSummary = describePreviousRun(crash)
+  const describeBug = [crashSummary, safeInput.user_notes]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+
+  // install-method is a dropdown whose options are exact strings, and Polaris
+  // cannot tell how it was installed. Prefilling it with a guess would put a
+  // wrong answer in a field maintainers rely on, so it is left for the user.
+  const baseFields = [
+    ['describe-bug', describeBug],
+    ['host-os', String(firstNonEmpty(system?.os?.distro, system?.distro, config.distro, safeInput.platform) || '')],
+    ['gpu', [firstNonEmpty(system?.gpu?.name, system?.gpu_name, config.gpu, stats.gpu_name), firstNonEmpty(system?.gpu?.driver, system?.driver, config.driver)].filter(Boolean).join(' / ')],
+    ['client', [firstNonEmpty(client.type, stats.client_type, stats.client_name), firstNonEmpty(client.name, stats.client_name)].filter(Boolean).join(' ')],
+    ['runtime', [firstNonEmpty(stats.launch_mode, stats.stream_display_mode, stats.runtime_backend), firstNonEmpty(stats.capture_path, stats.capture_transport), firstNonEmpty(stats.encoder, stats.encode_target_device)].filter(Boolean).join(' / ')],
+    ['additional', `Polaris version ${formatIssueValue(safeInput.version)}. Attach the exported support bundle to this issue; it carries the full redacted evidence.`],
+  ]
+
+  const build = (logsValue) => {
+    const params = new URLSearchParams()
+    params.set('template', ISSUE_FORM_TEMPLATE)
+    for (const [key, value] of baseFields) {
+      if (String(value || '').trim()) params.set(key, String(value))
+    }
+    if (logsValue) params.set('logs', logsValue)
+    return `${repositoryUrl}/issues/new?${params.toString()}`
+  }
+
+  const evidence = issueEvidenceSummary(safeInput, crash, silentFailures)
+  let candidate = build(evidence)
+  if (candidate.length <= maxLength) return candidate
+
+  // Shrink the evidence rather than dropping fields: an issue missing its
+  // environment answers is worse than one whose log excerpt is short.
+  let kept = evidence
+  while (kept.length > 0) {
+    kept = kept.slice(0, Math.floor(kept.length / 2))
+    candidate = build(kept ? `${kept}\n${TRUNCATION_NOTICE}` : TRUNCATION_NOTICE)
+    if (candidate.length <= maxLength) return candidate
+  }
+  return build(TRUNCATION_NOTICE)
+}
+
 export function buildAnonymizedDiagnosticsBundle(input = {}) {
   const streamEvidence = input.stream_evidence || buildStreamEvidence(input)
   const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence })
@@ -910,7 +1041,7 @@ export function buildAnonymizedDiagnosticsBundle(input = {}) {
       'bare key assignment is also redacted, because a log line carries no surrounding context to',
       'say whether it names a label or a secret.',
     ].join(' '),
-    support_bundle_version: 2,
+    support_bundle_version: 3,
     ...input,
     stream_evidence: streamEvidence,
     issue_draft: issueDraft,
