@@ -935,6 +935,7 @@ describe('the redaction notice describes what the code does', () => {
     expect(notice).not.toContain('Fields containing')
     expect(notice).toContain('Whole words')
     expect(notice).toContain('qualifies it')
+    expect(notice).toContain('session_id')
   })
 
   it('survives its own rules', () => {
@@ -1085,12 +1086,33 @@ describe('credentials that are not strings', () => {
     expect(sanitizeDiagnosticsValue(measurements)).toEqual(measurements)
   })
 
-  it('keeps the identifiers that say which device the bundle is about', () => {
-    // client_id and session_id were both raised with this defect and are
-    // deliberately not redacted. Reaching them through the word list means
-    // treating `id` as a credential, which blanks user_id and app_id with it, and
-    // a support bundle about a paired device has to be able to name the device.
-    const identifiers = { client_id: 'nova-rp6-01', session_id: 99887766 }
+  it('redacts the Web UI session bearer id in structured diagnostics', () => {
+    expect(sanitizeDiagnosticsValue({
+      session_id: 99887766,
+      sessionId: 'session-secret',
+      'session-id': 'another-secret',
+    })).toEqual({
+      session_id: REDACTED_VALUE,
+      sessionId: REDACTED_VALUE,
+      'session-id': REDACTED_VALUE,
+    })
+  })
+
+  it('redacts the Web UI session bearer id in free log text', () => {
+    expect(redactSensitiveText('session_id=99887766 sessionId=session-secret'))
+      .toBe(`session_id=${REDACTED_VALUE} sessionId=${REDACTED_VALUE}`)
+  })
+
+  it('keeps non-secret identifiers and nearby session names readable', () => {
+    // `id` cannot become sensitive generally: these identifiers carry useful
+    // diagnostic identity, while only session_id is the Web UI bearer credential.
+    const identifiers = {
+      client_id: 'nova-rp6-01',
+      user_id: 42,
+      app_id: 1091500,
+      session_idle: false,
+      session_identifier: 'display-session-2',
+    }
 
     expect(sanitizeDiagnosticsValue(identifiers)).toEqual(identifiers)
   })
