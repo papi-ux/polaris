@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate explicit Vulkan dependencies for release-only CUDA package builds."""
+"""Validate explicit release-package build and runtime dependencies."""
 
 from pathlib import Path
 import re
@@ -19,9 +19,67 @@ def shell_array(text: str, name: str) -> str:
     return match.group("body")
 
 
+def shell_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for line in text.replace("\\\n", " ").splitlines():
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        line_tokens = list(lexer)
+        if not line_tokens:
+            continue
+        if tokens and tokens[-1] != ";":
+            tokens.append(";")
+        tokens.extend(line_tokens)
+    return tokens
+
+
+def shell_array_tokens(text: str, name: str) -> list[str]:
+    return [token for token in shell_tokens(shell_array(text, name)) if token != ";"]
+
+
 def require_package(section: str, package: str, context: str) -> None:
     if not re.search(rf"(?m)^\s*'{re.escape(package)}'\s*$", section):
         raise AssertionError(f"{context} must explicitly include {package}")
+
+
+def require_single_cmake_bool(tokens: list[str], option: str, expected: str, context: str) -> None:
+    definition = re.compile(rf"-D{re.escape(option)}(?::BOOL)?=(ON|OFF)")
+    definitions = [match.group(1) for token in tokens if (match := definition.fullmatch(token))]
+    mentions = [token for token in tokens if option in token]
+    if definitions != [expected] or len(mentions) != 1:
+        raise AssertionError(
+            f"{context} must set exactly one literal -D{option}={expected} and contain no override"
+        )
+
+
+def self_test_cmake_bool_contract() -> None:
+    option = "POLARIS_ENABLE_PIPEWIRE"
+    require_single_cmake_bool(
+        shell_tokens(f"-D{option}=OFF\n"),
+        option,
+        "OFF",
+        "valid self-test",
+    )
+    rejected = {
+        "comment-only": f"# -D{option}=OFF\n",
+        "missing": "-DUNRELATED=ON\n",
+        "duplicate": f"-D{option}=OFF -D{option}=OFF\n",
+        "opposite": f"-D{option}=ON\n",
+        "both": f"-D{option}=OFF -D{option}=ON\n",
+        "nonliteral": f"-D{option}=${{PIPEWIRE_SETTING}}\n",
+    }
+    for label, script in rejected.items():
+        try:
+            require_single_cmake_bool(
+                shell_tokens(script),
+                option,
+                "OFF",
+                f"{label} self-test",
+            )
+        except AssertionError:
+            continue
+        raise AssertionError(f"CMake option contract must reject the {label} mutation")
 
 
 def workflow_job(text: str, name: str) -> str:
@@ -31,6 +89,16 @@ def workflow_job(text: str, name: str) -> str:
     )
     if not match:
         raise AssertionError(f"missing {name} workflow job")
+    return match.group("body")
+
+
+def workflow_step(job: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - name:|\Z)",
+        job,
+    )
+    if not match:
+        raise AssertionError(f"missing workflow step: {name}")
     return match.group("body")
 
 
@@ -45,19 +113,33 @@ def workflow_run_script(step: str) -> str:
 
 
 def workflow_run_tokens(step: str) -> list[str]:
-    script = workflow_run_script(step)
-    tokens: list[str] = []
-    for line in script.replace("\\\n", " ").splitlines():
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
-        lexer.whitespace_split = True
-        lexer.commenters = "#"
-        line_tokens = list(lexer)
-        if not line_tokens:
+    return shell_tokens(workflow_run_script(step))
+
+
+def command_arguments(tokens: list[str], executable: str) -> list[list[str]]:
+    boundaries = {";", "&&", "||", "do", "then"}
+    commands: list[list[str]] = []
+    for index, token in enumerate(tokens):
+        if token != executable or (index > 0 and tokens[index - 1] not in boundaries):
             continue
-        if tokens and tokens[-1] != ";":
-            tokens.append(";")
-        tokens.extend(line_tokens)
-    return tokens
+        end = index + 1
+        while end < len(tokens) and tokens[end] not in boundaries:
+            end += 1
+        commands.append(tokens[index + 1:end])
+    return commands
+
+
+def require_consumed_cmake_bool(
+    executable_tokens: list[str],
+    consumed_arguments: list[str],
+    option: str,
+    expected: str,
+    context: str,
+) -> None:
+    require_single_cmake_bool(consumed_arguments, option, expected, context)
+    executable_mentions = [token for token in executable_tokens if option in token]
+    if len(executable_mentions) != 1:
+        raise AssertionError(f"{context} contains an executable override outside the consumed CMake arguments")
 
 
 def contains_command(tokens: list[str], expected: list[str]) -> bool:
@@ -71,18 +153,81 @@ def contains_command(tokens: list[str], expected: list[str]) -> bool:
     return False
 
 
+self_test_cmake_bool_contract()
+
 arch = read("packaging/linux/Arch/PKGBUILD")
 require_package(shell_array(arch, "depends"), "vulkan-icd-loader", "Arch runtime dependencies")
 require_package(shell_array(arch, "makedepends"), "vulkan-headers", "Arch build dependencies")
 
 fedora = read("packaging/linux/fedora/Polaris.spec")
-if not re.search(r"(?m)^BuildRequires:\s+vulkan-loader-devel\s*$", fedora):
-    raise AssertionError("Fedora build dependencies must explicitly include vulkan-loader-devel")
+for package in ("pipewire-devel", "vulkan-loader-devel"):
+    if not re.search(rf"(?m)^BuildRequires:\s+{re.escape(package)}\s*$", fedora):
+        raise AssertionError(f"Fedora build dependencies must explicitly include {package}")
+fedora_build_match = re.search(r"(?ms)^%build\n(?P<body>.*?)(?=^%check\n)", fedora)
+if not fedora_build_match:
+    raise AssertionError("missing Fedora RPM spec build section")
+fedora_build = fedora_build_match.group("body")
+fedora_spec_tokens = shell_tokens(fedora_build)
+fedora_spec_cmake_args = shell_array_tokens(fedora_build, "cmake_args")
+fedora_spec_cmake_commands = command_arguments(fedora_spec_tokens, "cmake")
+if fedora_spec_cmake_commands.count(["${cmake_args[@]}"]) != 1:
+    raise AssertionError("Fedora RPM spec must consume cmake_args exactly once in its configure command")
+for option, expected in (
+    ("POLARIS_ENABLE_PIPEWIRE", "OFF"),
+    ("POLARIS_ENABLE_PORTAL", "ON"),
+):
+    require_consumed_cmake_bool(
+        fedora_spec_tokens,
+        fedora_spec_cmake_args,
+        option,
+        expected,
+        "Fedora RPM spec",
+    )
 
 workflow = read(".github/workflows/build.yml")
 if len(re.findall(r"(?m)^  fedora-rpm-build:\s*$", workflow)) != 1:
     raise AssertionError("release workflow must define exactly one Fedora RPM job")
+fedora_clang_job = workflow_job(workflow, "fedora-clang-build")
 fedora_job = workflow_job(workflow, "fedora-rpm-build")
+
+fedora_clang_configure = workflow_step(fedora_clang_job, "Configure")
+fedora_clang_tokens = workflow_run_tokens(fedora_clang_configure)
+fedora_clang_commands = command_arguments(fedora_clang_tokens, "cmake")
+fedora_clang_configure_commands = [
+    arguments for arguments in fedora_clang_commands if arguments[:2] == ["-B", "build"]
+]
+if len(fedora_clang_configure_commands) != 1:
+    raise AssertionError("Fedora Clang CI must contain exactly one directly parsed cmake configure command")
+for option, expected in (
+    ("POLARIS_ENABLE_PIPEWIRE", "OFF"),
+    ("POLARIS_ENABLE_PORTAL", "ON"),
+):
+    require_consumed_cmake_bool(
+        fedora_clang_tokens,
+        fedora_clang_configure_commands[0],
+        option,
+        expected,
+        "Fedora Clang CI",
+    )
+
+fedora_rpm_configure = workflow_step(fedora_job, "Configure")
+fedora_rpm_script = workflow_run_script(fedora_rpm_configure)
+fedora_rpm_tokens = shell_tokens(fedora_rpm_script)
+fedora_rpm_cmake_args = shell_array_tokens(fedora_rpm_script, "cmake_args")
+fedora_rpm_cmake_commands = command_arguments(fedora_rpm_tokens, "cmake")
+if fedora_rpm_cmake_commands.count(["${cmake_args[@]}"]) != 1:
+    raise AssertionError("Fedora RPM CI must consume cmake_args exactly once in its configure command")
+for option, expected in (
+    ("POLARIS_ENABLE_PIPEWIRE", "OFF"),
+    ("POLARIS_ENABLE_PORTAL", "ON"),
+):
+    require_consumed_cmake_bool(
+        fedora_rpm_tokens,
+        fedora_rpm_cmake_args,
+        option,
+        expected,
+        "Fedora RPM CI",
+    )
 fedora_strategy = re.search(
     r"(?ms)^    strategy:\n.*?(?=^    env:\n)",
     fedora_job,
@@ -184,4 +329,4 @@ for package in ("vulkan-headers", "vulkan-icd-loader"):
     if package not in arch_install_tokens:
         raise AssertionError(f"Arch CI dependencies must explicitly install {package}")
 
-print("Release package Vulkan dependency contracts look correct.")
+print("Release package dependency contracts look correct.")
