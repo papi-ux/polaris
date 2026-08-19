@@ -315,15 +315,27 @@
             </InfoHint>
           </div>
         </div>
-        <div class="flex flex-wrap gap-2">
+        <div class="flex flex-col items-start gap-2 lg:items-end">
+          <div class="flex flex-wrap gap-2 lg:justify-end">
+            <a
+              v-for="resource in resources"
+              :key="resource.href"
+              class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-[border-color,color,box-shadow,background-color] duration-200 hover:border-ice hover:text-ice hover:shadow-[0_0_16px_color-mix(in_srgb,var(--color-ice)_8%,transparent)] no-underline"
+              :href="resource.href"
+              target="_blank"
+            >
+              {{ $t(resource.labelKey) }}
+            </a>
+          </div>
           <a
-            v-for="resource in resources"
-            :key="resource.href"
-            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-[border-color,color,box-shadow,background-color] duration-200 hover:border-ice hover:text-ice hover:shadow-[0_0_16px_color-mix(in_srgb,var(--color-ice)_8%,transparent)] no-underline"
-            :href="resource.href"
+            class="focus-ring inline-flex min-h-7 items-center rounded-md px-2 text-xs font-medium text-storm no-underline transition-colors duration-200 hover:text-silver"
+            :href="sponsor.href"
             target="_blank"
+            rel="noopener noreferrer"
+            :aria-label="$t(sponsor.ariaLabelKey)"
           >
-            {{ $t(resource.labelKey) }}
+            <span aria-hidden="true" class="mr-1.5 text-danger/80">♥</span>
+            {{ $t(sponsor.labelKey) }}
           </a>
         </div>
       </div>
@@ -381,7 +393,7 @@ const compatibilityClients = [
   { platform: 'Desktop', name: 'Coming Soon', status: 'Planned', link: '' }
 ]
 
-import { resources, legalDocs } from '../resource-links.js'
+import { resources, legalDocs, sponsor } from '../resource-links.js'
 
 const quickActions = [
   { to: '/', titleKey: 'index.quick_mission_title', descKey: 'index.quick_mission_desc' },
