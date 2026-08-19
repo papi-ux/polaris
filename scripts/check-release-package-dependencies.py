@@ -153,7 +153,51 @@ def contains_command(tokens: list[str], expected: list[str]) -> bool:
     return False
 
 
+def require_command(
+    tokens: list[str], expected: list[str], context: str
+) -> None:
+    if not contains_command(tokens, expected):
+        raise AssertionError(f"{context} must contain executable tokens: {expected}")
+
+
+def command_count(tokens: list[str], expected: list[str]) -> int:
+    width = len(expected)
+    boundaries = {";", "&&", "||", "do", "then"}
+    return sum(
+        tokens[index:index + width] == expected
+        and (index == 0 or tokens[index - 1] in boundaries)
+        for index in range(len(tokens) - width + 1)
+    )
+
+
+def executable_array(tokens: list[str], name: str) -> list[str]:
+    marker = f"{name}=("
+    starts = [index for index, token in enumerate(tokens) if token == marker]
+    if len(starts) != 1:
+        raise AssertionError(f"expected one executable {name} array")
+    end = tokens.index(")", starts[0] + 1)
+    return [token for token in tokens[starts[0] + 1:end] if token != ";"]
+
+
+def self_test_executable_release_contract() -> None:
+    expected = ["gh", "release", "edit", "v1.2.3", "--draft=true"]
+    require_command(
+        shell_tokens('gh release edit "v1.2.3" --draft=true\n'),
+        expected,
+        "valid release command self-test",
+    )
+    for label, script in {
+        "commented": '# gh release edit "v1.2.3" --draft=true\n',
+        "echoed": 'echo gh release edit "v1.2.3" --draft=true\n',
+    }.items():
+        if contains_command(shell_tokens(script), expected):
+            raise AssertionError(
+                f"release command contract must reject {label} inert text"
+            )
+
+
 self_test_cmake_bool_contract()
+self_test_executable_release_contract()
 
 arch = read("packaging/linux/Arch/PKGBUILD")
 require_package(shell_array(arch, "depends"), "vulkan-icd-loader", "Arch runtime dependencies")
@@ -334,65 +378,92 @@ for required_tag_guard in (
         )
 
 release_stage = workflow_step(release_job, "Stage curated GitHub release")
-release_stage_script = workflow_run_script(release_stage)
-if "id: stage-release" not in release_stage:
+release_stage_tokens = workflow_run_tokens(release_stage)
+if not re.search(r"(?m)^        id: stage-release\s*$", release_stage):
     raise AssertionError("curated release staging must export draft publication state")
-for required_stage_fact in (
-    'release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"',
-    'gh release create "${POLARIS_PACKAGE_REF_NAME}"',
-    "--draft",
-    "--verify-tag",
-    'gh release edit "${POLARIS_PACKAGE_REF_NAME}"',
-    "--draft=true",
-    'published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"',
-    'if [ "$published_notes" != "$expected_notes" ]; then',
+for required_stage_tokens in (
+    ["release_notes=docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"],
+    [
+        "gh", "release", "create", "${POLARIS_PACKAGE_REF_NAME}",
+        "--draft", "--verify-tag", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--notes-file", "$release_notes",
+    ],
+    [
+        "gh", "release", "edit", "${POLARIS_PACKAGE_REF_NAME}",
+        "--verify-tag", "--draft=true", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--notes-file", "$release_notes",
+    ],
+    ["published_notes=$(gh release view ${POLARIS_PACKAGE_REF_NAME} --json body --jq .body)"],
+    ["if", "[", "$published_notes", "!=", "$expected_notes", "]", ";", "then"],
 ):
-    if required_stage_fact not in release_stage_script:
-        raise AssertionError(f"curated release staging is missing: {required_stage_fact}")
-if release_stage_script.count("--verify-tag") != 2:
+    require_command(
+        release_stage_tokens,
+        required_stage_tokens,
+        "curated release staging",
+    )
+if release_stage_tokens.count("--verify-tag") != 2:
     raise AssertionError("both release create and edit must verify that the tag exists")
-if release_stage_script.count('echo "publish_draft=true" >> "$GITHUB_OUTPUT"') != 2:
+if command_count(
+    release_stage_tokens,
+    ["echo", "publish_draft=true", ">>", "$GITHUB_OUTPUT"],
+) != 2:
     raise AssertionError("both new and existing releases must remain draft until asset verification")
-if "is_draft=" in release_stage_script:
+if any(token.startswith("is_draft=") for token in release_stage_tokens):
     raise AssertionError("an existing public release must not stay public during rerun mutation")
-if "gh release upload" in release_stage_script or "gh release delete-asset" in release_stage_script:
+if any(
+    contains_command(release_stage_tokens, command)
+    for command in (["gh", "release", "upload"], ["gh", "release", "delete-asset"])
+):
     raise AssertionError("release notes must be verified before any asset mutation")
 
 release_upload = workflow_step(release_job, "Upload release assets to GitHub release")
 release_upload_tokens = workflow_run_tokens(release_upload)
-if "published_notes=" in workflow_run_script(release_upload):
+if any(token.startswith("published_notes=") for token in release_upload_tokens):
     raise AssertionError("release-note verification must not move after asset upload")
-for exact_upload_fact in (
-    'release_files=(release-assets/final/*)',
-    'declare -A expected_asset_names=()',
-    'expected_asset_names["$(basename "$release_file")"]=1',
-    'gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq \'.assets[].name\'',
-    'if [[ -z "${expected_asset_names[$published_asset]+present}" ]]; then',
-    'gh release delete-asset "${POLARIS_PACKAGE_REF_NAME}" "$published_asset" --yes',
-    'gh release upload "${POLARIS_PACKAGE_REF_NAME}" "${release_files[@]}" --clobber',
+for exact_upload_tokens in (
+    ["release_files=(release-assets/final/*)"],
+    ["declare", "-A", "expected_asset_names=()"],
+    ["expected_asset_names[$(basename $release_file)]=1"],
+    ["gh", "release", "view", "${POLARIS_PACKAGE_REF_NAME}", "--json", "assets", "--jq", ".assets[].name"],
+    ["if", "[[", "-z", "${expected_asset_names[$published_asset]+present}", "]]", ";", "then"],
+    ["gh", "release", "delete-asset", "${POLARIS_PACKAGE_REF_NAME}", "$published_asset", "--yes"],
+    ["gh", "release", "upload", "${POLARIS_PACKAGE_REF_NAME}", "${release_files[@]}", "--clobber"],
 ):
-    if exact_upload_fact not in workflow_run_script(release_upload):
-        raise AssertionError(
-            f"release upload must remove assets outside the finalized set: {exact_upload_fact}"
-        )
-if "|| true" in workflow_run_script(release_upload):
+    require_command(
+        release_upload_tokens,
+        exact_upload_tokens,
+        "release upload must remove assets outside the finalized set",
+    )
+if command_count(release_upload_tokens, ["true"]):
     raise AssertionError("remote asset cleanup must fail closed")
 release_verify_body = workflow_step(release_job, "Verify release assets on GitHub release")
-release_verify_script = workflow_run_script(release_verify_body)
-for exact_verify_fact in (
-    "set -euo pipefail",
-    "find release-assets/final -maxdepth 1 -type f -printf '%f\\n' | sort",
-    "required_binary_assets=(",
-    'for required_asset in "${required_binary_assets[@]}"; do',
-    'gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq \'.assets[].name\' | sort',
-    'if [ "${#expected_assets[@]}" -eq 0 ] || [ "${expected_assets[*]}" != "${published_assets[*]}" ]; then',
+release_verify_tokens = workflow_run_tokens(release_verify_body)
+for exact_verify_tokens in (
+    ["set", "-euo", "pipefail"],
+    ["find", "release-assets/final", "-maxdepth", "1", "-type", "f", "-printf", "%f\\n", "|", "sort"],
+    ["required_binary_assets=("],
+    ["for", "required_asset", "in", "${required_binary_assets[@]}", ";", "do"],
+    ["gh", "release", "view", "${POLARIS_PACKAGE_REF_NAME}", "--json", "assets", "--jq", ".assets[].name", "|", "sort"],
+    [
+        "if", "[", "${#expected_assets[@]}", "-eq", "0", "]", "||",
+        "[", "${expected_assets[*]}", "!=", "${published_assets[*]}", "]", ";", "then",
+    ],
 ):
-    if exact_verify_fact not in release_verify_script:
-        raise AssertionError(
-            f"release verification must compare the exact local and remote asset sets: {exact_verify_fact}"
-        )
+    require_command(
+        release_verify_tokens,
+        exact_verify_tokens,
+        "release verification must compare the exact local and remote asset sets",
+    )
+expected_required_binaries = [
+    "Polaris-arch-x86_64.pkg.tar.zst",
+    "Polaris-fedora44-x86_64.rpm",
+    "Polaris-steamos3.8-x86_64.pkg.tar.zst",
+    "Polaris-ubuntu24.04-x86_64.deb",
+]
+if executable_array(release_verify_tokens, "required_binary_assets") != expected_required_binaries:
+    raise AssertionError("release verification must require the exact four binary assets")
 for partial_check in ("supported_count", "legacy_count"):
-    if partial_check in release_verify_script:
+    if any(partial_check in token for token in release_verify_tokens):
         raise AssertionError("release verification must not accept a partial asset subset")
 release_publish = workflow_step(release_job, "Publish verified draft release")
 expected_release_publish = (
