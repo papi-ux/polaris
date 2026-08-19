@@ -1140,12 +1140,8 @@ jobs:
           fi
           bash scripts/check-packaged-binary-paths.sh \
             "$binary" \
-            build/cpack_artifacts/package-strings.txt
-          if grep -Fq "PipeWire detected, will prefer native PipeWire for audio capture" \
-              build/cpack_artifacts/package-strings.txt; then
-            echo "Fedora RPM unexpectedly contains native PipeWire audio support" >&2
-            exit 1
-          fi
+            build/cpack_artifacts/package-strings.txt \
+            --forbid-native-pipewire-audio
 
           polaris --version | tee build/cpack_artifacts/package-version.txt
           if [ "${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}" = "true" ] &&
