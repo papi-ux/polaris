@@ -1408,10 +1408,10 @@ jobs:
           else
             gh release edit "${POLARIS_PACKAGE_REF_NAME}" \
               --verify-tag \
+              --draft=true \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
               --notes-file "$release_notes"
-            is_draft="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json isDraft --jq .isDraft)"
-            echo "publish_draft=$is_draft" >> "$GITHUB_OUTPUT"
+            echo "publish_draft=true" >> "$GITHUB_OUTPUT"
           fi
 
           expected_notes="$(cat "$release_notes")"
@@ -1427,26 +1427,59 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
 
-          for legacy_asset in \
-            Polaris-fedora42-x86_64.rpm \
-            Polaris-fedora42-src.rpm \
-            Polaris-fedora43-x86_64.rpm \
-            Polaris-fedora43-src.rpm; do
-            gh release delete-asset "${POLARIS_PACKAGE_REF_NAME}" "${legacy_asset}" --yes >/dev/null 2>&1 || true
+          release_files=(release-assets/final/*)
+          if [ "${#release_files[@]}" -eq 0 ]; then
+            echo "No finalized release assets are available" >&2
+            exit 1
+          fi
+
+          declare -A expected_asset_names=()
+          for release_file in "${release_files[@]}"; do
+            expected_asset_names["$(basename "$release_file")"]=1
           done
 
-          gh release upload "${POLARIS_PACKAGE_REF_NAME}" release-assets/final/* --clobber
+          mapfile -t published_assets < <(
+            gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '.assets[].name'
+          )
+          for published_asset in "${published_assets[@]}"; do
+            if [[ -z "${expected_asset_names[$published_asset]+present}" ]]; then
+              gh release delete-asset "${POLARIS_PACKAGE_REF_NAME}" "$published_asset" --yes
+            fi
+          done
+
+          gh release upload "${POLARIS_PACKAGE_REF_NAME}" "${release_files[@]}" --clobber
 
       - name: Verify release assets on GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          supported_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(. == "Polaris-fedora44-x86_64.rpm" or . == "Polaris-ubuntu24.04-x86_64.deb" or . == "Polaris-arch-x86_64.pkg.tar.zst" or . == "Polaris-steamos3.8-x86_64.pkg.tar.zst")] | length')
-          legacy_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '[.assets[].name | select(startswith("Polaris-fedora42-") or startswith("Polaris-fedora43-"))] | length')
-          if [ "${supported_count}" -ne 4 ] || [ "${legacy_count}" -ne 0 ]; then
-            echo "Expected Fedora 44, Ubuntu 24.04, Arch, and SteamOS 3.8 binary assets with no Fedora 42/43 assets on ${POLARIS_PACKAGE_REF_NAME}; supported=${supported_count}, legacy=${legacy_count}" >&2
+          set -euo pipefail
+
+          mapfile -t expected_assets < <(
+            find release-assets/final -maxdepth 1 -type f -printf '%f\n' | sort
+          )
+          required_binary_assets=(
+            Polaris-arch-x86_64.pkg.tar.zst
+            Polaris-fedora44-x86_64.rpm
+            Polaris-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-ubuntu24.04-x86_64.deb
+          )
+          for required_asset in "${required_binary_assets[@]}"; do
+            if [[ ! " ${expected_assets[*]} " =~ " ${required_asset} " ]]; then
+              echo "Finalized release assets are missing required binary: $required_asset" >&2
+              exit 1
+            fi
+          done
+          mapfile -t published_assets < <(
+            gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '.assets[].name' | sort
+          )
+          if [ "${#expected_assets[@]}" -eq 0 ] || [ "${expected_assets[*]}" != "${published_assets[*]}" ]; then
+            echo "Published assets do not match the exact finalized asset set on ${POLARIS_PACKAGE_REF_NAME}" >&2
+            printf 'expected: %s\n' "${expected_assets[*]}" >&2
+            printf 'published: %s\n' "${published_assets[*]}" >&2
             exit 1
           fi
 

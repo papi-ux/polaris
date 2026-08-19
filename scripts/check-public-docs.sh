@@ -1393,12 +1393,16 @@ release_publication_facts = (
     'Revalidate release tag against packaged source',
     'Stage curated GitHub release',
     '--draft',
+    '--draft=true',
     '--verify-tag',
     '--notes-file "$release_notes"',
     'gh release edit "${POLARIS_PACKAGE_REF_NAME}"',
     'published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"',
     'Publish verified draft release',
     '--draft=false',
+    'release_files=(release-assets/final/*)',
+    'gh release delete-asset "${POLARIS_PACKAGE_REF_NAME}" "$published_asset" --yes',
+    'if [ "${#expected_assets[@]}" -eq 0 ] || [ "${expected_assets[*]}" != "${published_assets[*]}" ]; then',
 )
 for fact in release_publication_facts:
     if fact not in release_workflow:

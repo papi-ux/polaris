@@ -343,6 +343,7 @@ for required_stage_fact in (
     "--draft",
     "--verify-tag",
     'gh release edit "${POLARIS_PACKAGE_REF_NAME}"',
+    "--draft=true",
     'published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"',
     'if [ "$published_notes" != "$expected_notes" ]; then',
 ):
@@ -350,6 +351,10 @@ for required_stage_fact in (
         raise AssertionError(f"curated release staging is missing: {required_stage_fact}")
 if release_stage_script.count("--verify-tag") != 2:
     raise AssertionError("both release create and edit must verify that the tag exists")
+if release_stage_script.count('echo "publish_draft=true" >> "$GITHUB_OUTPUT"') != 2:
+    raise AssertionError("both new and existing releases must remain draft until asset verification")
+if "is_draft=" in release_stage_script:
+    raise AssertionError("an existing public release must not stay public during rerun mutation")
 if "gh release upload" in release_stage_script or "gh release delete-asset" in release_stage_script:
     raise AssertionError("release notes must be verified before any asset mutation")
 
@@ -357,57 +362,38 @@ release_upload = workflow_step(release_job, "Upload release assets to GitHub rel
 release_upload_tokens = workflow_run_tokens(release_upload)
 if "published_notes=" in workflow_run_script(release_upload):
     raise AssertionError("release-note verification must not move after asset upload")
-for legacy_version in ("42", "43"):
-    for cleanup_asset in (
-        f"Polaris-fedora{legacy_version}-x86_64.rpm",
-        f"Polaris-fedora{legacy_version}-src.rpm",
-    ):
-        if cleanup_asset not in release_upload_tokens:
-            raise AssertionError(f"release workflow must delete stale asset: {cleanup_asset}")
-cleanup_command = [
-    "gh", "release", "delete-asset", "${POLARIS_PACKAGE_REF_NAME}", "${legacy_asset}", "--yes",
-]
-if not contains_command(release_upload_tokens, cleanup_command):
-    raise AssertionError("release workflow must invoke gh release delete-asset for each stale Fedora asset")
+for exact_upload_fact in (
+    'release_files=(release-assets/final/*)',
+    'declare -A expected_asset_names=()',
+    'expected_asset_names["$(basename "$release_file")"]=1',
+    'gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq \'.assets[].name\'',
+    'if [[ -z "${expected_asset_names[$published_asset]+present}" ]]; then',
+    'gh release delete-asset "${POLARIS_PACKAGE_REF_NAME}" "$published_asset" --yes',
+    'gh release upload "${POLARIS_PACKAGE_REF_NAME}" "${release_files[@]}" --clobber',
+):
+    if exact_upload_fact not in workflow_run_script(release_upload):
+        raise AssertionError(
+            f"release upload must remove assets outside the finalized set: {exact_upload_fact}"
+        )
+if "|| true" in workflow_run_script(release_upload):
+    raise AssertionError("remote asset cleanup must fail closed")
 release_verify_body = workflow_step(release_job, "Verify release assets on GitHub release")
 release_verify_script = workflow_run_script(release_verify_body)
-expected_supported_assignment = (
-    'supported_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '
-    "'[.assets[].name | select(. == \"Polaris-fedora44-x86_64.rpm\" or "
-    ". == \"Polaris-ubuntu24.04-x86_64.deb\" or "
-    ". == \"Polaris-arch-x86_64.pkg.tar.zst\" or "
-    ". == \"Polaris-steamos3.8-x86_64.pkg.tar.zst\")] | length')"
-)
-expected_legacy_assignment = (
-    'legacy_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '
-    "'[.assets[].name | select(startswith(\"Polaris-fedora42-\") or "
-    "startswith(\"Polaris-fedora43-\"))] | length')"
-)
-for variable, expected_assignment in (
-    ("supported_count", expected_supported_assignment),
-    ("legacy_count", expected_legacy_assignment),
+for exact_verify_fact in (
+    "set -euo pipefail",
+    "find release-assets/final -maxdepth 1 -type f -printf '%f\\n' | sort",
+    "required_binary_assets=(",
+    'for required_asset in "${required_binary_assets[@]}"; do',
+    'gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq \'.assets[].name\' | sort',
+    'if [ "${#expected_assets[@]}" -eq 0 ] || [ "${expected_assets[*]}" != "${published_assets[*]}" ]; then',
 ):
-    assignment_mentions = [
-        line
-        for line in release_verify_script.splitlines()
-        if re.search(rf"(^|[^A-Za-z0-9_]){re.escape(variable)}=", line)
-    ]
-    if assignment_mentions != [expected_assignment]:
+    if exact_verify_fact not in release_verify_script:
         raise AssertionError(
-            f"release verification must bind {variable} exactly once at top level using the reviewed query"
+            f"release verification must compare the exact local and remote asset sets: {exact_verify_fact}"
         )
-expected_release_verify_lines = [
-    expected_supported_assignment,
-    expected_legacy_assignment,
-    'if [ "${supported_count}" -ne 4 ] || [ "${legacy_count}" -ne 0 ]; then',
-    '  echo "Expected Fedora 44, Ubuntu 24.04, Arch, and SteamOS 3.8 binary assets with no Fedora 42/43 assets on ${POLARIS_PACKAGE_REF_NAME}; supported=${supported_count}, legacy=${legacy_count}" >&2',
-    "  exit 1",
-    "fi",
-]
-if release_verify_script.splitlines() != expected_release_verify_lines:
-    raise AssertionError(
-        "release verification must use the exact reviewed top-level query and failure program"
-    )
+for partial_check in ("supported_count", "legacy_count"):
+    if partial_check in release_verify_script:
+        raise AssertionError("release verification must not accept a partial asset subset")
 release_publish = workflow_step(release_job, "Publish verified draft release")
 expected_release_publish = (
     "        if: steps.stage-release.outputs.publish_draft == 'true'\n"
