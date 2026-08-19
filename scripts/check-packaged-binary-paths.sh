@@ -36,3 +36,8 @@ case "$grep_status" in
     exit 2
     ;;
 esac
+
+if ! grep -Fq "portal: PipeWire format negotiated:" "$report"; then
+  echo "Packaged Polaris binary does not contain XDG Desktop Portal capture support" >&2
+  exit 1
+fi

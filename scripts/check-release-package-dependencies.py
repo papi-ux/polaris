@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate explicit Vulkan dependencies for release-only CUDA package builds."""
+"""Validate explicit release-package build and runtime dependencies."""
 
 from pathlib import Path
 import re
@@ -76,8 +76,9 @@ require_package(shell_array(arch, "depends"), "vulkan-icd-loader", "Arch runtime
 require_package(shell_array(arch, "makedepends"), "vulkan-headers", "Arch build dependencies")
 
 fedora = read("packaging/linux/fedora/Polaris.spec")
-if not re.search(r"(?m)^BuildRequires:\s+vulkan-loader-devel\s*$", fedora):
-    raise AssertionError("Fedora build dependencies must explicitly include vulkan-loader-devel")
+for package in ("pipewire-devel", "vulkan-loader-devel"):
+    if not re.search(rf"(?m)^BuildRequires:\s+{re.escape(package)}\s*$", fedora):
+        raise AssertionError(f"Fedora build dependencies must explicitly include {package}")
 
 workflow = read(".github/workflows/build.yml")
 if len(re.findall(r"(?m)^  fedora-rpm-build:\s*$", workflow)) != 1:
@@ -184,4 +185,4 @@ for package in ("vulkan-headers", "vulkan-icd-loader"):
     if package not in arch_install_tokens:
         raise AssertionError(f"Arch CI dependencies must explicitly install {package}")
 
-print("Release package Vulkan dependency contracts look correct.")
+print("Release package dependency contracts look correct.")

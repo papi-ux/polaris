@@ -47,6 +47,7 @@ BuildRequires: npm
 BuildRequires: numactl-devel
 BuildRequires: openssl-devel
 BuildRequires: opus-devel
+BuildRequires: pipewire-devel
 BuildRequires: pulseaudio-libs-devel
 BuildRequires: python3
 BuildRequires: rpm-build
