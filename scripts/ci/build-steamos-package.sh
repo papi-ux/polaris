@@ -97,6 +97,8 @@ if [ ! -L "$RECEIPT_ROOT/usr/bin/polaris" ] && [ ! -x "$RECEIPT_ROOT/usr/bin/pol
   exit 1
 fi
 test -x "$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"
+test -x "$RECEIPT_ROOT/usr/bin/polaris-gamescope-session"
+test -x "$RECEIPT_ROOT/usr/bin/polaris-gamescope-runtime-lib.sh"
 test -d "$RECEIPT_ROOT/usr/share/polaris"
 test -f "$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"
 test -f "$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.terminal.desktop"
@@ -117,7 +119,14 @@ objdump -p "$BINARY_PATH" >> "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"
 NAMCAP_ACTUAL="$BUILD_ROOT/namcap-actual.sorted"
 NAMCAP_ALLOWED="$BUILD_ROOT/namcap-allowed.sorted"
 NAMCAP_MISSING="$BUILD_ROOT/namcap-reviewed-missing.txt"
-namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"
+# Namcap 3.6 resolves shebang basenames through PATH, then compares the
+# unresolved lexical result with pacman's owned paths. SteamOS inherits a root
+# PATH that prefers /usr/sbin (a symlink to /usr/bin), so Bash is found as
+# /usr/sbin/bash even though the package database owns /usr/bin/bash. That
+# produces the contradictory "dependency not needed" and "uninstalled
+# dependency" warnings for valid Bash scripts. Use the canonical user binary
+# paths so interpreter ownership remains deterministic and reviewable.
+PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"
 LC_ALL=C sort -u "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" > "$NAMCAP_ACTUAL"
 LC_ALL=C sort -u "$SOURCE_ROOT/packaging/linux/SteamOS/namcap-reviewed-warnings.txt" > "$NAMCAP_ALLOWED"
 comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$OUTPUT_ROOT/steamos3.8-namcap.txt"

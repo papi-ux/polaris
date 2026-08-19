@@ -1,3 +1,7 @@
+#!/bin/bash
+# Kept executable as a standalone script so distro packages can install this
+# shared body directly. Nix and the manual installer prepend their own wrapper;
+# this shebang is then an inert comment.
 export PATH="${POLARIS_SESSION_PATH:-$PATH}"
 
 set -euo pipefail
@@ -860,4 +864,3 @@ case "${1:-}" in
     exit 2
     ;;
 esac
-

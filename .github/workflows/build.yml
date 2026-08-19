@@ -378,6 +378,13 @@ jobs:
             echo "Packaged Browser Stream helper was not found" >&2
             exit 1
           fi
+          for gamescope_payload in polaris-gamescope-session polaris-gamescope-runtime-lib.sh; do
+            if [ ! -x "$extract_dir/usr/bin/$gamescope_payload" ]; then
+              echo "Packaged Gamescope payload was not found: $gamescope_payload" >&2
+              exit 1
+            fi
+            bash -n "$extract_dir/usr/bin/$gamescope_payload"
+          done
 
           strings "$binary" > arch-pkgbuild/package-strings.txt
           if ! grep -Fq "Couldn't initialize cuda" arch-pkgbuild/package-strings.txt; then
@@ -410,6 +417,13 @@ jobs:
             echo "Installed Arch package is missing the Browser Stream helper" >&2
             exit 1
           fi
+          for gamescope_payload in /usr/bin/polaris-gamescope-session /usr/bin/polaris-gamescope-runtime-lib.sh; do
+            if [ ! -x "$gamescope_payload" ]; then
+              echo "Installed Arch package is missing a Gamescope payload: $gamescope_payload" >&2
+              exit 1
+            fi
+            bash -n "$gamescope_payload"
+          done
 
           ldd "$installed_binary" | tee arch-pkgbuild/package-ldd.txt
           if grep -Fq "not found" arch-pkgbuild/package-ldd.txt; then
@@ -800,6 +814,13 @@ jobs:
             echo "Installed Ubuntu DEB is missing the Browser Stream helper" >&2
             exit 1
           fi
+          for gamescope_payload in /usr/bin/polaris-gamescope-session /usr/bin/polaris-gamescope-runtime-lib.sh; do
+            if ! dpkg -L "$package_name" | grep -Fxq "$gamescope_payload" || [ ! -x "$gamescope_payload" ]; then
+              echo "Installed Ubuntu DEB is missing a Gamescope payload: $gamescope_payload" >&2
+              exit 1
+            fi
+            bash -n "$gamescope_payload"
+          done
 
           readelf -d "$binary" | tee build/cpack_artifacts/package-needed.txt
           ldd "$binary" | tee build/cpack_artifacts/package-ldd.txt
@@ -1099,6 +1120,13 @@ jobs:
             echo "Installed Fedora RPM is missing the Browser Stream helper" >&2
             exit 1
           fi
+          for gamescope_payload in /usr/bin/polaris-gamescope-session /usr/bin/polaris-gamescope-runtime-lib.sh; do
+            if ! grep -Fxq "$gamescope_payload" build/cpack_artifacts/package-files.txt || [ ! -x "$gamescope_payload" ]; then
+              echo "Installed Fedora RPM is missing a Gamescope payload: $gamescope_payload" >&2
+              exit 1
+            fi
+            bash -n "$gamescope_payload"
+          done
 
           readelf -d "$binary" | tee build/cpack_artifacts/package-needed.txt
           ldd "$binary" | tee build/cpack_artifacts/package-ldd.txt

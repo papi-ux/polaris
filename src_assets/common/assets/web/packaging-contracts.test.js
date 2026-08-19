@@ -387,6 +387,56 @@ describe('Linux packaging contracts', () => {
     }
   })
 
+  it('ships the gamescope stream launcher and runtime library in every Linux package', () => {
+    const cmake = readSource('cmake/packaging/linux.cmake')
+    const session = readSource('nix/modules/polaris-gamescope-session.sh')
+    const runtimeLibrary = readSource('nix/modules/polaris-gamescope-runtime-lib.sh')
+    const archPkgbuild = readSource('packaging/linux/Arch/PKGBUILD')
+    const steamOsPkgbuild = readSource('packaging/linux/SteamOS/PKGBUILD')
+    const steamOsBuild = readSource('scripts/ci/build-steamos-package.sh')
+    const workflow = readSource('.github/workflows/build.yml')
+    const archJob = section(workflow, '  arch-build:', '  fedora-clang-build:')
+    const ubuntuJob = section(workflow, '  ubuntu-build:', '  fedora-rpm-build:')
+    const fedoraJob = section(workflow, '  fedora-rpm-build:', '  release-assets:')
+    const packageInstall = section(cmake, 'if(NOT ${POLARIS_BUILD_APPIMAGE})', 'endif()')
+    const debDependencies = section(cmake, 'set(CPACK_DEBIAN_PACKAGE_DEPENDS', 'set(CPACK_RPM_PACKAGE_REQUIRES')
+    const rpmDependencies = section(cmake, 'set(CPACK_RPM_PACKAGE_REQUIRES', 'if(NOT BOOST_USE_STATIC)')
+
+    expect(session.startsWith('#!/bin/bash\n')).toBe(true)
+    expect(runtimeLibrary.startsWith('#!/bin/bash\n')).toBe(true)
+    expect(packageInstall).toContain('"${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"')
+    expect(packageInstall).toContain('RENAME "polaris-gamescope-session"')
+    expect(packageInstall).toContain('"${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"')
+    expect(packageInstall.match(/DESTINATION "\$\{CMAKE_INSTALL_BINDIR\}"/g)).toHaveLength(2)
+    expect(debDependencies).toContain('bash, \\')
+    expect(rpmDependencies).toContain('bash, \\')
+
+    for (const pkgbuild of [archPkgbuild, steamOsPkgbuild]) {
+      expect(pkgbuild).toMatch(/depends=\([\s\S]*?\n\s+'bash'\n[\s\S]*?\n\)/)
+      expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-gamescope-session"')
+      expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"')
+      expect(pkgbuild).toContain('bash -n "$pkgdir/usr/bin/polaris-gamescope-session"')
+      expect(pkgbuild).toContain('bash -n "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"')
+    }
+
+    for (const packagedPath of [
+      '$RECEIPT_ROOT/usr/bin/polaris-gamescope-session',
+      '$RECEIPT_ROOT/usr/bin/polaris-gamescope-runtime-lib.sh',
+    ]) {
+      expect(steamOsBuild).toContain(`test -x "${packagedPath}"`)
+    }
+
+    for (const [job, packageKind] of [
+      [archJob, 'Arch package'],
+      [ubuntuJob, 'Ubuntu DEB'],
+      [fedoraJob, 'Fedora RPM'],
+    ]) {
+      expect(job, `${packageKind} must check the installed gamescope launcher`).toContain('/usr/bin/polaris-gamescope-session')
+      expect(job, `${packageKind} must check the installed gamescope runtime library`).toContain('/usr/bin/polaris-gamescope-runtime-lib.sh')
+      expect(job, `${packageKind} must syntax-check its gamescope payload`).toContain('bash -n "$gamescope_payload"')
+    }
+  })
+
   it('defines a distinct SteamOS 3.8 build lane', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
@@ -678,7 +728,7 @@ describe('Linux packaging contracts', () => {
     for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libpipewire', 'libxkbcommon']) {
       expect(pkgbuild).toContain(`'${dependency}'`)
     }
-    expect(buildScript).toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"')
+    expect(buildScript).toContain('PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"')
     expect(buildScript).toContain('comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED"')
     expect(buildScript).toContain('comm -13 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED"')
     expect(buildScript).toContain('if [ -s "$OUTPUT_ROOT/steamos3.8-namcap.txt" ]; then')

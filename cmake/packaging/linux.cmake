@@ -20,6 +20,15 @@ if(NOT ${POLARIS_BUILD_APPIMAGE})
             DESTINATION "${POLARIS_UDEV_RULES_DIR}")
     install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.conf"
             DESTINATION "${POLARIS_MODULES_LOAD_DIR}")
+
+    # gamescope_stream resolves this launcher by name at runtime. Keep the
+    # shared ownership library beside it so the launcher's default lookup is
+    # package-owned on DEB, RPM, Arch, and SteamOS installs.
+    install(PROGRAMS "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}"
+            RENAME "polaris-gamescope-session")
+    install(PROGRAMS "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 
 # copy assets (excluding shaders) to build directory, for running without install
@@ -53,6 +62,7 @@ set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/
 set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
+            bash, \
             debianutils, \
             grim, \
             labwc, \
@@ -75,6 +85,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             xwayland")
 set(CPACK_RPM_PACKAGE_REQUIRES "\
             ${CPACK_RPM_PLATFORM_PACKAGE_REQUIRES} \
+            bash, \
             grim, \
             labwc, \
             libcap >= 2.22, \
