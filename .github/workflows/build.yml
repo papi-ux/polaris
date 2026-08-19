@@ -20,14 +20,55 @@ env:
   UBUNTU_APT_SNAPSHOT: 20260818T000000Z
 
 jobs:
-  web-checks:
-    name: Web checks
+  resolve-source:
+    name: Resolve exact source
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
 
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.POLARIS_CHECKOUT_REF }}
+
+      - name: Bind release tag to source commit
+        id: source
+        env:
+          IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        run: |
+          set -euo pipefail
+
+          source_commit="$(git rev-parse HEAD)"
+          if [ "$IS_RELEASE" = "true" ]; then
+            release_tag="${POLARIS_PACKAGE_REF_NAME}"
+            if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Release tag must match vMAJOR.MINOR.PATCH: $release_tag" >&2
+              exit 1
+            fi
+
+            git tag -d "$release_tag" >/dev/null 2>&1 || true
+            git fetch --no-tags --force origin \
+              "refs/tags/${release_tag}:refs/tags/${release_tag}"
+            tag_commit="$(git rev-parse "refs/tags/${release_tag}^{commit}")"
+            if [ "$tag_commit" != "$source_commit" ]; then
+              echo "Release tag $release_tag resolves to $tag_commit, not checked-out source $source_commit" >&2
+              exit 1
+            fi
+          fi
+
+          echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
+
+  web-checks:
+    name: Web checks
+    needs: resolve-source
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -63,6 +104,7 @@ jobs:
 
   cpp-sanitizer-tests:
     name: C++ sanitizer tests
+    needs: resolve-source
     runs-on: ubuntu-24.04
     env:
       ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
@@ -71,6 +113,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.resolve-source.outputs.commit }}
           submodules: recursive
 
       - name: Set up Node.js
@@ -149,7 +192,7 @@ jobs:
 
   arch-build:
     name: Arch build
-    needs: web-checks
+    needs: [resolve-source, web-checks]
     runs-on: ubuntu-24.04
     container:
       # Match the package snapshot below. Keeping both immutable prevents a
@@ -172,7 +215,7 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+          ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Initialize submodules
         if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
@@ -481,7 +524,7 @@ jobs:
 
   fedora-clang-build:
     name: Fedora 44 Clang compile check
-    needs: web-checks
+    needs: [resolve-source, web-checks]
     runs-on: ubuntu-24.04
     container:
       image: fedora:44
@@ -505,7 +548,7 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+          ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Initialize submodules
         run: |
@@ -605,13 +648,13 @@ jobs:
 
   steamos-build:
     name: SteamOS 3.8 build
-    needs: web-checks
+    needs: [resolve-source, web-checks]
     runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+          ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Resolve exact SteamOS source commit
         run: |
@@ -654,7 +697,7 @@ jobs:
 
   ubuntu-build:
     name: Ubuntu build
-    needs: web-checks
+    needs: [resolve-source, web-checks]
     runs-on: ubuntu-24.04
     env:
       CCACHE_DIR: ~/.cache/ccache
@@ -663,7 +706,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+          ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Initialize submodules
         run: |
@@ -869,7 +912,7 @@ jobs:
 
   fedora-rpm-build:
     name: Fedora ${{ matrix.fedora }} RPM build
-    needs: web-checks
+    needs: [resolve-source, web-checks]
     runs-on: ubuntu-24.04
     container:
       image: fedora:${{ matrix.fedora }}
@@ -901,7 +944,7 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+          ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Initialize submodules
         run: |
@@ -1187,6 +1230,7 @@ jobs:
   release-assets:
     name: Release assets
     needs:
+      - resolve-source
       - arch-build
       - steamos-build
       - ubuntu-build
@@ -1201,7 +1245,7 @@ jobs:
       - name: Check out exact release source
         uses: actions/checkout@v7
         with:
-          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+          ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Download Arch package outputs
         uses: actions/download-artifact@v8
@@ -1319,7 +1363,29 @@ jobs:
 
           ls -la release-assets/staged release-assets/final
 
-      - name: Upload release assets to GitHub release
+      - name: Revalidate release tag against packaged source
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}
+        run: |
+          set -euo pipefail
+
+          checked_out_commit="$(git rev-parse HEAD)"
+          if [ "$checked_out_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then
+            echo "Release checkout $checked_out_commit does not match packaged source $EXPECTED_SOURCE_COMMIT" >&2
+            exit 1
+          fi
+
+          git tag -d "${POLARIS_PACKAGE_REF_NAME}" >/dev/null 2>&1 || true
+          git fetch --no-tags --force origin \
+            "refs/tags/${POLARIS_PACKAGE_REF_NAME}:refs/tags/${POLARIS_PACKAGE_REF_NAME}"
+          tag_commit="$(git rev-parse "refs/tags/${POLARIS_PACKAGE_REF_NAME}^{commit}")"
+          if [ "$tag_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then
+            echo "Release tag ${POLARIS_PACKAGE_REF_NAME} moved to $tag_commit; expected $EXPECTED_SOURCE_COMMIT" >&2
+            exit 1
+          fi
+
+      - name: Stage curated GitHub release
+        id: stage-release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -1334,14 +1400,33 @@ jobs:
 
           if ! gh release view "${POLARIS_PACKAGE_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${POLARIS_PACKAGE_REF_NAME}" \
+              --draft \
               --verify-tag \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
               --notes-file "$release_notes"
+            echo "publish_draft=true" >> "$GITHUB_OUTPUT"
           else
             gh release edit "${POLARIS_PACKAGE_REF_NAME}" \
+              --verify-tag \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
               --notes-file "$release_notes"
+            is_draft="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json isDraft --jq .isDraft)"
+            echo "publish_draft=$is_draft" >> "$GITHUB_OUTPUT"
           fi
+
+          expected_notes="$(cat "$release_notes")"
+          published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"
+          if [ "$published_notes" != "$expected_notes" ]; then
+            echo "Published release notes do not match $release_notes" >&2
+            exit 1
+          fi
+
+      - name: Upload release assets to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
 
           for legacy_asset in \
             Polaris-fedora42-x86_64.rpm \
@@ -1352,13 +1437,6 @@ jobs:
           done
 
           gh release upload "${POLARIS_PACKAGE_REF_NAME}" release-assets/final/* --clobber
-
-          expected_notes="$(cat "$release_notes")"
-          published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"
-          if [ "$published_notes" != "$expected_notes" ]; then
-            echo "Published release notes do not match $release_notes" >&2
-            exit 1
-          fi
 
       - name: Verify release assets on GitHub release
         env:
@@ -1371,3 +1449,10 @@ jobs:
             echo "Expected Fedora 44, Ubuntu 24.04, Arch, and SteamOS 3.8 binary assets with no Fedora 42/43 assets on ${POLARIS_PACKAGE_REF_NAME}; supported=${supported_count}, legacy=${legacy_count}" >&2
             exit 1
           fi
+
+      - name: Publish verified draft release
+        if: steps.stage-release.outputs.publish_draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false

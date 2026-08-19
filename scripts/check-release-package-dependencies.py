@@ -185,6 +185,47 @@ for option, expected in (
     )
 
 workflow = read(".github/workflows/build.yml")
+resolve_job = workflow_job(workflow, "resolve-source")
+resolve_script = workflow_run_script(
+    workflow_step(resolve_job, "Bind release tag to source commit")
+)
+for required_source_guard in (
+    '^v[0-9]+\\.[0-9]+\\.[0-9]+$',
+    'git fetch --no-tags --force origin',
+    'tag_commit="$(git rev-parse "refs/tags/${release_tag}^{commit}")"',
+    'if [ "$tag_commit" != "$source_commit" ]; then',
+    'echo "commit=$source_commit" >> "$GITHUB_OUTPUT"',
+):
+    if required_source_guard not in resolve_script:
+        raise AssertionError(
+            f"exact-source resolver is missing release guard: {required_source_guard}"
+        )
+if resolve_script.index('tag_commit="$(git rev-parse') >= resolve_script.index(
+    'echo "commit=$source_commit"'
+):
+    raise AssertionError("release tag must be validated before exporting the source commit")
+
+exact_checkout_ref = "ref: ${{ needs.resolve-source.outputs.commit }}"
+for job_name in (
+    "web-checks",
+    "cpp-sanitizer-tests",
+    "arch-build",
+    "fedora-clang-build",
+    "steamos-build",
+    "ubuntu-build",
+    "fedora-rpm-build",
+    "release-assets",
+):
+    job = workflow_job(workflow, job_name)
+    if job.count("uses: actions/checkout@v7") != 1:
+        raise AssertionError(f"{job_name} must contain exactly one checkout")
+    if job.count(exact_checkout_ref) != 1:
+        raise AssertionError(
+            f"{job_name} must check out the immutable resolve-source output"
+        )
+    if "resolve-source" not in job.split("    steps:", 1)[0]:
+        raise AssertionError(f"{job_name} must directly depend on resolve-source")
+
 if len(re.findall(r"(?m)^  fedora-rpm-build:\s*$", workflow)) != 1:
     raise AssertionError("release workflow must define exactly one Fedora RPM job")
 fedora_clang_job = workflow_job(workflow, "fedora-clang-build")
@@ -257,23 +298,65 @@ release_checkout = workflow_step(release_job, "Check out exact release source")
 expected_release_checkout = (
     "        uses: actions/checkout@v7\n"
     "        with:\n"
-    "          ref: ${{ env.POLARIS_CHECKOUT_REF }}\n"
+    "          ref: ${{ needs.resolve-source.outputs.commit }}\n"
 )
 if release_checkout.strip() != expected_release_checkout.strip():
     raise AssertionError(
         "release-assets must check out the exact packaged ref before reading curated notes"
     )
-release_upload = re.search(
-    r"(?ms)^      - name: Upload release assets to GitHub release\n(?P<body>.*?)(?=^      - name:|\Z)",
-    release_job,
+release_step_names = (
+    "Check out exact release source",
+    "Revalidate release tag against packaged source",
+    "Stage curated GitHub release",
+    "Upload release assets to GitHub release",
+    "Verify release assets on GitHub release",
+    "Publish verified draft release",
 )
-if not release_upload:
-    raise AssertionError("missing release asset upload workflow step")
-if release_job.index("- name: Check out exact release source") >= release_job.index(
-    "- name: Upload release assets to GitHub release"
+release_step_positions = [release_job.index(f"- name: {name}") for name in release_step_names]
+if release_step_positions != sorted(release_step_positions):
+    raise AssertionError(
+        "release checkout, tag validation, note staging, asset upload, verification, and publication must remain ordered"
+    )
+
+release_tag_validation = workflow_run_script(
+    workflow_step(release_job, "Revalidate release tag against packaged source")
+)
+for required_tag_guard in (
+    'checked_out_commit="$(git rev-parse HEAD)"',
+    'if [ "$checked_out_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then',
+    'git fetch --no-tags --force origin',
+    'tag_commit="$(git rev-parse "refs/tags/${POLARIS_PACKAGE_REF_NAME}^{commit}")"',
+    'if [ "$tag_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then',
 ):
-    raise AssertionError("release source checkout must precede release publication")
-release_upload_tokens = workflow_run_tokens(release_upload.group("body"))
+    if required_tag_guard not in release_tag_validation:
+        raise AssertionError(
+            f"release-assets tag revalidation is missing: {required_tag_guard}"
+        )
+
+release_stage = workflow_step(release_job, "Stage curated GitHub release")
+release_stage_script = workflow_run_script(release_stage)
+if "id: stage-release" not in release_stage:
+    raise AssertionError("curated release staging must export draft publication state")
+for required_stage_fact in (
+    'release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"',
+    'gh release create "${POLARIS_PACKAGE_REF_NAME}"',
+    "--draft",
+    "--verify-tag",
+    'gh release edit "${POLARIS_PACKAGE_REF_NAME}"',
+    'published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"',
+    'if [ "$published_notes" != "$expected_notes" ]; then',
+):
+    if required_stage_fact not in release_stage_script:
+        raise AssertionError(f"curated release staging is missing: {required_stage_fact}")
+if release_stage_script.count("--verify-tag") != 2:
+    raise AssertionError("both release create and edit must verify that the tag exists")
+if "gh release upload" in release_stage_script or "gh release delete-asset" in release_stage_script:
+    raise AssertionError("release notes must be verified before any asset mutation")
+
+release_upload = workflow_step(release_job, "Upload release assets to GitHub release")
+release_upload_tokens = workflow_run_tokens(release_upload)
+if "published_notes=" in workflow_run_script(release_upload):
+    raise AssertionError("release-note verification must not move after asset upload")
 for legacy_version in ("42", "43"):
     for cleanup_asset in (
         f"Polaris-fedora{legacy_version}-x86_64.rpm",
@@ -286,13 +369,7 @@ cleanup_command = [
 ]
 if not contains_command(release_upload_tokens, cleanup_command):
     raise AssertionError("release workflow must invoke gh release delete-asset for each stale Fedora asset")
-release_verify = re.search(
-    r"(?ms)^      - name: Verify release assets on GitHub release\n(?P<body>.*?)(?=^      - name:|\Z)",
-    release_job,
-)
-if not release_verify:
-    raise AssertionError("missing release asset verification workflow step")
-release_verify_body = release_verify.group("body")
+release_verify_body = workflow_step(release_job, "Verify release assets on GitHub release")
 release_verify_script = workflow_run_script(release_verify_body)
 expected_supported_assignment = (
     'supported_count=$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json assets --jq '
@@ -330,6 +407,18 @@ expected_release_verify_lines = [
 if release_verify_script.splitlines() != expected_release_verify_lines:
     raise AssertionError(
         "release verification must use the exact reviewed top-level query and failure program"
+    )
+release_publish = workflow_step(release_job, "Publish verified draft release")
+expected_release_publish = (
+    "        if: steps.stage-release.outputs.publish_draft == 'true'\n"
+    "        env:\n"
+    "          GH_TOKEN: ${{ github.token }}\n"
+    "          GH_REPO: ${{ github.repository }}\n"
+    '        run: gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false\n'
+)
+if release_publish.strip() != expected_release_publish.strip():
+    raise AssertionError(
+        "only the post-verification step may publish a staged draft release"
     )
 arch_job = workflow_job(workflow, "arch-build")
 arch_install = re.search(

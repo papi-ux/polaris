@@ -102,19 +102,32 @@ describe('v1.3.11 release contract', () => {
     }
   })
 
-  it('publishes the curated notes beside the release assets', () => {
+  it('binds curated notes and assets to one immutable release source', () => {
     const workflow = read('.github/workflows/build.yml')
 
     expect(workflow).toContain('release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"')
     expect(workflow).toContain('- name: Check out exact release source')
-    expect(workflow).toContain('ref: ${{ env.POLARIS_CHECKOUT_REF }}')
-    expect(workflow.indexOf('- name: Check out exact release source')).toBeLessThan(
-      workflow.indexOf('- name: Upload release assets to GitHub release'),
-    )
+    expect(workflow).toContain('ref: ${{ needs.resolve-source.outputs.commit }}')
+    const orderedSteps = [
+      '- name: Check out exact release source',
+      '- name: Revalidate release tag against packaged source',
+      '- name: Stage curated GitHub release',
+      '- name: Upload release assets to GitHub release',
+      '- name: Verify release assets on GitHub release',
+      '- name: Publish verified draft release',
+    ]
+    const positions = orderedSteps.map((step) => workflow.indexOf(step))
+    expect(positions.every((position) => position >= 0)).toBe(true)
+    expect(positions).toEqual([...positions].sort((left, right) => left - right))
+    expect(workflow).toContain('^v[0-9]+\\.[0-9]+\\.[0-9]+$')
+    expect(workflow).toContain('tag_commit="$(git rev-parse "refs/tags/${release_tag}^{commit}")"')
+    expect(workflow).toContain('if [ "$tag_commit" != "$source_commit" ]; then')
+    expect(workflow).toContain('--draft')
     expect(workflow).toContain('--verify-tag')
     expect(workflow).toContain('--notes-file "$release_notes"')
     expect(workflow).toContain('gh release edit "${POLARIS_PACKAGE_REF_NAME}"')
     expect(workflow).toContain('published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"')
+    expect(workflow).toContain('run: gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false')
     expect(workflow).not.toContain('Automated Fedora 44, Ubuntu, Arch, and SteamOS 3.8 release assets')
   })
 

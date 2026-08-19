@@ -1389,10 +1389,16 @@ if release_notes.count("systemctl --user restart polaris") != 3:
 release_workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")
 release_publication_facts = (
     'release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"',
+    'ref: ${{ needs.resolve-source.outputs.commit }}',
+    'Revalidate release tag against packaged source',
+    'Stage curated GitHub release',
+    '--draft',
     '--verify-tag',
     '--notes-file "$release_notes"',
     'gh release edit "${POLARIS_PACKAGE_REF_NAME}"',
     'published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"',
+    'Publish verified draft release',
+    '--draft=false',
 )
 for fact in release_publication_facts:
     if fact not in release_workflow:
@@ -1400,6 +1406,18 @@ for fact in release_publication_facts:
         sys.exit(1)
 if "Automated Fedora 44, Ubuntu, Arch, and SteamOS 3.8 release assets" in release_workflow:
     print("release workflow must not replace curated notes with generic asset text", file=sys.stderr)
+    sys.exit(1)
+
+release_order = (
+    "- name: Revalidate release tag against packaged source",
+    "- name: Stage curated GitHub release",
+    "- name: Upload release assets to GitHub release",
+    "- name: Verify release assets on GitHub release",
+    "- name: Publish verified draft release",
+)
+release_positions = [release_workflow.find(step) for step in release_order]
+if -1 in release_positions or release_positions != sorted(release_positions):
+    print("release workflow must verify source and notes before assets, then publish", file=sys.stderr)
     sys.exit(1)
 
 if "bash scripts/check-public-docs.sh" not in contributing:
