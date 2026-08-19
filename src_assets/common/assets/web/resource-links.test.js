@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { legalDocs, resources } from './resource-links.js'
+import { legalDocs, resources, sponsor } from './resource-links.js'
 
 const all = [...resources, ...legalDocs]
 
@@ -11,6 +11,13 @@ describe('resource links', () => {
     const hrefs = resources.map((entry) => entry.href)
     expect(hrefs).toContain('https://papi-ux.com/docs/')
     expect(hrefs).toContain('https://papi-ux.com/docs/troubleshooting/')
+  })
+
+  it('offers the canonical project entry points', () => {
+    const hrefs = resources.map((entry) => entry.href)
+    expect(hrefs).toContain('https://papi-ux.com/')
+    expect(hrefs).toContain('https://github.com/papi-ux/polaris')
+    expect(hrefs).toContain('https://github.com/papi-ux/polaris/releases')
   })
 
   it('keeps the destinations that only exist on GitHub', () => {
@@ -33,5 +40,14 @@ describe('resource links', () => {
   it('lists each destination once', () => {
     const hrefs = all.map((entry) => entry.href)
     expect(new Set(hrefs).size).toBe(hrefs.length)
+  })
+
+  it('keeps sponsorship separate from primary resources', () => {
+    expect(sponsor).toEqual({
+      href: 'https://github.com/sponsors/papi-ux',
+      labelKey: 'resource_card.sponsor',
+      ariaLabelKey: 'resource_card.sponsor_desc'
+    })
+    expect(all.map((entry) => entry.href)).not.toContain(sponsor.href)
   })
 })

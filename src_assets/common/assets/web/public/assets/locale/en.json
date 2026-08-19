@@ -663,7 +663,7 @@
     "quick_troubleshoot_desc": "Use recovery tools, diagnostics, and force-close actions.",
     "quick_troubleshoot_title": "Troubleshooting",
     "recent_issues": "Recent Issues",
-    "resources_desc": "Open the Polaris docs, discussions, and stuttering clinic from one place.",
+    "resources_desc": "Official website, docs, source, releases, discussions, and tuning guides.",
     "resources_title": "Resources",
     "session_mode": "Session Mode",
     "session_mode_idle": "Idle",
@@ -1084,8 +1084,11 @@
     "warning_msg": "Only pair devices you control. A trusted client can launch apps, watch streams, or control the host depending on the permissions you give it."
   },
   "resource_card": {
+    "website": "Website",
     "documentation": "Documentation",
     "troubleshooting_guide": "Troubleshooting Guide",
+    "github": "GitHub",
+    "releases": "Releases",
     "github_discussions": "GitHub Discussions",
     "github_wiki": "GitHub WiKi",
     "github_stuttering_clinic": "Stuttering Clinic",
@@ -1094,6 +1097,8 @@
     "license": "License",
     "resources": "Resources",
     "resources_desc": "Resources for Polaris!",
+    "sponsor": "Sponsor",
+    "sponsor_desc": "Support Polaris and Nova on GitHub Sponsors",
     "third_party_notice": "Third Party Notice"
   },
   "troubleshooting": {
