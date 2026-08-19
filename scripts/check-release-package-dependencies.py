@@ -179,6 +179,11 @@ def executable_array(tokens: list[str], name: str) -> list[str]:
     return [token for token in tokens[starts[0] + 1:end] if token != ";"]
 
 
+def reject_heredoc(tokens: list[str], context: str) -> None:
+    if any(token.startswith("<<") for token in tokens):
+        raise AssertionError(f"{context} must not use heredoc payloads as contract evidence")
+
+
 def self_test_executable_release_contract() -> None:
     expected = ["gh", "release", "edit", "v1.2.3", "--draft=true"]
     require_command(
@@ -233,21 +238,26 @@ resolve_job = workflow_job(workflow, "resolve-source")
 resolve_script = workflow_run_script(
     workflow_step(resolve_job, "Bind release tag to source commit")
 )
-for required_source_guard in (
-    '^v[0-9]+\\.[0-9]+\\.[0-9]+$',
-    'git fetch --no-tags --force origin',
-    'tag_commit="$(git rev-parse "refs/tags/${release_tag}^{commit}")"',
-    'if [ "$tag_commit" != "$source_commit" ]; then',
-    'echo "commit=$source_commit" >> "$GITHUB_OUTPUT"',
+resolve_tokens = shell_tokens(resolve_script)
+reject_heredoc(resolve_tokens, "exact-source resolver")
+for required_source_command in (
+    ["set", "-euo", "pipefail"],
+    ["source_commit=$(git rev-parse HEAD)"],
+    ["git", "fetch", "--no-tags", "--force", "origin", "refs/tags/${release_tag}:refs/tags/${release_tag}"],
+    ["tag_commit=$(git rev-parse refs/tags/${release_tag}^{commit})"],
+    [
+        "if", "[[", "!", "$release_tag", "=~", "^v[0-9]+.[0-9]+.[0-9]+$", "]]", ";", "then", ";",
+        "echo", "Release tag must match vMAJOR.MINOR.PATCH: $release_tag", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
+    [
+        "if", "[", "$tag_commit", "!=", "$source_commit", "]", ";", "then", ";",
+        "echo", "Release tag $release_tag resolves to $tag_commit, not checked-out source $source_commit", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
+    ["echo", "commit=$source_commit", ">>", "$GITHUB_OUTPUT"],
 ):
-    if required_source_guard not in resolve_script:
-        raise AssertionError(
-            f"exact-source resolver is missing release guard: {required_source_guard}"
-        )
-if resolve_script.index('tag_commit="$(git rev-parse') >= resolve_script.index(
-    'echo "commit=$source_commit"'
-):
-    raise AssertionError("release tag must be validated before exporting the source commit")
+    require_command(resolve_tokens, required_source_command, "exact-source resolver")
 
 exact_checkout_ref = "ref: ${{ needs.resolve-source.outputs.commit }}"
 for job_name in (
@@ -362,27 +372,45 @@ if release_step_positions != sorted(release_step_positions):
         "release checkout, tag validation, note staging, asset upload, verification, and publication must remain ordered"
     )
 
-release_tag_validation = workflow_run_script(
+release_tag_validation_tokens = workflow_run_tokens(
     workflow_step(release_job, "Revalidate release tag against packaged source")
 )
-for required_tag_guard in (
-    'checked_out_commit="$(git rev-parse HEAD)"',
-    'if [ "$checked_out_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then',
-    'git fetch --no-tags --force origin',
-    'tag_commit="$(git rev-parse "refs/tags/${POLARIS_PACKAGE_REF_NAME}^{commit}")"',
-    'if [ "$tag_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then',
+reject_heredoc(release_tag_validation_tokens, "release tag revalidation")
+for required_tag_command in (
+    ["set", "-euo", "pipefail"],
+    ["checked_out_commit=$(git rev-parse HEAD)"],
+    ["git", "fetch", "--no-tags", "--force", "origin", "refs/tags/${POLARIS_PACKAGE_REF_NAME}:refs/tags/${POLARIS_PACKAGE_REF_NAME}"],
+    ["tag_commit=$(git rev-parse refs/tags/${POLARIS_PACKAGE_REF_NAME}^{commit})"],
+    [
+        "if", "[", "$checked_out_commit", "!=", "$EXPECTED_SOURCE_COMMIT", "]", ";", "then", ";",
+        "echo", "Release checkout $checked_out_commit does not match packaged source $EXPECTED_SOURCE_COMMIT", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
+    [
+        "if", "[", "$tag_commit", "!=", "$EXPECTED_SOURCE_COMMIT", "]", ";", "then", ";",
+        "echo", "Release tag ${POLARIS_PACKAGE_REF_NAME} moved to $tag_commit; expected $EXPECTED_SOURCE_COMMIT", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
 ):
-    if required_tag_guard not in release_tag_validation:
-        raise AssertionError(
-            f"release-assets tag revalidation is missing: {required_tag_guard}"
-        )
+    require_command(
+        release_tag_validation_tokens,
+        required_tag_command,
+        "release tag revalidation",
+    )
 
 release_stage = workflow_step(release_job, "Stage curated GitHub release")
 release_stage_tokens = workflow_run_tokens(release_stage)
+reject_heredoc(release_stage_tokens, "curated release staging")
 if not re.search(r"(?m)^        id: stage-release\s*$", release_stage):
     raise AssertionError("curated release staging must export draft publication state")
 for required_stage_tokens in (
     ["release_notes=docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"],
+    ["set", "-euo", "pipefail"],
+    [
+        "if", "[", "!", "-s", "$release_notes", "]", ";", "then", ";",
+        "echo", "Missing curated release notes: $release_notes", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
     [
         "gh", "release", "create", "${POLARIS_PACKAGE_REF_NAME}",
         "--draft", "--verify-tag", "--title", "${POLARIS_PACKAGE_REF_NAME}",
@@ -394,7 +422,11 @@ for required_stage_tokens in (
         "--notes-file", "$release_notes",
     ],
     ["published_notes=$(gh release view ${POLARIS_PACKAGE_REF_NAME} --json body --jq .body)"],
-    ["if", "[", "$published_notes", "!=", "$expected_notes", "]", ";", "then"],
+    [
+        "if", "[", "$published_notes", "!=", "$expected_notes", "]", ";", "then", ";",
+        "echo", "Published release notes do not match $release_notes", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
 ):
     require_command(
         release_stage_tokens,
@@ -403,6 +435,25 @@ for required_stage_tokens in (
     )
 if release_stage_tokens.count("--verify-tag") != 2:
     raise AssertionError("both release create and edit must verify that the tag exists")
+stage_release_mutations = [
+    arguments
+    for arguments in command_arguments(release_stage_tokens, "gh")
+    if arguments[:2] in (["release", "create"], ["release", "edit"])
+]
+expected_stage_release_mutations = [
+    [
+        "release", "create", "${POLARIS_PACKAGE_REF_NAME}", "--draft",
+        "--verify-tag", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--notes-file", "$release_notes",
+    ],
+    [
+        "release", "edit", "${POLARIS_PACKAGE_REF_NAME}", "--verify-tag",
+        "--draft=true", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--notes-file", "$release_notes",
+    ],
+]
+if stage_release_mutations != expected_stage_release_mutations:
+    raise AssertionError("release staging must contain only the reviewed create and edit mutations")
 if command_count(
     release_stage_tokens,
     ["echo", "publish_draft=true", ">>", "$GITHUB_OUTPUT"],
@@ -418,10 +469,17 @@ if any(
 
 release_upload = workflow_step(release_job, "Upload release assets to GitHub release")
 release_upload_tokens = workflow_run_tokens(release_upload)
+reject_heredoc(release_upload_tokens, "release asset upload")
 if any(token.startswith("published_notes=") for token in release_upload_tokens):
     raise AssertionError("release-note verification must not move after asset upload")
 for exact_upload_tokens in (
+    ["set", "-euo", "pipefail"],
     ["release_files=(release-assets/final/*)"],
+    [
+        "if", "[", "${#release_files[@]}", "-eq", "0", "]", ";", "then", ";",
+        "echo", "No finalized release assets are available", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
     ["declare", "-A", "expected_asset_names=()"],
     ["expected_asset_names[$(basename $release_file)]=1"],
     ["gh", "release", "view", "${POLARIS_PACKAGE_REF_NAME}", "--json", "assets", "--jq", ".assets[].name"],
@@ -436,17 +494,36 @@ for exact_upload_tokens in (
     )
 if command_count(release_upload_tokens, ["true"]):
     raise AssertionError("remote asset cleanup must fail closed")
+upload_release_mutations = [
+    arguments
+    for arguments in command_arguments(release_upload_tokens, "gh")
+    if arguments[:2] in (["release", "delete-asset"], ["release", "upload"])
+]
+if upload_release_mutations != [
+    ["release", "delete-asset", "${POLARIS_PACKAGE_REF_NAME}", "$published_asset", "--yes"],
+    ["release", "upload", "${POLARIS_PACKAGE_REF_NAME}", "${release_files[@]}", "--clobber"],
+]:
+    raise AssertionError("release upload must contain only exact cleanup and finalized upload mutations")
 release_verify_body = workflow_step(release_job, "Verify release assets on GitHub release")
 release_verify_tokens = workflow_run_tokens(release_verify_body)
+reject_heredoc(release_verify_tokens, "release asset verification")
 for exact_verify_tokens in (
     ["set", "-euo", "pipefail"],
     ["find", "release-assets/final", "-maxdepth", "1", "-type", "f", "-printf", "%f\\n", "|", "sort"],
     ["required_binary_assets=("],
-    ["for", "required_asset", "in", "${required_binary_assets[@]}", ";", "do"],
+    [
+        "if", "[[", "!", " ${expected_assets[*]} ", "=~", " ${required_asset} ", "]]", ";", "then", ";",
+        "echo", "Finalized release assets are missing required binary: $required_asset", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
     ["gh", "release", "view", "${POLARIS_PACKAGE_REF_NAME}", "--json", "assets", "--jq", ".assets[].name", "|", "sort"],
     [
         "if", "[", "${#expected_assets[@]}", "-eq", "0", "]", "||",
-        "[", "${expected_assets[*]}", "!=", "${published_assets[*]}", "]", ";", "then",
+        "[", "${expected_assets[*]}", "!=", "${published_assets[*]}", "]", ";", "then", ";",
+        "echo", "Published assets do not match the exact finalized asset set on ${POLARIS_PACKAGE_REF_NAME}", ">", "&", "2", ";",
+        "printf", "expected: %s\\n", "${expected_assets[*]}", ">", "&", "2", ";",
+        "printf", "published: %s\\n", "${published_assets[*]}", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
     ],
 ):
     require_command(
