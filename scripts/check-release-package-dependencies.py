@@ -24,6 +24,18 @@ def require_package(section: str, package: str, context: str) -> None:
         raise AssertionError(f"{context} must explicitly include {package}")
 
 
+def require_single_cmake_bool(text: str, option: str, expected: str, context: str) -> None:
+    definitions = re.findall(
+        rf"(?<![A-Za-z0-9_])-D{re.escape(option)}(?::BOOL)?=(ON|OFF)(?![A-Za-z0-9_])",
+        text,
+    )
+    mentions = text.count(option)
+    if definitions != [expected] or mentions != 1:
+        raise AssertionError(
+            f"{context} must set exactly one literal -D{option}={expected} and contain no override"
+        )
+
+
 def workflow_job(text: str, name: str) -> str:
     match = re.search(
         rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
@@ -79,11 +91,40 @@ fedora = read("packaging/linux/fedora/Polaris.spec")
 for package in ("pipewire-devel", "vulkan-loader-devel"):
     if not re.search(rf"(?m)^BuildRequires:\s+{re.escape(package)}\s*$", fedora):
         raise AssertionError(f"Fedora build dependencies must explicitly include {package}")
+require_single_cmake_bool(
+    fedora,
+    "POLARIS_ENABLE_PIPEWIRE",
+    "OFF",
+    "Fedora RPM spec",
+)
+require_single_cmake_bool(
+    fedora,
+    "POLARIS_ENABLE_PORTAL",
+    "ON",
+    "Fedora RPM spec",
+)
 
 workflow = read(".github/workflows/build.yml")
 if len(re.findall(r"(?m)^  fedora-rpm-build:\s*$", workflow)) != 1:
     raise AssertionError("release workflow must define exactly one Fedora RPM job")
+fedora_clang_job = workflow_job(workflow, "fedora-clang-build")
 fedora_job = workflow_job(workflow, "fedora-rpm-build")
+for context, job in (
+    ("Fedora Clang CI", fedora_clang_job),
+    ("Fedora RPM CI", fedora_job),
+):
+    require_single_cmake_bool(
+        job,
+        "POLARIS_ENABLE_PIPEWIRE",
+        "OFF",
+        context,
+    )
+    require_single_cmake_bool(
+        job,
+        "POLARIS_ENABLE_PORTAL",
+        "ON",
+        context,
+    )
 fedora_strategy = re.search(
     r"(?ms)^    strategy:\n.*?(?=^    env:\n)",
     fedora_job,
