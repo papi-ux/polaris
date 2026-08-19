@@ -178,6 +178,29 @@ namespace portal {
     return client_dynamic_range <= 0;
   }
 
+  static pipewire_capture::dmabuf_override_e portal_dmabuf_override() {
+    return pipewire_capture::dmabuf_override_from_env(std::getenv("POLARIS_PORTAL_DMABUF"));
+  }
+
+  static void log_dmabuf_policy(
+    platf::mem_type_e mem_type,
+    pipewire_capture::dmabuf_override_e override,
+    std::string_view source
+  ) {
+    if (override == pipewire_capture::dmabuf_override_e::force_cpu) {
+      BOOST_LOG(info) << "portal: portal_dmabuf_forced_off source="sv << source
+                      << "; offering SHM only"sv;
+    }
+    else if (mem_type == platf::mem_type_e::vaapi && override == pipewire_capture::dmabuf_override_e::allow_vaapi) {
+      BOOST_LOG(warning) << "portal: vaapi_pipewire_dmabuf_explicitly_enabled source="sv << source
+                         << "; operator opted into an unvalidated path with no automatic stall fallback"sv;
+    }
+    else if (mem_type == platf::mem_type_e::vaapi) {
+      BOOST_LOG(info) << "portal: vaapi_pipewire_dmabuf_disabled_for_stability source="sv << source
+                      << "; offering SHM by default; set POLARIS_PORTAL_DMABUF=1 only on a host where this path is known to work"sv;
+    }
+  }
+
   // Encoder render node for DMA-BUF eligibility: the configured adapter_name
   // when it names a canonical render node, else the host's sole render node.
   // Single-GPU hosts get zero-copy without configuration; multi-GPU hosts stay
@@ -219,7 +242,18 @@ namespace portal {
     bool may_use_dmabuf = false;
     const bool prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range);
     const bool prefer_sdr = portal_prefer_sdr_formats(client_dynamic_range);
+    const auto dmabuf_override = portal_dmabuf_override();
     if (encoder_render_node) {
+      const pipewire_capture::dmabuf_eligibility_t eligibility {
+        .capture_render_node = encoder_render_node,
+        .encoder_render_node = *encoder_render_node,
+        .mem_type = mem_type,
+        .egl_import_supported = true,
+      };
+      may_use_dmabuf = pipewire_capture::may_offer_dmabuf(eligibility, dmabuf_override);
+    }
+    log_dmabuf_policy(mem_type, dmabuf_override, "local_graph"sv);
+    if (may_use_dmabuf) {
       // LINEAR always for gamescope (only allocates LINEAR on PW node).
       dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats({DRM_FORMAT_MOD_LINEAR});
       // Ensure 10-bit LINEAR is present for HDR streams even if EGL skipped it.
@@ -247,7 +281,6 @@ namespace portal {
                  format.spa_format == SPA_VIDEO_FORMAT_xRGB_210LE;
         });
       }
-      may_use_dmabuf = !dmabuf_formats.empty();
     }
     auto local = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {
       .remote_fd = -1,
@@ -568,15 +601,23 @@ namespace portal {
         }
         std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
         bool may_use_dmabuf = false;
-        if (!session->capture_render_node) {
+        const auto dmabuf_override = portal_dmabuf_override();
+        const bool allow_vaapi = dmabuf_override == pipewire_capture::dmabuf_override_e::allow_vaapi;
+        log_dmabuf_policy(mem_type, dmabuf_override, "portal_remote"sv);
+        if (dmabuf_override == pipewire_capture::dmabuf_override_e::force_cpu ||
+            (mem_type == platf::mem_type_e::vaapi && !allow_vaapi)) {
+          // The policy log above records whether this is an operator-forced or
+          // default stability containment decision.
+        } else if (!session->capture_render_node) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because the portal stream did not provide an explicit capture render node"sv;
         } else if (!encoder_render_node) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because config::video.adapter_name is not an explicit canonical render node"sv;
         } else if (*session->capture_render_node != *encoder_render_node) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because capture render node ["sv << *session->capture_render_node
                           << "] does not match encoder adapter ["sv << *encoder_render_node << ']';
-        } else if (mem_type != platf::mem_type_e::vaapi && mem_type != platf::mem_type_e::cuda) {
-          BOOST_LOG(info) << "portal: DMA-BUF disabled because encoder memory type is not VAAPI or CUDA"sv;
+        } else if (mem_type != platf::mem_type_e::cuda &&
+                   !(allow_vaapi && mem_type == platf::mem_type_e::vaapi)) {
+          BOOST_LOG(info) << "portal: DMA-BUF disabled because encoder memory type is neither CUDA nor explicitly enabled VAAPI"sv;
         } else {
           if (mem_type == platf::mem_type_e::cuda) {
             // LINEAR one-plane packed RGB: 8-bit BGRx/BGRA + 10-bit xBGR_210LE (HDR).
@@ -633,7 +674,7 @@ namespace portal {
             .mem_type = mem_type,
             .egl_import_supported = !dmabuf_formats.empty(),
           };
-          may_use_dmabuf = pipewire_capture::may_offer_dmabuf(eligibility);
+          may_use_dmabuf = pipewire_capture::may_offer_dmabuf(eligibility, dmabuf_override);
           if (!may_use_dmabuf) {
             BOOST_LOG(info) << "portal: DMA-BUF disabled because no compatible packed-RGB modifier is available for encoder render node ["sv
                             << *encoder_render_node << ']';
@@ -646,6 +687,7 @@ namespace portal {
                         << " prefer_hdr="sv << (want_prefer_hdr ? "true"sv : "false"sv)
                         << " prefer_sdr="sv << (want_prefer_sdr ? "true"sv : "false"sv)
                         << " force_hdr="sv << (portal_force_hdr_enabled() ? "true"sv : "false"sv)
+                        << " vaapi_opt_in="sv << (allow_vaapi ? "true"sv : "false"sv)
                         << " client_dynamic_range="sv << client_dynamic_range
                         << " capture_node="sv << session->capture_render_node.value_or("none")
                         << " encoder_node="sv << encoder_render_node.value_or("none")

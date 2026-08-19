@@ -77,6 +77,12 @@ namespace pipewire_capture {
     bool egl_import_supported = false;
   };
 
+  enum class dmabuf_override_e {
+    default_safe,
+    force_cpu,
+    allow_vaapi,
+  };
+
   struct dmabuf_plane_t {
     int fd = -1;
     std::uint32_t chunk_offset = 0;
@@ -111,7 +117,16 @@ namespace pipewire_capture {
     const std::optional<std::string> &portal_capture_render_node,
     const std::optional<std::string> &encoder_render_node
   );
-  bool may_offer_dmabuf(const dmabuf_eligibility_t &eligibility);
+  // Only exact "0" and "1" values carry authority. Everything else, including
+  // a missing variable, retains the fail-closed default.
+  dmabuf_override_e dmabuf_override_from_env(const char *value);
+  // VAAPI stays fail-closed unless the operator explicitly opts into the
+  // unvalidated route. The typed override prevents contradictory force/allow
+  // flags from reaching this boundary.
+  bool may_offer_dmabuf(
+    const dmabuf_eligibility_t &eligibility,
+    dmabuf_override_e override = dmabuf_override_e::default_safe
+  );
   std::vector<dmabuf_format_modifier_t> task1_packed_dmabuf_formats(std::vector<std::uint64_t> modifiers);
   std::vector<dmabuf_format_modifier_t> filter_importable_dmabuf_formats(
     const std::vector<dmabuf_format_modifier_t> &portal_formats,
