@@ -47,6 +47,7 @@ BuildRequires: npm
 BuildRequires: numactl-devel
 BuildRequires: openssl-devel
 BuildRequires: opus-devel
+BuildRequires: pipewire-devel
 BuildRequires: pulseaudio-libs-devel
 BuildRequires: python3
 BuildRequires: rpm-build
@@ -153,6 +154,8 @@ cmake_args=(
   "-DPOLARIS_ENABLE_X11=ON"
   "-DPOLARIS_ENABLE_DRM=ON"
   "-DPOLARIS_ENABLE_BROWSER_STREAM=ON"
+  "-DPOLARIS_ENABLE_PIPEWIRE=OFF"
+  "-DPOLARIS_ENABLE_PORTAL=ON"
   "-DPOLARIS_PUBLISHER_NAME=papi"
   "-DPOLARIS_PUBLISHER_WEBSITE=https://github.com/papi-ux/polaris"
   "-DPOLARIS_PUBLISHER_ISSUE_URL=https://github.com/papi-ux/polaris/issues"

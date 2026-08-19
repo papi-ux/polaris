@@ -911,6 +911,10 @@ describe('Linux packaging contracts', () => {
       )
       expect(block).not.toMatch(/strings "\$binary"\s*\|\s*grep/)
     }
+
+    expect(fedoraConfigure).toContain('--forbid-native-pipewire-audio')
+    expect(ubuntuConfigure).not.toContain('--forbid-native-pipewire-audio')
+    expect(workflow.match(/--forbid-native-pipewire-audio/g)).toHaveLength(1)
   })
 
   it('rejects contaminated strings without the legacy pipefail false negative', () => {
@@ -962,6 +966,7 @@ exit 42`,
         stringsPath,
         `#!/usr/bin/env bash
 printf '/usr/share/polaris/shaders/opengl\\n'
+printf 'portal: PipeWire format negotiated: \\n'
 printf 'safe-symbol\\n'
 `,
       )
@@ -971,6 +976,32 @@ printf 'safe-symbol\\n'
         { encoding: 'utf8', env },
       )
       expect(safe.status, `checker stderr: ${safe.stderr}`).toBe(0)
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('rejects packaged binaries without portal capture support', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-package-portal-'))
+    try {
+      const binDir = join(fixture, 'bin')
+      const stringsPath = join(binDir, 'strings')
+      const dummyBinary = join(fixture, 'polaris')
+      const report = join(fixture, 'package-strings.txt')
+      mkdirSync(binDir)
+      writeFileSync(dummyBinary, 'fixture')
+      writeFileSync(stringsPath, '#!/usr/bin/env bash\nprintf \'safe-symbol\\n\'\n')
+      chmodSync(stringsPath, 0o755)
+
+      const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+      const result = spawnSync(
+        'bash',
+        ['scripts/check-packaged-binary-paths.sh', dummyBinary, report],
+        { encoding: 'utf8', env },
+      )
+
+      expect(result.status, `checker stderr: ${result.stderr}`).toBe(1)
+      expect(result.stderr).toContain('does not contain XDG Desktop Portal capture support')
     } finally {
       rmSync(fixture, { force: true, recursive: true })
     }
@@ -1000,6 +1031,96 @@ printf 'safe-symbol\\n'
 
       expect(result.status, `checker stderr: ${result.stderr}`).toBe(2)
       expect(result.stderr).toContain('Failed to scan packaged Polaris binary strings')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('fails closed when the native PipeWire audio marker scan errors', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-package-native-audio-scan-'))
+    try {
+      const binDir = join(fixture, 'bin')
+      const stringsPath = join(binDir, 'strings')
+      const grepPath = join(binDir, 'grep')
+      const dummyBinary = join(fixture, 'polaris')
+      const report = join(fixture, 'package-strings.txt')
+      mkdirSync(binDir)
+      writeFileSync(dummyBinary, 'fixture')
+      writeFileSync(
+        stringsPath,
+        `#!/usr/bin/env bash
+printf 'portal: PipeWire format negotiated: \\n'
+printf 'safe-symbol\\n'
+`,
+      )
+      writeFileSync(
+        grepPath,
+        `#!/usr/bin/env bash
+if [ "$1" = "-Fq" ] && [ "$2" = "PipeWire detected, will prefer native PipeWire for audio capture" ]; then
+  exit 2
+fi
+exec "$REAL_GREP" "$@"
+`,
+      )
+      chmodSync(stringsPath, 0o755)
+      chmodSync(grepPath, 0o755)
+
+      const realGrep = spawnSync('bash', ['-c', 'command -v grep'], { encoding: 'utf8' }).stdout.trim()
+      const env = {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        REAL_GREP: realGrep,
+      }
+      const result = spawnSync(
+        'bash',
+        [
+          'scripts/check-packaged-binary-paths.sh',
+          dummyBinary,
+          report,
+          '--forbid-native-pipewire-audio',
+        ],
+        { encoding: 'utf8', env },
+      )
+
+      expect(result.status, `checker stderr: ${result.stderr}`).toBe(2)
+      expect(result.stderr).toContain('Failed to scan for native PipeWire audio support')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('rejects native PipeWire audio support when the Fedora policy forbids it', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-package-native-audio-'))
+    try {
+      const binDir = join(fixture, 'bin')
+      const stringsPath = join(binDir, 'strings')
+      const dummyBinary = join(fixture, 'polaris')
+      const report = join(fixture, 'package-strings.txt')
+      mkdirSync(binDir)
+      writeFileSync(dummyBinary, 'fixture')
+      writeFileSync(
+        stringsPath,
+        `#!/usr/bin/env bash
+printf 'portal: PipeWire format negotiated: \\n'
+printf 'PipeWire detected, will prefer native PipeWire for audio capture\\n'
+`,
+      )
+      chmodSync(stringsPath, 0o755)
+
+      const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+      const result = spawnSync(
+        'bash',
+        [
+          'scripts/check-packaged-binary-paths.sh',
+          dummyBinary,
+          report,
+          '--forbid-native-pipewire-audio',
+        ],
+        { encoding: 'utf8', env },
+      )
+
+      expect(result.status, `checker stderr: ${result.stderr}`).toBe(1)
+      expect(result.stderr).toContain('unexpectedly contains native PipeWire audio support')
     } finally {
       rmSync(fixture, { force: true, recursive: true })
     }
