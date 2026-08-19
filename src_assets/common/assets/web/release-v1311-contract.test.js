@@ -14,7 +14,7 @@ const sectionBetween = (source, startHeading, endHeading) => {
 
 const releaseSection = () => sectionBetween(
   read('docs/changelog.md'),
-  '## v1.3.11 - 2026-08-18',
+  '## v1.3.11 - 2026-08-19',
   '## v1.3.10 - 2026-08-16',
 )
 
@@ -54,7 +54,7 @@ describe('v1.3.11 release contract', () => {
   it('moves the versioned release metadata together', () => {
     expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.3.11')
     expect(read('README.md')).not.toMatch(/^#{1,6}\s+.*(?:release|what is new).*v\d/im)
-    expect(read('docs/changelog.md')).toContain('## v1.3.11 - 2026-08-18')
+    expect(read('docs/changelog.md')).toContain('## v1.3.11 - 2026-08-19')
     expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.3.11"')
   })
 
@@ -68,7 +68,7 @@ describe('v1.3.11 release contract', () => {
     const publicDocsGate = read('scripts/check-public-docs.sh')
 
     expect(publicDocsGate).toContain('README must not duplicate a version-specific release section')
-    expect(publicDocsGate).toContain('"## v1.3.11 - 2026-08-18"')
+    expect(publicDocsGate).toContain('"## v1.3.11 - 2026-08-19"')
     expect(publicDocsGate).toContain('docs/release-notes/v1.3.11.md')
     for (const asset of expectedAssets) {
       expect(publicDocsGate, `public checker must require: ${asset}`).toContain(asset)

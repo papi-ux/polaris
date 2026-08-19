@@ -5,7 +5,7 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
-## v1.3.11 - 2026-08-18
+## v1.3.11 - 2026-08-19
 
 A support, private-runtime recovery, display-truth, and reproducibility patch. Polaris can now preserve the evidence around crashes and silent failures, accept a bounded report from an authenticated paired client, recover private Steam and owned Gamescope reconnects, find Flatpak Heroic and Lutris libraries, keep PipeWire VAAPI capture on the safe SHM path by default, and stop describing requested display state as applied until the compositor reports it back.
 
