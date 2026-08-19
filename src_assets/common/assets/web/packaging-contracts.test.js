@@ -398,12 +398,16 @@ describe('Linux packaging contracts', () => {
     const ubuntuJob = section(workflow, '  ubuntu-build:', '  fedora-rpm-build:')
     const fedoraJob = section(workflow, '  fedora-rpm-build:', '  release-assets:')
     const packageInstall = section(cmake, 'if(NOT ${POLARIS_BUILD_APPIMAGE})', 'endif()')
+    const debDependencies = section(cmake, 'set(CPACK_DEBIAN_PACKAGE_DEPENDS', 'set(CPACK_RPM_PACKAGE_REQUIRES')
+    const rpmDependencies = section(cmake, 'set(CPACK_RPM_PACKAGE_REQUIRES', 'if(NOT BOOST_USE_STATIC)')
 
     expect(session.startsWith('#!/usr/bin/env bash\n')).toBe(true)
     expect(packageInstall).toContain('"${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"')
     expect(packageInstall).toContain('RENAME "polaris-gamescope-session"')
     expect(packageInstall).toContain('"${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"')
     expect(packageInstall.match(/DESTINATION "\$\{CMAKE_INSTALL_BINDIR\}"/g)).toHaveLength(2)
+    expect(debDependencies).toContain('bash, \\')
+    expect(rpmDependencies).toContain('bash, \\')
 
     for (const pkgbuild of [archPkgbuild, steamOsPkgbuild]) {
       expect(pkgbuild).toMatch(/depends=\([\s\S]*?\n\s+'bash'\n[\s\S]*?\n\)/)

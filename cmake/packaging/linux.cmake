@@ -62,6 +62,7 @@ set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/
 set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
+            bash, \
             debianutils, \
             grim, \
             labwc, \
@@ -84,6 +85,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             xwayland")
 set(CPACK_RPM_PACKAGE_REQUIRES "\
             ${CPACK_RPM_PLATFORM_PACKAGE_REQUIRES} \
+            bash, \
             grim, \
             labwc, \
             libcap >= 2.22, \
