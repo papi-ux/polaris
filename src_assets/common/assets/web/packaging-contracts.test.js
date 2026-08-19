@@ -962,6 +962,7 @@ exit 42`,
         stringsPath,
         `#!/usr/bin/env bash
 printf '/usr/share/polaris/shaders/opengl\\n'
+printf 'portal: PipeWire format negotiated: \\n'
 printf 'safe-symbol\\n'
 `,
       )
@@ -971,6 +972,32 @@ printf 'safe-symbol\\n'
         { encoding: 'utf8', env },
       )
       expect(safe.status, `checker stderr: ${safe.stderr}`).toBe(0)
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('rejects packaged binaries without portal capture support', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-package-portal-'))
+    try {
+      const binDir = join(fixture, 'bin')
+      const stringsPath = join(binDir, 'strings')
+      const dummyBinary = join(fixture, 'polaris')
+      const report = join(fixture, 'package-strings.txt')
+      mkdirSync(binDir)
+      writeFileSync(dummyBinary, 'fixture')
+      writeFileSync(stringsPath, '#!/usr/bin/env bash\nprintf \'safe-symbol\\n\'\n')
+      chmodSync(stringsPath, 0o755)
+
+      const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+      const result = spawnSync(
+        'bash',
+        ['scripts/check-packaged-binary-paths.sh', dummyBinary, report],
+        { encoding: 'utf8', env },
+      )
+
+      expect(result.status, `checker stderr: ${result.stderr}`).toBe(1)
+      expect(result.stderr).toContain('does not contain XDG Desktop Portal capture support')
     } finally {
       rmSync(fixture, { force: true, recursive: true })
     }
