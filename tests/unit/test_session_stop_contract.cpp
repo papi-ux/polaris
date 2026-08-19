@@ -371,8 +371,93 @@ TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState
   ASSERT_NE(stop_start, std::string::npos);
   ASSERT_NE(refresh_start, std::string::npos);
   const auto stop_body = source.substr(stop_start, refresh_start - stop_start);
-  EXPECT_NE(stop_body.find("gp::read_marker(marker_path())"), std::string::npos);
+  EXPECT_NE(source.find("bool owned_group_drained_ = false"), std::string::npos);
+
+  const auto owned_socket_reclaim_start = source.find(
+    "bool reclaim_owned_gamescope_sockets_after_drain_unlocked()"
+  );
+  ASSERT_NE(owned_socket_reclaim_start, std::string::npos);
+  ASSERT_LT(owned_socket_reclaim_start, stop_start);
+  const auto owned_socket_reclaim = source.substr(
+    owned_socket_reclaim_start,
+    stop_start - owned_socket_reclaim_start
+  );
+  EXPECT_NE(
+    owned_socket_reclaim.find("!owned_group_drained_ || socket_name_ != \"gamescope-0\""),
+    std::string::npos
+  );
+  const auto reclaim_wayland = owned_socket_reclaim.find(
+    "gp::remove_orphan_socket(socket_path(\"gamescope-0\"))"
+  );
+  const auto reclaim_ei = owned_socket_reclaim.find(
+    "gp::remove_orphan_socket(socket_path(\"gamescope-0-ei\"))"
+  );
+  ASSERT_NE(reclaim_wayland, std::string::npos);
+  ASSERT_NE(reclaim_ei, std::string::npos);
+  EXPECT_LT(reclaim_wayland, reclaim_ei);
+  EXPECT_EQ(owned_socket_reclaim.find("gamescope-1"), std::string::npos)
+    << "post-drain cleanup may reclaim only the exact owned runtime socket pair";
+
+  const auto missing_marker_guard = stop_body.find("if (owned_ && !marker_)");
+  const auto missing_marker_return = stop_body.find("return;", missing_marker_guard);
+  const auto owned_marker_branch = stop_body.find("if (owned_ && marker_)", missing_marker_return);
+  const auto raw_marker = stop_body.find(
+    "const auto marker_on_disk = gp::read_marker(marker_path())",
+    owned_marker_branch
+  );
+  const auto retry_gate = stop_body.find("if (!owned_group_drained_)", raw_marker);
+  const auto live_marker = stop_body.find("gp::validated_marker(marker_path(), \"runtime\")", retry_gate);
+  const auto drain_group = stop_body.find("drain_private_process_group(", live_marker);
+  const auto mark_drained = stop_body.find("owned_group_drained_ = true", drain_group);
+  const auto reclaim_sockets = stop_body.find(
+    "reclaim_owned_gamescope_sockets_after_drain_unlocked()",
+    mark_drained
+  );
+  const auto clear_files = stop_body.find("remove_owned_files_if_current_unlocked()", reclaim_sockets);
+  const auto clear_retry_state = stop_body.find("owned_group_drained_ = false", clear_files);
+  ASSERT_NE(missing_marker_guard, std::string::npos);
+  ASSERT_NE(missing_marker_return, std::string::npos);
+  ASSERT_NE(owned_marker_branch, std::string::npos);
+  ASSERT_NE(raw_marker, std::string::npos);
+  ASSERT_NE(retry_gate, std::string::npos);
+  ASSERT_NE(live_marker, std::string::npos);
+  ASSERT_NE(drain_group, std::string::npos);
+  ASSERT_NE(mark_drained, std::string::npos);
+  ASSERT_NE(reclaim_sockets, std::string::npos);
+  ASSERT_NE(clear_files, std::string::npos);
+  ASSERT_NE(clear_retry_state, std::string::npos);
+  EXPECT_LT(missing_marker_guard, missing_marker_return);
+  EXPECT_LT(missing_marker_return, owned_marker_branch)
+    << "an owned runtime without immutable marker authority must retain its state";
+  EXPECT_LT(owned_marker_branch, raw_marker);
+  EXPECT_LT(raw_marker, retry_gate)
+    << "every retry must revalidate the raw immutable marker before cleanup";
+  EXPECT_LT(retry_gate, live_marker);
+  EXPECT_LT(live_marker, drain_group);
+  EXPECT_LT(drain_group, mark_drained);
+  EXPECT_LT(mark_drained, reclaim_sockets);
+  EXPECT_LT(reclaim_sockets, clear_files)
+    << "socket authority must be consumed before marker/environment authority";
+  EXPECT_LT(clear_files, clear_retry_state);
   EXPECT_EQ(stop_body.find("validated_marker_for_socket"), std::string::npos);
+
+  const auto reset_start = source.find("void reset_after_external_stop() override");
+  const auto reset_end = source.find("bool is_running() const override", reset_start);
+  ASSERT_NE(reset_start, std::string::npos);
+  ASSERT_NE(reset_end, std::string::npos);
+  const auto reset_body = source.substr(reset_start, reset_end - reset_start);
+  EXPECT_NE(reset_body.find("owned_group_drained_ = false"), std::string::npos);
+
+  const auto clear_state_start = source.find("void clear_runtime_state_unlocked()");
+  const auto clear_state_end = source.find("bool revalidate_running_unlocked(", clear_state_start);
+  ASSERT_NE(clear_state_start, std::string::npos);
+  ASSERT_NE(clear_state_end, std::string::npos);
+  const auto clear_state_body = source.substr(
+    clear_state_start,
+    clear_state_end - clear_state_start
+  );
+  EXPECT_NE(clear_state_body.find("owned_group_drained_ = false"), std::string::npos);
+
   const auto runtime_start = source.find("bool start(const start_params_t &params) override");
   const auto runtime_stop = source.find("void stop() override", runtime_start);
   ASSERT_NE(runtime_start, std::string::npos);
@@ -389,8 +474,20 @@ TEST(SessionStopContractTests, OwnedRuntimeDrainsPrivateGroupBeforeClearingState
   EXPECT_LT(acquisition, reclaim);
   EXPECT_LT(reclaim, spawn);
   EXPECT_LT(spawn, marker_write);
+  const auto owned_spawn = start_body.find("owned_ = true", spawn);
+  const auto reset_spawn_retry_state = start_body.find("owned_group_drained_ = false", owned_spawn);
+  ASSERT_NE(owned_spawn, std::string::npos);
+  ASSERT_NE(reset_spawn_retry_state, std::string::npos);
+  EXPECT_LT(owned_spawn, reset_spawn_retry_state);
   EXPECT_NE(start_body.find("runtime_acquisition_allowed_locked()"), std::string::npos);
   EXPECT_NE(source.find("try_attach_gamescope0(params, true)"), std::string::npos);
+
+  const auto attach_start = source.find("bool try_attach_gamescope0(");
+  const auto attach_end = source.find("static bool idle_hdr_flags_match_force()", attach_start);
+  ASSERT_NE(attach_start, std::string::npos);
+  ASSERT_NE(attach_end, std::string::npos);
+  const auto attach_body = source.substr(attach_start, attach_end - attach_start);
+  EXPECT_NE(attach_body.find("owned_group_drained_ = false"), std::string::npos);
   const auto drain_start = source.find("bool drain_private_process_group(");
   const auto rollback_start = source.find("bool rollback_spawned_private_group(", drain_start);
   ASSERT_NE(drain_start, std::string::npos);
