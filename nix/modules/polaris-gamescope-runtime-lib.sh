@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Shared gamescope exact-generation ownership helpers.
 # Callers must set POLARIS_PROC_ROOT/POLARIS_PROC_NET_UNIX/POLARIS_X11_SOCKET_DIR
 # only in tests; production defaults are Linux procfs and the X11 socket directory.
