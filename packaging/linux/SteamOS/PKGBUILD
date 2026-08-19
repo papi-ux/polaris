@@ -20,6 +20,7 @@ options=('debug' 'strip')
 # It is an optdepend instead; see docs/steamos.md.
 depends=(
   'avahi'
+  'bash'
   'boost-libs'
   'curl'
   'gcc-libs'

@@ -24,6 +24,7 @@ options=('debug' 'strip')
 
 depends=(
   'avahi'
+  'bash'
   'boost-libs'
   'curl'
   'grim'

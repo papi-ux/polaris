@@ -406,6 +406,7 @@ describe('Linux packaging contracts', () => {
     expect(packageInstall.match(/DESTINATION "\$\{CMAKE_INSTALL_BINDIR\}"/g)).toHaveLength(2)
 
     for (const pkgbuild of [archPkgbuild, steamOsPkgbuild]) {
+      expect(pkgbuild).toMatch(/depends=\([\s\S]*?\n\s+'bash'\n[\s\S]*?\n\)/)
       expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-gamescope-session"')
       expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"')
       expect(pkgbuild).toContain('bash -n "$pkgdir/usr/bin/polaris-gamescope-session"')
