@@ -106,6 +106,11 @@ describe('v1.3.11 release contract', () => {
     const workflow = read('.github/workflows/build.yml')
 
     expect(workflow).toContain('release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"')
+    expect(workflow).toContain('- name: Check out exact release source')
+    expect(workflow).toContain('ref: ${{ env.POLARIS_CHECKOUT_REF }}')
+    expect(workflow.indexOf('- name: Check out exact release source')).toBeLessThan(
+      workflow.indexOf('- name: Upload release assets to GitHub release'),
+    )
     expect(workflow).toContain('--verify-tag')
     expect(workflow).toContain('--notes-file "$release_notes"')
     expect(workflow).toContain('gh release edit "${POLARIS_PACKAGE_REF_NAME}"')

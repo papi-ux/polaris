@@ -1198,6 +1198,11 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out exact release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.POLARIS_CHECKOUT_REF }}
+
       - name: Download Arch package outputs
         uses: actions/download-artifact@v8
         with:

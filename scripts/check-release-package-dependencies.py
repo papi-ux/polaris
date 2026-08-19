@@ -253,12 +253,26 @@ for legacy_version in ("42", "43"):
         if legacy_marker in workflow:
             raise AssertionError(f"release workflow retains Fedora {legacy_version}: {legacy_marker}")
 release_job = workflow_job(workflow, "release-assets")
+release_checkout = workflow_step(release_job, "Check out exact release source")
+expected_release_checkout = (
+    "        uses: actions/checkout@v7\n"
+    "        with:\n"
+    "          ref: ${{ env.POLARIS_CHECKOUT_REF }}\n"
+)
+if release_checkout.strip() != expected_release_checkout.strip():
+    raise AssertionError(
+        "release-assets must check out the exact packaged ref before reading curated notes"
+    )
 release_upload = re.search(
     r"(?ms)^      - name: Upload release assets to GitHub release\n(?P<body>.*?)(?=^      - name:|\Z)",
     release_job,
 )
 if not release_upload:
     raise AssertionError("missing release asset upload workflow step")
+if release_job.index("- name: Check out exact release source") >= release_job.index(
+    "- name: Upload release assets to GitHub release"
+):
+    raise AssertionError("release source checkout must precede release publication")
 release_upload_tokens = workflow_run_tokens(release_upload.group("body"))
 for legacy_version in ("42", "43"):
     for cleanup_asset in (
