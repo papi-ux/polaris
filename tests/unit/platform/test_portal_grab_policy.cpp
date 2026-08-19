@@ -628,15 +628,34 @@ TEST(PipeWireCapturePolicyTests, RenderNodeValidationAcceptsOnlyCanonicalRenderN
   EXPECT_EQ(pipewire_capture::canonical_render_node("/dev/dri/renderDabc"), std::nullopt);
 }
 
-TEST(PipeWireCapturePolicyTests, SameRenderNodeEligibilityRequiresExplicitMatchingGpuPathAndEglSupport) {
+TEST(PipeWireCapturePolicyTests, DmaBufEligibilityRequiresSupportedEncoderAndExplicitMatchingGpuPath) {
   const pipewire_capture::dmabuf_eligibility_t eligible {
     .capture_render_node = "/dev/dri/renderD128",
     .encoder_render_node = "/dev/dri/renderD128",
-    .mem_type = platf::mem_type_e::vaapi,
+    .mem_type = platf::mem_type_e::cuda,
     .egl_import_supported = true,
   };
 
   EXPECT_TRUE(pipewire_capture::may_offer_dmabuf(eligible));
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(eligible, pipewire_capture::dmabuf_override_e::force_cpu));
+
+  auto vaapi = eligible;
+  vaapi.mem_type = platf::mem_type_e::vaapi;
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(vaapi));
+  EXPECT_TRUE(pipewire_capture::may_offer_dmabuf(vaapi, pipewire_capture::dmabuf_override_e::allow_vaapi));
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(vaapi, pipewire_capture::dmabuf_override_e::force_cpu));
+
+  auto vaapi_missing_capture = vaapi;
+  vaapi_missing_capture.capture_render_node.reset();
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(vaapi_missing_capture, pipewire_capture::dmabuf_override_e::allow_vaapi));
+
+  auto vaapi_mismatched = vaapi;
+  vaapi_mismatched.encoder_render_node = "/dev/dri/renderD129";
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(vaapi_mismatched, pipewire_capture::dmabuf_override_e::allow_vaapi));
+
+  auto vaapi_no_egl = vaapi;
+  vaapi_no_egl.egl_import_supported = false;
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(vaapi_no_egl, pipewire_capture::dmabuf_override_e::allow_vaapi));
 
   auto missing_capture = eligible;
   missing_capture.capture_render_node.reset();
@@ -649,6 +668,7 @@ TEST(PipeWireCapturePolicyTests, SameRenderNodeEligibilityRequiresExplicitMatchi
   auto system_memory = eligible;
   system_memory.mem_type = platf::mem_type_e::system;
   EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(system_memory));
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(system_memory, pipewire_capture::dmabuf_override_e::allow_vaapi));
 
   auto no_egl = eligible;
   no_egl.egl_import_supported = false;
@@ -658,6 +678,19 @@ TEST(PipeWireCapturePolicyTests, SameRenderNodeEligibilityRequiresExplicitMatchi
   noncanonical.capture_render_node = "renderD128";
   noncanonical.encoder_render_node = "renderD128";
   EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(noncanonical));
+}
+
+TEST(PipeWireCapturePolicyTests, DmaBufEnvironmentOverrideRequiresAnExactZeroOrOne) {
+  using enum pipewire_capture::dmabuf_override_e;
+
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env(nullptr), default_safe);
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env(""), default_safe);
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env("0"), force_cpu);
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env("1"), allow_vaapi);
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env("00"), default_safe);
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env("01"), default_safe);
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env("true"), default_safe);
+  EXPECT_EQ(pipewire_capture::dmabuf_override_from_env(" 1"), default_safe);
 }
 
 TEST(PipeWireCapturePolicyTests, DmaBufCapabilityFilteringKeepsOnlyPackedRgbImportableNonExternalFormats) {
