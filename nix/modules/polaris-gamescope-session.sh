@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Kept executable as a standalone script so distro packages can install this
 # shared body directly. Nix and the manual installer prepend their own wrapper;
 # this shebang is then an inert comment.
