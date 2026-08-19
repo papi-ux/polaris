@@ -399,8 +399,19 @@ for required_tag_command in (
     )
 
 release_stage = workflow_step(release_job, "Stage curated GitHub release")
+release_stage_script = workflow_run_script(release_stage)
 release_stage_tokens = workflow_run_tokens(release_stage)
 reject_heredoc(release_stage_tokens, "curated release staging")
+if len(re.findall(r"\bgh\s+release\s+create\b", release_stage_script)) != 1 or len(
+    re.findall(r"\bgh\s+release\s+edit\b", release_stage_script)
+) != 1:
+    raise AssertionError("release staging must contain only one create and one edit mutation")
+for forbidden_stage_mutation in ("upload", "delete-asset"):
+    if re.search(
+        rf"\bgh\s+release\s+{re.escape(forbidden_stage_mutation)}\b",
+        release_stage_script,
+    ):
+        raise AssertionError("release staging must not mutate assets")
 if not re.search(r"(?m)^        id: stage-release\s*$", release_stage):
     raise AssertionError("curated release staging must export draft publication state")
 for required_stage_tokens in (
@@ -468,8 +479,20 @@ if any(
     raise AssertionError("release notes must be verified before any asset mutation")
 
 release_upload = workflow_step(release_job, "Upload release assets to GitHub release")
+release_upload_script = workflow_run_script(release_upload)
 release_upload_tokens = workflow_run_tokens(release_upload)
 reject_heredoc(release_upload_tokens, "release asset upload")
+for mutation, expected_count in (("delete-asset", 1), ("upload", 1)):
+    if len(
+        re.findall(rf"\bgh\s+release\s+{re.escape(mutation)}\b", release_upload_script)
+    ) != expected_count:
+        raise AssertionError(f"release upload must contain exactly one {mutation} mutation")
+for forbidden_upload_mutation in ("create", "edit"):
+    if re.search(
+        rf"\bgh\s+release\s+{re.escape(forbidden_upload_mutation)}\b",
+        release_upload_script,
+    ):
+        raise AssertionError("release upload must not create or edit release metadata")
 if any(token.startswith("published_notes=") for token in release_upload_tokens):
     raise AssertionError("release-note verification must not move after asset upload")
 for exact_upload_tokens in (
@@ -511,6 +534,7 @@ for exact_verify_tokens in (
     ["set", "-euo", "pipefail"],
     ["find", "release-assets/final", "-maxdepth", "1", "-type", "f", "-printf", "%f\\n", "|", "sort"],
     ["required_binary_assets=("],
+    ["for", "required_asset", "in", "${required_binary_assets[@]}", ";", "do"],
     [
         "if", "[[", "!", " ${expected_assets[*]} ", "=~", " ${required_asset} ", "]]", ";", "then", ";",
         "echo", "Finalized release assets are missing required binary: $required_asset", ">", "&", "2", ";",
