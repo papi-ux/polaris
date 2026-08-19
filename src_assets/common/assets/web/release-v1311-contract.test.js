@@ -102,6 +102,17 @@ describe('v1.3.11 release contract', () => {
     }
   })
 
+  it('publishes the curated notes beside the release assets', () => {
+    const workflow = read('.github/workflows/build.yml')
+
+    expect(workflow).toContain('release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"')
+    expect(workflow).toContain('--verify-tag')
+    expect(workflow).toContain('--notes-file "$release_notes"')
+    expect(workflow).toContain('gh release edit "${POLARIS_PACKAGE_REF_NAME}"')
+    expect(workflow).toContain('published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"')
+    expect(workflow).not.toContain('Automated Fedora 44, Ubuntu, Arch, and SteamOS 3.8 release assets')
+  })
+
   it('pins the immutable Arch snapshot rather than mirror retry behavior', () => {
     const workflow = read('.github/workflows/build.yml')
 

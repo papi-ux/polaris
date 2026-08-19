@@ -1319,10 +1319,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+
+          release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"
+          if [ ! -s "$release_notes" ]; then
+            echo "Missing curated release notes: $release_notes" >&2
+            exit 1
+          fi
+
           if ! gh release view "${POLARIS_PACKAGE_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${POLARIS_PACKAGE_REF_NAME}" \
+              --verify-tag \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
-              --notes "Automated Fedora 44, Ubuntu, Arch, and SteamOS 3.8 release assets for ${POLARIS_PACKAGE_REF_NAME}."
+              --notes-file "$release_notes"
+          else
+            gh release edit "${POLARIS_PACKAGE_REF_NAME}" \
+              --title "${POLARIS_PACKAGE_REF_NAME}" \
+              --notes-file "$release_notes"
           fi
 
           for legacy_asset in \
@@ -1334,6 +1347,13 @@ jobs:
           done
 
           gh release upload "${POLARIS_PACKAGE_REF_NAME}" release-assets/final/* --clobber
+
+          expected_notes="$(cat "$release_notes")"
+          published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"
+          if [ "$published_notes" != "$expected_notes" ]; then
+            echo "Published release notes do not match $release_notes" >&2
+            exit 1
+          fi
 
       - name: Verify release assets on GitHub release
         env:

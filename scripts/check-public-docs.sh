@@ -1386,6 +1386,22 @@ if release_notes.count("systemctl --user restart polaris") != 3:
     print("v1.3.11 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
 
+release_workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")
+release_publication_facts = (
+    'release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"',
+    '--verify-tag',
+    '--notes-file "$release_notes"',
+    'gh release edit "${POLARIS_PACKAGE_REF_NAME}"',
+    'published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"',
+)
+for fact in release_publication_facts:
+    if fact not in release_workflow:
+        print(f"release workflow is missing curated-note contract: {fact}", file=sys.stderr)
+        sys.exit(1)
+if "Automated Fedora 44, Ubuntu, Arch, and SteamOS 3.8 release assets" in release_workflow:
+    print("release workflow must not replace curated notes with generic asset text", file=sys.stderr)
+    sys.exit(1)
+
 if "bash scripts/check-public-docs.sh" not in contributing:
     print("CONTRIBUTING.md must invoke the non-executable checker through bash", file=sys.stderr)
     sys.exit(1)
