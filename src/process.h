@@ -764,6 +764,7 @@ namespace proc {
 #ifdef __linux__
     bool terminate_session_owned_steam_before_cage_stop();
     bool cleanup_tracked_detached_children_after_launch_failure();
+    void finalize_isolated_session_runtime(bool runtime_was_stopped_externally);
     void terminate_isolated_session_generation();
     void finish_isolated_session_generation_cleanup();
     std::shared_ptr<const steam_big_picture_guard_snapshot_t> snapshot_steam_big_picture_input_guard(

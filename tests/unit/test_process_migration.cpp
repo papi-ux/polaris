@@ -3411,11 +3411,19 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
     << "terminate_impl must not be able to replace captured completeness with a literal";
 
   const auto generation_cleanup_start = source.find("void proc_t::terminate_isolated_session_generation()");
+  const auto runtime_finalize_start = source.find("void proc_t::finalize_isolated_session_runtime(");
   const auto generation_finish_start = source.find("void proc_t::finish_isolated_session_generation_cleanup()");
   const auto generation_finish_end = source.find("#endif", generation_finish_start);
+  ASSERT_NE(runtime_finalize_start, std::string::npos);
   ASSERT_NE(generation_cleanup_start, std::string::npos);
   ASSERT_NE(generation_finish_start, std::string::npos);
   ASSERT_NE(generation_finish_end, std::string::npos);
+  ASSERT_LT(runtime_finalize_start, generation_cleanup_start);
+  const auto runtime_finalize = source.substr(
+    runtime_finalize_start,
+    generation_cleanup_start - runtime_finalize_start
+  );
+  const auto normalized_runtime_finalize = collapse_whitespace(runtime_finalize);
   const auto generation_cleanup = source.substr(
     generation_cleanup_start,
     generation_finish_start - generation_cleanup_start
@@ -3428,37 +3436,86 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
     "const bool isolated_cleanup_complete = terminate_isolated_session_processes("
   );
   const auto cleanup_success_gate = generation_cleanup.find("isolated_session_cleanup_resets_router(");
-  // The router reset goes through the labwc stream-runtime facade rather than
-  // naming cage_display_router directly.
-  const auto reset_cage = generation_cleanup.find("stream_runtime::labwc::reset_after_external_stop()");
+  const auto reset_runtime = generation_cleanup.find("finalize_isolated_session_runtime(true)");
   const auto retain_generation = generation_cleanup.find(
     "retaining immutable cage generation because exact-generation cleanup was incomplete"
   );
+  const auto stop_runtime = generation_cleanup.find("finalize_isolated_session_runtime(false)");
   const auto cleanup_clear_gate = generation_finish.find("isolated_session_cleanup_clears_state(");
   const auto clear_generation = generation_finish.find("_session_instance_id.clear()");
-  // Retention must not orphan the cage: the supervisor is polaris's own
-  // pidfd-bound child and always provable, so even when the wider generation
-  // snapshot is incomplete the retention branch has to stop the session cage
-  // (via the labwc facade, whose stop() carries its own ownership proof).
-  // Without this, an incompletely attributable teardown leaves labwc running
-  // as an orphan compositor and its supervisor as a zombie until restart.
-  const auto retention_stops_cage = generation_cleanup.find("stream_runtime::labwc::stop()");
   ASSERT_NE(cleanup_result, std::string::npos);
   ASSERT_NE(cleanup_success_gate, std::string::npos);
-  ASSERT_NE(reset_cage, std::string::npos);
+  ASSERT_NE(reset_runtime, std::string::npos);
   ASSERT_NE(retain_generation, std::string::npos);
-  ASSERT_NE(retention_stops_cage, std::string::npos)
-    << "the retention branch of terminate_isolated_session_generation must stop "
-       "the session cage rather than orphan it";
+  ASSERT_NE(stop_runtime, std::string::npos)
+    << "the retention branch must stop the immutable launch runtime rather than orphan it";
   ASSERT_NE(cleanup_clear_gate, std::string::npos);
   ASSERT_NE(clear_generation, std::string::npos);
   EXPECT_LT(cleanup_result, cleanup_success_gate);
-  EXPECT_LT(cleanup_success_gate, reset_cage);
-  EXPECT_LT(reset_cage, retain_generation);
-  EXPECT_LT(retain_generation, retention_stops_cage)
-    << "the cage stop belongs on the retention branch, after the retention "
+  EXPECT_LT(cleanup_success_gate, reset_runtime);
+  EXPECT_LT(reset_runtime, retain_generation);
+  EXPECT_LT(retain_generation, stop_runtime)
+    << "the runtime stop belongs on the retention branch, after the retention "
        "decision is logged";
   EXPECT_LT(cleanup_clear_gate, clear_generation);
+
+  const auto gamescope_branch = normalized_runtime_finalize.find("if (_session_used_gamescope_runtime)");
+  const auto gamescope_acquire = normalized_runtime_finalize.find(
+    "stream_runtime::acquire(",
+    gamescope_branch
+  );
+  const auto gamescope_kind = normalized_runtime_finalize.find(
+    "stream_path::runtime_kind_e::GAMESCOPE",
+    gamescope_acquire
+  );
+  const auto gamescope_acquire_end = normalized_runtime_finalize.find(");", gamescope_kind);
+  const auto gamescope_stop = normalized_runtime_finalize.find(
+    "gamescope_runtime->stop()",
+    gamescope_acquire_end
+  );
+  const auto gamescope_return = normalized_runtime_finalize.find("return;", gamescope_stop);
+  const auto reset_labwc = normalized_runtime_finalize.find(
+    "stream_runtime::labwc::reset_after_external_stop()",
+    gamescope_return
+  );
+  const auto stop_labwc = normalized_runtime_finalize.find("stream_runtime::labwc::stop()", reset_labwc);
+  ASSERT_NE(gamescope_branch, std::string::npos);
+  ASSERT_NE(gamescope_acquire, std::string::npos);
+  ASSERT_NE(gamescope_kind, std::string::npos);
+  ASSERT_NE(gamescope_acquire_end, std::string::npos);
+  ASSERT_NE(gamescope_stop, std::string::npos);
+  ASSERT_NE(gamescope_return, std::string::npos);
+  ASSERT_NE(reset_labwc, std::string::npos);
+  ASSERT_NE(stop_labwc, std::string::npos);
+  EXPECT_LT(gamescope_branch, gamescope_acquire);
+  EXPECT_LT(gamescope_acquire, gamescope_kind);
+  EXPECT_LT(gamescope_kind, gamescope_acquire_end);
+  EXPECT_LT(gamescope_acquire_end, gamescope_stop);
+  EXPECT_LT(gamescope_stop, gamescope_return);
+  EXPECT_LT(gamescope_return, reset_labwc)
+    << "the Gamescope branch must return before any labwc lifecycle call";
+  EXPECT_LT(reset_labwc, stop_labwc);
+
+  const auto retained_generation_reaped = execute.find(
+    "process: reaped a retained isolated session generation at launch"
+  );
+  const auto retained_runtime_finalize = execute.find(
+    "finalize_isolated_session_runtime(true)",
+    retained_generation_reaped
+  );
+  const auto retained_runtime_flag_clear = execute.find(
+    "_session_used_gamescope_runtime = false",
+    retained_runtime_finalize
+  );
+  ASSERT_NE(retained_generation_reaped, std::string::npos);
+  ASSERT_NE(retained_runtime_finalize, std::string::npos);
+  ASSERT_NE(retained_runtime_flag_clear, std::string::npos);
+  EXPECT_LT(retained_generation_reaped, retained_runtime_finalize);
+  EXPECT_LT(retained_runtime_finalize, retained_runtime_flag_clear)
+    << "retained cleanup must dispatch through immutable runtime identity before clearing it";
+
+  EXPECT_EQ(generation_cleanup.find("stream_runtime::labwc::reset_after_external_stop()"), std::string::npos);
+  EXPECT_EQ(generation_cleanup.find("stream_runtime::labwc::stop()"), std::string::npos);
   EXPECT_EQ(terminate.find("config::video.linux_display.use_cage_compositor"), std::string::npos);
   EXPECT_EQ(terminate.find("cage_display_router::stop()"), std::string::npos);
   EXPECT_EQ(terminate.find("terminate_steam_app_processes("), std::string::npos);

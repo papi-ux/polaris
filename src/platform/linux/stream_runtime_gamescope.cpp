@@ -364,7 +364,7 @@ namespace stream_runtime {
       bool start(const start_params_t &params) override {
         std::lock_guard lock(mu_);
         const bool retained_state =
-          owned_ || pid_ > 0 || leader_pidfd_ >= 0 || marker_ ||
+          owned_ || owned_group_drained_ || pid_ > 0 || leader_pidfd_ >= 0 || marker_ ||
           !socket_name_.empty() || !x11_display_.empty();
         if (retained_state) {
           owner_transition_lock_t retained_lock;
@@ -529,6 +529,7 @@ namespace stream_runtime {
         }
         pid_ = child;
         owned_ = true;
+        owned_group_drained_ = false;
         socket_name_ = "gamescope-0";
 
         // Capture the exact PID generation only after exec has exposed the
@@ -569,6 +570,7 @@ namespace stream_runtime {
           close_leader_pidfd();
           pid_ = 0;
           owned_ = false;
+          owned_group_drained_ = false;
           marker_.reset();
           socket_name_.clear();
           return false;
@@ -599,6 +601,7 @@ namespace stream_runtime {
             close_leader_pidfd();
             pid_ = 0;
             owned_ = false;
+            owned_group_drained_ = false;
             marker_.reset();
             socket_name_.clear();
             return false;
@@ -646,6 +649,7 @@ namespace stream_runtime {
         close_leader_pidfd();
         pid_ = 0;
         owned_ = false;
+        owned_group_drained_ = false;
         marker_.reset();
         socket_name_.clear();
         x11_display_.clear();
@@ -696,6 +700,11 @@ namespace stream_runtime {
       pid_t pid_ = 0;
       int leader_pidfd_ = -1;
       bool owned_ = false;
+      // A successful drain consumes live process identity, but socket removal
+      // can still fail closed on a lock/holder race. Keep that progress so a
+      // later stop retries exact socket/file cleanup without trying to signal a
+      // process group that has already been proven empty.
+      bool owned_group_drained_ = false;
       std::optional<gp::marker_t> marker_;
       std::string socket_name_;
       std::string x11_display_;
@@ -778,32 +787,71 @@ namespace stream_runtime {
         return fs::remove(marker_path(), ec) && !ec;
       }
 
+      bool reclaim_owned_gamescope_sockets_after_drain_unlocked() const {
+        if (!owned_group_drained_ || socket_name_ != "gamescope-0") {
+          BOOST_LOG(error) << "gamescope_runtime: refusing post-drain cleanup without exact gamescope-0 ownership"sv;
+          return false;
+        }
+
+        if (!gp::remove_orphan_socket(socket_path("gamescope-0"))) {
+          BOOST_LOG(error) << "gamescope_runtime: gamescope-0 socket remains live or ambiguous after owned drain"sv;
+          return false;
+        }
+        if (!gp::remove_orphan_socket(socket_path("gamescope-0-ei"))) {
+          BOOST_LOG(error) << "gamescope_runtime: gamescope-0-ei socket remains live or ambiguous after owned drain"sv;
+          return false;
+        }
+        return true;
+      }
+
       void stop_unlocked() {
+        if (owned_ && !marker_) {
+          BOOST_LOG(error) << "gamescope_runtime: owned runtime lacks immutable marker authority; preserving state"sv;
+          return;
+        }
         if (owned_ && marker_) {
           owner_transition_lock_t owner_lock;
           if (!owner_lock) {
             BOOST_LOG(error) << "gamescope_runtime: could not acquire ownership transition lock; refusing teardown"sv;
             return;
           }
-          const auto current = gp::validated_marker(marker_path(), "runtime");
-          if (!current || *current != *marker_ || !is_private_group_leader(marker_->pid)) {
-            BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale or unverified group="sv
+          // The durable marker remains authoritative across a retry after the
+          // live group has drained. Re-read it under the transition lock before
+          // either signaling or consuming socket/file ownership.
+          const auto marker_on_disk = gp::read_marker(marker_path());
+          if (!marker_on_disk || *marker_on_disk != *marker_) {
+            BOOST_LOG(warning) << "gamescope_runtime: refusing teardown with stale or replaced marker group="sv
                                << marker_->pid;
             return;
           }
-          // The pidfd keeps the unreaped leader allocation as the PGID barrier.
-          // After TERM the leader may be a zombie, so this callback deliberately
-          // fences only the immutable marker record instead of requiring live
-          // cmdline/exe/socket validation before SIGKILL escalation.
-          const auto authority_still_current = [this]() {
-            const auto marker_on_disk = gp::read_marker(marker_path());
-            return marker_on_disk && *marker_on_disk == *marker_;
-          };
-          if (!drain_private_process_group(marker_->pid, leader_pidfd_, authority_still_current)) {
-            BOOST_LOG(error) << "gamescope_runtime: private group did not drain; preserving ownership state"sv;
+
+          if (!owned_group_drained_) {
+            const auto current = gp::validated_marker(marker_path(), "runtime");
+            if (!current || *current != *marker_ || !is_private_group_leader(marker_->pid)) {
+              BOOST_LOG(warning) << "gamescope_runtime: refusing to signal stale or unverified group="sv
+                                 << marker_->pid;
+              return;
+            }
+            // The pidfd keeps the unreaped leader allocation as the PGID
+            // barrier. After TERM the leader may be a zombie, so escalation
+            // fences the immutable marker instead of requiring live socket
+            // ownership that teardown is intentionally consuming.
+            const auto authority_still_current = [this]() {
+              const auto marker_on_disk = gp::read_marker(marker_path());
+              return marker_on_disk && *marker_on_disk == *marker_;
+            };
+            if (!drain_private_process_group(marker_->pid, leader_pidfd_, authority_still_current)) {
+              BOOST_LOG(error) << "gamescope_runtime: private group did not drain; preserving ownership state"sv;
+              return;
+            }
+            owned_group_drained_ = true;
+            BOOST_LOG(info) << "gamescope_runtime: drained owned gamescope group="sv << marker_->pid;
+          }
+
+          if (!reclaim_owned_gamescope_sockets_after_drain_unlocked()) {
+            BOOST_LOG(error) << "gamescope_runtime: failed to reclaim drained generation sockets; preserving state"sv;
             return;
           }
-          BOOST_LOG(info) << "gamescope_runtime: drained owned gamescope group="sv << marker_->pid;
           if (!remove_owned_files_if_current_unlocked()) {
             BOOST_LOG(error) << "gamescope_runtime: failed to clear drained ownership files; preserving state"sv;
             return;
@@ -816,6 +864,7 @@ namespace stream_runtime {
         close_leader_pidfd();
         pid_ = 0;
         owned_ = false;
+        owned_group_drained_ = false;
         marker_.reset();
         socket_name_.clear();
         x11_display_.clear();
@@ -835,6 +884,7 @@ namespace stream_runtime {
         close_leader_pidfd();
         marker_.reset();
         owned_ = false;
+        owned_group_drained_ = false;
         pid_ = 0;
         socket_name_.clear();
         x11_display_.clear();
@@ -898,6 +948,7 @@ namespace stream_runtime {
         close_leader_pidfd();
         marker_ = marker;
         owned_ = false;
+        owned_group_drained_ = false;
         pid_ = marker->pid;
         socket_name_ = "gamescope-0";
         x11_display_ = display;

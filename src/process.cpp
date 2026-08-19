@@ -5902,7 +5902,7 @@ namespace proc {
       }
       BOOST_LOG(warning) << "process: reaped a retained isolated session generation at launch"sv;
       if (retained_session_owned_cage) {
-        stream_runtime::labwc::reset_after_external_stop();
+        finalize_isolated_session_runtime(true);
       }
       _session_instance_id.clear();
       _session_used_cage_compositor = false;
@@ -8244,6 +8244,32 @@ namespace proc {
     return complete;
   }
 
+  void proc_t::finalize_isolated_session_runtime(bool runtime_was_stopped_externally) {
+    // Runtime selection is immutable launch-generation state. Mutable config
+    // may already have been restored by the time retained cleanup runs, so it
+    // cannot safely choose which singleton owns teardown.
+    if (_session_used_gamescope_runtime) {
+      auto *gamescope_runtime = stream_runtime::acquire(
+        stream_path::runtime_kind_e::GAMESCOPE
+      );
+      if (!gamescope_runtime) {
+        BOOST_LOG(error) << "process: Gamescope launch generation has no runtime owner; refusing fallback teardown"sv;
+        return;
+      }
+      // Owned runtimes drain through their pidfd/marker authority. Attached
+      // idle runtimes detach here without signaling their external owner.
+      gamescope_runtime->stop();
+      return;
+    }
+
+    if (runtime_was_stopped_externally) {
+      stream_runtime::labwc::reset_after_external_stop();
+    }
+    else {
+      stream_runtime::labwc::stop();
+    }
+  }
+
   void proc_t::terminate_isolated_session_generation() {
     const bool prior_cleanup_complete = _exact_generation_cleanup_complete;
     const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
@@ -8282,7 +8308,7 @@ namespace proc {
           !_session_instance_id.empty(),
           _exact_generation_cleanup_complete
         )) {
-      stream_runtime::labwc::reset_after_external_stop();
+      finalize_isolated_session_runtime(true);
     } else {
       BOOST_LOG(error) << "process: retaining immutable cage generation because exact-generation cleanup was incomplete"sv;
       // The generation stays retained for whatever the snapshot could not
@@ -8296,7 +8322,7 @@ namespace proc {
       // reaps the supervisor's private group, and fails closed on its own
       // ownership proof, so it cannot touch anything this session did not
       // spawn.
-      stream_runtime::labwc::stop();
+      finalize_isolated_session_runtime(false);
     }
   }
 
