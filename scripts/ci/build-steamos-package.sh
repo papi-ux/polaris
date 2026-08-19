@@ -97,6 +97,8 @@ if [ ! -L "$RECEIPT_ROOT/usr/bin/polaris" ] && [ ! -x "$RECEIPT_ROOT/usr/bin/pol
   exit 1
 fi
 test -x "$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"
+test -x "$RECEIPT_ROOT/usr/bin/polaris-gamescope-session"
+test -x "$RECEIPT_ROOT/usr/bin/polaris-gamescope-runtime-lib.sh"
 test -d "$RECEIPT_ROOT/usr/share/polaris"
 test -f "$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"
 test -f "$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.terminal.desktop"

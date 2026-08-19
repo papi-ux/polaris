@@ -387,6 +387,49 @@ describe('Linux packaging contracts', () => {
     }
   })
 
+  it('ships the gamescope stream launcher and runtime library in every Linux package', () => {
+    const cmake = readSource('cmake/packaging/linux.cmake')
+    const session = readSource('nix/modules/polaris-gamescope-session.sh')
+    const archPkgbuild = readSource('packaging/linux/Arch/PKGBUILD')
+    const steamOsPkgbuild = readSource('packaging/linux/SteamOS/PKGBUILD')
+    const steamOsBuild = readSource('scripts/ci/build-steamos-package.sh')
+    const workflow = readSource('.github/workflows/build.yml')
+    const archJob = section(workflow, '  arch-build:', '  fedora-clang-build:')
+    const ubuntuJob = section(workflow, '  ubuntu-build:', '  fedora-rpm-build:')
+    const fedoraJob = section(workflow, '  fedora-rpm-build:', '  release-assets:')
+    const packageInstall = section(cmake, 'if(NOT ${POLARIS_BUILD_APPIMAGE})', 'endif()')
+
+    expect(session.startsWith('#!/usr/bin/env bash\n')).toBe(true)
+    expect(packageInstall).toContain('"${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"')
+    expect(packageInstall).toContain('RENAME "polaris-gamescope-session"')
+    expect(packageInstall).toContain('"${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"')
+    expect(packageInstall.match(/DESTINATION "\$\{CMAKE_INSTALL_BINDIR\}"/g)).toHaveLength(2)
+
+    for (const pkgbuild of [archPkgbuild, steamOsPkgbuild]) {
+      expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-gamescope-session"')
+      expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"')
+      expect(pkgbuild).toContain('bash -n "$pkgdir/usr/bin/polaris-gamescope-session"')
+      expect(pkgbuild).toContain('bash -n "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"')
+    }
+
+    for (const packagedPath of [
+      '$RECEIPT_ROOT/usr/bin/polaris-gamescope-session',
+      '$RECEIPT_ROOT/usr/bin/polaris-gamescope-runtime-lib.sh',
+    ]) {
+      expect(steamOsBuild).toContain(`test -x "${packagedPath}"`)
+    }
+
+    for (const [job, packageKind] of [
+      [archJob, 'Arch package'],
+      [ubuntuJob, 'Ubuntu DEB'],
+      [fedoraJob, 'Fedora RPM'],
+    ]) {
+      expect(job, `${packageKind} must check the installed gamescope launcher`).toContain('/usr/bin/polaris-gamescope-session')
+      expect(job, `${packageKind} must check the installed gamescope runtime library`).toContain('/usr/bin/polaris-gamescope-runtime-lib.sh')
+      expect(job, `${packageKind} must syntax-check its gamescope payload`).toContain('bash -n "$gamescope_payload"')
+    }
+  })
+
   it('defines a distinct SteamOS 3.8 build lane', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')

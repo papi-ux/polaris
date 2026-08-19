@@ -159,4 +159,8 @@ package() {
   test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"
   test -f "$pkgdir/usr/lib/udev/rules.d/60-polaris.rules"
   test -f "$pkgdir/usr/lib/modules-load.d/60-polaris.conf"
+  test -x "$pkgdir/usr/bin/polaris-gamescope-session"
+  test -x "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"
+  bash -n "$pkgdir/usr/bin/polaris-gamescope-session"
+  bash -n "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"
 }
