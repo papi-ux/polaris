@@ -728,7 +728,7 @@ describe('Linux packaging contracts', () => {
     for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libpipewire', 'libxkbcommon']) {
       expect(pkgbuild).toContain(`'${dependency}'`)
     }
-    expect(buildScript).toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"')
+    expect(buildScript).toContain('PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"')
     expect(buildScript).toContain('comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED"')
     expect(buildScript).toContain('comm -13 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED"')
     expect(buildScript).toContain('if [ -s "$OUTPUT_ROOT/steamos3.8-namcap.txt" ]; then')
