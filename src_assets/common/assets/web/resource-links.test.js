@@ -18,6 +18,7 @@ describe('resource links', () => {
     expect(hrefs).toContain('https://papi-ux.com/')
     expect(hrefs).toContain('https://github.com/papi-ux/polaris')
     expect(hrefs).toContain('https://github.com/papi-ux/polaris/releases')
+    expect(hrefs).toContain('https://matrix.to/#/#papi-ux:papi-ux.com')
   })
 
   it('keeps the destinations that only exist on GitHub', () => {

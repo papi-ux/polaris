@@ -7,7 +7,7 @@ starts at `v1.0.0`.
 
 ## v1.3.11 - 2026-08-18
 
-A support, private-runtime recovery, display-truth, and reproducibility patch. Polaris can now preserve the evidence around crashes and silent failures, accept a bounded report from an authenticated paired client, recover private Steam and owned Gamescope reconnects, find Flatpak Heroic and Lutris libraries, and stop describing requested display state as applied until the compositor reports it back.
+A support, private-runtime recovery, display-truth, and reproducibility patch. Polaris can now preserve the evidence around crashes and silent failures, accept a bounded report from an authenticated paired client, recover private Steam and owned Gamescope reconnects, find Flatpak Heroic and Lutris libraries, keep PipeWire VAAPI capture on the safe SHM path by default, and stop describing requested display state as applied until the compositor reports it back.
 
 - Reports the effective Private Stream path instead of only the configured choice, so a fallback or pending relaunch is visible in status and support evidence
 - Finds Heroic and Lutris libraries in both native and Flatpak homes, emits the matching launch command, deduplicates the two sources, and validates launcher-controlled identifiers before placing them in a command
@@ -22,12 +22,14 @@ A support, private-runtime recovery, display-truth, and reproducibility patch. P
 - Ships `polaris-gamescope-session` and its shared runtime library in all four Linux package families with Bash dependencies and executable package receipts
 - Finalizes the immutable runtime chosen by each launch generation, drains only Gamescope authority owned by Polaris, and reclaims only the proven-owned `gamescope-0` / `gamescope-0-ei` socket pair while ambiguous cleanup remains retryable and fail-closed
 - Warns when a client HDR request reaches a final live SDR stream, outside encoder probes and after final colorspace selection, naming the black-video/working-audio symptom and immediate SDR recovery without changing protocol behavior
+- Keeps PipeWire VAAPI capture on SHM by default for local Gamescope/KWin graphs and portal-remoted streams. CUDA DMA-BUF is unchanged; exact `POLARIS_PORTAL_DMABUF=1` is an operator opt-in for a host that has already proved that route, while unset, malformed, and exact `0` values remain on SHM
+- Adds the public papi-ux Matrix Space to the README and System > Resources so community chat is available beside the existing docs, source, releases, and Discussions links
 - Runs every sanitizer suite the repository defines, including the five audio, input, network, pairing, and video suites that had still been omitted after the first CI expansion
 - Pins the Arch build container and package repositories to the immutable `2026/08/17` archive snapshot, removing live mirror database/package-pool skew from release builds
 - Pins sanitizer and Ubuntu APT resolution plus the DEB smoke to snapshot `20260818T000000Z`, isolated from runner sources and stale indexes, with partial updates and exceeded deadlines failing closed
 - Keeps `npm audit --audit-level=high` mandatory
 - Retains exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
-- Keeps the evidence limits explicit: the maintainer host is KWin rather than Hyprland, native/Flatpak discovery is contract-tested without a live Flatpak launcher install, Nova's user-facing report action opens Android's share sheet and does not yet automatically post to the paired-host endpoint, the known 4K dummy-plug SHM capture ceiling remains performance follow-up, and draft PR #481 still needs affected RX 7800 XT default/forced-SHM proof before it can join this release
+- Keeps the evidence limits explicit: the maintainer host is KWin rather than Hyprland, native/Flatpak discovery is contract-tested without a live Flatpak launcher install, Nova's user-facing report action opens Android's share sheet and does not yet automatically post to the paired-host endpoint, the known 4K dummy-plug SHM capture ceiling remains performance follow-up, and the affected RX 7800 XT has not physically tested this exact safe-default candidate. This release contains the stall by defaulting VAAPI to SHM; it does not claim the underlying DMA-BUF stall is fixed
 
 ## v1.3.10 - 2026-08-16
 

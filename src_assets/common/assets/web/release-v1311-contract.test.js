@@ -38,6 +38,8 @@ const requiredFacts = [
   'gamescope-0',
   'HDR',
   'empty pairing',
+  'POLARIS_PORTAL_DMABUF',
+  'Matrix',
   'npm audit --audit-level=high',
 ]
 
@@ -126,6 +128,16 @@ describe('v1.3.11 release contract', () => {
     expect(notes).toContain('app_id')
     expect(notes).toContain('non-string scalars unchanged unless their field name is sensitive')
     expect(notes).toContain('preserving measurements such as bitrate, frame rate, packet loss, port, and GPU index')
+  })
+
+  it('records the VAAPI containment and affected-host evidence boundary', () => {
+    const notes = read('docs/release-notes/v1.3.11.md')
+
+    expect(notes).toContain('Keeps PipeWire VAAPI capture on SHM by default')
+    expect(notes).toContain('POLARIS_PORTAL_DMABUF=1')
+    expect(notes).toContain('affected RX 7800 XT has not physically tested this exact candidate')
+    expect(notes).toContain('does not claim that the underlying DMA-BUF')
+    expect(notes).not.toContain('containment remains in draft PR #481')
   })
 
   it('keeps the exact four-asset set in the release notes', () => {
