@@ -3678,10 +3678,15 @@ namespace proc {
     bool steam_big_picture_input_guard_enabled(
       const proc::ctx_t &app,
       bool use_cage_compositor,
-      bool mirror_desktop
+      bool mirror_desktop,
+      bool nested_wsi_session
     ) {
+      // Nested Gamescope owns Steam as its primary child. Closing Big Picture
+      // there can surface desktop Steam above the game instead of protecting a
+      // separate background client, which is the labwc compatibility case.
       return use_cage_compositor &&
              !mirror_desktop &&
+             !nested_wsi_session &&
              (is_steam_big_picture_app(app) ||
               proc::steam_launch_mode_is_big_picture(app.steam_launch_mode));
     }
@@ -4070,9 +4075,15 @@ namespace proc {
   bool steam_big_picture_input_guard_enabled_for_tests(
     const proc::ctx_t &app,
     bool use_cage_compositor,
-    bool mirror_desktop
+    bool mirror_desktop,
+    bool nested_wsi_session
   ) {
-    return steam_big_picture_input_guard_enabled(app, use_cage_compositor, mirror_desktop);
+    return steam_big_picture_input_guard_enabled(
+      app,
+      use_cage_compositor,
+      mirror_desktop,
+      nested_wsi_session
+    );
   }
 
   std::string steam_big_picture_log_path_for_tests(
@@ -5798,9 +5809,10 @@ namespace proc {
 
   std::shared_ptr<const steam_big_picture_guard_snapshot_t> proc_t::snapshot_steam_big_picture_input_guard(
     bool use_cage_compositor,
-    bool mirror_desktop
+    bool mirror_desktop,
+    bool nested_wsi_session
   ) const {
-    if (!steam_big_picture_input_guard_enabled(_app, use_cage_compositor, mirror_desktop)) {
+    if (!steam_big_picture_input_guard_enabled(_app, use_cage_compositor, mirror_desktop, nested_wsi_session)) {
       return {};
     }
 
@@ -5984,10 +5996,6 @@ namespace proc {
     const bool requested_headless_for_session =
       !mirror_desktop_session &&
       (config::video.linux_display.headless_mode || gamescope_stream_session);
-    const auto steam_guard_snapshot = snapshot_steam_big_picture_input_guard(
-      use_cage_compositor_for_session,
-      launch_session && launch_session->mirror_desktop
-    );
 #endif
 
     this->initial_display = config::video.output_name;
@@ -6313,6 +6321,11 @@ namespace proc {
                            << " because polaris-gamescope-session is not on PATH; using attach"sv;
       }
     }
+    const auto steam_guard_snapshot = snapshot_steam_big_picture_input_guard(
+      use_cage_compositor_for_session,
+      mirror_desktop_session,
+      nested_wsi_session
+    );
 #endif
 
     if (resolved_optimization.virtual_display.has_value()) {

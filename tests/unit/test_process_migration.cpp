@@ -1065,9 +1065,10 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsScopedToPrivateCompat
   big_picture.name = "Steam Big Picture";
   big_picture.detached = {"setsid steam -gamepadui"};
 
-  EXPECT_TRUE(proc::steam_big_picture_input_guard_enabled_for_tests(big_picture, true, false));
-  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(big_picture, false, false));
-  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(big_picture, true, true));
+  EXPECT_TRUE(proc::steam_big_picture_input_guard_enabled_for_tests(big_picture, true, false, false));
+  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(big_picture, false, false, false));
+  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(big_picture, true, true, false));
+  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(big_picture, true, false, true));
 
   proc::ctx_t compatibility_game {};
   compatibility_game.name = "MOUSE";
@@ -1078,11 +1079,12 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsScopedToPrivateCompat
     "setsid steam -gamepadui",
     "setsid steam steam://rungameid/2416450",
   };
-  EXPECT_TRUE(proc::steam_big_picture_input_guard_enabled_for_tests(compatibility_game, true, false));
+  EXPECT_TRUE(proc::steam_big_picture_input_guard_enabled_for_tests(compatibility_game, true, false, false));
+  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(compatibility_game, true, false, true));
 
   compatibility_game.steam_launch_mode = "direct";
   compatibility_game.detached = {"setsid steam steam://rungameid/2416450"};
-  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(compatibility_game, true, false));
+  EXPECT_FALSE(proc::steam_big_picture_input_guard_enabled_for_tests(compatibility_game, true, false, false));
 }
 
 TEST(ProcessRuntimeConfigTests, GamescopeNestedSessionTargetsSteamGamesAndBigPictureWithoutAnHdrGate) {
@@ -3550,6 +3552,9 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsi
   const auto execute = source.substr(execute_start, execute_end - execute_start);
   const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
   const auto snapshot_guard = execute.find("snapshot_steam_big_picture_input_guard(");
+  const auto nested_wsi_selected = execute.find("nested_wsi_session = true");
+  const auto snapshot_guard_end = execute.find(");", snapshot_guard);
+  const auto snapshot_guard_call = execute.substr(snapshot_guard, snapshot_guard_end - snapshot_guard);
   // Pinned to the prep loop rather than to that call's argument list: #450
   // reformatted the launch across lines and added a prep_output argument, which
   // broke the old literal without changing the ordering this test guards.
@@ -3561,6 +3566,8 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsi
   const auto start_guard = execute.find("start_steam_big_picture_input_guard(");
   const auto launch_committed = execute.find("stop_guard_on_failed_launch.disable()");
   ASSERT_NE(snapshot_guard, std::string::npos);
+  ASSERT_NE(nested_wsi_selected, std::string::npos);
+  ASSERT_NE(snapshot_guard_end, std::string::npos);
   ASSERT_NE(first_prep_launch, std::string::npos);
   ASSERT_NE(failed_launch_guard, std::string::npos);
   ASSERT_NE(failed_launch_stop, std::string::npos);
@@ -3568,6 +3575,9 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsi
   ASSERT_NE(first_main_launch, std::string::npos);
   ASSERT_NE(start_guard, std::string::npos);
   ASSERT_NE(launch_committed, std::string::npos);
+  EXPECT_LT(nested_wsi_selected, snapshot_guard);
+  EXPECT_NE(snapshot_guard_call.find("nested_wsi_session"), std::string::npos)
+    << "nested WSI selection must disable the labwc Big Picture compatibility guard";
   EXPECT_LT(snapshot_guard, first_prep_launch);
   EXPECT_LT(snapshot_guard, start_guard);
   EXPECT_LT(failed_launch_guard, failed_launch_stop);

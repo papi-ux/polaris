@@ -185,7 +185,8 @@ namespace proc {
   bool steam_big_picture_input_guard_enabled_for_tests(
     const struct ctx_t &app,
     bool use_cage_compositor,
-    bool mirror_desktop
+    bool mirror_desktop,
+    bool nested_wsi_session
   );
   std::string steam_big_picture_log_path_for_tests(
     const struct ctx_t &app,
@@ -769,7 +770,8 @@ namespace proc {
     void finish_isolated_session_generation_cleanup();
     std::shared_ptr<const steam_big_picture_guard_snapshot_t> snapshot_steam_big_picture_input_guard(
       bool use_cage_compositor,
-      bool mirror_desktop
+      bool mirror_desktop,
+      bool nested_wsi_session
     ) const;
     void start_steam_big_picture_input_guard(
       const boost::process::v1::environment &launch_env,
