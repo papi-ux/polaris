@@ -21,7 +21,7 @@ if(POLARIS_PREFER_CLANG AND NOT CMAKE_C_COMPILER AND NOT CMAKE_CXX_COMPILER
     set(CMAKE_CXX_COMPILER "${POLARIS_CLANG_CXX_COMPILER}" CACHE FILEPATH "C++ compiler" FORCE)
 endif()
 
-project(Polaris VERSION 1.3.10
+project(Polaris VERSION 1.3.11
         DESCRIPTION "Self-hosted game stream host for Moonlight"
         HOMEPAGE_URL "https://github.com/papi-ux/polaris")
 
