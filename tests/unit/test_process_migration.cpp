@@ -796,6 +796,25 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_NE(source.find("rtsp_snapshot.active_sessions + rtsp_snapshot.pending_sessions"), std::string::npos);
 }
 
+#ifdef __linux__
+TEST(ProcessRuntimeConfigTests, DeferredCageProbeRecoversWhenNovaLaunchAlreadyCountsASession) {
+  EXPECT_TRUE(proc::should_reprobe_deferred_cage_encoder_for_tests(true, true, false));
+  EXPECT_TRUE(proc::should_reprobe_deferred_cage_encoder_for_tests(true, false, false));
+  EXPECT_FALSE(proc::should_reprobe_deferred_cage_encoder_for_tests(true, false, true));
+  EXPECT_FALSE(proc::should_reprobe_deferred_cage_encoder_for_tests(false, true, false));
+
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto reprobe_start = source.find("auto reprobe_encoders_for_cage = [&]");
+  const auto cage_socket = source.find("const auto cage_socket", reprobe_start);
+  ASSERT_NE(reprobe_start, std::string::npos);
+  ASSERT_NE(cage_socket, std::string::npos);
+  const auto reprobe_guard = source.substr(reprobe_start, cage_socket - reprobe_start);
+  EXPECT_NE(reprobe_guard.find("should_reprobe_deferred_cage_encoder("), std::string::npos);
+  EXPECT_NE(reprobe_guard.find("!video::active_encoder_name().empty()"), std::string::npos);
+}
+#endif
+
 TEST(ProcessRuntimeConfigTests, RefreshPreservesLifecycleSynchronizationObjects) {
   const auto source = read_source_file_for_contract("src/process.cpp");
   const auto refresh_start = source.find("void refresh(const std::string &file_name, bool needs_terminate)");

@@ -63,6 +63,25 @@ TEST(VideoHdrProbeGuardSource, HdrCapabilityProbeCannotFailTheEncoder) {
     << "HEVC profile selection must follow the actual encoder input depth";
 }
 
+TEST(VideoCaptureGuardSource, MissingEncoderStopsBeforeCaptureDereference) {
+  const auto source = read_video_source();
+  ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";
+
+  const auto dereference_pos = source.find("if (chosen_encoder->flags & PARALLEL_ENCODING)");
+  ASSERT_NE(dereference_pos, std::string::npos) << "capture encoder dereference not found";
+
+  const auto capture_pos = source.rfind("void capture(", dereference_pos);
+  ASSERT_NE(capture_pos, std::string::npos) << "capture overload not found";
+
+  const auto guard_pos = source.find("if (!chosen_encoder)", capture_pos);
+  ASSERT_NE(guard_pos, std::string::npos) << "missing-encoder guard not found";
+  EXPECT_LT(guard_pos, dereference_pos) << "missing-encoder guard must run before dereference";
+
+  const auto guarded_prefix = source.substr(guard_pos, dereference_pos - guard_pos);
+  EXPECT_NE(guarded_prefix.find("return;"), std::string::npos)
+    << "missing encoder must stop video capture rather than continue";
+}
+
 TEST(VideoHdrDiagnosticsSource, WarnsWhenAClientHdrRequestBecomesAnSdrStream) {
   const auto source = read_video_source();
   ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";
