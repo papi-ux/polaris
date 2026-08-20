@@ -668,6 +668,41 @@ namespace game_library {
     return cached;
   }
 
+  std::optional<std::string> set_steam_input_xbox_support(std::string_view vdf_payload, bool enabled) {
+    constexpr std::string_view key = "\"SteamController_XBoxSupport\"";
+    const auto key_at = vdf_payload.find(key);
+    if (key_at == std::string_view::npos) {
+      return std::nullopt;
+    }
+
+    // The value is the next quoted token, and it has to be on the same line: a
+    // key whose value Steam has not written yet must not consume the next
+    // setting's value and silently rewrite the wrong field.
+    const auto line_end = vdf_payload.find('\n', key_at);
+    const auto limit = line_end == std::string_view::npos ? vdf_payload.size() : line_end;
+    const auto value_open = vdf_payload.find('"', key_at + key.size());
+    if (value_open == std::string_view::npos || value_open >= limit) {
+      return std::nullopt;
+    }
+    const auto value_close = vdf_payload.find('"', value_open + 1);
+    if (value_close == std::string_view::npos || value_close >= limit) {
+      return std::nullopt;
+    }
+
+    const auto current = vdf_payload.substr(value_open + 1, value_close - value_open - 1);
+    const std::string_view desired = enabled ? "1" : "0";
+    if (current == desired) {
+      return std::nullopt;
+    }
+
+    std::string updated;
+    updated.reserve(vdf_payload.size());
+    updated.append(vdf_payload.substr(0, value_open + 1));
+    updated.append(desired);
+    updated.append(vdf_payload.substr(value_close));
+    return updated;
+  }
+
   playtime_snapshot_t steam_playtime_snapshot() {
     static std::mutex guard;
     static playtime_snapshot_t cached;
