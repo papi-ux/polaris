@@ -12,11 +12,13 @@ Moonlight-compatible clients, and explains the active capture, encoder, client,
 and runtime path in one web console.
 
 [![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1f1d31)](https://github.com/papi-ux/polaris/stargazers)
+[![Matrix](https://img.shields.io/badge/Matrix-Join_chat-0dbd8b?style=for-the-badge&logo=matrix&logoColor=white&labelColor=1f1d31)](https://matrix.to/#/#papi-ux:papi-ux.com)
 [![License](https://img.shields.io/github/license/papi-ux/polaris?style=for-the-badge&color=4c5265&labelColor=1f1d31)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/papi-ux/polaris?style=for-the-badge&color=c8d6e5&labelColor=1f1d31&label=latest)](https://github.com/papi-ux/polaris/releases/latest)
 
 [**Explore Polaris**](https://papi-ux.com/polaris/) ·
 [**Download**](https://github.com/papi-ux/polaris/releases/latest) ·
+[Join the Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) ·
 [Quick start](https://papi-ux.com/docs/quickstart/) ·
 [Compatibility](https://papi-ux.com/docs/compatibility/)
 
@@ -119,7 +121,7 @@ capture path, HDR mode, or experimental Browser Stream setup.
 
 - [Documentation](https://papi-ux.com/docs/) · [FAQ](https://papi-ux.com/docs/faq/) · [Runtime](https://papi-ux.com/docs/runtime/)
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [GitHub changelog](docs/changelog.md)
-- [Releases](https://github.com/papi-ux/polaris/releases) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
+- [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Releases](https://github.com/papi-ux/polaris/releases) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 - [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md) · [Source](https://github.com/papi-ux/polaris)
 
 ## Acknowledgments
@@ -154,6 +156,6 @@ License v3.0](LICENSE).
   <img src="docs/screenshots/polaris-icon-lightmode.svg" width="56" alt="Polaris mascot">
 </picture>
 
-<sub>[Website](https://papi-ux.com/polaris/) · [Documentation](https://papi-ux.com/docs/) · [Releases](https://github.com/papi-ux/polaris/releases) · [Security](SECURITY.md)</sub>
+<sub>[Website](https://papi-ux.com/polaris/) · [Matrix](https://matrix.to/#/#papi-ux:papi-ux.com) · [Documentation](https://papi-ux.com/docs/) · [Releases](https://github.com/papi-ux/polaris/releases) · [Security](SECURITY.md)</sub>
 
 </div>

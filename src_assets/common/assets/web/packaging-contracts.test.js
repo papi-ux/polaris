@@ -717,7 +717,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^pkgname = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^pkgver = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
-    expect(buildScript).toContain("'polaris|1.3.10-1|x86_64'")
+    expect(buildScript).toContain("'polaris|1.3.11-1|x86_64'")
     expect(buildScript).toContain('PACKAGE_PATHS=(polaris-[0-9]*-x86_64.pkg.tar.zst)')
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
     expect(buildScript).toContain("sed -n 's/^depend = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
@@ -757,8 +757,18 @@ describe('Linux packaging contracts', () => {
     const releaseVerifierIndex = workflow.indexOf('      - name: Verify release assets on GitHub release')
     expect(releaseVerifierIndex).toBeGreaterThanOrEqual(0)
     const releaseVerifier = workflow.slice(releaseVerifierIndex)
-    expect(releaseVerifier).toContain('Polaris-steamos3.8-x86_64.pkg.tar.zst')
-    expect(releaseVerifier).toContain('"${supported_count}" -ne 4')
+    for (const requiredBinary of [
+      'Polaris-arch-x86_64.pkg.tar.zst',
+      'Polaris-fedora44-x86_64.rpm',
+      'Polaris-steamos3.8-x86_64.pkg.tar.zst',
+      'Polaris-ubuntu24.04-x86_64.deb',
+    ]) {
+      expect(releaseVerifier).toContain(requiredBinary)
+    }
+    expect(releaseVerifier).toContain("find release-assets/final -maxdepth 1 -type f -printf '%f\\n' | sort")
+    expect(releaseVerifier).toContain("--json assets --jq '.assets[].name' | sort")
+    expect(releaseVerifier).toContain('[ "${expected_assets[*]}" != "${published_assets[*]}" ]')
+    expect(releaseVerifier).not.toContain('supported_count')
   })
 
   it('keeps unpublished candidate sourcing explicit, local-only, and absent from CI', () => {

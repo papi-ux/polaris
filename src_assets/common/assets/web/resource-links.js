@@ -16,6 +16,7 @@ export const resources = [
   { href: 'https://papi-ux.com/docs/troubleshooting/', labelKey: 'resource_card.troubleshooting_guide' },
   { href: 'https://github.com/papi-ux/polaris', labelKey: 'resource_card.github' },
   { href: 'https://github.com/papi-ux/polaris/releases', labelKey: 'resource_card.releases' },
+  { href: 'https://matrix.to/#/#papi-ux:papi-ux.com', labelKey: 'resource_card.matrix_community' },
   { href: 'https://github.com/papi-ux/polaris/discussions', labelKey: 'resource_card.github_discussions' },
   { href: 'https://github.com/papi-ux/polaris/wiki', labelKey: 'resource_card.github_wiki' },
   { href: 'https://github.com/papi-ux/polaris/wiki/Stuttering-Clinic', labelKey: 'resource_card.github_stuttering_clinic' }
