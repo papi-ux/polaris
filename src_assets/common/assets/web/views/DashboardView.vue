@@ -94,9 +94,11 @@
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div class="min-w-0">
               <div class="section-kicker">{{ $t('dashboard.doctor') }}</div>
-              <div class="mt-2 flex flex-wrap items-center gap-2">
-                <span class="inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
+              <div class="mt-2 flex min-w-0 items-start gap-2">
+                <span class="mt-1.5 inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
                 <h3 class="text-xl font-semibold leading-tight text-silver">{{ doctorHeadline }}</h3>
+              </div>
+              <div class="mt-3 flex flex-wrap items-center gap-2" data-dashboard-doctor-meta>
                 <span v-if="doctorConfidenceLabel" class="control-chip">{{ doctorConfidenceLabel }}</span>
                 <span class="meta-pill" :class="autoQuality.toneClass">{{ autoQuality.compactLabel }}</span>
                 <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
