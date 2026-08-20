@@ -82,6 +82,49 @@ TEST(VideoCaptureGuardSource, MissingEncoderStopsBeforeCaptureDereference) {
     << "missing encoder must stop video capture rather than continue";
 }
 
+TEST(VideoCaptureGuardSource, EncoderProbeCannotMutateStateDuringCapture) {
+  const auto source = read_video_source();
+  ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";
+
+  const auto probe_pos = source.find(
+    "int probe_encoders(bool strict_configured_encoder, bool save_successful_cache)"
+  );
+  ASSERT_NE(probe_pos, std::string::npos) << "encoder probe entry point not found";
+  const auto probe_prefix = source.substr(probe_pos, 1024);
+  EXPECT_NE(
+    probe_prefix.find("std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};"),
+    std::string::npos
+  ) << "encoder probing must hold the encoder-state writer lock";
+  EXPECT_NE(probe_prefix.find("encoder_state_lock.try_lock_for(2s)"), std::string::npos)
+    << "encoder probing must fail closed instead of waiting indefinitely for capture";
+
+  const auto dereference_pos = source.find("if (chosen_encoder->flags & PARALLEL_ENCODING)");
+  ASSERT_NE(dereference_pos, std::string::npos) << "capture encoder dereference not found";
+  const auto capture_pos = source.rfind("void capture(", dereference_pos);
+  ASSERT_NE(capture_pos, std::string::npos) << "capture overload not found";
+  const auto capture_prefix = source.substr(capture_pos, dereference_pos - capture_pos);
+  const auto capture_lock_pos = capture_prefix.find(
+    "std::shared_lock encoder_state_lock {encoder_state_mutex};"
+  );
+  const auto missing_encoder_guard_pos = capture_prefix.find("if (!chosen_encoder)");
+  ASSERT_NE(capture_lock_pos, std::string::npos)
+    << "capture must hold an encoder-state reader lock";
+  ASSERT_NE(missing_encoder_guard_pos, std::string::npos)
+    << "capture missing-encoder guard not found";
+  EXPECT_LT(capture_lock_pos, missing_encoder_guard_pos)
+    << "the reader lock must cover the first selected-encoder read";
+
+  const auto reset_pos = source.find("void reset_encoder_probe_state()");
+  ASSERT_NE(reset_pos, std::string::npos) << "encoder state reset entry point not found";
+  const auto reset_body = source.substr(reset_pos, 512);
+  EXPECT_NE(
+    reset_body.find("std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};"),
+    std::string::npos
+  ) << "external encoder-state resets must hold the writer lock";
+  EXPECT_NE(reset_body.find("encoder_state_lock.try_lock_for(2s)"), std::string::npos)
+    << "external resets must not wait indefinitely for active capture";
+}
+
 TEST(VideoHdrDiagnosticsSource, WarnsWhenAClientHdrRequestBecomesAnSdrStream) {
   const auto source = read_video_source();
   ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";

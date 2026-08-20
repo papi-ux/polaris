@@ -12,7 +12,9 @@
 #include <fstream>
 #include <list>
 #include <limits>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 
@@ -2045,7 +2047,10 @@ namespace video {
   };
 
   static encoder_t *chosen_encoder;
+  static std::shared_timed_mutex encoder_state_mutex;
   static thread_local bool encoder_probe_in_progress = false;
+
+  static void reset_encoder_probe_state_unlocked();
 
   bool encoder_probe_active() {
     return encoder_probe_in_progress;
@@ -3863,6 +3868,11 @@ namespace video {
     void *channel_data,
     packet_queue_t packets
   ) {
+    // A probe mutates chosen_encoder and the static encoder capability records.
+    // Hold a shared lease for the full capture lifetime so a deferred cage
+    // reprobe cannot invalidate state beneath an active video thread.
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
     if (!chosen_encoder) {
       BOOST_LOG(error) << "Video capture refused because no encoder is selected; "sv
                        << "encoder probing must complete before a stream starts"sv;
@@ -4378,6 +4388,15 @@ namespace video {
       return -1;
     }
 
+    // Probing resets and rewrites the selected encoder and its capability
+    // fields. Keep that mutation exclusive with every capture that consumes
+    // the same process-wide state.
+    std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};
+    if (!encoder_state_lock.try_lock_for(2s)) {
+      BOOST_LOG(error) << "Encoder probe refused because active video capture did not quiesce within 2 seconds"sv;
+      return -1;
+    }
+
     auto encoder_list = encoders;
 
     // If we already have a good encoder, check to see if another probe is required
@@ -4413,7 +4432,7 @@ namespace video {
       last_encoder_probe_supported_ref_frames_invalidation = previous_ref_frames_invalidation;
       last_encoder_probe_supported_yuv444_for_codec = previous_yuv444_for_codec;
     };
-    reset_encoder_probe_state();
+    reset_encoder_probe_state_unlocked();
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
@@ -4769,6 +4788,8 @@ namespace video {
   }
 
   codec_capability_state_t advertised_codec_capability_state() {
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
     codec_capability_state_t capability_state {
       active_hevc_mode,
       active_av1_mode,
@@ -4788,6 +4809,8 @@ namespace video {
   }
 
   bool advertised_codec_capability_state_ready() {
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
     if (chosen_encoder) {
       return true;
     }
@@ -4801,7 +4824,7 @@ namespace video {
     return false;
   }
 
-  void reset_encoder_probe_state() {
+  static void reset_encoder_probe_state_unlocked() {
     chosen_encoder = nullptr;
     active_hevc_mode = config::video.hevc_mode;
     active_av1_mode = config::video.av1_mode;
@@ -4809,7 +4832,18 @@ namespace video {
     last_encoder_probe_supported_yuv444_for_codec = {false, false, false};
   }
 
+  void reset_encoder_probe_state() {
+    std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};
+    if (!encoder_state_lock.try_lock_for(2s)) {
+      BOOST_LOG(warning) << "Encoder state reset deferred because active video capture did not quiesce within 2 seconds"sv;
+      return;
+    }
+    reset_encoder_probe_state_unlocked();
+  }
+
   std::string active_encoder_name() {
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
     if (!chosen_encoder) {
       return {};
     }
@@ -4818,6 +4852,8 @@ namespace video {
   }
 
   platf::mem_type_e active_encoder_mem_type() {
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
     if (!chosen_encoder || !chosen_encoder->platform_formats) {
       return platf::mem_type_e::unknown;
     }
@@ -4836,6 +4872,8 @@ namespace video {
   }
 
   bool active_encoder_runtime_supports_config(const config_t &config) {
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
     if (!chosen_encoder || !chosen_encoder->platform_formats) {
       return false;
     }
@@ -4856,6 +4894,8 @@ namespace video {
   }
 
   bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config) {
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
     if (!chosen_encoder || !chosen_encoder->platform_formats) {
       return false;
     }
