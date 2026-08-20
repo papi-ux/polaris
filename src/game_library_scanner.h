@@ -113,6 +113,43 @@ namespace game_library {
   /** @brief Where Steam keeps its data, for each home directory we know about. */
   std::vector<std::filesystem::path> steam_data_roots(const std::vector<std::filesystem::path> &home_roots);
 
+  /**
+   * @brief Steam Input settings relevant to Polaris' emulated Xbox controller.
+   *
+   * App ids and profile paths deliberately do not leave the parser. Doctor only
+   * needs the aggregate conflict state, and diagnostics exports must not reveal
+   * which local account owns a profile or which games are installed.
+   */
+  struct steam_input_config_t {
+    bool parsed = false;
+    bool xbox_support_enabled = false;
+    int forced_app_count = 0;
+  };
+
+  /** @brief Read the relevant settings from one localconfig.vdf payload. */
+  steam_input_config_t parse_steam_input_vdf(std::string_view vdf_payload);
+
+  /**
+   * @brief PII-free aggregate of the Steam profiles Polaris could inspect.
+   */
+  struct steam_input_snapshot_t {
+    std::string status = "unknown";
+    int profiles_checked = 0;
+    int profiles_with_xbox_support = 0;
+    int forced_app_count = 0;
+    std::string detail;
+
+    bool conflict() const {
+      return profiles_with_xbox_support > 0 || forced_app_count > 0;
+    }
+  };
+
+  /** @brief Inspect an explicit set of profile files without caching. */
+  steam_input_snapshot_t inspect_steam_input_configs(const std::vector<std::filesystem::path> &paths);
+
+  /** @brief Inspect locally discovered Steam profiles, cached briefly. */
+  steam_input_snapshot_t steam_input_snapshot();
+
   /** @brief What the launcher files said, and when we last looked. */
   struct playtime_snapshot_t {
     std::map<std::string, playtime_t> by_app_id;

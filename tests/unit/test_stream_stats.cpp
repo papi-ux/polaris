@@ -278,6 +278,11 @@ TEST(StreamStatsControllerInputTests, SerializesNativeControllerDiagnostics) {
   stats.input_virtual_controller_error = "";
   stats.input_host_controller_isolation = "strict_bwrap";
   stats.input_host_controller_isolation_detail = "2 virtual nodes allowed; host pads masked";
+  stats.input_steam_input_status = "xbox_opt_in";
+  stats.input_steam_profiles_checked = 2;
+  stats.input_steam_profiles_with_xbox_support = 1;
+  stats.input_steam_forced_app_count = 0;
+  stats.input_steam_input_detail = "Steam Input is opted in for Xbox controllers in 1 local profile(s).";
   stats.input_haptics_supported = true;
   stats.input_haptics_detail = "rumble callbacks registered for client pad 2";
 
@@ -290,6 +295,11 @@ TEST(StreamStatsControllerInputTests, SerializesNativeControllerDiagnostics) {
   EXPECT_EQ(input.at("virtual_controller_kind"), "xone");
   EXPECT_EQ(input.at("host_controller_isolation"), "strict_bwrap");
   EXPECT_EQ(input.at("host_controller_isolation_detail"), "2 virtual nodes allowed; host pads masked");
+  EXPECT_EQ(input.at("steam_input_status"), "xbox_opt_in");
+  EXPECT_EQ(input.at("steam_profiles_checked"), 2);
+  EXPECT_EQ(input.at("steam_profiles_with_xbox_support"), 1);
+  EXPECT_EQ(input.at("steam_forced_app_count"), 0);
+  EXPECT_EQ(input.at("steam_input_detail"), "Steam Input is opted in for Xbox controllers in 1 local profile(s).");
   EXPECT_TRUE(input.at("haptics_supported"));
   EXPECT_EQ(input.at("haptics_detail"), "rumble callbacks registered for client pad 2");
 }
@@ -627,6 +637,76 @@ TEST(StreamStatsDoctorTests, ClassifiesGpuNativeStreamAsReady) {
   EXPECT_EQ(doctor.at("primary_issue"), "none");
   EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
   EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
+}
+
+TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+  stats.input_host_controller_isolation = "strict_bwrap";
+  stats.input_steam_input_status = "xbox_opt_in_and_per_app_forced";
+  stats.input_steam_profiles_checked = 2;
+  stats.input_steam_profiles_with_xbox_support = 1;
+  stats.input_steam_forced_app_count = 2;
+  stats.input_steam_input_detail =
+    "Steam Input is opted in for Xbox controllers in 1 local profile(s), and 2 app override(s) force Steam Input on.";
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "steady"}, {"grade", "good"}}
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "steam_input_conflict");
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  EXPECT_EQ(doctor.at("status"), "needs_action");
+  EXPECT_EQ(doctor.at("confidence").at("level"), "high");
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Adjust Steam Input");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
+  EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
+  EXPECT_EQ(
+    doctor.at("advanced_evidence").at("controller_input").at("steam_forced_app_count"),
+    2
+  );
+  ASSERT_EQ(doctor.at("advanced_evidence").at("recent_issue_codes").size(), 1);
+  EXPECT_EQ(
+    doctor.at("advanced_evidence").at("recent_issue_codes").at(0),
+    "steam_input_conflict"
+  );
+
+  bool saw_conflict = false;
+  for (const auto &item : doctor.at("evidence")) {
+    if (item.at("id") == "steam_input_compatibility") {
+      saw_conflict = true;
+      EXPECT_EQ(item.at("status"), "fail");
+      EXPECT_EQ(item.at("source"), "local_steam_config");
+      EXPECT_EQ(item.at("value"), "xbox_opt_in_and_per_app_forced");
+    }
+  }
+  EXPECT_TRUE(saw_conflict);
+}
+
+TEST(StreamStatsDoctorTests, IgnoresSteamInputSettingsWithoutStrictIsolation) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+  stats.input_host_controller_isolation = "disabled";
+  stats.input_steam_input_status = "xbox_opt_in";
+  stats.input_steam_profiles_checked = 1;
+  stats.input_steam_profiles_with_xbox_support = 1;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "steady"}, {"grade", "good"}}
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
 }
 
 TEST(StreamStatsDoctorTests, KeepsNearTargetHighRefreshPacingGreen) {

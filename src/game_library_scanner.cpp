@@ -509,6 +509,165 @@ namespace game_library {
     return roots;
   }
 
+  steam_input_config_t parse_steam_input_vdf(std::string_view vdf_payload) {
+    steam_input_config_t result;
+    if (vdf_payload.empty()) {
+      return result;
+    }
+
+    std::vector<std::string> section;
+    std::string pending_section;
+    std::set<std::string> forced_apps;
+    std::istringstream stream {std::string(vdf_payload)};
+    std::string line;
+    bool saw_vdf_entry = false;
+
+    const auto quoted = [](const std::string &text, std::size_t from, std::string &out) -> std::size_t {
+      const auto open = text.find('"', from);
+      if (open == std::string::npos) {
+        return std::string::npos;
+      }
+      const auto close = text.find('"', open + 1);
+      if (close == std::string::npos) {
+        return std::string::npos;
+      }
+      out = text.substr(open + 1, close - open - 1);
+      return close + 1;
+    };
+
+    while (std::getline(stream, line)) {
+      const auto begin = line.find_first_not_of(" \t\r");
+      if (begin == std::string::npos) {
+        continue;
+      }
+      line = line.substr(begin);
+      while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+        line.pop_back();
+      }
+
+      if (line == "{") {
+        section.push_back(pending_section);
+        pending_section.clear();
+        continue;
+      }
+      if (line == "}") {
+        if (!section.empty()) {
+          section.pop_back();
+        }
+        continue;
+      }
+      if (line.empty() || line.front() != '"') {
+        continue;
+      }
+
+      std::string key;
+      const auto after_key = quoted(line, 0, key);
+      if (after_key == std::string::npos) {
+        continue;
+      }
+
+      std::string value;
+      if (quoted(line, after_key, value) == std::string::npos) {
+        pending_section = key;
+        saw_vdf_entry = true;
+        continue;
+      }
+      saw_vdf_entry = true;
+
+      if (key == "SteamController_XBoxSupport") {
+        result.xbox_support_enabled = value == "1";
+        continue;
+      }
+
+      if (key != "UseSteamControllerConfig" ||
+          section.size() < 2 ||
+          section[section.size() - 2] != "apps") {
+        continue;
+      }
+
+      const auto &app_id = section.back();
+      if (app_id.empty() || app_id.find_first_not_of("0123456789") != std::string::npos) {
+        continue;
+      }
+      if (value == "2") {
+        forced_apps.insert(app_id);
+      } else {
+        forced_apps.erase(app_id);
+      }
+    }
+
+    result.parsed = saw_vdf_entry;
+    result.forced_app_count = static_cast<int>(forced_apps.size());
+    return result;
+  }
+
+  steam_input_snapshot_t inspect_steam_input_configs(const std::vector<std::filesystem::path> &paths) {
+    steam_input_snapshot_t result;
+    for (const auto &path : paths) {
+      std::ifstream file(path);
+      if (!file.is_open()) {
+        continue;
+      }
+
+      const std::string payload {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+      const auto profile = parse_steam_input_vdf(payload);
+      if (!profile.parsed) {
+        continue;
+      }
+      ++result.profiles_checked;
+      if (profile.xbox_support_enabled) {
+        ++result.profiles_with_xbox_support;
+      }
+      result.forced_app_count += profile.forced_app_count;
+    }
+
+    if (result.profiles_checked == 0) {
+      result.detail = "No readable Steam local profile was found.";
+    } else if (result.profiles_with_xbox_support > 0 && result.forced_app_count > 0) {
+      result.status = "xbox_opt_in_and_per_app_forced";
+      result.detail =
+        "Steam Input is opted in for Xbox controllers in " +
+        std::to_string(result.profiles_with_xbox_support) +
+        " local profile(s), and " +
+        std::to_string(result.forced_app_count) +
+        " app override(s) force Steam Input on.";
+    } else if (result.profiles_with_xbox_support > 0) {
+      result.status = "xbox_opt_in";
+      result.detail =
+        "Steam Input is opted in for Xbox controllers in " +
+        std::to_string(result.profiles_with_xbox_support) +
+        " local profile(s).";
+    } else if (result.forced_app_count > 0) {
+      result.status = "per_app_forced";
+      result.detail =
+        std::to_string(result.forced_app_count) +
+        " app override(s) force Steam Input on.";
+    } else {
+      result.status = "clear";
+      result.detail = "Steam Input is not opted in for Xbox controllers, and no app override forces it on.";
+    }
+
+    return result;
+  }
+
+  steam_input_snapshot_t steam_input_snapshot() {
+    static std::mutex guard;
+    static steam_input_snapshot_t cached;
+    static std::chrono::steady_clock::time_point read_at {};
+
+    const std::lock_guard<std::mutex> lock {guard};
+    const auto now = std::chrono::steady_clock::now();
+    if (read_at != std::chrono::steady_clock::time_point {} && now - read_at < std::chrono::seconds(30)) {
+      return cached;
+    }
+
+    cached = inspect_steam_input_configs(
+      steam_localconfig_paths(steam_data_roots(library_home_roots()))
+    );
+    read_at = now;
+    return cached;
+  }
+
   playtime_snapshot_t steam_playtime_snapshot() {
     static std::mutex guard;
     static playtime_snapshot_t cached;
