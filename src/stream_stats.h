@@ -50,7 +50,11 @@ namespace stream_stats {
 
     // Network
     double latency_ms = 0;
+    /// Confirmed media-path packet loss only. ENet control loss is kept separate.
     double packet_loss = 0;
+    bool packet_loss_available = false;
+    std::string packet_loss_source = "unavailable";
+    double control_channel_packet_loss = 0;
     uint64_t bytes_sent = 0;
 
     // Adaptive bitrate
@@ -137,7 +141,13 @@ namespace stream_stats {
 
     // Network
     double latency_ms = 0;
+    /// Confirmed media-path packet loss only. ENet control loss is kept separate.
     double packet_loss = 0;
+    bool packet_loss_available = false;
+    std::string packet_loss_source = "unavailable";
+    /// ENet reliable control-channel EWMA; diagnostic context, not video loss.
+    double control_channel_packet_loss = 0;
+    uint64_t control_channel_samples = 0;
     /// Debounced by network_risk_tracker_t; the single truth every reader serves.
     bool network_risk = false;
     uint64_t bytes_sent = 0;
@@ -358,6 +368,21 @@ namespace stream_stats {
   void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent);
 
   /**
+   * @brief Update ENet control-channel observations without treating its loss
+   *        EWMA as media packet loss.
+   *
+   * RTT remains actionable path evidence. Control loss is exposed for
+   * diagnostics only and cannot grade the stream or reduce quality.
+   */
+  void update_control_channel_stats(double latency_ms, double control_packet_loss, uint64_t bytes_sent);
+
+  /** @brief Per-client overload of update_control_channel_stats(). */
+  void update_control_channel_stats(const std::string &client_ip,
+                                    double latency_ms,
+                                    double control_packet_loss,
+                                    uint64_t bytes_sent);
+
+  /**
    * @brief Convert a scaled loss ratio (e.g. ENet's peer packetLoss against
    *        ENET_PEER_PACKET_LOSS_SCALE) to the 0-100 percentage this module stores.
    * @param scaled_loss Loss ratio numerator as reported by the transport.
@@ -369,12 +394,9 @@ namespace stream_stats {
   /**
    * @brief Debounced elevated/normal state behind the served network_risk.
    *
-   * ENet's packetLoss is an EWMA computed over the low-rate control channel,
-   * so a single retransmit reads as whole percents for a while - a 0.35%
-   * cut flagged "Network jitter" on objectively perfect streams. The 2%
-   * cut matches the session-grading "fair" line, the warm-up skips the
-   * samples computed from the fewest packets, and the two-sample debounce
-   * keeps one noisy reading from flipping the HUD either way.
+   * Confirmed media loss and RTT may feed this tracker. ENet's packetLoss is
+   * a reliable control-channel EWMA and must be passed as zero here; it is
+   * exposed separately as non-actionable diagnostic context.
    */
   struct network_risk_tracker_t {
     static constexpr double k_loss_elevated_pct = 2.0;

@@ -2618,6 +2618,9 @@ namespace nvhttp {
       health["hdr_risk"] = hdr_risk ? "elevated" : "normal";
       health["hdr_source"] = hdr_source_missing ? "missing" : (stats.stream_hdr_enabled ? "metadata" : "sdr");
       health["network_risk"] = network_risk ? "elevated" : "normal";
+      health["packet_loss_available"] = stats.packet_loss_available;
+      health["packet_loss_source"] = stats.packet_loss_source;
+      health["control_channel_packet_loss_pct"] = stats.control_channel_packet_loss;
       health["host_render_limited"] = host_render_limited;
       if (auto_action != "none" || host_render_limited) {
         health["recovery_profile"] = primary_issue;
@@ -8486,6 +8489,9 @@ namespace nvhttp {
           session.last_latency_ms = avg_latency;
           session.last_bitrate_kbps = avg_bitrate;
           session.last_packet_loss_pct = packet_loss;
+          // Nova derives this value from Moonlight's client media/performance
+          // counters, independently of Polaris's ENet control channel.
+          session.last_packet_loss_source = "client_media_transport";
           session.last_codec = codec;
           session.last_duration_s = duration_s;
           session.last_sample_count = samples;

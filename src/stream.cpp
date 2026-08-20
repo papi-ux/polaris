@@ -1068,12 +1068,12 @@ namespace stream {
 
   void record_network_stats(const std::string &client_ip,
                             double latency_ms,
-                            double packet_loss,
+                            double control_packet_loss,
                             std::uint64_t bytes_sent) {
     if (client_ip.empty()) {
-      stream_stats::update_network_stats(latency_ms, packet_loss, bytes_sent);
+      stream_stats::update_control_channel_stats(latency_ms, control_packet_loss, bytes_sent);
     } else {
-      stream_stats::update_network_stats(client_ip, latency_ms, packet_loss, bytes_sent);
+      stream_stats::update_control_channel_stats(client_ip, latency_ms, control_packet_loss, bytes_sent);
     }
   }
 
@@ -1081,9 +1081,8 @@ namespace stream {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
 
-      // Clients on the periodic-ping protocol path never send IDX_LOSS_STATS, so this
-      // is the only packet their sessions can source network health from. ENet already
-      // maintains a smoothed mean RTT and reliable-packet loss ratio on the peer.
+      // ENet maintains RTT and a loss EWMA for its reliable, low-rate control
+      // channel. RTT is shared-path evidence; the loss EWMA is not video loss.
       if (!session->control.peer) {
         return;
       }
@@ -1094,7 +1093,7 @@ namespace stream {
         ENET_PEER_PACKET_LOSS_SCALE);
 
       if (adaptive_bitrate::is_enabled()) {
-        adaptive_bitrate::update_network_stats(loss_pct, rtt_ms);
+        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
       }
 
       const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
@@ -1124,12 +1123,6 @@ namespace stream {
         << "last good frame [" << lastGoodFrame << ']' << std::endl
         << "---end stats---";
 
-      double loss_pct = 0.0;
-      if (t.count() > 0) {
-        double estimated_total_packets = t.count();
-        loss_pct = std::clamp(count * 100.0 / estimated_total_packets, 0.0, 100.0);
-      }
-
       double rtt_ms = 0.0;
       std::string client_ip;
       if (session->control.peer) {
@@ -1138,10 +1131,13 @@ namespace stream {
       }
 
       if (adaptive_bitrate::is_enabled() && t.count() > 0) {
-        adaptive_bitrate::update_network_stats(loss_pct, rtt_ms);
+        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
       }
 
-      record_network_stats(client_ip, rtt_ms, loss_pct, 0);
+      // IDX_LOSS_STATS reports a lost-packet count and elapsed milliseconds,
+      // not a total-packet denominator. Dividing count by time manufactured a
+      // percentage, so retain RTT and wait for quantified media telemetry.
+      record_network_stats(client_ip, rtt_ms, 0.0, 0);
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {

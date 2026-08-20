@@ -3460,14 +3460,15 @@ namespace proc {
       const double effective_target = target_fps > 0.0 ? target_fps : session_grading_target_fps(stats);
       const double fps_ratio =
         (effective_target > 0.0 && stats.fps > 0.0) ? std::clamp(stats.fps / effective_target, 0.0, 1.5) : 1.0;
+      const double media_packet_loss = stats.packet_loss_available ? stats.packet_loss : 0.0;
 
-      if (fps_ratio >= 0.95 && stats.packet_loss < 0.5 && stats.latency_ms < 20) {
+      if (fps_ratio >= 0.95 && media_packet_loss < 0.5 && stats.latency_ms < 20) {
         return "A";
       }
-      if (fps_ratio >= 0.85 && stats.packet_loss < 2.0 && stats.latency_ms < 40) {
+      if (fps_ratio >= 0.85 && media_packet_loss < 2.0 && stats.latency_ms < 40) {
         return "B";
       }
-      if (fps_ratio >= 0.70 && stats.packet_loss < 5.0) {
+      if (fps_ratio >= 0.70 && media_packet_loss < 5.0) {
         return "C";
       }
       if (fps_ratio >= 0.50) {
@@ -8123,12 +8124,13 @@ namespace proc {
         session.avg_fps = stats.fps;
         session.avg_latency_ms = stats.latency_ms;
         session.avg_bitrate_kbps = stats.bitrate_kbps;
-        session.packet_loss_pct = stats.packet_loss;
+        session.packet_loss_pct = stats.packet_loss_available ? stats.packet_loss : 0.0;
         session.last_fps = stats.fps;
         session.last_target_fps = session_grading_target_fps(stats);
         session.last_latency_ms = stats.latency_ms;
         session.last_bitrate_kbps = stats.bitrate_kbps;
-        session.last_packet_loss_pct = stats.packet_loss;
+        session.last_packet_loss_pct = session.packet_loss_pct;
+        session.last_packet_loss_source = stats.packet_loss_available ? stats.packet_loss_source : "unavailable";
         session.last_codec = stats.codec;
         session.last_end_reason = "host_pause";
         session.session_count = 1;
