@@ -292,6 +292,32 @@ TEST(SteamPlaytimeTests, FindsLocalconfigForEveryUserUnderARoot) {
   EXPECT_EQ(found.front(), user / "localconfig.vdf");
 }
 
+TEST(SteamPlaytimeTests, ReportsEachProfileOnceWhenTwoRootsResolveToTheSameDirectory) {
+  const auto root = lutris_test_root("steam_userdata_aliased");
+  const auto user = root / "userdata" / "11324806" / "config";
+  std::filesystem::create_directories(user);
+  write_text(user / "localconfig.vdf", kLocalConfig);
+
+  // A stock install symlinks ~/.steam/steam at ~/.local/share/Steam, and both are
+  // probed, so this profile is reachable twice. Counting callers must still see one.
+  const auto alias = root.parent_path() / "steam_userdata_aliased_link";
+  std::filesystem::remove_all(alias);
+  std::error_code link_ec;
+  std::filesystem::create_directory_symlink(root, alias, link_ec);
+  if (link_ec) {
+    GTEST_SKIP() << "symlinks are unavailable on this filesystem";
+  }
+
+  const auto found = game_library::steam_localconfig_paths({root, alias});
+  ASSERT_EQ(found.size(), 1u);
+
+  // Reached through the alias alone, the profile is still reported once, by the
+  // path the caller actually walked rather than the resolved target.
+  const auto through_alias = game_library::steam_localconfig_paths({alias});
+  ASSERT_EQ(through_alias.size(), 1u);
+  EXPECT_EQ(through_alias.front(), alias / "userdata" / "11324806" / "config" / "localconfig.vdf");
+}
+
 TEST(SteamInputTests, ReadsXboxOptInAndOnlyCountsForcedApps) {
   constexpr const char *config = R"vdf(
 "UserLocalConfigStore"

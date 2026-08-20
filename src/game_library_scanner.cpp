@@ -805,6 +805,11 @@ namespace game_library {
 
   std::vector<std::filesystem::path> steam_localconfig_paths(const std::vector<std::filesystem::path> &roots) {
     std::vector<std::filesystem::path> found;
+    // A stock Linux install symlinks ~/.steam/steam at ~/.local/share/Steam, and both
+    // are probed as roots, so the same profile arrives twice. Callers that merge by
+    // app id never noticed; callers that count -- Doctor reports "N app override(s)"
+    // -- reported double. Identity is the resolved file, not the path used to reach it.
+    std::set<std::filesystem::path> seen;
     for (const auto &root : roots) {
       // A fresh code per query: one shared across the walk stays set after the first
       // user directory that has no localconfig, and silently swallows every later one.
@@ -828,6 +833,17 @@ namespace game_library {
         auto candidate = user.path() / "config" / "localconfig.vdf";
         std::error_code file_ec;
         if (std::filesystem::is_regular_file(candidate, file_ec) && !file_ec) {
+          // Deduplicate on the resolved target, but report the path we walked: the
+          // raw path is what a caller can act on, and a file we cannot resolve is
+          // still worth reading once.
+          std::error_code canonical_ec;
+          auto identity = std::filesystem::weakly_canonical(candidate, canonical_ec);
+          if (canonical_ec) {
+            identity = candidate;
+          }
+          if (!seen.insert(std::move(identity)).second) {
+            continue;
+          }
           found.push_back(std::move(candidate));
         }
       }
