@@ -523,6 +523,14 @@ namespace ai_optimizer {
     return value;
   }
 
+  static bool is_legacy_host_control_loss(const session_history_t &session) {
+    return session.last_packet_loss_source.empty() &&
+      normalize_end_reason(session.last_end_reason) == "host_pause" &&
+      session.last_duration_s == 0 &&
+      session.last_sample_count == 0 &&
+      (session.last_packet_loss_pct > 0.0 || session.packet_loss_pct > 0.0);
+  }
+
   session_history_t sanitize_session_history(session_history_t session) {
     session.session_count = sanitize_session_count(session);
     session.poor_outcome_count =
@@ -532,6 +540,34 @@ namespace ai_optimizer {
         session.consecutive_poor_outcomes,
         session.poor_outcome_count
       );
+
+    if (is_legacy_host_control_loss(session)) {
+      // Pre-provenance host-pause snapshots copied ENet's reliable control
+      // channel EWMA into the media-loss field. It cannot grade video quality.
+      session.last_packet_loss_source = "legacy_control_channel";
+      session.last_packet_loss_pct = 0.0;
+      session.packet_loss_pct = 0.0;
+
+      const bool latency_confirms_network =
+        session.last_latency_ms >= stream_stats::network_risk_tracker_t::k_rtt_elevated_ms;
+      if (!latency_confirms_network) {
+        std::erase(session.last_issues, "network_jitter");
+        session.last_network_risk = "normal";
+        if (session.last_primary_issue == "network_jitter") {
+          session.last_primary_issue = session.last_issues.empty() ? "steady" : session.last_issues.front();
+        }
+        if (session.last_issues.empty()) {
+          session.last_health_grade = "good";
+          session.last_safe_bitrate_kbps = 0;
+        } else if (session.last_issues.size() == 1 &&
+                   to_lower_copy(session.last_health_grade) == "degraded") {
+          session.last_health_grade = "watch";
+        }
+      }
+
+      session.last_quality_grade = grade_session_quality(session);
+      session.quality_grade = session.last_quality_grade;
+    }
 
     if (session.last_safe_target_fps < 0.0 ||
         session.last_safe_target_fps > 240.0 ||
@@ -590,7 +626,14 @@ namespace ai_optimizer {
       before.last_relaunch_recommended != after.last_relaunch_recommended ||
       before.last_health_grade != after.last_health_grade ||
       before.last_primary_issue != after.last_primary_issue ||
-      before.last_issues != after.last_issues;
+      before.last_issues != after.last_issues ||
+      before.packet_loss_pct != after.packet_loss_pct ||
+      before.last_packet_loss_pct != after.last_packet_loss_pct ||
+      before.last_packet_loss_source != after.last_packet_loss_source ||
+      before.quality_grade != after.quality_grade ||
+      before.last_quality_grade != after.last_quality_grade ||
+      before.last_network_risk != after.last_network_risk ||
+      before.last_safe_bitrate_kbps != after.last_safe_bitrate_kbps;
   }
 
   static bool is_control_shell_app(const std::string &app_name) {
@@ -1124,6 +1167,7 @@ namespace ai_optimizer {
     merged.last_latency_ms = latest.last_latency_ms;
     merged.last_bitrate_kbps = latest.last_bitrate_kbps;
     merged.last_packet_loss_pct = latest.last_packet_loss_pct;
+    merged.last_packet_loss_source = latest.last_packet_loss_source;
     merged.last_quality_grade = latest.last_quality_grade;
     merged.last_codec = latest.last_codec;
     merged.last_duration_s = latest.last_duration_s;
@@ -1684,7 +1728,8 @@ namespace ai_optimizer {
                        << "%, latency " << static_cast<int>(std::round(prompt_history.last_latency_ms))
                        << "ms, bitrate " << prompt_history.last_bitrate_kbps
                        << "kbps, packet loss " << prompt_history.last_packet_loss_pct
-                       << "%, grade " << latest_quality_grade(prompt_history)
+                       << "% (source " << (prompt_history.last_packet_loss_source.empty() ? "unknown" : prompt_history.last_packet_loss_source) << ")"
+                       << ", grade " << latest_quality_grade(prompt_history)
                        << ", codec " << latest_codec(prompt_history) << "\n";
       }
       history_stream << "  Rolling history: " << prompt_history.session_count
@@ -2622,7 +2667,10 @@ namespace ai_optimizer {
         )
       );
 
+    const bool legacy_control_only =
+      session.last_packet_loss_source == "legacy_control_channel";
     const bool reuse_recent_success =
+      !legacy_control_only &&
       (latest_grade == "A" || latest_grade == "B") &&
       (session.last_bitrate_kbps > 0 || !session.last_codec.empty());
 
@@ -3164,6 +3212,7 @@ namespace ai_optimizer {
         h.last_latency_ms = val.value("last_latency_ms", h.avg_latency_ms);
         h.last_bitrate_kbps = val.value("last_bitrate_kbps", h.avg_bitrate_kbps);
         h.last_packet_loss_pct = val.value("last_packet_loss_pct", h.packet_loss_pct);
+        h.last_packet_loss_source = val.value("last_packet_loss_source", "");
         h.last_quality_grade = val.value("last_quality_grade", h.quality_grade);
         h.last_codec = val.value("last_codec", h.codec);
         h.last_duration_s = val.value("last_duration_s", 0);
@@ -3237,6 +3286,7 @@ namespace ai_optimizer {
         {"last_latency_ms", h.last_latency_ms},
         {"last_bitrate_kbps", h.last_bitrate_kbps},
         {"last_packet_loss_pct", h.last_packet_loss_pct},
+        {"last_packet_loss_source", h.last_packet_loss_source},
         {"last_quality_grade", h.last_quality_grade},
         {"last_codec", h.last_codec},
         {"last_duration_s", h.last_duration_s},
@@ -3345,6 +3395,7 @@ namespace ai_optimizer {
       existing.last_latency_ms = normalized_session.last_latency_ms;
       existing.last_bitrate_kbps = normalized_session.last_bitrate_kbps;
       existing.last_packet_loss_pct = normalized_session.last_packet_loss_pct;
+      existing.last_packet_loss_source = normalized_session.last_packet_loss_source;
       existing.last_quality_grade = normalized_session.last_quality_grade;
       existing.last_codec = normalized_session.last_codec;
       existing.last_duration_s = normalized_session.last_duration_s;
@@ -3542,6 +3593,7 @@ namespace ai_optimizer {
       entry["last_latency_ms"] = h.last_latency_ms;
       entry["last_bitrate_kbps"] = h.last_bitrate_kbps;
       entry["last_packet_loss_pct"] = h.last_packet_loss_pct;
+      entry["last_packet_loss_source"] = h.last_packet_loss_source;
       entry["last_quality_grade"] = h.last_quality_grade;
       entry["last_codec"] = h.last_codec;
       entry["last_duration_s"] = h.last_duration_s;
