@@ -155,14 +155,17 @@ namespace doctor_actions {
     }
 
     /**
-     * Whether the in-flight run is the Steam Input one.
+     * Whether the last run was the Steam Input one, active or finished.
      *
      * `verify` carries only a run id, so the shared verb has to ask what it is
-     * verifying before the streaming gate decides a stream is required.
+     * verifying before the streaming gate decides a stream is required. The
+     * check deliberately ignores `active`: verifying a Steam Input run that has
+     * already been undone must answer "expired", not send the caller off to
+     * start a stream this action never needed.
      */
-    bool steam_input_run_active() {
+    bool steam_input_run_selected() {
       std::lock_guard<std::mutex> lock(action_mutex);
-      return action_run.active && action_run.kind == action_kind_e::disable_steam_input_xbox;
+      return action_run.kind == action_kind_e::disable_steam_input_xbox;
     }
 
     std::string next_run_id() {
@@ -276,7 +279,7 @@ namespace doctor_actions {
     // Steam Input work runs ahead of the streaming gate below on purpose. Its
     // whole point is to edit a profile Steam is not holding open, which means
     // the fix is applied precisely when no stream is running.
-    if (action_id == "disable_steam_input_xbox" || (action_id == "verify" && steam_input_run_active())) {
+    if (action_id == "disable_steam_input_xbox" || (action_id == "verify" && steam_input_run_selected())) {
 #ifndef __linux__
       return {
         {"status", false},
