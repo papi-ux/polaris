@@ -155,6 +155,12 @@ namespace proc {
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
 
+  bool should_reprobe_deferred_cage_encoder_for_tests(
+    bool use_cage_compositor,
+    bool no_active_sessions_at_launch,
+    bool encoder_selected
+  );
+
   enum class steam_game_process_event_kind_e {
     none,
     started,

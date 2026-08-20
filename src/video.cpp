@@ -3863,6 +3863,12 @@ namespace video {
     void *channel_data,
     packet_queue_t packets
   ) {
+    if (!chosen_encoder) {
+      BOOST_LOG(error) << "Video capture refused because no encoder is selected; "sv
+                       << "encoder probing must complete before a stream starts"sv;
+      return;
+    }
+
     auto idr_events = mail->event<bool>(mail::idr);
 
     idr_events->raise(true);

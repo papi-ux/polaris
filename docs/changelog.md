@@ -7,6 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Prevents Nova launches from crashing when headless cage startup sees an already-counted session before encoder selection by forcing the deferred cage probe whenever no encoder is selected and stopping capture safely if that invariant is ever violated
 - Detects when local Steam Input settings can claim the Polaris Xbox virtual controller during strict gamepad isolation, reports the conflict and PII-free aggregate evidence in Doctor, and points to the host-wide and per-game Steam settings without changing them automatically
 
 ## v1.3.11 - 2026-08-19
