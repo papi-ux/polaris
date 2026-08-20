@@ -1257,10 +1257,30 @@ namespace stream_stats {
       current_stats.client_name = client_name;
       current_stats.client_ip = client_ip;
     } else {
-      // Reset all stats when stream ends
+      // Reset all stats when stream ends, but carry the controller-input facts
+      // across: they describe the host, not the stream that just ended, and the
+      // Steam Input conflict is only safe to fix while nothing is streaming.
+      // Wiping them here made the finding vanish at exactly the moment its own
+      // one-click fix became applicable.
+      const auto isolation = current_stats.input_host_controller_isolation;
+      const auto isolation_detail = current_stats.input_host_controller_isolation_detail;
+      const auto steam_status = current_stats.input_steam_input_status;
+      const auto steam_profiles = current_stats.input_steam_profiles_checked;
+      const auto steam_opt_in = current_stats.input_steam_profiles_with_xbox_support;
+      const auto steam_forced = current_stats.input_steam_forced_app_count;
+      const auto steam_detail = current_stats.input_steam_input_detail;
+
       current_stats = stats_t {};
       clear_capture_profile_buckets();
       reset_hot_fields();
+
+      current_stats.input_host_controller_isolation = isolation;
+      current_stats.input_host_controller_isolation_detail = isolation_detail;
+      current_stats.input_steam_input_status = steam_status;
+      current_stats.input_steam_profiles_checked = steam_profiles;
+      current_stats.input_steam_profiles_with_xbox_support = steam_opt_in;
+      current_stats.input_steam_forced_app_count = steam_forced;
+      current_stats.input_steam_input_detail = steam_detail;
     }
   }
 
