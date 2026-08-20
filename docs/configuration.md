@@ -160,6 +160,25 @@ own virtual devices enabled. This needs no configuration and applies to every pr
 Writing your own `rc.xml` there takes over completely: a file without Polaris' generated marker
 comment is never overwritten, and Polaris then stops managing input isolation for that session.
 
+### Steam Input and virtual controllers
+
+Strict host-controller isolation exposes the Polaris virtual gamepad to the streamed app while hiding
+physical controllers connected to the host. Local Steam Input settings can still claim that virtual
+Xbox controller.
+For Proton games, Steam then tries to hand the game a replacement controller through `/dev/uinput`,
+but the strict sandbox deliberately does not expose that device or dynamically created input nodes.
+The result is a controller that works in host-side event tests but is completely dead in the game.
+
+When Doctor reports `steam_input_conflict`, open Steam Settings > Controller and disable Steam Input
+for Xbox controllers. Also review the affected game's Controller properties: use Default after
+disabling the host-wide Xbox setting, or Disable Steam Input for that game. A per-game Force On
+override still triggers the conflict.
+
+This Doctor check is read-only. It reports only aggregate status and counts; it does not expose Steam
+account ids, installed app ids, profile filenames, or filesystem paths, and it does not edit Steam
+configuration. Close Steam before changing the setting through Steam or by another supported tool so
+the running client cannot overwrite the update.
+
 ## Linux HDR and Main10
 
 On Linux, treat sessions that log `stream_hdr_enabled=false` as SDR even if the client requests HDR.

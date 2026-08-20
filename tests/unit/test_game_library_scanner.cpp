@@ -292,6 +292,110 @@ TEST(SteamPlaytimeTests, FindsLocalconfigForEveryUserUnderARoot) {
   EXPECT_EQ(found.front(), user / "localconfig.vdf");
 }
 
+TEST(SteamInputTests, ReadsXboxOptInAndOnlyCountsForcedApps) {
+  constexpr const char *config = R"vdf(
+"UserLocalConfigStore"
+{
+  "system"
+  {
+    "SteamController_XBoxSupport"  "1"
+  }
+  "Software"
+  {
+    "Valve"
+    {
+      "Steam"
+      {
+        "apps"
+        {
+          "111"
+          {
+            "UseSteamControllerConfig"  "2"
+          }
+          "222"
+          {
+            "UseSteamControllerConfig"  "0"
+          }
+        }
+        "somethingelse"
+        {
+          "333"
+          {
+            "UseSteamControllerConfig"  "2"
+          }
+        }
+      }
+    }
+  }
+}
+)vdf";
+
+  const auto parsed = game_library::parse_steam_input_vdf(config);
+  EXPECT_TRUE(parsed.parsed);
+  EXPECT_TRUE(parsed.xbox_support_enabled);
+  EXPECT_EQ(parsed.forced_app_count, 1);
+}
+
+TEST(SteamInputTests, LastSettingWinsAndMalformedInputStaysUnknown) {
+  constexpr const char *config = R"vdf(
+"SteamController_XBoxSupport"  "1"
+"SteamController_XBoxSupport"  "0"
+"apps"
+{
+  "444"
+  {
+    "UseSteamControllerConfig"  "2"
+    "UseSteamControllerConfig"  "1"
+  }
+}
+)vdf";
+
+  const auto parsed = game_library::parse_steam_input_vdf(config);
+  EXPECT_TRUE(parsed.parsed);
+  EXPECT_FALSE(parsed.xbox_support_enabled);
+  EXPECT_EQ(parsed.forced_app_count, 0);
+
+  const auto malformed = game_library::parse_steam_input_vdf("not a vdf payload");
+  EXPECT_FALSE(malformed.parsed);
+  EXPECT_FALSE(malformed.xbox_support_enabled);
+  EXPECT_EQ(malformed.forced_app_count, 0);
+}
+
+TEST(SteamInputTests, AggregatesProfilesWithoutLeakingPathsOrAppIds) {
+  const auto root = lutris_test_root("steam_input_profiles");
+  const auto first = root / "profile-a.vdf";
+  const auto second = root / "profile-b.vdf";
+  write_text(first,
+    "\"SteamController_XBoxSupport\"  \"1\"\n"
+    "\"apps\"\n"
+    "{\n"
+    "  \"555\"\n"
+    "  {\n"
+    "    \"UseSteamControllerConfig\"  \"2\"\n"
+    "  }\n"
+    "}\n");
+  write_text(second, "\"SteamController_XBoxSupport\"  \"0\"\n");
+
+  const auto snapshot = game_library::inspect_steam_input_configs({first, second});
+  EXPECT_EQ(snapshot.status, "xbox_opt_in_and_per_app_forced");
+  EXPECT_EQ(snapshot.profiles_checked, 2);
+  EXPECT_EQ(snapshot.profiles_with_xbox_support, 1);
+  EXPECT_EQ(snapshot.forced_app_count, 1);
+  EXPECT_TRUE(snapshot.conflict());
+  EXPECT_EQ(snapshot.detail.find(root.string()), std::string::npos);
+  EXPECT_EQ(snapshot.detail.find("555"), std::string::npos);
+}
+
+TEST(SteamInputTests, ReportsUnknownWhenNoProfileIsReadable) {
+  const auto snapshot = game_library::inspect_steam_input_configs({
+    lutris_test_root("steam_input_missing") / "missing.vdf"
+  });
+
+  EXPECT_EQ(snapshot.status, "unknown");
+  EXPECT_EQ(snapshot.profiles_checked, 0);
+  EXPECT_FALSE(snapshot.conflict());
+}
+
 TEST(LutrisLibraryScannerTests, CarriesPlaytimeSecondsFromTheListingJson) {
   const auto games = game_library::parse_lutris_list_games_json(
     R"json([{"name":"3DMark","slug":"3dmark","runner":"steam","playtimeSeconds":73.152428}])json");

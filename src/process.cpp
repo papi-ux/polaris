@@ -96,6 +96,7 @@
 #include "browser_stream.h"
 #include "stream_stats.h"
 #include "game_classifier.h"
+#include "game_library_scanner.h"
 
 #define DEFAULT_APP_IMAGE_PATH POLARIS_ASSETS_DIR "/box.png"
 
@@ -7506,6 +7507,27 @@ namespace proc {
         stats.input_haptics_supported,
         stats.input_haptics_detail
       );
+
+      if (gamepad_isolation_plan.strict_applied() && context_uses_steam(_app)) {
+        const auto steam_input = game_library::steam_input_snapshot();
+        stream_stats::update_steam_input_state(
+          steam_input.status,
+          steam_input.profiles_checked,
+          steam_input.profiles_with_xbox_support,
+          steam_input.forced_app_count,
+          steam_input.detail
+        );
+      } else {
+        stream_stats::update_steam_input_state(
+          "not_applicable",
+          0,
+          0,
+          0,
+          gamepad_isolation_plan.strict_applied() ?
+            "The active launch does not use Steam." :
+            "Strict gamepad isolation is not active."
+        );
+      }
     };
 
     auto apply_gamepad_sdl_env = [&](auto &env) {
