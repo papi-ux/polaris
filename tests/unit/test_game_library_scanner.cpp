@@ -412,6 +412,44 @@ TEST(SteamInputTests, AggregatesProfilesWithoutLeakingPathsOrAppIds) {
   EXPECT_EQ(snapshot.detail.find("555"), std::string::npos);
 }
 
+TEST(SteamInputTests, ClearsTheXboxOptInWithoutDisturbingTheRestOfTheProfile) {
+  const std::string profile =
+    "\"UserLocalConfigStore\"\n{\n"
+    "\t\"SteamController_XBoxSupport\"\t\t\"1\"\n"
+    "\t\"SteamController_GenericGamepadSupport\"\t\t\"1\"\n"
+    "}\n";
+
+  const auto updated = game_library::set_steam_input_xbox_support(profile, false);
+  ASSERT_TRUE(updated.has_value());
+  EXPECT_NE(updated->find("\"SteamController_XBoxSupport\"\t\t\"0\""), std::string::npos);
+  // Only that one value may move: this rewrites a live Steam profile.
+  EXPECT_NE(updated->find("\"SteamController_GenericGamepadSupport\"\t\t\"1\""), std::string::npos);
+  EXPECT_EQ(updated->size(), profile.size());
+
+  // Re-enabling is the undo path, and it round-trips exactly.
+  const auto restored = game_library::set_steam_input_xbox_support(*updated, true);
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_EQ(*restored, profile);
+}
+
+TEST(SteamInputTests, SkipsTheWriteWhenTheOptInAlreadyHoldsTheRequestedValue) {
+  const std::string already_off =
+    "\"UserLocalConfigStore\"\n{\n\t\"SteamController_XBoxSupport\"\t\t\"0\"\n}\n";
+  EXPECT_FALSE(game_library::set_steam_input_xbox_support(already_off, false).has_value());
+
+  // A profile that never mentions the key is not ours to invent.
+  const std::string absent = "\"UserLocalConfigStore\"\n{\n\t\"Other\"\t\t\"1\"\n}\n";
+  EXPECT_FALSE(game_library::set_steam_input_xbox_support(absent, false).has_value());
+}
+
+TEST(SteamInputTests, RefusesToBorrowAValueFromTheFollowingLine) {
+  // A key Steam wrote without a value must not consume the next setting's
+  // value and silently rewrite the wrong field.
+  const std::string truncated =
+    "\"UserLocalConfigStore\"\n{\n\t\"SteamController_XBoxSupport\"\n\t\"Other\"\t\t\"1\"\n}\n";
+  EXPECT_FALSE(game_library::set_steam_input_xbox_support(truncated, false).has_value());
+}
+
 TEST(SteamInputTests, ReportsUnknownWhenNoProfileIsReadable) {
   const auto snapshot = game_library::inspect_steam_input_configs({
     lutris_test_root("steam_input_missing") / "missing.vdf"
