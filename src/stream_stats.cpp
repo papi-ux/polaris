@@ -905,7 +905,7 @@ namespace stream_stats {
         method = "POST";
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        rollback = "Undo restores the previous Steam Input opt-in for every profile this run changed.";
+        rollback = "Closing Steam ends any game running through it, including the session you are streaming now. Undo restores the previous Steam Input opt-in for every profile this run changed.";
         verification = {
           {"mode", "local_steam_config"},
           {"delay_seconds", 2},
