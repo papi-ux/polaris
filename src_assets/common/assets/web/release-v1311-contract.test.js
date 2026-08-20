@@ -138,13 +138,20 @@ describe('v1.3.11 release contract', () => {
     expect(workflow).not.toContain('Automated Fedora 44, Ubuntu, Arch, and SteamOS 3.8 release assets')
   })
 
-  it('pins the immutable Arch snapshot rather than mirror retry behavior', () => {
+  it('pins Arch build inputs and separately checks rolling compatibility', () => {
     const workflow = read('.github/workflows/build.yml')
 
     expect(workflow).toContain('image: archlinux@sha256:')
-    expect(workflow).toContain('ARCH_REPOSITORY_SNAPSHOT: 2026/08/17')
+    expect(workflow).toContain('ARCH_REPOSITORY_SNAPSHOT: 2026/08/19')
+    expect(workflow).toContain('ARCH_BOOST_PACKAGE_VERSION: 1.92.0-1')
+    expect(workflow).toContain('ARCH_BOOST_SHA256: 0d795c6401c8bfa16012ada7e2e7f34934fb268f9174470edac1b389056f79bb')
+    expect(workflow).toContain('ARCH_BOOST_LIBS_SHA256: 4b1392e578e46c1b23910d1c26956927d7e986d6afd5090be59045afb3c04f8d')
     expect(workflow).toContain('archive.archlinux.org/repos/%s/$repo/os/$arch')
+    expect(workflow).toContain('- name: Install pinned Boost ABI')
     expect(workflow).toContain('Do not add mirror retries')
+    expect(workflow).toContain('arch-current-compatibility:')
+    expect(workflow).toContain('geo.mirror.pkgbuild.com/$repo/os/$arch')
+    expect(workflow).toContain('- arch-current-compatibility')
   })
 
   it('records the client-report boundary without claiming automatic Nova upload', () => {
