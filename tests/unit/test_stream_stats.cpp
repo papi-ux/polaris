@@ -639,6 +639,33 @@ TEST(StreamStatsDoctorTests, ClassifiesGpuNativeStreamAsReady) {
   EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
 }
 
+TEST(StreamStatsDoctorTests, SteamInputFindingSurvivesTheEndOfTheStream) {
+  // The conflict is host state, and its one-click fix is only safe with Steam
+  // closed -- which is to say, once the stream has ended. Wiping these fields
+  // with the rest of the session made the finding disappear at exactly the
+  // moment it became actionable.
+  stream_stats::update_stream_active(true, "client", "10.0.0.5");
+  stream_stats::update_controller_input_state(true, 0, "xone", "", "strict_bwrap", "strict isolation active", true, "");
+  stream_stats::update_steam_input_state("xbox_opt_in", 1, 1, 0, "Steam Input is opted in for Xbox controllers in 1 local profile(s).");
+
+  stream_stats::update_stream_active(false, "", "");
+
+  const auto after = stream_stats::get_current();
+  EXPECT_FALSE(after.streaming);
+  EXPECT_EQ(after.input_host_controller_isolation, "strict_bwrap");
+  EXPECT_EQ(after.input_steam_input_status, "xbox_opt_in");
+  EXPECT_EQ(after.input_steam_profiles_with_xbox_support, 1);
+
+  // And the idle Doctor payload still names it, with the fix still offered.
+  const auto doctor = stream_stats::build_doctor_json(after, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "steam_input_conflict");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "disable_steam_input_xbox");
+
+  // Session telemetry is still gone; only the host facts carry over.
+  EXPECT_EQ(after.client_name, "");
+  EXPECT_DOUBLE_EQ(after.encode_time_ms, 0.0);
+}
+
 TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
