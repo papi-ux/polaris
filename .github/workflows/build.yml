@@ -195,11 +195,14 @@ jobs:
     needs: [resolve-source, web-checks]
     runs-on: ubuntu-24.04
     container:
-      # Match the package snapshot below. Keeping both immutable prevents a
-      # future base image from being mixed with an older userspace.
+      # Keep the base immutable. The repository snapshot and hash-pinned Boost
+      # overlay below define the complete package userspace used by the build.
       image: archlinux@sha256:4bf33b21a715aac0b48ce6e9eaed4782a898eae96f88f5da3635572129c2584a
     env:
-      ARCH_REPOSITORY_SNAPSHOT: 2026/08/17
+      ARCH_REPOSITORY_SNAPSHOT: 2026/08/19
+      ARCH_BOOST_PACKAGE_VERSION: 1.92.0-1
+      ARCH_BOOST_SHA256: 0d795c6401c8bfa16012ada7e2e7f34934fb268f9174470edac1b389056f79bb
+      ARCH_BOOST_LIBS_SHA256: 4b1392e578e46c1b23910d1c26956927d7e986d6afd5090be59045afb3c04f8d
       CCACHE_DIR: /github/home/.cache/ccache
       CCACHE_COMPILERCHECK: content
 
@@ -275,6 +278,25 @@ jobs:
             nlohmann-json npm numactl openssl opus pipewire python vulkan-headers vulkan-icd-loader \
             wayland wayland-protocols which
 
+      - name: Install pinned Boost ABI
+        run: |
+          set -euo pipefail
+
+          boost_package="$RUNNER_TEMP/boost-${ARCH_BOOST_PACKAGE_VERSION}-x86_64.pkg.tar.zst"
+          boost_libraries_package="$RUNNER_TEMP/boost-libs-${ARCH_BOOST_PACKAGE_VERSION}-x86_64.pkg.tar.zst"
+          archive_base="https://archive.archlinux.org/packages/b"
+
+          curl --fail --location --show-error \
+            --output "$boost_package" \
+            "${archive_base}/boost/boost-${ARCH_BOOST_PACKAGE_VERSION}-x86_64.pkg.tar.zst"
+          curl --fail --location --show-error \
+            --output "$boost_libraries_package" \
+            "${archive_base}/boost-libs/boost-libs-${ARCH_BOOST_PACKAGE_VERSION}-x86_64.pkg.tar.zst"
+
+          printf '%s  %s\n' "$ARCH_BOOST_SHA256" "$boost_package" | sha256sum --check --strict
+          printf '%s  %s\n' "$ARCH_BOOST_LIBS_SHA256" "$boost_libraries_package" | sha256sum --check --strict
+          pacman -U --noconfirm "$boost_package" "$boost_libraries_package"
+
       - name: Configure
         if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         run: |
@@ -340,10 +362,13 @@ jobs:
           PY
 
       - name: Validate Arch package
-        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           useradd -m builder
-          pacman -Syu --noconfirm --needed cuda
+          # The base system was synchronized before the exact Boost overlay.
+          # Installing only CUDA here cannot downgrade that overlay back to
+          # the older repository-snapshot Boost ABI.
+          pacman -S --noconfirm --needed cuda
 
           # CUDA 13 supports GCC up to 15.x. Arch rolling moved to GCC 16,
           # so use Arch's cuda-provided gcc15 toolchain when present. Older
@@ -381,7 +406,7 @@ jobs:
           su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && ${arch_makepkg_env} makepkg --nodeps --noconfirm --nocheck"
 
       - name: Smoke test Arch package
-        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           set -euo pipefail
 
@@ -445,6 +470,12 @@ jobs:
           while IFS= read -r soname; do
             if [[ "$soname" != *".${boost_version}" ]]; then
               echo "Arch package Boost soname mismatch: ${soname} does not match boost-libs ${boost_version}" >&2
+              exit 1
+            fi
+
+            dependency="${soname%%.so.*}.so"
+            if ! grep -Fq "depend = ${dependency}=${boost_version}-" arch-pkgbuild/package-pkginfo.txt; then
+              echo "Arch package does not declare the versioned provider for ${soname}" >&2
               exit 1
             fi
           done <<< "$boost_sonames"
@@ -520,6 +551,65 @@ jobs:
             build/dev.polaris-stream.app.Polaris.metainfo.xml
             build/dev.polaris-stream.app.Polaris.desktop
             build/dev.polaris-stream.app.Polaris.terminal.desktop
+          if-no-files-found: warn
+
+  arch-current-compatibility:
+    name: Arch rolling compatibility
+    needs: [resolve-source, arch-build]
+    if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+    runs-on: ubuntu-24.04
+    container:
+      # The container identity is immutable; its mirror is deliberately live.
+      # This observation is separate from the reproducible snapshot build and
+      # catches rolling-repository ABI drift before an asset is published.
+      image: archlinux@sha256:4bf33b21a715aac0b48ce6e9eaed4782a898eae96f88f5da3635572129c2584a
+
+    steps:
+      - name: Synchronize current Arch repositories
+        run: |
+          set -euo pipefail
+          printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm
+
+      - name: Download exact Arch package
+        uses: actions/download-artifact@v8
+        with:
+          name: arch-package-outputs
+          path: arch-current-package
+
+      - name: Install and launch against current Arch
+        run: |
+          set -euo pipefail
+
+          pkg_path="$(find arch-current-package -maxdepth 1 -type f -name 'polaris-[0-9]*-x86_64.pkg.tar.*' ! -name '*debug*' | sort | head -n 1)"
+          if [ -z "$pkg_path" ]; then
+            echo "No Arch package was available for current-repository validation" >&2
+            exit 1
+          fi
+
+          pacman -U --noconfirm "$pkg_path"
+          pacman -Q boost-libs | tee arch-current-package/current-boost.txt
+          pacman -Ql polaris | tee arch-current-package/package-installed-files.txt >/dev/null
+          installed_binary="$(awk '/\/usr\/bin\/polaris-[0-9][^/]*$/ { print $2; exit }' arch-current-package/package-installed-files.txt)"
+          if [ -z "$installed_binary" ]; then
+            echo "Installed Polaris binary was not found" >&2
+            exit 1
+          fi
+
+          ldd "$installed_binary" | tee arch-current-package/package-ldd.txt
+          if grep -Fq "not found" arch-current-package/package-ldd.txt; then
+            echo "Arch package has unresolved libraries in the current rolling repository" >&2
+            exit 1
+          fi
+          polaris --version | tee arch-current-package/package-version.txt
+
+      - name: Upload current Arch compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: arch-current-compatibility
+          path: arch-current-package/*.txt
           if-no-files-found: warn
 
   fedora-clang-build:
@@ -1232,6 +1322,7 @@ jobs:
     needs:
       - resolve-source
       - arch-build
+      - arch-current-compatibility
       - steamos-build
       - ubuntu-build
       - fedora-rpm-build

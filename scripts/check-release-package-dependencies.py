@@ -206,6 +206,18 @@ self_test_executable_release_contract()
 
 arch = read("packaging/linux/Arch/PKGBUILD")
 require_package(shell_array(arch, "depends"), "vulkan-icd-loader", "Arch runtime dependencies")
+for boost_library in (
+    "libboost_filesystem.so",
+    "libboost_locale.so",
+    "libboost_log.so",
+    "libboost_program_options.so",
+    "libboost_thread.so",
+):
+    require_package(
+        shell_array(arch, "depends"),
+        boost_library,
+        "Arch versioned Boost runtime dependencies",
+    )
 require_package(shell_array(arch, "makedepends"), "vulkan-headers", "Arch build dependencies")
 
 fedora = read("packaging/linux/fedora/Polaris.spec")
@@ -579,6 +591,15 @@ if release_publish.strip() != expected_release_publish.strip():
         "only the post-verification step may publish a staged draft release"
     )
 arch_job = workflow_job(workflow, "arch-build")
+for exact_arch_input in (
+    "ARCH_REPOSITORY_SNAPSHOT: 2026/08/19",
+    "ARCH_BOOST_PACKAGE_VERSION: 1.92.0-1",
+    "ARCH_BOOST_SHA256: 0d795c6401c8bfa16012ada7e2e7f34934fb268f9174470edac1b389056f79bb",
+    "ARCH_BOOST_LIBS_SHA256: 4b1392e578e46c1b23910d1c26956927d7e986d6afd5090be59045afb3c04f8d",
+):
+    if arch_job.count(exact_arch_input) != 1:
+        raise AssertionError(f"Arch CI must pin exact input: {exact_arch_input}")
+
 arch_install = re.search(
     r"(?ms)^      - name: Install dependencies\n(?P<body>.*?)(?=^      - name:|\Z)",
     arch_job,
@@ -589,5 +610,65 @@ arch_install_tokens = workflow_run_tokens(arch_install.group("body"))
 for package in ("vulkan-headers", "vulkan-icd-loader"):
     if package not in arch_install_tokens:
         raise AssertionError(f"Arch CI dependencies must explicitly install {package}")
+
+boost_install = workflow_step(arch_job, "Install pinned Boost ABI")
+boost_install_tokens = workflow_run_tokens(boost_install)
+for exact_boost_command in (
+    [
+        "curl", "--fail", "--location", "--show-error", "--output",
+        "$boost_package",
+        "${archive_base}/boost/boost-${ARCH_BOOST_PACKAGE_VERSION}-x86_64.pkg.tar.zst",
+    ],
+    [
+        "curl", "--fail", "--location", "--show-error", "--output",
+        "$boost_libraries_package",
+        "${archive_base}/boost-libs/boost-libs-${ARCH_BOOST_PACKAGE_VERSION}-x86_64.pkg.tar.zst",
+    ],
+    ["pacman", "-U", "--noconfirm", "$boost_package", "$boost_libraries_package"],
+):
+    require_command(boost_install_tokens, exact_boost_command, "pinned Arch Boost overlay")
+if boost_install_tokens.count("sha256sum") != 2 or boost_install_tokens.count("--check") != 2:
+    raise AssertionError("both pinned Arch Boost packages must pass SHA-256 verification")
+
+arch_package_condition = (
+    "if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}"
+)
+for step_name in ("Validate Arch package", "Smoke test Arch package"):
+    step = workflow_step(arch_job, step_name)
+    if step.count(arch_package_condition) != 1:
+        raise AssertionError(f"{step_name} must run for pull requests and exact releases")
+
+arch_smoke = workflow_step(arch_job, "Smoke test Arch package")
+for metadata_contract in (
+    'dependency="${soname%%.so.*}.so"',
+    'grep -Fq "depend = ${dependency}=${boost_version}-" arch-pkgbuild/package-pkginfo.txt',
+):
+    if arch_smoke.count(metadata_contract) != 1:
+        raise AssertionError(
+            "Arch package smoke must bind every Boost NEEDED entry to a versioned dependency"
+        )
+
+arch_current_job = workflow_job(workflow, "arch-current-compatibility")
+if arch_current_job.count("needs: [resolve-source, arch-build]") != 1:
+    raise AssertionError("current Arch compatibility must consume the exact Arch build")
+if arch_current_job.count(arch_package_condition) != 1:
+    raise AssertionError("current Arch compatibility must run for pull requests and exact releases")
+for current_step in (
+    "Synchronize current Arch repositories",
+    "Download exact Arch package",
+    "Install and launch against current Arch",
+):
+    workflow_step(arch_current_job, current_step)
+for current_contract in (
+    "pacman -Syu --noconfirm",
+    'pacman -U --noconfirm "$pkg_path"',
+    'ldd "$installed_binary"',
+    "polaris --version",
+):
+    if arch_current_job.count(current_contract) != 1:
+        raise AssertionError(f"current Arch compatibility is missing: {current_contract}")
+
+if release_job.count("      - arch-current-compatibility\n") != 1:
+    raise AssertionError("release publication must wait for current Arch compatibility")
 
 print("Release package dependency contracts look correct.")
