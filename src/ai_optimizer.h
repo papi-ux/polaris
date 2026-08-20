@@ -105,6 +105,8 @@ namespace ai_optimizer {
     double last_latency_ms = 0;
     int last_bitrate_kbps = 0;
     double last_packet_loss_pct = 0;
+    /// client_media_transport, media_transport, unavailable, or legacy_control_channel.
+    std::string last_packet_loss_source;
     std::string last_quality_grade;
     std::string last_codec;
     int last_duration_s = 0;

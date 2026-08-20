@@ -840,6 +840,55 @@ TEST(StreamStatsDoctorTests, NetworkWatchRechecksWithoutChangingBitrate) {
   EXPECT_FALSE(action.at("payload_preview").contains("target_bitrate_kbps"));
 }
 
+TEST(StreamStatsDoctorTests, ControlLossIsInformationalAndCannotReduceQuality) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 59.71;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 16988;
+  stats.paired_target_bitrate_kbps = 20000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 0.77;
+  stats.frame_jitter_ms = 1.57;
+  stats.dropped_frame_ratio = 0.03;
+  stats.packet_loss = 0.0;
+  stats.packet_loss_available = false;
+  stats.packet_loss_source = "unavailable";
+  stats.control_channel_packet_loss = 8.72039794921875;
+  stats.control_channel_samples = 42;
+  stats.latency_ms = 4.0;
+  stats.network_risk = false;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+
+  EXPECT_EQ(doctor.at("primary_issue"), "control_channel_observation");
+  EXPECT_EQ(doctor.at("status"), "ok");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("confidence").at("basis"), "control_channel_only");
+  EXPECT_EQ(doctor.at("confidence").at("sample_window").at("samples"), 42);
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Keep monitoring");
+
+  bool saw_unknown_media_loss = false;
+  bool saw_control_observation = false;
+  for (const auto &item : doctor.at("evidence")) {
+    if (item.at("id") == "packet_loss") {
+      saw_unknown_media_loss = true;
+      EXPECT_EQ(item.at("status"), "unknown");
+      EXPECT_TRUE(item.at("value").is_null());
+    }
+    if (item.at("id") == "control_channel_packet_loss") {
+      saw_control_observation = true;
+      EXPECT_EQ(item.at("status"), "watch");
+      EXPECT_DOUBLE_EQ(item.at("value"), 8.72039794921875);
+    }
+  }
+  EXPECT_TRUE(saw_unknown_media_loss);
+  EXPECT_TRUE(saw_control_observation);
+}
+
 TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -952,9 +1001,11 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
 
   stats.packet_loss = 3.4;
+  stats.packet_loss_available = true;
   EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
 
   stats.packet_loss = 0.0;
+  stats.packet_loss_available = false;
   stats.latency_ms = 45.0;
   EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
 }
@@ -1297,15 +1348,35 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
 
   EXPECT_DOUBLE_EQ(stats.latency_ms, 11.5);
   EXPECT_DOUBLE_EQ(stats.packet_loss, 0.4);
+  EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_EQ(stats.packet_loss_source, "media_transport");
   EXPECT_EQ(stats.bytes_sent, 123456789ull);
 
   stream_stats::update_stream_active(false);
 }
 
-// The periodic-ping handler in stream.cpp sources loss from ENet's scaled
-// peer->packetLoss; this module stores percent (0-100), matching the readers
-// (served network_risk elevates at 2% after warm-up and debounce; session
-// grading stays at 0.5/2/5%).
+TEST(StreamStatsHotFieldTests, ControlChannelLossNeverBecomesMediaLossOrRisk) {
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true);
+  for (int i = 0; i < 50; ++i) {
+    stream_stats::update_control_channel_stats(4.0, 8.72039794921875, 0);
+  }
+
+  const auto stats = stream_stats::get_current();
+
+  EXPECT_DOUBLE_EQ(stats.latency_ms, 4.0);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+  EXPECT_FALSE(stats.packet_loss_available);
+  EXPECT_EQ(stats.packet_loss_source, "unavailable");
+  EXPECT_DOUBLE_EQ(stats.control_channel_packet_loss, 8.72039794921875);
+  EXPECT_EQ(stats.control_channel_samples, 50);
+  EXPECT_FALSE(stats.network_risk);
+
+  stream_stats::update_stream_active(false);
+}
+
+// The periodic-ping handler in stream.cpp converts ENet's scaled control loss
+// to percent for diagnostics, while keeping it out of media grading.
 TEST(StreamStatsHotFieldTests, RuntimeDisplayWarningIsServedAndResetWithTheStream) {
   stream_stats::update_stream_active(true);
   stream_stats::update_runtime_display_warning("Host Virtual Display could not be created");

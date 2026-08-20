@@ -30,12 +30,12 @@ namespace stream {
    *
    * A report with a client address updates that client's mirror and the
    * top-level fields when it is the primary client. An address-less report
-   * updates only the top-level fields. In either case, the network-risk
-   * debounce consumes the report exactly once.
+   * updates only the top-level fields. RTT feeds network risk; the ENet loss
+   * EWMA remains diagnostic-only control-channel context.
    */
   void record_network_stats(const std::string &client_ip,
                             double latency_ms,
-                            double packet_loss,
+                            double control_packet_loss,
                             std::uint64_t bytes_sent);
 
   struct session_profile_t {

@@ -177,9 +177,11 @@ TEST(StreamNetworkStatsTests, OneTransientReportDoesNotClassifyCleanStreamAsNetw
   EXPECT_EQ(health.at("primary_issue"), "steady");
   EXPECT_EQ(health.at("limiting_factor"), "none");
 
-  // A second distinct elevated report still confirms real pressure promptly.
+  // More high control-channel estimates still cannot manufacture media loss.
   stream::record_network_stats(client_ip, 3.0, 3.0, 0);
-  EXPECT_TRUE(stream_stats::get_current().network_risk);
+  EXPECT_FALSE(stream_stats::get_current().network_risk);
+  EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+  EXPECT_DOUBLE_EQ(stream_stats::get_current().control_channel_packet_loss, 3.0);
 
   stream_stats::remove_client(client_ip);
   stream_stats::update_stream_active(false);
@@ -193,19 +195,25 @@ TEST(StreamNetworkStatsTests, SecondaryClientReportDoesNotReplacePrimaryTelemetr
   stream_stats::add_client(secondary_ip, "Secondary client");
 
   stream::record_network_stats(primary_ip, 3.0, 0.0, 1000);
-  stream::record_network_stats(secondary_ip, 9.0, 1.0, 2000);
+  for (int i = 0; i < 50; ++i) {
+    stream::record_network_stats(secondary_ip, 90.0, 8.0, 2000);
+  }
 
   const auto stats = stream_stats::get_current();
   EXPECT_DOUBLE_EQ(stats.latency_ms, 3.0);
   EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+  EXPECT_FALSE(stats.network_risk);
+  EXPECT_EQ(stats.control_channel_samples, 1u);
   EXPECT_EQ(stats.bytes_sent, 1000u);
   EXPECT_EQ(stats.clients.size(), 2u);
   if (stats.clients.size() == 2u) {
     EXPECT_DOUBLE_EQ(stats.clients[0].latency_ms, 3.0);
     EXPECT_DOUBLE_EQ(stats.clients[0].packet_loss, 0.0);
+    EXPECT_DOUBLE_EQ(stats.clients[0].control_channel_packet_loss, 0.0);
     EXPECT_EQ(stats.clients[0].bytes_sent, 1000u);
-    EXPECT_DOUBLE_EQ(stats.clients[1].latency_ms, 9.0);
-    EXPECT_DOUBLE_EQ(stats.clients[1].packet_loss, 1.0);
+    EXPECT_DOUBLE_EQ(stats.clients[1].latency_ms, 90.0);
+    EXPECT_DOUBLE_EQ(stats.clients[1].packet_loss, 0.0);
+    EXPECT_DOUBLE_EQ(stats.clients[1].control_channel_packet_loss, 8.0);
     EXPECT_EQ(stats.clients[1].bytes_sent, 2000u);
   }
 

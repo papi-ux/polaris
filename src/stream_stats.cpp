@@ -75,6 +75,9 @@ namespace stream_stats {
     std::atomic<double> hot_capture_source_fps {0.0};
     std::atomic<double> hot_latency_ms {0.0};
     std::atomic<double> hot_packet_loss {0.0};
+    std::atomic<bool> hot_packet_loss_available {false};
+    std::atomic<double> hot_control_channel_packet_loss {0.0};
+    std::atomic<uint64_t> hot_control_channel_samples {0};
     std::atomic<bool> hot_network_risk {false};
     std::atomic<uint64_t> hot_bytes_sent {0};
 
@@ -122,6 +125,9 @@ namespace stream_stats {
       hot_capture_source_fps.store(0.0, std::memory_order_relaxed);
       hot_latency_ms.store(0.0, std::memory_order_relaxed);
       hot_packet_loss.store(0.0, std::memory_order_relaxed);
+      hot_packet_loss_available.store(false, std::memory_order_relaxed);
+      hot_control_channel_packet_loss.store(0.0, std::memory_order_relaxed);
+      hot_control_channel_samples.store(0, std::memory_order_relaxed);
       {
         std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
         network_risk_tracker.reset();
@@ -357,6 +363,10 @@ namespace stream_stats {
     j["height"] = height;
     j["latency_ms"] = latency_ms;
     j["packet_loss"] = packet_loss;
+    j["packet_loss_available"] = packet_loss_available;
+    j["packet_loss_source"] = packet_loss_source;
+    j["control_channel_packet_loss"] = control_channel_packet_loss;
+    j["control_channel_samples"] = control_channel_samples;
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
@@ -396,6 +406,9 @@ namespace stream_stats {
       cj["height"] = c.height;
       cj["latency_ms"] = c.latency_ms;
       cj["packet_loss"] = c.packet_loss;
+      cj["packet_loss_available"] = c.packet_loss_available;
+      cj["packet_loss_source"] = c.packet_loss_source;
+      cj["control_channel_packet_loss"] = c.control_channel_packet_loss;
       cj["bytes_sent"] = c.bytes_sent;
       cj["adaptive_target_bitrate_kbps"] = c.adaptive_target_bitrate_kbps;
       clients_json.push_back(cj);
@@ -772,6 +785,11 @@ namespace stream_stats {
         body = "Doctor sees a debounced network warning, but current loss and latency do not justify reducing quality. Recheck the live path before changing bitrate.";
         next_step = "Recheck network";
         expected = "Doctor will either clear the warning or gather direct evidence before offering a bitrate change.";
+      } else if (primary_issue == "control_channel_observation") {
+        title = "Keep monitoring";
+        body = "The reliable control channel retried packets, but Polaris has no confirmed video-loss evidence and RTT remains stable. Do not lower quality from this observation alone.";
+        next_step = "Keep monitoring";
+        expected = "Visible media loss or sustained RTT pressure must appear before Doctor recommends a network recovery action.";
       } else if (primary_issue == "quality_capped_by_history") {
         if (live_bitrate_tunable) {
           body = "The current network is clean, but an older recovery profile is holding bitrate below this paired device's saved target. Doctor can retry quality gradually and verify every step.";
@@ -960,13 +978,16 @@ namespace stream_stats {
     const double target_fps = doctor_target_fps(stats);
     const double target_fps_gap = std::max(0.0, target_fps - stats.fps);
     const bool meaningful_fps_shortfall = is_meaningful_fps_shortfall(target_fps, stats.fps);
-    // The network verdict consumes the debounced flag the session status
-    // serves (network_risk_tracker_t). The raw one-sample cuts this replaced
-    // re-created the exact hair-trigger the tracker exists to prevent — the
-    // old 0.5% watch threshold sat below the control channel's steady EWMA
-    // noise, so Doctor said "network jitter" over perfect streams.
-    const bool network_fail = stats.network_risk && (stats.packet_loss > 2.0 || stats.latency_ms >= 45.0);
+    // Packet-loss actions require an explicitly confirmed media source. ENet's
+    // peer->packetLoss is a reliable control-channel EWMA: useful context, but
+    // not a measurement of video packets dropped at the client.
+    const bool confirmed_media_loss = stats.packet_loss_available && stats.packet_loss > 2.0;
+    const bool network_fail = stats.network_risk && (confirmed_media_loss || stats.latency_ms >= 45.0);
     const bool network_watch = stats.network_risk && !network_fail;
+    const bool control_channel_observation =
+      stats.streaming &&
+      stats.control_channel_samples > 0 &&
+      stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
     const bool history_safe_source = stats.optimization_source.find("history_safe") != std::string::npos;
@@ -1034,6 +1055,7 @@ namespace stream_stats {
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
       else if (quality_capped_by_history) primary_issue = "quality_capped_by_history";
+      else if (control_channel_observation) primary_issue = "control_channel_observation";
       else primary_issue = "none";
     }
 
@@ -1053,7 +1075,8 @@ namespace stream_stats {
       status = "needs_action";
       severity = "critical";
       simple_state = "Needs attention";
-    } else if (primary_issue != "none" || (honor_health_grade && health_grade == "watch") || capture_cpu_copy || pacing_watch) {
+    } else if ((primary_issue != "none" && primary_issue != "control_channel_observation") ||
+               (honor_health_grade && health_grade == "watch") || capture_cpu_copy || pacing_watch) {
       traffic = "amber";
       status = capture_cpu_copy ? "watch" : "needs_action";
       severity = "warning";
@@ -1066,6 +1089,7 @@ namespace stream_stats {
       primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
+      primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
       primary_issue == "quality_capped_by_history" ? "An older recovery profile is limiting quality even though the live network is stable." :
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
@@ -1077,7 +1101,28 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
     append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_latency_fail ? "fail" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
-    append_doctor_evidence(evidence, "packet_loss", "Packet loss", stats.packet_loss, "%", network_fail ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Packet loss reported by current stream telemetry.");
+    append_doctor_evidence(
+      evidence,
+      "packet_loss",
+      "Video packet loss",
+      stats.packet_loss_available ? nlohmann::json(stats.packet_loss) : nlohmann::json(nullptr),
+      "%",
+      !stats.packet_loss_available ? "unknown" : confirmed_media_loss ? "fail" : "pass",
+      stats.packet_loss_source,
+      stats.packet_loss_available ?
+        "Packet loss confirmed by media-path telemetry." :
+        "No confirmed media packet-loss measurement is available for this live stream."
+    );
+    append_doctor_evidence(
+      evidence,
+      "control_channel_packet_loss",
+      "Control-channel loss estimate",
+      stats.control_channel_samples > 0 ? nlohmann::json(stats.control_channel_packet_loss) : nlohmann::json(nullptr),
+      "%",
+      stats.control_channel_samples == 0 ? "unknown" : control_channel_observation ? "watch" : "pass",
+      "enet_control_channel",
+      "ENet reliable-channel EWMA. Retransmissions can make this read high even when video delivery is healthy; it cannot grade the stream or authorize a bitrate reduction."
+    );
     append_doctor_evidence(evidence, "latency", "Network latency", stats.latency_ms, "ms", stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Round-trip latency reported by the active client control channel.");
     append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a guarded recovery-profile retry." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
     append_doctor_evidence(
@@ -1109,7 +1154,7 @@ namespace stream_stats {
     );
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "frame_interval_error_ms", "frame_jitter_ms"});
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["controller_input"] = {
@@ -1146,6 +1191,10 @@ namespace stream_stats {
       confidence_score = 0.68;
       confidence_level = "medium";
       basis = "live_evidence_recheck";
+    } else if (primary_issue == "control_channel_observation") {
+      confidence_score = 0.72;
+      confidence_level = "medium";
+      basis = "control_channel_only";
     } else if (health.contains("primary_issue")) {
       confidence_score = 0.92;
       confidence_level = "high";
@@ -1170,7 +1219,7 @@ namespace stream_stats {
     doctor["severity"] = severity;
     doctor["simple_state"] = simple_state;
     doctor["primary_issue"] = primary_issue;
-    doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.streaming ? 1 : 0}, {"seconds", stats.streaming ? 1 : 0}}}};
+    doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.control_channel_samples}, {"seconds", 0}}}};
     doctor["summary"] = summary;
     doctor["recommendation"] = doctor_recommendation(primary_issue, summary, health, stats.adaptive_runtime_update_supported);
     doctor["evidence"] = std::move(evidence);
@@ -1187,7 +1236,7 @@ namespace stream_stats {
     if (suppressed_stale_network_finding) {
       doctor["suppressed_findings"].push_back({
         {"id", "stale_network_jitter"},
-        {"reason", "Current debounced packet-loss and latency evidence is clean; the older health label cannot trigger a bitrate change."}
+        {"reason", "Confirmed media loss is unavailable and current RTT evidence is below the action threshold; the older health label cannot trigger a bitrate change."}
       });
     }
     // Actions that reported success and did not land. These are not stream
@@ -1371,6 +1420,7 @@ namespace stream_stats {
     // own lock, so stats_mutex stays out of this path.
     hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
     hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
+    hot_packet_loss_available.store(true, std::memory_order_relaxed);
     hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
     ingest_network_risk(latency_ms, packet_loss);
   }
@@ -1384,16 +1434,58 @@ namespace stream_stats {
     if (it != current_stats.clients.end()) {
       it->latency_ms = latency_ms;
       it->packet_loss = packet_loss;
+      it->packet_loss_available = true;
+      it->packet_loss_source = "media_transport";
       it->bytes_sent = bytes_sent;
     }
 
-    // Also update top-level stats (use first client for backward compat)
-    if (!current_stats.clients.empty() && current_stats.clients.front().ip == client_ip) {
+    // Also update top-level stats (use first client for backward compat).
+    // Only that primary client's observation may drive the top-level risk.
+    const bool primary_client =
+      !current_stats.clients.empty() && current_stats.clients.front().ip == client_ip;
+    if (primary_client) {
       hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
       hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
+      hot_packet_loss_available.store(true, std::memory_order_relaxed);
       hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
+      ingest_network_risk(latency_ms, packet_loss);
     }
-    ingest_network_risk(latency_ms, packet_loss);
+  }
+
+  void update_control_channel_stats(double latency_ms, double control_packet_loss, uint64_t bytes_sent) {
+    hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
+    hot_control_channel_packet_loss.store(control_packet_loss, std::memory_order_relaxed);
+    hot_control_channel_samples.fetch_add(1, std::memory_order_relaxed);
+    hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
+    // RTT describes the shared path. The ENet loss EWMA describes only its
+    // reliable control channel, so it cannot enter the actionable loss term.
+    ingest_network_risk(latency_ms, 0.0);
+  }
+
+  void update_control_channel_stats(const std::string &client_ip,
+                                    double latency_ms,
+                                    double control_packet_loss,
+                                    uint64_t bytes_sent) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+
+    auto it = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [&client_ip](const client_stats_t &c) { return c.ip == client_ip; });
+
+    if (it != current_stats.clients.end()) {
+      it->latency_ms = latency_ms;
+      it->control_channel_packet_loss = control_packet_loss;
+      it->bytes_sent = bytes_sent;
+    }
+
+    const bool primary_client =
+      !current_stats.clients.empty() && current_stats.clients.front().ip == client_ip;
+    if (primary_client) {
+      hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
+      hot_control_channel_packet_loss.store(control_packet_loss, std::memory_order_relaxed);
+      hot_control_channel_samples.fetch_add(1, std::memory_order_relaxed);
+      hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
+      ingest_network_risk(latency_ms, 0.0);
+    }
   }
 
   void update_runtime_state(const platf::runtime_state_t &state) {
@@ -2227,6 +2319,10 @@ namespace stream_stats {
     result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
     result.latency_ms = hot_latency_ms.load(std::memory_order_relaxed);
     result.packet_loss = hot_packet_loss.load(std::memory_order_relaxed);
+    result.packet_loss_available = hot_packet_loss_available.load(std::memory_order_relaxed);
+    result.packet_loss_source = result.packet_loss_available ? "media_transport" : "unavailable";
+    result.control_channel_packet_loss = hot_control_channel_packet_loss.load(std::memory_order_relaxed);
+    result.control_channel_samples = hot_control_channel_samples.load(std::memory_order_relaxed);
     result.network_risk = hot_network_risk.load(std::memory_order_relaxed);
     result.bytes_sent = hot_bytes_sent.load(std::memory_order_relaxed);
     result.idr_requests_total = hot_idr_requests_total.load(std::memory_order_relaxed);

@@ -266,6 +266,70 @@ TEST(AiOptimizerHistorySanitization, ClearsLowConfidenceSoftEndRecoveryBias) {
   EXPECT_EQ("host_render_limited", sanitized.last_primary_issue);
 }
 
+TEST(AiOptimizerHistorySanitization, RepairsLegacyControlLossGradeAndNetworkLimit) {
+  auto session = make_session("C", "host_pause", 0, 0);
+  session.session_count = 3;
+  session.avg_fps = 59.71;
+  session.last_fps = 59.71;
+  session.last_target_fps = 60.0;
+  session.avg_latency_ms = 4.0;
+  session.last_latency_ms = 4.0;
+  session.packet_loss_pct = 3.2;
+  session.last_packet_loss_pct = 8.72039794921875;
+  session.last_sample_confidence = "low";
+  session.last_health_grade = "watch";
+  session.last_primary_issue = "network_jitter";
+  session.last_issues = {"network_jitter"};
+  session.last_network_risk = "elevated";
+  session.last_bitrate_kbps = 16988;
+  session.last_safe_bitrate_kbps = 12741;
+
+  const auto sanitized = ai_optimizer::sanitize_session_history(session);
+
+  EXPECT_EQ(sanitized.last_packet_loss_source, "legacy_control_channel");
+  EXPECT_DOUBLE_EQ(sanitized.packet_loss_pct, 0.0);
+  EXPECT_DOUBLE_EQ(sanitized.last_packet_loss_pct, 0.0);
+  EXPECT_EQ(ai_optimizer::grade_session_quality(sanitized), "A");
+  EXPECT_EQ(sanitized.quality_grade, "A");
+  EXPECT_EQ(sanitized.last_quality_grade, "A");
+  EXPECT_EQ(sanitized.last_network_risk, "normal");
+  EXPECT_EQ(sanitized.last_primary_issue, "steady");
+  EXPECT_TRUE(sanitized.last_issues.empty());
+  EXPECT_EQ(sanitized.last_health_grade, "good");
+  EXPECT_EQ(sanitized.last_safe_bitrate_kbps, 0);
+  EXPECT_FALSE(
+    ai_optimizer::get_history_safe_fallback(
+      "RetroidPocket6",
+      "Legacy Control Loss",
+      std::optional<ai_optimizer::session_history_t> {sanitized}
+    ).has_value()
+  );
+}
+
+TEST(AiOptimizerHistorySanitization, KeepsRealRttPressureWhileDiscardingControlLoss) {
+  auto session = make_session("D", "host_pause", 0, 0);
+  session.avg_fps = 59.71;
+  session.last_fps = 59.71;
+  session.last_target_fps = 60.0;
+  session.avg_latency_ms = 52.0;
+  session.last_latency_ms = 52.0;
+  session.packet_loss_pct = 8.7;
+  session.last_packet_loss_pct = 8.7;
+  session.last_health_grade = "watch";
+  session.last_primary_issue = "network_jitter";
+  session.last_issues = {"network_jitter"};
+  session.last_network_risk = "elevated";
+
+  const auto sanitized = ai_optimizer::sanitize_session_history(session);
+
+  EXPECT_EQ(sanitized.last_packet_loss_source, "legacy_control_channel");
+  EXPECT_DOUBLE_EQ(sanitized.packet_loss_pct, 0.0);
+  EXPECT_EQ(sanitized.last_network_risk, "elevated");
+  EXPECT_EQ(sanitized.last_primary_issue, "network_jitter");
+  EXPECT_EQ(sanitized.last_health_grade, "watch");
+  EXPECT_EQ(ai_optimizer::grade_session_quality(sanitized), "C");
+}
+
 TEST(AiOptimizerHistorySanitization, KeepsSampledSoftEndRecoveryBias) {
   auto session = make_session("C", "disconnect", 180, 180);
   session.session_count = 3;

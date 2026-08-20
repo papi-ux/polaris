@@ -69,6 +69,9 @@ namespace doctor_actions {
         {"streaming", stats.streaming},
         {"network_risk", stats.network_risk},
         {"packet_loss_pct", stats.packet_loss},
+        {"packet_loss_available", stats.packet_loss_available},
+        {"packet_loss_source", stats.packet_loss_source},
+        {"control_channel_packet_loss_pct", stats.control_channel_packet_loss},
         {"latency_ms", stats.latency_ms},
         {"bitrate_kbps", current_live_bitrate(stats)},
         {"paired_target_bitrate_kbps", stats.paired_target_bitrate_kbps},
@@ -172,7 +175,7 @@ namespace doctor_actions {
 
   bool network_pressure_confirmed(const stream_stats::stats_t &stats) {
     return stats.streaming && stats.network_risk &&
-      (stats.packet_loss > 2.0 || stats.latency_ms >= 45.0);
+      ((stats.packet_loss_available && stats.packet_loss > 2.0) || stats.latency_ms >= 45.0);
   }
 
   int guarded_bitrate_target(int current_bitrate_kbps,
