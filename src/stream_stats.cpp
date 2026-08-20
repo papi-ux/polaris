@@ -373,6 +373,11 @@ namespace stream_stats {
       {"virtual_controller_error", input_virtual_controller_error},
       {"host_controller_isolation", input_host_controller_isolation},
       {"host_controller_isolation_detail", input_host_controller_isolation_detail},
+      {"steam_input_status", input_steam_input_status},
+      {"steam_profiles_checked", input_steam_profiles_checked},
+      {"steam_profiles_with_xbox_support", input_steam_profiles_with_xbox_support},
+      {"steam_forced_app_count", input_steam_forced_app_count},
+      {"steam_input_detail", input_steam_input_detail},
       {"haptics_supported", input_haptics_supported},
       {"haptics_detail", input_haptics_detail}
     };
@@ -777,6 +782,10 @@ namespace stream_stats {
           next_step = "Relaunch with paired target";
           expected = "The next stream should start at the saved paired bitrate.";
         }
+      } else if (primary_issue == "steam_input_conflict") {
+        body = "Local Steam Input settings can claim the Polaris Xbox virtual controller while strict isolation prevents Steam from creating its replacement controller. Disable Steam Input for Xbox controllers in Steam Settings, and set any per-game Force On overrides to Default or Disable.";
+        next_step = "Adjust Steam Input";
+        expected = "Proton games should read the Polaris virtual controller directly without a per-game workaround.";
       } else if (primary_issue == "encoder_load") {
         body = "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
         next_step = "Lower stream load";
@@ -961,6 +970,15 @@ namespace stream_stats {
       stats.duplicate_frame_ratio >= 0.10 ||
       stats.dropped_frame_ratio >= 0.04 ||
       meaningful_fps_shortfall;
+    const bool strict_gamepad_isolation =
+      stats.input_host_controller_isolation == "strict_bwrap";
+    const bool steam_input_known =
+      stats.input_steam_input_status != "unknown" &&
+      stats.input_steam_input_status != "not_applicable";
+    const bool steam_input_conflict =
+      strict_gamepad_isolation &&
+      (stats.input_steam_profiles_with_xbox_support > 0 ||
+       stats.input_steam_forced_app_count > 0);
 
     std::string primary_issue = health.value("primary_issue", std::string {});
     if (primary_issue == "steady" || primary_issue == "none") primary_issue.clear();
@@ -973,6 +991,13 @@ namespace stream_stats {
       // bitrate reduction without current debounced network evidence. A live
       // debounced watch can request another check, never a quality change.
       primary_issue = network_watch ? "network_observation" : std::string {};
+    }
+    if (steam_input_conflict && !network_fail && !encoder_fail && !capture_latency_fail) {
+      // This is a deterministic host-state conflict, not an inference from a
+      // missing controller event. Keep critical live stream failures ahead of
+      // it, but do not let a generic pacing or capture watch hide why the
+      // controller is structurally dead inside the strict sandbox.
+      primary_issue = "steam_input_conflict";
     }
     if (primary_issue.empty()) {
       if (!stats.streaming) primary_issue = "no_active_stream";
@@ -1021,6 +1046,7 @@ namespace stream_stats {
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
       primary_issue == "quality_capped_by_history" ? "An older recovery profile is limiting quality even though the live network is stable." :
+      primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
       health.contains("summary") && !suppressed_stale_network_finding ? health.value("summary", std::string {}) :
@@ -1048,19 +1074,46 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "paired_bitrate_target", "Paired quality target", stats.paired_target_bitrate_kbps, "kbps", quality_capped_by_history ? "watch" : stats.paired_target_bitrate_kbps > 0 ? "pass" : "unknown", "session_profile", quality_capped_by_history ? "A history-safe recovery layer is keeping the live bitrate below the paired target." : "Saved bitrate preference for the active paired client.");
     append_doctor_evidence(evidence, "target_fps_gap", "Target FPS gap", target_fps_gap, "FPS", meaningful_fps_shortfall ? "watch" : "pass", "stream_stats", "Encoded FPS below the requested cadence is a source or compositor pacing gap, not network jitter by itself.");
     append_doctor_evidence(evidence, "frame_pacing", "Mean target interval error", stats.frame_jitter_ms, "ms", pacing_watch ? "watch" : "pass", "stream_stats", "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter.");
+    append_doctor_evidence(
+      evidence,
+      "steam_input_compatibility",
+      "Steam Input compatibility",
+      stats.input_steam_input_status,
+      "",
+      steam_input_conflict ? "fail" : strict_gamepad_isolation && steam_input_known ? "pass" : "unknown",
+      "local_steam_config",
+      stats.input_steam_input_detail.empty() ?
+        (strict_gamepad_isolation ? "Steam Input compatibility has not been inspected yet." : "Strict gamepad isolation is not active.") :
+        stats.input_steam_input_detail
+    );
 
     auto advanced = nlohmann::json::object();
     advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "frame_interval_error_ms", "frame_jitter_ms"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
+    advanced["controller_input"] = {
+      {"host_controller_isolation", stats.input_host_controller_isolation},
+      {"steam_input_status", stats.input_steam_input_status},
+      {"steam_profiles_checked", stats.input_steam_profiles_checked},
+      {"steam_profiles_with_xbox_support", stats.input_steam_profiles_with_xbox_support},
+      {"steam_forced_app_count", stats.input_steam_forced_app_count},
+      {"steam_input_detail", stats.input_steam_input_detail}
+    };
     advanced["health"] = health;
     advanced["recent_issue_codes"] = nlohmann::json::array();
+    if (steam_input_conflict) {
+      advanced["recent_issue_codes"].push_back("steam_input_conflict");
+    }
     advanced["raw_fields_redacted"] = true;
 
     double confidence_score = 0.35;
     std::string confidence_level = "low";
     std::string basis = "insufficient_data";
-    if (primary_issue == "quality_capped_by_history") {
+    if (primary_issue == "steam_input_conflict") {
+      confidence_score = 0.98;
+      confidence_level = "high";
+      basis = "local_steam_config_and_isolation_plan";
+    } else if (primary_issue == "quality_capped_by_history") {
       confidence_score = 0.96;
       confidence_level = "high";
       basis = "session_policy_and_live_telemetry";
@@ -1449,6 +1502,19 @@ namespace stream_stats {
     current_stats.input_host_controller_isolation_detail = host_controller_isolation_detail;
     current_stats.input_haptics_supported = haptics_supported;
     current_stats.input_haptics_detail = haptics_detail;
+  }
+
+  void update_steam_input_state(const std::string &status,
+                                int profiles_checked,
+                                int profiles_with_xbox_support,
+                                int forced_app_count,
+                                const std::string &detail) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.input_steam_input_status = status.empty() ? "unknown" : status;
+    current_stats.input_steam_profiles_checked = std::max(0, profiles_checked);
+    current_stats.input_steam_profiles_with_xbox_support = std::max(0, profiles_with_xbox_support);
+    current_stats.input_steam_forced_app_count = std::max(0, forced_app_count);
+    current_stats.input_steam_input_detail = detail;
   }
 
   void update_capture_profile(const capture_profile_sample_t &sample) {

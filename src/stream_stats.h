@@ -157,6 +157,11 @@ namespace stream_stats {
     std::string input_virtual_controller_error;
     std::string input_host_controller_isolation = "unknown";
     std::string input_host_controller_isolation_detail;
+    std::string input_steam_input_status = "unknown";
+    int input_steam_profiles_checked = 0;
+    int input_steam_profiles_with_xbox_support = 0;
+    int input_steam_forced_app_count = 0;
+    std::string input_steam_input_detail;
     bool input_haptics_supported = false;
     std::string input_haptics_detail;
 
@@ -517,6 +522,15 @@ namespace stream_stats {
                                      const std::string &host_controller_isolation_detail,
                                      bool haptics_supported,
                                      const std::string &haptics_detail);
+
+  /**
+   * @brief Update the PII-free Steam Input compatibility snapshot for Doctor.
+   */
+  void update_steam_input_state(const std::string &status,
+                                int profiles_checked,
+                                int profiles_with_xbox_support,
+                                int forced_app_count,
+                                const std::string &detail);
 
   /**
    * @brief Record a single capture timing sample into the shared telemetry sink.
