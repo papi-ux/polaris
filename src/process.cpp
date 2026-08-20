@@ -3334,6 +3334,17 @@ namespace proc {
       return configured_max_bitrate > 0 || has_paired_target_bitrate || !ai_auto_quality_enabled;
     }
 
+#ifdef __linux__
+    bool should_reprobe_deferred_cage_encoder(
+      bool use_cage_compositor,
+      bool no_active_sessions_at_launch,
+      bool encoder_selected
+    ) {
+      return use_cage_compositor &&
+             (no_active_sessions_at_launch || !encoder_selected);
+    }
+#endif
+
     void apply_optimization_layer(resolved_session_optimization_t &resolved,
                                   const optimization_locks_t &locks,
                                   const device_db::optimization_t &optimization,
@@ -4073,6 +4084,18 @@ namespace proc {
 
 #if defined(POLARIS_TESTS)
 #ifdef __linux__
+  bool should_reprobe_deferred_cage_encoder_for_tests(
+    bool use_cage_compositor,
+    bool no_active_sessions_at_launch,
+    bool encoder_selected
+  ) {
+    return should_reprobe_deferred_cage_encoder(
+      use_cage_compositor,
+      no_active_sessions_at_launch,
+      encoder_selected
+    );
+  }
+
   bool steam_big_picture_input_guard_enabled_for_tests(
     const proc::ctx_t &app,
     bool use_cage_compositor,
@@ -7107,8 +7130,18 @@ namespace proc {
     bool cage_started_with_detached_client = false;
 
     auto reprobe_encoders_for_cage = [&](bool strict_configured_encoder = false, bool save_successful_cache = true) -> bool {
-      if (!config::video.linux_display.use_cage_compositor || !no_active_sessions_at_launch) {
+      const bool encoder_selected = !video::active_encoder_name().empty();
+      if (!should_reprobe_deferred_cage_encoder(
+            config::video.linux_display.use_cage_compositor,
+            no_active_sessions_at_launch,
+            encoder_selected
+          )) {
         return true;
+      }
+
+      if (!no_active_sessions_at_launch && !encoder_selected) {
+        BOOST_LOG(warning) << "session_manager: No encoder is selected after a deferred cage probe; "sv
+                           << "reprobing despite an already-counted session"sv;
       }
 
       const auto cage_socket = stream_runtime::labwc::wayland_socket();
