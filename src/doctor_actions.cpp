@@ -8,13 +8,22 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "adaptive_bitrate.h"
+#include "game_library_scanner.h"
 #include "logging.h"
+
+#ifdef __linux__
+  #include "process.h"
+#endif
 
 using namespace std::literals;
 
@@ -23,13 +32,21 @@ namespace doctor_actions {
     enum class action_kind_e {
       none,
       lower_bitrate,
-      restore_quality
+      restore_quality,
+      disable_steam_input_xbox
+    };
+
+    /** One profile this run rewrote, and the value it held beforehand. */
+    struct steam_profile_edit_t {
+      std::filesystem::path path;
+      bool previously_enabled = true;
     };
 
     struct action_run_t {
       bool active = false;
       action_kind_e kind = action_kind_e::none;
       std::string run_id;
+      std::vector<steam_profile_edit_t> steam_edits;
       bool previous_adaptive_enabled = false;
       int previous_base_bitrate_kbps = 0;
       int previous_live_bitrate_kbps = 0;
@@ -62,6 +79,87 @@ namespace doctor_actions {
     bool network_stable_for_quality_retry(const stream_stats::stats_t &stats) {
       return stats.streaming && !stats.network_risk &&
         stats.packet_loss <= 2.0 && stats.latency_ms < 45.0;
+    }
+
+    /**
+     * Rewrite one profile's Xbox opt-in through a sibling temp file.
+     *
+     * A half-written localconfig.vdf is a corrupted Steam profile, so the new
+     * payload is only ever swapped in by rename, which is atomic within the
+     * directory. Returns false when nothing was written, including the case
+     * where the value already held the requested setting.
+     */
+    bool rewrite_steam_profile(const std::filesystem::path &path, bool enabled) {
+      std::ifstream input {path, std::ios::binary};
+      if (!input) {
+        return false;
+      }
+      std::ostringstream buffer;
+      buffer << input.rdbuf();
+      input.close();
+
+      const auto updated = game_library::set_steam_input_xbox_support(buffer.str(), enabled);
+      if (!updated) {
+        return false;
+      }
+
+      auto temporary = path;
+      temporary += ".polaris-doctor";
+      {
+        std::ofstream output {temporary, std::ios::binary | std::ios::trunc};
+        if (!output) {
+          return false;
+        }
+        output << *updated;
+        if (!output) {
+          return false;
+        }
+      }
+
+      std::error_code rename_ec;
+      std::filesystem::rename(temporary, path, rename_ec);
+      if (rename_ec) {
+        std::error_code discard_ec;
+        std::filesystem::remove(temporary, discard_ec);
+        return false;
+      }
+      return true;
+    }
+
+    /**
+     * Read the profiles again, deliberately bypassing the 30s snapshot cache.
+     *
+     * Verification runs seconds after the write, well inside that cache, so the
+     * cached snapshot would report the state this action just changed and call
+     * its own success a failure.
+     */
+    game_library::steam_input_snapshot_t fresh_steam_input_state() {
+      return game_library::inspect_steam_input_configs(
+        game_library::steam_localconfig_paths(
+          game_library::steam_data_roots(game_library::library_home_roots())
+        )
+      );
+    }
+
+    nlohmann::json steam_input_evidence() {
+      const auto snapshot = fresh_steam_input_state();
+      return {
+        {"steam_input_status", snapshot.status},
+        {"profiles_checked", snapshot.profiles_checked},
+        {"profiles_with_xbox_support", snapshot.profiles_with_xbox_support},
+        {"forced_app_count", snapshot.forced_app_count}
+      };
+    }
+
+    /**
+     * Whether the in-flight run is the Steam Input one.
+     *
+     * `verify` carries only a run id, so the shared verb has to ask what it is
+     * verifying before the streaming gate decides a stream is required.
+     */
+    bool steam_input_run_active() {
+      std::lock_guard<std::mutex> lock(action_mutex);
+      return action_run.active && action_run.kind == action_kind_e::disable_steam_input_xbox;
     }
 
     std::string next_run_id() {
@@ -112,6 +210,27 @@ namespace doctor_actions {
       if (!action_run.active || run_id.empty() || run_id != action_run.run_id) {
         return {{"status", false}, {"changed", false}, {"error", "This Doctor undo is no longer available."}};
       }
+
+      if (action_run.kind == action_kind_e::disable_steam_input_xbox) {
+        int restored = 0;
+        for (const auto &edit : action_run.steam_edits) {
+          if (rewrite_steam_profile(edit.path, edit.previously_enabled)) {
+            ++restored;
+          }
+        }
+        action_run.active = false;
+        BOOST_LOG(info) << "Doctor: restored Steam Input opt-in on "sv << restored
+                        << " profile(s) run=" << run_id;
+        return {
+          {"status", true},
+          {"changed", restored > 0},
+          {"state", "undone"},
+          {"message", "Restored the Steam Input setting each profile held before this Doctor run."},
+          {"restored_profiles", restored},
+          {"evidence", steam_input_evidence()}
+        };
+      }
+
       if (!adaptive_bitrate::get_state().runtime_update_supported) {
         return {
           {"status", false},
@@ -149,6 +268,113 @@ namespace doctor_actions {
         {"restored_bitrate_kbps", restore_live_bitrate_kbps},
         {"adaptive_bitrate_enabled", action_run.previous_adaptive_enabled}
       };
+    }
+
+    // Steam Input work runs ahead of the streaming gate below on purpose. Its
+    // whole point is to edit a profile Steam is not holding open, which means
+    // the fix is applied precisely when no stream is running.
+    if (action_id == "disable_steam_input_xbox" || (action_id == "verify" && steam_input_run_active())) {
+#ifndef __linux__
+      return {
+        {"status", false},
+        {"changed", false},
+        {"error", "Closing desktop Steam is only supported on Linux hosts."}
+      };
+#else
+      if (action_id == "verify") {
+        const auto run_id = request.value("run_id", std::string {});
+        std::lock_guard<std::mutex> lock(action_mutex);
+        if (!action_run.active || run_id.empty() || run_id != action_run.run_id) {
+          return {{"status", false}, {"changed", false}, {"state", "expired"}, {"error", "Doctor run not found."}};
+        }
+        const auto state = fresh_steam_input_state();
+        const bool cleared = state.profiles_with_xbox_support == 0;
+        // A per-app Force On outranks the host-wide opt-in this action owns, so
+        // clearing the opt-in while overrides remain is a real partial result,
+        // not a success and not a failure.
+        const bool overrides_remain = state.forced_app_count > 0;
+        return {
+          {"status", true},
+          {"changed", false},
+          {"run_id", run_id},
+          {"state", cleared && !overrides_remain ? "resolved" : "needs_attention"},
+          {"message", !cleared ?
+             "A Steam profile still opts the emulated controller into Steam Input." :
+             overrides_remain ?
+               "The host-wide opt-in is cleared, but per-game Force On overrides remain. Set those games to Default or Disable in their Steam controller properties." :
+               "No Steam profile opts the emulated controller into Steam Input any more."},
+          {"evidence", steam_input_evidence()},
+          {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run_id}}}
+        };
+      }
+
+      const auto before = fresh_steam_input_state();
+      if (before.profiles_with_xbox_support == 0) {
+        return {
+          {"status", false},
+          {"changed", false},
+          {"state", "evidence_changed"},
+          {"error", before.forced_app_count > 0 ?
+             "No profile opts in host-wide. The remaining conflict is per-game Force On, which must be changed in each game's Steam controller properties." :
+             "No Steam profile opts the emulated controller into Steam Input."},
+          {"evidence", steam_input_evidence()}
+        };
+      }
+
+      // Steam rewrites this file when it exits, so an edit under a live client
+      // is reverted the moment that client closes. Closing Steam first is the
+      // whole reason this action asks for confirmation.
+      if (proc::desktop_steam_client_active() && !proc::request_desktop_steam_shutdown_for_private_stream()) {
+        return {
+          {"status", false},
+          {"changed", false},
+          {"state", "steam_still_running"},
+          {"error", "Desktop Steam did not close, so the change would be reverted when it exits. Close Steam and try again."},
+          {"evidence", steam_input_evidence()}
+        };
+      }
+
+      action_run_t run;
+      run.active = true;
+      run.kind = action_kind_e::disable_steam_input_xbox;
+      run.run_id = next_run_id();
+      run.applied_at = std::chrono::steady_clock::now();
+      for (const auto &path : game_library::steam_localconfig_paths(
+             game_library::steam_data_roots(game_library::library_home_roots()))) {
+        if (rewrite_steam_profile(path, false)) {
+          run.steam_edits.push_back({path, true});
+        }
+      }
+
+      if (run.steam_edits.empty()) {
+        return {
+          {"status", false},
+          {"changed", false},
+          {"error", "No Steam profile could be updated."},
+          {"evidence", steam_input_evidence()}
+        };
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(action_mutex);
+        action_run = run;
+      }
+      BOOST_LOG(info) << "Doctor: cleared the Xbox Steam Input opt-in on "sv
+                      << run.steam_edits.size() << " profile(s) run=" << run.run_id;
+
+      return {
+        {"status", true},
+        {"changed", true},
+        {"state", "watching"},
+        {"message", "Closed desktop Steam and cleared the Xbox Steam Input opt-in. Launch the game again to pick up the change."},
+        {"run_id", run.run_id},
+        {"applied", {{"profiles_updated", static_cast<int>(run.steam_edits.size())}}},
+        {"before", {{"profiles_with_xbox_support", before.profiles_with_xbox_support}, {"forced_app_count", before.forced_app_count}}},
+        {"verification", {{"delay_seconds", 2}, {"action_id", "verify"}, {"run_id", run.run_id}}},
+        {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run.run_id}}},
+        {"evidence", steam_input_evidence()}
+      };
+#endif
     }
 
     const auto stats = stream_stats::get_current();

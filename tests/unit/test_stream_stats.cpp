@@ -664,8 +664,19 @@ TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
   EXPECT_EQ(doctor.at("status"), "needs_action");
   EXPECT_EQ(doctor.at("confidence").at("level"), "high");
   EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Adjust Steam Input");
-  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
-  EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
+  // This finding shipped read-only, with the action pinned to "none". It now
+  // offers one, and the invariant that replaced it is what the action must
+  // stay: reversible, never destructive, and never applied without a
+  // confirmation, because applying it closes the user's desktop Steam.
+  const auto &action = doctor.at("safe_recovery_action");
+  EXPECT_EQ(action.at("id"), "disable_steam_input_xbox");
+  EXPECT_EQ(action.at("kind"), "host_setting");
+  EXPECT_FALSE(action.at("destructive"));
+  EXPECT_TRUE(action.at("requires_confirmation"));
+  EXPECT_TRUE(action.at("requires_owner"));
+  EXPECT_TRUE(action.at("undo").at("supported"));
+  EXPECT_EQ(action.at("endpoint"), "/api/doctor/action");
+  EXPECT_EQ(action.at("payload_preview").at("action_id"), "disable_steam_input_xbox");
   EXPECT_EQ(
     doctor.at("advanced_evidence").at("controller_input").at("steam_forced_app_count"),
     2

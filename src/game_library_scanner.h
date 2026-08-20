@@ -150,6 +150,17 @@ namespace game_library {
   /** @brief Inspect locally discovered Steam profiles, cached briefly. */
   steam_input_snapshot_t steam_input_snapshot();
 
+  /**
+   * @brief Rewrite one profile's host-wide Xbox Steam Input opt-in.
+   *
+   * Returns the whole updated payload, or nullopt when the key is absent or
+   * already holds the requested value, so a caller can skip the write entirely.
+   * Everything outside that one value is preserved byte for byte: this edits a
+   * live Steam profile, and a reformatting writer would be a far worse bug than
+   * the setting it came to change.
+   */
+  std::optional<std::string> set_steam_input_xbox_support(std::string_view vdf_payload, bool enabled);
+
   /** @brief What the launcher files said, and when we last looked. */
   struct playtime_snapshot_t {
     std::map<std::string, playtime_t> by_app_id;
