@@ -648,9 +648,31 @@ for metadata_contract in (
             "Arch package smoke must bind every Boost NEEDED entry to a versioned dependency"
         )
 
-arch_current_job = workflow_job(workflow, "arch-current-compatibility")
-if arch_current_job.count("needs: [resolve-source, arch-build]") != 1:
-    raise AssertionError("current Arch compatibility must consume the exact Arch build")
+optional_native_job_needs = {
+    "arch-current-compatibility": (
+        "needs: [resolve-source, cpp-sanitizer-tests, arch-build]"
+    ),
+    "fedora-clang-build": (
+        "needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]"
+    ),
+    "steamos-build": (
+        "needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]"
+    ),
+    "ubuntu-build": (
+        "needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]"
+    ),
+    "fedora-rpm-build": (
+        "needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]"
+    ),
+}
+optional_native_jobs = {}
+for job_name, expected_needs in optional_native_job_needs.items():
+    job = workflow_job(workflow, job_name)
+    if job.count(expected_needs) != 1:
+        raise AssertionError(f"{job_name} must wait for both required native gates")
+    optional_native_jobs[job_name] = job
+
+arch_current_job = optional_native_jobs["arch-current-compatibility"]
 if arch_current_job.count(arch_package_condition) != 1:
     raise AssertionError("current Arch compatibility must run for pull requests and exact releases")
 for current_step in (

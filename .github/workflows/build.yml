@@ -587,7 +587,7 @@ jobs:
 
   arch-current-compatibility:
     name: Arch rolling compatibility
-    needs: [resolve-source, arch-build]
+    needs: [resolve-source, cpp-sanitizer-tests, arch-build]
     if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
     runs-on: ubuntu-24.04
     container:
@@ -646,7 +646,7 @@ jobs:
 
   fedora-clang-build:
     name: Fedora 44 Clang compile check
-    needs: [resolve-source, web-checks]
+    needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
     if: needs.resolve-source.outputs.native_required == 'true'
     runs-on: ubuntu-24.04
     container:
@@ -771,7 +771,7 @@ jobs:
 
   steamos-build:
     name: SteamOS 3.8 build
-    needs: [resolve-source, web-checks]
+    needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
     if: needs.resolve-source.outputs.native_required == 'true'
     runs-on: ubuntu-24.04
 
@@ -821,7 +821,7 @@ jobs:
 
   ubuntu-build:
     name: Ubuntu build
-    needs: [resolve-source, web-checks]
+    needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
     if: needs.resolve-source.outputs.native_required == 'true'
     runs-on: ubuntu-24.04
     env:
@@ -1049,7 +1049,7 @@ jobs:
 
   fedora-rpm-build:
     name: Fedora ${{ matrix.fedora }} RPM build
-    needs: [resolve-source, web-checks]
+    needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
     if: needs.resolve-source.outputs.native_required == 'true'
     runs-on: ubuntu-24.04
     container:
