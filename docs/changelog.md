@@ -1,5 +1,7 @@
 # Changelog
 
+- Unreleased: nested Gamescope teardown now serializes helper transitions and asks session-owned Steam to exit before using the exact-generation compositor stop fallback, preventing overlapping stops from poisoning reconnect recovery.
+
 This file tracks the public Polaris release line.
 
 Older historical tags remain in the repository for continuity, but the current public product line

@@ -16,14 +16,18 @@ polaris_process_fields() {
 }
 polaris_validate_marker() {
   case "${2:-}" in
-    nested) [ "${NESTED_VALID:-0}" = 1 ] ;;
+    nested) [ "${NESTED_VALID:-0}" = 1 ] && [ ! -e "$POLARIS_ACTIONS.nested-stopped" ] ;;
     idle) [ "${IDLE_VALID:-0}" = 1 ] ;;
     *) return 1 ;;
   esac
 }
 polaris_stop_marked_gamescope() {
   printf 'stop-nested\n' >>"$POLARIS_ACTIONS"
-  [ "${STOP_OK:-0}" = 1 ]
+  if [ -n "${STOP_DELAY:-}" ]; then
+    sleep "$STOP_DELAY"
+  fi
+  [ "${STOP_OK:-0}" = 1 ] || return 1
+  : >"$POLARIS_ACTIONS.nested-stopped"
 }
 polaris_reclaim_orphan_gamescope_sockets() {
   printf 'reclaim\n' >>"$POLARIS_ACTIONS"
@@ -62,6 +66,9 @@ printf 'kill %s\n' "$*" >>"$POLARIS_ACTIONS"
 pid="${2:-}"
 case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
 rm -rf "$POLARIS_PROC_ROOT/$pid"
+if [ "${NESTED_DIES_WITH_STEAM:-0}" = 1 ]; then
+  : >"$POLARIS_ACTIONS.nested-stopped"
+fi
 EOF
 chmod +x "$work/bin/"*
 
@@ -78,7 +85,9 @@ run_stop() {
     POLARIS_PGREP_OUTPUT="${POLARIS_PGREP_OUTPUT:-}" \
     POLARIS_PGREP_STATUS="${POLARIS_PGREP_STATUS:-0}" \
     POLARIS_IDLE_WAIT_STEPS=2 POLARIS_PORTAL_WAIT_STEPS=2 \
+    POLARIS_NESTED_GRACE_STEPS=1 \
     NESTED_VALID="${NESTED_VALID:-0}" STOP_OK="${STOP_OK:-0}" \
+    STOP_DELAY="${STOP_DELAY:-}" NESTED_DIES_WITH_STEAM="${NESTED_DIES_WITH_STEAM:-0}" \
     RECLAIM_OK="${RECLAIM_OK:-0}" IDLE_VALID="${IDLE_VALID:-0}" \
     IDLE_OWNS_SOCKET="${IDLE_OWNS_SOCKET:-0}" WRITE_ENV_OK="${WRITE_ENV_OK:-0}" \
     IDLE_START_OK="${IDLE_START_OK:-1}" PORTAL_RESTART_OK="${PORTAL_RESTART_OK:-1}" \
@@ -87,6 +96,7 @@ run_stop() {
 }
 reset_state() {
   rm -rf "$work/run"/*
+  rm -f "$actions".*
   mkdir -p "$work/run"
   printf '1\n' >"$work/run/polaris-gamescope-wsi-nested"
   printf 'nested\n' >"$work/run/polaris-gamescope-session-mode"
@@ -176,6 +186,44 @@ POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=$'100\n101' \
 grep -qx 'kill -TERM 101' "$actions" || fail "exact-session Steam was not signalled"
 ! grep -q 'kill .*100' "$actions" || fail "desktop Steam was signalled"
 [ -d "$work/proc/100" ] || fail "desktop Steam process was removed"
+steam_line="$(grep -nFx 'kill -TERM 101' "$actions" | head -n1 | cut -d: -f1)"
+stop_line="$(grep -nFx 'stop-nested' "$actions" | head -n1 | cut -d: -f1)"
+[ -n "$steam_line" ] && [ -n "$stop_line" ] && [ "$steam_line" -lt "$stop_line" ] ||
+  fail "nested compositor fallback ran before exact-session Steam shutdown"
+
+# A primary-child exit may terminate gamescope naturally. Reclaim its orphaned
+# endpoints and never signal the compositor group in that case.
+reset_state
+mkdir -p "$work/proc/101"
+printf '11\n' >"$work/proc/101/start"
+printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=101 \
+  NESTED_VALID=1 STOP_OK=1 NESTED_DIES_WITH_STEAM=1 RECLAIM_OK=1 \
+  IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 PORTAL_READY=1 \
+  run_stop >/dev/null 2>&1 || fail "natural nested exit handoff failed"
+grep -qx 'kill -TERM 101' "$actions" || fail "natural exit did not request exact-session Steam shutdown"
+! grep -qx 'stop-nested' "$actions" || fail "natural exit still signalled the compositor group"
+grep -qx 'reclaim' "$actions" || fail "natural exit did not reclaim orphaned endpoints"
+
+# Overlapping stop attempts serialize on one lifecycle lock. The first consumes
+# the durable state; the waiter then observes an idempotently completed stop.
+reset_state
+NESTED_VALID=1 STOP_OK=1 STOP_DELAY=0.3 RECLAIM_OK=1 \
+  IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 PORTAL_READY=1 \
+  run_stop >/dev/null 2>&1 &
+first_stop=$!
+for _ in $(seq 1 100); do
+  grep -qx 'stop-nested' "$actions" 2>/dev/null && break
+  sleep 0.01
+done
+grep -qx 'stop-nested' "$actions" || fail "first overlapping stop never entered teardown"
+NESTED_VALID=1 STOP_OK=1 RECLAIM_OK=1 \
+  IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 PORTAL_READY=1 \
+  run_stop >/dev/null 2>&1 &
+second_stop=$!
+wait "$first_stop" || fail "first overlapping stop failed"
+wait "$second_stop" || fail "serialized overlapping stop was not idempotent"
+[ "$(grep -cx 'stop-nested' "$actions")" = 1 ] || fail "overlapping stops repeated compositor teardown"
 
 # Recovery may run in a fresh process environment; the immutable credential is
 # persisted until the full idle/portal handoff completes.
@@ -227,6 +275,75 @@ while IFS= read -r line; do
   [ "$line" = 'case "${1:-}" in' ] && break
   printf '%s\n' "$line" >>"$prefix"
 done <"$script"
+
+# The lifecycle lock belongs to the short-lived start/stop operation. The single
+# launch subshell must exec the detached target with fd 7 closed while preserving
+# $! as that target's PID, process-group leader, and session leader.
+(
+  export XDG_RUNTIME_DIR="$work/run"
+  export POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh"
+  export POLARIS_FLOCK_BIN="$(command -v flock)"
+  # shellcheck source=/dev/null
+  . "$prefix"
+  acquire_session_operation_lock || fail "could not acquire operation lock for inheritance test"
+  parent_identity="$(stat -Lc '%d:%i' "/proc/$BASHPID/fd/7")"
+  path_identity="$(stat -Lc '%d:%i' "$session_operation_lock")"
+  [ "$parent_identity" = "$path_identity" ] || fail "parent does not hold operation lock"
+  child_result="$work/child-operation-lock"
+  child_pid=
+  cleanup_operation_lock_child() {
+    if [ -n "${child_pid:-}" ] && kill -0 "$child_pid" 2>/dev/null; then
+      kill -TERM "$child_pid" 2>/dev/null || true
+      wait "$child_pid" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_operation_lock_child EXIT
+  (
+    run_without_session_operation_lock setsid bash -c '
+      if [ -e "/proc/$BASHPID/fd/7" ]; then fd7=inherited; else fd7=closed; fi
+      process_stat="$(<"/proc/$BASHPID/stat")"
+      process_fields="${process_stat#*) }"
+      set -- $process_fields
+      pgid="$3"
+      sid="$4"
+      printf "fd7=%s\npid=%s\npgid=%s\nsid=%s\n" "$fd7" "$BASHPID" "$pgid" "$sid"
+      trap "exit 0" TERM
+      while :; do sleep 1; done
+    '
+  ) >"$child_result" &
+  child_pid=$!
+  child_ready=0
+  for _ in $(seq 1 100); do
+    if [ "$(wc -l <"$child_result")" -ge 4 ]; then
+      child_ready=1
+      break
+    fi
+    kill -0 "$child_pid" 2>/dev/null || fail "session child exited before topology capture"
+    sleep 0.02
+  done
+  [ "$child_ready" = 1 ] || fail "session child topology capture timed out"
+  [ "$(sed -n '1p' "$child_result")" = fd7=closed ] ||
+    fail "session child inherited operation lock fd"
+  [ "$(sed -n '2p' "$child_result")" = "pid=$child_pid" ] ||
+    fail "launch pid does not identify the session child"
+  [ "$(sed -n '3p' "$child_result")" = "pgid=$child_pid" ] ||
+    fail "launch pid is not the child process-group leader"
+  [ "$(sed -n '4p' "$child_result")" = "sid=$child_pid" ] ||
+    fail "launch pid is not the child session leader"
+  child_exe="$(readlink -f "/proc/$child_pid/exe")"
+  bash_exe="$(readlink -f "$(command -v bash)")"
+  [ "$child_exe" = "$bash_exe" ] || fail "launch pid does not identify the target executable"
+  kill -TERM "$child_pid"
+  wait "$child_pid" || true
+  child_pid=
+  trap - EXIT
+)
+grep -Fq 'run_without_session_operation_lock() {' "$script" ||
+  fail "operation-lock helper adds an extra subshell"
+grep -Fq 'run_without_session_operation_lock setsid env' "$script" ||
+  fail "nested Gamescope launch does not drop the operation lock"
+grep -Fq 'run_without_session_operation_lock setsid -f env' "$script" ||
+  fail "attach Steam launch does not drop the operation lock"
 (
   export XDG_RUNTIME_DIR="$work/run"
   export POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh"
@@ -293,5 +410,9 @@ grep -Fq 'POLARIS_SESSION_STATE_BEFORE_COMMIT_HOOK' "$script" ||
   fail "atomic publication interruption hook is missing"
 grep -Fq 'export POLARIS_GAMESCOPE_LOCK_HELD=1' "$script" ||
   fail "portal handoff is not finalized under the ownership lock"
+grep -Fq 'acquire_session_operation_lock' "$script" ||
+  fail "nested lifecycle operations are not serialized"
+grep -Fq 'wait_for_nested_gamescope_exit' "$script" ||
+  fail "nested stop has no graceful compositor-exit window"
 
 echo "PASS: gamescope session stop state machine"
