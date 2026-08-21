@@ -50,10 +50,7 @@ jobs:
           native_required=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags --depth=1 origin "$BASE_COMMIT"
-            native_required="$(
-              git diff --name-only --no-renames -z "$BASE_COMMIT" "$source_commit" |
-                scripts/ci/classify-native-build.sh
-            )"
+            native_required="$(git diff --name-only --no-renames -z "$BASE_COMMIT" "$source_commit" | scripts/ci/classify-native-build.sh)"
           fi
 
           if [ "$IS_RELEASE" = "true" ]; then
