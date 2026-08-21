@@ -405,6 +405,19 @@ namespace config {
    */
   std::string back_button_timeout_warning(int timeout_ms);
 
+  /**
+   * @brief Parse a boolean configuration value.
+   *
+   * Recognizes the documented spellings case-insensitively and in both
+   * directions, so `Enabled` and `enabled` agree. Text that is not a boolean at
+   * all, such as a mode name pasted onto a boolean key, returns nullopt rather
+   * than quietly reading as false.
+   *
+   * @param value Raw configuration text.
+   * @return The parsed value, or nullopt when the text is not a boolean.
+   */
+  std::optional<bool> parse_bool(std::string_view value);
+
   int parse(int argc, char *argv[]);
   bool is_valid_command_prefix(std::string_view argument);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
