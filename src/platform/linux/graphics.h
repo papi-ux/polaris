@@ -222,7 +222,18 @@ namespace egl {
   KITTY_USING_MOVE_T(ctx_t, (std::tuple<display_t::pointer, EGLContext>), , {
     TUPLE_2D_REF(disp, ctx, el);
     if (ctx) {
-      eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      // Releasing with EGL_NO_CONTEXT unbinds whatever context is current on the
+      // calling thread, and the display argument does not scope it: EGL 1.5 3.7.3
+      // treats the release as thread-wide, and Mesa's _eglBindContext unbinds the
+      // thread's context whichever display it came from. video::make_encode_device
+      // builds a replacement encode device before destroying the original when it
+      // demotes 10-bit to 8-bit, so releasing unconditionally here unbound the
+      // context the replacement had just made current. Every later GL call then
+      // silently no-opped and all five conversion shaders reported a compile
+      // failure with an empty driver info log. Release only what we bound.
+      if (eglGetCurrentContext() == ctx) {
+        eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      }
       eglDestroyContext(disp, ctx);
     }
   });
