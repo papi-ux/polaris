@@ -1,5 +1,7 @@
 # Changelog
 
+- Unreleased: nested Gamescope teardown now serializes helper transitions and asks session-owned Steam to exit before using the exact-generation compositor stop fallback, preventing overlapping stops from poisoning reconnect recovery.
+
 This file tracks the public Polaris release line.
 
 Older historical tags remain in the repository for continuity, but the current public product line
@@ -7,6 +9,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Fixes black video with working audio when a client requests HDR on a host with no HDR output: rebuilding the encode device for the 10-bit to 8-bit demotion released the EGL context the new device had just made current, so its color-conversion shaders never compiled and the session died before the first frame
+- Sizes nested Gamescope sessions to the final negotiated render width, height, and frame rate instead of imposing the standalone 4K120 fallback on every client
 - Prevents Nova launches from crashing when headless cage startup sees an already-counted session before encoder selection by forcing the deferred cage probe whenever no encoder is selected, stopping capture safely if that invariant is ever violated, and keeping encoder probing or reset exclusive with active capture
 - Detects when local Steam Input settings can claim the Polaris Xbox virtual controller during strict gamepad isolation, reports the conflict and PII-free aggregate evidence in Doctor, and points to the host-wide and per-game Steam settings without changing them automatically
 

@@ -831,7 +831,18 @@ namespace egl {
         gl_drain_errors;
 
         if (compiled_source.has_right()) {
-          BOOST_LOG(error) << shader_path << ": "sv << compiled_source.right();
+          const auto &compile_error = compiled_source.right();
+          if (compile_error.empty()) {
+            // A driver that rejected the source always says why. An empty info log
+            // means the call never reached a live context, so name that instead of
+            // printing a bare colon and sending the reader after the shader files.
+            BOOST_LOG(error) << shader_path << ": compilation failed and the driver gave no reason"sv
+                             << (eglGetCurrentContext() == EGL_NO_CONTEXT ?
+                                   "; no EGL context is current on this thread"sv :
+                                   ""sv);
+          } else {
+            BOOST_LOG(error) << shader_path << ": "sv << compile_error;
+          }
           error_flag = true;
         }
       }

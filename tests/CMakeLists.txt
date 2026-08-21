@@ -122,6 +122,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_egl_ctx_release_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_labwc_render_device_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_platform_hardening_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_logging.cpp
@@ -369,6 +370,12 @@ if (UNIX)
         COMMAND ${CMAKE_COMMAND} -E env
                 POLARIS_SOURCE_DIR=${CMAKE_SOURCE_DIR}
                 bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_stop_shell.sh
+    )
+    add_test(
+        NAME polaris_gamescope_session_geometry_shell
+        COMMAND ${CMAKE_COMMAND} -E env
+                POLARIS_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+                bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_geometry_shell.sh
     )
 endif()
 
