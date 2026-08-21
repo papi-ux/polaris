@@ -89,7 +89,11 @@ TEST(VaapiSourceContractTests, ConversionFailuresRemainWiredToLinuxFallbackHandl
   const auto source = read_source_for_contract("src/video.cpp");
   ASSERT_FALSE(source.empty());
 
-  EXPECT_EQ(count_occurrences(source, "handle_linux_gpu_native_conversion_failure("), 3u);
+  // One definition and three call sites: both steady-state conversions and the
+  // session's initial image. #409 arrived because the initial one was missing
+  // from this list, so a GPU-native route that could not convert its first
+  // frame ended the session with nothing retired and no SHM retry.
+  EXPECT_EQ(count_occurrences(source, "handle_linux_gpu_native_conversion_failure("), 4u);
 
   EXPECT_NE(source.find("update_windowed_gpu_native_probe_result(false);"), std::string::npos);
   EXPECT_NE(
@@ -98,6 +102,24 @@ TEST(VaapiSourceContractTests, ConversionFailuresRemainWiredToLinuxFallbackHandl
   );
   EXPECT_NE(
     source.find("if (handle_linux_gpu_native_conversion_failure(frame)) {\n              ec = platf::capture_e::reinit;"),
+    std::string::npos
+  );
+
+  // The initial image is a dummy allocation with no capture metadata, so it
+  // needs the route-scoped predicate as well as the frame-scoped one.
+  EXPECT_NE(
+    source.find("handle_linux_gpu_native_conversion_failure(frame) ||\n        handle_headless_extcopy_initial_conversion_failure();"),
+    std::string::npos
+  );
+
+  // Retiring the route only helps if the run reinitializes on SHM. Returning
+  // error here is what left the reporter's client with no video at all.
+  EXPECT_NE(
+    source.find("return retired_gpu_native_route ? encode_e::reinit : encode_e::error;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("ec = retired_gpu_native_route ? platf::capture_e::reinit : platf::capture_e::error;"),
     std::string::npos
   );
 }
