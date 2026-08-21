@@ -131,6 +131,16 @@ namespace stream_runtime {
       );
     }
 
+    bool should_disable_headless_extcopy_after_initial_conversion_failure(
+      const platf::runtime_state_t &runtime_state,
+      std::optional<bool> cached_extcopy_dmabuf_probe_result
+    ) {
+      return cage_display_router::should_disable_headless_extcopy_after_initial_conversion_failure(
+        runtime_state,
+        cached_extcopy_dmabuf_probe_result
+      );
+    }
+
     std::optional<bool> cached_windowed_gpu_native_probe_result() {
       return cage_display_router::cached_windowed_gpu_native_probe_result();
     }

@@ -520,6 +520,30 @@ namespace video {
         << "Headless ext-image-copy-capture DMA-BUF frame conversion failed; disabling headless DMA-BUF capture and reinitializing with SHM/system-memory fallback"sv;
       return true;
     }
+
+    bool handle_headless_extcopy_initial_conversion_failure() {
+      if (!::config::video.linux_display.use_cage_compositor) {
+        return false;
+      }
+      const auto labwc = snapshot_labwc();
+      if (!labwc.running) {
+        return false;
+      }
+
+      if (!stream_runtime::labwc::should_disable_headless_extcopy_after_initial_conversion_failure(
+            labwc.state,
+            stream_runtime::labwc::cached_headless_extcopy_dmabuf_probe_result()
+          )) {
+        return false;
+      }
+
+      stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
+      stream_stats::update_gpu_native_probe_attempt("headless_extcopy", "failed", "initial_frame_conversion", "initial_gpu_frame_conversion_failed");
+      stream_stats::update_gpu_native_probe_selection("headless_shm", "headless_shm");
+      BOOST_LOG(warning)
+        << "Headless ext-image-copy-capture DMA-BUF path could not convert the session's initial image; disabling headless DMA-BUF capture and reinitializing with SHM/system-memory fallback"sv;
+      return true;
+    }
 #endif
 
     std::string_view color_coding_label(const sunshine_colorspace_t &colorspace) {
@@ -3531,7 +3555,13 @@ namespace video {
     return result;
   }
 
-  std::optional<sync_session_t> make_synced_session(platf::display_t *disp, const encoder_t &encoder, frame_t &frame, sync_session_ctx_t &ctx) {
+  std::optional<sync_session_t> make_synced_session(
+    platf::display_t *disp,
+    const encoder_t &encoder,
+    frame_t &frame,
+    sync_session_ctx_t &ctx,
+    bool &retired_gpu_native_route
+  ) {
     sync_session_t encode_session;
 
     encode_session.ctx = &ctx;
@@ -3560,6 +3590,14 @@ namespace video {
     // Load the initial image to prepare for encoding
     if (session->convert(frame)) {
       BOOST_LOG(error) << "Could not convert initial image"sv;
+#ifdef __linux__
+      // A GPU-native route that cannot convert its first frame produces a
+      // session that delivers nothing at all, so retire it here rather than
+      // leaving the fallback wired only to steady-state conversion failures.
+      retired_gpu_native_route =
+        handle_linux_gpu_native_conversion_failure(frame) ||
+        handle_headless_extcopy_initial_conversion_failure();
+#endif
       return std::nullopt;
     }
 
@@ -3636,9 +3674,12 @@ namespace video {
 
     std::vector<sync_session_t> synced_sessions;
     for (auto &ctx : synced_session_ctxs) {
-      auto synced_session = make_synced_session(disp.get(), encoder, initial_frame, *ctx);
+      bool retired_gpu_native_route = false;
+      auto synced_session = make_synced_session(disp.get(), encoder, initial_frame, *ctx, retired_gpu_native_route);
       if (!synced_session) {
-        return encode_e::error;
+        // Retiring the route already selected SHM for the next attempt, so
+        // reinitialize instead of ending the session with no video.
+        return retired_gpu_native_route ? encode_e::reinit : encode_e::error;
       }
 
       synced_sessions.emplace_back(std::move(*synced_session));
@@ -3657,9 +3698,10 @@ namespace video {
 
           synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*encode_session_ctx)));
 
-          auto encode_session = make_synced_session(disp.get(), encoder, frame, *synced_session_ctxs.back());
+          bool retired_gpu_native_route = false;
+          auto encode_session = make_synced_session(disp.get(), encoder, frame, *synced_session_ctxs.back(), retired_gpu_native_route);
           if (!encode_session) {
-            ec = platf::capture_e::error;
+            ec = retired_gpu_native_route ? platf::capture_e::reinit : platf::capture_e::error;
             return false;
           }
 
