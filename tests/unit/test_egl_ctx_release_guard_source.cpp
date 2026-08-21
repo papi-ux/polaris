@@ -24,10 +24,12 @@
  */
 #include <gtest/gtest.h>
 
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -39,40 +41,138 @@ namespace {
     return buffer.str();
   }
 
+  std::string strip_cpp_comments(std::string_view source) {
+    enum class state_e {
+      code,
+      line_comment,
+      block_comment,
+      string_literal,
+      char_literal,
+    };
+
+    std::string code;
+    code.reserve(source.size());
+    auto state = state_e::code;
+    bool escaped = false;
+
+    for (std::size_t i = 0; i < source.size(); ++i) {
+      const auto ch = source[i];
+      const auto next = i + 1 < source.size() ? source[i + 1] : '\0';
+
+      switch (state) {
+        case state_e::code:
+          if (ch == '/' && next == '/') {
+            code.push_back(' ');
+            ++i;
+            state = state_e::line_comment;
+          } else if (ch == '/' && next == '*') {
+            code.push_back(' ');
+            ++i;
+            state = state_e::block_comment;
+          } else {
+            code.push_back(ch);
+            if (ch == '"') {
+              state = state_e::string_literal;
+              escaped = false;
+            } else if (ch == '\'') {
+              state = state_e::char_literal;
+              escaped = false;
+            }
+          }
+          break;
+
+        case state_e::line_comment:
+          if (ch == '\n') {
+            code.push_back(ch);
+            state = state_e::code;
+          }
+          break;
+
+        case state_e::block_comment:
+          if (ch == '*' && next == '/') {
+            code.push_back(' ');
+            ++i;
+            state = state_e::code;
+          }
+          break;
+
+        case state_e::string_literal:
+        case state_e::char_literal: {
+          code.push_back(ch);
+          const auto terminator = state == state_e::string_literal ? '"' : '\'';
+          if (escaped) {
+            escaped = false;
+          } else if (ch == '\\') {
+            escaped = true;
+          } else if (ch == terminator) {
+            state = state_e::code;
+          }
+          break;
+        }
+      }
+    }
+
+    return code;
+  }
+
+  std::string normalize_code(std::string_view source) {
+    const auto uncommented = strip_cpp_comments(source);
+    std::string normalized;
+    normalized.reserve(uncommented.size());
+    bool pending_space = false;
+
+    for (const auto ch : uncommented) {
+      if (std::isspace(static_cast<unsigned char>(ch))) {
+        pending_space = !normalized.empty();
+        continue;
+      }
+      if (pending_space) {
+        normalized.push_back(' ');
+        pending_space = false;
+      }
+      normalized.push_back(ch);
+    }
+
+    return normalized;
+  }
+
+  std::size_t count_occurrences(std::string_view source, std::string_view needle) {
+    std::size_t count = 0;
+    std::size_t position = 0;
+    while ((position = source.find(needle, position)) != std::string_view::npos) {
+      ++count;
+      position += needle.size();
+    }
+    return count;
+  }
+
+  bool ctx_release_contract_holds(std::string_view source) {
+    const auto code = normalize_code(source);
+    constexpr std::string_view contract =
+      "if (eglGetCurrentContext() == ctx) { "
+      "eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); "
+      "} eglDestroyContext(disp, ctx);";
+    return count_occurrences(code, "KITTY_USING_MOVE_T(ctx_t,") == 1 &&
+           count_occurrences(code, contract) == 1;
+  }
+
+  bool missing_context_diagnostic_contract_holds(std::string_view source) {
+    const auto code = normalize_code(source);
+    constexpr std::string_view condition =
+      "eglGetCurrentContext() == EGL_NO_CONTEXT ? "
+      "\"; no EGL context is current on this thread\"sv : \"\"sv";
+    return count_occurrences(code, "if (compile_error.empty()) {") == 1 &&
+           count_occurrences(code, "compilation failed and the driver gave no reason") == 1 &&
+           count_occurrences(code, condition) == 1;
+  }
+
 }  // namespace
 
 TEST(EglCtxReleaseGuardSource, ContextReleaseIsScopedToTheContextWeBound) {
   const auto source = read_source("src/platform/linux/graphics.h");
   ASSERT_FALSE(source.empty()) << "could not read src/platform/linux/graphics.h via POLARIS_SOURCE_DIR";
-
-  const auto ctx_pos = source.find("KITTY_USING_MOVE_T(ctx_t,");
-  ASSERT_NE(ctx_pos, std::string::npos) << "egl::ctx_t declaration not found";
-
-  const auto body_end = source.find("});", ctx_pos);
-  ASSERT_NE(body_end, std::string::npos) << "egl::ctx_t destructor body not found";
-  const auto body = source.substr(ctx_pos, body_end - ctx_pos);
-
-  const auto guard_pos = body.find("if (eglGetCurrentContext() == ctx)");
-  EXPECT_NE(guard_pos, std::string::npos)
-    << "~egl::ctx_t must release only when this context is the one bound to the calling "
-       "thread: eglMakeCurrent with EGL_NO_CONTEXT is a thread-wide release and would "
-       "otherwise unbind a live context belonging to a replacement encode device";
-
-  const auto release_pos = body.find("eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)");
-  ASSERT_NE(release_pos, std::string::npos) << "the context release call is missing entirely";
-  EXPECT_LT(guard_pos, release_pos)
-    << "the release must sit inside the eglGetCurrentContext() guard, not before it";
-
-  // Destruction itself must stay unconditional. A context that is current on some
-  // other thread still has to be destroyed here; EGL defers the delete until it is
-  // no longer current, which is exactly the behaviour we want.
-  const auto destroy_pos = body.find("eglDestroyContext(disp, ctx)");
-  ASSERT_NE(destroy_pos, std::string::npos) << "eglDestroyContext call not found";
-  EXPECT_LT(release_pos, destroy_pos) << "release must precede destroy";
-  const auto guard_close = body.find("}", release_pos);
-  ASSERT_NE(guard_close, std::string::npos) << "guard block is unterminated";
-  EXPECT_LT(guard_close, destroy_pos)
-    << "eglDestroyContext must run unconditionally, outside the eglGetCurrentContext guard";
+  EXPECT_TRUE(ctx_release_contract_holds(source))
+    << "~egl::ctx_t must guard the thread-wide release and keep destruction unconditional";
 }
 
 TEST(EglCtxReleaseGuardSource, EmptyShaderInfoLogNamesTheMissingContext) {
@@ -82,8 +182,40 @@ TEST(EglCtxReleaseGuardSource, EmptyShaderInfoLogNamesTheMissingContext) {
   // An empty compile info log means the GL call never reached a live context. Saying
   // so is what separates this failure from a missing or unreadable shader file; the
   // bare "<path>: " line it used to print sent two reporters after their asset paths.
-  EXPECT_NE(source.find("compilation failed and the driver gave no reason"), std::string::npos)
-    << "an empty shader info log must report that the driver gave no reason, not print a bare colon";
-  EXPECT_NE(source.find("no EGL context is current on this thread"), std::string::npos)
-    << "an empty shader info log must name a missing current EGL context as the likely cause";
+  EXPECT_TRUE(missing_context_diagnostic_contract_holds(source))
+    << "an empty shader info log must report the missing-current-context condition";
+}
+
+TEST(EglCtxReleaseGuardMatcher, RejectsCommentedOutGuard) {
+  constexpr std::string_view source = R"cpp(
+    KITTY_USING_MOVE_T(ctx_t, tuple_t, , {
+      // if (eglGetCurrentContext() == ctx)
+      eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      }
+      eglDestroyContext(disp, ctx);
+    });
+  )cpp";
+  EXPECT_FALSE(ctx_release_contract_holds(source));
+}
+
+TEST(EglCtxReleaseGuardMatcher, RejectsDestroyHiddenInsideOuterGuard) {
+  constexpr std::string_view source = R"cpp(
+    KITTY_USING_MOVE_T(ctx_t, tuple_t, , {
+      if (eglGetCurrentContext() == ctx) {
+        eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (cleanup_enabled) {}
+        eglDestroyContext(disp, ctx);
+      }
+    });
+  )cpp";
+  EXPECT_FALSE(ctx_release_contract_holds(source));
+}
+
+TEST(EglCtxReleaseGuardMatcher, RejectsInvertedMissingContextDiagnostic) {
+  constexpr std::string_view source = R"cpp(
+    eglGetCurrentContext() != EGL_NO_CONTEXT ?
+      "; no EGL context is current on this thread"sv : ""sv;
+    "compilation failed and the driver gave no reason"sv;
+  )cpp";
+  EXPECT_FALSE(missing_context_diagnostic_contract_holds(source));
 }
