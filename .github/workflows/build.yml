@@ -143,7 +143,7 @@ jobs:
       - name: Cache Ubuntu package downloads
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/polaris-ubuntu-archives
+          path: /var/tmp/polaris-ubuntu-archives
           key: polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
             polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-
@@ -158,7 +158,7 @@ jobs:
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
           snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
-          snapshot_archives="$RUNNER_TEMP/polaris-ubuntu-archives"
+          snapshot_archives="/var/tmp/polaris-ubuntu-archives"
           mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial" "$snapshot_archives/partial"
           sudo chown -R _apt:root "$snapshot_archives/partial"
           cat > "$snapshot_sources" <<EOF
@@ -858,7 +858,7 @@ jobs:
       - name: Cache Ubuntu package downloads
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/polaris-ubuntu-archives
+          path: /var/tmp/polaris-ubuntu-archives
           key: polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-build-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
             polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-build-
@@ -884,7 +884,7 @@ jobs:
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
           snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
-          snapshot_archives="$RUNNER_TEMP/polaris-ubuntu-archives"
+          snapshot_archives="/var/tmp/polaris-ubuntu-archives"
           mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial" "$snapshot_archives/partial"
           sudo chown -R _apt:root "$snapshot_archives/partial"
           cat > "$snapshot_sources" <<EOF
