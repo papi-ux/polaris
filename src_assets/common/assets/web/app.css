@@ -321,6 +321,68 @@ textarea {
   @apply xl:justify-end;
 }
 
+/* Compact context cards used beside page headings. Keep the System summary
+   visually attached to its heading instead of letting its three articles
+   collapse into an unstyled text column. */
+.system-page-header,
+.security-page-header {
+  align-items: flex-start;
+}
+
+.system-toolbar-notes {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.header-support-card {
+  min-width: 0;
+  height: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--edge-raised);
+  border-radius: 0.75rem;
+  background: var(--surface-raised);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.header-support-title-row {
+  @apply flex items-center justify-between gap-2;
+}
+
+.header-support-value {
+  @apply mt-2 break-words text-base font-semibold leading-tight text-silver;
+}
+
+.header-support-copy {
+  @apply mt-1 text-xs leading-relaxed text-storm;
+}
+
+.security-header-card {
+  width: 100%;
+}
+
+@media (min-width: 40rem) {
+  .system-toolbar-notes {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 80rem) {
+  .system-page-header {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(36rem, 1.2fr);
+    gap: 1.5rem;
+  }
+
+  .security-header-card {
+    width: auto;
+    min-width: 20rem;
+    max-width: 24.375rem;
+  }
+}
+
 .section-title-row {
   @apply flex min-w-0 items-center gap-2;
 }
