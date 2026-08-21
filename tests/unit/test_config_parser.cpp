@@ -25,6 +25,35 @@ namespace {
   }
 }  // namespace
 
+TEST(ConfigParserTests, BooleanValuesParseRegardlessOfCase) {
+  // The lowercasing in to_bool() was a no-op, so every capitalized spelling in a
+  // hand-edited polaris.conf read as false without saying anything.
+  EXPECT_EQ(config::parse_bool("Enabled"), std::optional<bool> {true});
+  EXPECT_EQ(config::parse_bool("TRUE"), std::optional<bool> {true});
+  EXPECT_EQ(config::parse_bool("On"), std::optional<bool> {true});
+  EXPECT_EQ(config::parse_bool("Disabled"), std::optional<bool> {false});
+  EXPECT_EQ(config::parse_bool("OFF"), std::optional<bool> {false});
+}
+
+TEST(ConfigParserTests, DocumentedBooleanSpellingsParseBothWays) {
+  for (const auto *value : {"true", "yes", "enable", "enabled", "on", "1"}) {
+    EXPECT_EQ(config::parse_bool(value), std::optional<bool> {true}) << value;
+  }
+
+  for (const auto *value : {"false", "no", "disable", "disabled", "off", "0"}) {
+    EXPECT_EQ(config::parse_bool(value), std::optional<bool> {false}) << value;
+  }
+}
+
+TEST(ConfigParserTests, AValueThatIsNotABooleanIsReportedRatherThanReadAsFalse) {
+  // #517, found via #409: linux_capture_profile = gpu_native is a mode name on a
+  // boolean key. It read as false, capture telemetry stayed off, and nothing in
+  // the log said the value had been rejected.
+  EXPECT_FALSE(config::parse_bool("gpu_native").has_value());
+  EXPECT_FALSE(config::parse_bool("sometimes").has_value());
+  EXPECT_FALSE(config::parse_bool("").has_value());
+}
+
 TEST(ConfigParserTests, PlausibleBackButtonTimeoutsAreNotWarnedAbout) {
   // -1 is the documented way to disable Home emulation, and any other negative
   // value disables it too, so neither is a mistake.
