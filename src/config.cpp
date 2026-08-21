@@ -1001,17 +1001,42 @@ namespace config {
     }
   }
 
-  bool to_bool(std::string &boolean) {
-    std::for_each(std::begin(boolean), std::end(boolean), [](char ch) {
-      return (char) std::tolower(ch);
+  std::optional<bool> parse_bool(std::string_view value) {
+    std::string normalized {value};
+    std::transform(std::begin(normalized), std::end(normalized), std::begin(normalized), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
     });
 
-    return boolean == "true"sv ||
-           boolean == "yes"sv ||
-           boolean == "enable"sv ||
-           boolean == "enabled"sv ||
-           boolean == "on"sv ||
-           (std::find(std::begin(boolean), std::end(boolean), '1') != std::end(boolean));
+    if (normalized == "true"sv ||
+        normalized == "yes"sv ||
+        normalized == "enable"sv ||
+        normalized == "enabled"sv ||
+        normalized == "on"sv ||
+        normalized == "1"sv) {
+      return true;
+    }
+
+    if (normalized == "false"sv ||
+        normalized == "no"sv ||
+        normalized == "disable"sv ||
+        normalized == "disabled"sv ||
+        normalized == "off"sv ||
+        normalized == "0"sv) {
+      return false;
+    }
+
+    return std::nullopt;
+  }
+
+  bool to_bool(std::string &boolean) {
+    if (const auto parsed = parse_bool(boolean)) {
+      return *parsed;
+    }
+
+    // What unrecognized values have always meant: a stray '1' anywhere in the
+    // text reads as true. Kept so that no existing config file changes meaning,
+    // and reported by bool_f rather than left silent.
+    return std::find(std::begin(boolean), std::end(boolean), '1') != std::end(boolean);
   }
 
   void bool_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, bool &input) {
@@ -1020,6 +1045,11 @@ namespace config {
 
     if (tmp.empty()) {
       return;
+    }
+
+    if (!parse_bool(tmp)) {
+      BOOST_LOG(warning) << "config: "sv << name << " expects a boolean, got: "sv << tmp
+                         << " (use enabled or disabled)"sv;
     }
 
     input = to_bool(tmp);
