@@ -18,9 +18,36 @@ marker="$rt/polaris-gamescope.pid"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus"
 # Module option services.polarisGamescopeSession.hdr — allow force-HDR path at all.
 allow_client_hdr=1
-gs_width="${POLARIS_HDR_WIDTH:-3840}"
-gs_height="${POLARIS_HDR_HEIGHT:-2160}"
-gs_refresh="${POLARIS_HDR_REFRESH:-120}"
+
+polaris_valid_dimension() {
+  [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+polaris_valid_refresh() {
+  [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+    [[ ! "${1:-}" =~ ^0+([.]0+)?$ ]]
+}
+
+polaris_first_valid_geometry_value() {
+  local validator="$1" candidate
+  shift
+  for candidate in "$@"; do
+    if "$validator" "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Prefer the final negotiated/render geometry published by Polaris. Retain the
+# legacy HDR overrides and 4K120 defaults for standalone/manual helper use.
+gs_width="$(polaris_first_valid_geometry_value polaris_valid_dimension \
+  "${POLARIS_SESSION_TARGET_WIDTH:-}" "${POLARIS_HDR_WIDTH:-}" 3840)"
+gs_height="$(polaris_first_valid_geometry_value polaris_valid_dimension \
+  "${POLARIS_SESSION_TARGET_HEIGHT:-}" "${POLARIS_HDR_HEIGHT:-}" 2160)"
+gs_refresh="$(polaris_first_valid_geometry_value polaris_valid_refresh \
+  "${POLARIS_SESSION_TARGET_FPS:-}" "${POLARIS_HDR_REFRESH:-}" 120)"
 
 session_id_file="$rt/polaris-gamescope-session-id"
 session_mode_file="$rt/polaris-gamescope-session-mode"
