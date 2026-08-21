@@ -13,6 +13,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   POLARIS_CHECKOUT_REF: ${{ inputs.release_tag || github.ref }}
   POLARIS_PACKAGE_REF_NAME: ${{ inputs.release_tag || github.ref_name }}
@@ -136,6 +140,14 @@ jobs:
           node-version: '22'
           cache: npm
 
+      - name: Cache Ubuntu package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/polaris-ubuntu-archives
+          key: polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-
+
       - name: Install dependencies
         # This suite installs the larger dependency set; the pinned snapshot
         # completed in 18m03s on the first protected run, but the snapshot
@@ -146,7 +158,9 @@ jobs:
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
           snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
-          mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial"
+          snapshot_archives="$RUNNER_TEMP/polaris-ubuntu-archives"
+          mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial" "$snapshot_archives/partial"
+          sudo chown -R _apt:root "$snapshot_archives/partial"
           cat > "$snapshot_sources" <<EOF
           Types: deb
           URIs: https://snapshot.ubuntu.com/ubuntu/$UBUNTU_APT_SNAPSHOT/
@@ -158,6 +172,7 @@ jobs:
             -o "Dir::Etc::sourcelist=$snapshot_sources"
             -o "Dir::Etc::sourceparts=$snapshot_source_parts"
             -o "Dir::State::Lists=$snapshot_lists"
+            -o "Dir::Cache::archives=$snapshot_archives"
             -o APT::Update::Error-Mode=any
             -o Acquire::Retries=3
             -o Acquire::http::Timeout=30
@@ -174,7 +189,8 @@ jobs:
             libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
             libappindicator3-dev libgtk-3-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-            nodejs npm wayland-protocols
+            wayland-protocols
+          sudo chmod -R a+rX "$snapshot_archives"
 
       - name: Configure sanitizer build
         run: |
@@ -839,6 +855,14 @@ jobs:
           node-version: '22'
           cache: npm
 
+      - name: Cache Ubuntu package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/polaris-ubuntu-archives
+          key: polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-build-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-build-
+
       - name: Cache C++ compiler outputs
         uses: actions/cache@v6
         with:
@@ -860,7 +884,9 @@ jobs:
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
           snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
-          mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial"
+          snapshot_archives="$RUNNER_TEMP/polaris-ubuntu-archives"
+          mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial" "$snapshot_archives/partial"
+          sudo chown -R _apt:root "$snapshot_archives/partial"
           cat > "$snapshot_sources" <<EOF
           Types: deb
           URIs: https://snapshot.ubuntu.com/ubuntu/$UBUNTU_APT_SNAPSHOT/
@@ -872,6 +898,7 @@ jobs:
             -o "Dir::Etc::sourcelist=$snapshot_sources"
             -o "Dir::Etc::sourceparts=$snapshot_source_parts"
             -o "Dir::State::Lists=$snapshot_lists"
+            -o "Dir::Cache::archives=$snapshot_archives"
             -o APT::Update::Error-Mode=any
             -o Acquire::Retries=3
             -o Acquire::http::Timeout=30
@@ -890,6 +917,7 @@ jobs:
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             golang-go \
             wayland-protocols
+          sudo chmod -R a+rX "$snapshot_archives"
 
       - name: Configure
         run: |
