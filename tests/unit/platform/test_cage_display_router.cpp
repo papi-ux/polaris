@@ -574,6 +574,59 @@ TEST(CageDisplayRouterPolicyTests, HeadlessDmabufGpuConversionFailureDisablesExt
   ));
 }
 
+TEST(CageDisplayRouterPolicyTests, InitialImageConversionFailureRetiresASelectedHeadlessDmabufRoute) {
+  // #409: the initial image is a dummy allocation, so it carries no capture
+  // metadata and the steady-state predicate cannot see it. A GPU-native route
+  // that cannot convert it delivers no frames at all.
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_disable_headless_extcopy_after_initial_conversion_failure(
+    runtime_state,
+    std::optional<bool> {true}
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, InitialImageConversionFailureDoesNotRetireARouteThatWasNeverSelected) {
+  // This is also what keeps the retirement from repeating: once the route is
+  // retired the cached result reads false, so the reinitialized SHM attempt
+  // cannot retire anything a second time and reinit cannot loop.
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_FALSE(cage_display_router::should_disable_headless_extcopy_after_initial_conversion_failure(
+    runtime_state,
+    std::optional<bool> {false}
+  ));
+  EXPECT_FALSE(cage_display_router::should_disable_headless_extcopy_after_initial_conversion_failure(
+    runtime_state,
+    std::nullopt
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, InitialImageConversionFailureLeavesTheWindowedOverrideAlone) {
+  // The windowed GPU-native override owns its own probe and its own fallback.
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_FALSE(cage_display_router::should_disable_headless_extcopy_after_initial_conversion_failure(
+    runtime_state,
+    std::optional<bool> {true}
+  ));
+}
+
 TEST(CageDisplayRouterPolicyTests, NonHeadlessDmabufConversionFailureDoesNotDisableExtcopyFallback) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,

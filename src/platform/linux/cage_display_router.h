@@ -209,6 +209,29 @@ namespace cage_display_router {
   );
 
   /**
+   * @brief Returns whether a failure to convert the session's initial image
+   *        should disable the true-headless ext-image-copy DMA-BUF path.
+   *
+   * The initial image is a dummy allocation rather than a captured frame, so it
+   * carries no capture metadata to attribute the failure to. What it does prove
+   * is that the encode device selected for the GPU-native route cannot convert
+   * on this host, which is the same conclusion by a shorter path.
+   *
+   * Without this the session simply ends. The retirement in #409 was wired to
+   * the steady-state loop only, so a route that failed on the very first
+   * conversion took the encode run down with it: no retirement, no SHM retry,
+   * and a client that connects and then receives nothing.
+   *
+   * The cached probe result is required to be a positive, so a route that was
+   * never selected is never retired and the reinitialized SHM attempt cannot
+   * retire itself a second time.
+   */
+  bool should_disable_headless_extcopy_after_initial_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    std::optional<bool> cached_extcopy_dmabuf_probe_result
+  );
+
+  /**
    * @brief Returns the cached result of the windowed GPU-native probe for the
    *        current Polaris process, if one exists.
    */

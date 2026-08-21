@@ -973,6 +973,15 @@ namespace cage_display_router {
            source_metadata.residency == platf::frame_residency_e::gpu;
   }
 
+  bool should_disable_headless_extcopy_after_initial_conversion_failure(
+    const platf::runtime_state_t &runtime_state,
+    std::optional<bool> cached_extcopy_dmabuf_probe_result
+  ) {
+    return runtime_state.effective_headless &&
+           !runtime_state.gpu_native_override_active &&
+           cached_extcopy_dmabuf_probe_result == std::optional<bool> {true};
+  }
+
   std::optional<bool> cached_windowed_gpu_native_probe_result() {
     return windowed_gpu_native_probe.get();
   }
