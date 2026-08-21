@@ -122,6 +122,10 @@ namespace stream_runtime {
       const platf::runtime_state_t &runtime_state,
       const platf::frame_metadata_t &source_metadata
     );
+    bool should_disable_headless_extcopy_after_initial_conversion_failure(
+      const platf::runtime_state_t &runtime_state,
+      std::optional<bool> cached_extcopy_dmabuf_probe_result
+    );
     std::optional<bool> cached_windowed_gpu_native_probe_result();
     std::optional<bool> cached_headless_extcopy_dmabuf_probe_result();
     void update_windowed_gpu_native_probe_result(bool supported);
