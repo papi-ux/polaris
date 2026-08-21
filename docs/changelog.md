@@ -9,6 +9,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Sizes nested Gamescope sessions to the final negotiated render width, height, and frame rate instead of imposing the standalone 4K120 fallback on every client
 - Prevents Nova launches from crashing when headless cage startup sees an already-counted session before encoder selection by forcing the deferred cage probe whenever no encoder is selected, stopping capture safely if that invariant is ever violated, and keeping encoder probing or reset exclusive with active capture
 - Detects when local Steam Input settings can claim the Polaris Xbox virtual controller during strict gamepad isolation, reports the conflict and PII-free aggregate evidence in Doctor, and points to the host-wide and per-game Steam settings without changing them automatically
 
