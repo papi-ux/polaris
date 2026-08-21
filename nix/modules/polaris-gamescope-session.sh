@@ -25,6 +25,37 @@ gs_refresh="${POLARIS_HDR_REFRESH:-120}"
 session_id_file="$rt/polaris-gamescope-session-id"
 session_mode_file="$rt/polaris-gamescope-session-mode"
 session_state_file="$rt/polaris-gamescope-session-state"
+session_operation_lock="$rt/polaris-gamescope-session-operation.lock"
+
+acquire_session_operation_lock() {
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" fd_identity path_identity
+  if [ "${POLARIS_SESSION_OPERATION_LOCK_HELD:-0}" = 1 ]; then
+    fd_identity="$(stat -Lc '%d:%i' "/proc/$BASHPID/fd/7" 2>/dev/null || true)"
+    path_identity="$(stat -Lc '%d:%i' "$session_operation_lock" 2>/dev/null || true)"
+    if [ -n "$fd_identity" ] && [ "$fd_identity" = "$path_identity" ]; then
+      return 0
+    fi
+  fi
+  unset POLARIS_SESSION_OPERATION_LOCK_HELD
+  exec 7>>"$session_operation_lock" || return 1
+  "$lock_bin" -x 7 || return 1
+  export POLARIS_SESSION_OPERATION_LOCK_HELD=1
+}
+
+run_without_session_operation_lock() {
+  exec 7>&-
+  unset POLARIS_SESSION_OPERATION_LOCK_HELD
+  exec "$@"
+}
+
+wait_for_nested_gamescope_exit() {
+  local _
+  for _ in $(seq 1 "${POLARIS_NESTED_GRACE_STEPS:-20}"); do
+    polaris_validate_marker "$marker" nested || return 0
+    sleep 0.1
+  done
+  ! polaris_validate_marker "$marker" nested
+}
 
 publish_nested_claim() (
   local new_state="$1" expected_state="${2:-absent}"
@@ -223,6 +254,10 @@ steam_app_game_alive() {
 
 case "${1:-}" in
   start)
+    acquire_session_operation_lock || {
+      echo "polaris-gamescope-session: could not serialize session start" >&2
+      exit 1
+    }
     requested_session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
     [ -n "$requested_session_id" ] || {
       echo "polaris-gamescope-session: missing immutable session credential" >&2
@@ -461,22 +496,22 @@ case "${1:-}" in
         echo "polaris-gamescope-session: ownership transition changed before nested launch" >&2
         exit 1
       }
-      setsid env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
-        "${child_env[@]}" "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
-        --backend headless \
-        "${steam_flags[@]}" \
-        --xwayland-count 2 \
-        "${prefer_vk[@]}" \
-        "${hdr_flags[@]}" \
-        -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
-        -w "$gs_width" -h "$gs_height" \
-        -- "${steam_launch[@]}" \
-        >"$steam_log" 2>&1 &
+      (
+        run_without_session_operation_lock setsid env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
+          "${child_env[@]}" "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
+          --backend headless \
+          "${steam_flags[@]}" \
+          --xwayland-count 2 \
+          "${prefer_vk[@]}" \
+          "${hdr_flags[@]}" \
+          -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
+          -w "$gs_width" -h "$gs_height" \
+          -- "${steam_launch[@]}"
+      ) >"$steam_log" 2>&1 &
       nested_launch_pid=$!
 
-      # Resolve the real headless gamescope PID. setsid/env/wrapProgram may leave
-      # $! as a launcher; preserve that PID as the private PGID/SID and pin the
-      # separately discovered compositor generation in the marker.
+      # The one explicit subshell execs setsid, so $! remains the private PGID/SID
+      # leader across env/wrapProgram execs. Resolve and pin the compositor itself.
       resolve_nested_gamescope_pid() {
         local root="$1" p
         if polaris_headless_gamescope_pid "$root" 2>/dev/null; then
@@ -611,26 +646,28 @@ case "${1:-}" in
       # captures empty gamescope → black stream (measured 2026-07-14).
       # Do not pass host WAYLAND_DISPLAY; do not enable FROG WSI here.
       echo "polaris-gamescope-session: attach Steam on DISPLAY=${DISPLAY:-:1} (X11 only, host Wayland stripped)" >&2
-      setsid -f env \
-        -u WAYLAND_DISPLAY \
-        -u CLUTTER_BACKEND \
-        -u ELECTRON_OZONE_PLATFORM_HINT \
-        -u MOZ_ENABLE_WAYLAND \
-        -u ENABLE_GAMESCOPE_WSI \
-        -u ENABLE_HDR_WSI \
-        DISPLAY="${DISPLAY:-:1}" \
-        GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
-        PULSE_SINK="$audio_sink" \
-        PIPEWIRE_NODE="$audio_sink" \
-        POLARIS_SESSION_AUDIO_SINK="$audio_sink" \
-        STEAM_MULTIPLE_XWAYLANDS=1 \
-        QT_QPA_PLATFORM=xcb \
-        GDK_BACKEND=x11 \
-        SDL_VIDEODRIVER=x11 \
-        XDG_SESSION_TYPE=x11 \
-        "${hdr_steam_env[@]}" \
-        setpriv --inh-caps=-all --ambient-caps=-all -- \
-        "${steam_launch[@]}" >"$steam_log" 2>&1
+      (
+        run_without_session_operation_lock setsid -f env \
+          -u WAYLAND_DISPLAY \
+          -u CLUTTER_BACKEND \
+          -u ELECTRON_OZONE_PLATFORM_HINT \
+          -u MOZ_ENABLE_WAYLAND \
+          -u ENABLE_GAMESCOPE_WSI \
+          -u ENABLE_HDR_WSI \
+          DISPLAY="${DISPLAY:-:1}" \
+          GAMESCOPE_WAYLAND_DISPLAY=gamescope-0 \
+          PULSE_SINK="$audio_sink" \
+          PIPEWIRE_NODE="$audio_sink" \
+          POLARIS_SESSION_AUDIO_SINK="$audio_sink" \
+          STEAM_MULTIPLE_XWAYLANDS=1 \
+          QT_QPA_PLATFORM=xcb \
+          GDK_BACKEND=x11 \
+          SDL_VIDEODRIVER=x11 \
+          XDG_SESSION_TYPE=x11 \
+          "${hdr_steam_env[@]}" \
+          setpriv --inh-caps=-all --ambient-caps=-all -- \
+          "${steam_launch[@]}"
+      ) >"$steam_log" 2>&1
       sleep 2
     fi
     ;;
@@ -682,6 +719,21 @@ case "${1:-}" in
     done
     ;;
   stop)
+    acquire_session_operation_lock || {
+      echo "polaris-gamescope-session: could not serialize session stop" >&2
+      exit 1
+    }
+    if [ ! -e "$session_state_file" ] \
+        && [ ! -s "$session_id_file" ] \
+        && [ ! -f "$session_mode_file" ] \
+        && [ ! -f "$rt/polaris-gamescope-wsi-nested" ]; then
+      if polaris_validate_marker "$marker" nested; then
+        echo "polaris-gamescope-session: nested owner remains without a durable recovery claim" >&2
+        exit 1
+      fi
+      echo "polaris-gamescope-session: stop already complete" >&2
+      exit 0
+    fi
     load_session_instance_id || {
       echo "polaris-gamescope-session: missing or mismatched session credential during stop" >&2
       exit 1
@@ -736,10 +788,23 @@ case "${1:-}" in
           ;;
         1|nested)
           echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
+          if ! kill_session_steam || ! session_steam_absent; then
+            echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
+            exit 1
+          fi
           if polaris_validate_marker "$marker" nested; then
-            if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
-              echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
-              exit 1
+            if wait_for_nested_gamescope_exit; then
+              echo "polaris-gamescope-session: nested gamescope exited after exact-session Steam shutdown" >&2
+              if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+                echo "polaris-gamescope-session: nested exit left non-reclaimable sockets; retaining recovery claim" >&2
+                exit 1
+              fi
+            else
+              echo "polaris-gamescope-session: nested gamescope did not exit after child shutdown; using exact-generation fallback" >&2
+              if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
+                echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
+                exit 1
+              fi
             fi
           else
             # Nested generation already dead (host hang dump, gamescope crash, or
@@ -751,10 +816,6 @@ case "${1:-}" in
               exit 1
             fi
             echo "polaris-gamescope-session: nested marker invalid/dead; sockets orphan or absent — restoring idle" >&2
-          fi
-          if ! kill_session_steam || ! session_steam_absent; then
-            echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
-            exit 1
           fi
           publish_nested_claim restore-idle "$claim_state" || {
             echo "polaris-gamescope-session: transition claim changed before idle restoration" >&2
