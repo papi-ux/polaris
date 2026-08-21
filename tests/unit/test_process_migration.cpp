@@ -406,10 +406,16 @@ TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunc
   ASSERT_NE(app_env_loop, std::string::npos);
   const auto reserved_filter = body.find("is_reserved_session_env_key(key)", app_env_loop);
   ASSERT_NE(reserved_filter, std::string::npos);
-  const auto credential_reassert = body.find("set_child_only_session_env_var(", credential + 1);
+  const auto credential_reassert = body.find("set_child_only_session_env_var(", app_env_loop);
   ASSERT_NE(credential_reassert, std::string::npos);
+  const auto credential_reassert_key = body.find(
+    "\"POLARIS_SESSION_INSTANCE_ID\"",
+    credential_reassert
+  );
+  ASSERT_NE(credential_reassert_key, std::string::npos);
   EXPECT_LT(app_env_loop, reserved_filter);
   EXPECT_LT(reserved_filter, credential_reassert);
+  EXPECT_LT(credential_reassert_key, credential_reassert + 512);
   EXPECT_NE(body.find("platf::unset_env(\"POLARIS_SESSION_INSTANCE_ID\")", app_env_loop), std::string::npos);
 }
 
@@ -4683,6 +4689,27 @@ TEST(GamescopeNestedSessionContract, StartupUsesItsOwnVisibleTimeoutAndTheNixMod
   EXPECT_NE(source.find("prep_output = stderr;"), std::string::npos);
   EXPECT_NE(source.find("Nested gamescope startup timed out after "), std::string::npos);
   EXPECT_EQ(options.find("injectApps"), std::string::npos);
+}
+
+TEST(GamescopeNestedSessionContract, FinalGeometryReachesTheHelperBeforePrepStarts) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  const auto execute_end = source.find("int proc_t::running()", execute_start);
+  ASSERT_NE(execute_start, std::string::npos);
+  ASSERT_NE(execute_end, std::string::npos);
+  const auto execute = source.substr(execute_start, execute_end - execute_start);
+
+  const auto width = execute.find("\"POLARIS_SESSION_TARGET_WIDTH\"");
+  const auto height = execute.find("\"POLARIS_SESSION_TARGET_HEIGHT\"");
+  const auto fps = execute.find("\"POLARIS_SESSION_TARGET_FPS\"");
+  const auto prep = execute.find("for (; _app_prep_it != std::end(_app.prep_cmds);");
+  ASSERT_NE(width, std::string::npos);
+  ASSERT_NE(height, std::string::npos);
+  ASSERT_NE(fps, std::string::npos);
+  ASSERT_NE(prep, std::string::npos);
+  EXPECT_LT(width, prep);
+  EXPECT_LT(height, prep);
+  EXPECT_LT(fps, prep);
 }
 
 TEST(HeadlessDongleContract, HeadlessDongleReachesTopologyPrepareWithoutAutoManageAlreadyOn) {

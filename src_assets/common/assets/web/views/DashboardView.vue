@@ -94,12 +94,16 @@
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div class="min-w-0">
               <div class="section-kicker">{{ $t('dashboard.doctor') }}</div>
-              <div class="mt-2 flex flex-wrap items-center gap-2">
-                <span class="inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
+              <div class="mt-2 flex min-w-0 items-start gap-2">
+                <span class="mt-1.5 inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
                 <h3 class="text-xl font-semibold leading-tight text-silver">{{ doctorHeadline }}</h3>
-                <span v-if="doctorConfidenceLabel" class="control-chip">{{ doctorConfidenceLabel }}</span>
-                <span class="meta-pill" :class="autoQuality.toneClass">{{ autoQuality.compactLabel }}</span>
-                <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
+              </div>
+              <div class="mt-3 flex flex-wrap items-center gap-2" data-dashboard-doctor-meta role="list" aria-label="Doctor confidence and Auto Quality status">
+                <div v-if="doctorConfidenceLabel" class="control-chip" role="listitem">{{ doctorConfidenceLabel }}</div>
+                <div class="meta-pill" :class="autoQuality.toneClass" role="listitem">{{ autoQuality.compactLabel }}</div>
+                <div class="inline-flex" role="listitem">
+                  <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
+                </div>
               </div>
               <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ doctorRecommendation }}</p>
               <p v-if="doctorExplanation" class="mt-3 max-w-3xl rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-sm leading-relaxed text-silver">

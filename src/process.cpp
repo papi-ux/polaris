@@ -6900,6 +6900,29 @@ namespace proc {
       "POLARIS_SESSION_INSTANCE_ID",
       _session_instance_id
     );
+    if (nested_wsi_session) {
+      // Prep runs before the general session environment is published below.
+      // Give the nested compositor the final scaled render geometry before its
+      // start helper executes, without leaking it into the daemon environment.
+      set_child_only_session_env_var(
+        _env,
+        _session_env_keys,
+        "POLARIS_SESSION_TARGET_WIDTH",
+        std::to_string(launch_session->width)
+      );
+      set_child_only_session_env_var(
+        _env,
+        _session_env_keys,
+        "POLARIS_SESSION_TARGET_HEIGHT",
+        std::to_string(launch_session->height)
+      );
+      set_child_only_session_env_var(
+        _env,
+        _session_env_keys,
+        "POLARIS_SESSION_TARGET_FPS",
+        format_session_fps(launch_session->fps)
+      );
+    }
 #endif
 
     std::error_code ec;
