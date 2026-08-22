@@ -57,7 +57,7 @@ PACKAGE_NAME="$(sed -n 's/^pkgname = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_VERSION="$(sed -n 's/^pkgver = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_IDENTITY="$PACKAGE_NAME|$PACKAGE_VERSION|$PACKAGE_ARCH"
-if [ "$PACKAGE_IDENTITY" != 'polaris|1.3.11-1|x86_64' ]; then
+if [ "$PACKAGE_IDENTITY" != 'polaris|1.3.12-1|x86_64' ]; then
   printf 'unexpected SteamOS package identity: %s\n' "$PACKAGE_IDENTITY" >&2
   exit 1
 fi

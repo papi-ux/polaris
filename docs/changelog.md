@@ -5,6 +5,17 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.12 - 2026-08-22
+
+An Arch packaging compatibility hotfix. Polaris runtime and protocol behavior remain the v1.3.11 line; this release repairs the published package contract that allowed a Boost 1.91-linked binary to install on a rolling system that already provided Boost 1.92.
+
+- Rebuilds the official Arch package against reviewed Boost 1.92.0-1 inputs while keeping the immutable package snapshot and the current rolling Arch observation as separate gates
+- Declares the five linked Boost providers as exact versioned SONAME dependencies, including `libboost_locale.so=1.92.0-64`, so a future incompatible Boost transition fails during package resolution instead of at process launch
+- Inspects the finished package's ELF `NEEDED` entries and requires every Boost SONAME to have a matching package dependency
+- Installs the exact finished package against current rolling Arch, requires `ldd` to report zero unresolved libraries, and launches `polaris --version` before release publication can proceed
+- Contains no Polaris runtime-code, protocol, configuration, or Nova client change; existing v1.3.11 configuration and Nova v1.3.7 pairing remain compatible
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+
 ## v1.3.11 - 2026-08-19
 
 A support, private-runtime recovery, display-truth, and reproducibility patch. Polaris can now preserve the evidence around crashes and silent failures, accept a bounded report from an authenticated paired client, recover private Steam and owned Gamescope reconnects, find Flatpak Heroic and Lutris libraries, keep PipeWire VAAPI capture on the safe SHM path by default, and stop describing requested display state as applied until the compositor reports it back.
