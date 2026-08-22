@@ -91,11 +91,13 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
     std::string original_runtime_dir;
     std::string original_pid_file;
     std::string original_compositor_pid_file;
+    std::string original_escape_child;
     bool had_path;
     bool had_home;
     bool had_runtime_dir;
     bool had_pid_file;
     bool had_compositor_pid_file;
+    bool had_escape_child;
     fs::path root;
     std::vector<pid_t> cleanup_pids;
 
@@ -120,6 +122,7 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
       restore_env("XDG_RUNTIME_DIR", original_runtime_dir, had_runtime_dir);
       restore_env("FAKE_LABWC_CHILD_PID_FILE", original_pid_file, had_pid_file);
       restore_env("FAKE_LABWC_COMPOSITOR_PID_FILE", original_compositor_pid_file, had_compositor_pid_file);
+      restore_env("FAKE_LABWC_ESCAPE_CHILD", original_escape_child, had_escape_child);
       std::error_code ec;
       fs::remove_all(root, ec);
     }
@@ -130,6 +133,7 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
   const auto *runtime_env = std::getenv("XDG_RUNTIME_DIR");
   const auto *pid_file_env = std::getenv("FAKE_LABWC_CHILD_PID_FILE");
   const auto *compositor_pid_file_env = std::getenv("FAKE_LABWC_COMPOSITOR_PID_FILE");
+  const auto *escape_child_env = std::getenv("FAKE_LABWC_ESCAPE_CHILD");
   cleanup_t cleanup {
     .linux_display = config::video.linux_display,
     .original_path = path_env ? path_env : "",
@@ -137,11 +141,13 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
     .original_runtime_dir = runtime_env ? runtime_env : "",
     .original_pid_file = pid_file_env ? pid_file_env : "",
     .original_compositor_pid_file = compositor_pid_file_env ? compositor_pid_file_env : "",
+    .original_escape_child = escape_child_env ? escape_child_env : "",
     .had_path = path_env != nullptr,
     .had_home = home_env != nullptr,
     .had_runtime_dir = runtime_env != nullptr,
     .had_pid_file = pid_file_env != nullptr,
     .had_compositor_pid_file = compositor_pid_file_env != nullptr,
+    .had_escape_child = escape_child_env != nullptr,
     .root = fs::temp_directory_path() / ("polaris-cage-external-exit-" + std::to_string(getpid())),
   };
   auto remove_cleanup_pid = [&](pid_t pid) {
@@ -176,7 +182,15 @@ if len(sys.argv) > 1 and sys.argv[1] == "-V":
 socket_path = os.path.join(os.environ["XDG_RUNTIME_DIR"], f"wayland-{(os.getpid() % 10000) + 100}")
 wayland_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 wayland_socket.bind(socket_path)
-worker = subprocess.Popen(["sleep", "60"])
+escape_child = os.environ.get("FAKE_LABWC_ESCAPE_CHILD") == "1"
+worker_command = ["sleep", "60"]
+if escape_child:
+    worker_command = [
+        sys.executable,
+        "-c",
+        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+    ]
+worker = subprocess.Popen(worker_command, start_new_session=escape_child)
 with open(os.environ["FAKE_LABWC_COMPOSITOR_PID_FILE"], "w", encoding="utf-8") as out:
     out.write(f"{os.getpid()}\n")
 with open(os.environ["FAKE_LABWC_CHILD_PID_FILE"], "w", encoding="utf-8") as out:
@@ -275,6 +289,46 @@ exit 0
       remove_cleanup_pid(worker);
     }
   }
+
+  // labwc may launch its startup client into a separate session. The
+  // supervisor is a child subreaper, so that client becomes its direct child
+  // when labwc exits even though it is outside the anchored process group.
+  // Teardown must drain that exact adopted descendant before the supervisor
+  // exits; otherwise the client is reparented to systemd and survives.
+  ASSERT_EQ(setenv("FAKE_LABWC_ESCAPE_CHILD", "1", 1), 0);
+  std::error_code escaped_ec;
+  fs::remove(pid_file, escaped_ec);
+  fs::remove(compositor_pid_file, escaped_ec);
+  ASSERT_TRUE(cage_display_router::start(
+    1280,
+    720,
+    60,
+    "",
+    false,
+    false,
+    "escaped-startup-client"
+  ));
+  const auto escaped_supervisor_pid = cage_display_router::get_pid();
+  ASSERT_GT(escaped_supervisor_pid, 0);
+  const auto escaped_compositor_pid = wait_for_pid_file(compositor_pid_file);
+  ASSERT_GT(escaped_compositor_pid, 0);
+  const auto escaped_worker_pid = wait_for_pid_file(pid_file);
+  ASSERT_GT(escaped_worker_pid, 0);
+  cleanup.cleanup_pids.push_back(escaped_worker_pid);
+  EXPECT_EQ(getpgid(escaped_worker_pid), escaped_worker_pid);
+  EXPECT_EQ(getsid(escaped_worker_pid), escaped_worker_pid);
+  EXPECT_NE(getpgid(escaped_worker_pid), escaped_supervisor_pid);
+
+  ASSERT_EQ(kill(escaped_compositor_pid, SIGTERM), 0);
+  ASSERT_TRUE(wait_for_router_exit(std::chrono::seconds(3)));
+  cage_display_router::stop();
+  const bool escaped_worker_exited = wait_for_process_exit(escaped_worker_pid, std::chrono::seconds(2));
+  EXPECT_TRUE(escaped_worker_exited)
+    << "external labwc exit leaked separate-session startup client pid " << escaped_worker_pid;
+  if (escaped_worker_exited) {
+    remove_cleanup_pid(escaped_worker_pid);
+  }
+  ASSERT_EQ(unsetenv("FAKE_LABWC_ESCAPE_CHILD"), 0);
 
   // A compositor that cannot honor SIGTERM must still be drained by the
   // supervisor's bounded escalation, not abandoned when stop() gives up.
