@@ -68,10 +68,10 @@ namespace cage_display_router {
 #endif
 
   // The direct child tracked by cage_pid is a tiny supervisor and the immutable
-  // leader of the private labwc session/process group. The compositor and every
-  // startup descendant stay inside that anchored group, so a compositor-driven
-  // exit cannot orphan its startup client and parent fallback never has to guess
-  // whether a recycled PGID still belongs to Polaris.
+  // leader of the private labwc session/process group. Normal descendants stay
+  // inside that anchored group. The supervisor is also a child subreaper so a
+  // startup client that creates its own session is adopted and drained without
+  // any global process scan or recycled-PID guesswork.
   static volatile sig_atomic_t supervised_runtime_pid = 0;
   static volatile sig_atomic_t supervisor_stop_requested = 0;
 
@@ -199,10 +199,11 @@ namespace cage_display_router {
    * Keep a stable direct child alive as the private session/process-group anchor.
    *
    * labwc is free to exit from its own menu while its startup client remains
-   * alive. The supervisor subreaps that runtime tree, drains the anchored group,
-   * and exits cleanly once no private descendants remain. If a descendant ignores
-   * graceful teardown, the final group SIGKILL includes the supervisor itself;
-   * the parent still owns and pidfd-tracks that immutable group leader.
+   * alive. The supervisor subreaps that runtime tree, drains the anchored group
+   * plus any adopted direct children that escaped it, and exits cleanly once no
+   * private descendants remain. If a descendant ignores graceful teardown, the
+   * final SIGKILL path covers both ownership classes before the group includes
+   * the supervisor itself.
    */
   [[noreturn]] static void supervise_labwc(
     const std::string &labwc_path,
@@ -252,6 +253,23 @@ namespace cage_display_router {
 
     supervised_runtime_pid = static_cast<sig_atomic_t>(runtime_pid);
     (void) sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
+
+    // A labwc startup client may call setsid() and leave the supervisor's
+    // process group. PR_SET_CHILD_SUBREAPER makes that exact runtime descendant
+    // a direct child when labwc exits. `/proc/.../children` is therefore a
+    // generation-scoped ownership source: unlike a global process scan, it
+    // cannot select an unrelated process that merely resembles the workload.
+    auto signal_direct_children = [](int signal_number) {
+      std::ifstream input {
+        "/proc/self/task/" + std::to_string(getpid()) + "/children"
+      };
+      pid_t child = 0;
+      while (input >> child) {
+        if (child > 1 && child != getpid()) {
+          (void) kill(child, signal_number);
+        }
+      }
+    };
 
     siginfo_t exit_info {};
     bool observed_exit = false;
@@ -305,6 +323,13 @@ namespace cage_display_router {
         break;
       }
 
+      if (live_children) {
+        // Catch descendants as soon as the subreaper adopts them. Repeating
+        // SIGTERM is harmless for the still-live compositor and closes the
+        // adoption race without widening ownership beyond direct children.
+        signal_direct_children(SIGTERM);
+      }
+
       if (!live_children) {
         supervised_runtime_pid = 0;
         if (runtime_reaped && WIFEXITED(runtime_status)) {
@@ -318,8 +343,10 @@ namespace cage_display_router {
       sleep_without_losing_interrupt_time(25ms);
     }
 
-    // The supervisor is the live, unreaped group leader. Killing its group is
-    // therefore generation-safe and cannot land on a recycled PGID.
+    // Separate-session descendants are outside the process group but remain
+    // exact adopted children. Kill those before killing the immutable group
+    // leader (which intentionally includes this supervisor).
+    signal_direct_children(SIGKILL);
     (void) kill(-getpgrp(), SIGKILL);
     _exit(127);
   }
