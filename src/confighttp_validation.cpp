@@ -105,6 +105,7 @@ namespace confighttp::validation {
       "browser_streaming"sv,
       "capture"sv,
       "cert"sv,
+      "clear_ai_api_key"sv,
       "color_range"sv,
       "client_gamepad_seat_isolation"sv,
       "client_keyboard_mouse_seat_isolation"sv,
@@ -359,6 +360,11 @@ namespace confighttp::validation {
 
       if (!contains(allowed_config_keys, std::string_view {key})) {
         error = "Unsupported config key: " + key;
+        return false;
+      }
+
+      if (key == "clear_ai_api_key" && !value.is_boolean()) {
+        error = "clear_ai_api_key must be a boolean";
         return false;
       }
 
