@@ -37,6 +37,26 @@ TEST(ConfigValidationTests, RejectsUnsupportedConfigKeys) {
   EXPECT_NE(error.find("Unsupported config key"), std::string::npos);
 }
 
+TEST(ConfigValidationTests, AcceptsAiApiKeyClearForPersistence) {
+  nlohmann::json payload = {
+    {"ai_api_key", ""},
+    {"clear_ai_api_key", true}
+  };
+
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+}
+
+TEST(ConfigValidationTests, RejectsNonBooleanAiApiKeyClearFlag) {
+  nlohmann::json payload = {
+    {"clear_ai_api_key", "true"}
+  };
+
+  std::string error;
+  EXPECT_FALSE(confighttp::validation::validate_config_payload(payload, error));
+  EXPECT_NE(error.find("clear_ai_api_key must be a boolean"), std::string::npos);
+}
+
 TEST(ConfigValidationTests, AcceptsBrowserStreamPrimaryAndDeprecatedAliasKeys) {
   nlohmann::json payload = {
     {"browser_streaming", "enabled"},
