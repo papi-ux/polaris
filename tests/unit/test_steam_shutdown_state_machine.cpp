@@ -185,6 +185,101 @@ TEST(SteamShutdownStateMachineTests, ProductionShutdownUsesSingleMonotonicQuiesc
   EXPECT_EQ(shutdown.find("for (int i = 0; i < 50; ++i)"), std::string::npos);
 }
 
+TEST(SteamShutdownStateMachineTests, PrivateCageGracefulShutdownRequiresCompleteSoloExactOwnership) {
+  EXPECT_TRUE(proc::should_request_session_owned_steam_graceful_shutdown_for_tests(
+    true, 1, 0, 0, true
+  ));
+  EXPECT_FALSE(proc::should_request_session_owned_steam_graceful_shutdown_for_tests(
+    false, 1, 0, 0, true
+  ));
+  EXPECT_FALSE(proc::should_request_session_owned_steam_graceful_shutdown_for_tests(
+    true, 0, 0, 0, true
+  ));
+  EXPECT_FALSE(proc::should_request_session_owned_steam_graceful_shutdown_for_tests(
+    true, 2, 0, 0, true
+  ));
+  EXPECT_FALSE(proc::should_request_session_owned_steam_graceful_shutdown_for_tests(
+    true, 1, 1, 0, true
+  ));
+  EXPECT_FALSE(proc::should_request_session_owned_steam_graceful_shutdown_for_tests(
+    true, 1, 0, 1, true
+  ));
+  EXPECT_FALSE(proc::should_request_session_owned_steam_graceful_shutdown_for_tests(
+    true, 1, 0, 0, false
+  ));
+}
+
+TEST(SteamShutdownStateMachineTests, GracefulAttemptDoesNotWaitWhenDispatchFails) {
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(false, true);
+  EXPECT_FALSE(result.root_exited);
+  EXPECT_EQ(result.request_calls, 1U);
+  EXPECT_EQ(result.wait_calls, 0U);
+}
+
+TEST(SteamShutdownStateMachineTests, GracefulAttemptFallsBackWhenExactRootDoesNotExit) {
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(true, false);
+  EXPECT_FALSE(result.root_exited);
+  EXPECT_EQ(result.request_calls, 1U);
+  EXPECT_EQ(result.wait_calls, 1U);
+}
+
+TEST(SteamShutdownStateMachineTests, GracefulAttemptSucceedsOnlyAfterExactRootExit) {
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(true, true);
+  EXPECT_TRUE(result.root_exited);
+  EXPECT_EQ(result.request_calls, 1U);
+  EXPECT_EQ(result.wait_calls, 1U);
+}
+
+TEST(SteamShutdownStateMachineTests, ProductionPrivateCageAttemptsScopedGracefulBeforePidfdFallback) {
+  const auto source = read_source_file("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto cleanup = source_between(
+    source,
+    "bool terminate_session_owned_steam_before_cage_stop_impl(",
+    "bool terminate_gamescope_attached_session_clients("
+  );
+  ASSERT_FALSE(cleanup.empty());
+
+  const auto root_cardinality_guard = cleanup.find("if (ownership.roots.size() != 1)");
+  const auto root_front_access = cleanup.find("ownership.roots.front()");
+  const auto no_unowned_guard = cleanup.find("ownership.unowned.empty()");
+  const auto graceful_request = cleanup.find("attempt_session_owned_steam_graceful_shutdown(");
+  const auto exact_pidfd_fallback = cleanup.find("terminate_pidfds(ownership.roots");
+  ASSERT_NE(root_cardinality_guard, std::string::npos);
+  ASSERT_NE(root_front_access, std::string::npos);
+  ASSERT_NE(no_unowned_guard, std::string::npos);
+  ASSERT_NE(graceful_request, std::string::npos);
+  ASSERT_NE(exact_pidfd_fallback, std::string::npos);
+  EXPECT_LT(root_cardinality_guard, root_front_access);
+  EXPECT_LT(no_unowned_guard, graceful_request);
+  EXPECT_LT(graceful_request, exact_pidfd_fallback);
+  EXPECT_NE(
+    cleanup.find("wait_for_pidfds_exit(", graceful_request),
+    std::string::npos
+  );
+  EXPECT_NE(
+    cleanup.find("private_steam_native_shutdown_timeout", graceful_request),
+    std::string::npos
+  );
+}
+
+TEST(SteamShutdownStateMachineTests, ProductionPrivateSteamRequestUsesSessionEnvironmentAndLiveFifo) {
+  const auto source = read_source_file("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto request = source_between(
+    source,
+    "bool proc_t::request_session_owned_steam_graceful_shutdown_before_cage_stop()",
+    "bool proc_t::terminate_session_owned_steam_before_cage_stop()"
+  );
+  ASSERT_FALSE(request.empty());
+  EXPECT_NE(request.find("_env.find(\"HOME\")"), std::string::npos);
+  EXPECT_NE(request.find("steam_instance_pipe_listener_active"), std::string::npos);
+  EXPECT_NE(request.find("canonical_steam_shutdown_command"), std::string::npos);
+  EXPECT_NE(request.find("platf::run_command"), std::string::npos);
+  EXPECT_NE(request.find(", _env, nullptr"), std::string::npos);
+  EXPECT_NE(request.find("child.detach()"), std::string::npos);
+}
+
 TEST(SteamShutdownStateMachineTests, PostShutdownPolicyRechecksLiveProcessState) {
   const auto source = read_source_file("src/process.cpp");
   ASSERT_FALSE(source.empty());
