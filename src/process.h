@@ -231,6 +231,17 @@ namespace proc {
     std::chrono::milliseconds timeout,
     std::chrono::milliseconds poll_interval
   );
+
+  struct private_steam_graceful_shutdown_test_result_t {
+    bool root_exited = false;
+    std::size_t request_calls = 0;
+    std::size_t wait_calls = 0;
+  };
+
+  private_steam_graceful_shutdown_test_result_t run_private_steam_graceful_shutdown_scenario_for_tests(
+    bool request_dispatched,
+    bool exact_root_exited
+  );
   std::optional<std::string> steam_instance_pipe_path_for_tests(
     const std::optional<std::string> &home_env,
     const std::optional<std::string> &account_home
@@ -265,6 +276,13 @@ namespace proc {
     bool session_owned_steam_client_active,
     bool unowned_steam_client_active,
     bool ownership_capture_complete
+  );
+  bool should_request_session_owned_steam_graceful_shutdown_for_tests(
+    bool ownership_capture_complete,
+    std::size_t root_count,
+    std::size_t launcher_root_count,
+    std::size_t unowned_count,
+    bool request_available
   );
   bool steam_shutdown_process_is_unowned_active_for_tests(
     std::string_view comm,
@@ -769,6 +787,7 @@ namespace proc {
     );
     void terminate_impl(bool immediate, bool needs_refresh);
 #ifdef __linux__
+    bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
     bool terminate_session_owned_steam_before_cage_stop();
     bool cleanup_tracked_detached_children_after_launch_failure();
     void finalize_isolated_session_runtime(bool runtime_was_stopped_externally);

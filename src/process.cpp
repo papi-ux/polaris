@@ -2057,6 +2057,32 @@ namespace proc {
       }
     };
 
+    using private_steam_graceful_shutdown_request_t = std::function<bool()>;
+    constexpr auto private_steam_native_shutdown_timeout = 10s;
+
+    template<typename Request, typename Wait>
+    bool attempt_session_owned_steam_graceful_shutdown(
+      Request &&request,
+      Wait &&wait_for_exact_root
+    ) {
+      return std::forward<Request>(request)() &&
+             std::forward<Wait>(wait_for_exact_root)();
+    }
+
+    bool should_request_session_owned_steam_graceful_shutdown(
+      bool ownership_capture_complete,
+      std::size_t root_count,
+      std::size_t launcher_root_count,
+      std::size_t unowned_count,
+      bool request_available
+    ) {
+      return ownership_capture_complete &&
+             root_count == 1 &&
+             launcher_root_count == 0 &&
+             unowned_count == 0 &&
+             request_available;
+    }
+
     std::optional<std::size_t> unique_top_level_steam_launcher(
       const std::vector<pidfd_handle_t> &launchers
     ) {
@@ -2294,7 +2320,8 @@ namespace proc {
     bool terminate_session_owned_steam_before_cage_stop_impl(
       const proc::ctx_t &app,
       bool session_owned_cage,
-      std::string_view session_instance_id
+      std::string_view session_instance_id,
+      private_steam_graceful_shutdown_request_t request_graceful_shutdown
     ) {
       const bool steam_context = context_uses_steam(app);
       if (!session_owned_cage || session_instance_id.empty() || !steam_context) {
@@ -2328,17 +2355,55 @@ namespace proc {
         return false;
       }
 
-      if (!ownership.unowned.empty()) {
+      const bool no_unowned_steam = ownership.unowned.empty();
+      if (!no_unowned_steam) {
         BOOST_LOG(info) << "process: leaving "sv << ownership.unowned.size()
                         << " non-session Steam client process(es) running"sv;
       }
 
-      BOOST_LOG(info) << "process: terminating the session-owned Steam client root through pidfd before "sv
-                      << ownership.helpers.size() << " helper process(es)"sv;
-      if (!terminate_pidfds(ownership.roots, 5s, 1s, "private Steam client root"sv)) {
-        BOOST_LOG(warning) << "process: session-owned Steam client root remained after bounded pidfd termination; "sv
-                           << "continuing with isolated cage fallback cleanup"sv;
-        return false;
+      bool root_exited = pidfd_has_exited(ownership.roots.front());
+      if (!root_exited &&
+          no_unowned_steam &&
+          should_request_session_owned_steam_graceful_shutdown(
+            ownership.capture_complete,
+            ownership.roots.size(),
+            ownership.launcher_roots.size(),
+            ownership.unowned.size(),
+            static_cast<bool>(request_graceful_shutdown)
+          )) {
+        BOOST_LOG(info) << "process: requesting session-owned Steam native shutdown before exact pidfd fallback"sv;
+        bool request_dispatched = false;
+        root_exited = attempt_session_owned_steam_graceful_shutdown(
+          [&]() {
+            request_dispatched = request_graceful_shutdown();
+            return request_dispatched;
+          },
+          [&]() {
+            return wait_for_pidfds_exit(
+              ownership.roots,
+              private_steam_native_shutdown_timeout
+            );
+          }
+        );
+        if (root_exited) {
+          BOOST_LOG(info) << "process: session-owned Steam client root exited after native shutdown request"sv;
+        } else if (request_dispatched) {
+          BOOST_LOG(warning) << "process: session-owned Steam native shutdown request did not stop the exact root; "sv
+                             << "falling back to PID-bound SIGTERM"sv;
+        } else {
+          BOOST_LOG(warning) << "process: session-owned Steam native shutdown request was not dispatched; "sv
+                             << "falling back to PID-bound SIGTERM"sv;
+        }
+      }
+
+      if (!root_exited) {
+        BOOST_LOG(info) << "process: terminating the session-owned Steam client root through pidfd before "sv
+                        << ownership.helpers.size() << " helper process(es)"sv;
+        if (!terminate_pidfds(ownership.roots, 5s, 1s, "private Steam client root"sv)) {
+          BOOST_LOG(warning) << "process: session-owned Steam client root remained after bounded pidfd termination; "sv
+                             << "continuing with isolated cage fallback cleanup"sv;
+          return false;
+        }
       }
 
       if (!ownership.helpers.empty()) {
@@ -4629,6 +4694,24 @@ namespace proc {
     return result;
   }
 
+  private_steam_graceful_shutdown_test_result_t run_private_steam_graceful_shutdown_scenario_for_tests(
+    bool request_dispatched,
+    bool exact_root_exited
+  ) {
+    private_steam_graceful_shutdown_test_result_t result;
+    result.root_exited = attempt_session_owned_steam_graceful_shutdown(
+      [&]() {
+        ++result.request_calls;
+        return request_dispatched;
+      },
+      [&]() {
+        ++result.wait_calls;
+        return exact_root_exited;
+      }
+    );
+    return result;
+  }
+
   std::optional<std::string> steam_instance_pipe_path_for_tests(
     const std::optional<std::string> &home_env,
     const std::optional<std::string> &account_home
@@ -4727,6 +4810,22 @@ namespace proc {
       session_owned_steam_client_active,
       unowned_steam_client_active,
       ownership_capture_complete
+    );
+  }
+
+  bool should_request_session_owned_steam_graceful_shutdown_for_tests(
+    bool ownership_capture_complete,
+    std::size_t root_count,
+    std::size_t launcher_root_count,
+    std::size_t unowned_count,
+    bool request_available
+  ) {
+    return should_request_session_owned_steam_graceful_shutdown(
+      ownership_capture_complete,
+      root_count,
+      launcher_root_count,
+      unowned_count,
+      request_available
     );
   }
 
@@ -5339,7 +5438,12 @@ namespace proc {
       forced_steam_ownership_descendants_only = previous_descendants_only;
       forced_steam_ownership_test_pids = previous_test_pids;
     });
-    return terminate_session_owned_steam_before_cage_stop();
+    return terminate_session_owned_steam_before_cage_stop_impl(
+      _app,
+      _session_used_cage_compositor,
+      _session_instance_id,
+      {}
+    );
   }
 
   bool isolated_session_capture_failure_retains_generation_for_tests(
@@ -8307,11 +8411,47 @@ namespace proc {
   }
 
 #ifdef __linux__
+  bool proc_t::request_session_owned_steam_graceful_shutdown_before_cage_stop() {
+    std::optional<std::string> session_home;
+    if (const auto home = _env.find("HOME"); home != _env.end() && !home->to_string().empty()) {
+      session_home = home->to_string();
+    }
+    const auto account_home = account_home_directory();
+    const auto pipe_path = steam_instance_pipe_path(
+      session_home,
+      account_home.empty() ? std::nullopt : std::optional<std::string> {account_home}
+    );
+    if (!pipe_path || !steam_instance_pipe_listener_active(*pipe_path)) {
+      BOOST_LOG(warning) << "process: exact private Steam FIFO listener is unavailable; refusing native shutdown request"sv;
+      return false;
+    }
+
+    const auto command = canonical_steam_shutdown_command(steam_launch_reference_command(_app));
+    BOOST_LOG(info) << "process: dispatching session-environment Steam native shutdown request ["sv << command << ']';
+    try {
+      boost::system::error_code ec;
+      boost::filesystem::path working_dir {};
+      auto child = platf::run_command(false, true, command, working_dir, _env, nullptr, ec, nullptr);
+      if (ec) {
+        BOOST_LOG(warning) << "process: session-environment Steam native shutdown command failed: "sv << ec.message();
+        return false;
+      }
+      child.detach();
+      return true;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "process: session-environment Steam native shutdown command threw: "sv << e.what();
+      return false;
+    }
+  }
+
   bool proc_t::terminate_session_owned_steam_before_cage_stop() {
     return terminate_session_owned_steam_before_cage_stop_impl(
       _app,
       _session_used_cage_compositor,
-      _session_instance_id
+      _session_instance_id,
+      [this]() {
+        return request_session_owned_steam_graceful_shutdown_before_cage_stop();
+      }
     );
   }
 
