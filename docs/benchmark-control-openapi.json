@@ -530,7 +530,7 @@
         "example": {
           "schema_version": 1,
           "measurement_spec_id": "measurement-spec-v1",
-          "collector_version": "1.3.11",
+          "collector_version": "1.3.13",
           "clock_domain": "CLOCK_MONOTONIC",
           "run_id": "pair-0001-control",
           "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

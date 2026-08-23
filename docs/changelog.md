@@ -1,18 +1,34 @@
 # Changelog
 
-- Unreleased: nested Gamescope teardown now serializes helper transitions and asks session-owned Steam to exit before using the exact-generation compositor stop fallback, preventing overlapping stops from poisoning reconnect recovery.
-
 This file tracks the public Polaris release line.
 
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
-## Unreleased
+## v1.3.13 - 2026-08-22
 
-- Fixes black video with working audio when a client requests HDR on a host with no HDR output: rebuilding the encode device for the 10-bit to 8-bit demotion released the EGL context the new device had just made current, so its color-conversion shaders never compiled and the session died before the first frame
-- Sizes nested Gamescope sessions to the final negotiated render width, height, and frame rate instead of imposing the standalone 4K120 fallback on every client
-- Prevents Nova launches from crashing when headless cage startup sees an already-counted session before encoder selection by forcing the deferred cage probe whenever no encoder is selected, stopping capture safely if that invariant is ever violated, and keeping encoder probing or reset exclusive with active capture
-- Detects when local Steam Input settings can claim the Polaris Xbox virtual controller during strict gamepad isolation, reports the conflict and PII-free aggregate evidence in Doctor, and points to the host-wide and per-game Steam settings without changing them automatically
+A Linux runtime reliability and configuration patch. Polaris now stops the exact Steam app workload before asking the private Steam client to exit, keeps nested compositor teardown serialized and generation-owned, restores several capture and encoder lifecycle invariants, and lets the AI Optimizer clear a stored API key through the same strict validation contract used by the rest of Settings.
+
+- Quiesces the exact `SteamLaunch AppId=<id>` lineage, including token-stripped descendants, before requesting full private-client shutdown; requires the pinned Steam game-process stop event plus a bounded settle, and uses exact pidfd `SIGKILL` rather than entering Steam's crashing destructor when proof is incomplete
+- Prevents the observed Depot Download HTTP teardown assertion by separating game removal, recording and AutoCloud exit work from global Steam client shutdown
+- Serializes nested Gamescope stop transitions, preserves exact-generation compositor ownership, and sizes nested sessions from the final negotiated render geometry instead of imposing a standalone 4K120 fallback
+- Releases only the EGL context a teardown thread actually bound, reprobes a missing deferred cage encoder before launch, and retires the initial GPU-native conversion object without racing active capture
+- Detects Steam Input settings that can claim Polaris's isolated virtual controller, keeps the finding after a stream ends, deduplicates aliased Steam profile roots, and offers one guarded Doctor action instead of mutating settings silently
+- Redacts private-session paths from public logs and keeps CI native-build classification, sanitizer coverage, package construction, `npm audit --audit-level=high`, and snapshot dependency handling fail-closed
+- Accepts canonical boolean spellings without changing unrelated configuration parsing and explicitly allows a typed `clear_ai_api_key` operation while unsupported keys remain rejected
+- Carries forward v1.3.12's reviewed Boost 1.92.0-1 Arch package contract, exact versioned Boost SONAME dependencies, package ELF/dependency verification, and current rolling Arch installation gate
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+
+## v1.3.12 - 2026-08-22
+
+An Arch packaging compatibility hotfix. Polaris runtime and protocol behavior remain the v1.3.11 line; this release repairs the published package contract that allowed a Boost 1.91-linked binary to install on a rolling system that already provided Boost 1.92.
+
+- Rebuilds the official Arch package against reviewed Boost 1.92.0-1 inputs while keeping the immutable package snapshot and the current rolling Arch observation as separate gates
+- Declares the five linked Boost providers as exact versioned SONAME dependencies, including `libboost_locale.so=1.92.0-64`, so a future incompatible Boost transition fails during package resolution instead of at process launch
+- Inspects the finished package's ELF `NEEDED` entries and requires every Boost SONAME to have a matching package dependency
+- Installs the exact finished package against current rolling Arch, requires `ldd` to report zero unresolved libraries, and launches `polaris --version` before release publication can proceed
+- Contains no Polaris runtime-code, protocol, configuration, or Nova client change; existing v1.3.11 configuration and Nova v1.3.7 pairing remain compatible
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
 
 ## v1.3.11 - 2026-08-19
 
