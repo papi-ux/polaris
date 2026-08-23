@@ -2059,6 +2059,17 @@ namespace proc {
 
     using private_steam_graceful_shutdown_request_t = std::function<bool()>;
     constexpr auto private_steam_native_shutdown_timeout = 10s;
+    constexpr auto private_steam_app_exit_timeout = 5s;
+    constexpr auto private_steam_app_settle_time = 5s;
+    constexpr auto private_steam_app_capture_timeout = 500ms;
+    constexpr auto private_steam_app_sigterm_timeout = 2s;
+    constexpr auto private_steam_app_sigkill_timeout = 1s;
+
+    bool quiesce_session_owned_steam_app_before_native_shutdown(
+      const proc::ctx_t &app,
+      std::string_view session_instance_id,
+      const boost::process::v1::environment &env
+    );
 
     template<typename Request, typename Wait>
     bool attempt_session_owned_steam_graceful_shutdown(
@@ -2153,7 +2164,22 @@ namespace proc {
       for (auto &handle : snapshot.helpers) {
         handles.emplace_back(std::move(handle));
       }
+      snapshot.roots.clear();
+      snapshot.launcher_roots.clear();
+      snapshot.helpers.clear();
       return handles;
+    }
+
+    bool kill_private_steam_pidfds_immediately(steam_client_ownership_snapshot_t &snapshot) {
+      auto handles = take_owned_steam_handles(snapshot);
+      for (const auto &handle : handles) {
+        if (!send_pidfd_signal(handle, SIGKILL)) {
+          BOOST_LOG(error) << "process: exact private Steam pidfd SIGKILL failed pid="sv
+                           << handle.pid << " error="sv << std::strerror(errno);
+          return false;
+        }
+      }
+      return wait_for_pidfds_exit(handles, private_steam_app_sigkill_timeout);
     }
 
     steam_client_ownership_snapshot_t steam_client_ownership_snapshot(std::string_view session_instance_id) {
@@ -2317,10 +2343,279 @@ namespace proc {
       return snapshot;
     }
 
+    bool steam_launch_cmdline_matches_appid(std::string_view cmdline, std::string_view appid) {
+      if (appid.empty() || !std::all_of(appid.begin(), appid.end(), [](unsigned char value) {
+            return std::isdigit(value) != 0;
+          })) {
+        return false;
+      }
+
+      const auto expected_appid = "AppId="s + std::string {appid};
+      const auto is_separator = [](unsigned char value) {
+        return value == '\0' || std::isspace(value) != 0;
+      };
+      std::string_view previous;
+      std::size_t cursor = 0;
+      while (cursor < cmdline.size()) {
+        while (cursor < cmdline.size() &&
+               is_separator(static_cast<unsigned char>(cmdline[cursor]))) {
+          ++cursor;
+        }
+        const auto begin = cursor;
+        while (cursor < cmdline.size() &&
+               !is_separator(static_cast<unsigned char>(cmdline[cursor]))) {
+          ++cursor;
+        }
+        if (begin == cursor) {
+          break;
+        }
+        const auto token = cmdline.substr(begin, cursor - begin);
+        if (previous == "SteamLaunch"sv && token == expected_appid) {
+          return true;
+        }
+        previous = token;
+      }
+      return false;
+    }
+
+    struct private_steam_app_root_snapshot_t {
+      std::vector<pidfd_handle_t> roots;
+      bool capture_complete = true;
+    };
+
+    private_steam_app_root_snapshot_t private_steam_app_root_snapshot(
+      std::string_view session_instance_id,
+      std::string_view appid
+    ) {
+      private_steam_app_root_snapshot_t snapshot;
+      DIR *dir = opendir("/proc");
+      if (!dir) {
+        snapshot.capture_complete = false;
+        return snapshot;
+      }
+      for (;;) {
+        auto *entry = read_next_proc_entry(dir);
+        if (entry == nullptr) {
+          if (errno != 0) {
+            snapshot.capture_complete = false;
+          }
+          break;
+        }
+        const std::string name = entry->d_name;
+        if (!proc_pid_dir_name(name)) {
+          continue;
+        }
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        if (pid <= 1 || pid == getpid()) {
+          continue;
+        }
+        const auto cmdline_before = read_proc_status_file_result(pid, "cmdline");
+        if (!cmdline_before.ok()) {
+          if (!process_vanished_during_proc_read(cmdline_before.error)) {
+            const auto status = read_proc_status_file(pid, "status");
+            if (!proc_status_is_zombie(status)) {
+              snapshot.capture_complete = false;
+            }
+          }
+          continue;
+        }
+        if (!steam_launch_cmdline_matches_appid(cmdline_before.bytes, appid)) {
+          continue;
+        }
+        const auto environ_before = read_proc_status_file_result(pid, "environ");
+        const auto identity_before = proc_start_time_ticks(pid);
+        if (!environ_before.ok() ||
+            !proc_environ_matches_isolated_session(environ_before.bytes, session_instance_id) ||
+            !identity_before) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+        int open_error = 0;
+        auto handle = open_process_pidfd(pid, open_error);
+        if (!handle) {
+          if (!process_vanished_during_proc_read(open_error)) {
+            snapshot.capture_complete = false;
+          }
+          continue;
+        }
+        const auto cmdline_after = read_proc_status_file_result(pid, "cmdline");
+        const auto environ_after = read_proc_status_file_result(pid, "environ");
+        const auto identity_after = proc_start_time_ticks(pid);
+        if (!cmdline_after.ok() || !environ_after.ok() ||
+            !steam_launch_cmdline_matches_appid(cmdline_after.bytes, appid) ||
+            !proc_environ_matches_isolated_session(environ_after.bytes, session_instance_id) ||
+            !steam_pidfd_capture_identity_matches(identity_before, identity_after)) {
+          snapshot.capture_complete = false;
+          continue;
+        }
+        snapshot.roots.emplace_back(std::move(*handle));
+      }
+      closedir(dir);
+      return snapshot;
+    }
+
+    bool resume_or_kill_frozen_pidfds(const std::vector<pidfd_handle_t> &frozen) {
+      bool all_safe = true;
+      for (const auto &handle : frozen) {
+        if (pidfd_has_exited(handle) || send_pidfd_signal(handle, SIGCONT)) {
+          continue;
+        }
+        const auto resume_error = errno;
+        if (resume_error == ESRCH || pidfd_has_exited(handle)) {
+          continue;
+        }
+        BOOST_LOG(warning) << "process: exact private Steam app pidfd could not resume; sending SIGKILL pid="sv
+                           << handle.pid << " error="sv << std::strerror(resume_error);
+        if (!send_pidfd_signal(handle, SIGKILL) && errno != ESRCH && !pidfd_has_exited(handle)) {
+          BOOST_LOG(error) << "process: exact private Steam app pidfd remained stopped after SIGCONT and SIGKILL failures pid="sv
+                           << handle.pid << " error="sv << std::strerror(errno);
+          all_safe = false;
+        }
+      }
+      return all_safe;
+    }
+
+    bool terminate_session_owned_steam_app_lineage(
+      const proc::ctx_t &app,
+      std::string_view session_instance_id
+    ) {
+      const auto appid = steam_appid_for_context(app);
+      if (appid.empty()) {
+        return true;
+      }
+      auto roots = private_steam_app_root_snapshot(session_instance_id, appid);
+      if (!roots.capture_complete || roots.roots.size() > 1) {
+        BOOST_LOG(error) << "process: refusing private Steam app quiescence because exact AppID root capture was ambiguous appid="sv
+                         << appid << " roots="sv << roots.roots.size();
+        return false;
+      }
+      if (roots.roots.empty()) {
+        BOOST_LOG(info) << "process: private Steam app is already quiescent appid="sv << appid;
+        return true;
+      }
+
+      const auto app_root_pid = roots.roots.front().pid;
+      std::vector<pidfd_handle_t> frozen;
+      std::set<pid_t> captured;
+      for (auto &root : roots.roots) {
+        if (!send_pidfd_signal(root, SIGSTOP)) {
+          return false;
+        }
+        captured.emplace(root.pid);
+        frozen.emplace_back(std::move(root));
+      }
+      auto resume_on_failure = util::fail_guard([&frozen]() {
+        (void) resume_or_kill_frozen_pidfds(frozen);
+      });
+
+      const auto capture_deadline = std::chrono::steady_clock::now() + private_steam_app_capture_timeout;
+      bool closure_complete = false;
+      while (std::chrono::steady_clock::now() < capture_deadline) {
+        bool added = false;
+        bool capture_failed = false;
+        DIR *dir = opendir("/proc");
+        if (!dir) {
+          return false;
+        }
+        for (;;) {
+          auto *entry = read_next_proc_entry(dir);
+          if (entry == nullptr) {
+            if (errno != 0) {
+              capture_failed = true;
+            }
+            break;
+          }
+          const std::string name = entry->d_name;
+          if (!proc_pid_dir_name(name)) {
+            continue;
+          }
+          const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+          if (pid <= 1 || pid == getpid() || captured.contains(pid)) {
+            continue;
+          }
+          const auto status = read_proc_status_file(pid, "status");
+          if (proc_status_is_zombie(status)) {
+            continue;
+          }
+          const auto real_uid = proc_status_real_uid(status);
+          if (!real_uid || *real_uid != getuid()) {
+            continue;
+          }
+          const auto descends_before = proc_pid_descends_from(pid, app_root_pid);
+          if (!descends_before) {
+            capture_failed = true;
+            continue;
+          }
+          if (!*descends_before) {
+            continue;
+          }
+          const auto identity_before = proc_start_time_ticks(pid);
+          int open_error = 0;
+          auto handle = open_process_pidfd(pid, open_error);
+          if (!handle) {
+            if (!process_vanished_during_proc_read(open_error)) {
+              capture_failed = true;
+            }
+            continue;
+          }
+          const auto identity_after = proc_start_time_ticks(pid);
+          const auto descends_after = proc_pid_descends_from(pid, app_root_pid);
+          if (!steam_pidfd_capture_identity_matches(identity_before, identity_after) ||
+              !descends_after || !*descends_after ||
+              !send_pidfd_signal(*handle, SIGSTOP)) {
+            capture_failed = true;
+            continue;
+          }
+          captured.emplace(pid);
+          frozen.emplace_back(std::move(*handle));
+          added = true;
+        }
+        closedir(dir);
+        if (capture_failed) {
+          return false;
+        }
+        if (!added) {
+          closure_complete = true;
+          break;
+        }
+        std::this_thread::sleep_for(10ms);
+      }
+      if (!closure_complete) {
+        BOOST_LOG(error) << "process: private Steam app lineage did not quiesce during exact pidfd capture appid="sv << appid;
+        return false;
+      }
+
+      for (const auto &handle : frozen) {
+        if (!send_pidfd_signal(handle, SIGTERM)) {
+          return false;
+        }
+      }
+      if (!resume_or_kill_frozen_pidfds(frozen)) {
+        return false;
+      }
+      resume_on_failure.disable();
+      if (!wait_for_pidfds_exit(frozen, private_steam_app_sigterm_timeout)) {
+        BOOST_LOG(warning) << "process: exact private Steam app lineage did not exit after SIGTERM; sending pidfd SIGKILL appid="sv
+                           << appid;
+        for (const auto &handle : frozen) {
+          if (!send_pidfd_signal(handle, SIGKILL)) {
+            return false;
+          }
+        }
+        if (!wait_for_pidfds_exit(frozen, private_steam_app_sigkill_timeout)) {
+          return false;
+        }
+      }
+      BOOST_LOG(info) << "process: exact private Steam app lineage drained before native shutdown appid="sv
+                      << appid << " processes="sv << frozen.size();
+      return true;
+    }
+
     bool terminate_session_owned_steam_before_cage_stop_impl(
       const proc::ctx_t &app,
       bool session_owned_cage,
       std::string_view session_instance_id,
+      const boost::process::v1::environment &env,
       private_steam_graceful_shutdown_request_t request_graceful_shutdown
     ) {
       const bool steam_context = context_uses_steam(app);
@@ -2371,49 +2666,49 @@ namespace proc {
             ownership.unowned.size(),
             static_cast<bool>(request_graceful_shutdown)
           )) {
-        BOOST_LOG(info) << "process: requesting session-owned Steam native shutdown before exact pidfd fallback"sv;
-        bool request_dispatched = false;
-        root_exited = attempt_session_owned_steam_graceful_shutdown(
-          [&]() {
-            request_dispatched = request_graceful_shutdown();
-            return request_dispatched;
-          },
-          [&]() {
-            return wait_for_pidfds_exit(
-              ownership.roots,
-              private_steam_native_shutdown_timeout
-            );
-          }
+        const bool app_quiescent = quiesce_session_owned_steam_app_before_native_shutdown(
+          app,
+          session_instance_id,
+          env
         );
-        if (root_exited) {
-          BOOST_LOG(info) << "process: session-owned Steam client root exited after native shutdown request"sv;
-        } else if (request_dispatched) {
-          BOOST_LOG(warning) << "process: session-owned Steam native shutdown request did not stop the exact root; "sv
-                             << "falling back to PID-bound SIGTERM"sv;
+        if (app_quiescent) {
+          BOOST_LOG(info) << "process: requesting session-owned Steam native shutdown after exact app quiescence"sv;
+          bool request_dispatched = false;
+          root_exited = attempt_session_owned_steam_graceful_shutdown(
+            [&]() {
+              request_dispatched = request_graceful_shutdown();
+              return request_dispatched;
+            },
+            [&]() {
+              return wait_for_pidfds_exit(
+                ownership.roots,
+                private_steam_native_shutdown_timeout
+              );
+            }
+          );
+          if (root_exited) {
+            BOOST_LOG(info) << "process: session-owned Steam client root exited after native shutdown request"sv;
+          } else if (request_dispatched) {
+            BOOST_LOG(warning) << "process: session-owned Steam native shutdown request did not stop the exact root; "sv
+                               << "falling back to exact pidfd SIGKILL"sv;
+          } else {
+            BOOST_LOG(warning) << "process: session-owned Steam native shutdown request was not dispatched; "sv
+                               << "falling back to exact pidfd SIGKILL"sv;
+          }
         } else {
-          BOOST_LOG(warning) << "process: session-owned Steam native shutdown request was not dispatched; "sv
-                             << "falling back to PID-bound SIGTERM"sv;
+          BOOST_LOG(warning) << "process: private Steam app did not reach verified quiescence; "sv
+                             << "skipping native shutdown and falling back to exact pidfd SIGKILL"sv;
         }
       }
 
       if (!root_exited) {
-        BOOST_LOG(info) << "process: terminating the session-owned Steam client root through pidfd before "sv
-                        << ownership.helpers.size() << " helper process(es)"sv;
-        if (!terminate_pidfds(ownership.roots, 5s, 1s, "private Steam client root"sv)) {
-          BOOST_LOG(warning) << "process: session-owned Steam client root remained after bounded pidfd termination; "sv
+        BOOST_LOG(info) << "process: terminating the exact private Steam set with pidfd SIGKILL to avoid Steam's crashing shutdown destructor"sv;
+        if (!kill_private_steam_pidfds_immediately(ownership)) {
+          BOOST_LOG(warning) << "process: session-owned Steam remained after exact pidfd SIGKILL; "sv
                              << "continuing with isolated cage fallback cleanup"sv;
           return false;
         }
-      }
-
-      if (!ownership.helpers.empty()) {
-        BOOST_LOG(info) << "process: allowing "sv << ownership.helpers.size()
-                        << " session-owned Steam helper process(es) to drain after client-root exit"sv;
-        if (wait_for_pidfds_exit(ownership.helpers, 2s)) {
-          BOOST_LOG(info) << "process: session-owned Steam helpers drained without direct signaling"sv;
-        } else {
-          BOOST_LOG(info) << "process: session-owned Steam helper drain grace elapsed; capturing exact survivors"sv;
-        }
+        root_exited = true;
       }
 
       auto survivors = steam_client_ownership_snapshot(session_instance_id);
@@ -2431,15 +2726,15 @@ namespace proc {
         return true;
       }
 
-      auto survivor_handles = take_owned_steam_handles(survivors);
-      BOOST_LOG(info) << "process: terminating "sv << survivor_handles.size()
+      const auto survivor_count = survivors.owned_count();
+      BOOST_LOG(info) << "process: terminating "sv << survivor_count
                       << " session-owned Steam survivor process(es) after client-root drain"sv;
-      if (terminate_pidfds(survivor_handles, 2s, 1s, "private Steam survivor"sv)) {
+      if (kill_private_steam_pidfds_immediately(survivors)) {
         BOOST_LOG(info) << "process: session-owned Steam exited before isolated cage stop"sv;
         return true;
       }
 
-      BOOST_LOG(warning) << "process: session-owned Steam survivors remained after bounded pidfd termination; "sv
+      BOOST_LOG(warning) << "process: session-owned Steam survivors remained after exact pidfd SIGKILL; "sv
                          << "continuing with isolated cage fallback cleanup"sv;
       return false;
     }
@@ -3878,6 +4173,83 @@ namespace proc {
       return candidates.front();
     }
 
+    bool wait_for_steam_app_stopped_event(
+      const std::filesystem::path &path,
+      const steam_game_process_log_snapshot_result_t &snapshot,
+      std::string_view appid
+    ) {
+      if (snapshot.status != steam_game_process_log_snapshot_status_e::captured ||
+          !snapshot.identity) {
+        return false;
+      }
+      auto cursor = snapshot.offset;
+      const auto deadline = std::chrono::steady_clock::now() + private_steam_app_exit_timeout;
+      while (std::chrono::steady_clock::now() < deadline) {
+        const auto current_identity = steam_game_process_log_identity(path);
+        if (!current_identity || *current_identity != *snapshot.identity) {
+          BOOST_LOG(warning) << "process: Steam gameprocess log changed identity while waiting for app stop appid="sv
+                             << appid;
+          return false;
+        }
+        std::ifstream log(path, std::ios::binary);
+        if (!log) {
+          return false;
+        }
+        log.seekg(static_cast<std::streamoff>(cursor), std::ios::beg);
+        if (!log) {
+          return false;
+        }
+        std::string line;
+        while (std::getline(log, line)) {
+          cursor += line.size() + 1;
+          const auto event = parse_steam_game_process_event(line);
+          if (event.kind == steam_game_process_event_kind_internal_e::stopped &&
+              event.appid == appid) {
+            std::this_thread::sleep_for(private_steam_app_settle_time);
+            return true;
+          }
+        }
+        if (log.bad()) {
+          return false;
+        }
+        std::this_thread::sleep_for(50ms);
+      }
+      return false;
+    }
+
+    bool quiesce_session_owned_steam_app_before_native_shutdown(
+      const proc::ctx_t &app,
+      std::string_view session_instance_id,
+      const boost::process::v1::environment &env
+    ) {
+      const auto appid = steam_appid_for_context(app);
+      if (appid.empty()) {
+        return true;
+      }
+      const auto log_path = steam_game_process_log_path(app, env);
+      const auto log_snapshot = snapshot_steam_game_process_log(log_path);
+      if (log_snapshot.status != steam_game_process_log_snapshot_status_e::captured) {
+        BOOST_LOG(warning) << "process: cannot prove private Steam app stop because gameprocess log snapshot failed appid="sv
+                           << appid;
+        return false;
+      }
+      const auto roots_before = private_steam_app_root_snapshot(session_instance_id, appid);
+      if (!roots_before.capture_complete || roots_before.roots.size() > 1) {
+        return false;
+      }
+      if (!roots_before.roots.empty() &&
+          !terminate_session_owned_steam_app_lineage(app, session_instance_id)) {
+        return false;
+      }
+      if (!wait_for_steam_app_stopped_event(log_path, log_snapshot, appid)) {
+        BOOST_LOG(warning) << "process: exact Steam app-stopped event did not arrive before native shutdown appid="sv
+                           << appid;
+        return false;
+      }
+      BOOST_LOG(info) << "process: verified private Steam app quiescence before native shutdown appid="sv << appid;
+      return true;
+    }
+
     bool dispatch_steam_big_picture_action(
       const std::string &reference_command,
       std::string_view action,
@@ -4695,10 +5067,20 @@ namespace proc {
   }
 
   private_steam_graceful_shutdown_test_result_t run_private_steam_graceful_shutdown_scenario_for_tests(
+    bool app_stop_dispatched,
+    bool app_quiescent,
     bool request_dispatched,
     bool exact_root_exited
   ) {
     private_steam_graceful_shutdown_test_result_t result;
+    ++result.app_stop_calls;
+    if (!app_stop_dispatched) {
+      return result;
+    }
+    ++result.app_wait_calls;
+    if (!app_quiescent) {
+      return result;
+    }
     result.root_exited = attempt_session_owned_steam_graceful_shutdown(
       [&]() {
         ++result.request_calls;
@@ -4710,6 +5092,20 @@ namespace proc {
       }
     );
     return result;
+  }
+
+  bool terminate_session_owned_steam_app_lineage_for_tests(
+    const ctx_t &app,
+    std::string_view session_instance_id
+  ) {
+    return terminate_session_owned_steam_app_lineage(app, session_instance_id);
+  }
+
+  bool steam_launch_cmdline_matches_appid_for_tests(
+    std::string_view cmdline,
+    std::string_view appid
+  ) {
+    return steam_launch_cmdline_matches_appid(cmdline, appid);
   }
 
   std::optional<std::string> steam_instance_pipe_path_for_tests(
@@ -5442,6 +5838,7 @@ namespace proc {
       _app,
       _session_used_cage_compositor,
       _session_instance_id,
+      boost::this_process::environment(),
       {}
     );
   }
@@ -8449,6 +8846,7 @@ namespace proc {
       _app,
       _session_used_cage_compositor,
       _session_instance_id,
+      _env,
       [this]() {
         return request_session_owned_steam_graceful_shutdown_before_cage_stop();
       }

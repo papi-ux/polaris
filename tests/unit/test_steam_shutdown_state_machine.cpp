@@ -12,11 +12,57 @@
 
 #if defined(__linux__)
   #include <fcntl.h>
+  #include <poll.h>
+  #include <signal.h>
   #include <sys/stat.h>
+  #include <sys/syscall.h>
+  #include <sys/wait.h>
   #include <unistd.h>
 #endif
 
 namespace {
+#if defined(__linux__)
+  struct child_guard_t {
+    pid_t pid = -1;
+    bool reaped = false;
+
+    ~child_guard_t() {
+      if (pid <= 0 || reaped) {
+        return;
+      }
+      (void) kill(pid, SIGKILL);
+      int status = 0;
+      while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+
+    pid_t wait(int *status, int options) {
+      const auto result = waitpid(pid, status, options);
+      if (result == pid) {
+        reaped = true;
+      }
+      return result;
+    }
+  };
+
+  struct fd_guard_t {
+    int fd = -1;
+    ~fd_guard_t() {
+      if (fd >= 0) {
+        close(fd);
+      }
+    }
+  };
+
+  bool wait_pidfd_exit(int fd, std::chrono::milliseconds timeout) {
+    pollfd descriptor {fd, POLLIN, 0};
+    int result = -1;
+    do {
+      result = poll(&descriptor, 1, static_cast<int>(timeout.count()));
+    } while (result < 0 && errno == EINTR);
+    return result == 1 && (descriptor.revents & POLLIN) != 0;
+  }
+#endif
+
   std::string read_source_file(const char *relative_path) {
     const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / relative_path;
     std::ifstream in(path);
@@ -209,28 +255,211 @@ TEST(SteamShutdownStateMachineTests, PrivateCageGracefulShutdownRequiresComplete
   ));
 }
 
-TEST(SteamShutdownStateMachineTests, GracefulAttemptDoesNotWaitWhenDispatchFails) {
-  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(false, true);
+TEST(SteamShutdownStateMachineTests, GracefulAttemptDoesNotRequestShutdownWhenAppStopFails) {
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(
+    false, true, true, true
+  );
   EXPECT_FALSE(result.root_exited);
+  EXPECT_EQ(result.app_stop_calls, 1U);
+  EXPECT_EQ(result.app_wait_calls, 0U);
+  EXPECT_EQ(result.request_calls, 0U);
+  EXPECT_EQ(result.wait_calls, 0U);
+}
+
+TEST(SteamShutdownStateMachineTests, GracefulAttemptDoesNotRequestShutdownBeforeAppQuiesces) {
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(
+    true, false, true, true
+  );
+  EXPECT_FALSE(result.root_exited);
+  EXPECT_EQ(result.app_stop_calls, 1U);
+  EXPECT_EQ(result.app_wait_calls, 1U);
+  EXPECT_EQ(result.request_calls, 0U);
+  EXPECT_EQ(result.wait_calls, 0U);
+}
+
+TEST(SteamShutdownStateMachineTests, GracefulAttemptDoesNotWaitWhenDispatchFails) {
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(
+    true, true, false, true
+  );
+  EXPECT_FALSE(result.root_exited);
+  EXPECT_EQ(result.app_stop_calls, 1U);
+  EXPECT_EQ(result.app_wait_calls, 1U);
   EXPECT_EQ(result.request_calls, 1U);
   EXPECT_EQ(result.wait_calls, 0U);
 }
 
 TEST(SteamShutdownStateMachineTests, GracefulAttemptFallsBackWhenExactRootDoesNotExit) {
-  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(true, false);
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(
+    true, true, true, false
+  );
   EXPECT_FALSE(result.root_exited);
+  EXPECT_EQ(result.app_stop_calls, 1U);
+  EXPECT_EQ(result.app_wait_calls, 1U);
   EXPECT_EQ(result.request_calls, 1U);
   EXPECT_EQ(result.wait_calls, 1U);
 }
 
-TEST(SteamShutdownStateMachineTests, GracefulAttemptSucceedsOnlyAfterExactRootExit) {
-  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(true, true);
+TEST(SteamShutdownStateMachineTests, GracefulAttemptSucceedsOnlyAfterAppQuiescenceAndExactRootExit) {
+  const auto result = proc::run_private_steam_graceful_shutdown_scenario_for_tests(
+    true, true, true, true
+  );
   EXPECT_TRUE(result.root_exited);
+  EXPECT_EQ(result.app_stop_calls, 1U);
+  EXPECT_EQ(result.app_wait_calls, 1U);
   EXPECT_EQ(result.request_calls, 1U);
   EXPECT_EQ(result.wait_calls, 1U);
 }
 
-TEST(SteamShutdownStateMachineTests, ProductionPrivateCageAttemptsScopedGracefulBeforePidfdFallback) {
+TEST(SteamShutdownStateMachineTests, SteamLaunchMarkerMatchesSplitArgvWithExactBoundaries) {
+  static constexpr char split_cmdline[] =
+    "reaper\0SteamLaunch\0AppId=4242\0--\0";
+  const std::string_view split_view {split_cmdline, sizeof(split_cmdline) - 1};
+
+  EXPECT_TRUE(proc::steam_launch_cmdline_matches_appid_for_tests(split_view, "4242"));
+  EXPECT_TRUE(proc::steam_launch_cmdline_matches_appid_for_tests(
+    "reaper SteamLaunch AppId=4242 --",
+    "4242"
+  ));
+  EXPECT_FALSE(proc::steam_launch_cmdline_matches_appid_for_tests(
+    "reaper NotSteamLaunch AppId=4242 --",
+    "4242"
+  ));
+  EXPECT_FALSE(proc::steam_launch_cmdline_matches_appid_for_tests(
+    "reaper SteamLaunch AppId=42420 --",
+    "4242"
+  ));
+  EXPECT_FALSE(proc::steam_launch_cmdline_matches_appid_for_tests(split_view, ""));
+  EXPECT_FALSE(proc::steam_launch_cmdline_matches_appid_for_tests(split_view, "42x2"));
+}
+
+TEST(SteamShutdownStateMachineTests, EmptySteamAppRootStillUsesPinnedStopBarrier) {
+  const auto source = read_source_file("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto quiescence = source_between(
+    source,
+    "bool quiesce_session_owned_steam_app_before_native_shutdown(\n"
+    "      const proc::ctx_t &app,\n"
+    "      std::string_view session_instance_id,\n"
+    "      const boost::process::v1::environment &env\n"
+    "    ) {\n"
+    "      const auto appid",
+    "bool dispatch_steam_big_picture_action("
+  );
+  ASSERT_FALSE(quiescence.empty());
+
+  const auto log_snapshot = quiescence.find("snapshot_steam_game_process_log(");
+  const auto roots_snapshot = quiescence.find("private_steam_app_root_snapshot(");
+  const auto stopped_barrier = quiescence.find("wait_for_steam_app_stopped_event(");
+  ASSERT_NE(log_snapshot, std::string::npos);
+  ASSERT_NE(roots_snapshot, std::string::npos);
+  ASSERT_NE(stopped_barrier, std::string::npos);
+  EXPECT_LT(log_snapshot, roots_snapshot);
+  EXPECT_LT(roots_snapshot, stopped_barrier);
+  EXPECT_EQ(quiescence.find("if (roots_before.roots.empty())"), std::string::npos);
+}
+
+TEST(SteamShutdownStateMachineTests, PrivateSteamAppQuiescenceTerminatesOnlyExactAppLineage) {
+  const std::string token = "private-steam-app-quiescence";
+  proc::ctx_t steam_app {};
+  steam_app.name = "Control";
+  steam_app.source = "steam";
+  steam_app.steam_appid = "4242";
+
+  const auto spawn_owned = [&](const char *argv0) {
+    const auto child = fork();
+    EXPECT_GE(child, 0);
+    if (child == 0) {
+      setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      execl("/bin/sleep", argv0, "60", nullptr);
+      _exit(127);
+    }
+    return child;
+  };
+
+  const auto cage = spawn_owned("labwc");
+  child_guard_t cage_guard {cage};
+  const auto steam = spawn_owned("/tmp/ubuntu12_32/steam");
+  child_guard_t steam_guard {steam};
+  ASSERT_GT(cage, 0);
+  ASSERT_GT(steam, 0);
+
+  int lineage_pipe[2] {-1, -1};
+  ASSERT_EQ(pipe(lineage_pipe), 0);
+  const auto app_root = fork();
+  ASSERT_GE(app_root, 0);
+  child_guard_t app_root_guard {app_root};
+  if (app_root == 0) {
+    close(lineage_pipe[0]);
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    const auto descendant = fork();
+    if (descendant < 0) _exit(124);
+    if (descendant == 0) {
+      close(lineage_pipe[1]);
+      unsetenv("POLARIS_SESSION_INSTANCE_ID");
+      execl("/bin/sleep", "Control.exe", "60", nullptr);
+      _exit(127);
+    }
+    if (write(lineage_pipe[1], &descendant, sizeof(descendant)) != sizeof(descendant)) _exit(125);
+    close(lineage_pipe[1]);
+    execl(
+      "/bin/bash",
+      "reaper",
+      "-c",
+      "trap 'exit 0' TERM; sleep 60 & wait",
+      "SteamLaunch",
+      "AppId=4242",
+      nullptr
+    );
+    _exit(127);
+  }
+
+  close(lineage_pipe[1]);
+  fd_guard_t lineage_read {lineage_pipe[0]};
+  pid_t descendant = -1;
+  ASSERT_EQ(read(lineage_read.fd, &descendant, sizeof(descendant)), sizeof(descendant));
+  ASSERT_GT(descendant, 0);
+  const int app_root_pidfd = static_cast<int>(syscall(SYS_pidfd_open, app_root, 0));
+  ASSERT_GE(app_root_pidfd, 0);
+  fd_guard_t app_root_pidfd_guard {app_root_pidfd};
+  const int descendant_pidfd = static_cast<int>(syscall(SYS_pidfd_open, descendant, 0));
+  ASSERT_GE(descendant_pidfd, 0);
+  fd_guard_t descendant_guard {descendant_pidfd};
+  auto terminate_descendant = util::fail_guard([descendant_pidfd]() {
+    (void) syscall(SYS_pidfd_send_signal, descendant_pidfd, SIGKILL, nullptr, 0);
+  });
+
+  bool marker_visible = false;
+  for (int attempt = 0; attempt < 40 && !marker_visible; ++attempt) {
+    std::ifstream cmdline_file("/proc/" + std::to_string(app_root) + "/cmdline", std::ios::binary);
+    const std::string cmdline(
+      (std::istreambuf_iterator<char>(cmdline_file)),
+      std::istreambuf_iterator<char>()
+    );
+    marker_visible = proc::steam_launch_cmdline_matches_appid_for_tests(cmdline, "4242");
+    if (!marker_visible) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(marker_visible);
+
+  ASSERT_TRUE(proc::terminate_session_owned_steam_app_lineage_for_tests(steam_app, token));
+  ASSERT_TRUE(wait_pidfd_exit(app_root_pidfd, std::chrono::seconds(2)))
+    << "the split-argv Steam app root must be terminated";
+
+  int app_status = 0;
+  EXPECT_EQ(app_root_guard.wait(&app_status, 0), app_root);
+  EXPECT_TRUE(WIFEXITED(app_status) || WIFSIGNALED(app_status));
+  EXPECT_TRUE(wait_pidfd_exit(descendant_pidfd, std::chrono::seconds(2)))
+    << "a token-stripped descendant of the exact Steam app root must be terminated";
+
+  int survivor_status = 0;
+  EXPECT_EQ(cage_guard.wait(&survivor_status, WNOHANG), 0)
+    << "the cage compositor must remain alive until cage teardown";
+  EXPECT_EQ(steam_guard.wait(&survivor_status, WNOHANG), 0)
+    << "the Steam root must remain alive until native shutdown is dispatched";
+}
+
+TEST(SteamShutdownStateMachineTests, ProductionPrivateCageQuiescesSteamAppBeforeNativeShutdown) {
   const auto source = read_source_file("src/process.cpp");
   ASSERT_FALSE(source.empty());
   const auto cleanup = source_between(
@@ -243,16 +472,21 @@ TEST(SteamShutdownStateMachineTests, ProductionPrivateCageAttemptsScopedGraceful
   const auto root_cardinality_guard = cleanup.find("if (ownership.roots.size() != 1)");
   const auto root_front_access = cleanup.find("ownership.roots.front()");
   const auto no_unowned_guard = cleanup.find("ownership.unowned.empty()");
+  const auto app_quiescence = cleanup.find("quiesce_session_owned_steam_app_before_native_shutdown(");
   const auto graceful_request = cleanup.find("attempt_session_owned_steam_graceful_shutdown(");
-  const auto exact_pidfd_fallback = cleanup.find("terminate_pidfds(ownership.roots");
+  const auto exact_pidfd_fallback = cleanup.find("kill_private_steam_pidfds_immediately(ownership");
   ASSERT_NE(root_cardinality_guard, std::string::npos);
   ASSERT_NE(root_front_access, std::string::npos);
   ASSERT_NE(no_unowned_guard, std::string::npos);
+  ASSERT_NE(app_quiescence, std::string::npos);
   ASSERT_NE(graceful_request, std::string::npos);
   ASSERT_NE(exact_pidfd_fallback, std::string::npos);
   EXPECT_LT(root_cardinality_guard, root_front_access);
-  EXPECT_LT(no_unowned_guard, graceful_request);
+  EXPECT_LT(no_unowned_guard, app_quiescence);
+  EXPECT_LT(app_quiescence, graceful_request);
   EXPECT_LT(graceful_request, exact_pidfd_fallback);
+  EXPECT_EQ(cleanup.find("terminate_pidfds(ownership.roots"), std::string::npos);
+  EXPECT_EQ(cleanup.find("wait_for_pidfds_exit(ownership.helpers"), std::string::npos);
   EXPECT_NE(
     cleanup.find("wait_for_pidfds_exit(", graceful_request),
     std::string::npos
@@ -261,6 +495,28 @@ TEST(SteamShutdownStateMachineTests, ProductionPrivateCageAttemptsScopedGraceful
     cleanup.find("private_steam_native_shutdown_timeout", graceful_request),
     std::string::npos
   );
+}
+
+TEST(SteamShutdownStateMachineTests, ProductionAppLineageCaptureIsBoundedAndCannotLeakStoppedProcesses) {
+  const auto source = read_source_file("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto resume_helper = source_between(
+    source,
+    "bool resume_or_kill_frozen_pidfds(",
+    "bool terminate_session_owned_steam_app_lineage("
+  );
+  const auto app_termination = source_between(
+    source,
+    "bool terminate_session_owned_steam_app_lineage(",
+    "bool terminate_session_owned_steam_before_cage_stop_impl("
+  );
+  ASSERT_FALSE(resume_helper.empty());
+  ASSERT_FALSE(app_termination.empty());
+  EXPECT_NE(resume_helper.find("SIGCONT"), std::string::npos);
+  EXPECT_NE(resume_helper.find("SIGKILL"), std::string::npos);
+  EXPECT_NE(app_termination.find("resume_or_kill_frozen_pidfds("), std::string::npos);
+  EXPECT_NE(app_termination.find("private_steam_app_capture_timeout"), std::string::npos);
+  EXPECT_EQ(app_termination.find("max_capture_passes"), std::string::npos);
 }
 
 TEST(SteamShutdownStateMachineTests, ProductionPrivateSteamRequestUsesSessionEnvironmentAndLiveFifo) {
