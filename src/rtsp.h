@@ -125,6 +125,10 @@ namespace rtsp_stream {
     // Empty = host default. Validated in make_launch_session; applied to the
     // in-memory config by proc_t::execute and restored at teardown.
     std::string stream_mode;
+    // Normalized Nova Play Setup preference from /launch profilePreference.
+    // Only high_fps may bypass the soft historical safe-FPS cap. Hard client,
+    // device, and encoder constraints remain authoritative.
+    std::string profile_preference = "auto";
     bool user_locked_display_mode;
     bool user_locked_virtual_display;
     uint32_t scale_factor;

@@ -232,6 +232,12 @@ namespace proc {
     std::chrono::milliseconds timeout,
     std::chrono::milliseconds poll_interval
   );
+  bool should_apply_history_safe_fps_cap_for_tests(
+    bool history_available,
+    double safe_target_fps,
+    bool relax_safe_target,
+    std::string_view preference
+  );
 
   struct private_steam_graceful_shutdown_test_result_t {
     bool root_exited = false;
