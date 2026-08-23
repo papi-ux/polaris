@@ -4947,21 +4947,30 @@ namespace proc {
     return desktop_steam_client_active_impl();
   }
 
+  namespace {
+    bool doctor_steam_shutdown_required(
+      bool desktop_steam_active,
+      bool steam_singleton_active
+    ) {
+      return desktop_steam_active || steam_singleton_active;
+    }
+  }
+
   bool request_desktop_steam_shutdown_for_private_stream() {
     const auto pipe_path = steam_instance_pipe_path();
     if (!pipe_path) {
-      BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing private stream shutdown handoff";
+      BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing Steam shutdown handoff";
       return false;
     }
 
     const auto command = canonical_steam_shutdown_command("steam");
-    BOOST_LOG(info) << "process: explicit Nova request closing desktop Steam before private stream using [" << command << "]";
+    BOOST_LOG(info) << "process: explicit request closing active Steam client before protected configuration change using [" << command << "]";
     auto env = boost::this_process::environment();
     boost::system::error_code ec;
     boost::filesystem::path working_dir {};
     auto child = platf::run_command(false, true, command, working_dir, env, nullptr, ec, nullptr);
     if (ec) {
-      BOOST_LOG(warning) << "process: explicit desktop Steam shutdown command failed: " << ec.message();
+      BOOST_LOG(warning) << "process: Steam shutdown command failed: " << ec.message();
       return false;
     }
     child.detach();
@@ -4983,13 +4992,36 @@ namespace proc {
       100ms
     );
     if (!quiescent) {
-      BOOST_LOG(warning) << "process: desktop Steam did not reach process/FIFO quiescence before shutdown deadline";
+      BOOST_LOG(warning) << "process: Steam client did not reach process/FIFO quiescence before shutdown deadline";
     }
     return quiescent;
+  }
+
+  bool ensure_steam_client_quiescent_for_doctor() {
+    const auto pipe_path = steam_instance_pipe_path();
+    if (!pipe_path) {
+      BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing Doctor Steam Input mutation";
+      return false;
+    }
+
+    const bool desktop_active = desktop_steam_client_active_impl();
+    const bool singleton_active = steam_instance_pipe_listener_active(*pipe_path);
+    if (!doctor_steam_shutdown_required(desktop_active, singleton_active)) {
+      return true;
+    }
+
+    return request_desktop_steam_shutdown_for_private_stream();
   }
 #endif
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
+  bool doctor_steam_shutdown_required_for_tests(
+    bool desktop_steam_active,
+    bool steam_singleton_active
+  ) {
+    return doctor_steam_shutdown_required(desktop_steam_active, steam_singleton_active);
+  }
+
   std::optional<std::string> resolve_nested_gamescope_session_target_for_tests(
     bool gamescope_stream_session,
     const proc::ctx_t &app
