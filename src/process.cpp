@@ -454,6 +454,9 @@ namespace proc {
                                             (classification.pacing_risk ||
                                              classification.capture_fallback ||
                                              classification.hdr_risk);
+      // Reused frames can be intentional for static or menu content. Keep
+      // duplicate cadence as a pacing signal, but require an actual target
+      // miss or dropped frames before attributing the cause to host rendering.
       classification.host_render_limited =
         classification.pacing_risk &&
         !classification.network_risk &&
@@ -462,9 +465,7 @@ namespace proc {
         !classification.hdr_risk &&
         !classification.decoder_risk &&
         !classification.virtual_display_risk &&
-        (meaningful_fps_shortfall ||
-         stats.duplicate_frame_ratio >= 0.08 ||
-         stats.dropped_frame_ratio >= 0.03);
+        (meaningful_fps_shortfall || stats.dropped_frame_ratio >= 0.03);
 
       if (classification.network_risk) classification.primary_issue = "network_jitter";
       else if (classification.hdr_risk) classification.primary_issue = "hdr_path";

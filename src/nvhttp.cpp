@@ -2443,6 +2443,9 @@ namespace nvhttp {
         current_virtual_display &&
         (pacing_risk || capture_fallback || hdr_risk);
       const bool sustained_target_miss = meaningful_fps_shortfall;
+      // Reused frames can be intentional for static or menu content. Keep
+      // duplicate cadence as a pacing signal, but require an actual target
+      // miss or dropped frames before attributing the cause to host rendering.
       const bool host_render_limited =
         pacing_risk &&
         !network_risk &&
@@ -2452,9 +2455,7 @@ namespace nvhttp {
         !hdr_risk &&
         !decoder_risk &&
         !virtual_display_risk &&
-        (sustained_target_miss ||
-         stats.duplicate_frame_ratio >= 0.08 ||
-         stats.dropped_frame_ratio >= 0.03);
+        (sustained_target_miss || stats.dropped_frame_ratio >= 0.03);
 
       auto issues = nlohmann::json::array();
       auto recommendations = nlohmann::json::array();
