@@ -144,6 +144,42 @@ TEST(NvhttpSessionHealthTests, MeaningfulTargetMissRemainsHostRenderLimited) {
   EXPECT_TRUE(health.at("host_render_limited").get<bool>());
 }
 
+TEST(NvhttpSessionHealthTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing) {
+  auto stats = stable_gpu_native_stats(60.0, 60.0);
+  stats.duplicate_frame_ratio = 0.10;
+
+  const auto health = nvhttp::build_session_health_json_for_tests(
+    stats,
+    false,
+    "Nova Client",
+    "Control"
+  );
+
+  EXPECT_EQ(health.at("grade"), "watch");
+  EXPECT_EQ(health.at("primary_issue"), "frame_pacing");
+  EXPECT_EQ(health.at("limiting_factor"), "pacing");
+  EXPECT_EQ(health.at("auto_action"), "none");
+  EXPECT_FALSE(health.at("host_render_limited").get<bool>());
+}
+
+TEST(NvhttpSessionHealthTests, DroppedFramesAtTargetRemainHostRenderLimited) {
+  auto stats = stable_gpu_native_stats(60.0, 60.0);
+  stats.dropped_frame_ratio = 0.04;
+
+  const auto health = nvhttp::build_session_health_json_for_tests(
+    stats,
+    false,
+    "Nova Client",
+    "Control"
+  );
+
+  EXPECT_EQ(health.at("grade"), "watch");
+  EXPECT_EQ(health.at("primary_issue"), "host_render_limited");
+  EXPECT_EQ(health.at("limiting_factor"), "host_render");
+  EXPECT_EQ(health.at("auto_action"), "lower_render_profile");
+  EXPECT_TRUE(health.at("host_render_limited").get<bool>());
+}
+
 TEST(StreamNetworkStatsTests, OneTransientReportDoesNotClassifyCleanStreamAsNetworkLimited) {
   constexpr auto client_ip = "203.0.113.120";
   stream_stats::update_stream_active(false);
@@ -237,6 +273,36 @@ TEST(ProcHostPauseClassificationTests, HighRefreshNearTargetDeliveryRemainsStead
 TEST(ProcHostPauseClassificationTests, MeaningfulTargetMissRemainsHostRenderLimited) {
   const auto classification = proc::classify_host_pause_session_for_tests(
     stable_gpu_native_stats(54.0, 60.0),
+    60.0,
+    false
+  );
+
+  EXPECT_EQ(classification.at("health_grade"), "watch");
+  EXPECT_EQ(classification.at("primary_issue"), "host_render_limited");
+  EXPECT_TRUE(classification.at("host_render_limited").get<bool>());
+}
+
+TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing) {
+  auto stats = stable_gpu_native_stats(60.0, 60.0);
+  stats.duplicate_frame_ratio = 0.10;
+
+  const auto classification = proc::classify_host_pause_session_for_tests(
+    stats,
+    60.0,
+    false
+  );
+
+  EXPECT_EQ(classification.at("health_grade"), "watch");
+  EXPECT_EQ(classification.at("primary_issue"), "frame_pacing");
+  EXPECT_FALSE(classification.at("host_render_limited").get<bool>());
+}
+
+TEST(ProcHostPauseClassificationTests, DroppedFramesAtTargetRemainHostRenderLimited) {
+  auto stats = stable_gpu_native_stats(60.0, 60.0);
+  stats.dropped_frame_ratio = 0.04;
+
+  const auto classification = proc::classify_host_pause_session_for_tests(
+    stats,
     60.0,
     false
   );
