@@ -1,365 +1,303 @@
 <template>
-  <div class="page-shell">
-    <section class="page-header system-page-header">
+  <div class="page-shell system-console">
+    <header class="system-console-header">
       <div class="page-heading">
         <div class="section-kicker">{{ $t('index.host_health') }}</div>
         <h1 class="page-title">{{ systemHeaderTitle }}</h1>
-        <p class="page-subtitle">Version, health, and recent issues.</p>
-        <div class="page-meta">
-          <span class="meta-pill font-medium" :class="healthBadgeClass">
-            {{ healthLabel }}
-          </span>
-          <template v-if="hasIssueCounts">
-            <span v-for="counter in issueCounters" :key="counter.label" class="meta-pill">
-              <span class="font-medium text-silver">{{ counter.count }}</span>
-              <span class="ml-1">{{ $t(counter.label) }}</span>
-            </span>
-          </template>
-          <span v-else class="meta-pill border-success/20 bg-success/10 text-success-bright">
-            {{ $t('index.no_active_issues') }}
-          </span>
+        <p class="page-subtitle">Live host state, recent issues, and the controls that matter now.</p>
+      </div>
+      <div class="system-header-actions">
+        <button
+          type="button"
+          class="focus-ring system-button system-button-secondary"
+          :disabled="checkingUpdates"
+          @click="refreshSystemPage"
+        >
+          {{ checkingUpdates ? 'Refreshing…' : 'Refresh' }}
+        </button>
+        <router-link class="focus-ring system-button system-button-primary" to="/troubleshooting">
+          Troubleshoot
+        </router-link>
+      </div>
+    </header>
+
+    <section data-system-status-strip class="system-status-strip" aria-label="Host health summary">
+      <article class="system-status-item">
+        <div class="system-status-heading">
+          <span class="section-kicker">Health</span>
+          <span class="system-status-dot" :class="healthBadgeClass" aria-hidden="true"></span>
         </div>
-      </div>
+        <div class="system-status-value">{{ healthLabel }}</div>
+        <div class="system-status-copy">{{ recentIssues.length ? 'Recent host issues are ready to review.' : 'No active host issues.' }}</div>
+      </article>
 
-      <div class="system-toolbar-notes">
-        <article class="header-support-card">
-          <div class="header-support-title-row">
-            <div class="section-kicker !mb-0">Version</div>
-            <button
-              type="button"
-              class="focus-ring inline-flex h-7 items-center justify-center rounded-lg border border-storm px-2.5 text-[11px] font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice"
-              @click="copyVersion"
-            >
-              {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
-            </button>
-          </div>
-          <div class="header-support-value">{{ version?.version || '—' }}</div>
-          <div class="header-support-copy">{{ versionHeaderSummary }}</div>
-          <a
-            v-if="stableBuildAvailable"
-            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg bg-ice px-3 text-sm font-medium text-void transition-[background-color,box-shadow] duration-200 hover:bg-ice/90 hover:shadow-glow-ice no-underline"
-            :href="githubVersion.release.html_url"
-            target="_blank"
-          >
-            {{ $t('index.view_release') }}
-          </a>
-          <a
-            v-else-if="notifyPreReleases && preReleaseBuildAvailable"
-            class="focus-ring mt-3 inline-flex h-8 items-center justify-center rounded-lg border border-accent/30 px-3 text-sm font-medium text-accent-bright transition-[background-color,border-color,color] duration-200 hover:bg-accent/10 no-underline"
-            :href="preReleaseVersion.release.html_url"
-            target="_blank"
-          >
-            {{ $t('index.view_release') }}
-          </a>
-        </article>
+      <article class="system-status-item">
+        <div class="system-status-heading">
+          <span class="section-kicker">Version</span>
+          <button type="button" class="focus-ring system-inline-action" @click="copyVersion">
+            {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
+          </button>
+        </div>
+        <div class="system-status-value">{{ version?.version || '—' }}</div>
+        <div class="system-status-copy">{{ versionHeaderSummary }}</div>
+      </article>
 
-        <article class="header-support-card">
-          <div class="header-support-title-row">
-            <div class="section-kicker !mb-0">Update</div>
-            <span
-              data-update-status-light
-              class="h-2.5 w-2.5 rounded-full"
-              :class="updateCenterStatusLightClass"
-              :aria-label="updateCenterState.statusLightLabel"
-              role="status"
-            ></span>
-          </div>
-          <div class="header-support-value">{{ updateCenterState.statusLabel }}</div>
-          <div class="header-support-copy">{{ updateCheckError || updateCenterState.primaryActionSummary }}</div>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <button
-              data-update-center-cta
-              type="button"
-              class="focus-ring inline-flex h-8 items-center justify-center rounded-lg px-3 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200"
-              :class="updateCenterCtaClass"
-              :disabled="updateCenterState.primaryActionKind === 'none'"
-              @click="handlePrimaryUpdateAction"
-            >
-              {{ copiedInstallCommand ? 'Copied' : updateCenterState.primaryActionLabel }}
-            </button>
-            <button
-              data-update-center-refresh
-              type="button"
-              class="focus-ring inline-flex h-8 items-center justify-center rounded-lg border border-storm px-3 text-sm font-medium text-silver transition-colors hover:border-ice hover:text-ice disabled:opacity-50"
-              :disabled="checkingUpdates"
-              @click="refreshUpdateStatus"
-            >
-              {{ checkingUpdates ? 'Checking…' : 'Refresh' }}
-            </button>
-          </div>
-        </article>
-
-        <article class="header-support-card">
-          <div class="section-kicker">Issues</div>
-          <div class="header-support-value">{{ recentIssues.length }}</div>
-          <div class="header-support-copy">
-            {{ recentIssues.length ? `${recentIssues.length} ${$t('index.visible_now')}` : 'No recent warnings or errors' }}
-          </div>
-        </article>
-      </div>
+      <article class="system-status-item">
+        <div class="system-status-heading">
+          <span class="section-kicker">Issues</span>
+          <span class="system-status-count">{{ groupedIssueLogs.length }}</span>
+        </div>
+        <div class="system-status-value">{{ groupedIssueLogs.length ? 'Needs review' : 'Clear' }}</div>
+        <div class="system-status-copy">{{ groupedIssueLogs.length ? `${groupedIssueLogs.length} grouped issues · ${recentIssues.length} shown` : 'Latest bounded log scan is clean.' }}</div>
+      </article>
     </section>
 
-    <section id="update-center" ref="updateCenterSection" data-update-center-details class="section-card border-ice/15 bg-gradient-to-br from-deep/70 via-deep/40 to-ice/5">
-      <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
-        <div class="max-w-3xl">
-          <div class="section-kicker">Update Center</div>
-          <div class="section-title-row">
-            <h2 class="section-title">Package updates</h2>
-            <InfoHint size="sm" label="Update Center details">
-              Polaris only checks and prepares manual install commands here. It never auto-installs packages or runs privileged commands from the web UI.
-            </InfoHint>
+    <div class="system-ops-grid">
+      <section data-system-telemetry class="section-card system-telemetry-panel">
+        <div class="system-panel-heading">
+          <div>
+            <div class="section-kicker">Host now</div>
+            <div class="section-title-row">
+              <h2 class="section-title">Telemetry</h2>
+              <InfoHint size="sm" label="System snapshot details">
+                {{ $t('index.system_snapshot_desc') }}
+              </InfoHint>
+            </div>
           </div>
-          <p class="section-copy mt-2">{{ updateCenterState.summary }}</p>
+          <span class="system-telemetry-live meta-pill" :class="telemetryLiveClass">
+            {{ telemetryLiveLabel }}
+          </span>
         </div>
-        <div class="flex flex-wrap items-center gap-2 self-start">
-          <span class="meta-pill" :class="updateCenterBadgeClass">{{ updateCenterState.statusLabel }}</span>
+
+        <div class="system-telemetry-grid">
+          <article class="system-telemetry-item">
+            <div class="system-telemetry-heading">
+              <span class="system-telemetry-label">{{ $t('index.gpu_health') }}</span>
+              <span class="system-telemetry-state" :class="gpu ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ gpu ? 'Nominal' : 'Unavailable' }}</span>
+            </div>
+            <template v-if="gpu">
+              <div class="system-telemetry-value text-accent">{{ gpu.utilization_pct ?? '--' }}<span>%</span></div>
+              <div class="system-telemetry-copy">{{ gpu.name || $t('index.gpu_active') }}</div>
+              <div class="system-telemetry-meta">
+                {{ gpu.temperature_c ?? '--' }}°C · {{ gpu.encoder_pct ?? '--' }}% {{ $t('index.encoder_short') }} · {{ gpu.power_draw_w?.toFixed?.(0) ?? '--' }}W
+              </div>
+            </template>
+            <div v-else class="system-telemetry-copy">{{ $t('index.gpu_unavailable') }}</div>
+          </article>
+
+          <article class="system-telemetry-item">
+            <div class="system-telemetry-heading">
+              <span class="system-telemetry-label">{{ $t('index.display_state') }}</span>
+              <span class="system-telemetry-state" :class="displays.length ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ displays.length ? 'Active' : 'Idle' }}</span>
+            </div>
+            <div class="system-telemetry-value">{{ displays.length }}</div>
+            <div class="system-telemetry-copy">{{ $t('index.active_displays') }}</div>
+            <div class="system-telemetry-meta">
+              <template v-if="displays.length">
+                {{ displays.slice(0, 2).map(formatDisplayName).join(' · ') }}
+              </template>
+              <template v-else>{{ $t('index.no_display_data') }}</template>
+            </div>
+          </article>
+
+          <article class="system-telemetry-item">
+            <div class="system-telemetry-heading">
+              <span class="system-telemetry-label">{{ $t('index.audio_state') }}</span>
+              <span class="system-telemetry-state" :class="audio?.sink ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ audio?.sink ? 'Ready' : 'Unavailable' }}</span>
+            </div>
+            <div class="system-telemetry-value system-telemetry-value-text">
+              {{ audio?.sink ? formatAudioName(audio.sink) : $t('index.audio_unavailable') }}
+            </div>
+            <div class="system-telemetry-meta">
+              {{ audio?.sink ? formatAudioDetail(audio.sink) : $t('index.audio_unavailable_desc') }}
+            </div>
+          </article>
+
+          <article class="system-telemetry-item">
+            <div class="system-telemetry-heading">
+              <span class="system-telemetry-label">{{ $t('index.session_mode') }}</span>
+              <span class="system-telemetry-state" :class="sessionType ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ sessionType ? 'Active' : 'Idle' }}</span>
+            </div>
+            <div class="system-telemetry-value system-telemetry-value-text">
+              {{ sessionType || $t('index.session_mode_idle') }}
+            </div>
+            <div class="system-telemetry-meta">
+              {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
+            </div>
+            <div
+              v-if="displaySession?.environment_repaired"
+              data-display-session-health
+              class="system-session-health border-success/30 bg-success/10 text-success-bright"
+            >
+              Desktop session environment was repaired automatically.
+            </div>
+            <div
+              v-else-if="displaySession?.status === 'missing_display_environment'"
+              data-display-session-health
+              class="system-session-health border-warning/30 bg-warning/10 text-warning-bright"
+            >
+              Desktop preview environment is missing. Restart Polaris from the desktop session or run the user service so it inherits Wayland/X11.
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <aside data-system-recent-issues class="section-card system-recent-issues-panel">
+        <div class="section-kicker">Recent issues</div>
+        <h2 class="section-title">{{ recentIssues.length ? 'Host activity to review' : 'Nothing needs attention' }}</h2>
+
+        <div v-if="recentIssues.length" class="system-issue-list">
+          <article
+            v-for="issue in recentIssues"
+            :key="`${issue.level}:${issue.message}`"
+            class="system-issue-item"
+            :class="issueSeverityClass(issue.level)"
+          >
+            <div class="system-issue-heading">
+              <span>{{ issue.level }}</span>
+              <span v-if="issue.count > 1">×{{ issue.count }}</span>
+            </div>
+            <div class="system-issue-message">{{ issue.message }}</div>
+            <time class="system-issue-time" :datetime="issue.timestamp || undefined">{{ issue.timestamp }}</time>
+          </article>
+        </div>
+
+        <div v-else class="system-issues-empty">
+          <div class="system-issues-check" aria-hidden="true">✓</div>
+          <div class="system-issues-empty-title">No warnings or errors</div>
+          <p>The latest bounded host log scan is clean.</p>
+          <span>Latest scan · up to 200 source lines</span>
+        </div>
+
+        <div class="system-issue-actions">
+         <span v-if="groupedIssueLogs.length > recentIssues.length" class="system-issue-more">+{{ groupedIssueLogs.length - recentIssues.length }} more in logs</span>
+          <router-link class="focus-ring system-text-link" to="/troubleshooting#logs">Open logs →</router-link>
+          <router-link v-if="recentIssues.length" class="focus-ring system-text-link" to="/troubleshooting">Run guided troubleshooting →</router-link>
+        </div>
+      </aside>
+    </div>
+
+    <section id="update-center" ref="updateCenterSection" data-system-update-summary class="section-card system-update-section">
+      <div class="system-update-summary">
+        <span
+          data-update-status-light
+          class="system-update-status-light"
+          :class="updateCenterStatusLightClass"
+          :aria-label="updateCenterState.statusLightLabel"
+          role="status"
+        ></span>
+        <div class="system-update-copy">
+          <div class="section-kicker">Software</div>
+          <h2 class="section-title">Update Center</h2>
+          <p><span class="system-update-state-summary">{{ updateCenterState.statusLabel }}</span> · {{ updateCheckError || updateCenterState.primaryActionSummary }}</p>
+          <p class="system-update-safety">Polaris never auto-installs updates from this page.</p>
+        </div>
+        <div class="system-update-actions">
           <button
+            data-update-center-cta
             type="button"
-            class="focus-ring inline-flex h-8 items-center justify-center rounded-lg border border-storm px-3 text-sm font-medium text-silver transition-colors hover:border-ice hover:text-ice disabled:opacity-50"
+            class="focus-ring system-button"
+            :class="updateCenterCtaClass"
+            :disabled="updateCenterState.primaryActionKind === 'none'"
+            @click="handlePrimaryUpdateAction"
+          >
+            {{ copiedInstallCommand ? 'Copied' : updateCenterState.primaryActionLabel }}
+          </button>
+          <button
+            data-update-center-refresh
+            type="button"
+            class="focus-ring system-button system-button-secondary"
             :disabled="checkingUpdates"
             @click="refreshUpdateStatus"
           >
             {{ checkingUpdates ? 'Checking…' : 'Check again' }}
           </button>
+          <button
+            v-if="!updateDetailsForced"
+            type="button"
+            class="focus-ring system-button system-button-secondary"
+            :aria-expanded="String(showUpdateDetails)"
+            aria-controls="system-update-details"
+            @click="updateDetailsOpen = !updateDetailsOpen"
+          >
+            {{ showUpdateDetails ? 'Hide details' : 'Update details' }}
+          </button>
         </div>
       </div>
 
-      <div class="mt-5 grid gap-3 lg:grid-cols-3">
-        <article class="surface-subtle p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Installed</div>
-          <div class="mt-2 text-2xl font-semibold text-silver">{{ updateCenterState.currentVersion || version?.version || '—' }}</div>
-          <div class="mt-1 text-xs text-storm">Running on this host</div>
-        </article>
-        <article class="surface-subtle p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Latest</div>
-          <div class="mt-2 text-2xl font-semibold text-ice">{{ updateCenterState.latestVersion || '—' }}</div>
-          <a v-if="updateCenterState.releaseUrl" class="mt-2 inline-flex text-sm font-medium text-ice no-underline hover:text-ice/80" :href="updateCenterState.releaseUrl" target="_blank">View release notes</a>
-        </article>
-        <article class="surface-subtle p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Package</div>
-          <div class="mt-2 text-sm font-medium text-silver">{{ updateCenterState.packageLabel || 'Manual release page' }}</div>
-          <div class="mt-1 break-all text-xs text-storm">{{ updateCenterState.asset?.name || 'No matching package detected for this host yet.' }}</div>
-          <div v-if="updateCenterState.assetDigest" class="mt-2 break-all text-[11px] text-storm">{{ updateCenterState.assetDigest }}</div>
-        </article>
-      </div>
+      <div v-show="showUpdateDetails" id="system-update-details" data-update-center-details class="system-update-details">
+        <div class="system-update-grid">
+          <article class="surface-subtle p-4">
+            <div class="system-telemetry-label">Installed</div>
+            <div class="system-update-value">{{ updateCenterState.currentVersion || version?.version || '—' }}</div>
+            <div class="system-update-meta">Running on this host</div>
+          </article>
+          <article class="surface-subtle p-4">
+            <div class="system-telemetry-label">Latest</div>
+            <div class="system-update-value text-ice">{{ updateCenterState.latestVersion || '—' }}</div>
+            <a v-if="updateCenterState.releaseUrl" class="system-text-link" :href="updateCenterState.releaseUrl" target="_blank">View release notes</a>
+          </article>
+          <article class="surface-subtle p-4">
+            <div class="system-telemetry-label">Package</div>
+            <div class="system-update-package">{{ updateCenterState.packageLabel || 'Manual release page' }}</div>
+            <div class="system-update-meta break-all">{{ updateCenterState.asset?.name || 'No matching package detected for this host yet.' }}</div>
+            <div v-if="updateCenterState.assetDigest" class="system-update-digest">{{ updateCenterState.assetDigest }}</div>
+          </article>
+        </div>
 
-      <div v-if="updateCenterState.asset || updateCenterState.releaseUrl" class="mt-5 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-        <div v-if="updateCenterState.canCopyInstallCommand" class="min-w-0 flex-1 rounded-2xl border border-storm/20 bg-void/40 p-4">
-          <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <div class="text-sm font-medium text-silver">Manual install command</div>
-              <div class="mt-1 text-xs text-storm">Copy, inspect, and run locally when you are ready. No auto-install from the web UI.</div>
+        <div v-if="updateCenterState.asset || updateCenterState.releaseUrl" class="system-install-row">
+          <div v-if="updateCenterState.canCopyInstallCommand" class="system-install-command">
+            <div class="system-install-heading">
+              <div>
+                <div class="font-medium text-silver">Manual install command</div>
+                <div class="system-update-meta">Copy, inspect, and run locally when you are ready. Polaris never auto-installs from the web UI.</div>
+              </div>
+              <button type="button" class="focus-ring system-button system-button-secondary" @click="copyInstallCommand">
+                {{ copiedInstallCommand ? 'Copied' : 'Copy command' }}
+              </button>
             </div>
-            <button type="button" class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-ice/30 px-3 text-sm font-medium text-ice transition-colors hover:bg-ice/10" @click="copyInstallCommand">
-              {{ copiedInstallCommand ? 'Copied' : 'Copy command' }}
-            </button>
+            <pre><code>{{ updateCenterState.installCommand }}</code></pre>
           </div>
-          <pre class="mt-3 overflow-x-auto rounded-xl border border-storm/20 bg-black/30 p-3 text-xs text-ice"><code>{{ updateCenterState.installCommand }}</code></pre>
-        </div>
-        <div class="flex flex-wrap gap-2">
-          <a v-if="updateCenterState.asset" class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void no-underline transition-colors hover:bg-ice/90" :href="updateCenterState.asset.browser_download_url" target="_blank">Download package</a>
-          <a v-if="updateCenterState.releaseUrl" class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver no-underline transition-colors hover:border-ice hover:text-ice" :href="updateCenterState.releaseUrl" target="_blank">Open release</a>
+          <div class="system-install-links">
+            <a v-if="updateCenterState.asset" class="focus-ring system-button system-button-primary" :href="updateCenterState.asset.browser_download_url" target="_blank">Download package</a>
+            <a v-if="updateCenterState.releaseUrl" class="focus-ring system-button system-button-secondary" :href="updateCenterState.releaseUrl" target="_blank">Open release</a>
+          </div>
         </div>
       </div>
     </section>
 
-    <section class="section-card">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <div class="section-kicker">Host</div>
-          <div class="section-title-row">
-            <h2 class="section-title">Telemetry</h2>
-            <InfoHint size="sm" label="System snapshot details">
-              {{ $t('index.system_snapshot_desc') }}
-            </InfoHint>
-          </div>
-        </div>
-        <div class="text-xs text-storm">{{ systemLoading ? 'Refreshing…' : 'Live' }}</div>
+    <nav class="system-quick-actions" aria-label="System shortcuts">
+      <router-link v-for="action in quickActions" :key="action.to" class="focus-ring system-quick-action" :to="action.to">
+        <span>{{ action.title }}</span>
+        <span aria-hidden="true">→</span>
+      </router-link>
+    </nav>
+
+    <footer class="system-resource-footer">
+      <div>
+        <div class="section-kicker">Product & resources</div>
+        <p>Nova client support, documentation, community, and project information.</p>
       </div>
-
-      <div class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.gpu_health') }}</div>
-          <div v-if="gpu" class="mt-3">
-            <div class="min-w-0 text-sm font-medium text-silver">{{ gpu.name || $t('index.gpu_active') }}</div>
-            <div class="mt-3 flex items-end gap-2 tabular-nums">
-              <div class="text-3xl font-semibold text-accent">{{ gpu.utilization_pct ?? '--' }}<span class="text-base">%</span></div>
-              <div class="pb-1 text-xs text-storm">{{ $t('index.gpu_utilization') }}</div>
-            </div>
-            <div class="mt-3 flex flex-wrap gap-2 text-xs text-storm tabular-nums">
-              <span>{{ gpu.temperature_c ?? '--' }}°C</span>
-              <span>{{ gpu.encoder_pct ?? '--' }}% {{ $t('index.encoder_short') }}</span>
-              <span>{{ gpu.power_draw_w?.toFixed?.(0) ?? '--' }}W</span>
-            </div>
-          </div>
-          <div v-else class="mt-3 text-sm text-storm">{{ $t('index.gpu_unavailable') }}</div>
-        </article>
-
-        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.display_state') }}</div>
-          <div class="mt-3 flex items-end gap-2 tabular-nums">
-            <div class="text-3xl font-semibold text-silver">{{ displays.length }}</div>
-            <div class="pb-1 text-xs text-storm">{{ $t('index.active_displays') }}</div>
-          </div>
-          <div class="mt-3 space-y-1 text-sm text-storm">
-            <div v-if="displays.length === 0">{{ $t('index.no_display_data') }}</div>
-            <div v-for="display in displays.slice(0, 3)" :key="display.name || display.id || display.label" class="truncate text-silver" :title="formatDisplayName(display)">
-              {{ formatDisplayName(display) }}
-            </div>
-          </div>
-        </article>
-
-        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.audio_state') }}</div>
-          <div class="mt-3 text-sm font-medium text-silver">
-            {{ audio?.sink ? formatAudioName(audio.sink) : $t('index.audio_unavailable') }}
-          </div>
-          <div class="mt-3 text-xs text-storm">
-            {{ audio?.sink ? formatAudioDetail(audio.sink) : $t('index.audio_unavailable_desc') }}
-          </div>
-        </article>
-
-        <article class="rounded-2xl border border-storm/20 bg-deep/40 p-4">
-          <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('index.session_mode') }}</div>
-          <div class="mt-3 text-sm font-medium capitalize text-silver">{{ sessionType || $t('index.session_mode_idle') }}</div>
-          <div class="mt-3 text-xs text-storm">
-            {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
-          </div>
-          <div
-            v-if="displaySession?.environment_repaired"
-            data-display-session-health
-            class="mt-3 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-xs text-success-bright"
-          >
-            Desktop session environment was repaired automatically from the user service.
-          </div>
-          <div
-            v-else-if="displaySession?.status === 'missing_display_environment'"
-            data-display-session-health
-            class="mt-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-bright"
-          >
-            Desktop preview environment is missing. Restart Polaris from the desktop session or run the user service so it inherits Wayland/X11.
-          </div>
-        </article>
+      <div class="system-resource-links">
+        <a class="focus-ring system-footer-link" href="https://github.com/papi-ux/nova" target="_blank">Nova</a>
+        <a v-for="link in resources" :key="link.href" class="focus-ring system-footer-link" :href="link.href" target="_blank">
+          {{ $t(link.labelKey) }}
+        </a>
+        <a
+          class="focus-ring system-footer-link text-xs"
+          :href="sponsor.href"
+          target="_blank"
+          rel="noopener noreferrer"
+          :aria-label="$t(sponsor.ariaLabelKey)"
+        >
+          <span aria-hidden="true" class="text-danger/80">♥</span>
+          {{ $t(sponsor.labelKey) }}
+        </a>
+        <a v-for="doc in legalDocs" :key="doc.href" class="focus-ring system-footer-link" :href="doc.href" target="_blank">
+          {{ $t(doc.labelKey) }}
+        </a>
       </div>
-    </section>
-
-    <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)]">
-      <section class="section-card">
-        <div class="section-kicker">Actions</div>
-        <div class="section-title-row">
-          <h2 class="section-title">Shortcuts</h2>
-          <InfoHint size="sm" label="Quick action details">
-            {{ $t('index.quick_actions_desc') }}
-          </InfoHint>
-        </div>
-        <div class="mt-5 grid gap-3 md:grid-cols-2">
-          <router-link
-            v-for="action in quickActions"
-            :key="action.to"
-            class="action-tile"
-            :to="action.to"
-          >
-            <div class="section-title-row">
-              <div class="text-sm font-medium text-silver">{{ $t(action.titleKey) }}</div>
-              <InfoHint size="sm" align="right" :label="`${$t(action.titleKey)} details`">
-                {{ $t(action.descKey) }}
-              </InfoHint>
-            </div>
-          </router-link>
-        </div>
-      </section>
-
-      <section class="section-card">
-        <div class="section-kicker">Clients</div>
-        <div class="section-title-row">
-          <h2 class="section-title">Supported paths</h2>
-          <InfoHint size="sm" label="Compatibility details">
-            {{ $t('index.compatibility_desc') }}
-          </InfoHint>
-        </div>
-        <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-          <div
-            v-for="client in compatibilityClients"
-            :key="client.platform"
-            class="surface-subtle p-4"
-          >
-            <div class="flex items-center justify-between gap-3">
-              <div class="text-sm font-medium text-silver">{{ client.platform }}</div>
-              <span class="rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-eyebrow" :class="client.link ? 'border-ice/30 bg-ice/10 text-ice' : 'border-storm/30 bg-deep/60 text-storm'">
-                {{ client.status }}
-              </span>
-            </div>
-            <div class="mt-2 text-sm text-storm">{{ client.name }}</div>
-            <a
-              v-if="client.link"
-              class="mt-3 inline-flex text-sm font-medium text-ice no-underline hover:text-ice/80"
-              :href="client.link"
-              target="_blank"
-            >
-              {{ $t('index.view_client') }}
-            </a>
-          </div>
-        </div>
-        <div class="mt-4 text-sm italic text-storm">{{ $t('client_card.generic_moonlight_clients_desc') }}</div>
-      </section>
-    </div>
-
-    <section class="section-card">
-      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div class="section-kicker">Resources</div>
-          <div class="section-title-row">
-            <h2 class="section-title">Links</h2>
-            <InfoHint size="sm" label="Resource details">
-              {{ $t('index.resources_desc') }}
-            </InfoHint>
-          </div>
-        </div>
-        <div class="flex flex-col items-start gap-2 lg:items-end">
-          <div class="flex flex-wrap gap-2 lg:justify-end">
-            <a
-              v-for="resource in resources"
-              :key="resource.href"
-              class="focus-ring inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-[border-color,color,box-shadow,background-color] duration-200 hover:border-ice hover:text-ice hover:shadow-[0_0_16px_color-mix(in_srgb,var(--color-ice)_8%,transparent)] no-underline"
-              :href="resource.href"
-              target="_blank"
-            >
-              {{ $t(resource.labelKey) }}
-            </a>
-          </div>
-          <a
-            class="focus-ring inline-flex min-h-7 items-center rounded-md px-2 text-xs font-medium text-storm no-underline transition-colors duration-200 hover:text-silver"
-            :href="sponsor.href"
-            target="_blank"
-            rel="noopener noreferrer"
-            :aria-label="$t(sponsor.ariaLabelKey)"
-          >
-            <span aria-hidden="true" class="mr-1.5 text-danger/80">♥</span>
-            {{ $t(sponsor.labelKey) }}
-          </a>
-        </div>
-      </div>
-    </section>
-
-    <section class="rounded-2xl border border-storm/20 bg-deep/30 p-4">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <div class="section-kicker">Legal</div>
-          <p class="mt-2 text-sm text-storm">{{ $t('resource_card.legal_desc') }}</p>
-        </div>
-        <div class="flex flex-wrap gap-2">
-          <a
-            v-for="document in legalDocs"
-            :key="document.href"
-            class="focus-ring inline-flex h-9 items-center justify-center rounded-lg bg-danger/20 px-4 text-sm font-medium text-danger transition-[background-color,color] duration-200 hover:bg-danger/30 no-underline"
-            :href="document.href"
-            target="_blank"
-          >
-            {{ $t(document.labelKey) }}
-          </a>
-        </div>
-      </div>
-    </section>
+    </footer>
   </div>
 </template>
 
@@ -371,6 +309,7 @@ import { buildUpdateCenterState, updateStatusLightClass } from '../update-center
 import InfoHint from '../components/InfoHint.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
+import { resources, legalDocs, sponsor } from '../resource-links.js'
 
 const { gpu, displays, audio, sessionType, displaySession, loading: systemLoading } = useSystemStats(3000)
 
@@ -378,7 +317,6 @@ const version = ref(null)
 const githubVersion = ref(null)
 const notifyPreReleases = ref(false)
 const preReleaseVersion = ref(null)
-const loading = ref(true)
 const logs = ref(null)
 const copiedVersion = ref(false)
 const copiedInstallCommand = ref(false)
@@ -386,20 +324,12 @@ const updateHost = ref({ platform: '', distro: {} })
 const checkingUpdates = ref(false)
 const updateCheckError = ref('')
 const updateCenterSection = ref(null)
-
-const compatibilityClients = [
-  { platform: 'Android', name: 'Nova', status: 'Supported', link: 'https://github.com/papi-ux/nova' },
-  { platform: 'iOS', name: 'Coming Soon', status: 'Planned', link: '' },
-  { platform: 'Desktop', name: 'Coming Soon', status: 'Planned', link: '' }
-]
-
-import { resources, legalDocs, sponsor } from '../resource-links.js'
+const updateDetailsOpen = ref(false)
 
 const quickActions = [
-  { to: '/', titleKey: 'index.quick_mission_title', descKey: 'index.quick_mission_desc' },
-  { to: '/troubleshooting#logs', titleKey: 'index.quick_logs_title', descKey: 'index.quick_logs_desc' },
-  { to: '/troubleshooting', titleKey: 'index.quick_troubleshoot_title', descKey: 'index.quick_troubleshoot_desc' },
-  { to: '/config', titleKey: 'index.quick_settings_title', descKey: 'index.quick_settings_desc' }
+  { to: '/apps', title: 'Applications' },
+  { to: '/troubleshooting#logs', title: 'Logs' },
+  { to: '/config', title: 'Settings' }
 ]
 
 const installedVersionNotStable = computed(() => {
@@ -418,22 +348,14 @@ const preReleaseBuildAvailable = computed(() => {
 })
 
 const buildVersionIsDirty = computed(() => {
-  return version.value?.version?.split('.').length === 5 &&
-    version.value.version.includes('dirty')
+  return version.value?.version?.split('.').length === 5 && version.value.version.includes('dirty')
 })
 
 const groupedIssueLogs = computed(() => groupRecentIssueLogs(logs.value, { maxSourceLines: 200 }))
-
 const fatalCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Fatal').length)
 const warningCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Warning').length)
 const errorCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Error').length)
 const recentIssues = computed(() => groupedIssueLogs.value.slice(0, 3))
-const issueCounters = computed(() => [
-  buildIssueCounter(fatalCount.value, 'index.fatal_issues', 'fatal'),
-  buildIssueCounter(warningCount.value, 'index.warning_issues', 'warning'),
-  buildIssueCounter(errorCount.value, 'index.error_issues', 'error')
-])
-const hasIssueCounts = computed(() => fatalCount.value > 0 || warningCount.value > 0 || errorCount.value > 0)
 
 const healthState = computed(() => {
   if (fatalCount.value > 0) return 'critical'
@@ -491,72 +413,55 @@ const updateCenterState = computed(() => buildUpdateCenterState({
   host: updateHost.value,
 }))
 
-const updateCenterBadgeClass = computed(() => {
-  switch (updateCenterState.value.status) {
-    case 'update_available':
-      return 'border-ice/30 bg-ice/10 text-ice'
-    case 'ahead':
-      return 'border-accent/30 bg-accent/10 text-accent-bright'
-    case 'unavailable':
-      return 'border-warning/30 bg-warning/10 text-warning-bright'
-    case 'disabled':
-      return 'border-storm/30 bg-deep/60 text-storm'
-    default:
-      return 'border-success/30 bg-success/10 text-success-bright'
-  }
-})
-
-
 const updateCenterStatusLightClass = computed(() => updateStatusLightClass(updateCenterState.value.statusTone))
 
 const updateCenterCtaClass = computed(() => {
   if (updateCenterState.value.status === 'update_available') {
-    return 'bg-ice text-void hover:bg-ice/90 hover:shadow-glow-ice'
+    return 'system-button-primary'
   }
   if (updateCenterState.value.primaryActionKind === 'none') {
-    return 'border border-storm bg-deep/50 text-storm'
+    return 'system-button-disabled'
   }
-  return 'border border-ice/30 text-ice hover:bg-ice/10'
+  return 'system-button-secondary'
 })
 
-function buildIssueCounter(count, label, tone) {
-  if (count === 0) {
-    return {
-      count,
-      label,
-      cardClass: 'border border-storm/20 bg-deep/60',
-      valueClass: 'text-silver',
-      labelClass: 'text-storm'
-    }
-  }
+const telemetryAvailable = computed(() => {
+  return Boolean(gpu.value || displays.value.length || audio.value?.sink || sessionType.value)
+})
 
-  if (tone === 'fatal') {
-    return {
-      count,
-      label,
-      cardClass: 'border border-danger/20 bg-danger/10',
-      valueClass: 'text-danger',
-      labelClass: 'text-danger-bright/70'
-    }
-  }
+const telemetryLiveLabel = computed(() => {
+  if (systemLoading.value) return 'Refreshing…'
+  return telemetryAvailable.value ? 'Live' : 'Unavailable'
+})
 
-  if (tone === 'warning') {
-    return {
-      count,
-      label,
-      cardClass: 'border border-warning/20 bg-warning/10',
-      valueClass: 'text-warning-bright',
-      labelClass: 'text-warning-bright/70'
-    }
-  }
+const telemetryLiveClass = computed(() => {
+  if (systemLoading.value) return 'border-ice/30 bg-ice/10 text-ice'
+  return telemetryAvailable.value
+    ? 'border-success/30 bg-success/10 text-success-bright'
+    : 'border-storm/30 bg-storm/10 text-silver'
+})
 
-  return {
-    count,
-    label,
-    cardClass: 'border border-info/20 bg-info/10',
-    valueClass: 'text-info-bright',
-    labelClass: 'text-info-bright/70'
-  }
+const updateDetailsForced = computed(() => {
+  return updateCenterState.value.status === 'update_available' || Boolean(updateCheckError.value)
+})
+
+const showUpdateDetails = computed(() => {
+  return updateDetailsOpen.value || updateDetailsForced.value
+})
+
+const sessionModeDescription = computed(() => {
+  const mode = String(sessionType.value || '').toLowerCase()
+  if (!mode) return ''
+  if (mode.includes('wayland')) return 'Wayland compositor active.'
+  if (mode.includes('x11')) return 'X11 desktop session active.'
+  if (mode.includes('headless')) return 'Headless · Private Stream runtime active.'
+  return 'Live compositor mode reported by the host.'
+})
+
+function issueSeverityClass(level) {
+  if (level === 'Fatal') return 'system-issue-fatal'
+  if (level === 'Warning') return 'system-issue-warning'
+  return 'system-issue-error'
 }
 
 function formatAudioName(sink) {
@@ -577,20 +482,9 @@ function formatAudioDetail(sink) {
 
 function formatDisplayName(display) {
   const base = display.friendly_name || display.name || display.id || 'Display'
-  if (display.width && display.height) {
-    return `${base} · ${display.width}×${display.height}`
-  }
+  if (display.width && display.height) return `${base} · ${display.width}×${display.height}`
   return base
 }
-
-const sessionModeDescription = computed(() => {
-  const mode = String(sessionType.value || '').toLowerCase()
-  if (!mode) return ''
-  if (mode.includes('wayland')) return 'Wayland compositor active.'
-  if (mode.includes('x11')) return 'X11 desktop session active.'
-  if (mode.includes('headless')) return 'Private Stream runtime active.'
-  return 'Live compositor mode reported by the host.'
-})
 
 async function copyVersion() {
   if (!version.value?.version || !navigator.clipboard) return
@@ -612,6 +506,7 @@ async function copyInstallCommand() {
 }
 
 function scrollToUpdateCenter() {
+  updateDetailsOpen.value = true
   updateCenterSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
@@ -626,24 +521,22 @@ async function handlePrimaryUpdateAction() {
     return
   }
   scrollToUpdateCenter()
-  if (action === 'copy_install_command') {
-    await copyInstallCommand()
-  }
+  if (action === 'copy_install_command') await copyInstallCommand()
 }
 
 async function refreshUpdateStatus() {
   checkingUpdates.value = true
   updateCheckError.value = ''
   try {
-    const config = await fetch('./api/config', { credentials: 'include' }).then((r) => r.json())
-    const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((r) => r.json()).catch(() => null)
+    const config = await fetch('./api/config', { credentials: 'include' }).then((response) => response.json())
+    const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((response) => response.json()).catch(() => null)
     updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }
     notifyPreReleases.value = config.notify_pre_releases
     version.value = new PolarisVersion(null, hostStatus?.version || config.version)
 
     try {
-      githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((r) => r.json()), null)
-      const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.json())
+      githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((response) => response.json()), null)
+      const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((response) => response.json())
       const preRelease = releases.find((release) => release.prerelease)
       preReleaseVersion.value = preRelease ? new PolarisVersion(preRelease, null) : null
     } catch (error) {
@@ -660,13 +553,22 @@ async function refreshUpdateStatus() {
   }
 }
 
-;(async () => {
-  await refreshUpdateStatus()
+async function fetchLogs() {
   try {
     logs.value = (await fetchLogTail(createLogTailState())).text
   } catch (error) {
     console.error(error)
   }
-  loading.value = false
+}
+
+async function refreshSystemPage() {
+  await Promise.all([
+    refreshUpdateStatus(),
+    fetchLogs(),
+  ])
+}
+
+;(async () => {
+  await refreshSystemPage()
 })()
 </script>
