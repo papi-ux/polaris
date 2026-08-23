@@ -11,17 +11,17 @@ const webSource = (relativePath) => readFileSync(
 describe('System resource sponsorship', () => {
   it('renders the sponsor as a quiet, accessible footer link', () => {
     const home = webSource('views/HomeView.vue')
-    const resourcesSection = home.slice(
-      home.indexOf('<div class="section-kicker">Resources</div>'),
-      home.indexOf('<div class="section-kicker">Legal</div>')
-    )
+    const footerStart = home.indexOf('<footer class="system-resource-footer">')
+    const footerEnd = home.indexOf('</footer>', footerStart)
+    const resourcesFooter = home.slice(footerStart, footerEnd)
 
-    expect(resourcesSection).toContain(':href="sponsor.href"')
-    expect(resourcesSection).toContain(':aria-label="$t(sponsor.ariaLabelKey)"')
-    expect(resourcesSection).toContain('rel="noopener noreferrer"')
-    expect(resourcesSection).toContain('aria-hidden="true"')
-    expect(resourcesSection).toContain('{{ $t(sponsor.labelKey) }}')
-    expect(resourcesSection).toContain('text-xs')
+    expect(footerStart).toBeGreaterThan(-1)
+    expect(resourcesFooter).toContain(':href="sponsor.href"')
+    expect(resourcesFooter).toContain(':aria-label="$t(sponsor.ariaLabelKey)"')
+    expect(resourcesFooter).toContain('rel="noopener noreferrer"')
+    expect(resourcesFooter).toContain('aria-hidden="true"')
+    expect(resourcesFooter).toContain('{{ $t(sponsor.labelKey) }}')
+    expect(resourcesFooter).toContain('text-xs')
   })
 
   it('does not repeat the sponsor prompt on onboarding and recovery cards', () => {
