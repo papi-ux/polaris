@@ -234,11 +234,15 @@ namespace proc {
 
   struct private_steam_graceful_shutdown_test_result_t {
     bool root_exited = false;
+    std::size_t app_stop_calls = 0;
+    std::size_t app_wait_calls = 0;
     std::size_t request_calls = 0;
     std::size_t wait_calls = 0;
   };
 
   private_steam_graceful_shutdown_test_result_t run_private_steam_graceful_shutdown_scenario_for_tests(
+    bool app_stop_dispatched,
+    bool app_quiescent,
     bool request_dispatched,
     bool exact_root_exited
   );
@@ -283,6 +287,14 @@ namespace proc {
     std::size_t launcher_root_count,
     std::size_t unowned_count,
     bool request_available
+  );
+  bool terminate_session_owned_steam_app_lineage_for_tests(
+    const struct ctx_t &app,
+    std::string_view session_instance_id
+  );
+  bool steam_launch_cmdline_matches_appid_for_tests(
+    std::string_view cmdline,
+    std::string_view appid
   );
   bool steam_shutdown_process_is_unowned_active_for_tests(
     std::string_view comm,
