@@ -1943,7 +1943,7 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownUsesImmutableExact
 #endif
 }
 
-TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownDrainsHelpersBeforeFallbackSignals) {
+TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownHardKillsExactFallbackSetWithoutDestructorSignals) {
 #ifdef __linux__
   linux_cage_compositor_guard_t config_guard;
   const std::string token = "steam-root-first-generation";
@@ -2037,8 +2037,8 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownDrainsHelpersBefor
 
   int root_status = 0;
   ASSERT_EQ(root_guard.wait(&root_status, 0), root);
-  ASSERT_TRUE(WIFEXITED(root_status));
-  EXPECT_EQ(WEXITSTATUS(root_status), 0);
+  ASSERT_TRUE(WIFSIGNALED(root_status));
+  EXPECT_EQ(WTERMSIG(root_status), SIGKILL);
 
   std::string shutdown_events;
   for (;;) {
@@ -2053,12 +2053,12 @@ TEST(ProcessRuntimeConfigTests, ProductionPreCageSteamTeardownDrainsHelpersBefor
   }
   close(event_pipe[0]);
 
-  EXPECT_NE(shutdown_events.find('R'), std::string::npos)
-    << "the Steam client root must receive the initial graceful signal";
-  EXPECT_NE(shutdown_events.find('G'), std::string::npos)
-    << "the Steam helper must drain through the client root";
+  EXPECT_EQ(shutdown_events.find('R'), std::string::npos)
+    << "fallback must not invoke the Steam client root destructor through SIGTERM";
+  EXPECT_EQ(shutdown_events.find('G'), std::string::npos)
+    << "fallback must not ask Steam helpers to drain through the crashing destructor path";
   EXPECT_EQ(shutdown_events.find('H'), std::string::npos)
-    << "Steam helpers must not receive fallback SIGTERM before the client root can drain them";
+    << "fallback must not deliver SIGTERM to exact private Steam helpers";
 #else
   GTEST_SKIP() << "Linux-only private Steam process-graph teardown ordering";
 #endif
@@ -3246,7 +3246,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   const auto generation_gate = implementation.find("session_instance_id.empty()");
   const auto capture_gate = implementation.find("ownership.capture_complete");
   const auto mixed_ownership_gate = implementation.find("ownership.unowned.empty()");
-  const auto pidfd_termination = implementation.find("terminate_pidfds(");
+  const auto pidfd_termination = implementation.find("kill_private_steam_pidfds_immediately(");
   ASSERT_NE(ownership_scan, std::string::npos);
   ASSERT_NE(immutable_cage_gate, std::string::npos);
   ASSERT_NE(generation_gate, std::string::npos);
@@ -3256,6 +3256,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_LT(ownership_scan, capture_gate);
   EXPECT_LT(capture_gate, pidfd_termination);
   EXPECT_LT(mixed_ownership_gate, pidfd_termination);
+  EXPECT_EQ(implementation.find("terminate_pidfds(ownership"), std::string::npos);
   EXPECT_EQ(implementation.find("config::video.linux_display.use_cage_compositor"), std::string::npos);
   EXPECT_EQ(implementation.find("cage_display_router::is_running()"), std::string::npos);
   EXPECT_EQ(implementation.find("platf::run_command("), std::string::npos);
