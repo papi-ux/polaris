@@ -536,6 +536,31 @@ TEST(SteamShutdownStateMachineTests, ProductionPrivateSteamRequestUsesSessionEnv
   EXPECT_NE(request.find("child.detach()"), std::string::npos);
 }
 
+TEST(SteamShutdownStateMachineTests, DoctorShutdownIncludesPrivateSteamSingleton) {
+  EXPECT_FALSE(proc::doctor_steam_shutdown_required_for_tests(false, false));
+  EXPECT_TRUE(proc::doctor_steam_shutdown_required_for_tests(true, false));
+  EXPECT_TRUE(proc::doctor_steam_shutdown_required_for_tests(false, true));
+  EXPECT_TRUE(proc::doctor_steam_shutdown_required_for_tests(true, true));
+}
+
+TEST(SteamShutdownStateMachineTests, ProductionDoctorQuiescesSteamBeforeVdfMutation) {
+  const auto source = read_source_file("src/doctor_actions.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto action = source_between(
+    source,
+    "if (action_id == \"disable_steam_input_xbox\" ||",
+    "const auto stats = stream_stats::get_current();"
+  );
+  ASSERT_FALSE(action.empty());
+
+  const auto quiesce = action.find("ensure_steam_client_quiescent_for_doctor()");
+  const auto rewrite = action.find("rewrite_steam_profile(path, false)");
+  ASSERT_NE(quiesce, std::string::npos);
+  ASSERT_NE(rewrite, std::string::npos);
+  EXPECT_LT(quiesce, rewrite);
+  EXPECT_EQ(action.find("if (proc::desktop_steam_client_active())"), std::string::npos);
+}
+
 TEST(SteamShutdownStateMachineTests, PostShutdownPolicyRechecksLiveProcessState) {
   const auto source = read_source_file("src/process.cpp");
   ASSERT_FALSE(source.empty());

@@ -330,12 +330,12 @@ namespace doctor_actions {
       // Steam rewrites this file when it exits, so an edit under a live client
       // is reverted the moment that client closes. Closing Steam first is the
       // whole reason this action asks for confirmation.
-      if (proc::desktop_steam_client_active() && !proc::request_desktop_steam_shutdown_for_private_stream()) {
+      if (!proc::ensure_steam_client_quiescent_for_doctor()) {
         return {
           {"status", false},
           {"changed", false},
           {"state", "steam_still_running"},
-          {"error", "Desktop Steam did not close, so the change would be reverted when it exits. Close Steam and try again."},
+          {"error", "Steam did not close, so the change would be reverted when it exits. Close Steam and try again."},
           {"evidence", steam_input_evidence()}
         };
       }
@@ -372,7 +372,7 @@ namespace doctor_actions {
         {"status", true},
         {"changed", true},
         {"state", "watching"},
-        {"message", "Closed desktop Steam and cleared the Xbox Steam Input opt-in. Launch the game again to pick up the change."},
+        {"message", "Closed Steam and cleared the Xbox Steam Input opt-in. Launch the game again to pick up the change."},
         {"run_id", run.run_id},
         {"applied", {{"profiles_updated", static_cast<int>(run.steam_edits.size())}}},
         {"before", {{"profiles_with_xbox_support", before.profiles_with_xbox_support}, {"forced_app_count", before.forced_app_count}}},

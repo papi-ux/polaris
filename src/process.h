@@ -151,6 +151,7 @@ namespace proc {
   );
   bool desktop_steam_client_active();
   bool request_desktop_steam_shutdown_for_private_stream();
+  bool ensure_steam_client_quiescent_for_doctor();
 #endif
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
@@ -262,6 +263,10 @@ namespace proc {
   bool desktop_steam_proc_environ_read_error_fails_closed_for_tests(pid_t forced_pid);
   bool desktop_steam_proc_scan_only_pid_for_tests(pid_t forced_pid);
   bool steam_instance_pipe_listener_active_for_tests(const std::string &pipe_path);
+  bool doctor_steam_shutdown_required_for_tests(
+    bool desktop_steam_active,
+    bool steam_singleton_active
+  );
   std::optional<std::string> resolve_nested_gamescope_session_target_for_tests(
     bool gamescope_stream_session,
     const struct ctx_t &app
