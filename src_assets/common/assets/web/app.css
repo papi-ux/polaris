@@ -383,6 +383,582 @@ textarea {
   }
 }
 
+/* Host-first System console. The old three-card header remains available to
+   older surfaces, while HomeView uses this flatter operational hierarchy. */
+.system-console {
+  --system-panel: color-mix(in srgb, var(--color-deep) 58%, transparent);
+  --system-panel-strong: color-mix(in srgb, var(--color-deep) 76%, transparent);
+  --system-edge: color-mix(in srgb, var(--color-storm) 24%, transparent);
+}
+
+.system-console-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.system-header-actions,
+.system-update-actions,
+.system-install-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.system-button {
+  display: inline-flex;
+  min-height: 2.25rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--system-edge);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.875rem;
+  color: var(--color-silver);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.system-button:hover {
+  border-color: color-mix(in srgb, var(--color-ice) 45%, transparent);
+  color: var(--color-ice);
+}
+
+.system-button-primary {
+  border-color: transparent;
+  background: var(--color-ice);
+  color: var(--color-void);
+}
+
+.system-button-primary:hover {
+  background: color-mix(in srgb, var(--color-ice) 90%, white);
+  color: var(--color-void);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--color-ice) 16%, transparent);
+}
+
+.system-button-secondary {
+  background: color-mix(in srgb, var(--color-deep) 58%, transparent);
+}
+
+.system-button-disabled {
+  border-color: var(--system-edge);
+  background: var(--system-panel);
+  color: var(--color-storm);
+}
+
+.system-status-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--system-edge);
+  border-radius: 0.75rem;
+  background: var(--system-panel);
+}
+
+.system-status-item {
+  min-width: 0;
+  padding: 1rem 1.125rem;
+  border-right: 1px solid var(--system-edge);
+}
+
+.system-status-item:last-child {
+  border-right: 0;
+}
+
+.system-status-heading,
+.system-telemetry-heading,
+.system-issue-heading,
+.system-install-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.system-status-dot,
+.system-update-status-light {
+  width: 0.625rem;
+  height: 0.625rem;
+  flex: 0 0 auto;
+  border-width: 1px;
+  border-radius: 999px;
+}
+
+.system-status-dot {
+  background: currentColor;
+  border-width: 0;
+}
+
+.system-status-value {
+  margin-top: 0.5rem;
+  color: var(--color-silver);
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.system-status-copy,
+.system-update-meta,
+.system-update-copy p,
+.system-resource-footer p {
+  margin-top: 0.25rem;
+  color: var(--color-storm);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.system-update-state-summary {
+  color: var(--color-silver);
+  font-weight: 700;
+}
+
+.system-update-safety {
+  color: var(--color-silver) !important;
+}
+
+.system-status-count {
+  color: var(--color-silver);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.system-inline-action {
+  min-height: 1.625rem;
+  border: 1px solid var(--system-edge);
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  color: var(--color-silver);
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+.system-ops-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(18rem, 0.75fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.system-telemetry-panel,
+.system-recent-issues-panel {
+  min-width: 0;
+}
+
+.system-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.system-telemetry-live {
+  align-self: flex-start;
+  white-space: nowrap;
+}
+
+.system-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.system-telemetry-item {
+  min-width: 0;
+  border: 1px solid var(--system-edge);
+  border-radius: 0.625rem;
+  padding: 1rem;
+  background: var(--system-panel);
+}
+
+.system-telemetry-label {
+  color: var(--color-silver);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.system-telemetry-state {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.system-telemetry-state-success {
+  color: var(--color-success-bright);
+}
+
+.system-telemetry-state-muted {
+  color: var(--color-silver);
+}
+
+.system-telemetry-value {
+  margin-top: 0.75rem;
+  color: var(--color-silver);
+  font-size: 2rem;
+  font-weight: 750;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.system-telemetry-value span {
+  margin-left: 0.125rem;
+  font-size: 1rem;
+}
+
+.system-telemetry-value-text {
+  overflow-wrap: anywhere;
+  font-size: 1.125rem;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.system-telemetry-copy {
+  margin-top: 0.5rem;
+  color: var(--color-silver);
+  font-size: 0.8125rem;
+}
+
+.system-telemetry-meta {
+  margin-top: 0.5rem;
+  color: var(--color-storm);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.system-session-health {
+  margin-top: 0.75rem;
+  border-width: 1px;
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.system-recent-issues-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.system-issue-list {
+  display: grid;
+  gap: 0.625rem;
+  margin-top: 1rem;
+}
+
+.system-issue-item {
+  border: 1px solid var(--system-edge);
+  border-radius: 0.625rem;
+  padding: 0.75rem;
+}
+
+.system-issue-fatal {
+  border-color: color-mix(in srgb, var(--color-danger) 34%, transparent);
+  background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+}
+
+.system-issue-warning {
+  border-color: color-mix(in srgb, var(--color-warning) 34%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+}
+
+.system-issue-error {
+  border-color: color-mix(in srgb, var(--color-info) 30%, transparent);
+  background: color-mix(in srgb, var(--color-info) 8%, transparent);
+}
+
+.system-issue-heading {
+  color: var(--color-silver);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.system-issue-message {
+  margin-top: 0.375rem;
+  color: var(--color-silver);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.system-issue-time {
+  display: block;
+  margin-top: 0.375rem;
+  color: var(--color-storm);
+  font-size: 0.6875rem;
+}
+
+.system-issues-empty {
+  margin-top: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-success) 25%, transparent);
+  border-radius: 0.625rem;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--color-success) 7%, transparent);
+}
+
+.system-issues-check {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--color-success) 38%, transparent);
+  border-radius: 999px;
+  color: var(--color-success-bright);
+  font-weight: 800;
+}
+
+.system-issues-empty-title {
+  margin-top: 0.75rem;
+  color: var(--color-silver);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.system-issues-empty p,
+.system-issues-empty span {
+  margin-top: 0.25rem;
+  color: var(--color-storm);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.system-issues-empty span {
+  display: block;
+  font-size: 0.6875rem;
+}
+
+.system-issue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: auto;
+  padding-top: 1rem;
+}
+
+.system-issue-more {
+  color: var(--color-storm);
+  font-size: 0.6875rem;
+}
+
+.system-text-link {
+  color: var(--color-ice);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.system-update-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.875rem;
+  align-items: start;
+}
+
+.system-update-status-light {
+  align-self: flex-start;
+  margin-top: 0.25rem;
+}
+
+.system-update-copy .section-title {
+  margin-top: 0.25rem;
+}
+
+.system-update-details {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--system-edge);
+}
+
+.system-update-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.system-update-value {
+  margin-top: 0.5rem;
+  color: var(--color-silver);
+  font-size: 1.5rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.system-update-package {
+  margin-top: 0.5rem;
+  color: var(--color-silver);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.system-update-digest {
+  margin-top: 0.5rem;
+  color: var(--color-storm);
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+.system-install-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.system-install-command {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--system-edge);
+  border-radius: 0.625rem;
+  padding: 1rem;
+  background: var(--system-panel);
+}
+
+.system-install-command pre {
+  margin-top: 0.75rem;
+  overflow-x: auto;
+  border: 1px solid var(--system-edge);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: color-mix(in srgb, black 28%, transparent);
+  color: var(--color-ice);
+  font-size: 0.75rem;
+}
+
+.system-quick-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.system-quick-action {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid var(--system-edge);
+  border-radius: 0.625rem;
+  padding: 0.875rem 1rem;
+  background: var(--system-panel);
+  color: var(--color-silver);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.system-quick-action:hover {
+  border-color: color-mix(in srgb, var(--color-ice) 36%, transparent);
+  color: var(--color-ice);
+}
+
+.system-resource-footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+  border-top: 1px solid var(--system-edge);
+  padding: 1rem 0.25rem 0;
+}
+
+.system-resource-links {
+  display: flex;
+  max-width: 52rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.375rem 0.875rem;
+}
+
+.system-footer-link {
+  display: inline-flex;
+  min-height: 1.75rem;
+  align-items: center;
+  padding: 0.25rem 0.125rem;
+  color: var(--color-silver);
+  font-size: 0.75rem;
+  text-decoration: none;
+}
+
+.system-footer-link:hover {
+  color: var(--color-ice);
+}
+
+.system-console .section-kicker {
+  color: var(--color-silver);
+}
+
+@media (max-width: 64rem) {
+  .system-console-header,
+  .system-resource-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .system-ops-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .system-resource-links {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 40rem) {
+  .system-header-actions,
+  .system-update-actions,
+  .system-install-links {
+    width: 100%;
+  }
+
+  .system-header-actions .system-button,
+  .system-update-actions .system-button {
+    flex: 1 1 auto;
+  }
+
+  .system-status-strip,
+  .system-telemetry-grid,
+  .system-update-grid,
+  .system-quick-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .system-status-item {
+    border-right: 0;
+    border-bottom: 1px solid var(--system-edge);
+  }
+
+  .system-status-item:last-child {
+    border-bottom: 0;
+  }
+
+  .system-telemetry-live {
+    align-self: flex-start;
+  }
+
+  .system-update-summary {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .system-update-actions {
+    grid-column: 1 / -1;
+  }
+
+  .system-install-row,
+  .system-install-heading {
+    flex-direction: column;
+  }
+}
+
 .section-title-row {
   @apply flex min-w-0 items-center gap-2;
 }
