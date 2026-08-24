@@ -158,6 +158,40 @@ TEST(SourceSafetyContracts, ShellCommandsBuiltByConcatenationAreEscaped) {
   }();
 }
 
+TEST(SourceSafetyContracts, PackageFortifyFilterFollowsTheGnuCompilerIdentity) {
+  for (const auto *relative_path : {
+         "packaging/linux/Arch/PKGBUILD",
+         "packaging/linux/SteamOS/PKGBUILD"
+       }) {
+    std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / relative_path);
+    ASSERT_TRUE(input.is_open()) << relative_path;
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const auto text = contents.str();
+
+    EXPECT_NE(text.find("-dM -E -x c++ /dev/null"), std::string::npos) << relative_path;
+    EXPECT_NE(text.find("#define __GNUC__"), std::string::npos) << relative_path;
+    EXPECT_NE(text.find("#define __clang__"), std::string::npos) << relative_path;
+    EXPECT_EQ(text.find("-dumpfullversion"), std::string::npos) << relative_path;
+  }
+}
+
+TEST(SourceSafetyContracts, GamescopePreviewConsumesBestEffortRepaintResult) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/confighttp.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto text = contents.str();
+  const auto command = text.find("gamescopectl debug_force_repaint");
+  ASSERT_NE(command, std::string::npos);
+  const auto window_start = command > 300 ? command - 300 : 0;
+  const auto window = text.substr(window_start, 700);
+
+  EXPECT_NE(window.find("const int repaint_result = std::system("), std::string::npos);
+  EXPECT_NE(window.find("if (repaint_result != 0)"), std::string::npos);
+  EXPECT_NE(window.find("BOOST_LOG(debug)"), std::string::npos);
+}
+
 TEST(SourceSafetyContracts, ReadlinkResultsAreCheckedBeforeUse) {
   // readlink reports failure as -1. Widening that into a size handed a
   // string_view a length of SIZE_MAX; the other seven call sites all checked.

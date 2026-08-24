@@ -523,7 +523,12 @@ namespace confighttp {
         // Nudge a frame then screenshot (async write inside gamescope).
         // shell-escape-checked: env is built above from shell_escape'd values,
         // and everything concatenated here is a literal.
-        std::system((env + "gamescopectl debug_force_repaint >/dev/null 2>&1").c_str());
+        const int repaint_result = std::system(
+          (env + "gamescopectl debug_force_repaint >/dev/null 2>&1").c_str()
+        );
+        if (repaint_result != 0) {
+          BOOST_LOG(debug) << "ConfigUI: gamescope repaint request failed with exit code " << repaint_result;
+        }
         std::ostringstream cmd;
         cmd << env << "gamescopectl screenshot " << shell_escape(outfile)
             << " >/dev/null 2>&1";

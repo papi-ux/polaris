@@ -102,6 +102,26 @@ TEST_F(PrivateStateFileTest, DoesNotCarryUnsupportedWindowsSecurityImplementatio
   EXPECT_EQ(session_contents.str().find("std::filesystem::create_directories("), std::string::npos);
 }
 
+TEST_F(PrivateStateFileTest, ParentFaultCounterExistsOnlyInTestBuilds) {
+  std::ifstream source(std::string {POLARIS_SOURCE_DIR} + "/src/private_state_file.cpp");
+  ASSERT_TRUE(source.is_open());
+  std::ostringstream contents;
+  contents << source.rdbuf();
+  const auto source_text = contents.str();
+
+  const auto expect_test_guarded = [&](std::string_view needle) {
+    const auto position = source_text.find(needle);
+    ASSERT_NE(position, std::string::npos);
+    const auto guard = source_text.rfind("#ifdef POLARIS_TESTS", position);
+    const auto guard_end = source_text.rfind("#endif", position);
+    ASSERT_NE(guard, std::string::npos);
+    EXPECT_GT(guard, guard_end) << needle;
+  };
+
+  expect_test_guarded("std::size_t created_parent_index = 0");
+  expect_test_guarded("++created_parent_index");
+}
+
 TEST_F(PrivateStateFileTest, SyncsCreatedParentEntryBeforeDescending) {
   std::ifstream source(std::string {POLARIS_SOURCE_DIR} + "/src/private_state_file.cpp");
   ASSERT_TRUE(source.is_open());
