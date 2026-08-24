@@ -449,6 +449,57 @@ TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionStat
     << "same-ID explicit overrides must still normalize companion state";
 }
 
+TEST(ProcessRuntimeConfigTests, FinalOptimizedVirtualDisplayChoicePrecedesLinuxModeDerivation) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(", execute_start);
+  ASSERT_NE(execute_start, std::string::npos);
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto body = source.substr(execute_start, terminate_start - execute_start);
+
+  const auto optimization_guard = body.find("if (resolved_optimization.virtual_display.has_value())");
+  const auto optimization_write = body.find(
+    "launch_session->virtual_display = *resolved_optimization.virtual_display",
+    optimization_guard
+  );
+  const auto mode_derivation = body.find(
+    "stream_display_policy::effective_session_selection_for_launch(",
+    optimization_write
+  );
+  const auto mode_apply = body.find(
+    "stream_display_policy::apply_selection(session_mode",
+    mode_derivation
+  );
+  const auto runtime_derivation = body.find(
+    "const bool gamescope_stream_session",
+    mode_apply
+  );
+  const auto capture_policy = body.find(
+    "stream_display_policy::resolve_current(",
+    runtime_derivation
+  );
+
+  ASSERT_NE(optimization_guard, std::string::npos);
+  ASSERT_NE(optimization_write, std::string::npos);
+  ASSERT_NE(mode_derivation, std::string::npos);
+  ASSERT_NE(mode_apply, std::string::npos);
+  ASSERT_NE(runtime_derivation, std::string::npos);
+  ASSERT_NE(capture_policy, std::string::npos);
+  EXPECT_LT(optimization_guard, optimization_write);
+  EXPECT_LT(optimization_write, mode_derivation)
+    << "final device/AI virtual-display intent must own session mode derivation";
+  EXPECT_LT(mode_derivation, mode_apply);
+  EXPECT_LT(mode_apply, runtime_derivation)
+    << "gamescope/headless decisions must consume the final session mode";
+  EXPECT_LT(runtime_derivation, capture_policy);
+  EXPECT_EQ(
+    body.find("stream_display_policy::effective_session_selection_for_launch(", mode_derivation + 1),
+    std::string::npos
+  ) << "one final derivation must own mode, capture, and reported runtime behavior";
+}
+
 TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWithoutCrossLockingRtsp) {
   const auto header = read_source_file_for_contract("src/process.h");
   const auto source = read_source_file_for_contract("src/process.cpp");
@@ -3048,8 +3099,12 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationOwnedCandidateSurvivesAnotherCand
   const bool transient_exited = wait_for_pidfd_exit(transient_pidfd.fd, std::chrono::seconds(2));
   EXPECT_TRUE(owned_exited) << "a previously proven owned pidfd must survive another candidate's retry";
   EXPECT_TRUE(transient_exited);
-  if (owned_exited) EXPECT_EQ(owned_guard.wait(nullptr, 0), owned);
-  if (transient_exited) EXPECT_EQ(transient_guard.wait(nullptr, 0), transient);
+  if (owned_exited) {
+    EXPECT_EQ(owned_guard.wait(nullptr, 0), owned);
+  }
+  if (transient_exited) {
+    EXPECT_EQ(transient_guard.wait(nullptr, 0), transient);
+  }
 #else
   GTEST_SKIP() << "Linux-only exact-generation owned pidfd retention";
 #endif

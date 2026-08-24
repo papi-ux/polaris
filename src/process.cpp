@@ -6507,11 +6507,9 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
-    // Session-scoped stream-mode override (/launch streamMode): apply the mode
-    // to the IN-MEMORY config for this session only. Nothing here persists to
-    // disk; terminate_impl restores the saved values after teardown, so the
-    // host default survives every launch. Without an override this block only
-    // snapshots current values and behavior is identical to before.
+    // Snapshot the host display policy before any session-scoped override.
+    // Final mode derivation is intentionally deferred until device/AI
+    // optimization has settled launch_session->virtual_display.
     {
       auto &linux_display = config::video.linux_display;
       this->initial_stream_mode = linux_display.stream_mode;
@@ -6522,44 +6520,7 @@ namespace proc {
       this->initial_use_cage_compositor = linux_display.use_cage_compositor;
       this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
       this->initial_auto_manage_displays = linux_display.auto_manage_displays;
-      const std::string session_mode = stream_display_policy::effective_session_selection_for_launch(
-        launch_session ? std::string_view {launch_session->stream_mode} : std::string_view {},
-        launch_session && launch_session->mirror_desktop,
-        launch_session && launch_session->virtual_display,
-        _app.virtual_display,
-        launch_session && launch_session->user_locked_virtual_display
-      );
-      if (!session_mode.empty() &&
-          !stream_display_policy::selection_companion_state_matches(session_mode)) {
-        std::string mode_error;
-        if (stream_display_policy::apply_selection(session_mode, mode_error)) {
-          // Saved-state restore is armed only when a mode was actually applied,
-          // so a no-override session touches nothing at save or teardown.
-          this->initial_linux_display_saved = true;
-          BOOST_LOG(info) << "process: session stream mode override ["sv << session_mode
-                          << "] applied in-memory for this session; host default restored at teardown"sv;
-          platf::reevaluate_capture_sources();
-        } else {
-          BOOST_LOG(warning) << "process: session stream mode override ["sv << session_mode
-                             << "] rejected: "sv << mode_error << "; using the host default"sv;
-        }
-      }
     }
-    const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
-    const bool gamescope_stream_session =
-      config::video.linux_display.stream_mode == "gamescope_stream" ||
-      config::video.linux_display.private_runtime == "gamescope";
-    _session_used_gamescope_runtime = gamescope_stream_session;
-    // Set true when a Steam title or Big Picture is rewired to its own
-    // polaris-gamescope-session compositor.
-    bool nested_wsi_session = false;
-    // Private nested runtime: labwc cage and/or owned/attach gamescope.
-    const bool use_cage_compositor_for_session =
-      !mirror_desktop_session &&
-      (config::video.linux_display.use_cage_compositor || gamescope_stream_session);
-    const bool requested_headless_for_session =
-      !mirror_desktop_session &&
-      (config::video.linux_display.headless_mode || gamescope_stream_session);
 #endif
 
     this->initial_display = config::video.output_name;
@@ -6807,7 +6768,57 @@ namespace proc {
                       << (launch_session->enable_hdr ? "true"sv : "false"sv);
     }
 
+    if (resolved_optimization.virtual_display.has_value()) {
+      launch_session->virtual_display = *resolved_optimization.virtual_display;
+    }
+
 #ifdef __linux__
+    // Apply the session display policy only after device/AI optimization has
+    // finalized virtual_display. This generation then owns runtime topology,
+    // capture policy, and the creation decision together.
+    const bool virtual_display_requested_before_mode =
+      launch_session->virtual_display ||
+      (_app.virtual_display && !launch_session->user_locked_virtual_display);
+    const std::string session_mode = stream_display_policy::effective_session_selection_for_launch(
+      launch_session ? std::string_view {launch_session->stream_mode} : std::string_view {},
+      launch_session && launch_session->mirror_desktop,
+      launch_session && launch_session->virtual_display,
+      _app.virtual_display,
+      launch_session && launch_session->user_locked_virtual_display
+    );
+    if (!session_mode.empty()) {
+      launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
+    }
+    if (!session_mode.empty() &&
+        !stream_display_policy::selection_companion_state_matches(session_mode)) {
+      std::string mode_error;
+      if (stream_display_policy::apply_selection(session_mode, mode_error)) {
+        this->initial_linux_display_saved = true;
+        BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
+                        << "] applied in-memory after optimization; host default restored at teardown"sv;
+        platf::reevaluate_capture_sources();
+      } else {
+        BOOST_LOG(warning) << "process: final session stream mode override ["sv << session_mode
+                           << "] rejected: "sv << mode_error << "; using the host default"sv;
+      }
+    }
+
+    const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
+    const bool gamescope_stream_session =
+      config::video.linux_display.stream_mode == "gamescope_stream" ||
+      config::video.linux_display.private_runtime == "gamescope";
+    _session_used_gamescope_runtime = gamescope_stream_session;
+    // Set true when a Steam title or Big Picture is rewired to its own
+    // polaris-gamescope-session compositor.
+    bool nested_wsi_session = false;
+    // Private nested runtime: labwc cage and/or owned/attach gamescope.
+    const bool use_cage_compositor_for_session =
+      !mirror_desktop_session &&
+      (config::video.linux_display.use_cage_compositor || gamescope_stream_session);
+    const bool requested_headless_for_session =
+      !mirror_desktop_session &&
+      (config::video.linux_display.headless_mode || gamescope_stream_session);
+
     // Portal is_hdr reads this file. Write from final enable_hdr only.
     // Never restart gamescope or rewrite from encoder probe. Session owns restart.
     {
@@ -6892,10 +6903,6 @@ namespace proc {
     );
 #endif
 
-    if (resolved_optimization.virtual_display.has_value()) {
-      launch_session->virtual_display = *resolved_optimization.virtual_display;
-    }
-
     if (resolved_optimization.target_bitrate_kbps.has_value()) {
       launch_session->target_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
       config::video.max_bitrate = *resolved_optimization.target_bitrate_kbps;
@@ -6943,9 +6950,8 @@ namespace proc {
     const bool using_headless_cage_runtime =
       requested_headless_for_session &&
       use_cage_compositor_for_session;
-    if (using_headless_cage_runtime && launch_session->virtual_display) {
+    if (using_headless_cage_runtime && virtual_display_requested_before_mode) {
       BOOST_LOG(info) << "session_optimization: normalized virtual_display from true to false for headless cage runtime"sv;
-      launch_session->virtual_display = false;
       stream_stats::update_runtime_display_warning(
         "Virtual display request skipped: the private stream runtime provides this session's display."
       );
