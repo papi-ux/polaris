@@ -105,6 +105,9 @@ namespace virtual_display {
    */
   bool wayland_backend_probe_allowed(bool platform_reports_wayland, std::string_view wayland_display);
 
+  /** @brief Return true only when the compositor can create a caller-named output. */
+  bool wayland_compositor_supports_exact_output_creation(std::string_view compositor);
+
   /**
    * @brief Build the connector name requested from Hyprland for one virtual display.
    *
@@ -137,18 +140,6 @@ namespace virtual_display {
   std::optional<hyprland_mode_t> hyprland_monitor_mode(
     std::string_view monitors_json,
     std::string_view output_name
-  );
-
-  /** @brief Return true only when swaymsg reports create_output success. */
-  bool sway_create_output_succeeded(std::string_view response_json);
-
-  /**
-   * @brief Return the one newly appeared HEADLESS-N output, or nullopt when
-   *        ownership cannot be proved from before/after Sway snapshots.
-   */
-  std::optional<std::string> sway_new_headless_output(
-    std::string_view before_outputs_json,
-    std::string_view after_outputs_json
   );
 
   /** @brief EVDI output identity is proven only by non-empty connector discovery. */
@@ -208,10 +199,6 @@ namespace virtual_display {
 #ifdef POLARIS_TESTS
   /** @brief Execute a callback under the production virtual-display creation mutex. */
   void with_creation_lock_for_tests(const std::function<void()> &callback);
-  bool with_valid_sway_before_snapshot_for_tests(
-    std::string_view snapshot,
-    const std::function<void()> &create_callback
-  );
 #endif
 
   /**

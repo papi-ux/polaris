@@ -2094,6 +2094,10 @@ namespace video {
     return requested_display_name.empty();
   }
 
+  bool display_switch_allowed_for_exact_capture(std::string_view exact_display_name) {
+    return exact_display_name.empty();
+  }
+
   std::optional<int> find_display_index(
     const std::vector<std::string> &display_names,
     std::string_view requested_display_name
@@ -2236,18 +2240,18 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
+    const auto exact_display_name = proc::proc.display_name;
     {
 #ifdef __linux__
     session_media::pending_start_owner_scope_t initial_owner_scope {
       capture_ctxs.front().channel_data
     };
 #endif
-    const auto requested_display_name = proc::proc.display_name;
-    if (!requested_display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, requested_display_name, capture_ctxs.front().config);
+    if (!exact_display_name.empty()) {
+      disp = platf::display(encoder.platform_formats->dev_type, exact_display_name, capture_ctxs.front().config);
     }
-    if (!disp && !capture_fallback_allowed(requested_display_name)) {
-      BOOST_LOG(error) << "Requested display ["sv << requested_display_name
+    if (!disp && !capture_fallback_allowed(exact_display_name)) {
+      BOOST_LOG(error) << "Requested display ["sv << exact_display_name
                        << "] could not be initialized; refusing another output"sv;
       return;
     }
@@ -2397,8 +2401,15 @@ namespace video {
         }
 
         if (switch_display_event->peek()) {
-          artificial_reinit = true;
-          return false;
+          if (!display_switch_allowed_for_exact_capture(exact_display_name)) {
+            const auto requested_display = *switch_display_event->pop();
+            BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                               << requested_display << "] while exact display ["sv
+                               << exact_display_name << "] is owned"sv;
+          } else {
+            artificial_reinit = true;
+            return false;
+          }
         }
 
         if (reinit_request_event.peek()) {
@@ -2456,8 +2467,14 @@ namespace video {
               // only support a single display session per device/application.
               disp.reset();
 
-              const auto exact_display_name = proc::proc.display_name;
-              if (!switch_display_event->peek() && !exact_display_name.empty()) {
+              if (!exact_display_name.empty()) {
+                if (switch_display_event->peek() &&
+                    !display_switch_allowed_for_exact_capture(exact_display_name)) {
+                  const auto requested_display = *switch_display_event->pop();
+                  BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                                     << requested_display << "] while exact display ["sv
+                                     << exact_display_name << "] is owned"sv;
+                }
                 {
 #ifdef __linux__
                   session_media::pending_start_owner_scope_t owner_scope {
@@ -3675,6 +3692,7 @@ namespace video {
     int &display_p
   ) {
     const auto &encoder = *chosen_encoder;
+    const auto exact_display_name = proc::proc.display_name;
 
     std::shared_ptr<platf::display_t> disp;
 
@@ -3690,6 +3708,35 @@ namespace video {
     }
 
     while (encode_session_ctx_queue.running()) {
+      if (!exact_display_name.empty()) {
+        if (switch_display_event->peek() &&
+            !display_switch_allowed_for_exact_capture(exact_display_name)) {
+          const auto requested_display = *switch_display_event->pop();
+          BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                             << requested_display << "] while exact display ["sv
+                             << exact_display_name << "] is owned"sv;
+        }
+        {
+#ifdef __linux__
+          session_media::pending_start_owner_scope_t owner_scope {
+            synced_session_ctxs.front()->channel_data
+          };
+#endif
+          reset_display(
+            disp,
+            encoder.platform_formats->dev_type,
+            exact_display_name,
+            synced_session_ctxs.front()->config
+          );
+        }
+        if (!disp) {
+          BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
+                           << "] could not be opened; refusing another output"sv;
+          return encode_e::error;
+        }
+        break;
+      }
+
       // Refresh display names since a display removal might have caused the reinitialization
       refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
 
@@ -3824,8 +3871,15 @@ namespace video {
         })
 
         if (switch_display_event->peek()) {
-          ec = platf::capture_e::reinit;
-          return false;
+          if (!display_switch_allowed_for_exact_capture(exact_display_name)) {
+            const auto requested_display = *switch_display_event->pop();
+            BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                               << requested_display << "] while exact display ["sv
+                               << exact_display_name << "] is owned"sv;
+          } else {
+            ec = platf::capture_e::reinit;
+            return false;
+          }
         }
 
         return true;
@@ -5154,6 +5208,10 @@ namespace video {
 
   bool capture_fallback_allowed_for_tests(std::string_view requested_display_name) {
     return capture_fallback_allowed(requested_display_name);
+  }
+
+  bool display_switch_allowed_for_exact_capture_for_tests(std::string_view exact_display_name) {
+    return display_switch_allowed_for_exact_capture(exact_display_name);
   }
 
   std::optional<int> find_display_index_for_tests(

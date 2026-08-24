@@ -344,7 +344,7 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   contents << input.rdbuf();
   const auto source = contents.str();
 
-  const auto initial = source.find("const auto requested_display_name = proc::proc.display_name;");
+  const auto initial = source.find("const auto exact_display_name = proc::proc.display_name;");
   const auto initial_end = source.find("display_wp = disp", initial);
   ASSERT_NE(initial, std::string::npos);
   ASSERT_NE(initial_end, std::string::npos);
@@ -363,17 +363,17 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   ASSERT_NE(reinit, std::string::npos);
   ASSERT_NE(reinit_end, std::string::npos);
   const auto reinit_body = source.substr(reinit, reinit_end - reinit);
-  const auto exact_name = reinit_body.find("const auto exact_display_name = proc::proc.display_name");
-  const auto exact_reset = reinit_body.find("reset_display(", exact_name);
+  const auto exact_branch = reinit_body.find("if (!exact_display_name.empty())");
+  const auto exact_reset = reinit_body.find("reset_display(", exact_branch);
   const auto identity = reinit_body.find("exact_display_name", exact_reset);
   const auto reinit_reject = reinit_body.find("return;", identity);
   const auto fallback_refresh = reinit_body.find("refresh_displays(", reinit_reject);
-  ASSERT_NE(exact_name, std::string::npos);
+  ASSERT_NE(exact_branch, std::string::npos);
   ASSERT_NE(exact_reset, std::string::npos);
   ASSERT_NE(identity, std::string::npos);
   ASSERT_NE(reinit_reject, std::string::npos);
   ASSERT_NE(fallback_refresh, std::string::npos);
-  EXPECT_LT(exact_name, exact_reset);
+  EXPECT_LT(exact_branch, exact_reset);
   EXPECT_LT(exact_reset, identity);
   EXPECT_LT(identity, reinit_reject);
   EXPECT_LT(reinit_reject, fallback_refresh);
@@ -390,6 +390,85 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
     wrapper.find("current_display_index = display_names.empty() ? -1 : 0"),
     std::string::npos
   );
+}
+
+TEST(SourceSafetyContracts, ExactOwnedCaptureRejectsDisplaySwitchesInBothCapturePipelines) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/video.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto async_begin = source.find("void captureThread(");
+  const auto sync_begin = source.find("encode_e encode_run_sync(", async_begin);
+  const auto sync_end = source.find("void captureThreadSync()", sync_begin);
+  ASSERT_NE(async_begin, std::string::npos);
+  ASSERT_NE(sync_begin, std::string::npos);
+  ASSERT_NE(sync_end, std::string::npos);
+
+  const auto async_body = source.substr(async_begin, sync_begin - async_begin);
+  const auto async_exact = async_body.find("const auto exact_display_name = proc::proc.display_name;");
+  const auto async_policy = async_body.find("display_switch_allowed_for_exact_capture(exact_display_name)");
+  const auto async_reinit_loop = async_body.find("while (capture_ctx_queue->running())", async_policy);
+  const auto async_exact_reopen = async_body.find("if (!exact_display_name.empty())", async_reinit_loop);
+  const auto async_reset = async_body.find("reset_display(", async_exact_reopen);
+  const auto async_identity = async_body.find("exact_display_name", async_reset);
+  const auto async_generic_refresh = async_body.find("refresh_displays(", async_identity);
+  ASSERT_NE(async_exact, std::string::npos);
+  ASSERT_NE(async_policy, std::string::npos);
+  ASSERT_NE(async_reinit_loop, std::string::npos);
+  ASSERT_NE(async_exact_reopen, std::string::npos);
+  ASSERT_NE(async_reset, std::string::npos);
+  ASSERT_NE(async_identity, std::string::npos);
+  ASSERT_NE(async_generic_refresh, std::string::npos);
+  EXPECT_LT(async_exact, async_policy);
+  EXPECT_LT(async_exact_reopen, async_reset);
+  EXPECT_LT(async_reset, async_identity);
+  EXPECT_LT(async_identity, async_generic_refresh);
+  EXPECT_EQ(
+    async_body.find("!switch_display_event->peek() && !exact_display_name.empty()"),
+    std::string::npos
+  );
+
+  const auto sync_body = source.substr(sync_begin, sync_end - sync_begin);
+  const auto sync_exact = sync_body.find("const auto exact_display_name = proc::proc.display_name;");
+  const auto sync_exact_branch = sync_body.find("if (!exact_display_name.empty())", sync_exact);
+  const auto sync_reset = sync_body.find("reset_display(", sync_exact_branch);
+  const auto sync_identity = sync_body.find("exact_display_name", sync_reset);
+  const auto sync_generic_refresh = sync_body.find("refresh_displays(", sync_identity);
+  const auto sync_policy = sync_body.find("display_switch_allowed_for_exact_capture(exact_display_name)");
+  ASSERT_NE(sync_exact, std::string::npos);
+  ASSERT_NE(sync_exact_branch, std::string::npos);
+  ASSERT_NE(sync_reset, std::string::npos);
+  ASSERT_NE(sync_identity, std::string::npos);
+  ASSERT_NE(sync_generic_refresh, std::string::npos);
+  ASSERT_NE(sync_policy, std::string::npos);
+  EXPECT_LT(sync_exact_branch, sync_reset);
+  EXPECT_LT(sync_reset, sync_identity);
+  EXPECT_LT(sync_identity, sync_generic_refresh);
+}
+
+TEST(SourceSafetyContracts, SwayVirtualOutputCreationIsRejectedBeforeMutation) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto wayland = source.find("namespace wayland_wlr");
+  const auto available = source.find("static bool is_available()", wayland);
+  const auto create = source.find("static std::optional<vdisplay_t> create(", available);
+  ASSERT_NE(wayland, std::string::npos);
+  ASSERT_NE(available, std::string::npos);
+  ASSERT_NE(create, std::string::npos);
+  const auto availability_body = source.substr(available, create - available);
+  const auto exact_capability = availability_body.find(
+    "wayland_compositor_supports_exact_output_creation(compositor)"
+  );
+  const auto reject = availability_body.find("return false", exact_capability);
+  ASSERT_NE(exact_capability, std::string::npos);
+  ASSERT_NE(reject, std::string::npos);
+  EXPECT_EQ(source.find("swaymsg -r create_output"), std::string::npos);
 }
 
 TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnotherOutputOrPortal) {
@@ -518,28 +597,27 @@ TEST(SourceSafetyContracts, VirtualDisplayCreationPublishesOnlyProvenOwnedConnec
   EXPECT_LT(evdi_close, evdi_reject);
   EXPECT_LT(evdi_reject, evdi_publish);
 
-  const auto sway = source.find("else if (compositor == \"sway\")");
-  const auto before = source.find("sway_outputs_before", sway);
-  const auto snapshot_gate = source.find("if (!with_valid_sway_before_snapshot(", before);
-  const auto create = source.find("swaymsg -r create_output", snapshot_gate);
-  const auto command_proof = source.find("sway_create_output_succeeded(", create);
-  const auto ownership = source.find("sway_new_headless_output(", command_proof);
-  const auto sway_reject = source.find("return std::nullopt;", ownership);
-  const auto mode = source.find("std::string mode_str", sway_reject);
-  ASSERT_NE(sway, std::string::npos);
-  ASSERT_NE(before, std::string::npos);
-  ASSERT_NE(snapshot_gate, std::string::npos);
+  const auto wayland = source.find("namespace wayland_wlr");
+  const auto create_entry = source.find("static std::optional<vdisplay_t> create(", wayland);
+  const auto hyprland = source.find("if (compositor == \"hyprland\")", create_entry);
+  const auto requested_name = source.find("std::string candidate = hyprland_output_name_for_pid(", hyprland);
+  const auto create = source.find("hyprctl output create headless", requested_name);
+  const auto ownership = source.find("hyprland_monitors_contain_output(", create);
+  const auto reject = source.find("return std::nullopt;", ownership);
+  const auto publish = source.find("display.backend = backend_e::WAYLAND_WLR", reject);
+  ASSERT_NE(wayland, std::string::npos);
+  ASSERT_NE(create_entry, std::string::npos);
+  ASSERT_NE(hyprland, std::string::npos);
+  ASSERT_NE(requested_name, std::string::npos);
   ASSERT_NE(create, std::string::npos);
-  ASSERT_NE(command_proof, std::string::npos);
   ASSERT_NE(ownership, std::string::npos);
-  ASSERT_NE(sway_reject, std::string::npos);
-  ASSERT_NE(mode, std::string::npos);
-  EXPECT_LT(before, snapshot_gate);
-  EXPECT_LT(snapshot_gate, create);
-  EXPECT_LT(create, command_proof);
-  EXPECT_LT(command_proof, ownership);
-  EXPECT_LT(ownership, sway_reject);
-  EXPECT_LT(sway_reject, mode);
+  ASSERT_NE(reject, std::string::npos);
+  ASSERT_NE(publish, std::string::npos);
+  EXPECT_LT(requested_name, create);
+  EXPECT_LT(create, ownership);
+  EXPECT_LT(ownership, reject);
+  EXPECT_LT(reject, publish);
+  EXPECT_EQ(source.find("swaymsg -r create_output"), std::string::npos);
 }
 
 TEST(SourceSafetyContracts, VirtualDisplayCreateSerializesCleanupCreationAndPersistence) {

@@ -237,6 +237,10 @@ namespace virtual_display {
     }
   }  // namespace
 
+  bool wayland_compositor_supports_exact_output_creation(std::string_view compositor) {
+    return compositor == "hyprland"sv;
+  }
+
   std::vector<persisted_display_t> parse_persisted_displays(std::string_view state_json) {
     std::vector<persisted_display_t> entries;
 
@@ -365,87 +369,6 @@ namespace virtual_display {
     }
 
     return std::nullopt;
-  }
-
-  static bool sway_output_snapshot_is_valid(std::string_view snapshot) {
-    const auto outputs = nlohmann::json::parse(snapshot, nullptr, false);
-    if (!outputs.is_array()) return false;
-    for (const auto &output : outputs) {
-      if (!output.is_object() || !output.contains("name") || !output["name"].is_string()) return false;
-    }
-    return true;
-  }
-
-  static bool with_valid_sway_before_snapshot(
-    std::string_view snapshot,
-    const std::function<void()> &create_callback
-  ) {
-    if (!sway_output_snapshot_is_valid(snapshot)) return false;
-    create_callback();
-    return true;
-  }
-
-#ifdef POLARIS_TESTS
-  bool with_valid_sway_before_snapshot_for_tests(
-    std::string_view snapshot,
-    const std::function<void()> &create_callback
-  ) {
-    return with_valid_sway_before_snapshot(snapshot, create_callback);
-  }
-#endif
-
-  bool sway_create_output_succeeded(std::string_view response_json) {
-    const auto response = nlohmann::json::parse(response_json, nullptr, false);
-    if (!response.is_array() || response.empty()) {
-      return false;
-    }
-    for (const auto &entry : response) {
-      if (!entry.is_object() ||
-          !entry.contains("success") ||
-          !entry["success"].is_boolean() ||
-          !entry["success"].get<bool>()) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  std::optional<std::string> sway_new_headless_output(
-    std::string_view before_outputs_json,
-    std::string_view after_outputs_json
-  ) {
-    if (!sway_output_snapshot_is_valid(before_outputs_json) ||
-        !sway_output_snapshot_is_valid(after_outputs_json)) {
-      return std::nullopt;
-    }
-    const auto before = nlohmann::json::parse(before_outputs_json, nullptr, false);
-    const auto after = nlohmann::json::parse(after_outputs_json, nullptr, false);
-    if (!before.is_array() || !after.is_array()) {
-      return std::nullopt;
-    }
-
-    std::set<std::string> previous_names;
-    for (const auto &output : before) {
-      if (output.is_object() && output.contains("name") && output["name"].is_string()) {
-        previous_names.insert(output["name"].get<std::string>());
-      }
-    }
-
-    std::optional<std::string> owned_output;
-    for (const auto &output : after) {
-      if (!output.is_object() || !output.contains("name") || !output["name"].is_string()) {
-        continue;
-      }
-      const auto name = output["name"].get<std::string>();
-      if (previous_names.contains(name) || !std::string_view {name}.starts_with("HEADLESS-")) {
-        continue;
-      }
-      if (owned_output) {
-        return std::nullopt;
-      }
-      owned_output = name;
-    }
-    return owned_output;
   }
 
   bool evdi_output_name_is_proven(std::string_view output_name) {
@@ -1165,24 +1088,12 @@ namespace virtual_display {
       }
 
       std::string compositor = detect_compositor();
-      if (compositor == "hyprland") {
-        // hyprctl is the control interface for Hyprland
-        return exec_cmd_rc("which hyprctl >/dev/null 2>&1") == 0;
-      }
-      if (compositor == "sway") {
-        // swaymsg can create outputs
-        return exec_cmd_rc("which swaymsg >/dev/null 2>&1") == 0;
-      }
-      if (compositor == "kwin") {
-        // KWin supports virtual outputs via DBus or kscreen-doctor
-        // (handled by kscreen fallback)
+      if (!wayland_compositor_supports_exact_output_creation(compositor)) {
         return false;
       }
 
-      // No supported compositor identified. wlr-randr alone cannot create an
-      // output (create() refuses the generic branch), so reporting available
-      // here would advertise a display that can never appear.
-      return false;
+      // hyprctl is the control interface for Hyprland and accepts a caller-owned name.
+      return exec_cmd_rc("which hyprctl >/dev/null 2>&1") == 0;
     }
 
     /**
@@ -1190,6 +1101,12 @@ namespace virtual_display {
      */
     static std::optional<vdisplay_t> create(int width, int height, int fps) {
       std::string compositor = detect_compositor();
+      if (!wayland_compositor_supports_exact_output_creation(compositor)) {
+        BOOST_LOG(warning) << "Virtual display: compositor ["sv << compositor
+                           << "] cannot create a caller-named output; refusing before mutation"sv;
+        return std::nullopt;
+      }
+
       std::string output_name;
 
       if (compositor == "hyprland") {
@@ -1319,50 +1236,8 @@ namespace virtual_display {
           }
         }
       }
-      else if (compositor == "sway") {
-        const std::string sway_outputs_before = exec_cmd("swaymsg -t get_outputs -r 2>/dev/null");
-        std::string create_result;
-        if (!with_valid_sway_before_snapshot(sway_outputs_before, [&] {
-              create_result = exec_cmd("swaymsg -r create_output 2>&1");
-            })) {
-          BOOST_LOG(error) << "Virtual display: refusing Sway creation without a valid before snapshot"sv;
-          return std::nullopt;
-        }
-        BOOST_LOG(info) << "Virtual display: swaymsg create_output: "sv << create_result;
-        if (!sway_create_output_succeeded(create_result)) {
-          BOOST_LOG(error) << "Virtual display: Sway rejected headless output creation"sv;
-          return std::nullopt;
-        }
-
-        const auto deadline = std::chrono::steady_clock::now() + 2s;
-        do {
-          output_name = sway_new_headless_output(
-            sway_outputs_before,
-            exec_cmd("swaymsg -t get_outputs -r 2>/dev/null")
-          ).value_or("");
-          if (!output_name.empty()) {
-            break;
-          }
-          std::this_thread::sleep_for(50ms);
-        } while (std::chrono::steady_clock::now() < deadline);
-
-        if (output_name.empty()) {
-          BOOST_LOG(error) << "Virtual display: could not prove ownership of the newly created Sway output"sv;
-          return std::nullopt;
-        }
-
-        std::string mode_str = std::to_string(width) + "x" + std::to_string(height) +
-                               "@" + std::to_string(fps) + "Hz";
-        std::string mode_cmd = "swaymsg output " + output_name + " mode " + mode_str;
-        if (exec_cmd_rc(mode_cmd) != 0) {
-          BOOST_LOG(error) << "Virtual display: failed to configure owned Sway output ["sv << output_name << ']';
-          exec_cmd_rc("swaymsg output " + output_name + " disable >/dev/null 2>&1");
-          return std::nullopt;
-        }
-      }
       else {
-        // Generic wlr-randr approach
-        BOOST_LOG(warning) << "Virtual display: no supported Wayland compositor detected for headless output creation"sv;
+        BOOST_LOG(warning) << "Virtual display: no supported Wayland compositor detected for named output creation"sv;
         return std::nullopt;
       }
 
