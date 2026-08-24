@@ -294,6 +294,24 @@ TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevalua
   EXPECT_NE(teardown.find("config::video.capture = initial_capture"), std::string::npos);
 }
 
+TEST(SourceSafetyContracts, LinuxVirtualDisplayCreationUsesOnlyTheEffectiveMode) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto decision = source.find("const bool should_use_linux_virtual_display");
+  const auto launch = source.find("if (", decision);
+  ASSERT_NE(decision, std::string::npos);
+  ASSERT_NE(launch, std::string::npos);
+  const auto body = source.substr(decision, launch - decision);
+
+  EXPECT_NE(body.find("display_policy.use_host_virtual_display"), std::string::npos);
+  EXPECT_EQ(body.find("launch_session->virtual_display"), std::string::npos);
+  EXPECT_EQ(body.find("_app.virtual_display"), std::string::npos);
+}
+
 TEST(SourceSafetyContracts, VirtualDisplayCreatedNameSurvivesMappingFailureBeforeCapture) {
   std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
   ASSERT_TRUE(input.is_open());
@@ -313,6 +331,115 @@ TEST(SourceSafetyContracts, VirtualDisplayCreatedNameSurvivesMappingFailureBefor
   ASSERT_NE(preserve, std::string::npos);
   EXPECT_LT(map, preserve);
   EXPECT_NE(launch.find("this->display_name", preserve), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/video.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto initial = source.find("const auto requested_display_name = proc::proc.display_name;");
+  const auto initial_end = source.find("display_wp = disp", initial);
+  ASSERT_NE(initial, std::string::npos);
+  ASSERT_NE(initial_end, std::string::npos);
+  const auto initial_body = source.substr(initial, initial_end - initial);
+  const auto initial_policy = initial_body.find("capture_fallback_allowed(");
+  const auto initial_reject = initial_body.find("return;", initial_policy);
+  const auto initial_refresh = initial_body.find("refresh_displays(");
+  ASSERT_NE(initial_policy, std::string::npos);
+  ASSERT_NE(initial_reject, std::string::npos);
+  ASSERT_NE(initial_refresh, std::string::npos);
+  EXPECT_LT(initial_policy, initial_reject);
+  EXPECT_LT(initial_reject, initial_refresh);
+
+  const auto reinit = source.find("while (capture_ctx_queue->running())", initial_end);
+  const auto reinit_end = source.find("display_wp = disp", reinit);
+  ASSERT_NE(reinit, std::string::npos);
+  ASSERT_NE(reinit_end, std::string::npos);
+  const auto reinit_body = source.substr(reinit, reinit_end - reinit);
+  const auto exact_refresh = reinit_body.find("if (!refresh_displays(");
+  const auto identity = reinit_body.find("proc::proc.display_name", exact_refresh);
+  const auto reinit_reject = reinit_body.find("return;", exact_refresh);
+  const auto reset = reinit_body.find("reset_display(", exact_refresh);
+  ASSERT_NE(exact_refresh, std::string::npos);
+  ASSERT_NE(identity, std::string::npos);
+  ASSERT_NE(reinit_reject, std::string::npos);
+  ASSERT_NE(reset, std::string::npos);
+  EXPECT_LT(exact_refresh, identity);
+  EXPECT_LT(identity, reinit_reject);
+  EXPECT_LT(reinit_reject, reset);
+
+  const auto generic_refresh = source.find(
+    "void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index)"
+  );
+  const auto capture_thread = source.find("void captureThread(", generic_refresh);
+  ASSERT_NE(generic_refresh, std::string::npos);
+  ASSERT_NE(capture_thread, std::string::npos);
+  const auto wrapper = source.substr(generic_refresh, capture_thread - generic_refresh);
+  EXPECT_NE(wrapper.find("if (!refresh_displays("), std::string::npos);
+  EXPECT_NE(
+    wrapper.find("current_display_index = display_names.empty() ? -1 : 0"),
+    std::string::npos
+  );
+}
+
+TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnotherOutputOrPortal) {
+  std::ifstream kwin_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/kwingrab.cpp");
+  ASSERT_TRUE(kwin_input.is_open());
+  std::ostringstream kwin_contents;
+  kwin_contents << kwin_input.rdbuf();
+  const auto kwin = kwin_contents.str();
+
+  const auto requested = kwin.find("if (!output_name.empty())");
+  const auto exact_policy = kwin.find("output_selection_can_fallback(output_name)", requested);
+  const auto reject = kwin.find("return -1;", exact_policy);
+  const auto configured_fallback = kwin.find("config::video.linux_display.streaming_output", requested);
+  ASSERT_NE(requested, std::string::npos);
+  ASSERT_NE(exact_policy, std::string::npos);
+  ASSERT_NE(reject, std::string::npos);
+  ASSERT_NE(configured_fallback, std::string::npos);
+  EXPECT_LT(exact_policy, reject);
+  EXPECT_LT(reject, configured_fallback);
+
+  std::ifstream portal_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/portal_grab.cpp");
+  ASSERT_TRUE(portal_input.is_open());
+  std::ostringstream portal_contents;
+  portal_contents << portal_input.rdbuf();
+  const auto portal = portal_contents.str();
+
+  const auto compatible = portal.find("const auto compatible");
+  const auto identity = portal.find("capture_identity_matches(", compatible);
+  const auto identity_mode = portal.find("g_media.stream_mode", identity);
+  const auto identity_output = portal.find("g_media.output_name", identity_mode);
+  const auto requested_mode = portal.find("requested_stream_mode", identity_output);
+  const auto requested_output = portal.find("requested_output_name", requested_mode);
+  const auto reuse = portal.find("return g_media.capture;", requested_output);
+  const auto kwin_start = portal.find("kwingrab::start_output_session(", reuse);
+  const auto required = portal.find("kwingrab::require_for_current_stream_mode()", kwin_start);
+  const auto fail_closed = portal.find("return nullptr;", required);
+  const auto generic_portal = portal.find("ensure_session_unlocked()", kwin_start);
+  ASSERT_NE(compatible, std::string::npos);
+  ASSERT_NE(identity, std::string::npos);
+  ASSERT_NE(identity_mode, std::string::npos);
+  ASSERT_NE(identity_output, std::string::npos);
+  ASSERT_NE(requested_mode, std::string::npos);
+  ASSERT_NE(requested_output, std::string::npos);
+  ASSERT_NE(reuse, std::string::npos);
+  ASSERT_NE(kwin_start, std::string::npos);
+  ASSERT_NE(required, std::string::npos);
+  ASSERT_NE(fail_closed, std::string::npos);
+  ASSERT_NE(generic_portal, std::string::npos);
+  EXPECT_LT(compatible, identity);
+  EXPECT_LT(identity, identity_mode);
+  EXPECT_LT(identity_mode, identity_output);
+  EXPECT_LT(identity_output, requested_mode);
+  EXPECT_LT(requested_mode, requested_output);
+  EXPECT_LT(requested_output, reuse);
+  EXPECT_LT(reuse, kwin_start);
+  EXPECT_LT(required, fail_closed);
+  EXPECT_LT(fail_closed, generic_portal);
 }
 
 TEST(SourceSafetyContracts, WlgrabRequestedOutputSelectionFailsClosed) {

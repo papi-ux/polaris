@@ -73,6 +73,32 @@ namespace portal {
   //     move the cache out while display threads still hold a ref.
   // -----------------------------------------------------------------------
 
+  bool capture_identity_matches(
+    std::string_view cached_stream_mode,
+    std::string_view cached_output_name,
+    std::string_view requested_stream_mode,
+    std::string_view requested_output_name
+  ) {
+    return cached_stream_mode == requested_stream_mode &&
+           cached_output_name == requested_output_name;
+  }
+
+#ifdef POLARIS_TESTS
+  bool portal_capture_identity_matches_for_tests(
+    std::string_view cached_stream_mode,
+    std::string_view cached_output_name,
+    std::string_view requested_stream_mode,
+    std::string_view requested_output_name
+  ) {
+    return capture_identity_matches(
+      cached_stream_mode,
+      cached_output_name,
+      requested_stream_mode,
+      requested_output_name
+    );
+  }
+#endif
+
   struct media_cache_t {
     std::unique_ptr<portal_session_t> portal;
     // Opaque lifetime guard for a Wayland-only kwingrab session. Keeping the
@@ -83,6 +109,8 @@ namespace portal {
     int requested_height = 0;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
     std::string adapter;
+    std::string stream_mode;
+    std::string output_name;
     // Last EnumFormat preference: prefer_hdr (force ∧ dynamicRange>0) or
     // prefer_sdr (dynamicRange<=0). Reuse only when both match.
     bool prefer_hdr = false;
@@ -93,6 +121,8 @@ namespace portal {
       requested_height = 0;
       mem_type = platf::mem_type_e::system;
       adapter.clear();
+      stream_mode.clear();
+      output_name.clear();
       prefer_hdr = false;
       prefer_sdr = false;
     }
@@ -450,11 +480,22 @@ namespace portal {
       std::unique_lock lock(g_media_mu);
 
       const auto requested_adapter = config::video.adapter_name;
+      const auto requested_stream_mode = config::video.linux_display.stream_mode;
+      const auto requested_output_name =
+        config::video.output_name.empty() ?
+          config::video.linux_display.streaming_output :
+          config::video.output_name;
       if (g_media.capture && g_media.capture->running()) {
         const auto compatible = g_media.requested_width == width &&
                                 g_media.requested_height == height &&
                                 g_media.mem_type == mem_type &&
                                 g_media.adapter == requested_adapter &&
+                                capture_identity_matches(
+                                  g_media.stream_mode,
+                                  g_media.output_name,
+                                  requested_stream_mode,
+                                  requested_output_name
+                                ) &&
                                 g_media.prefer_hdr == want_prefer_hdr &&
                                 g_media.prefer_sdr == want_prefer_sdr;
         if (compatible) {
@@ -504,9 +545,8 @@ namespace portal {
       // W3/W5 gamescopegrab: prefer session-graph Video/Source (media.name=gamescope)
       // without private portal ScreenCast when linux_stream_mode=gamescope_stream.
       // Falls through to portal if the node is missing (idle unit not exporting yet).
-      const auto &stream_mode = config::video.linux_display.stream_mode;
       if ((!g_media.capture || !g_media.capture->running()) &&
-          (stream_mode == "gamescope_stream" || stream_mode.empty()) &&
+          (requested_stream_mode == "gamescope_stream" || requested_stream_mode.empty()) &&
           config::video.linux_display.private_runtime == "gamescope") {
         if (auto gs = pipewire_capture::find_gamescope_video_source()) {
           if (auto local = start_local_pw_capture(
@@ -519,6 +559,8 @@ namespace portal {
             g_media.requested_height = height;
             g_media.mem_type = mem_type;
             g_media.adapter = requested_adapter;
+            g_media.stream_mode = requested_stream_mode;
+            g_media.output_name = requested_output_name;
             g_media.prefer_hdr = want_prefer_hdr;
             g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
@@ -543,10 +585,7 @@ namespace portal {
           portal_like_capture &&
           kwingrab::prefer_for_current_stream_mode()) {
         g_media.kwin.reset();
-        if (auto kwin_session = kwingrab::start_output_session(
-              config::video.output_name.empty() ? config::video.linux_display.streaming_output :
-                                                  config::video.output_name
-            )) {
+        if (auto kwin_session = kwingrab::start_output_session(requested_output_name)) {
           const auto &src = kwin_session->source();
           if (auto local = start_local_pw_capture(
                 src.node_id,
@@ -565,17 +604,29 @@ namespace portal {
             g_media.requested_height = height;
             g_media.mem_type = mem_type;
             g_media.adapter = requested_adapter;
+            g_media.stream_mode = requested_stream_mode;
+            g_media.output_name = requested_output_name;
             g_media.prefer_hdr = want_prefer_hdr;
             g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
           }
           else {
-            BOOST_LOG(info) << "portal: kwingrab PipeWire start failed; falling back to portal ScreenCast"sv;
+            BOOST_LOG(error) << "portal: kwingrab PipeWire start failed"sv;
             kwin_session.reset();
+            if (kwingrab::require_for_current_stream_mode()) {
+              BOOST_LOG(error) << "portal: host virtual capture requires output-pinned KWin capture; refusing generic portal fallback"sv;
+              return nullptr;
+            }
+            BOOST_LOG(info) << "portal: falling back to portal ScreenCast"sv;
           }
         }
         else {
-          BOOST_LOG(info) << "portal: kwingrab unavailable; falling back to portal ScreenCast"sv;
+          BOOST_LOG(error) << "portal: kwingrab unavailable"sv;
+          if (kwingrab::require_for_current_stream_mode()) {
+            BOOST_LOG(error) << "portal: host virtual capture requires output-pinned KWin capture; refusing generic portal fallback"sv;
+            return nullptr;
+          }
+          BOOST_LOG(info) << "portal: falling back to portal ScreenCast"sv;
         }
       }
 #endif
@@ -717,6 +768,8 @@ namespace portal {
         g_media.requested_height = height;
         g_media.mem_type = mem_type;
         g_media.adapter = requested_adapter;
+        g_media.stream_mode = requested_stream_mode;
+        g_media.output_name = requested_output_name;
         g_media.prefer_hdr = want_prefer_hdr;
         g_media.prefer_sdr = want_prefer_sdr;
         g_media.capture = new_capture;

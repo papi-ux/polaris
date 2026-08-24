@@ -147,7 +147,7 @@ namespace stream_display_policy {
     bool virtual_display_user_locked
   ) {
     if (mirror_desktop) {
-      return {};
+      return std::string {k_desktop_display};
     }
     if (!requested_selection.empty()) {
       return std::string {requested_selection};

@@ -137,8 +137,8 @@ TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClie
   ) << "an explicit client virtual-display choice must beat the app default";
   EXPECT_EQ(
     effective_session_selection_for_launch("", true, true, true, false),
-    ""
-  ) << "mirrorDesktop remains authoritative";
+    "desktop_display"
+  ) << "mirrorDesktop must override a host_virtual_display default for this session";
   EXPECT_EQ(
     effective_session_selection_for_launch("headless_stream", false, true, true, false),
     "headless_stream"

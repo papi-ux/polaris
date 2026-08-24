@@ -7190,10 +7190,7 @@ namespace proc {
     const bool using_headless_cage =
       display_policy.requested_headless &&
       display_policy.uses_labwc();
-    const bool should_use_linux_virtual_display =
-      display_policy.use_host_virtual_display ||
-      launch_session->virtual_display ||
-      (!launch_session->user_locked_virtual_display && _app.virtual_display);
+    const bool should_use_linux_virtual_display = display_policy.use_host_virtual_display;
 
     if (
       !display_policy.uses_labwc() &&

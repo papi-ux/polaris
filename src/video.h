@@ -590,6 +590,13 @@ namespace video {
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
 
+  bool capture_fallback_allowed_for_tests(std::string_view requested_display_name);
+
+  std::optional<int> find_display_index_for_tests(
+    const std::vector<std::string> &display_names,
+    std::string_view requested_display_name
+  );
+
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count);
 
   bool hdr_metadata_is_usable_for_tests(const SS_HDR_METADATA &metadata);

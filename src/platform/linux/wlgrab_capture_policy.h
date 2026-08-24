@@ -26,6 +26,13 @@ namespace wlgrab_capture_policy {
     gpu_native,
   };
 
+  inline std::string enumerated_monitor_identity(
+    std::size_t monitor_index,
+    std::string_view connector_name
+  ) {
+    return connector_name.empty() ? std::to_string(monitor_index) : std::string {connector_name};
+  }
+
   inline std::optional<std::size_t> select_monitor_index(
     std::string_view requested_display,
     const std::vector<std::string> &monitor_names

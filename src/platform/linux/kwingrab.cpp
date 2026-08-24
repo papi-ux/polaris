@@ -230,12 +230,11 @@ namespace kwingrab {
             }
           }
           if (!output) {
-            // A requested output that is not in KWin's registry (e.g. a virtual
-            // display that failed to attach) silently streaming some other
-            // output is exactly the wrong-output bug this pinning exists to
-            // prevent — make the miss visible before falling back.
-            BOOST_LOG(warning) << "kwingrab: requested output ["sv << output_name
-                               << "] not found; falling back to configured/first output"sv;
+            BOOST_LOG(error) << "kwingrab: requested output ["sv << output_name
+                             << "] not found; refusing another output"sv;
+            if (!output_selection_can_fallback(output_name)) {
+              return -1;
+            }
           }
         }
         if (!output) {
@@ -498,6 +497,10 @@ namespace kwingrab {
     return impl_->cast->source_;
   }
 
+  bool output_selection_can_fallback(std::string_view requested_output_name) {
+    return requested_output_name.empty();
+  }
+
   std::unique_ptr<session_t> start_output_session(std::string_view output_name) {
     auto session = std::make_unique<session_t>();
     session->impl_->cast = std::make_unique<screencast_t>();
@@ -536,6 +539,10 @@ namespace kwingrab {
       return true;
     }
     return false;
+  }
+
+  bool require_for_current_stream_mode() {
+    return config::video.linux_display.stream_mode == "host_virtual_display";
   }
 
 }  // namespace kwingrab

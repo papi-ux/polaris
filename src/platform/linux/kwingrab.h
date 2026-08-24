@@ -53,7 +53,13 @@ namespace kwingrab {
    */
   std::unique_ptr<session_t> start_output_session(std::string_view output_name = {});
 
+  /// True when an absent requested output may use configured/first output.
+  bool output_selection_can_fallback(std::string_view requested_output_name);
+
   /// True when current stream_mode is a host KDE path that may prefer kwingrab.
   bool prefer_for_current_stream_mode();
+
+  /// True when host virtual capture must not fall through to generic portal.
+  bool require_for_current_stream_mode();
 
 }  // namespace kwingrab
