@@ -59,48 +59,11 @@ TEST(VirtualDisplayTests, HyprlandMonitorModeRefusesAbsentOutputsAndUnusableGeom
   EXPECT_FALSE(virtual_display::hyprland_monitor_mode("", "X").has_value());
 }
 
-TEST(VirtualDisplayTests, SwayCreationRequiresCommandSuccessAndOneNewHeadlessOutput) {
-  constexpr std::string_view before = R"json([
-    {"name":"DP-1"},
-    {"name":"HEADLESS-1"}
-  ])json";
-  constexpr std::string_view after = R"json([
-    {"name":"DP-1"},
-    {"name":"HEADLESS-1"},
-    {"name":"HEADLESS-2"}
-  ])json";
-
-  EXPECT_TRUE(virtual_display::sway_create_output_succeeded(R"json([{"success":true}])json"));
-  EXPECT_FALSE(virtual_display::sway_create_output_succeeded(R"json([{"success":false}])json"));
-  EXPECT_FALSE(virtual_display::sway_create_output_succeeded("not json"));
-
-  EXPECT_EQ(virtual_display::sway_new_headless_output(before, after), "HEADLESS-2");
-  EXPECT_FALSE(virtual_display::sway_new_headless_output(before, before).has_value());
-  EXPECT_FALSE(virtual_display::sway_new_headless_output(
-    before,
-    R"json([{"name":"DP-1"},{"name":"HEADLESS-1"},{"name":"DP-2"}])json"
-  ).has_value());
-  EXPECT_FALSE(virtual_display::sway_new_headless_output(
-    before,
-    R"json([{"name":"DP-1"},{"name":"HEADLESS-1"},{"name":"HEADLESS-2"},{"name":"HEADLESS-3"}])json"
-  ).has_value());
-}
-
-TEST(VirtualDisplayTests, SwayMalformedAfterCannotProveOwnership) {
-  EXPECT_FALSE(virtual_display::sway_new_headless_output(
-    R"([{"name":"DP-1"}])",
-    R"([{"name":"DP-1"},{"bad":true},{"name":"HEADLESS-2"}])"
-  ));
-}
-
-TEST(VirtualDisplayTests, SwayInvalidBeforeSnapshotDoesNotCreate) {
-  int create_calls = 0;
-  const auto create = [&] { ++create_calls; };
-  EXPECT_FALSE(virtual_display::with_valid_sway_before_snapshot_for_tests("not json", create));
-  EXPECT_EQ(create_calls, 0);
-  EXPECT_TRUE(virtual_display::with_valid_sway_before_snapshot_for_tests(
-    R"([{"name":"DP-1"},{"name":"HEADLESS-1"}])", create));
-  EXPECT_EQ(create_calls, 1);
+TEST(VirtualDisplayTests, OnlyNamedWaylandCreationIsAdvertised) {
+  EXPECT_TRUE(virtual_display::wayland_compositor_supports_exact_output_creation("hyprland"));
+  EXPECT_FALSE(virtual_display::wayland_compositor_supports_exact_output_creation("sway"));
+  EXPECT_FALSE(virtual_display::wayland_compositor_supports_exact_output_creation("kwin"));
+  EXPECT_FALSE(virtual_display::wayland_compositor_supports_exact_output_creation(""));
 }
 
 TEST(VirtualDisplayTests, EvdiConnectorIdentityMustBeDiscovered) {

@@ -592,6 +592,8 @@ namespace video {
 
   bool capture_fallback_allowed_for_tests(std::string_view requested_display_name);
 
+  bool display_switch_allowed_for_exact_capture_for_tests(std::string_view exact_display_name);
+
   std::optional<int> find_display_index_for_tests(
     const std::vector<std::string> &display_names,
     std::string_view requested_display_name
