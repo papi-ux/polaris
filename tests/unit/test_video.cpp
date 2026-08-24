@@ -175,6 +175,9 @@ TEST(VideoDisplaySelectionTests, ExactDisplayIdentityMustRemainPresentAcrossRein
 
   EXPECT_EQ(video::find_display_index_for_tests(displays, "POLARIS-HEADLESS-512536-0"), 0);
   EXPECT_EQ(video::find_display_index_for_tests(displays, "HDMI-A-1"), 1);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "1"), 1)
+    << "legacy numeric WLR selection must retain its index after connector-name enumeration";
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "2"), std::nullopt);
   EXPECT_EQ(video::find_display_index_for_tests(displays, "missing-output"), std::nullopt);
 }
 

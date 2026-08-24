@@ -286,6 +286,10 @@ TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevalua
   EXPECT_LT(apply, reevaluate);
   EXPECT_NE(launch.find("_app.virtual_display", derive), std::string::npos);
   EXPECT_NE(launch.find("launch_session->user_locked_virtual_display", derive), std::string::npos);
+  EXPECT_EQ(
+    launch.find("!(launch_session && launch_session->mirror_desktop)", derive),
+    std::string::npos
+  ) << "derived desktop_display must actually be applied for mirror sessions";
 
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate);
   ASSERT_NE(terminate_end, std::string::npos);
@@ -359,17 +363,20 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   ASSERT_NE(reinit, std::string::npos);
   ASSERT_NE(reinit_end, std::string::npos);
   const auto reinit_body = source.substr(reinit, reinit_end - reinit);
-  const auto exact_refresh = reinit_body.find("if (!refresh_displays(");
-  const auto identity = reinit_body.find("proc::proc.display_name", exact_refresh);
-  const auto reinit_reject = reinit_body.find("return;", exact_refresh);
-  const auto reset = reinit_body.find("reset_display(", exact_refresh);
-  ASSERT_NE(exact_refresh, std::string::npos);
+  const auto exact_name = reinit_body.find("const auto exact_display_name = proc::proc.display_name");
+  const auto exact_reset = reinit_body.find("reset_display(", exact_name);
+  const auto identity = reinit_body.find("exact_display_name", exact_reset);
+  const auto reinit_reject = reinit_body.find("return;", identity);
+  const auto fallback_refresh = reinit_body.find("refresh_displays(", reinit_reject);
+  ASSERT_NE(exact_name, std::string::npos);
+  ASSERT_NE(exact_reset, std::string::npos);
   ASSERT_NE(identity, std::string::npos);
   ASSERT_NE(reinit_reject, std::string::npos);
-  ASSERT_NE(reset, std::string::npos);
-  EXPECT_LT(exact_refresh, identity);
+  ASSERT_NE(fallback_refresh, std::string::npos);
+  EXPECT_LT(exact_name, exact_reset);
+  EXPECT_LT(exact_reset, identity);
   EXPECT_LT(identity, reinit_reject);
-  EXPECT_LT(reinit_reject, reset);
+  EXPECT_LT(reinit_reject, fallback_refresh);
 
   const auto generic_refresh = source.find(
     "void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index)"
@@ -416,7 +423,11 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   const auto requested_mode = portal.find("requested_stream_mode", identity_output);
   const auto requested_output = portal.find("requested_output_name", requested_mode);
   const auto reuse = portal.find("return g_media.capture;", requested_output);
-  const auto kwin_start = portal.find("kwingrab::start_output_session(", reuse);
+  const auto no_wayland = portal.find("#ifndef POLARIS_BUILD_WAYLAND", reuse);
+  const auto no_wayland_mode = portal.find("requested_stream_mode == \"host_virtual_display\"", no_wayland);
+  const auto no_wayland_reject = portal.find("return nullptr;", no_wayland_mode);
+  const auto wayland_guard = portal.find("#ifdef POLARIS_BUILD_WAYLAND", no_wayland_reject);
+  const auto kwin_start = portal.find("kwingrab::start_output_session(", wayland_guard);
   const auto required = portal.find("kwingrab::require_for_current_stream_mode()", kwin_start);
   const auto fail_closed = portal.find("return nullptr;", required);
   const auto generic_portal = portal.find("ensure_session_unlocked()", kwin_start);
@@ -427,6 +438,10 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   ASSERT_NE(requested_mode, std::string::npos);
   ASSERT_NE(requested_output, std::string::npos);
   ASSERT_NE(reuse, std::string::npos);
+  ASSERT_NE(no_wayland, std::string::npos);
+  ASSERT_NE(no_wayland_mode, std::string::npos);
+  ASSERT_NE(no_wayland_reject, std::string::npos);
+  ASSERT_NE(wayland_guard, std::string::npos);
   ASSERT_NE(kwin_start, std::string::npos);
   ASSERT_NE(required, std::string::npos);
   ASSERT_NE(fail_closed, std::string::npos);
@@ -437,9 +452,53 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   EXPECT_LT(identity_output, requested_mode);
   EXPECT_LT(requested_mode, requested_output);
   EXPECT_LT(requested_output, reuse);
-  EXPECT_LT(reuse, kwin_start);
+  EXPECT_LT(reuse, no_wayland);
+  EXPECT_LT(no_wayland, no_wayland_mode);
+  EXPECT_LT(no_wayland_mode, no_wayland_reject);
+  EXPECT_LT(no_wayland_reject, wayland_guard);
+  EXPECT_LT(wayland_guard, kwin_start);
   EXPECT_LT(required, fail_closed);
   EXPECT_LT(fail_closed, generic_portal);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayCreationPublishesOnlyProvenOwnedConnectors) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto evdi_proof = source.find("if (!evdi_output_name_is_proven(output_name))");
+  const auto evdi_disconnect = source.find("fn_disconnect(handle)", evdi_proof);
+  const auto evdi_close = source.find("fn_close(handle)", evdi_disconnect);
+  const auto evdi_reject = source.find("return std::nullopt;", evdi_close);
+  const auto evdi_publish = source.find("vdisplay_t display", evdi_reject);
+  ASSERT_NE(evdi_proof, std::string::npos);
+  ASSERT_NE(evdi_disconnect, std::string::npos);
+  ASSERT_NE(evdi_close, std::string::npos);
+  ASSERT_NE(evdi_reject, std::string::npos);
+  ASSERT_NE(evdi_publish, std::string::npos);
+  EXPECT_LT(evdi_proof, evdi_disconnect);
+  EXPECT_LT(evdi_disconnect, evdi_close);
+  EXPECT_LT(evdi_close, evdi_reject);
+  EXPECT_LT(evdi_reject, evdi_publish);
+
+  const auto sway = source.find("else if (compositor == \"sway\")");
+  const auto before = source.find("sway_outputs_before", sway);
+  const auto command_proof = source.find("sway_create_output_succeeded(", before);
+  const auto ownership = source.find("sway_new_headless_output(", command_proof);
+  const auto sway_reject = source.find("return std::nullopt;", ownership);
+  const auto mode = source.find("std::string mode_str", sway_reject);
+  ASSERT_NE(sway, std::string::npos);
+  ASSERT_NE(before, std::string::npos);
+  ASSERT_NE(command_proof, std::string::npos);
+  ASSERT_NE(ownership, std::string::npos);
+  ASSERT_NE(sway_reject, std::string::npos);
+  ASSERT_NE(mode, std::string::npos);
+  EXPECT_LT(before, command_proof);
+  EXPECT_LT(command_proof, ownership);
+  EXPECT_LT(ownership, sway_reject);
+  EXPECT_LT(sway_reject, mode);
 }
 
 TEST(SourceSafetyContracts, WlgrabRequestedOutputSelectionFailsClosed) {

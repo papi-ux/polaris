@@ -420,10 +420,10 @@ TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunc
 }
 
 TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionState) {
-  // An explicit headless_stream request may match the current stream_mode ID
-  // while legacy companion state (for example prefer_gpu_native_capture) is
-  // stale. Skipping apply_selection in that case can resolve the session as
-  // windowed_stream even though the launch requested headless_stream.
+  // Explicit session modes must always normalize companion state. Mirror is
+  // derived as a session-scoped desktop_display override, so bypassing
+  // apply_selection would preserve a host_virtual_display default and could
+  // create or capture the wrong output.
   const auto source = read_source_file_for_contract("src/process.cpp");
   ASSERT_FALSE(source.empty());
 
@@ -439,7 +439,8 @@ TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionStat
   ASSERT_NE(apply_start, std::string::npos);
   const auto guard = body.substr(guard_start, apply_start - guard_start);
 
-  EXPECT_NE(guard.find("!(launch_session && launch_session->mirror_desktop)"), std::string::npos);
+  EXPECT_EQ(guard.find("!(launch_session && launch_session->mirror_desktop)"), std::string::npos)
+    << "mirror must normalize to the session-scoped desktop_display override";
   EXPECT_NE(
     guard.find("!stream_display_policy::selection_companion_state_matches(session_mode)"),
     std::string::npos

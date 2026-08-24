@@ -572,6 +572,13 @@ namespace portal {
         }
       }
 
+#ifndef POLARIS_BUILD_WAYLAND
+      if (requested_stream_mode == "host_virtual_display") {
+        BOOST_LOG(error) << "portal: host virtual capture requires KWin output pinning, but Wayland support is not built"sv;
+        return nullptr;
+      }
+#endif
+
 #ifdef POLARIS_BUILD_WAYLAND
       // W4/P1 kwingrab: host KDE desktop_display / headless_dongle — try KWin
       // zkde screencast before portal picker. Fail cleanly when not on KWin.

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <fcntl.h>
@@ -2100,6 +2101,17 @@ namespace video {
     if (requested_display_name.empty()) {
       return std::nullopt;
     }
+
+    std::size_t requested_index = 0;
+    const auto *begin = requested_display_name.data();
+    const auto *end = begin + requested_display_name.size();
+    const auto parsed = std::from_chars(begin, end, requested_index);
+    if (parsed.ec == std::errc {} && parsed.ptr == end) {
+      return requested_index < display_names.size() ?
+               std::optional<int> {static_cast<int>(requested_index)} :
+               std::nullopt;
+    }
+
     for (int index = 0; index < display_names.size(); ++index) {
       if (display_names[index] == requested_display_name) {
         return index;
@@ -2444,17 +2456,31 @@ namespace video {
               // only support a single display session per device/application.
               disp.reset();
 
-              // Reenumeration must preserve the exact active connector. A
-              // missing named output cannot reset capture to display 0.
-              if (!refresh_displays(
+              const auto exact_display_name = proc::proc.display_name;
+              if (!switch_display_event->peek() && !exact_display_name.empty()) {
+                {
+#ifdef __linux__
+                  session_media::pending_start_owner_scope_t owner_scope {
+                    capture_ctxs.front().channel_data
+                  };
+#endif
+                  reset_display(
+                    disp,
                     encoder.platform_formats->dev_type,
-                    display_names,
-                    display_p,
-                    proc::proc.display_name
-                  )) {
-                BOOST_LOG(error) << "Active display identity could not be preserved during reinitialization"sv;
-                return;
+                    exact_display_name,
+                    capture_ctxs.front().config
+                  );
+                }
+                if (!disp) {
+                  BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
+                                   << "] could not be reopened; refusing another output"sv;
+                  return;
+                }
+                break;
               }
+
+              // Only an explicit switch or an unnamed legacy session may enumerate.
+              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
