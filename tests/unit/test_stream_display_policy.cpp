@@ -4,6 +4,7 @@
  */
 
 #include <src/platform/linux/stream_display_policy.h>
+#include <src/platform/linux/virtual_display.h>
 #include <src/config.h>
 
 #include <algorithm>
@@ -119,6 +120,64 @@ TEST(StreamDisplayPolicyTests, LegacyBooleansMapToSelections) {
   EXPECT_EQ(selection_from_legacy_booleans({false, false, false}), "desktop_display");
 }
 
+TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClientDidNotChoose) {
+  using stream_display_policy::effective_session_selection_for_launch;
+
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, false, true, false),
+    "host_virtual_display"
+  );
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, true, false, true),
+    "host_virtual_display"
+  );
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, false, true, true),
+    ""
+  ) << "an explicit client virtual-display choice must beat the app default";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", true, true, true, false),
+    ""
+  ) << "mirrorDesktop remains authoritative";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("headless_stream", false, true, true, false),
+    "headless_stream"
+  ) << "an explicit accepted streamMode remains authoritative";
+}
+
+TEST(StreamDisplayPolicyTests, VirtualCaptureOutputNameNeverLosesTheCreatedConnector) {
+  using stream_display_policy::capture_output_name_for_virtual_display;
+
+  EXPECT_EQ(
+    capture_output_name_for_virtual_display("POLARIS-HEADLESS-512536-0", ""),
+    "POLARIS-HEADLESS-512536-0"
+  );
+  EXPECT_EQ(
+    capture_output_name_for_virtual_display("POLARIS-HEADLESS-512536-0", "1"),
+    "1"
+  );
+}
+
+TEST(StreamDisplayPolicyTests, HostVirtualCaptureFollowsTheVirtualDisplayBackend) {
+  using stream_display_policy::capture_for_host_virtual_display_backend;
+  using virtual_display::backend_e;
+
+  for (const auto current : {"", "auto", "portal", "kms"}) {
+    EXPECT_EQ(capture_for_host_virtual_display_backend(backend_e::WAYLAND_WLR, current), "wlr")
+      << current;
+  }
+
+  for (const auto backend : {backend_e::EVDI, backend_e::KSCREEN_DOCTOR}) {
+    EXPECT_EQ(capture_for_host_virtual_display_backend(backend, ""), "portal");
+    EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "auto"), "portal");
+    EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "portal"), "portal");
+    EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "wlr"), "wlr")
+      << "the existing explicit EVDI/KScreen operator override stays intact";
+  }
+
+  EXPECT_EQ(capture_for_host_virtual_display_backend(backend_e::NONE, "portal"), "portal");
+}
+
 TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
   LinuxDisplayPolicyGuard guard;
   std::string error;
@@ -185,6 +244,12 @@ TEST(StreamDisplayPolicyTests, CommonModeCompanionStateMatchesAllRegisteredSelec
     linux_display.use_cage_compositor = expected.use_cage_compositor;
     linux_display.prefer_gpu_native_capture = expected.prefer_gpu_native_capture;
     linux_display.private_runtime = test_case.runtime;
+    config::video.capture = test_case.selection == std::string_view {"host_virtual_display"} ?
+                              stream_display_policy::capture_for_host_virtual_display_backend(
+                                virtual_display::detect_backend(),
+                                ""
+                              ) :
+                              std::string {};
     EXPECT_TRUE(stream_display_policy::selection_companion_state_matches(test_case.selection));
 
     linux_display.prefer_gpu_native_capture = !expected.prefer_gpu_native_capture;

@@ -6522,7 +6522,13 @@ namespace proc {
       this->initial_use_cage_compositor = linux_display.use_cage_compositor;
       this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
       this->initial_auto_manage_displays = linux_display.auto_manage_displays;
-      const std::string session_mode = launch_session ? launch_session->stream_mode : std::string {};
+      const std::string session_mode = stream_display_policy::effective_session_selection_for_launch(
+        launch_session ? std::string_view {launch_session->stream_mode} : std::string_view {},
+        launch_session && launch_session->mirror_desktop,
+        launch_session && launch_session->virtual_display,
+        _app.virtual_display,
+        launch_session && launch_session->user_locked_virtual_display
+      );
       if (!session_mode.empty() &&
           !(launch_session && launch_session->mirror_desktop) &&
           !stream_display_policy::selection_companion_state_matches(session_mode)) {
@@ -7221,8 +7227,13 @@ namespace proc {
                           << virtual_display::backend_name(linux_vdisplay->backend);
 
           // Set output_name to the newly created virtual display so the
-          // capture pipeline uses the correct output
-          config::video.output_name = display_device::map_display_name(this->display_name);
+          // capture pipeline uses the correct output. If platform mapping is
+          // unavailable, keep the connector name rather than falling back.
+          const auto mapped_output_name = display_device::map_display_name(this->display_name);
+          config::video.output_name = stream_display_policy::capture_output_name_for_virtual_display(
+            this->display_name,
+            mapped_output_name
+          );
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
           launch_session->virtual_display = false;

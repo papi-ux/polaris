@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <string_view>
 
 // platform includes
 #include <arpa/inet.h>
@@ -57,6 +58,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "vaapi.h"
+#include "virtual_display.h"
 
 #include <linux/rtnetlink.h>
 
@@ -1363,19 +1365,28 @@ std::string get_local_ip_for_gateway() {
     return std::make_unique<linux_deinit_t>();
   }
 
-  // host_virtual_display is composited by KWin: its EVDI output is an ordinary
-  // KWin monitor, not a private cage. Capture must reach portal_grab, which
-  // routes it to kwingrab's output-pinned KWin ScreenCast (see PR #351). The
-  // auto-selected direct wlr/wlgrab path below would instead bind the desktop
-  // wayland-0, which does not advertise wlr-export-dmabuf — observed live to
-  // hard-fail every encoder (nvenc/vaapi/software) and produce no stream. So
-  // this mode must be kept off the auto WAYLAND source, letting PORTAL be
-  // chosen. An explicit capture=wlr still forces wlr (operator's call);
-  // cage-compositor modes (windowed/headless_stream) are unaffected because
-  // they set use_cage and are not host_virtual_display.
+  // host_virtual_display can be backed by two different compositor contracts.
+  // KWin/EVDI exposes an ordinary KWin monitor, so capture must reach
+  // portal_grab and kwingrab's output-pinned KWin ScreenCast (PR #351/#352).
+  // Hyprland/Sway WAYLAND_WLR creates a native wlroots headless output, which
+  // wlgrab can capture directly by its exact POLARIS-HEADLESS output name.
+  // Cage-compositor modes own their own capture source and never enter here.
+  bool host_virtual_display_needs_portal_for_backend(
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    virtual_display::backend_e backend
+  ) {
+    return stream_mode == "host_virtual_display" &&
+           !use_cage_compositor &&
+           backend != virtual_display::backend_e::WAYLAND_WLR;
+  }
+
   bool host_virtual_display_needs_portal() {
-    return !config::video.linux_display.use_cage_compositor
-        && config::video.linux_display.stream_mode == "host_virtual_display";
+    return host_virtual_display_needs_portal_for_backend(
+      config::video.linux_display.stream_mode,
+      config::video.linux_display.use_cage_compositor,
+      virtual_display::detect_backend()
+    );
   }
 
   void reevaluate_capture_sources() {

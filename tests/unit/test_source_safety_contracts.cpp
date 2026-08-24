@@ -263,6 +263,85 @@ TEST(SourceSafetyContracts, UbuntuSnapshotInstallsMayDowngradeRunnerPackages) {
   EXPECT_EQ(count_exact(workflow, curl_dev_pin), 2u);
 }
 
+TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevaluationAndRestoresHostState) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto execute = source.find("int proc_t::execute_impl(");
+  const auto terminate = source.find("void proc_t::terminate_impl(", execute);
+  ASSERT_NE(execute, std::string::npos);
+  ASSERT_NE(terminate, std::string::npos);
+  const auto launch = source.substr(execute, terminate - execute);
+
+  const auto derive = launch.find("effective_session_selection_for_launch(");
+  const auto apply = launch.find("stream_display_policy::apply_selection(session_mode");
+  const auto reevaluate = launch.find("platf::reevaluate_capture_sources()", apply);
+  ASSERT_NE(derive, std::string::npos);
+  ASSERT_NE(apply, std::string::npos);
+  ASSERT_NE(reevaluate, std::string::npos);
+  EXPECT_LT(derive, apply);
+  EXPECT_LT(apply, reevaluate);
+  EXPECT_NE(launch.find("_app.virtual_display", derive), std::string::npos);
+  EXPECT_NE(launch.find("launch_session->user_locked_virtual_display", derive), std::string::npos);
+
+  const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate);
+  ASSERT_NE(terminate_end, std::string::npos);
+  const auto teardown = source.substr(terminate, terminate_end - terminate);
+  EXPECT_NE(teardown.find("linux_display.stream_mode = initial_stream_mode"), std::string::npos);
+  EXPECT_NE(teardown.find("config::video.capture = initial_capture"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayCreatedNameSurvivesMappingFailureBeforeCapture) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto created = source.find("Virtual Display created: ");
+  const auto terminate = source.find("void proc_t::terminate_impl(", created);
+  ASSERT_NE(created, std::string::npos);
+  ASSERT_NE(terminate, std::string::npos);
+  const auto launch = source.substr(created, terminate - created);
+
+  const auto map = launch.find("display_device::map_display_name(this->display_name)");
+  const auto preserve = launch.find("capture_output_name_for_virtual_display(", map);
+  ASSERT_NE(map, std::string::npos);
+  ASSERT_NE(preserve, std::string::npos);
+  EXPECT_LT(map, preserve);
+  EXPECT_NE(launch.find("this->display_name", preserve), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, WlgrabRequestedOutputSelectionFailsClosed) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/wlgrab.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  const auto init = source.find("int init(platf::mem_type_e hwdevice_type");
+  const auto next_method = source.find("std::shared_ptr<platf::img_t> alloc_img()", init);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(next_method, std::string::npos);
+  const auto body = source.substr(init, next_method - init);
+
+  const auto select = body.find("wlgrab_capture_policy::select_monitor_index(");
+  const auto reject = body.find("if (!monitor_index)", select);
+  const auto refuse = body.find("refusing to capture another output", reject);
+  const auto return_failure = body.find("return -1;", reject);
+  const auto dereference = body.find("interface.monitors[*monitor_index]", select);
+  ASSERT_NE(select, std::string::npos);
+  ASSERT_NE(reject, std::string::npos);
+  ASSERT_NE(refuse, std::string::npos);
+  ASSERT_NE(return_failure, std::string::npos);
+  ASSERT_NE(dereference, std::string::npos);
+  EXPECT_LT(reject, return_failure);
+  EXPECT_LT(return_failure, dereference);
+  EXPECT_EQ(body.find("interface.monitors[0].get()"), std::string::npos);
+}
+
 TEST(SourceSafetyContracts, ReadlinkResultsAreCheckedBeforeUse) {
   // readlink reports failure as -1. Widening that into a size handed a
   // string_view a length of SIZE_MAX; the other seven call sites all checked.
