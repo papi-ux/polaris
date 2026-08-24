@@ -98,7 +98,12 @@ build() {
   export CFLAGS="${CFLAGS/-Werror=format-security/}"
   export CXXFLAGS="${CXXFLAGS/-Werror=format-security/}"
 
-  if [[ "$("${CXX}" -dumpfullversion | cut -d. -f1)" == "15" ]]; then
+  # Match the GNU-only Release workaround without aging out on compiler bumps.
+  # Clang defines __GNUC__ for compatibility but does not use the workaround.
+  local _compiler_macros
+  _compiler_macros="$("${CXX}" -dM -E -x c++ /dev/null)"
+  if [[ "${_compiler_macros}" == *"#define __GNUC__ "* &&
+        "${_compiler_macros}" != *"#define __clang__ "* ]]; then
     local _filtered_cppflags=()
     local _filtered_cflags=()
     local _filtered_cxxflags=()

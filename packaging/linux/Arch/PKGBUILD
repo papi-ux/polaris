@@ -139,9 +139,13 @@ build() {
     export CFLAGS="${CFLAGS/-Werror=format-security/}"
     export CXXFLAGS="${CXXFLAGS/-Werror=format-security/}"
 
-    # GCC 15 plus Polaris' current Release workaround can conflict with Arch's
-    # injected fortify defines during makepkg validation rebuilds.
-    if [[ "$("${CXX}" -dumpfullversion | cut -d. -f1)" == "15" ]]; then
+    # Polaris' GNU Release workaround disables optimization for two translation
+    # units, so makepkg's injected fortify defines must not reach that compile.
+    # Clang defines __GNUC__ for compatibility but does not use the workaround.
+    local _compiler_macros
+    _compiler_macros="$("${CXX}" -dM -E -x c++ /dev/null)"
+    if [[ "${_compiler_macros}" == *"#define __GNUC__ "* &&
+          "${_compiler_macros}" != *"#define __clang__ "* ]]; then
       local _filtered_cppflags=()
       local _filtered_cflags=()
       local _filtered_cxxflags=()
