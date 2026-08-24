@@ -139,6 +139,49 @@ namespace stream_display_policy {
     return booleans;
   }
 
+  std::string effective_session_selection_for_launch(
+    std::string_view requested_selection,
+    bool mirror_desktop,
+    bool launch_virtual_display,
+    bool app_virtual_display,
+    bool virtual_display_user_locked
+  ) {
+    if (mirror_desktop) {
+      return {};
+    }
+    if (!requested_selection.empty()) {
+      return std::string {requested_selection};
+    }
+    if (launch_virtual_display || (app_virtual_display && !virtual_display_user_locked)) {
+      return std::string {k_host_virtual_display};
+    }
+    return {};
+  }
+
+  std::string capture_output_name_for_virtual_display(
+    std::string_view created_output_name,
+    std::string_view mapped_output_name
+  ) {
+    return std::string {mapped_output_name.empty() ? created_output_name : mapped_output_name};
+  }
+
+  std::string capture_for_host_virtual_display_backend(
+    virtual_display::backend_e backend,
+    std::string_view current_capture
+  ) {
+    if (backend == virtual_display::backend_e::WAYLAND_WLR) {
+      return "wlr";
+    }
+
+    if ((backend == virtual_display::backend_e::EVDI ||
+         backend == virtual_display::backend_e::KSCREEN_DOCTOR) &&
+        (current_capture.empty() || current_capture == "auto")) {
+      return "portal";
+    }
+
+    return std::string {current_capture};
+  }
+
   resolved_t resolve(const input_t &input) {
     const auto selection = configured_selection_id();
     const auto *path = stream_path::find(selection);
@@ -254,6 +297,13 @@ namespace stream_display_policy {
         return false;
       }
 
+      if (key == k_host_virtual_display &&
+          config::video.capture != capture_for_host_virtual_display_backend(
+                                     virtual_display::detect_backend(),
+                                     config::video.capture
+                                   )) {
+        return false;
+      }
       if (key == stream_path::k_gamescope_stream && config::video.capture.empty()) {
         return false;
       }
@@ -280,6 +330,13 @@ namespace stream_display_policy {
     const auto key = to_lower_copy(selection);
 
     auto &linux_display = config::video.linux_display;
+
+    if (key == k_host_virtual_display) {
+      config::video.capture = capture_for_host_virtual_display_backend(
+        virtual_display::detect_backend(),
+        config::video.capture
+      );
+    }
 
     if (key == stream_path::k_gamescope_stream) {
       auto caps = stream_path::probe_host_capabilities();
@@ -351,6 +408,12 @@ namespace stream_display_policy {
         }
         else if (path->runtime == stream_path::runtime_kind_e::GAMESCOPE) {
           linux_display.private_runtime = std::string {k_runtime_gamescope};
+        }
+        if (path->id == k_host_virtual_display) {
+          config::video.capture = capture_for_host_virtual_display_backend(
+            virtual_display::detect_backend(),
+            config::video.capture
+          );
         }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.

@@ -6,8 +6,13 @@
 
 #include "src/platform/common.h"
 
+#include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace wlgrab_capture_policy {
   enum class gpu_native_capture_route_e {
@@ -20,6 +25,35 @@ namespace wlgrab_capture_policy {
     ram,
     gpu_native,
   };
+
+  inline std::optional<std::size_t> select_monitor_index(
+    std::string_view requested_display,
+    const std::vector<std::string> &monitor_names
+  ) {
+    if (monitor_names.empty()) {
+      return std::nullopt;
+    }
+    if (requested_display.empty()) {
+      return 0;
+    }
+
+    std::size_t requested_index = 0;
+    const auto *begin = requested_display.data();
+    const auto *end = begin + requested_display.size();
+    const auto parsed = std::from_chars(begin, end, requested_index);
+    if (parsed.ec == std::errc {} && parsed.ptr == end) {
+      return requested_index < monitor_names.size() ?
+               std::optional<std::size_t> {requested_index} :
+               std::nullopt;
+    }
+
+    for (std::size_t index = 0; index < monitor_names.size(); ++index) {
+      if (monitor_names[index] == requested_display) {
+        return index;
+      }
+    }
+    return std::nullopt;
+  }
 
   inline bool gpu_native_dmabuf_probe_is_allowed(
     platf::mem_type_e hwdevice_type,

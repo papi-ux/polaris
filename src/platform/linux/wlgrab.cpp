@@ -3,7 +3,9 @@
  * @brief Definitions for wlgrab capture.
  */
 // standard includes
+#include <string>
 #include <thread>
+#include <vector>
 
 // local includes
 #include "stream_runtime.h"
@@ -118,19 +120,33 @@ namespace wl {
         BOOST_LOG(info) << "wlr: wlr-export-dmabuf not available (cage mode — using screencopy only)"sv;
       }
 
-      auto monitor = interface.monitors[0].get();
-
-      if (!display_name.empty()) {
-        auto streamedMonitor = util::from_view(display_name);
-
-        if (streamedMonitor >= 0 && streamedMonitor < interface.monitors.size()) {
-          monitor = interface.monitors[streamedMonitor].get();
-        }
+      if (interface.monitors.empty()) {
+        BOOST_LOG(error) << "Wayland compositor advertised no capturable outputs"sv;
+        return -1;
       }
 
-      monitor->listen(interface.output_manager);
-
+      for (const auto &candidate : interface.monitors) {
+        candidate->listen(interface.output_manager);
+      }
       display.roundtrip();
+
+      std::vector<std::string> monitor_names;
+      monitor_names.reserve(interface.monitors.size());
+      for (const auto &candidate : interface.monitors) {
+        monitor_names.emplace_back(candidate->name);
+      }
+
+      const auto monitor_index = wlgrab_capture_policy::select_monitor_index(
+        display_name,
+        monitor_names
+      );
+      if (!monitor_index) {
+        BOOST_LOG(error) << "Requested Wayland output ["sv << display_name
+                         << "] was not found; refusing to capture another output"sv;
+        return -1;
+      }
+
+      auto monitor = interface.monitors[*monitor_index].get();
       reported_wayland_main_device = interface.dmabuf_feedback.main_device_path;
       stream_stats::update_wayland_main_device(reported_wayland_main_device);
       interface.consume_output_topology_dirty();

@@ -11,6 +11,24 @@ namespace {
   using route_e = wlgrab_capture_policy::gpu_native_capture_route_e;
 }
 
+TEST(WlgrabCapturePolicy, RequestedMonitorSelectionIsExactAndFailClosed) {
+  const std::vector<std::string> monitors {
+    "POLARIS-HEADLESS-512536-0",
+    "HDMI-A-1",
+  };
+
+  EXPECT_EQ(wlgrab_capture_policy::select_monitor_index("", monitors), 0u);
+  EXPECT_EQ(wlgrab_capture_policy::select_monitor_index("1", monitors), 1u);
+  EXPECT_EQ(
+    wlgrab_capture_policy::select_monitor_index("POLARIS-HEADLESS-512536-0", monitors),
+    0u
+  );
+  EXPECT_EQ(wlgrab_capture_policy::select_monitor_index("HDMI-A-1", monitors), 1u);
+  EXPECT_FALSE(wlgrab_capture_policy::select_monitor_index("2", monitors).has_value());
+  EXPECT_FALSE(wlgrab_capture_policy::select_monitor_index("DP-9", monitors).has_value());
+  EXPECT_FALSE(wlgrab_capture_policy::select_monitor_index("", {}).has_value());
+}
+
 TEST(WlgrabCapturePolicy, DirectVaapiCaptureUsesRamFallback) {
   EXPECT_EQ(
     wlgrab_capture_policy::select_direct_capture_path(platf::mem_type_e::vaapi, true),
