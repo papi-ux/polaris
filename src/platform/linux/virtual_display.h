@@ -11,6 +11,7 @@
 #pragma once
 
 // standard includes
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -203,6 +204,11 @@ namespace virtual_display {
    * For kscreen-doctor, enables/configures an existing output.
    */
   std::optional<vdisplay_t> create(int width, int height, int fps);
+
+#ifdef POLARIS_TESTS
+  /** @brief Execute a callback under the production virtual-display creation mutex. */
+  void with_creation_lock_for_tests(const std::function<void()> &callback);
+#endif
 
   /**
    * @brief Destroy a previously created virtual display.

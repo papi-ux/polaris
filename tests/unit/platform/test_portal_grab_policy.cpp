@@ -364,7 +364,10 @@ TEST(PortalGrabPolicyTests, TeardownCancellationCoversRemoteReopenAndRetryLoop) 
     << "OpenPipeWireRemote must receive the registered cancellable";
 
   const auto ensure_begin = grab_source.find("static bool ensure_session_unlocked()");
-  const auto ensure_end = grab_source.find("static bool ensure_global_session()", ensure_begin);
+  const auto ensure_end = grab_source.find(
+    "static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(",
+    ensure_begin
+  );
   ASSERT_NE(ensure_begin, std::string::npos);
   ASSERT_NE(ensure_end, std::string::npos);
   const auto ensure_body = grab_source.substr(ensure_begin, ensure_end - ensure_begin);

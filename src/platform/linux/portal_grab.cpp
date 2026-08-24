@@ -452,14 +452,6 @@ namespace portal {
     return true;
   }
 
-  static bool ensure_global_session() {
-    std::lock_guard transition_lock(g_capture_transition_mu);
-    auto start = session_media::begin_start();
-    reap_portal_cleanup();
-    std::lock_guard lock(g_media_mu);
-    return ensure_session_unlocked();
-  }
-
   static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(
     int width,
     int height,
@@ -504,29 +496,16 @@ namespace portal {
 
         BOOST_LOG(info) << "portal: capture configuration changed; retiring PipeWire generation before reconnect"sv;
         auto retired_capture = std::move(g_media.capture);
+        auto retired_portal = std::move(g_media.portal);
         auto retired_kwin = std::move(g_media.kwin);
         g_media.clear_meta();
         lock.unlock();
         retired_capture->stop();
         retired_capture->shutdown();
         retired_capture.reset();
+        retired_portal.reset();
         retired_kwin.reset();
         lock.lock();
-
-        // A PipeWire remote FD is a protocol connection, not a reusable device
-        // handle. Request a fresh remote only after the old producer is fully
-        // quiescent; the transition mutex prevents a concurrent replacement.
-        if (g_media.portal && g_media.portal->conn && !g_media.portal->session_handle.empty()) {
-          if (g_media.portal->pw_remote_fd >= 0) {
-            close(g_media.portal->pw_remote_fd);
-            g_media.portal->pw_remote_fd = -1;
-          }
-          g_media.portal->pw_remote_fd =
-            open_pipewire_remote_fd(g_media.portal->conn, g_media.portal->session_handle);
-        }
-        if (!g_media.portal || g_media.portal->pw_remote_fd < 0) {
-          g_media.portal.reset();
-        }
       } else if (g_media.capture) {
         // A dead stream invalidates the node on this private remote. Explicitly
         // retire it outside g_media_mu before replacing portal/session state.
@@ -855,11 +834,6 @@ namespace portal {
         cage_configured = config::video.linux_display.use_cage_compositor;
 #endif
         if (!cage_configured) {
-          if (!ensure_global_session()) {
-            return -1;
-          }
-
-
           auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range);
           if (!cap) {
             return -1;
@@ -979,13 +953,7 @@ namespace portal {
       }
 #endif
 
-      // Fallback: portal D-Bus capture (only when cage is NOT configured)
-      if (!ensure_global_session()) {
-        BOOST_LOG(warning) << "portal: No capture session available"sv;
-        return platf::capture_e::reinit;
-      }
-
-
+      // Fallback: source-owned portal/KWin capture (only when cage is NOT configured)
       auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
