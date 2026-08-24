@@ -6784,7 +6784,8 @@ namespace proc {
       launch_session && launch_session->mirror_desktop,
       launch_session && launch_session->virtual_display,
       _app.virtual_display,
-      launch_session && launch_session->user_locked_virtual_display
+      launch_session && launch_session->user_locked_virtual_display,
+      resolved_optimization.virtual_display.has_value()
     );
     if (!session_mode.empty()) {
       launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
