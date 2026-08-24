@@ -32,6 +32,15 @@ namespace stream_display_policy {
       });
     }
 
+    void normalize_host_virtual_display_state() {
+      auto &linux_display = config::video.linux_display;
+      linux_display.auto_manage_displays = false;
+      config::video.capture = capture_for_host_virtual_display_backend(
+        virtual_display::detect_backend(),
+        config::video.capture
+      );
+    }
+
   }  // namespace
 
   std::string label_for_selection(std::string_view selection) {
@@ -334,11 +343,7 @@ namespace stream_display_policy {
     auto &linux_display = config::video.linux_display;
 
     if (key == k_host_virtual_display) {
-      linux_display.auto_manage_displays = false;
-      config::video.capture = capture_for_host_virtual_display_backend(
-        virtual_display::detect_backend(),
-        config::video.capture
-      );
+      normalize_host_virtual_display_state();
     }
 
     if (key == stream_path::k_gamescope_stream) {
@@ -413,10 +418,7 @@ namespace stream_display_policy {
           linux_display.private_runtime = std::string {k_runtime_gamescope};
         }
         if (path->id == k_host_virtual_display) {
-          config::video.capture = capture_for_host_virtual_display_backend(
-            virtual_display::detect_backend(),
-            config::video.capture
-          );
+          normalize_host_virtual_display_state();
         }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.
@@ -435,6 +437,9 @@ namespace stream_display_policy {
       linux_display.use_cage_compositor,
       linux_display.prefer_gpu_native_capture,
     });
+    if (linux_display.stream_mode == k_host_virtual_display) {
+      normalize_host_virtual_display_state();
+    }
 
     if (linux_display.private_runtime.empty()) {
       linux_display.private_runtime = std::string {k_runtime_labwc};

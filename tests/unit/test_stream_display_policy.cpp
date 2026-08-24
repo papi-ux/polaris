@@ -347,6 +347,23 @@ TEST(StreamDisplayPolicyTests, ExplicitStreamModeWinsOverBooleans) {
   EXPECT_FALSE(resolved.use_private_runtime);
 }
 
+TEST(StreamDisplayPolicyTests, NormalizeConfigRepairsHostVirtualState) {
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  d.stream_mode = "host_virtual_display";
+  d.auto_manage_displays = true;
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_FALSE(d.auto_manage_displays);
+
+  d.stream_mode.clear();
+  d.headless_mode = true;
+  d.use_cage_compositor = false;
+  d.auto_manage_displays = true;
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_EQ(d.stream_mode, "host_virtual_display");
+  EXPECT_FALSE(d.auto_manage_displays);
+}
+
 TEST(StreamDisplayPolicyTests, NormalizeConfigDerivesStreamModeFromLegacyBooleans) {
   LinuxDisplayPolicyGuard guard;
   config::video.linux_display.stream_mode.clear();
