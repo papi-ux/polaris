@@ -11,6 +11,14 @@ namespace {
   using route_e = wlgrab_capture_policy::gpu_native_capture_route_e;
 }
 
+TEST(WlgrabCapturePolicy, EnumeratedOutputsPreferStableConnectorIdentity) {
+  EXPECT_EQ(
+    wlgrab_capture_policy::enumerated_monitor_identity(0, "POLARIS-HEADLESS-512536-0"),
+    "POLARIS-HEADLESS-512536-0"
+  );
+  EXPECT_EQ(wlgrab_capture_policy::enumerated_monitor_identity(1, ""), "1");
+}
+
 TEST(WlgrabCapturePolicy, RequestedMonitorSelectionIsExactAndFailClosed) {
   const std::vector<std::string> monitors {
     "POLARIS-HEADLESS-512536-0",

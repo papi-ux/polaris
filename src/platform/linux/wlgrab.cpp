@@ -1000,7 +1000,10 @@ namespace platf {
 
       BOOST_LOG(info) << "Monitor " << x << " is "sv << monitor->name << ": "sv << monitor->description;
 
-      display_names.emplace_back(std::to_string(x));
+      display_names.emplace_back(wlgrab_capture_policy::enumerated_monitor_identity(
+        static_cast<std::size_t>(x),
+        monitor->name
+      ));
     }
 
     BOOST_LOG(info) << "--------- End of Wayland monitor list ---------"sv;

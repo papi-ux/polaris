@@ -2089,6 +2089,25 @@ namespace video {
     false
   };
 
+  bool capture_fallback_allowed(std::string_view requested_display_name) {
+    return requested_display_name.empty();
+  }
+
+  std::optional<int> find_display_index(
+    const std::vector<std::string> &display_names,
+    std::string_view requested_display_name
+  ) {
+    if (requested_display_name.empty()) {
+      return std::nullopt;
+    }
+    for (int index = 0; index < display_names.size(); ++index) {
+      if (display_names[index] == requested_display_name) {
+        return index;
+      }
+    }
+    return std::nullopt;
+  }
+
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
     constexpr int max_attempts = 3;
 
@@ -2113,8 +2132,9 @@ namespace video {
    * @param dev_type The encoder device type used for display lookup.
    * @param display_names The list of display names to repopulate.
    * @param current_display_index The current display index or -1 if not yet known.
+   * @return true when the current/preferred identity remains selectable.
    */
-  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, std::string &preferred_display_name) {
+  bool refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, std::string &preferred_display_name) {
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
     const auto output_name { display_device::map_output_name(config::video.output_name) };
     std::string current_display_name = preferred_display_name;
@@ -2132,7 +2152,8 @@ namespace video {
     if (display_names.empty() && !old_display_names.empty()) {
       BOOST_LOG(error) << "No displays were found after reenumeration!"sv;
       display_names = std::move(old_display_names);
-      return;
+      current_display_index = -1;
+      return false;
     } else if (display_names.empty()) {
       display_names.emplace_back(output_name);
     }
@@ -2144,30 +2165,30 @@ namespace video {
       current_display_name = display_device::map_output_name(config::video.output_name);
     }
 
-    // If we had a name previously, let's try to find it in the new list
+    // Exact prior identity is authoritative. A miss cannot become display 0.
     if (!current_display_name.empty()) {
-      for (int x = 0; x < display_names.size(); ++x) {
-        if (display_names[x] == current_display_name) {
-          current_display_index = x;
-          return;
-        }
+      if (const auto index = find_display_index(display_names, current_display_name)) {
+        current_display_index = *index;
+        return true;
       }
 
-      // The old display was removed, so we'll start back at the first display again
-      BOOST_LOG(warning) << "Previous active display ["sv << current_display_name << "] is no longer present"sv;
-    } else {
-      for (int x = 0; x < display_names.size(); ++x) {
-        if (display_names[x] == output_name) {
-          current_display_index = x;
-          return;
-        }
-      }
+      current_display_index = -1;
+      BOOST_LOG(error) << "Previous active display ["sv << current_display_name
+                       << "] is no longer present; refusing another output"sv;
+      return false;
     }
+
+    if (const auto index = find_display_index(display_names, output_name)) {
+      current_display_index = *index;
+    }
+    return !display_names.empty();
   }
 
   void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
     static std::string empty_str = "";
-    refresh_displays(dev_type, display_names, current_display_index, empty_str);
+    if (!refresh_displays(dev_type, display_names, current_display_index, empty_str)) {
+      current_display_index = display_names.empty() ? -1 : 0;
+    }
   }
 
   void captureThread(
@@ -2209,8 +2230,14 @@ namespace video {
       capture_ctxs.front().channel_data
     };
 #endif
-    if (!proc::proc.display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
+    const auto requested_display_name = proc::proc.display_name;
+    if (!requested_display_name.empty()) {
+      disp = platf::display(encoder.platform_formats->dev_type, requested_display_name, capture_ctxs.front().config);
+    }
+    if (!disp && !capture_fallback_allowed(requested_display_name)) {
+      BOOST_LOG(error) << "Requested display ["sv << requested_display_name
+                       << "] could not be initialized; refusing another output"sv;
+      return;
     }
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
@@ -2417,8 +2444,17 @@ namespace video {
               // only support a single display session per device/application.
               disp.reset();
 
-              // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, proc::proc.display_name);
+              // Reenumeration must preserve the exact active connector. A
+              // missing named output cannot reset capture to display 0.
+              if (!refresh_displays(
+                    encoder.platform_formats->dev_type,
+                    display_names,
+                    display_p,
+                    proc::proc.display_name
+                  )) {
+                BOOST_LOG(error) << "Active display identity could not be preserved during reinitialization"sv;
+                return;
+              }
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
@@ -5088,6 +5124,17 @@ namespace video {
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {
     return reset_display_retry_delay(attempt);
+  }
+
+  bool capture_fallback_allowed_for_tests(std::string_view requested_display_name) {
+    return capture_fallback_allowed(requested_display_name);
+  }
+
+  std::optional<int> find_display_index_for_tests(
+    const std::vector<std::string> &display_names,
+    std::string_view requested_display_name
+  ) {
+    return find_display_index(display_names, requested_display_name);
   }
 
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count) {

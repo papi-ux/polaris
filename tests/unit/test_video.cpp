@@ -162,6 +162,22 @@ TEST(VideoCacheTests, ResetDisplayRetryDelayBackoffCapsAtTwoHundredMilliseconds)
   EXPECT_EQ(video::reset_display_retry_delay_for_tests(3), std::chrono::milliseconds(200));
 }
 
+TEST(VideoDisplaySelectionTests, ExactNamedCaptureDoesNotAllowGenericFallback) {
+  EXPECT_TRUE(video::capture_fallback_allowed_for_tests(""));
+  EXPECT_FALSE(video::capture_fallback_allowed_for_tests("POLARIS-HEADLESS-512536-0"));
+}
+
+TEST(VideoDisplaySelectionTests, ExactDisplayIdentityMustRemainPresentAcrossReinit) {
+  const std::vector<std::string> displays {
+    "POLARIS-HEADLESS-512536-0",
+    "HDMI-A-1",
+  };
+
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "POLARIS-HEADLESS-512536-0"), 0);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "HDMI-A-1"), 1);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "missing-output"), std::nullopt);
+}
+
 TEST(VideoDisplaySelectionTests, RejectsDisplaySwitchWhenDisplayListIsEmpty) {
   EXPECT_EQ(video::clamp_display_index_for_tests(1, 0), std::nullopt);
 }

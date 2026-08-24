@@ -41,6 +41,12 @@ namespace portal {
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
   bool portal_cancel_source_wakes_wait_for_tests();
+  bool portal_capture_identity_matches_for_tests(
+    std::string_view cached_stream_mode,
+    std::string_view cached_output_name,
+    std::string_view requested_stream_mode,
+    std::string_view requested_output_name
+  );
 }
 
 TEST(PortalCapabilityPolicyTests, ExplicitCaptureSelectionWinsOverStreamModeDefault) {
@@ -103,6 +109,18 @@ TEST(PortalGrabPolicyTests, HostVirtualDisplayRequestsMonitorSourceDespiteHeadle
   EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "host_virtual_display"), 1u);
 }
 
+TEST(PortalGrabPolicyTests, CaptureCacheReuseIsBoundToStreamAndOutputIdentity) {
+  EXPECT_TRUE(portal::portal_capture_identity_matches_for_tests(
+    "host_virtual_display", "DVI-I-1", "host_virtual_display", "DVI-I-1"
+  ));
+  EXPECT_FALSE(portal::portal_capture_identity_matches_for_tests(
+    "desktop_display", "HDMI-A-1", "host_virtual_display", "DVI-I-1"
+  ));
+  EXPECT_FALSE(portal::portal_capture_identity_matches_for_tests(
+    "host_virtual_display", "HDMI-A-1", "host_virtual_display", "DVI-I-1"
+  ));
+}
+
 #ifdef POLARIS_BUILD_WAYLAND
 TEST(PortalGrabPolicyTests, KwingrabPreferredForHostKdeModesIncludingVirtualDisplay) {
   struct config_guard_t {
@@ -128,6 +146,29 @@ TEST(PortalGrabPolicyTests, KwingrabPreferredForHostKdeModesIncludingVirtualDisp
     ld.stream_mode = mode;
     EXPECT_FALSE(kwingrab::prefer_for_current_stream_mode()) << mode;
   }
+}
+TEST(PortalGrabPolicyTests, KwingrabRequiredOnlyForPinnedHostVirtualDisplay) {
+  struct config_guard_t {
+    config::video_t::linux_display_t linux_display = config::video.linux_display;
+
+    ~config_guard_t() {
+      config::video.linux_display = linux_display;
+    }
+  } guard;
+
+  auto &mode = config::video.linux_display.stream_mode;
+  mode = "host_virtual_display";
+  EXPECT_TRUE(kwingrab::require_for_current_stream_mode());
+
+  for (const char *unrequired : {"desktop_display", "headless_dongle", "windowed_stream", ""}) {
+    mode = unrequired;
+    EXPECT_FALSE(kwingrab::require_for_current_stream_mode()) << unrequired;
+  }
+}
+
+TEST(PortalGrabPolicyTests, KwingrabNamedOutputMissCannotFallback) {
+  EXPECT_TRUE(kwingrab::output_selection_can_fallback(""));
+  EXPECT_FALSE(kwingrab::output_selection_can_fallback("DVI-I-1"));
 }
 #endif
 
