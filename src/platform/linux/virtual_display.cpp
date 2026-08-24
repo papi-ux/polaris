@@ -70,6 +70,10 @@ namespace virtual_display {
     }
 
     std::mutex persisted_state_mutex;
+    // One creation transaction across stream and web UI callers. The lock is
+    // held through output discovery/configuration and persisted ownership
+    // publication so Sway before/after attribution cannot overlap in-process.
+    static std::mutex creation_mutex;
 
     const char *backend_persist_name(backend_e backend) {
       switch (backend) {
@@ -1581,7 +1585,9 @@ namespace virtual_display {
     return unavailable_reason_for(backend, evdi_blocked, !config::video.linux_display.streaming_output.empty());
   }
 
-  bool cleanup_stale() {
+  static void destroy_unlocked(vdisplay_t &display);
+
+  static bool cleanup_stale_unlocked() {
     const pid_t self = getpid();
     std::vector<persisted_display_t> stale;
 
@@ -1613,14 +1619,27 @@ namespace virtual_display {
     for (auto &entry : stale) {
       BOOST_LOG(info) << "Virtual display: cleaning up stale persisted display ["sv
                       << entry.display.output_name << "] from pid "sv << entry.owner_pid;
-      destroy(entry.display);
+      destroy_unlocked(entry.display);
     }
 
     return !stale.empty();
   }
 
+  bool cleanup_stale() {
+    std::lock_guard creation_lock {creation_mutex};
+    return cleanup_stale_unlocked();
+  }
+
+#ifdef POLARIS_TESTS
+  void with_creation_lock_for_tests(const std::function<void()> &callback) {
+    std::lock_guard creation_lock {creation_mutex};
+    callback();
+  }
+#endif
+
   std::optional<vdisplay_t> create(int width, int height, int fps) {
-    cleanup_stale();
+    std::lock_guard creation_lock {creation_mutex};
+    cleanup_stale_unlocked();
 
     backend_e backend = detect_backend();
 
@@ -1656,7 +1675,7 @@ namespace virtual_display {
     }
   }
 
-  void destroy(vdisplay_t &display) {
+  static void destroy_unlocked(vdisplay_t &display) {
     if (!display.active) {
       return;
     }
@@ -1685,6 +1704,11 @@ namespace virtual_display {
     // Drop only this display's record. Clearing the whole file here used to
     // strand a sibling display that was still live.
     forget_persisted_display(display);
+  }
+
+  void destroy(vdisplay_t &display) {
+    std::lock_guard creation_lock {creation_mutex};
+    destroy_unlocked(display);
   }
 
 }  // namespace virtual_display

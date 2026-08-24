@@ -4,9 +4,12 @@
  */
 #include "../../tests_common.h"
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #ifdef __linux__
   #include <src/platform/linux/virtual_display.h>
@@ -86,6 +89,34 @@ TEST(VirtualDisplayTests, SwayCreationRequiresCommandSuccessAndOneNewHeadlessOut
 TEST(VirtualDisplayTests, EvdiConnectorIdentityMustBeDiscovered) {
   EXPECT_FALSE(virtual_display::evdi_output_name_is_proven(""));
   EXPECT_TRUE(virtual_display::evdi_output_name_is_proven("DVI-I-1"));
+}
+
+TEST(VirtualDisplayTests, CreationMutexSerializesIndependentCallers) {
+  std::atomic<int> active {0};
+  std::atomic<int> maximum_active {0};
+  std::atomic<int> completed {0};
+
+  const auto callback = [&] {
+    const int now = active.fetch_add(1) + 1;
+    int observed = maximum_active.load();
+    while (observed < now && !maximum_active.compare_exchange_weak(observed, now)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    active.fetch_sub(1);
+    completed.fetch_add(1);
+  };
+
+  std::thread first {[&] {
+    virtual_display::with_creation_lock_for_tests(callback);
+  }};
+  std::thread second {[&] {
+    virtual_display::with_creation_lock_for_tests(callback);
+  }};
+  first.join();
+  second.join();
+
+  EXPECT_EQ(completed.load(), 2);
+  EXPECT_EQ(maximum_active.load(), 1);
 }
 
 TEST(VirtualDisplayTests, BackendDetectionLogCacheOnlySignalsOnFirstObservationAndChanges) {

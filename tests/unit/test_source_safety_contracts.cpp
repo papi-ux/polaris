@@ -461,6 +461,41 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   EXPECT_LT(fail_closed, generic_portal);
 }
 
+TEST(SourceSafetyContracts, PortalSourceSelectionAndIdentityTransitionOwnOneGeneration) {
+  std::ifstream portal_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/portal_grab.cpp");
+  ASSERT_TRUE(portal_input.is_open());
+  std::ostringstream portal_contents;
+  portal_contents << portal_input.rdbuf();
+  const auto portal = portal_contents.str();
+
+  EXPECT_EQ(portal.find("static bool ensure_global_session()"), std::string::npos);
+  const auto init = portal.find("if (!cage_configured)");
+  const auto init_capture = portal.find("ensure_global_capture(", init);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(init_capture, std::string::npos);
+  EXPECT_EQ(portal.substr(init, init_capture - init).find("ensure_global_session()"), std::string::npos);
+
+  const auto capture_fallback = portal.find("// Fallback: source-owned portal/KWin capture");
+  const auto capture_owner = portal.find("ensure_global_capture(", capture_fallback);
+  ASSERT_NE(capture_fallback, std::string::npos);
+  ASSERT_NE(capture_owner, std::string::npos);
+  EXPECT_EQ(portal.substr(capture_fallback, capture_owner - capture_fallback).find("ensure_global_session()"), std::string::npos);
+
+  const auto transition = portal.find("capture configuration changed");
+  const auto retired_portal = portal.find("auto retired_portal = std::move(g_media.portal)", transition);
+  const auto unlock = portal.find("lock.unlock()", transition);
+  const auto destroy_portal = portal.find("retired_portal.reset()", unlock);
+  const auto relock = portal.find("lock.lock()", destroy_portal);
+  ASSERT_NE(transition, std::string::npos);
+  ASSERT_NE(retired_portal, std::string::npos);
+  ASSERT_NE(unlock, std::string::npos);
+  ASSERT_NE(destroy_portal, std::string::npos);
+  ASSERT_NE(relock, std::string::npos);
+  EXPECT_LT(retired_portal, unlock);
+  EXPECT_LT(unlock, destroy_portal);
+  EXPECT_LT(destroy_portal, relock);
+}
+
 TEST(SourceSafetyContracts, VirtualDisplayCreationPublishesOnlyProvenOwnedConnectors) {
   std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
   ASSERT_TRUE(input.is_open());
@@ -499,6 +534,53 @@ TEST(SourceSafetyContracts, VirtualDisplayCreationPublishesOnlyProvenOwnedConnec
   EXPECT_LT(command_proof, ownership);
   EXPECT_LT(ownership, sway_reject);
   EXPECT_LT(sway_reject, mode);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayCreateSerializesCleanupCreationAndPersistence) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto mutex = source.find("static std::mutex creation_mutex");
+  const auto cleanup_entry = source.find("bool cleanup_stale()");
+  const auto cleanup_end = source.find("#ifdef POLARIS_TESTS", cleanup_entry);
+  const auto cleanup_body = source.substr(cleanup_entry, cleanup_end - cleanup_entry);
+  const auto cleanup_lock = cleanup_body.find("std::lock_guard creation_lock {creation_mutex}");
+  const auto create = source.find("std::optional<vdisplay_t> create(int width, int height, int fps)", cleanup_entry);
+  const auto create_end = source.find("void destroy(vdisplay_t &display)", create);
+  const auto destroy_lock = source.find("std::lock_guard creation_lock {creation_mutex}", create_end);
+  ASSERT_NE(mutex, std::string::npos);
+  ASSERT_NE(cleanup_entry, std::string::npos);
+  ASSERT_NE(cleanup_end, std::string::npos);
+  ASSERT_NE(cleanup_lock, std::string::npos);
+  ASSERT_NE(create, std::string::npos);
+  ASSERT_NE(create_end, std::string::npos);
+  ASSERT_NE(destroy_lock, std::string::npos);
+  const auto body = source.substr(create, create_end - create);
+  const auto lock = body.find("std::lock_guard creation_lock {creation_mutex}");
+  const auto cleanup = body.find("cleanup_stale_unlocked()");
+  const auto backend = body.find("detect_backend()");
+  const auto persistence = body.find("record_persisted_display(");
+  ASSERT_NE(lock, std::string::npos);
+  ASSERT_NE(cleanup, std::string::npos);
+  ASSERT_NE(backend, std::string::npos);
+  ASSERT_NE(persistence, std::string::npos);
+  EXPECT_LT(lock, cleanup);
+  EXPECT_LT(cleanup, backend);
+  EXPECT_LT(backend, persistence);
+
+  std::ifstream process_input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  std::ifstream confighttp_input(fs::path {POLARIS_SOURCE_DIR} / "src/confighttp.cpp");
+  ASSERT_TRUE(process_input.is_open());
+  ASSERT_TRUE(confighttp_input.is_open());
+  std::ostringstream process_contents;
+  std::ostringstream confighttp_contents;
+  process_contents << process_input.rdbuf();
+  confighttp_contents << confighttp_input.rdbuf();
+  EXPECT_NE(process_contents.str().find("virtual_display::create("), std::string::npos);
+  EXPECT_NE(confighttp_contents.str().find("virtual_display::create("), std::string::npos);
 }
 
 TEST(SourceSafetyContracts, WlgrabRequestedOutputSelectionFailsClosed) {
