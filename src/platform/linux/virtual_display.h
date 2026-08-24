@@ -138,6 +138,21 @@ namespace virtual_display {
     std::string_view output_name
   );
 
+  /** @brief Return true only when swaymsg reports create_output success. */
+  bool sway_create_output_succeeded(std::string_view response_json);
+
+  /**
+   * @brief Return the one newly appeared HEADLESS-N output, or nullopt when
+   *        ownership cannot be proved from before/after Sway snapshots.
+   */
+  std::optional<std::string> sway_new_headless_output(
+    std::string_view before_outputs_json,
+    std::string_view after_outputs_json
+  );
+
+  /** @brief EVDI output identity is proven only by non-empty connector discovery. */
+  bool evdi_output_name_is_proven(std::string_view output_name);
+
   /**
    * @brief Return whether an output name belongs to Polaris's Hyprland namespace.
    */

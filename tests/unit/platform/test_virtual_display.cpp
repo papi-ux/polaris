@@ -56,6 +56,38 @@ TEST(VirtualDisplayTests, HyprlandMonitorModeRefusesAbsentOutputsAndUnusableGeom
   EXPECT_FALSE(virtual_display::hyprland_monitor_mode("", "X").has_value());
 }
 
+TEST(VirtualDisplayTests, SwayCreationRequiresCommandSuccessAndOneNewHeadlessOutput) {
+  constexpr std::string_view before = R"json([
+    {"name":"DP-1"},
+    {"name":"HEADLESS-1"}
+  ])json";
+  constexpr std::string_view after = R"json([
+    {"name":"DP-1"},
+    {"name":"HEADLESS-1"},
+    {"name":"HEADLESS-2"}
+  ])json";
+
+  EXPECT_TRUE(virtual_display::sway_create_output_succeeded(R"json([{"success":true}])json"));
+  EXPECT_FALSE(virtual_display::sway_create_output_succeeded(R"json([{"success":false}])json"));
+  EXPECT_FALSE(virtual_display::sway_create_output_succeeded("not json"));
+
+  EXPECT_EQ(virtual_display::sway_new_headless_output(before, after), "HEADLESS-2");
+  EXPECT_FALSE(virtual_display::sway_new_headless_output(before, before).has_value());
+  EXPECT_FALSE(virtual_display::sway_new_headless_output(
+    before,
+    R"json([{"name":"DP-1"},{"name":"HEADLESS-1"},{"name":"DP-2"}])json"
+  ).has_value());
+  EXPECT_FALSE(virtual_display::sway_new_headless_output(
+    before,
+    R"json([{"name":"DP-1"},{"name":"HEADLESS-1"},{"name":"HEADLESS-2"},{"name":"HEADLESS-3"}])json"
+  ).has_value());
+}
+
+TEST(VirtualDisplayTests, EvdiConnectorIdentityMustBeDiscovered) {
+  EXPECT_FALSE(virtual_display::evdi_output_name_is_proven(""));
+  EXPECT_TRUE(virtual_display::evdi_output_name_is_proven("DVI-I-1"));
+}
+
 TEST(VirtualDisplayTests, BackendDetectionLogCacheOnlySignalsOnFirstObservationAndChanges) {
   virtual_display::backend_detection_log_cache_t cache;
 

@@ -6530,7 +6530,6 @@ namespace proc {
         launch_session && launch_session->user_locked_virtual_display
       );
       if (!session_mode.empty() &&
-          !(launch_session && launch_session->mirror_desktop) &&
           !stream_display_policy::selection_companion_state_matches(session_mode)) {
         std::string mode_error;
         if (stream_display_policy::apply_selection(session_mode, mode_error)) {

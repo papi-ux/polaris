@@ -363,6 +363,60 @@ namespace virtual_display {
     return std::nullopt;
   }
 
+  bool sway_create_output_succeeded(std::string_view response_json) {
+    const auto response = nlohmann::json::parse(response_json, nullptr, false);
+    if (!response.is_array() || response.empty()) {
+      return false;
+    }
+    for (const auto &entry : response) {
+      if (!entry.is_object() ||
+          !entry.contains("success") ||
+          !entry["success"].is_boolean() ||
+          !entry["success"].get<bool>()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::optional<std::string> sway_new_headless_output(
+    std::string_view before_outputs_json,
+    std::string_view after_outputs_json
+  ) {
+    const auto before = nlohmann::json::parse(before_outputs_json, nullptr, false);
+    const auto after = nlohmann::json::parse(after_outputs_json, nullptr, false);
+    if (!before.is_array() || !after.is_array()) {
+      return std::nullopt;
+    }
+
+    std::set<std::string> previous_names;
+    for (const auto &output : before) {
+      if (output.is_object() && output.contains("name") && output["name"].is_string()) {
+        previous_names.insert(output["name"].get<std::string>());
+      }
+    }
+
+    std::optional<std::string> owned_output;
+    for (const auto &output : after) {
+      if (!output.is_object() || !output.contains("name") || !output["name"].is_string()) {
+        continue;
+      }
+      const auto name = output["name"].get<std::string>();
+      if (previous_names.contains(name) || !std::string_view {name}.starts_with("HEADLESS-")) {
+        continue;
+      }
+      if (owned_output) {
+        return std::nullopt;
+      }
+      owned_output = name;
+    }
+    return owned_output;
+  }
+
+  bool evdi_output_name_is_proven(std::string_view output_name) {
+    return !output_name.empty();
+  }
+
   bool hyprland_output_is_polaris_owned(std::string_view output_name) {
     constexpr std::string_view prefix = "POLARIS-HEADLESS-";
     if (!output_name.starts_with(prefix)) {
@@ -960,11 +1014,11 @@ namespace virtual_display {
         output_name = find_evdi_output(new_device_path);
       }
 
-      if (output_name.empty()) {
-        // Fallback: use a generic name that downstream code can try to match
-        output_name = "VIRTUAL-1";
-        BOOST_LOG(warning) << "Virtual display: could not determine EVDI output name, using fallback ["sv
-                           << output_name << "]"sv;
+      if (!evdi_output_name_is_proven(output_name)) {
+        BOOST_LOG(error) << "Virtual display: could not prove the EVDI output connector; refusing to publish a guessed name"sv;
+        fn_disconnect(handle);
+        fn_close(handle);
+        return std::nullopt;
       }
 
       vdisplay_t display;
@@ -1231,20 +1285,39 @@ namespace virtual_display {
         }
       }
       else if (compositor == "sway") {
-        // Sway: create a headless output
-        std::string result = exec_cmd("swaymsg create_output 2>&1");
-        BOOST_LOG(info) << "Virtual display: swaymsg create_output: "sv << result;
+        const std::string sway_outputs_before = exec_cmd("swaymsg -t get_outputs -r 2>/dev/null");
+        const std::string create_result = exec_cmd("swaymsg -r create_output 2>&1");
+        BOOST_LOG(info) << "Virtual display: swaymsg create_output: "sv << create_result;
+        if (!sway_create_output_succeeded(create_result)) {
+          BOOST_LOG(error) << "Virtual display: Sway rejected headless output creation"sv;
+          return std::nullopt;
+        }
 
-        std::this_thread::sleep_for(500ms);
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        do {
+          output_name = sway_new_headless_output(
+            sway_outputs_before,
+            exec_cmd("swaymsg -t get_outputs -r 2>/dev/null")
+          ).value_or("");
+          if (!output_name.empty()) {
+            break;
+          }
+          std::this_thread::sleep_for(50ms);
+        } while (std::chrono::steady_clock::now() < deadline);
 
-        // Sway names headless outputs as HEADLESS-N
-        output_name = "HEADLESS-1";
+        if (output_name.empty()) {
+          BOOST_LOG(error) << "Virtual display: could not prove ownership of the newly created Sway output"sv;
+          return std::nullopt;
+        }
 
-        // Set the resolution
         std::string mode_str = std::to_string(width) + "x" + std::to_string(height) +
                                "@" + std::to_string(fps) + "Hz";
         std::string mode_cmd = "swaymsg output " + output_name + " mode " + mode_str;
-        exec_cmd_rc(mode_cmd);
+        if (exec_cmd_rc(mode_cmd) != 0) {
+          BOOST_LOG(error) << "Virtual display: failed to configure owned Sway output ["sv << output_name << ']';
+          exec_cmd_rc("swaymsg output " + output_name + " disable >/dev/null 2>&1");
+          return std::nullopt;
+        }
       }
       else {
         // Generic wlr-randr approach
