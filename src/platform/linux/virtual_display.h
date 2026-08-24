@@ -208,6 +208,10 @@ namespace virtual_display {
 #ifdef POLARIS_TESTS
   /** @brief Execute a callback under the production virtual-display creation mutex. */
   void with_creation_lock_for_tests(const std::function<void()> &callback);
+  bool with_valid_sway_before_snapshot_for_tests(
+    std::string_view snapshot,
+    const std::function<void()> &create_callback
+  );
 #endif
 
   /**

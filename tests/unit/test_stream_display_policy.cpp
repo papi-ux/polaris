@@ -145,6 +145,16 @@ TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClie
   ) << "an explicit accepted streamMode remains authoritative";
 }
 
+TEST(StreamDisplayPolicyTests, HostVirtualClearsStaleAutoManage) {
+  LinuxDisplayPolicyGuard guard;
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("host_virtual_display", error)) << error;
+  config::video.linux_display.auto_manage_displays = true;
+  EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("host_virtual_display"));
+  ASSERT_TRUE(stream_display_policy::apply_selection("host_virtual_display", error)) << error;
+  EXPECT_FALSE(config::video.linux_display.auto_manage_displays);
+}
+
 TEST(StreamDisplayPolicyTests, VirtualCaptureOutputNameNeverLosesTheCreatedConnector) {
   using stream_display_policy::capture_output_name_for_virtual_display;
 

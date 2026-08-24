@@ -367,6 +367,33 @@ namespace virtual_display {
     return std::nullopt;
   }
 
+  static bool sway_output_snapshot_is_valid(std::string_view snapshot) {
+    const auto outputs = nlohmann::json::parse(snapshot, nullptr, false);
+    if (!outputs.is_array()) return false;
+    for (const auto &output : outputs) {
+      if (!output.is_object() || !output.contains("name") || !output["name"].is_string()) return false;
+    }
+    return true;
+  }
+
+  static bool with_valid_sway_before_snapshot(
+    std::string_view snapshot,
+    const std::function<void()> &create_callback
+  ) {
+    if (!sway_output_snapshot_is_valid(snapshot)) return false;
+    create_callback();
+    return true;
+  }
+
+#ifdef POLARIS_TESTS
+  bool with_valid_sway_before_snapshot_for_tests(
+    std::string_view snapshot,
+    const std::function<void()> &create_callback
+  ) {
+    return with_valid_sway_before_snapshot(snapshot, create_callback);
+  }
+#endif
+
   bool sway_create_output_succeeded(std::string_view response_json) {
     const auto response = nlohmann::json::parse(response_json, nullptr, false);
     if (!response.is_array() || response.empty()) {
@@ -1290,7 +1317,13 @@ namespace virtual_display {
       }
       else if (compositor == "sway") {
         const std::string sway_outputs_before = exec_cmd("swaymsg -t get_outputs -r 2>/dev/null");
-        const std::string create_result = exec_cmd("swaymsg -r create_output 2>&1");
+        std::string create_result;
+        if (!with_valid_sway_before_snapshot(sway_outputs_before, [&] {
+              create_result = exec_cmd("swaymsg -r create_output 2>&1");
+            })) {
+          BOOST_LOG(error) << "Virtual display: refusing Sway creation without a valid before snapshot"sv;
+          return std::nullopt;
+        }
         BOOST_LOG(info) << "Virtual display: swaymsg create_output: "sv << create_result;
         if (!sway_create_output_succeeded(create_result)) {
           BOOST_LOG(error) << "Virtual display: Sway rejected headless output creation"sv;
