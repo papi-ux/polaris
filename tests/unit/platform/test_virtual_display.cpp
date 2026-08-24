@@ -86,6 +86,13 @@ TEST(VirtualDisplayTests, SwayCreationRequiresCommandSuccessAndOneNewHeadlessOut
   ).has_value());
 }
 
+TEST(VirtualDisplayTests, SwayMalformedAfterCannotProveOwnership) {
+  EXPECT_FALSE(virtual_display::sway_new_headless_output(
+    R"([{"name":"DP-1"}])",
+    R"([{"name":"DP-1"},{"bad":true},{"name":"HEADLESS-2"}])"
+  ));
+}
+
 TEST(VirtualDisplayTests, SwayInvalidBeforeSnapshotDoesNotCreate) {
   int create_calls = 0;
   const auto create = [&] { ++create_calls; };

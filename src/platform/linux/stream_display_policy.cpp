@@ -173,9 +173,8 @@ namespace stream_display_policy {
       return "wlr";
     }
 
-    if ((backend == virtual_display::backend_e::EVDI ||
-         backend == virtual_display::backend_e::KSCREEN_DOCTOR) &&
-        (current_capture.empty() || current_capture == "auto")) {
+    if (backend == virtual_display::backend_e::EVDI ||
+        backend == virtual_display::backend_e::KSCREEN_DOCTOR) {
       return "portal";
     }
 
