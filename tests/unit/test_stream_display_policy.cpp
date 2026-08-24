@@ -181,8 +181,8 @@ TEST(StreamDisplayPolicyTests, HostVirtualCaptureFollowsTheVirtualDisplayBackend
     EXPECT_EQ(capture_for_host_virtual_display_backend(backend, ""), "portal");
     EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "auto"), "portal");
     EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "portal"), "portal");
-    EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "wlr"), "wlr")
-      << "the existing explicit EVDI/KScreen operator override stays intact";
+    EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "wlr"), "portal");
+    EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "kms"), "portal");
   }
 
   EXPECT_EQ(capture_for_host_virtual_display_backend(backend_e::NONE, "portal"), "portal");

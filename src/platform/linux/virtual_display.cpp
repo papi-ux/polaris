@@ -414,6 +414,10 @@ namespace virtual_display {
     std::string_view before_outputs_json,
     std::string_view after_outputs_json
   ) {
+    if (!sway_output_snapshot_is_valid(before_outputs_json) ||
+        !sway_output_snapshot_is_valid(after_outputs_json)) {
+      return std::nullopt;
+    }
     const auto before = nlohmann::json::parse(before_outputs_json, nullptr, false);
     const auto after = nlohmann::json::parse(after_outputs_json, nullptr, false);
     if (!before.is_array() || !after.is_array()) {
