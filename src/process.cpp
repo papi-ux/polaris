@@ -101,6 +101,19 @@
 #define DEFAULT_APP_IMAGE_PATH POLARIS_ASSETS_DIR "/box.png"
 
 namespace proc {
+  namespace {
+    bool should_apply_history_safe_fps_cap(
+      bool history_available,
+      double safe_target_fps,
+      bool relax_safe_target,
+      std::string_view preference
+    ) {
+      return history_available &&
+             safe_target_fps > 0.0 &&
+             !relax_safe_target &&
+             preference != "high_fps";
+    }
+  }
   using namespace std::literals;
   namespace pt = boost::property_tree;
 
@@ -5022,6 +5035,20 @@ namespace proc {
     return doctor_steam_shutdown_required(desktop_steam_active, steam_singleton_active);
   }
 
+  bool should_apply_history_safe_fps_cap_for_tests(
+    bool history_available,
+    double safe_target_fps,
+    bool relax_safe_target,
+    std::string_view preference
+  ) {
+    return should_apply_history_safe_fps_cap(
+      history_available,
+      safe_target_fps,
+      relax_safe_target,
+      preference
+    );
+  }
+
   std::optional<std::string> resolve_nested_gamescope_session_target_for_tests(
     bool gamescope_stream_session,
     const proc::ctx_t &app
@@ -6715,8 +6742,15 @@ namespace proc {
 
     const double effective_history_safe_target_fps =
       history ? ai_optimizer::effective_history_safe_target_fps(launch_session->device_name, *history) : 0.0;
-    if (history && effective_history_safe_target_fps > 0.0 &&
-        !ai_optimizer::should_relax_history_safe_target_fps(*history)) {
+    const bool relax_history_safe_target =
+      history && ai_optimizer::should_relax_history_safe_target_fps(*history);
+    const bool apply_history_safe_cap = should_apply_history_safe_fps_cap(
+      static_cast<bool>(history),
+      effective_history_safe_target_fps,
+      relax_history_safe_target,
+      launch_session->profile_preference
+    );
+    if (apply_history_safe_cap) {
       const int safe_fps =
         static_cast<int>(std::round(effective_history_safe_target_fps * 1000.0));
       if (safe_fps > 0 && launch_session->fps > safe_fps) {
@@ -6741,6 +6775,12 @@ namespace proc {
           "History-safe pacing overrode the paired display-mode FPS ceiling."
         );
       }
+    } else if (history && effective_history_safe_target_fps > 0.0 &&
+               launch_session->profile_preference == "high_fps") {
+      BOOST_LOG(info) << "session_optimization: explicit high_fps preference bypassed the soft history-safe "
+                      << static_cast<int>(std::round(effective_history_safe_target_fps))
+                      << " FPS cap for \""sv << launch_session->device_name << "\" + \""sv
+                      << _app.name << '"';
     } else if (history && effective_history_safe_target_fps > 0.0) {
       BOOST_LOG(info) << "session_optimization: relaxing history-safe "
                       << static_cast<int>(std::round(effective_history_safe_target_fps))
