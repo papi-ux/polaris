@@ -172,7 +172,9 @@ namespace private_state_file {
           return;
         }
 
+#ifdef POLARIS_TESTS
         std::size_t created_parent_index = 0;
+#endif
         for (std::size_t index = 0; index < components.size(); ++index) {
           const auto &component = components[index];
           const bool final_parent = index + 1 == components.size();
@@ -235,9 +237,11 @@ namespace private_state_file {
             return;
           }
           descriptor_ = next;
+#ifdef POLARIS_TESTS
           if (parent_entry_needs_sync) {
             ++created_parent_index;
           }
+#endif
         }
       }
 
