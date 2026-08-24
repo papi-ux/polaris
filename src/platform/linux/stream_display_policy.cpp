@@ -297,6 +297,9 @@ namespace stream_display_policy {
         return false;
       }
 
+      if (key == k_host_virtual_display && linux_display.auto_manage_displays) {
+        return false;
+      }
       if (key == k_host_virtual_display &&
           config::video.capture != capture_for_host_virtual_display_backend(
                                      virtual_display::detect_backend(),
@@ -332,6 +335,7 @@ namespace stream_display_policy {
     auto &linux_display = config::video.linux_display;
 
     if (key == k_host_virtual_display) {
+      linux_display.auto_manage_displays = false;
       config::video.capture = capture_for_host_virtual_display_backend(
         virtual_display::detect_backend(),
         config::video.capture

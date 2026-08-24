@@ -520,17 +520,23 @@ TEST(SourceSafetyContracts, VirtualDisplayCreationPublishesOnlyProvenOwnedConnec
 
   const auto sway = source.find("else if (compositor == \"sway\")");
   const auto before = source.find("sway_outputs_before", sway);
-  const auto command_proof = source.find("sway_create_output_succeeded(", before);
+  const auto snapshot_gate = source.find("if (!with_valid_sway_before_snapshot(", before);
+  const auto create = source.find("swaymsg -r create_output", snapshot_gate);
+  const auto command_proof = source.find("sway_create_output_succeeded(", create);
   const auto ownership = source.find("sway_new_headless_output(", command_proof);
   const auto sway_reject = source.find("return std::nullopt;", ownership);
   const auto mode = source.find("std::string mode_str", sway_reject);
   ASSERT_NE(sway, std::string::npos);
   ASSERT_NE(before, std::string::npos);
+  ASSERT_NE(snapshot_gate, std::string::npos);
+  ASSERT_NE(create, std::string::npos);
   ASSERT_NE(command_proof, std::string::npos);
   ASSERT_NE(ownership, std::string::npos);
   ASSERT_NE(sway_reject, std::string::npos);
   ASSERT_NE(mode, std::string::npos);
-  EXPECT_LT(before, command_proof);
+  EXPECT_LT(before, snapshot_gate);
+  EXPECT_LT(snapshot_gate, create);
+  EXPECT_LT(create, command_proof);
   EXPECT_LT(command_proof, ownership);
   EXPECT_LT(ownership, sway_reject);
   EXPECT_LT(sway_reject, mode);

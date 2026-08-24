@@ -86,6 +86,16 @@ TEST(VirtualDisplayTests, SwayCreationRequiresCommandSuccessAndOneNewHeadlessOut
   ).has_value());
 }
 
+TEST(VirtualDisplayTests, SwayInvalidBeforeSnapshotDoesNotCreate) {
+  int create_calls = 0;
+  const auto create = [&] { ++create_calls; };
+  EXPECT_FALSE(virtual_display::with_valid_sway_before_snapshot_for_tests("not json", create));
+  EXPECT_EQ(create_calls, 0);
+  EXPECT_TRUE(virtual_display::with_valid_sway_before_snapshot_for_tests(
+    R"([{"name":"DP-1"},{"name":"HEADLESS-1"}])", create));
+  EXPECT_EQ(create_calls, 1);
+}
+
 TEST(VirtualDisplayTests, EvdiConnectorIdentityMustBeDiscovered) {
   EXPECT_FALSE(virtual_display::evdi_output_name_is_proven(""));
   EXPECT_TRUE(virtual_display::evdi_output_name_is_proven("DVI-I-1"));
