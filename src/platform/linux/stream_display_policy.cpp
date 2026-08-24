@@ -153,7 +153,8 @@ namespace stream_display_policy {
     bool mirror_desktop,
     bool launch_virtual_display,
     bool app_virtual_display,
-    bool virtual_display_user_locked
+    bool virtual_display_user_locked,
+    bool virtual_display_optimization_present
   ) {
     if (mirror_desktop) {
       return std::string {k_desktop_display};
@@ -161,7 +162,12 @@ namespace stream_display_policy {
     if (!requested_selection.empty()) {
       return std::string {requested_selection};
     }
-    if (launch_virtual_display || (app_virtual_display && !virtual_display_user_locked)) {
+    if (launch_virtual_display) {
+      return std::string {k_host_virtual_display};
+    }
+    if (!virtual_display_optimization_present &&
+        app_virtual_display &&
+        !virtual_display_user_locked) {
       return std::string {k_host_virtual_display};
     }
     return {};
@@ -411,11 +417,11 @@ namespace stream_display_policy {
         linux_display.headless_mode = booleans.headless_mode;
         linux_display.use_cage_compositor = booleans.use_cage_compositor;
         linux_display.prefer_gpu_native_capture = booleans.prefer_gpu_native_capture;
-        if (path->runtime == stream_path::runtime_kind_e::LABWC) {
+        linux_display.private_runtime = std::string {
+          stream_path::runtime_kind_id(path->runtime)
+        };
+        if (linux_display.private_runtime.empty() && booleans.use_cage_compositor) {
           linux_display.private_runtime = std::string {k_runtime_labwc};
-        }
-        else if (path->runtime == stream_path::runtime_kind_e::GAMESCOPE) {
-          linux_display.private_runtime = std::string {k_runtime_gamescope};
         }
         if (path->id == k_host_virtual_display) {
           normalize_host_virtual_display_state();
@@ -441,8 +447,13 @@ namespace stream_display_policy {
       normalize_host_virtual_display_state();
     }
 
-    if (linux_display.private_runtime.empty()) {
-      linux_display.private_runtime = std::string {k_runtime_labwc};
+    if (const auto *path = stream_path::find(linux_display.stream_mode)) {
+      linux_display.private_runtime = std::string {
+        stream_path::runtime_kind_id(path->runtime)
+      };
+      if (linux_display.private_runtime.empty() && linux_display.use_cage_compositor) {
+        linux_display.private_runtime = std::string {k_runtime_labwc};
+      }
     }
   }
 

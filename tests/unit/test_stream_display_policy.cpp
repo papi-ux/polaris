@@ -136,6 +136,14 @@ TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClie
     ""
   ) << "an explicit client virtual-display choice must beat the app default";
   EXPECT_EQ(
+    effective_session_selection_for_launch("", false, false, true, false, true),
+    ""
+  ) << "optimizer false must suppress an unlocked legacy app default";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, true, true, false, true),
+    "host_virtual_display"
+  );
+  EXPECT_EQ(
     effective_session_selection_for_launch("", true, true, true, false),
     "desktop_display"
   ) << "mirrorDesktop must override a host_virtual_display default for this session";
@@ -345,6 +353,17 @@ TEST(StreamDisplayPolicyTests, ExplicitStreamModeWinsOverBooleans) {
   EXPECT_EQ(resolved.selection, "host_virtual_display");
   EXPECT_TRUE(resolved.use_host_virtual_display);
   EXPECT_FALSE(resolved.use_private_runtime);
+}
+
+TEST(StreamDisplayPolicyTests, NormalizeConfigClearsStaleGamescopeRuntime) {
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  for (const auto mode : {"desktop_display", "host_virtual_display", "headless_dongle"}) {
+    d.stream_mode = mode;
+    d.private_runtime = "gamescope";
+    stream_display_policy::normalize_config_from_load();
+    EXPECT_TRUE(d.private_runtime.empty()) << mode;
+  }
 }
 
 TEST(StreamDisplayPolicyTests, NormalizeConfigRepairsHostVirtualState) {

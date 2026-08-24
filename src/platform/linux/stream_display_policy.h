@@ -58,7 +58,8 @@ namespace stream_display_policy {
     bool mirror_desktop,
     bool launch_virtual_display,
     bool app_virtual_display,
-    bool virtual_display_user_locked
+    bool virtual_display_user_locked,
+    bool virtual_display_optimization_present = false
   );
 
   /**
