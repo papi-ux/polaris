@@ -1,5 +1,6 @@
 #include "../tests_common.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -360,10 +361,12 @@ TEST(SteamShutdownStateMachineTests, EmptySteamAppRootStillUsesPinnedStopBarrier
 
 TEST(SteamShutdownStateMachineTests, PrivateSteamAppQuiescenceTerminatesOnlyExactAppLineage) {
   const std::string token = "private-steam-app-quiescence";
+  const std::string appid = "4242" + std::to_string(getpid());
+  const std::string launch_marker = "AppId=" + appid;
   proc::ctx_t steam_app {};
   steam_app.name = "Control";
   steam_app.source = "steam";
-  steam_app.steam_appid = "4242";
+  steam_app.steam_appid = appid;
 
   const auto spawn_owned = [&](const char *argv0) {
     const auto child = fork();
@@ -407,7 +410,7 @@ TEST(SteamShutdownStateMachineTests, PrivateSteamAppQuiescenceTerminatesOnlyExac
       "-c",
       "trap 'exit 0' TERM; sleep 60 & wait",
       "SteamLaunch",
-      "AppId=4242",
+      launch_marker.c_str(),
       nullptr
     );
     _exit(127);
@@ -435,12 +438,38 @@ TEST(SteamShutdownStateMachineTests, PrivateSteamAppQuiescenceTerminatesOnlyExac
       (std::istreambuf_iterator<char>(cmdline_file)),
       std::istreambuf_iterator<char>()
     );
-    marker_visible = proc::steam_launch_cmdline_matches_appid_for_tests(cmdline, "4242");
+    marker_visible = proc::steam_launch_cmdline_matches_appid_for_tests(cmdline, appid);
     if (!marker_visible) {
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
   }
   ASSERT_TRUE(marker_visible);
+
+  bool single_marker_root = false;
+  for (int attempt = 0; attempt < 40 && !single_marker_root; ++attempt) {
+    std::size_t matching_roots = 0;
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator("/proc", ec)) {
+      const auto name = entry.path().filename().string();
+      if (ec || name.empty() ||
+          !std::all_of(name.begin(), name.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
+        continue;
+      }
+      std::ifstream cmdline_file(entry.path() / "cmdline", std::ios::binary);
+      const std::string cmdline(
+        (std::istreambuf_iterator<char>(cmdline_file)),
+        std::istreambuf_iterator<char>()
+      );
+      if (proc::steam_launch_cmdline_matches_appid_for_tests(cmdline, appid)) {
+        ++matching_roots;
+      }
+    }
+    single_marker_root = matching_roots == 1;
+    if (!single_marker_root) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  ASSERT_TRUE(single_marker_root);
 
   ASSERT_TRUE(proc::terminate_session_owned_steam_app_lineage_for_tests(steam_app, token));
   ASSERT_TRUE(wait_pidfd_exit(app_root_pidfd, std::chrono::seconds(2)))
