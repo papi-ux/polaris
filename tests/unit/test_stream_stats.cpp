@@ -656,14 +656,23 @@ TEST(StreamStatsDoctorTests, SteamInputFindingSurvivesTheEndOfTheStream) {
   EXPECT_EQ(after.input_steam_input_status, "xbox_opt_in");
   EXPECT_EQ(after.input_steam_profiles_with_xbox_support, 1);
 
-  // And the idle Doctor payload still names it, with the fix still offered.
+  // The idle Doctor payload still reports the finding, but this release exposes
+  // read-only manual guidance rather than a host mutation.
   const auto doctor = stream_stats::build_doctor_json(after, nlohmann::json::object());
   EXPECT_EQ(doctor.at("primary_issue"), "steam_input_conflict");
-  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "disable_steam_input_xbox");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("kind"), "manual_guidance");
 
   // Session telemetry is still gone; only the host facts carry over.
   EXPECT_EQ(after.client_name, "");
   EXPECT_DOUBLE_EQ(after.encode_time_ms, 0.0);
+}
+
+TEST(StreamStatsDoctorTests, LegacySteamVdfActionFailsClosedReadOnly) {
+  const auto result = doctor_actions::execute({{"action_id", "disable_steam_input_xbox"}});
+  EXPECT_FALSE(result.at("status").get<bool>());
+  EXPECT_FALSE(result.at("changed").get<bool>());
+  EXPECT_EQ(result.at("state"), "read_only");
 }
 
 TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
@@ -691,19 +700,16 @@ TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
   EXPECT_EQ(doctor.at("status"), "needs_action");
   EXPECT_EQ(doctor.at("confidence").at("level"), "high");
   EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Adjust Steam Input");
-  // This finding shipped read-only, with the action pinned to "none". It now
-  // offers one, and the invariant that replaced it is what the action must
-  // stay: reversible, never destructive, and never applied without a
-  // confirmation, because applying it closes the user's desktop Steam.
+  // High-confidence evidence remains, but the release action is manual only.
   const auto &action = doctor.at("safe_recovery_action");
-  EXPECT_EQ(action.at("id"), "disable_steam_input_xbox");
-  EXPECT_EQ(action.at("kind"), "host_setting");
+  EXPECT_EQ(action.at("id"), "none");
+  EXPECT_EQ(action.at("kind"), "manual_guidance");
   EXPECT_FALSE(action.at("destructive"));
-  EXPECT_TRUE(action.at("requires_confirmation"));
-  EXPECT_TRUE(action.at("requires_owner"));
-  EXPECT_TRUE(action.at("undo").at("supported"));
-  EXPECT_EQ(action.at("endpoint"), "/api/doctor/action");
-  EXPECT_EQ(action.at("payload_preview").at("action_id"), "disable_steam_input_xbox");
+  EXPECT_FALSE(action.at("requires_confirmation"));
+  EXPECT_FALSE(action.at("requires_owner"));
+  EXPECT_FALSE(action.at("undo").at("supported"));
+  EXPECT_EQ(action.at("endpoint"), "");
+  EXPECT_FALSE(action.at("payload_preview").contains("action_id"));
   EXPECT_EQ(
     doctor.at("advanced_evidence").at("controller_input").at("steam_forced_app_count"),
     2
