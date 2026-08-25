@@ -1457,6 +1457,7 @@ namespace video {
     config_t config;
     int frame_nr;
     void *channel_data;
+    std::string exact_display_name;
   };
 
   struct sync_session_t {
@@ -1471,6 +1472,7 @@ namespace video {
     img_event_t images;
     config_t config;
     void *channel_data;
+    std::string exact_display_name;
   };
 
   struct capture_thread_async_ctx_t {
@@ -2098,6 +2100,13 @@ namespace video {
     return exact_display_name.empty();
   }
 
+  bool exact_display_generations_match(
+    std::string_view active_exact_display_name,
+    std::string_view incoming_exact_display_name
+  ) {
+    return active_exact_display_name == incoming_exact_display_name;
+  }
+
   std::optional<int> find_display_index(
     const std::vector<std::string> &display_names,
     std::string_view requested_display_name
@@ -2240,7 +2249,7 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
-    const auto exact_display_name = proc::proc.display_name;
+    const auto exact_display_name = capture_ctxs.front().exact_display_name;
     {
 #ifdef __linux__
     session_media::pending_start_owner_scope_t initial_owner_scope {
@@ -2397,7 +2406,21 @@ namespace video {
         }
 
         while (capture_ctx_queue->peek()) {
-          capture_ctxs.emplace_back(std::move(*capture_ctx_queue->pop()));
+          auto incoming_capture_ctx = capture_ctx_queue->pop();
+          if (!incoming_capture_ctx) {
+            return false;
+          }
+          if (!exact_display_generations_match(
+                exact_display_name,
+                incoming_capture_ctx->exact_display_name
+              )) {
+            BOOST_LOG(error) << "Rejecting capture context with exact display provenance ["sv
+                             << incoming_capture_ctx->exact_display_name
+                             << "] while generation ["sv << exact_display_name << "] is active"sv;
+            incoming_capture_ctx->images->stop();
+            continue;
+          }
+          capture_ctxs.emplace_back(std::move(*incoming_capture_ctx));
         }
 
         if (switch_display_event->peek()) {
@@ -3692,7 +3715,6 @@ namespace video {
     int &display_p
   ) {
     const auto &encoder = *chosen_encoder;
-    const auto exact_display_name = proc::proc.display_name;
 
     std::shared_ptr<platf::display_t> disp;
 
@@ -3706,6 +3728,8 @@ namespace video {
 
       synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*ctx)));
     }
+
+    const auto exact_display_name = synced_session_ctxs.front()->exact_display_name;
 
     while (encode_session_ctx_queue.running()) {
       if (!exact_display_name.empty()) {
@@ -3800,12 +3824,23 @@ namespace video {
         auto frame = make_frame(std::move(img));
 
         while (encode_session_ctx_queue.peek()) {
-          auto encode_session_ctx = encode_session_ctx_queue.pop();
-          if (!encode_session_ctx) {
+          auto incoming_sync_ctx = encode_session_ctx_queue.pop();
+          if (!incoming_sync_ctx) {
             return false;
           }
+          if (!exact_display_generations_match(
+                exact_display_name,
+                incoming_sync_ctx->exact_display_name
+              )) {
+            BOOST_LOG(error) << "Rejecting synchronized capture context with exact display provenance ["sv
+                             << incoming_sync_ctx->exact_display_name
+                             << "] while generation ["sv << exact_display_name << "] is active"sv;
+            incoming_sync_ctx->shutdown_event->raise(true);
+            incoming_sync_ctx->join_event->raise(true);
+            continue;
+          }
 
-          synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*encode_session_ctx)));
+          synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*incoming_sync_ctx)));
 
           bool retired_gpu_native_route = false;
           auto encode_session = make_synced_session(disp.get(), encoder, frame, *synced_session_ctxs.back(), retired_gpu_native_route);
@@ -3937,7 +3972,8 @@ namespace video {
     safe::mail_t mail,
     config_t &config,
     void *channel_data,
-    packet_queue_t packets
+    packet_queue_t packets,
+    std::string exact_display_name
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -3952,7 +3988,12 @@ namespace video {
       return;
     }
 
-    ref->capture_ctx_queue->raise(capture_ctx_t {images, config, channel_data});
+    ref->capture_ctx_queue->raise(capture_ctx_t {
+      images,
+      config,
+      channel_data,
+      std::move(exact_display_name),
+    });
 
     if (!ref->capture_ctx_queue->running()) {
       return;
@@ -4040,8 +4081,15 @@ namespace video {
     auto idr_events = mail->event<bool>(mail::idr);
 
     idr_events->raise(true);
+    const auto exact_display_name = proc::proc.exact_display_name;
     if (chosen_encoder->flags & PARALLEL_ENCODING) {
-      capture_async(std::move(mail), config, channel_data, std::move(packets));
+      capture_async(
+        std::move(mail),
+        config,
+        channel_data,
+        std::move(packets),
+        exact_display_name
+      );
     } else {
       safe::signal_t join_event;
       auto ref = capture_thread_sync.ref();
@@ -4055,6 +4103,7 @@ namespace video {
         config,
         1,
         channel_data,
+        exact_display_name,
       });
 
       // Wait for join signal
@@ -5212,6 +5261,13 @@ namespace video {
 
   bool display_switch_allowed_for_exact_capture_for_tests(std::string_view exact_display_name) {
     return display_switch_allowed_for_exact_capture(exact_display_name);
+  }
+
+  bool exact_display_generations_match_for_tests(
+    std::string_view active_exact_display_name,
+    std::string_view incoming_exact_display_name
+  ) {
+    return exact_display_generations_match(active_exact_display_name, incoming_exact_display_name);
   }
 
   std::optional<int> find_display_index_for_tests(

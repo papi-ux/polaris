@@ -344,7 +344,7 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   contents << input.rdbuf();
   const auto source = contents.str();
 
-  const auto initial = source.find("const auto exact_display_name = proc::proc.display_name;");
+  const auto initial = source.find("const auto exact_display_name = capture_ctxs.front().exact_display_name;");
   const auto initial_end = source.find("display_wp = disp", initial);
   ASSERT_NE(initial, std::string::npos);
   ASSERT_NE(initial_end, std::string::npos);
@@ -392,12 +392,74 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   );
 }
 
-TEST(SourceSafetyContracts, ExactOwnedCaptureRejectsDisplaySwitchesInBothCapturePipelines) {
+TEST(SourceSafetyContracts, ExactOutputProvenanceLivesInLaunchAndCaptureGenerations) {
   std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/video.cpp");
   ASSERT_TRUE(input.is_open());
   std::ostringstream contents;
   contents << input.rdbuf();
   const auto source = contents.str();
+
+  std::ifstream process_input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  std::ifstream process_header_input(fs::path {POLARIS_SOURCE_DIR} / "src/process.h");
+  ASSERT_TRUE(process_input.is_open());
+  ASSERT_TRUE(process_header_input.is_open());
+  std::ostringstream process_contents;
+  std::ostringstream process_header_contents;
+  process_contents << process_input.rdbuf();
+  process_header_contents << process_header_input.rdbuf();
+  const auto process_source = process_contents.str();
+  const auto process_header = process_header_contents.str();
+
+  EXPECT_NE(process_header.find("std::string exact_display_name;"), std::string::npos);
+  const auto first_publish = process_source.find("this->exact_display_name = this->display_name;");
+  const auto second_publish = process_source.find("this->exact_display_name = this->display_name;", first_publish + 1);
+  const auto third_publish = process_source.find(
+    "this->exact_display_name = this->display_name;",
+    second_publish + 1
+  );
+  const auto clear = process_source.find("exact_display_name.clear()", second_publish);
+  ASSERT_NE(first_publish, std::string::npos);
+  ASSERT_NE(second_publish, std::string::npos);
+  EXPECT_EQ(third_publish, std::string::npos);
+  ASSERT_NE(clear, std::string::npos);
+
+  const auto sync_ctx = source.find("struct sync_session_ctx_t");
+  const auto sync_ctx_end = source.find("};", sync_ctx);
+  const auto async_ctx = source.find("struct capture_ctx_t");
+  const auto async_ctx_end = source.find("};", async_ctx);
+  ASSERT_NE(sync_ctx, std::string::npos);
+  ASSERT_NE(sync_ctx_end, std::string::npos);
+  ASSERT_NE(async_ctx, std::string::npos);
+  ASSERT_NE(async_ctx_end, std::string::npos);
+  EXPECT_NE(source.substr(sync_ctx, sync_ctx_end - sync_ctx).find("std::string exact_display_name;"), std::string::npos);
+  EXPECT_NE(source.substr(async_ctx, async_ctx_end - async_ctx).find("std::string exact_display_name;"), std::string::npos);
+  const auto capture_admission = source.find(
+    "const auto exact_display_name = proc::proc.exact_display_name;"
+  );
+  const auto async_entry = source.find("void capture_async(");
+  const auto async_publish = source.find("ref->capture_ctx_queue->raise(capture_ctx_t", async_entry);
+  const auto async_provenance = source.find("std::move(exact_display_name)", async_publish);
+  const auto async_publish_end = source.find("});", async_publish);
+  const auto async_call = source.find("capture_async(", capture_admission);
+  const auto async_call_provenance = source.find("exact_display_name", async_call);
+  const auto async_call_end = source.find(");", async_call);
+  const auto sync_publish = source.find("ref->encode_session_ctx_queue.raise(sync_session_ctx_t", capture_admission);
+  const auto sync_provenance = source.find("exact_display_name,", sync_publish);
+  const auto sync_publish_end = source.find("});", sync_publish);
+  ASSERT_NE(capture_admission, std::string::npos);
+  ASSERT_NE(async_entry, std::string::npos);
+  ASSERT_NE(async_publish, std::string::npos);
+  ASSERT_NE(async_provenance, std::string::npos);
+  ASSERT_NE(async_publish_end, std::string::npos);
+  ASSERT_NE(async_call, std::string::npos);
+  ASSERT_NE(async_call_provenance, std::string::npos);
+  ASSERT_NE(async_call_end, std::string::npos);
+  ASSERT_NE(sync_publish, std::string::npos);
+  ASSERT_NE(sync_provenance, std::string::npos);
+  ASSERT_NE(sync_publish_end, std::string::npos);
+  EXPECT_LT(async_provenance, async_publish_end);
+  EXPECT_LT(async_call_provenance, async_call_end);
+  EXPECT_LT(sync_provenance, sync_publish_end);
 
   const auto async_begin = source.find("void captureThread(");
   const auto sync_begin = source.find("encode_e encode_run_sync(", async_begin);
@@ -407,7 +469,7 @@ TEST(SourceSafetyContracts, ExactOwnedCaptureRejectsDisplaySwitchesInBothCapture
   ASSERT_NE(sync_end, std::string::npos);
 
   const auto async_body = source.substr(async_begin, sync_begin - async_begin);
-  const auto async_exact = async_body.find("const auto exact_display_name = proc::proc.display_name;");
+  const auto async_exact = async_body.find("const auto exact_display_name = capture_ctxs.front().exact_display_name;");
   const auto async_policy = async_body.find("display_switch_allowed_for_exact_capture(exact_display_name)");
   const auto async_reinit_loop = async_body.find("while (capture_ctx_queue->running())", async_policy);
   const auto async_exact_reopen = async_body.find("if (!exact_display_name.empty())", async_reinit_loop);
@@ -426,12 +488,20 @@ TEST(SourceSafetyContracts, ExactOwnedCaptureRejectsDisplaySwitchesInBothCapture
   EXPECT_LT(async_reset, async_identity);
   EXPECT_LT(async_identity, async_generic_refresh);
   EXPECT_EQ(
+    async_body.find("const auto exact_display_name = proc::proc.display_name"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    async_body.find("const auto exact_display_name = proc::proc.exact_display_name"),
+    std::string::npos
+  );
+  EXPECT_EQ(
     async_body.find("!switch_display_event->peek() && !exact_display_name.empty()"),
     std::string::npos
   );
 
   const auto sync_body = source.substr(sync_begin, sync_end - sync_begin);
-  const auto sync_exact = sync_body.find("const auto exact_display_name = proc::proc.display_name;");
+  const auto sync_exact = sync_body.find("const auto exact_display_name = synced_session_ctxs.front()->exact_display_name;");
   const auto sync_exact_branch = sync_body.find("if (!exact_display_name.empty())", sync_exact);
   const auto sync_reset = sync_body.find("reset_display(", sync_exact_branch);
   const auto sync_identity = sync_body.find("exact_display_name", sync_reset);
@@ -446,6 +516,49 @@ TEST(SourceSafetyContracts, ExactOwnedCaptureRejectsDisplaySwitchesInBothCapture
   EXPECT_LT(sync_exact_branch, sync_reset);
   EXPECT_LT(sync_reset, sync_identity);
   EXPECT_LT(sync_identity, sync_generic_refresh);
+  EXPECT_EQ(
+    sync_body.find("const auto exact_display_name = proc::proc.display_name"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    sync_body.find("const auto exact_display_name = proc::proc.exact_display_name"),
+    std::string::npos
+  );
+}
+
+TEST(SourceSafetyContracts, CaptureGenerationMismatchIsRejectedBeforePublication) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/video.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto async_begin = source.find("void captureThread(");
+  const auto sync_begin = source.find("encode_e encode_run_sync(", async_begin);
+  const auto sync_end = source.find("void captureThreadSync()", sync_begin);
+  ASSERT_NE(async_begin, std::string::npos);
+  ASSERT_NE(sync_begin, std::string::npos);
+  ASSERT_NE(sync_end, std::string::npos);
+
+  const auto async_body = source.substr(async_begin, sync_begin - async_begin);
+  const auto async_match = async_body.find("exact_display_generations_match(");
+  const auto async_reject = async_body.find("incoming_capture_ctx->images->stop()", async_match);
+  const auto async_publish = async_body.find("capture_ctxs.emplace_back", async_reject);
+  ASSERT_NE(async_match, std::string::npos);
+  ASSERT_NE(async_reject, std::string::npos);
+  ASSERT_NE(async_publish, std::string::npos);
+  EXPECT_LT(async_match, async_reject);
+  EXPECT_LT(async_reject, async_publish);
+
+  const auto sync_body = source.substr(sync_begin, sync_end - sync_begin);
+  const auto sync_match = sync_body.find("exact_display_generations_match(");
+  const auto sync_reject = sync_body.find("incoming_sync_ctx->join_event->raise(true)", sync_match);
+  const auto sync_publish = sync_body.find("synced_session_ctxs.emplace_back", sync_reject);
+  ASSERT_NE(sync_match, std::string::npos);
+  ASSERT_NE(sync_reject, std::string::npos);
+  ASSERT_NE(sync_publish, std::string::npos);
+  EXPECT_LT(sync_match, sync_reject);
+  EXPECT_LT(sync_reject, sync_publish);
 }
 
 TEST(SourceSafetyContracts, SwayVirtualOutputCreationIsRejectedBeforeMutation) {

@@ -594,6 +594,11 @@ namespace video {
 
   bool display_switch_allowed_for_exact_capture_for_tests(std::string_view exact_display_name);
 
+  bool exact_display_generations_match_for_tests(
+    std::string_view active_exact_display_name,
+    std::string_view incoming_exact_display_name
+  );
+
   std::optional<int> find_display_index_for_tests(
     const std::vector<std::string> &display_names,
     std::string_view requested_display_name
