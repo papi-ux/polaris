@@ -187,18 +187,30 @@ TEST(VideoDisplaySelectionTests, ExactOwnedCaptureRejectsDisplaySwitches) {
   EXPECT_FALSE(video::display_switch_allowed_for_exact_capture_for_tests("HDMI-A-1"));
 }
 
-TEST(VideoDisplaySelectionTests, CaptureContextsMustShareExactGenerationProvenance) {
-  EXPECT_TRUE(video::exact_display_generations_match_for_tests("", ""));
-  EXPECT_TRUE(video::exact_display_generations_match_for_tests(
-    "POLARIS-HEADLESS-512536-0",
-    "POLARIS-HEADLESS-512536-0"
-  ));
-  EXPECT_FALSE(video::exact_display_generations_match_for_tests("", "POLARIS-HEADLESS-512536-0"));
-  EXPECT_FALSE(video::exact_display_generations_match_for_tests("POLARIS-HEADLESS-512536-0", ""));
-  EXPECT_FALSE(video::exact_display_generations_match_for_tests(
-    "POLARIS-HEADLESS-512536-0",
-    "POLARIS-HEADLESS-512536-1"
-  ));
+TEST(VideoDisplaySelectionTests, CaptureContextsMustShareTheWholeGeneration) {
+  capture_generation::identity_t generation {
+    .generation_id = 42,
+    .exact_display_name = "POLARIS-HEADLESS-512536-0",
+    .requested_output_name = "POLARIS-HEADLESS-512536-0",
+    .stream_mode = "host_virtual_display",
+    .capture_backend = "portal",
+    .adapter_name = "/dev/dri/renderD128",
+    .headless_mode = true,
+  };
+  EXPECT_TRUE(video::capture_generations_match_for_tests(generation, generation));
+
+  auto changed = generation;
+  changed.generation_id = 43;
+  EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
+  changed = generation;
+  changed.stream_mode = "desktop_display";
+  EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
+  changed = generation;
+  changed.adapter_name = "/dev/dri/renderD129";
+  EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
+  changed = generation;
+  changed.exact_display_name.clear();
+  EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
 }
 
 TEST(VideoDisplaySelectionTests, RejectsDisplaySwitchWhenDisplayListIsEmpty) {

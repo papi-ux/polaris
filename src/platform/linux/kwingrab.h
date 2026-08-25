@@ -14,6 +14,8 @@
 #include <string>
 #include <string_view>
 
+#include "src/capture_generation.h"
+
 namespace kwingrab {
 
   struct stream_source_t {
@@ -56,10 +58,10 @@ namespace kwingrab {
   /// True when an absent requested output may use configured/first output.
   bool output_selection_can_fallback(std::string_view requested_output_name);
 
-  /// True when current stream_mode is a host KDE path that may prefer kwingrab.
-  bool prefer_for_current_stream_mode();
+  /// True when the immutable generation is a host KDE path that may prefer kwingrab.
+  bool prefer_for_generation(const capture_generation::identity_t &generation);
 
-  /// True when host virtual capture must not fall through to generic portal.
-  bool require_for_current_stream_mode();
+  /// True when this generation must not fall through to generic portal.
+  bool require_for_generation(const capture_generation::identity_t &generation);
 
 }  // namespace kwingrab

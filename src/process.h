@@ -42,6 +42,7 @@
 #include <nlohmann/json.hpp>
 
 // local includes
+#include "capture_generation.h"
 #include "config.h"
 #include "audio.h"
 #include "platform/common.h"
@@ -682,9 +683,7 @@ namespace proc {
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
 
     std::string display_name;
-    // Connector identity owned by this launch generation. Unlike display_name,
-    // this is never rewritten by legacy display enumeration.
-    std::string exact_display_name;
+    capture_generation::identity_t capture_generation;
     std::string initial_display;
     std::string mode_changed_display;
     bool initial_hdr = false;
