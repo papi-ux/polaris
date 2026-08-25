@@ -179,7 +179,7 @@ jobs:
             -o Acquire::https::Timeout=30
           )
           sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install -y \
+          sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
             build-essential cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev libcurl4-openssl-dev \
@@ -905,7 +905,7 @@ jobs:
             -o Acquire::https::Timeout=30
           )
           sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install -y \
+          sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
             build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev libcurl4-openssl-dev \
