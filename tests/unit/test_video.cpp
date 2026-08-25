@@ -187,6 +187,20 @@ TEST(VideoDisplaySelectionTests, ExactOwnedCaptureRejectsDisplaySwitches) {
   EXPECT_FALSE(video::display_switch_allowed_for_exact_capture_for_tests("HDMI-A-1"));
 }
 
+TEST(VideoDisplaySelectionTests, CaptureContextsMustShareExactGenerationProvenance) {
+  EXPECT_TRUE(video::exact_display_generations_match_for_tests("", ""));
+  EXPECT_TRUE(video::exact_display_generations_match_for_tests(
+    "POLARIS-HEADLESS-512536-0",
+    "POLARIS-HEADLESS-512536-0"
+  ));
+  EXPECT_FALSE(video::exact_display_generations_match_for_tests("", "POLARIS-HEADLESS-512536-0"));
+  EXPECT_FALSE(video::exact_display_generations_match_for_tests("POLARIS-HEADLESS-512536-0", ""));
+  EXPECT_FALSE(video::exact_display_generations_match_for_tests(
+    "POLARIS-HEADLESS-512536-0",
+    "POLARIS-HEADLESS-512536-1"
+  ));
+}
+
 TEST(VideoDisplaySelectionTests, RejectsDisplaySwitchWhenDisplayListIsEmpty) {
   EXPECT_EQ(video::clamp_display_index_for_tests(1, 0), std::nullopt);
 }

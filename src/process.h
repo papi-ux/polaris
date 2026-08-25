@@ -682,6 +682,9 @@ namespace proc {
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
 
     std::string display_name;
+    // Connector identity owned by this launch generation. Unlike display_name,
+    // this is never rewritten by legacy display enumeration.
+    std::string exact_display_name;
     std::string initial_display;
     std::string mode_changed_display;
     bool initial_hdr = false;
