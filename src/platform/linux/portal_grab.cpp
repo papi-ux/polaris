@@ -26,6 +26,7 @@
 #include <spa/param/video/raw.h>
 #include <unistd.h>
 
+#include "src/capture_generation.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -73,29 +74,19 @@ namespace portal {
   //     move the cache out while display threads still hold a ref.
   // -----------------------------------------------------------------------
 
-  bool capture_identity_matches(
-    std::string_view cached_stream_mode,
-    std::string_view cached_output_name,
-    std::string_view requested_stream_mode,
-    std::string_view requested_output_name
+  bool capture_generation_matches(
+    const capture_generation::identity_t &cached,
+    const capture_generation::identity_t &requested
   ) {
-    return cached_stream_mode == requested_stream_mode &&
-           cached_output_name == requested_output_name;
+    return cached == requested;
   }
 
 #ifdef POLARIS_TESTS
-  bool portal_capture_identity_matches_for_tests(
-    std::string_view cached_stream_mode,
-    std::string_view cached_output_name,
-    std::string_view requested_stream_mode,
-    std::string_view requested_output_name
+  bool portal_capture_generation_matches_for_tests(
+    const capture_generation::identity_t &cached,
+    const capture_generation::identity_t &requested
   ) {
-    return capture_identity_matches(
-      cached_stream_mode,
-      cached_output_name,
-      requested_stream_mode,
-      requested_output_name
-    );
+    return capture_generation_matches(cached, requested);
   }
 #endif
 
@@ -108,9 +99,7 @@ namespace portal {
     int requested_width = 0;
     int requested_height = 0;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
-    std::string adapter;
-    std::string stream_mode;
-    std::string output_name;
+    capture_generation::identity_t generation;
     // Last EnumFormat preference: prefer_hdr (force ∧ dynamicRange>0) or
     // prefer_sdr (dynamicRange<=0). Reuse only when both match.
     bool prefer_hdr = false;
@@ -120,9 +109,7 @@ namespace portal {
       requested_width = 0;
       requested_height = 0;
       mem_type = platf::mem_type_e::system;
-      adapter.clear();
-      stream_mode.clear();
-      output_name.clear();
+      generation = {};
       prefer_hdr = false;
       prefer_sdr = false;
     }
@@ -194,12 +181,14 @@ namespace portal {
   // Exclusive 10-bit PQ EnumFormat only when gamescope is in HDR mode *and* the
   // client stream will encode HDR (dynamicRange > 0). Host KDE ScreenCast is
   // 8-bit-only; never restrict EnumFormat to PQ outside gamescope_stream.
-  static bool portal_prefer_hdr_formats(int client_dynamic_range) {
+  static bool portal_prefer_hdr_formats(
+    int client_dynamic_range,
+    std::string_view stream_mode
+  ) {
     if (client_dynamic_range <= 0 || !portal_force_hdr_enabled()) {
       return false;
     }
-    const auto &mode = config::video.linux_display.stream_mode;
-    return mode.empty() || mode == "gamescope_stream";
+    return stream_mode.empty() || stream_mode == "gamescope_stream";
   }
 
   // Exclusive 8-bit EnumFormat when the stream encodes SDR. Mixed offers still
@@ -235,8 +224,8 @@ namespace portal {
   // when it names a canonical render node, else the host's sole render node.
   // Single-GPU hosts get zero-copy without configuration; multi-GPU hosts stay
   // fail-closed so DMA-BUF never imports across GPUs by guess.
-  static std::optional<std::string> encoder_render_node_for_dmabuf() {
-    if (auto configured = pipewire_capture::canonical_render_node(config::video.adapter_name)) {
+  static std::optional<std::string> encoder_render_node_for_dmabuf(std::string_view adapter_name) {
+    if (auto configured = pipewire_capture::canonical_render_node(adapter_name)) {
       return configured;
     }
     std::vector<std::string> nodes;
@@ -265,12 +254,13 @@ namespace portal {
     int width,
     int height,
     platf::mem_type_e mem_type,
-    int client_dynamic_range
+    int client_dynamic_range,
+    const capture_generation::identity_t &generation
   ) {
-    const auto encoder_render_node = encoder_render_node_for_dmabuf();
+    const auto encoder_render_node = encoder_render_node_for_dmabuf(generation.adapter_name);
     std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
     bool may_use_dmabuf = false;
-    const bool prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range);
+    const bool prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range, generation.stream_mode);
     const bool prefer_sdr = portal_prefer_sdr_formats(client_dynamic_range);
     const auto dmabuf_override = portal_dmabuf_override();
     if (encoder_render_node) {
@@ -411,14 +401,14 @@ namespace portal {
   }
 
   // Caller must hold g_media_mu.
-  static bool ensure_session_unlocked() {
+  static bool ensure_session_unlocked(const capture_generation::identity_t &generation) {
     if (!g_media.portal || !g_media.portal->ready || g_media.portal->pw_node_id == 0) {
       g_media.portal.reset();
-      auto try_create = []() {
+      auto try_create = [&generation]() {
         return create_portal_session(capture_type_for_stream_display(
-          config::video.linux_display.headless_mode,
-          config::video.linux_display.use_cage_compositor,
-          config::video.linux_display.stream_mode));
+          generation.headless_mode,
+          generation.use_cage_compositor,
+          generation.stream_mode));
       };
       g_media.portal = try_create();
       // Nested↔idle gamescope handoff: portal-gamescope may briefly fail Start with
@@ -456,7 +446,8 @@ namespace portal {
     int width,
     int height,
     platf::mem_type_e mem_type,
-    int client_dynamic_range
+    int client_dynamic_range,
+    const capture_generation::identity_t &generation
   ) {
     // Only one configuration transition may retire/publish a capture generation.
     std::lock_guard transition_lock(g_capture_transition_mu);
@@ -465,29 +456,17 @@ namespace portal {
     // Lock contract (SB-2 + S4 single mutex):
     // 1) Under g_media_mu: ensure session + start PipeWire (no dual-mutex nesting).
     // 2) Wait for negotiation OUTSIDE the lock so release_global_capture can progress.
-    const bool want_prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range);
+    const bool want_prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range, generation.stream_mode);
     const bool want_prefer_sdr = portal_prefer_sdr_formats(client_dynamic_range);
     std::shared_ptr<pipewire_capture::capture_t> capture;
     {
       std::unique_lock lock(g_media_mu);
 
-      const auto requested_adapter = config::video.adapter_name;
-      const auto requested_stream_mode = config::video.linux_display.stream_mode;
-      const auto requested_output_name =
-        config::video.output_name.empty() ?
-          config::video.linux_display.streaming_output :
-          config::video.output_name;
       if (g_media.capture && g_media.capture->running()) {
         const auto compatible = g_media.requested_width == width &&
                                 g_media.requested_height == height &&
                                 g_media.mem_type == mem_type &&
-                                g_media.adapter == requested_adapter &&
-                                capture_identity_matches(
-                                  g_media.stream_mode,
-                                  g_media.output_name,
-                                  requested_stream_mode,
-                                  requested_output_name
-                                ) &&
+                                g_media.generation == generation &&
                                 g_media.prefer_hdr == want_prefer_hdr &&
                                 g_media.prefer_sdr == want_prefer_sdr;
         if (compatible) {
@@ -525,11 +504,11 @@ namespace portal {
       // without private portal ScreenCast when linux_stream_mode=gamescope_stream.
       // Falls through to portal if the node is missing (idle unit not exporting yet).
       if ((!g_media.capture || !g_media.capture->running()) &&
-          (requested_stream_mode == "gamescope_stream" || requested_stream_mode.empty()) &&
-          config::video.linux_display.private_runtime == "gamescope") {
+          (generation.stream_mode == "gamescope_stream" || generation.stream_mode.empty()) &&
+          generation.private_runtime == "gamescope") {
         if (auto gs = pipewire_capture::find_gamescope_video_source()) {
           if (auto local = start_local_pw_capture(
-                gs->node_id, gs->object_serial, width, height, mem_type, client_dynamic_range)) {
+                gs->node_id, gs->object_serial, width, height, mem_type, client_dynamic_range, generation)) {
             BOOST_LOG(info) << "portal: gamescopegrab local Video/Source node="sv << gs->node_id
                             << " name="sv << gs->node_name << " (no private ScreenCast)"sv;
             g_media.kwin.reset();
@@ -537,9 +516,7 @@ namespace portal {
             g_media.requested_width = width;
             g_media.requested_height = height;
             g_media.mem_type = mem_type;
-            g_media.adapter = requested_adapter;
-            g_media.stream_mode = requested_stream_mode;
-            g_media.output_name = requested_output_name;
+            g_media.generation = generation;
             g_media.prefer_hdr = want_prefer_hdr;
             g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
@@ -552,7 +529,7 @@ namespace portal {
       }
 
 #ifndef POLARIS_BUILD_WAYLAND
-      if (requested_stream_mode == "host_virtual_display") {
+      if (generation.stream_mode == "host_virtual_display") {
         BOOST_LOG(error) << "portal: host virtual capture requires KWin output pinning, but Wayland support is not built"sv;
         return nullptr;
       }
@@ -563,15 +540,15 @@ namespace portal {
       // zkde screencast before portal picker. Fail cleanly when not on KWin.
       // capture=portal/auto/empty only; explicit wlr/kms unchanged.
       const bool portal_like_capture =
-        config::video.capture.empty() ||
-        config::video.capture == "auto" ||
-        config::video.capture == "portal" ||
-        config::video.capture == "kwin";
+        generation.capture_backend.empty() ||
+        generation.capture_backend == "auto" ||
+        generation.capture_backend == "portal" ||
+        generation.capture_backend == "kwin";
       if ((!g_media.capture || !g_media.capture->running()) &&
           portal_like_capture &&
-          kwingrab::prefer_for_current_stream_mode()) {
+          kwingrab::prefer_for_generation(generation)) {
         g_media.kwin.reset();
-        if (auto kwin_session = kwingrab::start_output_session(requested_output_name)) {
+        if (auto kwin_session = kwingrab::start_output_session(generation.requested_output_name)) {
           const auto &src = kwin_session->source();
           if (auto local = start_local_pw_capture(
                 src.node_id,
@@ -579,7 +556,8 @@ namespace portal {
                 width > 0 ? width : src.width,
                 height > 0 ? height : src.height,
                 mem_type,
-                client_dynamic_range)) {
+                client_dynamic_range,
+                generation)) {
             BOOST_LOG(info) << "portal: kwingrab local PW node="sv << src.node_id
                             << " output="sv << src.output_name
                             << " (no xdg-desktop-portal picker)"sv;
@@ -589,9 +567,7 @@ namespace portal {
             g_media.requested_width = width;
             g_media.requested_height = height;
             g_media.mem_type = mem_type;
-            g_media.adapter = requested_adapter;
-            g_media.stream_mode = requested_stream_mode;
-            g_media.output_name = requested_output_name;
+            g_media.generation = generation;
             g_media.prefer_hdr = want_prefer_hdr;
             g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
@@ -599,7 +575,7 @@ namespace portal {
           else {
             BOOST_LOG(error) << "portal: kwingrab PipeWire start failed"sv;
             kwin_session.reset();
-            if (kwingrab::require_for_current_stream_mode()) {
+            if (kwingrab::require_for_generation(generation)) {
               BOOST_LOG(error) << "portal: host virtual capture requires output-pinned KWin capture; refusing generic portal fallback"sv;
               return nullptr;
             }
@@ -608,7 +584,7 @@ namespace portal {
         }
         else {
           BOOST_LOG(error) << "portal: kwingrab unavailable"sv;
-          if (kwingrab::require_for_current_stream_mode()) {
+          if (kwingrab::require_for_generation(generation)) {
             BOOST_LOG(error) << "portal: host virtual capture requires output-pinned KWin capture; refusing generic portal fallback"sv;
             return nullptr;
           }
@@ -621,12 +597,12 @@ namespace portal {
       if (capture && capture->running()) {
         // fall through to negotiation wait outside lock
       }
-      else if (!ensure_session_unlocked()) {
+      else if (!ensure_session_unlocked(generation)) {
         return nullptr;
       }
       else {
         auto *session = g_media.portal.get();
-        const auto encoder_render_node = encoder_render_node_for_dmabuf();
+        const auto encoder_render_node = encoder_render_node_for_dmabuf(generation.adapter_name);
         // Headless gamescope often omits SPA capture.device / render_node. If the
         // operator set adapter_name to a render node (same GPU as NVENC), assume it.
         if (!session->capture_render_node) {
@@ -648,7 +624,7 @@ namespace portal {
         } else if (!session->capture_render_node) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because the portal stream did not provide an explicit capture render node"sv;
         } else if (!encoder_render_node) {
-          BOOST_LOG(info) << "portal: DMA-BUF disabled because config::video.adapter_name is not an explicit canonical render node"sv;
+          BOOST_LOG(info) << "portal: DMA-BUF disabled because the capture generation adapter is not an explicit canonical render node"sv;
         } else if (*session->capture_render_node != *encoder_render_node) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because capture render node ["sv << *session->capture_render_node
                           << "] does not match encoder adapter ["sv << *encoder_render_node << ']';
@@ -753,9 +729,7 @@ namespace portal {
         g_media.requested_width = width;
         g_media.requested_height = height;
         g_media.mem_type = mem_type;
-        g_media.adapter = requested_adapter;
-        g_media.stream_mode = requested_stream_mode;
-        g_media.output_name = requested_output_name;
+        g_media.generation = generation;
         g_media.prefer_hdr = want_prefer_hdr;
         g_media.prefer_sdr = want_prefer_sdr;
         g_media.capture = new_capture;
@@ -773,7 +747,7 @@ namespace portal {
     {
       std::lock_guard lock(g_media_mu);
       // If release_global_capture raced us, drop the orphan (caller must not use it).
-      if (g_media.capture != capture) {
+      if (g_media.capture != capture || g_media.generation != generation) {
         return nullptr;
       }
       if (!capture || !capture->negotiated()) {
@@ -811,9 +785,17 @@ namespace portal {
     std::uint32_t capture_spa_format = 0;
 
     bool probe_only = false;  // true during encoder probe (skip portal session)
+    capture_generation::identity_t generation_;
 
     int
     init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
+      generation_ = config.capture_generation;
+      if (!generation_.exact_display_name.empty() &&
+          (display_name != generation_.exact_display_name ||
+           generation_.requested_output_name != generation_.exact_display_name)) {
+        BOOST_LOG(error) << "portal: exact capture generation identity mismatch; refusing initialization"sv;
+        return -1;
+      }
       requested_width = config.width;
       requested_height = config.height;
       cfg_width = requested_width;
@@ -831,10 +813,10 @@ namespace portal {
         // Check config, not runtime state — cage may not be running yet at init time.
         bool cage_configured = false;
 #ifdef POLARIS_BUILD_WAYLAND
-        cage_configured = config::video.linux_display.use_cage_compositor;
+        cage_configured = generation_.use_cage_compositor;
 #endif
         if (!cage_configured) {
-          auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range);
+          auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_);
           if (!cap) {
             return -1;
           }
@@ -926,7 +908,7 @@ namespace portal {
 
       // If cage/labwc is configured, use direct wlr-screencopy (no portal, no picker)
 #ifdef POLARIS_BUILD_WAYLAND
-      if (config::video.linux_display.use_cage_compositor) {
+      if (generation_.use_cage_compositor) {
         // Wait for labwc to be running (it may still be starting up)
         for (int wait = 0; wait < 50 && !stream_runtime::labwc::is_running(); ++wait) {
           std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -954,7 +936,7 @@ namespace portal {
 #endif
 
       // Fallback: source-owned portal/KWin capture (only when cage is NOT configured)
-      auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range);
+      auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
         return platf::capture_e::reinit;

@@ -24,6 +24,7 @@
 #include <drm_fourcc.h>
 #include <spa/param/video/raw.h>
 
+#include "src/capture_generation.h"
 #include "src/config.h"
 #include "src/platform/common.h"
 #include "src/platform/linux/pipewire_capture.h"
@@ -41,11 +42,9 @@ namespace portal {
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
   bool portal_cancel_source_wakes_wait_for_tests();
-  bool portal_capture_identity_matches_for_tests(
-    std::string_view cached_stream_mode,
-    std::string_view cached_output_name,
-    std::string_view requested_stream_mode,
-    std::string_view requested_output_name
+  bool portal_capture_generation_matches_for_tests(
+    const capture_generation::identity_t &cached,
+    const capture_generation::identity_t &requested
   );
 }
 
@@ -109,60 +108,65 @@ TEST(PortalGrabPolicyTests, HostVirtualDisplayRequestsMonitorSourceDespiteHeadle
   EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "host_virtual_display"), 1u);
 }
 
-TEST(PortalGrabPolicyTests, CaptureCacheReuseIsBoundToStreamAndOutputIdentity) {
-  EXPECT_TRUE(portal::portal_capture_identity_matches_for_tests(
-    "host_virtual_display", "DVI-I-1", "host_virtual_display", "DVI-I-1"
-  ));
-  EXPECT_FALSE(portal::portal_capture_identity_matches_for_tests(
-    "desktop_display", "HDMI-A-1", "host_virtual_display", "DVI-I-1"
-  ));
-  EXPECT_FALSE(portal::portal_capture_identity_matches_for_tests(
-    "host_virtual_display", "HDMI-A-1", "host_virtual_display", "DVI-I-1"
-  ));
+TEST(PortalGrabPolicyTests, CaptureCacheReuseRequiresTheWholeImmutableGeneration) {
+  const capture_generation::identity_t generation {
+    .generation_id = 42,
+    .exact_display_name = "DVI-I-1",
+    .requested_output_name = "DVI-I-1",
+    .stream_mode = "host_virtual_display",
+    .capture_backend = "portal",
+    .private_runtime = "",
+    .adapter_name = "/dev/dri/renderD128",
+    .headless_mode = true,
+    .use_cage_compositor = false,
+  };
+  EXPECT_TRUE(portal::portal_capture_generation_matches_for_tests(generation, generation));
+
+  std::vector<capture_generation::identity_t> mismatches(9, generation);
+  mismatches[0].generation_id = 43;
+  mismatches[1].exact_display_name = "DVI-I-2";
+  mismatches[2].requested_output_name = "HDMI-A-1";
+  mismatches[3].stream_mode = "desktop_display";
+  mismatches[4].capture_backend = "wlr";
+  mismatches[5].private_runtime = "gamescope";
+  mismatches[6].adapter_name = "/dev/dri/renderD129";
+  mismatches[7].headless_mode = false;
+  mismatches[8].use_cage_compositor = true;
+  for (const auto &mismatch : mismatches) {
+    EXPECT_FALSE(portal::portal_capture_generation_matches_for_tests(generation, mismatch));
+  }
 }
 
 #ifdef POLARIS_BUILD_WAYLAND
-TEST(PortalGrabPolicyTests, KwingrabPreferredForHostKdeModesIncludingVirtualDisplay) {
-  struct config_guard_t {
-    config::video_t::linux_display_t linux_display = config::video.linux_display;
-
-    ~config_guard_t() {
-      config::video.linux_display = linux_display;
-    }
-  } guard;
-
-  auto &ld = config::video.linux_display;
-
-  // Host KDE paths pin capture through kwingrab. host_virtual_display must be
-  // one of them: its EVDI output is composited by KWin, and kwingrab is the
-  // only path that can select that output by name — the portal picker cannot.
+TEST(PortalGrabPolicyTests, KwingrabPreferenceUsesImmutableGenerationPolicy) {
+  capture_generation::identity_t generation;
   for (const char *mode : {"desktop_display", "headless_dongle", "host_virtual_display"}) {
-    ld.stream_mode = mode;
-    EXPECT_TRUE(kwingrab::prefer_for_current_stream_mode()) << mode;
+    generation.stream_mode = mode;
+    EXPECT_TRUE(kwingrab::prefer_for_generation(generation)) << mode;
   }
-
-  // Private compositor runtimes stay on gamescopegrab / portal / wlroots.
   for (const char *mode : {"windowed_stream", "headless_stream", "gamescope_stream"}) {
-    ld.stream_mode = mode;
-    EXPECT_FALSE(kwingrab::prefer_for_current_stream_mode()) << mode;
+    generation.stream_mode = mode;
+    EXPECT_FALSE(kwingrab::prefer_for_generation(generation)) << mode;
   }
+
+  generation.stream_mode.clear();
+  generation.use_cage_compositor = false;
+  generation.private_runtime.clear();
+  EXPECT_TRUE(kwingrab::prefer_for_generation(generation));
+  generation.private_runtime = "gamescope";
+  EXPECT_FALSE(kwingrab::prefer_for_generation(generation));
+  generation.private_runtime.clear();
+  generation.use_cage_compositor = true;
+  EXPECT_FALSE(kwingrab::prefer_for_generation(generation));
 }
-TEST(PortalGrabPolicyTests, KwingrabRequiredOnlyForPinnedHostVirtualDisplay) {
-  struct config_guard_t {
-    config::video_t::linux_display_t linux_display = config::video.linux_display;
-
-    ~config_guard_t() {
-      config::video.linux_display = linux_display;
-    }
-  } guard;
-
-  auto &mode = config::video.linux_display.stream_mode;
-  mode = "host_virtual_display";
-  EXPECT_TRUE(kwingrab::require_for_current_stream_mode());
+TEST(PortalGrabPolicyTests, KwingrabRequirementUsesImmutableGenerationPolicy) {
+  capture_generation::identity_t generation;
+  generation.stream_mode = "host_virtual_display";
+  EXPECT_TRUE(kwingrab::require_for_generation(generation));
 
   for (const char *unrequired : {"desktop_display", "headless_dongle", "windowed_stream", ""}) {
-    mode = unrequired;
-    EXPECT_FALSE(kwingrab::require_for_current_stream_mode()) << unrequired;
+    generation.stream_mode = unrequired;
+    EXPECT_FALSE(kwingrab::require_for_generation(generation)) << unrequired;
   }
 }
 
@@ -363,7 +367,7 @@ TEST(PortalGrabPolicyTests, TeardownCancellationCoversRemoteReopenAndRetryLoop) 
   EXPECT_NE(open_body.find("&out_fd_list,\n      cancellable,"), std::string::npos)
     << "OpenPipeWireRemote must receive the registered cancellable";
 
-  const auto ensure_begin = grab_source.find("static bool ensure_session_unlocked()");
+  const auto ensure_begin = grab_source.find("static bool ensure_session_unlocked(const capture_generation::identity_t &generation)");
   const auto ensure_end = grab_source.find(
     "static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(",
     ensure_begin
@@ -456,7 +460,7 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   EXPECT_NE(grab.find("g_media_mu"), std::string::npos);
   EXPECT_EQ(grab.find("g_portal_mu"), std::string::npos);
   EXPECT_EQ(grab.find("g_capture_mtx"), std::string::npos);
-  EXPECT_NE(grab.find("ensure_session_unlocked()"), std::string::npos);
+  EXPECT_NE(grab.find("ensure_session_unlocked(generation)"), std::string::npos);
   EXPECT_NE(grab.find("Wait outside g_media_mu"), std::string::npos);
   EXPECT_NE(grab.find("pipewire_capture::capture_t"), std::string::npos);
   EXPECT_NE(grab.find("polaris-gamescope-force"), std::string::npos);
@@ -475,7 +479,7 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   const auto fn_end = grab.find("class portal_display_t", fn_start);
   ASSERT_NE(fn_end, std::string::npos);
   const auto fn = grab.substr(fn_start, fn_end - fn_start);
-  EXPECT_NE(fn.find("ensure_session_unlocked()"), std::string::npos);
+  EXPECT_NE(fn.find("ensure_session_unlocked(generation)"), std::string::npos);
   EXPECT_NE(fn.find("Wait outside g_media_mu"), std::string::npos);
   auto stripped = fn;
   for (;;) {

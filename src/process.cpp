@@ -6488,6 +6488,7 @@ namespace proc {
 #endif
 
     ++_session_generation;
+    capture_generation.generation_id = _session_generation;
 #ifdef __linux__
     _session_instance_id = generate_session_token();
     _session_used_cage_compositor = false;
@@ -7161,7 +7162,7 @@ namespace proc {
           // Set virtual_display to true when everything went fine
           this->virtual_display = true;
           this->display_name = platf::to_utf8(vdisplayName);
-          this->exact_display_name = this->display_name;
+          this->capture_generation.exact_display_name = this->display_name;
 
           // When using virtual display, we don't care which display user configured to use.
           // So we always set output_name to the newly created virtual display as a workaround for
@@ -7224,7 +7225,7 @@ namespace proc {
           launch_session->virtual_display = true;
           this->virtual_display = true;
           this->display_name = linux_vdisplay->output_name;
-          this->exact_display_name = this->display_name;
+          this->capture_generation.exact_display_name = this->display_name;
 
           BOOST_LOG(info) << "Virtual Display created: "sv << linux_vdisplay->output_name
                           << " ("sv << render_width << "x"sv << render_height
@@ -7309,6 +7310,23 @@ namespace proc {
       }
       linux_display::enable_streaming_display(render_width, render_height, target_fps);
     }
+
+    const auto generation_id = capture_generation.generation_id;
+    const auto exact_output_name = capture_generation.exact_display_name;
+    const auto configured_output_name = !config::video.output_name.empty() ?
+                                          config::video.output_name :
+                                          config::video.linux_display.streaming_output;
+    capture_generation = capture_generation::identity_t {
+      .generation_id = generation_id,
+      .exact_display_name = exact_output_name,
+      .requested_output_name = exact_output_name.empty() ? configured_output_name : exact_output_name,
+      .stream_mode = config::video.linux_display.stream_mode,
+      .capture_backend = config::video.capture,
+      .private_runtime = config::video.linux_display.private_runtime,
+      .adapter_name = config::video.adapter_name,
+      .headless_mode = config::video.linux_display.headless_mode,
+      .use_cage_compositor = config::video.linux_display.use_cage_compositor,
+    };
 #endif
 
     // Probe encoders again before streaming to ensure our chosen
@@ -9344,7 +9362,7 @@ namespace proc {
     _app_name.clear();
     _app = {};
     display_name.clear();
-    exact_display_name.clear();
+    capture_generation = {};
     initial_display.clear();
     initial_color_range = 0;
     initial_nvenc_tune = 0;

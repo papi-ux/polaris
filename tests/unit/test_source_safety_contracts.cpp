@@ -344,7 +344,7 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   contents << input.rdbuf();
   const auto source = contents.str();
 
-  const auto initial = source.find("const auto exact_display_name = capture_ctxs.front().exact_display_name;");
+  const auto initial = source.find("const auto active_generation = capture_ctxs.front().config.capture_generation;");
   const auto initial_end = source.find("display_wp = disp", initial);
   ASSERT_NE(initial, std::string::npos);
   ASSERT_NE(initial_end, std::string::npos);
@@ -410,17 +410,16 @@ TEST(SourceSafetyContracts, ExactOutputProvenanceLivesInLaunchAndCaptureGenerati
   const auto process_source = process_contents.str();
   const auto process_header = process_header_contents.str();
 
-  EXPECT_NE(process_header.find("std::string exact_display_name;"), std::string::npos);
-  const auto first_publish = process_source.find("this->exact_display_name = this->display_name;");
-  const auto second_publish = process_source.find("this->exact_display_name = this->display_name;", first_publish + 1);
-  const auto third_publish = process_source.find(
-    "this->exact_display_name = this->display_name;",
-    second_publish + 1
+  EXPECT_NE(process_header.find("capture_generation::identity_t capture_generation;"), std::string::npos);
+  EXPECT_EQ(process_header.find("std::string exact_display_name;"), std::string::npos);
+  const auto first_publish = process_source.find("this->capture_generation.exact_display_name = this->display_name;");
+  const auto second_publish = process_source.find(
+    "this->capture_generation.exact_display_name = this->display_name;",
+    first_publish + 1
   );
-  const auto clear = process_source.find("exact_display_name.clear()", second_publish);
+  const auto clear = process_source.find("capture_generation = {};", second_publish);
   ASSERT_NE(first_publish, std::string::npos);
   ASSERT_NE(second_publish, std::string::npos);
-  EXPECT_EQ(third_publish, std::string::npos);
   ASSERT_NE(clear, std::string::npos);
 
   const auto sync_ctx = source.find("struct sync_session_ctx_t");
@@ -431,20 +430,22 @@ TEST(SourceSafetyContracts, ExactOutputProvenanceLivesInLaunchAndCaptureGenerati
   ASSERT_NE(sync_ctx_end, std::string::npos);
   ASSERT_NE(async_ctx, std::string::npos);
   ASSERT_NE(async_ctx_end, std::string::npos);
-  EXPECT_NE(source.substr(sync_ctx, sync_ctx_end - sync_ctx).find("std::string exact_display_name;"), std::string::npos);
-  EXPECT_NE(source.substr(async_ctx, async_ctx_end - async_ctx).find("std::string exact_display_name;"), std::string::npos);
+  EXPECT_NE(source.substr(sync_ctx, sync_ctx_end - sync_ctx).find("config_t config;"), std::string::npos);
+  EXPECT_NE(source.substr(async_ctx, async_ctx_end - async_ctx).find("config_t config;"), std::string::npos);
+  EXPECT_EQ(source.substr(sync_ctx, sync_ctx_end - sync_ctx).find("std::string exact_display_name;"), std::string::npos);
+  EXPECT_EQ(source.substr(async_ctx, async_ctx_end - async_ctx).find("std::string exact_display_name;"), std::string::npos);
   const auto capture_admission = source.find(
-    "const auto exact_display_name = proc::proc.exact_display_name;"
+    "config.capture_generation = proc::proc.capture_generation;"
   );
   const auto async_entry = source.find("void capture_async(");
   const auto async_publish = source.find("ref->capture_ctx_queue->raise(capture_ctx_t", async_entry);
-  const auto async_provenance = source.find("std::move(exact_display_name)", async_publish);
+  const auto async_provenance = source.find("config,", async_publish);
   const auto async_publish_end = source.find("});", async_publish);
   const auto async_call = source.find("capture_async(", capture_admission);
-  const auto async_call_provenance = source.find("exact_display_name", async_call);
+  const auto async_call_provenance = source.find("config,", async_call);
   const auto async_call_end = source.find(");", async_call);
   const auto sync_publish = source.find("ref->encode_session_ctx_queue.raise(sync_session_ctx_t", capture_admission);
-  const auto sync_provenance = source.find("exact_display_name,", sync_publish);
+  const auto sync_provenance = source.find("config,", sync_publish);
   const auto sync_publish_end = source.find("});", sync_publish);
   ASSERT_NE(capture_admission, std::string::npos);
   ASSERT_NE(async_entry, std::string::npos);
@@ -469,7 +470,7 @@ TEST(SourceSafetyContracts, ExactOutputProvenanceLivesInLaunchAndCaptureGenerati
   ASSERT_NE(sync_end, std::string::npos);
 
   const auto async_body = source.substr(async_begin, sync_begin - async_begin);
-  const auto async_exact = async_body.find("const auto exact_display_name = capture_ctxs.front().exact_display_name;");
+  const auto async_exact = async_body.find("const auto active_generation = capture_ctxs.front().config.capture_generation;");
   const auto async_policy = async_body.find("display_switch_allowed_for_exact_capture(exact_display_name)");
   const auto async_reinit_loop = async_body.find("while (capture_ctx_queue->running())", async_policy);
   const auto async_exact_reopen = async_body.find("if (!exact_display_name.empty())", async_reinit_loop);
@@ -501,7 +502,7 @@ TEST(SourceSafetyContracts, ExactOutputProvenanceLivesInLaunchAndCaptureGenerati
   );
 
   const auto sync_body = source.substr(sync_begin, sync_end - sync_begin);
-  const auto sync_exact = sync_body.find("const auto exact_display_name = synced_session_ctxs.front()->exact_display_name;");
+  const auto sync_exact = sync_body.find("const auto active_generation = synced_session_ctxs.front()->config.capture_generation;");
   const auto sync_exact_branch = sync_body.find("if (!exact_display_name.empty())", sync_exact);
   const auto sync_reset = sync_body.find("reset_display(", sync_exact_branch);
   const auto sync_identity = sync_body.find("exact_display_name", sync_reset);
@@ -541,7 +542,7 @@ TEST(SourceSafetyContracts, CaptureGenerationMismatchIsRejectedBeforePublication
   ASSERT_NE(sync_end, std::string::npos);
 
   const auto async_body = source.substr(async_begin, sync_begin - async_begin);
-  const auto async_match = async_body.find("exact_display_generations_match(");
+  const auto async_match = async_body.find("capture_generations_match(");
   const auto async_reject = async_body.find("incoming_capture_ctx->images->stop()", async_match);
   const auto async_publish = async_body.find("capture_ctxs.emplace_back", async_reject);
   ASSERT_NE(async_match, std::string::npos);
@@ -551,7 +552,7 @@ TEST(SourceSafetyContracts, CaptureGenerationMismatchIsRejectedBeforePublication
   EXPECT_LT(async_reject, async_publish);
 
   const auto sync_body = source.substr(sync_begin, sync_end - sync_begin);
-  const auto sync_match = sync_body.find("exact_display_generations_match(");
+  const auto sync_match = sync_body.find("capture_generations_match(");
   const auto sync_reject = sync_body.find("incoming_sync_ctx->join_event->raise(true)", sync_match);
   const auto sync_publish = sync_body.find("synced_session_ctxs.emplace_back", sync_reject);
   ASSERT_NE(sync_match, std::string::npos);
@@ -559,6 +560,107 @@ TEST(SourceSafetyContracts, CaptureGenerationMismatchIsRejectedBeforePublication
   ASSERT_NE(sync_publish, std::string::npos);
   EXPECT_LT(sync_match, sync_reject);
   EXPECT_LT(sync_reject, sync_publish);
+}
+
+TEST(SourceSafetyContracts, CaptureGenerationIdentityIsOwnedFromLaunchThroughVideo) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream identity_in(root / "src/capture_generation.h");
+  std::ifstream process_header_in(root / "src/process.h");
+  std::ifstream process_in(root / "src/process.cpp");
+  std::ifstream video_header_in(root / "src/video.h");
+  std::ifstream video_in(root / "src/video.cpp");
+  ASSERT_TRUE(identity_in.is_open());
+  ASSERT_TRUE(process_header_in.is_open());
+  ASSERT_TRUE(process_in.is_open());
+  ASSERT_TRUE(video_header_in.is_open());
+  ASSERT_TRUE(video_in.is_open());
+
+  std::ostringstream identity_out, process_header_out, process_out, video_header_out, video_out;
+  identity_out << identity_in.rdbuf();
+  process_header_out << process_header_in.rdbuf();
+  process_out << process_in.rdbuf();
+  video_header_out << video_header_in.rdbuf();
+  video_out << video_in.rdbuf();
+  const auto identity = identity_out.str();
+  const auto process_header = process_header_out.str();
+  const auto process = process_out.str();
+  const auto video_header = video_header_out.str();
+  const auto video = video_out.str();
+
+  EXPECT_NE(identity.find("struct identity_t"), std::string::npos);
+  for (const auto field : {"generation_id", "exact_display_name", "requested_output_name", "stream_mode",
+                           "capture_backend", "private_runtime", "adapter_name",
+                           "headless_mode", "use_cage_compositor"}) {
+    EXPECT_NE(identity.find(field), std::string::npos) << field;
+  }
+  EXPECT_NE(process_header.find("capture_generation::identity_t capture_generation;"), std::string::npos);
+  EXPECT_EQ(process_header.find("std::string exact_display_name;"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation.generation_id = _session_generation;"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation = capture_generation::identity_t {"), std::string::npos);
+  EXPECT_NE(video_header.find("capture_generation::identity_t capture_generation;"), std::string::npos);
+  EXPECT_NE(video.find("config.capture_generation = proc::proc.capture_generation;"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, PortalSourceSelectionAndPublicationUseOneCaptureGeneration) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream portal_in(root / "src/platform/linux/portal_grab.cpp");
+  std::ifstream kwin_header_in(root / "src/platform/linux/kwingrab.h");
+  ASSERT_TRUE(portal_in.is_open());
+  ASSERT_TRUE(kwin_header_in.is_open());
+  std::ostringstream portal_out, kwin_header_out;
+  portal_out << portal_in.rdbuf();
+  kwin_header_out << kwin_header_in.rdbuf();
+  const auto portal = portal_out.str();
+  const auto kwin_header = kwin_header_out.str();
+
+  const auto ensure = portal.find("static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(");
+  const auto display = portal.find("class portal_display_t", ensure);
+  ASSERT_NE(ensure, std::string::npos);
+  ASSERT_NE(display, std::string::npos);
+  const auto ensure_body = portal.substr(ensure, display - ensure);
+  EXPECT_NE(ensure_body.find("const capture_generation::identity_t &generation"), std::string::npos);
+  EXPECT_NE(ensure_body.find("g_media.generation == generation"), std::string::npos);
+  const auto first_publication = ensure_body.find("g_media.generation = generation");
+  const auto second_publication = ensure_body.find("g_media.generation = generation", first_publication + 1);
+  const auto third_publication = ensure_body.find("g_media.generation = generation", second_publication + 1);
+  const auto fourth_publication = ensure_body.find("g_media.generation = generation", third_publication + 1);
+  ASSERT_NE(first_publication, std::string::npos);
+  ASSERT_NE(second_publication, std::string::npos);
+  ASSERT_NE(third_publication, std::string::npos);
+  EXPECT_EQ(fourth_publication, std::string::npos);
+  EXPECT_NE(
+    ensure_body.find("g_media.capture != capture || g_media.generation != generation"),
+    std::string::npos
+  );
+  EXPECT_NE(ensure_body.find("ensure_session_unlocked(generation)"), std::string::npos);
+  EXPECT_NE(ensure_body.find("kwingrab::prefer_for_generation(generation)"), std::string::npos);
+  EXPECT_NE(ensure_body.find("kwingrab::require_for_generation(generation)"), std::string::npos);
+  EXPECT_NE(ensure_body.find("start_output_session(generation.requested_output_name)"), std::string::npos);
+  for (const auto forbidden : {"config::video.adapter_name", "config::video.output_name",
+                               "config::video.capture", "config::video.linux_display"}) {
+    EXPECT_EQ(ensure_body.find(forbidden), std::string::npos) << forbidden;
+  }
+
+  const auto init = portal.find("init(platf::mem_type_e", display);
+  const auto capture = portal.find("capture(const push_captured_image_cb_t", init);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(capture, std::string::npos);
+  const auto init_body = portal.substr(init, capture - init);
+  const auto exact_validation = init_body.find("display_name != generation_.exact_display_name");
+  const auto requested_validation = init_body.find("generation_.requested_output_name != generation_.exact_display_name");
+  const auto exact_reject = init_body.find("return -1;", requested_validation);
+  const auto init_capture = init_body.find("ensure_global_capture(", exact_reject);
+  ASSERT_NE(exact_validation, std::string::npos);
+  ASSERT_NE(requested_validation, std::string::npos);
+  ASSERT_NE(exact_reject, std::string::npos);
+  ASSERT_NE(init_capture, std::string::npos);
+  EXPECT_LT(exact_validation, requested_validation);
+  EXPECT_LT(requested_validation, exact_reject);
+  EXPECT_LT(exact_reject, init_capture);
+  EXPECT_NE(init_body.find("generation_ = config.capture_generation;"), std::string::npos);
+  EXPECT_NE(init_body.find("generation_"), std::string::npos);
+  EXPECT_NE(kwin_header.find("prefer_for_generation(const capture_generation::identity_t &generation)"), std::string::npos);
+  EXPECT_NE(kwin_header.find("require_for_generation(const capture_generation::identity_t &generation)"), std::string::npos);
 }
 
 TEST(SourceSafetyContracts, SwayVirtualOutputCreationIsRejectedBeforeMutation) {
@@ -595,12 +697,14 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   const auto exact_policy = kwin.find("output_selection_can_fallback(output_name)", requested);
   const auto reject = kwin.find("return -1;", exact_policy);
   const auto configured_fallback = kwin.find("config::video.linux_display.streaming_output", requested);
+  const auto first_output_fallback = kwin.find("output = outputs_.begin()->first", reject);
   ASSERT_NE(requested, std::string::npos);
   ASSERT_NE(exact_policy, std::string::npos);
   ASSERT_NE(reject, std::string::npos);
-  ASSERT_NE(configured_fallback, std::string::npos);
+  EXPECT_EQ(configured_fallback, std::string::npos);
+  ASSERT_NE(first_output_fallback, std::string::npos);
   EXPECT_LT(exact_policy, reject);
-  EXPECT_LT(reject, configured_fallback);
+  EXPECT_LT(reject, first_output_fallback);
 
   std::ifstream portal_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/portal_grab.cpp");
   ASSERT_TRUE(portal_input.is_open());
@@ -609,26 +713,21 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   const auto portal = portal_contents.str();
 
   const auto compatible = portal.find("const auto compatible");
-  const auto identity = portal.find("capture_identity_matches(", compatible);
-  const auto identity_mode = portal.find("g_media.stream_mode", identity);
-  const auto identity_output = portal.find("g_media.output_name", identity_mode);
-  const auto requested_mode = portal.find("requested_stream_mode", identity_output);
-  const auto requested_output = portal.find("requested_output_name", requested_mode);
-  const auto reuse = portal.find("return g_media.capture;", requested_output);
+  const auto identity = portal.find("g_media.generation == generation", compatible);
+  const auto reuse = portal.find("return g_media.capture;", identity);
   const auto no_wayland = portal.find("#ifndef POLARIS_BUILD_WAYLAND", reuse);
-  const auto no_wayland_mode = portal.find("requested_stream_mode == \"host_virtual_display\"", no_wayland);
+  const auto no_wayland_mode = portal.find("generation.stream_mode == \"host_virtual_display\"", no_wayland);
   const auto no_wayland_reject = portal.find("return nullptr;", no_wayland_mode);
   const auto wayland_guard = portal.find("#ifdef POLARIS_BUILD_WAYLAND", no_wayland_reject);
-  const auto kwin_start = portal.find("kwingrab::start_output_session(", wayland_guard);
-  const auto required = portal.find("kwingrab::require_for_current_stream_mode()", kwin_start);
+  const auto kwin_start = portal.find(
+    "kwingrab::start_output_session(generation.requested_output_name)",
+    wayland_guard
+  );
+  const auto required = portal.find("kwingrab::require_for_generation(generation)", kwin_start);
   const auto fail_closed = portal.find("return nullptr;", required);
-  const auto generic_portal = portal.find("ensure_session_unlocked()", kwin_start);
+  const auto generic_portal = portal.find("ensure_session_unlocked(generation)", kwin_start);
   ASSERT_NE(compatible, std::string::npos);
   ASSERT_NE(identity, std::string::npos);
-  ASSERT_NE(identity_mode, std::string::npos);
-  ASSERT_NE(identity_output, std::string::npos);
-  ASSERT_NE(requested_mode, std::string::npos);
-  ASSERT_NE(requested_output, std::string::npos);
   ASSERT_NE(reuse, std::string::npos);
   ASSERT_NE(no_wayland, std::string::npos);
   ASSERT_NE(no_wayland_mode, std::string::npos);
@@ -639,11 +738,7 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   ASSERT_NE(fail_closed, std::string::npos);
   ASSERT_NE(generic_portal, std::string::npos);
   EXPECT_LT(compatible, identity);
-  EXPECT_LT(identity, identity_mode);
-  EXPECT_LT(identity_mode, identity_output);
-  EXPECT_LT(identity_output, requested_mode);
-  EXPECT_LT(requested_mode, requested_output);
-  EXPECT_LT(requested_output, reuse);
+  EXPECT_LT(identity, reuse);
   EXPECT_LT(reuse, no_wayland);
   EXPECT_LT(no_wayland, no_wayland_mode);
   EXPECT_LT(no_wayland_mode, no_wayland_reject);
