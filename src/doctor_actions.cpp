@@ -207,6 +207,15 @@ namespace doctor_actions {
     return std::min(one_step_ceiling_kbps, paired_target_bitrate_kbps);
   }
 
+  nlohmann::json steam_vdf_read_only_response() {
+    return {
+      {"status", false},
+      {"changed", false},
+      {"state", "read_only"},
+      {"error", "Automatic Steam profile changes and their Undo are disabled in this release. Review Steam Input settings manually."}
+    };
+  }
+
   nlohmann::json execute(const nlohmann::json &request) {
     const auto action_id = request.value("action_id", std::string {});
 
@@ -218,6 +227,7 @@ namespace doctor_actions {
       }
 
       if (action_run.kind == action_kind_e::disable_steam_input_xbox) {
+        return steam_vdf_read_only_response();
         int restored = 0;
         for (const auto &edit : action_run.steam_edits) {
           if (rewrite_steam_profile(edit.path, edit.previously_enabled)) {
@@ -276,10 +286,10 @@ namespace doctor_actions {
       };
     }
 
-    // Steam Input work runs ahead of the streaming gate below on purpose. Its
-    // whole point is to edit a profile Steam is not holding open, which means
-    // the fix is applied precisely when no stream is running.
+    // Legacy Steam VDF action IDs remain recognized only so stale clients and
+    // receipts fail closed before Steam shutdown or filesystem work.
     if (action_id == "disable_steam_input_xbox" || (action_id == "verify" && steam_input_run_selected())) {
+      return steam_vdf_read_only_response();
 #ifndef __linux__
       return {
         {"status", false},
