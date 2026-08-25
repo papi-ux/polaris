@@ -572,7 +572,7 @@ TEST(SteamShutdownStateMachineTests, DoctorShutdownIncludesPrivateSteamSingleton
   EXPECT_TRUE(proc::doctor_steam_shutdown_required_for_tests(true, true));
 }
 
-TEST(SteamShutdownStateMachineTests, ProductionDoctorQuiescesSteamBeforeVdfMutation) {
+TEST(SteamShutdownStateMachineTests, ProductionDoctorSteamVdfMutationFailsClosedBeforeAnyWork) {
   const auto source = read_source_file("src/doctor_actions.cpp");
   ASSERT_FALSE(source.empty());
   const auto action = source_between(
@@ -581,13 +581,30 @@ TEST(SteamShutdownStateMachineTests, ProductionDoctorQuiescesSteamBeforeVdfMutat
     "const auto stats = stream_stats::get_current();"
   );
   ASSERT_FALSE(action.empty());
-
-  const auto quiesce = action.find("ensure_steam_client_quiescent_for_doctor()");
+  const auto guard = action.find("return steam_vdf_read_only_response()");
+  const auto shutdown = action.find("ensure_steam_client_quiescent_for_doctor()");
   const auto rewrite = action.find("rewrite_steam_profile(path, false)");
-  ASSERT_NE(quiesce, std::string::npos);
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(shutdown, std::string::npos);
   ASSERT_NE(rewrite, std::string::npos);
-  EXPECT_LT(quiesce, rewrite);
-  EXPECT_EQ(action.find("if (proc::desktop_steam_client_active())"), std::string::npos);
+  EXPECT_LT(guard, shutdown);
+  EXPECT_LT(guard, rewrite);
+}
+
+TEST(SteamShutdownStateMachineTests, DoctorSteamVdfUndoFailsClosedBeforeAnyRestore) {
+  const auto source = read_source_file("src/doctor_actions.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto undo = source_between(
+    source,
+    "if (action_run.kind == action_kind_e::disable_steam_input_xbox)",
+    "if (!adaptive_bitrate::get_state().runtime_update_supported)"
+  );
+  ASSERT_FALSE(undo.empty());
+  const auto guard = undo.find("return steam_vdf_read_only_response()");
+  const auto restore = undo.find("rewrite_steam_profile(edit.path");
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(restore, std::string::npos);
+  EXPECT_LT(guard, restore);
 }
 
 TEST(SteamShutdownStateMachineTests, PostShutdownPolicyRechecksLiveProcessState) {

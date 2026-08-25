@@ -913,22 +913,17 @@ namespace stream_stats {
       } else if ((primary_issue == "network_jitter" || primary_issue == "quality_capped_by_history") && !live_bitrate_tunable) {
         unavailable_reason = "The active encoder does not support runtime bitrate updates.";
       } else if (primary_issue == "steam_input_conflict") {
-        // Steam rewrites its profile on exit, so an edit made underneath a
-        // running client is reverted the moment that client closes. The action
-        // therefore closes desktop Steam first, which is why it confirms.
-        id = "disable_steam_input_xbox";
-        label = "Close Steam and fix";
-        kind = "host_setting";
-        endpoint = "/api/doctor/action";
-        method = "POST";
-        payload["action_id"] = id;
-        payload["source_result_id"] = source_result_id;
-        rollback = "Closing Steam ends any game running through it, including the session you are streaming now. Undo restores the previous Steam Input opt-in for every profile this run changed.";
+        id = "none";
+        label = "Review Steam Input";
+        kind = "manual_guidance";
+        unavailable_reason =
+          "Automatic Steam profile changes are disabled in this release. Review the host-wide Xbox opt-in and per-game overrides in Steam controller settings.";
+        rollback = "Read-only guidance; Doctor does not close Steam or change any profile.";
         verification = {
-          {"mode", "local_steam_config"},
-          {"delay_seconds", 2},
-          {"endpoint", "/api/doctor/action"},
-          {"success_when", nlohmann::json::array({"no Steam profile opts the emulated pad into Steam Input"})}
+          {"mode", "manual_steam_config"},
+          {"delay_seconds", 0},
+          {"endpoint", ""},
+          {"success_when", nlohmann::json::array({"Steam Input host opt-in and per-game overrides are reviewed manually"})}
         };
       } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
         id = "export_support_bundle";
@@ -947,8 +942,7 @@ namespace stream_stats {
         if (health.contains("safe_hdr")) payload["hdr"] = health["safe_hdr"];
       }
 
-      const bool undoable =
-        id == "lower_bitrate" || id == "restore_quality" || id == "disable_steam_input_xbox";
+      const bool undoable = id == "lower_bitrate" || id == "restore_quality";
 
       return {
         {"id", id},
