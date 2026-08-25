@@ -663,6 +663,75 @@ TEST(SourceSafetyContracts, PortalSourceSelectionAndPublicationUseOneCaptureGene
   EXPECT_NE(kwin_header.find("require_for_generation(const capture_generation::identity_t &generation)"), std::string::npos);
 }
 
+TEST(SourceSafetyContracts, LinuxBackendDispatchUsesCaptureGenerationAuthority) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/misc.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto planner = source.find("static display_backend_e choose_display_backend(");
+  const auto display = source.find("std::shared_ptr<display_t> display(", planner);
+  const auto display_end = source.find("class linux_deinit_t", display);
+  ASSERT_NE(planner, std::string::npos);
+  ASSERT_NE(display, std::string::npos);
+  ASSERT_NE(display_end, std::string::npos);
+  const auto planner_body = source.substr(planner, display - planner);
+  const auto display_body = source.substr(display, display_end - display);
+  EXPECT_NE(planner_body.find("exact_output_owned && (requested.empty() || requested == \"auto\")"), std::string::npos);
+  EXPECT_NE(planner_body.find("requested == \"wlr\""), std::string::npos);
+  EXPECT_NE(planner_body.find("requested == \"portal\""), std::string::npos);
+  const auto requested = display_body.find("config.capture_generation.capture_backend");
+  const auto exact_owned = display_body.find("config.capture_generation.exact_display_name.empty()", requested);
+  const auto choose = display_body.find("choose_display_backend(", exact_owned);
+  const auto dispatch = display_body.find("switch (backend)", choose);
+  ASSERT_NE(requested, std::string::npos);
+  ASSERT_NE(exact_owned, std::string::npos);
+  ASSERT_NE(choose, std::string::npos);
+  ASSERT_NE(dispatch, std::string::npos);
+  EXPECT_LT(requested, exact_owned);
+  EXPECT_LT(exact_owned, choose);
+  EXPECT_LT(choose, dispatch);
+  EXPECT_EQ(display_body.find("if (sources[source::"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, PortalRejectsForeignBackendBeforeMutationAndUsesPureMode) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream portal_in(root / "src/platform/linux/portal_grab.cpp");
+  std::ifstream session_in(root / "src/platform/linux/portal_session.cpp");
+  ASSERT_TRUE(portal_in.is_open());
+  ASSERT_TRUE(session_in.is_open());
+  std::ostringstream portal_out, session_out;
+  portal_out << portal_in.rdbuf();
+  session_out << session_in.rdbuf();
+  const auto portal = portal_out.str();
+  const auto session = session_out.str();
+
+  const auto policy = session.find("uint32_t capture_type_for_stream_display(");
+  const auto policy_end = session.find("// Helper: call a portal method", policy);
+  ASSERT_NE(policy, std::string::npos);
+  ASSERT_NE(policy_end, std::string::npos);
+  const auto policy_body = session.substr(policy, policy_end - policy);
+  EXPECT_NE(policy_body.find("const auto mode = stream_mode;"), std::string::npos);
+  EXPECT_EQ(policy_body.find("config::video"), std::string::npos);
+
+  const auto ensure = portal.find("static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(");
+  const auto transition = portal.find("std::lock_guard transition_lock", ensure);
+  const auto ensure_guard = portal.find("portal_capture_backend_allowed(generation.capture_backend)", ensure);
+  ASSERT_NE(ensure, std::string::npos);
+  ASSERT_NE(transition, std::string::npos);
+  ASSERT_NE(ensure_guard, std::string::npos);
+  EXPECT_LT(ensure_guard, transition);
+
+  const auto init = portal.find("init(platf::mem_type_e");
+  const auto init_guard = portal.find("portal_capture_backend_allowed(generation_.capture_backend)", init);
+  const auto exact_guard = portal.find("generation_.exact_display_name.empty()", init_guard);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(init_guard, std::string::npos);
+  ASSERT_NE(exact_guard, std::string::npos);
+  EXPECT_LT(init_guard, exact_guard);
+}
+
 TEST(SourceSafetyContracts, SwayVirtualOutputCreationIsRejectedBeforeMutation) {
   std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
   ASSERT_TRUE(input.is_open());

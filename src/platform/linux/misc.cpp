@@ -57,6 +57,7 @@
 #include "src/entry_handler.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/video.h"
 #include "vaapi.h"
 #include "virtual_display.h"
 
@@ -1233,6 +1234,123 @@ std::string get_local_ip_for_gateway() {
 
   static std::bitset<source::MAX_FLAGS> sources;
 
+  enum class display_backend_e {
+    none,
+    nvfbc,
+    wayland,
+    portal,
+    kms,
+    x11,
+  };
+
+  static display_backend_e choose_display_backend(
+    std::string_view requested,
+    bool exact_output_owned,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  ) {
+    if (exact_output_owned && (requested.empty() || requested == "auto")) {
+      return display_backend_e::none;
+    }
+    if (requested == "wlr") {
+      return wayland_available ? display_backend_e::wayland : display_backend_e::none;
+    }
+    if (requested == "portal" || requested == "kwin") {
+      return portal_available ? display_backend_e::portal : display_backend_e::none;
+    }
+    if (requested == "kms" || requested == "drm") {
+      return kms_available ? display_backend_e::kms : display_backend_e::none;
+    }
+    if (requested == "x11") {
+      return x11_available ? display_backend_e::x11 : display_backend_e::none;
+    }
+    if (requested == "nvfbc") {
+      return nvfbc_available && cuda_memory ? display_backend_e::nvfbc : display_backend_e::none;
+    }
+    if (!requested.empty() && requested != "auto") {
+      return display_backend_e::none;
+    }
+    if (nvfbc_available && cuda_memory) {
+      return display_backend_e::nvfbc;
+    }
+    if (wayland_available) {
+      return display_backend_e::wayland;
+    }
+    if (portal_available) {
+      return display_backend_e::portal;
+    }
+    if (kms_available) {
+      return display_backend_e::kms;
+    }
+    if (x11_available) {
+      return display_backend_e::x11;
+    }
+    return display_backend_e::none;
+  }
+
+#ifdef POLARIS_TESTS
+  std::string capture_backend_dispatch_for_tests(
+    std::string_view requested,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  ) {
+    switch (choose_display_backend(
+      requested,
+      false,
+      nvfbc_available,
+      wayland_available,
+      portal_available,
+      kms_available,
+      x11_available,
+      cuda_memory
+    )) {
+      case display_backend_e::nvfbc: return "nvfbc";
+      case display_backend_e::wayland: return "wayland";
+      case display_backend_e::portal: return "portal";
+      case display_backend_e::kms: return "kms";
+      case display_backend_e::x11: return "x11";
+      default: return "none";
+    }
+  }
+
+  std::string exact_capture_backend_dispatch_for_tests(
+    std::string_view requested,
+    bool exact_output_owned,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  ) {
+    switch (choose_display_backend(
+      requested,
+      exact_output_owned,
+      nvfbc_available,
+      wayland_available,
+      portal_available,
+      kms_available,
+      x11_available,
+      cuda_memory
+    )) {
+      case display_backend_e::nvfbc: return "nvfbc";
+      case display_backend_e::wayland: return "wayland";
+      case display_backend_e::portal: return "portal";
+      case display_backend_e::kms: return "kms";
+      case display_backend_e::x11: return "x11";
+      default: return "none";
+    }
+  }
+#endif
+
 #ifdef POLARIS_BUILD_CUDA
   std::vector<std::string> nvfbc_display_names();
   std::shared_ptr<display_t> nvfbc_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
@@ -1318,37 +1436,81 @@ std::string get_local_ip_for_gateway() {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    bool nvfbc_available = false;
+    bool wayland_available = false;
+    bool portal_available = false;
+    bool kms_available = false;
+    bool x11_available = false;
 #ifdef POLARIS_BUILD_CUDA
-    if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
-      BOOST_LOG(info) << "Screencasting with NvFBC"sv;
-      return nvfbc_display(hwdevice_type, display_name, config);
-    }
+    nvfbc_available = sources[source::NVFBC];
 #endif
 #ifdef POLARIS_BUILD_WAYLAND
-    if (sources[source::WAYLAND]) {
-      BOOST_LOG(info) << "Screencasting with Wayland's protocol"sv;
-      return wl_display(hwdevice_type, display_name, config);
-    }
+    wayland_available = sources[source::WAYLAND];
 #endif
 #ifdef POLARIS_BUILD_PORTAL
-    if (sources[source::PORTAL]) {
-      BOOST_LOG(info) << "Screencasting with XDG Desktop Portal"sv;
-      return portal_display(hwdevice_type, display_name, config);
-    }
+    portal_available = sources[source::PORTAL];
 #endif
 #ifdef POLARIS_BUILD_DRM
-    if (sources[source::KMS]) {
-      BOOST_LOG(info) << "Screencasting with KMS"sv;
-      return kms_display(hwdevice_type, display_name, config);
-    }
+    kms_available = sources[source::KMS];
 #endif
 #ifdef POLARIS_BUILD_X11
-    if (sources[source::X11]) {
-      BOOST_LOG(info) << "Screencasting with X11"sv;
-      return x11_display(hwdevice_type, display_name, config);
-    }
+    x11_available = sources[source::X11];
 #endif
 
+    const auto requested_backend = config.capture_generation.capture_backend;
+    const bool exact_output_owned = !config.capture_generation.exact_display_name.empty();
+    const auto backend = choose_display_backend(
+      requested_backend,
+      exact_output_owned,
+      nvfbc_available,
+      wayland_available,
+      portal_available,
+      kms_available,
+      x11_available,
+      hwdevice_type == mem_type_e::cuda
+    );
+    switch (backend) {
+      case display_backend_e::nvfbc:
+#ifdef POLARIS_BUILD_CUDA
+        BOOST_LOG(info) << "Screencasting with NvFBC"sv;
+        return nvfbc_display(hwdevice_type, display_name, config);
+#else
+        break;
+#endif
+      case display_backend_e::wayland:
+#ifdef POLARIS_BUILD_WAYLAND
+        BOOST_LOG(info) << "Screencasting with Wayland's protocol"sv;
+        return wl_display(hwdevice_type, display_name, config);
+#else
+        break;
+#endif
+      case display_backend_e::portal:
+#ifdef POLARIS_BUILD_PORTAL
+        BOOST_LOG(info) << "Screencasting with XDG Desktop Portal"sv;
+        return portal_display(hwdevice_type, display_name, config);
+#else
+        break;
+#endif
+      case display_backend_e::kms:
+#ifdef POLARIS_BUILD_DRM
+        BOOST_LOG(info) << "Screencasting with KMS"sv;
+        return kms_display(hwdevice_type, display_name, config);
+#else
+        break;
+#endif
+      case display_backend_e::x11:
+#ifdef POLARIS_BUILD_X11
+        BOOST_LOG(info) << "Screencasting with X11"sv;
+        return x11_display(hwdevice_type, display_name, config);
+#else
+        break;
+#endif
+      default:
+        break;
+    }
+
+    BOOST_LOG(error) << "No available capture backend satisfies generation request ["sv
+                     << requested_backend << "]"sv;
     return nullptr;
   }
 
