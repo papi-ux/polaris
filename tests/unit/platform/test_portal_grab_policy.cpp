@@ -42,9 +42,33 @@ namespace portal {
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
   bool portal_cancel_source_wakes_wait_for_tests();
+  bool portal_capture_backend_allowed_for_tests(std::string_view capture_backend);
   bool portal_capture_generation_matches_for_tests(
     const capture_generation::identity_t &cached,
     const capture_generation::identity_t &requested
+  );
+}
+
+namespace platf {
+  std::string capture_backend_dispatch_for_tests(
+    std::string_view capture_backend,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  );
+
+  std::string exact_capture_backend_dispatch_for_tests(
+    std::string_view capture_backend,
+    bool exact_output_owned,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
   );
 }
 
@@ -106,6 +130,37 @@ TEST(PortalGrabPolicyTests, HostVirtualDisplayRequestsMonitorSourceDespiteHeadle
   // exact window+restore_token combination the dongle comment above warns
   // hangs KDE ScreenCast.
   EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "host_virtual_display"), 1u);
+}
+
+TEST(PortalGrabPolicyTests, EmptyModeSourcePolicyDoesNotReadMutableGlobalMode) {
+  const auto original_mode = config::video.linux_display.stream_mode;
+  config::video.linux_display.stream_mode = "host_virtual_display";
+  EXPECT_EQ(portal::capture_type_for_stream_display(true, false, ""), 2u);
+  config::video.linux_display.stream_mode = original_mode;
+}
+
+TEST(PortalGrabPolicyTests, ExplicitBackendDispatchNeverFallsThrough) {
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("wlr", false, false, true, false, false, false), "none");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("wlr", false, true, true, false, false, false), "wayland");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("portal", false, true, true, true, true, false), "portal");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("kms", false, true, true, false, true, false), "none");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("auto", false, true, true, true, true, false), "wayland");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("bogus", true, true, true, true, true, true), "none");
+}
+
+TEST(PortalGrabPolicyTests, ExactOwnedBackendMustBeConcrete) {
+  EXPECT_EQ(platf::exact_capture_backend_dispatch_for_tests("", true, false, false, true, false, false, false), "none");
+  EXPECT_EQ(platf::exact_capture_backend_dispatch_for_tests("auto", true, false, true, true, false, false, false), "none");
+  EXPECT_EQ(platf::exact_capture_backend_dispatch_for_tests("", false, false, false, true, false, false, false), "portal");
+}
+
+TEST(PortalGrabPolicyTests, PortalAcceptsOnlyPortalAuthority) {
+  for (const auto backend : {"", "auto", "portal", "kwin"}) {
+    EXPECT_TRUE(portal::portal_capture_backend_allowed_for_tests(backend)) << backend;
+  }
+  for (const auto backend : {"wlr", "kms", "drm", "x11", "nvfbc"}) {
+    EXPECT_FALSE(portal::portal_capture_backend_allowed_for_tests(backend)) << backend;
+  }
 }
 
 TEST(PortalGrabPolicyTests, CaptureCacheReuseRequiresTheWholeImmutableGeneration) {

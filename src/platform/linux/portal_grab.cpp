@@ -81,7 +81,18 @@ namespace portal {
     return cached == requested;
   }
 
+  bool portal_capture_backend_allowed(std::string_view capture_backend) {
+    return capture_backend.empty() ||
+           capture_backend == "auto" ||
+           capture_backend == "portal" ||
+           capture_backend == "kwin";
+  }
+
 #ifdef POLARIS_TESTS
+  bool portal_capture_backend_allowed_for_tests(std::string_view capture_backend) {
+    return portal_capture_backend_allowed(capture_backend);
+  }
+
   bool portal_capture_generation_matches_for_tests(
     const capture_generation::identity_t &cached,
     const capture_generation::identity_t &requested
@@ -449,6 +460,11 @@ namespace portal {
     int client_dynamic_range,
     const capture_generation::identity_t &generation
   ) {
+    if (!portal_capture_backend_allowed(generation.capture_backend)) {
+      BOOST_LOG(error) << "portal: capture generation backend ["sv << generation.capture_backend
+                       << "] is not portal-authoritative; refusing acquisition"sv;
+      return nullptr;
+    }
     // Only one configuration transition may retire/publish a capture generation.
     std::lock_guard transition_lock(g_capture_transition_mu);
     auto start = session_media::begin_start();
@@ -539,11 +555,7 @@ namespace portal {
       // W4/P1 kwingrab: host KDE desktop_display / headless_dongle — try KWin
       // zkde screencast before portal picker. Fail cleanly when not on KWin.
       // capture=portal/auto/empty only; explicit wlr/kms unchanged.
-      const bool portal_like_capture =
-        generation.capture_backend.empty() ||
-        generation.capture_backend == "auto" ||
-        generation.capture_backend == "portal" ||
-        generation.capture_backend == "kwin";
+      const bool portal_like_capture = portal_capture_backend_allowed(generation.capture_backend);
       if ((!g_media.capture || !g_media.capture->running()) &&
           portal_like_capture &&
           kwingrab::prefer_for_generation(generation)) {
@@ -790,6 +802,11 @@ namespace portal {
     int
     init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
       generation_ = config.capture_generation;
+      if (!portal_capture_backend_allowed(generation_.capture_backend)) {
+        BOOST_LOG(error) << "portal: capture generation backend ["sv << generation_.capture_backend
+                         << "] is not portal-authoritative; refusing initialization"sv;
+        return -1;
+      }
       if (!generation_.exact_display_name.empty() &&
           (display_name != generation_.exact_display_name ||
            generation_.requested_output_name != generation_.exact_display_name)) {
