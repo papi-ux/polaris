@@ -231,6 +231,31 @@ TEST(SourceSafetyContracts, DoctorSteamVdfMutationAndUndoAreReleaseReadOnly) {
   EXPECT_EQ(action.find("disable_steam_input_xbox"), std::string::npos);
 }
 
+TEST(SourceSafetyContracts, UbuntuSnapshotInstallsMayDowngradeRunnerPackages) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / ".github/workflows/build.yml");
+  ASSERT_TRUE(input.good());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto workflow = contents.str();
+  ASSERT_FALSE(workflow.empty());
+
+  const auto count_exact = [](std::string_view haystack, std::string_view needle) {
+    std::size_t count = 0;
+    for (std::size_t offset = 0;
+         (offset = haystack.find(needle, offset)) != std::string_view::npos;
+         offset += needle.size()) {
+      ++count;
+    }
+    return count;
+  };
+
+  constexpr std::string_view unprotected_snapshot_install = R"(sudo apt-get "${apt_options[@]}" install -y \)";
+  constexpr std::string_view protected_snapshot_install = R"(sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \)";
+
+  EXPECT_EQ(count_exact(workflow, unprotected_snapshot_install), 0u);
+  EXPECT_EQ(count_exact(workflow, protected_snapshot_install), 2u);
+}
+
 TEST(SourceSafetyContracts, ReadlinkResultsAreCheckedBeforeUse) {
   // readlink reports failure as -1. Widening that into a size handed a
   // string_view a length of SIZE_MAX; the other seven call sites all checked.
