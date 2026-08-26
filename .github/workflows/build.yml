@@ -179,10 +179,16 @@ jobs:
             -o Acquire::https::Timeout=30
           )
           sudo apt-get "${apt_options[@]}" update
+          curl_snapshot_version="$(apt-cache "${apt_options[@]}" madison libcurl4-openssl-dev | awk 'NR == 1 {print $3}')"
+          if [[ -z "$curl_snapshot_version" ]]; then
+            echo "::error::Pinned Ubuntu snapshot does not contain libcurl4-openssl-dev"
+            exit 1
+          fi
           sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
             build-essential cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
-            libpulse-dev libopus-dev libcurl4t64 libcurl4-openssl-dev \
+            libpulse-dev libopus-dev \
+            "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
             libdrm-dev libgbm-dev libcap-dev libwayland-dev \
             libpipewire-0.3-dev libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
@@ -905,10 +911,16 @@ jobs:
             -o Acquire::https::Timeout=30
           )
           sudo apt-get "${apt_options[@]}" update
+          curl_snapshot_version="$(apt-cache "${apt_options[@]}" madison libcurl4-openssl-dev | awk 'NR == 1 {print $3}')"
+          if [[ -z "$curl_snapshot_version" ]]; then
+            echo "::error::Pinned Ubuntu snapshot does not contain libcurl4-openssl-dev"
+            exit 1
+          fi
           sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
             build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
-            libpulse-dev libopus-dev libcurl4t64 libcurl4-openssl-dev \
+            libpulse-dev libopus-dev \
+            "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
             libdrm-dev libgbm-dev libcap-dev libwayland-dev \
             libpipewire-0.3-dev libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
