@@ -78,6 +78,7 @@
 #include "ai_optimizer.h"
 #include "device_db.h"
 #include "doctor_actions.h"
+#include "recovery_profile.h"
 #include "client_support_report.h"
 #include "confighttp.h"
 #include "stream_stats.h"
@@ -2401,7 +2402,8 @@ namespace nvhttp {
     nlohmann::json build_session_health_json(const stream_stats::stats_t &stats,
                                              bool current_virtual_display,
                                              const std::string &device_name,
-                                             const std::string &app_name) {
+                                             const std::string &app_name,
+                                             std::string_view app_uuid = {}) {
       const auto device_profile = device_db::get_device(device_name);
       const bool mobile_client = is_mobile_client_type(device_profile);
       const std::string active_codec_family = codec_family(stats.codec);
@@ -2646,10 +2648,28 @@ namespace nvhttp {
         adaptive_bitrate::get_state(),
         stats.bitrate_kbps
       );
-      health["doctor"] = stream_stats::build_doctor_json(stats, health);
+      health["doctor"] = stream_stats::build_doctor_json(stats, health, app_uuid);
       return health;
     }
   }  // namespace
+
+  nlohmann::json build_session_health_for_action(const stream_stats::stats_t &stats,
+                                                 bool current_virtual_display,
+                                                 const std::string &device_name,
+                                                 const std::string &app_name) {
+    return build_session_health_json(
+      stats,
+      current_virtual_display,
+      device_name,
+      app_name,
+      proc::proc.get_running_app_uuid()
+    );
+  }
+
+  std::string effective_stream_display_mode_for_action(const stream_stats::stats_t &stats,
+                                                       bool current_virtual_display) {
+    return effective_stream_display_mode_selection(stats, current_virtual_display);
+  }
 
 #ifdef POLARIS_TESTS
   std::optional<int> select_paired_client_launch_bitrate_for_tests(
@@ -6523,6 +6543,7 @@ namespace nvhttp {
       features["disconnect_resume_v1"] = true;
       features["diagnostics_doctor_v1"] = true;
       features["doctor_actions_v1"] = true;
+      features["recovery_profile_next_launch_v1"] = true;
       features["doctor_ai_explanation_v1"] = false;
       features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
@@ -6765,10 +6786,32 @@ namespace nvhttp {
         stats,
         status_snapshot.virtual_display,
         named_cert_p->name,
-        status_snapshot.game
+        status_snapshot.game,
+        status_snapshot.game_uuid
       );
       output["health"] = health;
       output["doctor"] = health.value("doctor", nlohmann::json::object());
+      const auto recovery_records = client_role == "viewer" ? nlohmann::json::array() :
+        recovery_profile::statuses_for_owner(
+          platf::appdata() / "recovery_profiles.json", named_cert_p->uuid
+        );
+      output["recovery_records"] = recovery_records;
+      if (client_role != "viewer" && !status_snapshot.game_uuid.empty()) {
+        output["recovery"] = recovery_profile::status(
+          platf::appdata() / "recovery_profiles.json",
+          named_cert_p->uuid,
+          status_snapshot.game_uuid
+        );
+      } else if (recovery_records.size() == 1) {
+        output["recovery"] = recovery_records.front();
+      } else {
+        output["recovery"] = {
+          {"status", true},
+          {"changed", false},
+          {"state", "none"},
+          {"recovery_state", "none"}
+        };
+      }
       output["auto_quality"] = health.value("recovery_policy", nlohmann::json::object());
       output["profile_state"] = build_live_profile_state_json(
         health,
@@ -6882,7 +6925,8 @@ namespace nvhttp {
           stats,
           proc::proc.session_uses_virtual_display(),
           response_client->name,
-          app_name
+          app_name,
+          proc::proc.get_running_app_uuid()
         );
 
         nlohmann::json output;
@@ -7108,7 +7152,8 @@ namespace nvhttp {
           stats,
           proc::proc.session_uses_virtual_display(),
           response_client->name,
-          proc::proc.get_last_run_app_name()
+          proc::proc.get_last_run_app_name(),
+          proc::proc.get_running_app_uuid()
         );
 
         nlohmann::json output;
@@ -8060,19 +8105,50 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
-      if (!proc::proc.is_session_owner(named_cert_p->uuid)) {
-        nlohmann::json err;
-        err["error"] = "Only the active session owner can run Doctor actions";
-        SimpleWeb::CaseInsensitiveMultimap headers;
-        headers.emplace("Content-Type", "application/json");
-        response->write(SimpleWeb::StatusCode::client_error_forbidden, err.dump(), headers);
-        return;
-      }
 
       try {
         std::string body_str(std::istreambuf_iterator<char>(request->content), {});
         const auto body = body_str.empty() ? nlohmann::json::object() : nlohmann::json::parse(body_str);
-        const auto output = doctor_actions::execute(body);
+        const bool active_owner_present = !proc::proc.get_session_owner_unique_id().empty();
+        const bool active_owner =
+          active_owner_present && proc::proc.is_session_owner(named_cert_p->uuid);
+        if (!doctor_actions::paired_route_allowed(
+              body.value("action_id", std::string {}),
+              active_owner_present,
+              active_owner
+            )) {
+          nlohmann::json err;
+          err["error"] = "Only the active session owner can run Doctor actions; a disconnected owner may only undo its own queued recovery run.";
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_forbidden, err.dump(), headers);
+          return;
+        }
+        const auto stats = stream_stats::get_current();
+        const auto app_uuid = proc::proc.get_running_app_uuid();
+        const auto app_name = proc::proc.get_last_run_app_name();
+        const bool virtual_display = proc::proc.session_uses_virtual_display();
+        const auto timing = stream_stats::get_session_timing(named_cert_p->uuid);
+        const auto health = build_session_health_json(
+          stats, virtual_display, named_cert_p->name, app_name, app_uuid
+        );
+        doctor_actions::recovery_action_context_t recovery_context {
+          .active_owner = active_owner,
+          .host_tuning_allowed = stats.streaming && !proc::proc.session_shutdown_requested(),
+          .caller_is_viewer = !active_owner && active_owner_present,
+          .require_owner_scope = true,
+          .owner_uuid = named_cert_p->uuid,
+          .device_name = named_cert_p->name,
+          .app_uuid = app_uuid,
+          .app_name = app_name,
+          .launch_instance_id = proc::proc.get_session_token(),
+          .session_generation = timing.session_generation,
+          .effective_stream_display_mode = effective_stream_display_mode_selection(stats, virtual_display),
+          .state_path = platf::appdata() / "recovery_profiles.json",
+          .stats = stats,
+          .health = health,
+        };
+        const auto output = doctor_actions::execute(body, recovery_context);
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(output.dump(), headers);
@@ -8117,7 +8193,8 @@ namespace nvhttp {
           stats,
           proc::proc.session_uses_virtual_display(),
           named_cert_p->name,
-          proc::proc.get_last_run_app_name()
+          proc::proc.get_last_run_app_name(),
+          proc::proc.get_running_app_uuid()
         );
         output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
@@ -8179,7 +8256,8 @@ namespace nvhttp {
           stats,
           proc::proc.session_uses_virtual_display(),
           named_cert_p->name,
-          proc::proc.get_last_run_app_name()
+          proc::proc.get_last_run_app_name(),
+          proc::proc.get_running_app_uuid()
         );
         output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
@@ -8240,7 +8318,8 @@ namespace nvhttp {
           stats,
           proc::proc.session_uses_virtual_display(),
           named_cert_p->name,
-          proc::proc.get_last_run_app_name()
+          proc::proc.get_last_run_app_name(),
+          proc::proc.get_running_app_uuid()
         );
         output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
@@ -8875,6 +8954,62 @@ namespace nvhttp {
         }
         output["last_invalidated_at"] = session_history->last_invalidated_at;
       }
+      std::optional<std::string> canonical_app_uuid;
+      if (!game.empty()) {
+        const auto apps = proc::proc.get_apps();
+        std::vector<recovery_profile::app_identity_t> identities;
+        identities.reserve(apps.size());
+        for (const auto &app : apps) {
+          identities.push_back({.uuid = app.uuid, .id = app.id, .name = app.name});
+        }
+        canonical_app_uuid = recovery_profile::resolve_canonical_app_uuid(game, identities);
+      }
+      if (canonical_app_uuid) {
+        double paired_mode_fps = 0.0;
+        int paired_width = 0;
+        int paired_height = 0;
+        (void) (!named_cert_p->display_mode.empty() &&
+          parse_stream_policy_display_mode(
+            named_cert_p->display_mode, paired_width, paired_height, paired_mode_fps
+          ));
+        recovery_profile::optimizer_constraints_t recovery_constraints;
+        recovery_constraints.paired_width = paired_width;
+        recovery_constraints.paired_height = paired_height;
+        const auto codec_support = advertised_codec_support_for_http(true);
+        recovery_constraints.supported_codecs.push_back("h264");
+        if (codec_support.hevc_mode > 1) recovery_constraints.supported_codecs.push_back("hevc");
+        if (codec_support.av1_mode > 1) recovery_constraints.supported_codecs.push_back("av1");
+        recovery_constraints.hdr_supported =
+          codec_support.hevc_mode == 3 && device_profile && device_profile->hdr_capable;
+#ifdef __linux__
+        recovery_constraints.allowed_stream_display_modes =
+          stream_display_policy::allowed_launch_modes(host_virtual_display_available(), false);
+#else
+        recovery_constraints.allowed_stream_display_modes = {
+          "headless_stream", "desktop_display", "windowed_stream"
+        };
+        if (host_virtual_display_available()) {
+          recovery_constraints.allowed_stream_display_modes.push_back("host_virtual_display");
+        }
+#endif
+        const auto recovery = recovery_profile::prepare_for_optimizer(
+          platf::appdata() / "recovery_profiles.json",
+          named_cert_p->uuid,
+          *canonical_app_uuid,
+          recovery_constraints
+        );
+        if (recovery) {
+          output = recovery_profile::overlay_optimization(
+            std::move(output), *recovery
+          );
+          effective_optimization.display_mode = output.value("display_mode", std::string {});
+          effective_optimization.target_bitrate_kbps = output.value("target_bitrate_kbps", 0);
+          effective_optimization.preferred_codec = output.value("preferred_codec", std::string {});
+          effective_optimization.hdr = output.value("hdr", false);
+          effective_optimization.virtual_display = output.value("virtual_display", false);
+        }
+      }
+
       output["profile_state"] = build_optimizer_profile_state_json(
         device,
         game,
@@ -8885,6 +9020,10 @@ namespace nvhttp {
         output.value("recovery_policy", nlohmann::json::object()),
         applied_history_safe
       );
+      if (output.contains("recovery_run_id")) {
+        output["profile_state"]["recovery_run_id"] = output["recovery_run_id"];
+        output["profile_state"]["recovery_state"] = output["recovery_state"];
+      }
 
 #ifdef __linux__
       put_optimization_launch_policy(output, args, game);
