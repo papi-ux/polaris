@@ -643,7 +643,7 @@ contributing = strip_html_comments(
 readme = strip_html_comments(Path("README.md").read_text(encoding="utf-8"))
 changelog = strip_html_comments(Path("docs/changelog.md").read_text(encoding="utf-8"))
 release_notes = strip_html_comments(
-    Path("docs/release-notes/v1.3.13.md").read_text(encoding="utf-8")
+    Path("docs/release-notes/v1.3.14.md").read_text(encoding="utf-8")
 )
 
 
@@ -1274,20 +1274,20 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
 
 current_release = markdown_section(
     changelog,
+    "## v1.3.14 - 2026-08-26",
     "## v1.3.13 - 2026-08-22",
-    "## v1.3.12 - 2026-08-22",
 )
 current_release_prose = rendered_markdown(current_release)
 required_release_facts = (
-    "SteamLaunch AppId=<id>",
-    "Depot Download HTTP",
-    "SIGKILL",
-    "nested Gamescope",
-    "EGL context",
+    "frame_pacing",
+    "apply_recovery_profile_next_launch",
+    "24-hour",
+    "one-shot",
     "Steam Input",
-    "clear_ai_api_key",
-    "Boost 1.92.0-1",
-    "npm audit --audit-level=high",
+    "deterministic-fallback",
+    "Codex CLI",
+    "GCC 16",
+    "Ubuntu",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-steamos3.8-x86_64.pkg.tar.zst",
@@ -1295,7 +1295,7 @@ required_release_facts = (
 )
 for fact in required_release_facts:
     if fact not in current_release_prose:
-        print(f"v1.3.13 changelog is missing final release fact: {fact}", file=sys.stderr)
+        print(f"v1.3.14 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
 asset_phrase = (
@@ -1304,7 +1304,7 @@ asset_phrase = (
     "`Polaris-steamos3.8-x86_64.pkg.tar.zst`, and "
     "`Polaris-ubuntu24.04-x86_64.deb`"
 )
-for label, section in (("v1.3.13 changelog", current_release_prose),):
+for label, section in (("v1.3.14 changelog", current_release_prose),):
     if section.count(asset_phrase) != 1:
         print(f"{label} must contain the exact visible four-asset phrase", file=sys.stderr)
         sys.exit(1)
@@ -1322,7 +1322,7 @@ building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section in (
     ("docs/building.md Packaging", building_packaging_prose),
-    ("v1.3.13 changelog", current_release_prose),
+    ("v1.3.14 changelog", current_release_prose),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
     if actual_assets != expected_assets:
@@ -1334,35 +1334,54 @@ for label, section in (
         sys.exit(1)
 
 release_notes_facts = (
-    "v1.3.11",
-    "v1.3.12",
-    "Steam app lineage",
-    "SteamLaunch AppId=<id>",
-    "Depot Download HTTP",
-    "SIGKILL",
-    "nested Gamescope",
-    "EGL context",
+    "v1.3.13",
+    "Nova v1.3.9",
+    "frame_pacing",
+    "apply_recovery_profile_next_launch",
+    "24 hours",
+    "one-shot",
     "Steam Input",
-    "clear_ai_api_key",
-    "Boost 1.92.0-1",
-    "Physical Retroid Pocket 6",
+    "deterministic-fallback",
+    "Codex CLI",
+    "Retroid Pocket 6",
     "CodeQL analysis remains unavailable",
-    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.3.13/Polaris-fedora44-x86_64.rpm &&",
+    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.3.14/Polaris-fedora44-x86_64.rpm &&",
     "sudo dnf install \"./Polaris-fedora44-x86_64.rpm\" &&",
-    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.3.13/Polaris-arch-x86_64.pkg.tar.zst &&",
+    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.3.14/Polaris-arch-x86_64.pkg.tar.zst &&",
     "sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&",
-    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.3.13/Polaris-ubuntu24.04-x86_64.deb &&",
+    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.3.14/Polaris-ubuntu24.04-x86_64.deb &&",
     "sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&",
+    "wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.3.14/Polaris-steamos3.8-x86_64.pkg.tar.zst &&",
+    "trap 'sudo steamos-readonly enable' EXIT",
+    "sudo pacman-key --init || exit $?",
+    "sudo pacman-key --populate || exit $?",
+    "systemctl --user enable --now polaris",
 )
 for fact in release_notes_facts:
     if fact not in release_notes:
-        print(f"v1.3.13 release notes are missing release fact: {fact}", file=sys.stderr)
+        print(f"v1.3.14 release notes are missing release fact: {fact}", file=sys.stderr)
+        sys.exit(1)
+for forbidden in (
+    "High FPS",
+    "history_safe",
+    "profilePreference",
+    "#532",
+    "Mirror desktop mode",
+):
+    if forbidden in current_release_prose or forbidden in release_notes:
+        print(f"v1.3.14 public release scope must exclude: {forbidden}", file=sys.stderr)
         sys.exit(1)
 if release_notes.count("sudo -H polaris --setup-host &&") != 3:
-    print("v1.3.13 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
+    print("v1.3.14 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
+    sys.exit(1)
+if release_notes.count("sudo -H polaris --setup-host || exit $?") != 1:
+    print("v1.3.14 release notes must chain setup-host in the SteamOS command", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("systemctl --user restart polaris") != 3:
-    print("v1.3.13 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
+    print("v1.3.14 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
+    sys.exit(1)
+if release_notes.count("systemctl --user enable --now polaris") != 1:
+    print("v1.3.14 release notes must start Polaris once after SteamOS read-only restoration", file=sys.stderr)
     sys.exit(1)
 
 release_workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")

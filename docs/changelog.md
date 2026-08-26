@@ -5,6 +5,19 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## v1.3.14 - 2026-08-26
+
+A matched Doctor-safety and stream-classification patch for Nova v1.3.9. Polaris now keeps frame-pacing evidence distinct from network loss, queues a durable one-shot recovery profile for the exact paired client and game, and keeps OpenAI subscription Doctor explanations deterministic while ordinary optimization continues through Codex CLI.
+
+- Reports duplicate-only target-rate delivery as `frame_pacing` without contradictory Stable state or an unsupported network/bitrate diagnosis
+- Adds a confirmed, host-derived `apply_recovery_profile_next_launch` action with 24-hour private persistence, exact owner/app isolation, idempotent receipts, reconnect reconstruction, and scoped Undo
+- Preserves paired resolution while enforcing safe FPS, bitrate, codec, HDR, topology, and a verified fresh launch; previews never consume the one-shot record
+- Binds confirmations to exact Doctor evidence so safe-profile drift requires a new confirmation, and consumes a run only after trusted post-connect settings match
+- Keeps Steam Input recovery manual and read-only without changing VDF files, Steam state, live streams, or unrelated optimizer history
+- Treats OpenAI subscription Doctor explanations as a clean informational `deterministic-fallback` source while regular optimizer requests retain the Codex CLI route
+- Retains the GCC 16, Ubuntu snapshot, exact release-source, sanitizer, Arch, public-hygiene, and CodeQL gates from the protected release base
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
+
 ## v1.3.13 - 2026-08-22
 
 A Linux runtime reliability and configuration patch. Polaris now stops the exact Steam app workload before asking the private Steam client to exit, keeps nested compositor teardown serialized and generation-owned, restores several capture and encoder lifecycle invariants, and lets the AI Optimizer clear a stored API key through the same strict validation contract used by the rest of Settings.
