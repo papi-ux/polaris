@@ -4596,9 +4596,6 @@ namespace nvhttp {
     launch_session->requested_width = launch_session->width;
     launch_session->requested_height = launch_session->height;
     launch_session->requested_fps = launch_session->fps;
-    launch_session->profile_preference = normalize_profile_preference(
-      get_arg(args, "profilePreference", "auto")
-    );
 
     launch_session->device_name = named_cert_p->name.empty() ? "PolarisDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
