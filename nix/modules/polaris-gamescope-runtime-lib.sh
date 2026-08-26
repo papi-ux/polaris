@@ -18,10 +18,15 @@ polaris_process_fields() {
   # shellcheck disable=SC2206
   local fields=( $rest )
   [ "${#fields[@]}" -ge 20 ] || return 1
+  POLARIS_PROCESS_STATE="${fields[0]}"
   POLARIS_PROCESS_PPID="${fields[1]}"
   POLARIS_PROCESS_PGID="${fields[2]}"
   POLARIS_PROCESS_SESSION_ID="${fields[3]}"
   POLARIS_PROCESS_START_TIME="${fields[19]}"
+  case "$POLARIS_PROCESS_STATE" in
+    [A-Za-z]) ;;
+    *) return 1 ;;
+  esac
   case "$POLARIS_PROCESS_PPID:$POLARIS_PROCESS_PGID:$POLARIS_PROCESS_SESSION_ID:$POLARIS_PROCESS_START_TIME" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
@@ -499,6 +504,10 @@ polaris_private_session_alive() {
       return 2
     fi
     [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    # Zombies cannot execute, fork, retain file descriptors, or own sockets.
+    # A stopped parent may not reap them until its own terminal signal, so they
+    # are terminal for teardown even while their procfs entry still exists.
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
     # Any live member of the authorized private session keeps teardown alive,
     # including descendants that moved to a separate process group.
     found=0
@@ -507,11 +516,235 @@ polaris_private_session_alive() {
   return "$found"
 }
 
+polaris_process_group_alive() {
+  local session_id="$1" process_group="$2" proc_root process pid found=1 seen=0
+  proc_root="$(polaris_proc_root)"
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 2
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    seen=1
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$process" ] && continue
+      return 2
+    fi
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    [ "$POLARIS_PROCESS_PGID" = "$process_group" ] || continue
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    found=0
+  done
+  [ "$seen" = 1 ] || return 2
+  return "$found"
+}
+
+polaris_wait_process_group_stopped() {
+  local session_id="$1" process_group="$2" proc_root process pid seen all_stopped
+  local steps="${POLARIS_FREEZE_WAIT_STEPS:-100}"
+  proc_root="$(polaris_proc_root)"
+  for _ in $(seq 1 "$steps"); do
+    [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 1
+    seen=0
+    all_stopped=1
+    for process in "$proc_root"/[0-9]*; do
+      [ -d "$process" ] || continue
+      pid="${process##*/}"
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      if ! polaris_process_fields "$pid"; then
+        [ ! -e "$process" ] && continue
+        return 1
+      fi
+      [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+      [ "$POLARIS_PROCESS_PGID" = "$process_group" ] || continue
+      seen=1
+      case "$POLARIS_PROCESS_STATE" in
+        T|t|Z) ;;
+        *) all_stopped=0 ;;
+      esac
+    done
+    [ "$seen" = 1 ] || return 1
+    [ "$all_stopped" = 1 ] && return 0
+    sleep 0.01
+  done
+  return 1
+}
+
+polaris_private_session_has_no_live_siblings() {
+  local session_id="$1" proc_root process pid seen=0
+  proc_root="$(polaris_proc_root)"
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 2
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    seen=1
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$process" ] && continue
+      return 2
+    fi
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    [ "$POLARIS_PROCESS_PGID" = "$session_id" ] || return 1
+  done
+  [ "$seen" = 1 ] || return 2
+  return 0
+}
+
+polaris_wait_group_leader_stopped() {
+  local pid="$1" start_time="$2" session_id="$3" executable="$4"
+  local steps="${POLARIS_FREEZE_WAIT_STEPS:-100}"
+  for _ in $(seq 1 "$steps"); do
+    if ! polaris_process_fields "$pid" \
+        || [ "$POLARIS_PROCESS_START_TIME" != "$start_time" ] \
+        || [ "$POLARIS_PROCESS_PGID" != "$pid" ] \
+        || [ "$POLARIS_PROCESS_SESSION_ID" != "$session_id" ]; then
+      return 1
+    fi
+    if [ -z "$executable" ]; then
+      # A zombie leader still pins its PID/PGID against reuse but exposes no
+      # executable. It is valid authority only while its exact generation and
+      # terminal Z state remain unchanged; live group members are checked by
+      # polaris_wait_process_group_stopped before any negative KILL.
+      [ "$POLARIS_PROCESS_STATE" = Z ] && return 0
+      return 1
+    fi
+    [ "$(readlink -f "$(polaris_proc_root)/$pid/exe" 2>/dev/null)" = "$executable" ] || return 1
+    case "$POLARIS_PROCESS_STATE" in
+      T|t) return 0 ;;
+    esac
+    sleep 0.01
+  done
+  return 1
+}
+
+polaris_wait_gamescope_stopped() {
+  local pid="$1" start_time="$2" executable="$3" process_group="$4" session_id="$5"
+  local steps="${POLARIS_FREEZE_WAIT_STEPS:-100}"
+  for _ in $(seq 1 "$steps"); do
+    if ! polaris_validate_process_generation "$pid" "$start_time" "$executable" \
+        || [ "$POLARIS_PROCESS_PGID" != "$process_group" ] \
+        || [ "$POLARIS_PROCESS_SESSION_ID" != "$session_id" ]; then
+      return 1
+    fi
+    case "$POLARIS_PROCESS_STATE" in
+      T|t) return 0 ;;
+    esac
+    sleep 0.01
+  done
+  return 1
+}
+
+# Kill every remaining process group of an already-authorized private session.
+# Steam and pressure-vessel may move helpers into sibling groups while retaining
+# the original SID. Freeze and revalidate each group leader as an immutable PGID
+# reuse barrier before negative signaling. A leaderless or unreadable group
+# fails closed and keeps the durable recovery claim.
+polaris_kill_private_session_groups() {
+  local session_id="$1" kill_bin="${POLARIS_KILL_BIN:-kill}"
+  local proc_root process pid process_group group existing seen_group index
+  local group_start group_executable group_rc
+  local kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
+  local groups=() group_starts=() group_executables=()
+  proc_root="$(polaris_proc_root)"
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 1
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$process" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    process_group="$POLARIS_PROCESS_PGID"
+    [ "$process_group" != "$session_id" ] || continue
+    seen_group=0
+    for existing in "${groups[@]+"${groups[@]}"}"; do
+      [ "$existing" = "$process_group" ] && seen_group=1
+    done
+    [ "$seen_group" = 1 ] || groups+=("$process_group")
+  done
+  for group in "${groups[@]+"${groups[@]}"}"; do
+    polaris_process_fields "$group" || return 1
+    [ "$POLARIS_PROCESS_PGID" = "$group" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+    group_start="$POLARIS_PROCESS_START_TIME"
+    if [ "$POLARIS_PROCESS_STATE" = Z ]; then
+      # An unreaped group leader is an immutable numeric PGID barrier even
+      # though procfs no longer exposes its executable. A live sibling caused
+      # this group to be collected; all such siblings still must freeze T/t.
+      group_executable=''
+    else
+      group_executable="$(readlink -f "$proc_root/$group/exe" 2>/dev/null)" || return 1
+      [ -n "$group_executable" ] || return 1
+    fi
+    group_starts+=("$group_start")
+    group_executables+=("$group_executable")
+  done
+  for index in "${!groups[@]}"; do
+    group="${groups[$index]}"
+    # Freeze the entire validated group, not a positive PID. The live exact
+    # group leader is the PGID-reuse barrier; the post-signal identity and
+    # kernel-state checks prove that the barrier actually entered T/t.
+    "$kill_bin" -STOP "-$group" 2>/dev/null || return 1
+    polaris_wait_group_leader_stopped \
+      "$group" "${group_starts[$index]}" "$session_id" "${group_executables[$index]}" || return 1
+    polaris_wait_process_group_stopped "$session_id" "$group" || return 1
+  done
+  # The original group is already frozen, and every group found above is now
+  # frozen. A group created during enumeration is not authorized by this pass;
+  # fail with the marked compositor still alive so a retry can enumerate it.
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$process" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    process_group="$POLARIS_PROCESS_PGID"
+    [ "$process_group" != "$session_id" ] || continue
+    seen_group=0
+    for existing in "${groups[@]+"${groups[@]}"}"; do
+      [ "$existing" = "$process_group" ] && seen_group=1
+    done
+    [ "$seen_group" = 1 ] || return 1
+  done
+  for index in "${!groups[@]}"; do
+    group="${groups[$index]}"
+    polaris_wait_group_leader_stopped \
+      "$group" "${group_starts[$index]}" "$session_id" "${group_executables[$index]}" || return 1
+    polaris_wait_process_group_stopped "$session_id" "$group" || return 1
+    "$kill_bin" -KILL "-$group" 2>/dev/null || return 1
+    for _ in $(seq 1 "$kill_steps"); do
+      if polaris_process_group_alive "$session_id" "$group"; then
+        sleep 0.1
+        continue
+      else
+        group_rc=$?
+        [ "$group_rc" -eq 1 ] || return 1
+        break
+      fi
+    done
+    if polaris_process_group_alive "$session_id" "$group"; then
+      return 1
+    else
+      group_rc=$?
+      [ "$group_rc" -eq 1 ] || return 1
+    fi
+  done
+  polaris_private_session_has_no_live_siblings "$session_id"
+}
+
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   local marker_line pid start_time executable_path pgid session_id group_leader_start group_leader_executable socket inode entry current_inode
-  local owned_sockets=() term_steps="${POLARIS_STOP_WAIT_STEPS:-30}" kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}" leader_stopped=0
+  local owned_sockets=() kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
+  local group_stop_requested=0 destructive_signal_armed=0 group_rc
   umask 077
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
@@ -545,29 +778,55 @@ polaris_stop_marked_gamescope() (
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
     && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
-  # Inline EXIT trap (not a nested function) so SC2329 does not flag a
-  # "never invoked" helper. CONT only if we STOPped the leader and authorize it.
+  # Freeze the complete private process group and prove that both the immutable
+  # group leader and the exact marked compositor reached kernel stop state.
+  # This removes the Xwayland-disappears-while-Gamescope-runs failure mode even
+  # when setsid owns a wrapper and Gamescope is its child. Before teardown is
+  # committed, a failure resumes only the still-exact group. Once committed,
+  # every failure leaves the marker generation stopped for a safe retry.
   trap '
-    if [ "$leader_stopped" = 1 ] \
+    if [ "$destructive_signal_armed" = 0 ] \
+        && [ "$group_stop_requested" = 1 ] \
         && polaris_process_fields "$pgid" \
         && [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
         && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
         && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] \
         && [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ]; then
-      "$kill_bin" -CONT "$pgid" 2>/dev/null || true
+      "$kill_bin" -CONT "-$pgid" 2>/dev/null || true
     fi
   ' EXIT
-  "$kill_bin" -STOP "$pgid" 2>/dev/null || return 1
-  leader_stopped=1
+  # Revalidate the leader immediately before the negative-PGID freeze. Keeping
+  # that exact leader alive prevents the numeric process group from being
+  # recycled while stop state is established.
   polaris_process_fields "$pgid" || return 1
   [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
     && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
     && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
   [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ] || return 1
-  "$kill_bin" -TERM "-$pgid" 2>/dev/null || return 1
-  group_rc=0
-  for _ in $(seq 1 "$term_steps"); do
-    [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  group_stop_requested=1
+  "$kill_bin" -STOP "-$pgid" 2>/dev/null || return 1
+  polaris_wait_group_leader_stopped "$pgid" "$group_leader_start" "$session_id" "$group_leader_executable" || return 1
+  polaris_wait_gamescope_stopped "$pid" "$start_time" "$executable_path" "$pgid" "$session_id" || return 1
+  polaris_wait_process_group_stopped "$session_id" "$pgid" || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  # Commit before the first helper that may send SIGKILL. An interruption after
+  # this assignment can never resume Gamescope over a partially removed group.
+  destructive_signal_armed=1
+  polaris_kill_private_session_groups "$pgid" || return 1
+  # All escaped groups must be terminal while the exact original marker and
+  # frozen leader still provide retry authority. Only then kill the original.
+  polaris_process_fields "$pgid" || return 1
+  [ "$POLARIS_PROCESS_STATE" = T ] || [ "$POLARIS_PROCESS_STATE" = t ] || return 1
+  [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
+    && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ] || return 1
+  polaris_wait_gamescope_stopped "$pid" "$start_time" "$executable_path" "$pgid" "$session_id" || return 1
+  polaris_wait_process_group_stopped "$session_id" "$pgid" || return 1
+  polaris_private_session_has_no_live_siblings "$session_id" || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  "$kill_bin" -KILL "-$pgid" 2>/dev/null || return 1
+  for _ in $(seq 1 "$kill_steps"); do
     if polaris_private_session_alive "$pgid"; then
       sleep 0.1
       continue
@@ -577,34 +836,6 @@ polaris_stop_marked_gamescope() (
       break
     fi
   done
-  if polaris_private_session_alive "$pgid"; then
-    [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-    # Keep the exact private-session leader allocation as an immutable PGID-reuse
-    # barrier through the last negative-PGID operation. The marked compositor may
-    # be a launcher child and may exit after TERM; only the retained leader can
-    # authorize safe escalation.
-    polaris_process_fields "$pgid" || return 1
-    [ "$POLARIS_PROCESS_START_TIME" = "$group_leader_start" ] \
-      && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
-      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
-    [ "$(readlink -f "$(polaris_proc_root)/$pgid/exe" 2>/dev/null)" = "$group_leader_executable" ] || return 1
-    [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-    "$kill_bin" -KILL "-$pgid" 2>/dev/null || return 1
-    for _ in $(seq 1 "$kill_steps"); do
-      [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
-      if polaris_private_session_alive "$pgid"; then
-        sleep 0.1
-        continue
-      else
-        group_rc=$?
-        [ "$group_rc" -eq 1 ] || return 1
-        break
-      fi
-    done
-  else
-    group_rc=$?
-    [ "$group_rc" -eq 1 ] || return 1
-  fi
   if polaris_private_session_alive "$pgid"; then
     return 1
   else
