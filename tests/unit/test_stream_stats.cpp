@@ -1069,6 +1069,37 @@ TEST(StreamStatsDoctorTests, RelaunchFindingOffersExactDurableNextLaunchContract
     action.at("verification").at("action_id"),
     "verify_recovery_profile_next_launch"
   );
+
+  const auto identical = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "frame_pacing"},
+      {"grade", "watch"},
+      {"relaunch_recommended", true},
+      {"safe_display_mode", "headless"},
+      {"safe_target_fps", 40},
+      {"safe_bitrate_kbps", 18000},
+      {"safe_codec", "hevc"},
+      {"safe_hdr", false}
+    },
+    "game-a"
+  );
+  const auto changed_profile = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "frame_pacing"},
+      {"grade", "watch"},
+      {"relaunch_recommended", true},
+      {"safe_display_mode", "headless"},
+      {"safe_target_fps", 30},
+      {"safe_bitrate_kbps", 14000},
+      {"safe_codec", "hevc"},
+      {"safe_hdr", false}
+    },
+    "game-a"
+  );
+  EXPECT_EQ(identical.at("result_id"), doctor.at("result_id"));
+  EXPECT_NE(changed_profile.at("result_id"), doctor.at("result_id"));
 }
 
 TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {

@@ -135,6 +135,35 @@ TEST_F(RecoveryProfileTest, QueuesPrivateDurableProfileAndRepeatsIdempotently) {
   EXPECT_EQ(resumed.value("recovery_state", ""), "queued");
 }
 
+TEST_F(RecoveryProfileTest, RepeatingConsumedConfirmedActionReturnsAppliedRun) {
+  const auto first = queue_profile(
+    target, "client-a", "game-a", "doctor-v2-watch-frame_pacing-none-a", safe_profile(), now
+  );
+  ASSERT_TRUE(first.value("status", false));
+  const auto run_id = first.value("run_id", "");
+  auto launched = matching_launch();
+  ASSERT_TRUE(recovery_profile::verify(
+    target, "client-a", "game-a", run_id, launched, now + 1
+  ).value("status", false));
+
+  auto changed_profile = safe_profile();
+  changed_profile.target_fps = 30;
+  const auto repeated = queue_profile(
+    target,
+    "client-a",
+    "game-a",
+    "doctor-v2-watch-frame_pacing-none-a",
+    changed_profile,
+    now + 2
+  );
+  EXPECT_TRUE(repeated.value("status", false));
+  EXPECT_FALSE(repeated.value("changed", true));
+  EXPECT_TRUE(repeated.value("idempotent", false));
+  EXPECT_EQ(repeated.value("recovery_state", ""), "applied");
+  EXPECT_EQ(repeated.value("run_id", ""), run_id);
+  EXPECT_EQ(repeated.at("safe_profile").value("target_fps", 0), safe_profile().target_fps);
+}
+
 TEST_F(RecoveryProfileTest, IsolatesOwnerAndCanonicalGame) {
   ASSERT_TRUE(queue_profile(
     target, "client-a", "game-a", "doctor-v2-watch-frame_pacing-none", safe_profile(), now

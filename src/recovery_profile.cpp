@@ -382,11 +382,10 @@ namespace recovery_profile {
     const bool expired_records_changed = expire_and_prune(loaded.store, now);
 
     auto existing = find_key(loaded.store, owner_uuid, app_uuid);
-    if (existing != loaded.store.records.end() && existing->state == "queued" &&
+    if (existing != loaded.store.records.end() &&
+        (existing->state == "queued" || existing->state == "applied") &&
         existing->source_result_id == source_result_id) {
       auto receipt = receipt_json(*existing);
-      receipt["state"] = "queued";
-      receipt["recovery_state"] = "queued";
       receipt["idempotent"] = true;
       if (expired_records_changed && !persist(path, loaded.store)) return unavailable(load_status_e::io_error);
       return receipt;

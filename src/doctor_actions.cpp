@@ -350,7 +350,9 @@ namespace doctor_actions {
       if (receipt.value("status", false)) {
         receipt["action_id"] = "apply_recovery_profile_next_launch";
         receipt["kind"] = "next_launch_profile";
-        receipt["message"] =
+        const auto recovery_state = receipt.value("recovery_state", std::string {});
+        receipt["message"] = recovery_state == "applied" ?
+          "This confirmed recovery action was already applied by its matching one-shot launch." :
           "The current stream is unchanged. The safer profile is queued only for the next launch of this game on this paired device.";
         receipt["verification"] = {
           {"mode", "post_connect"},
@@ -371,8 +373,11 @@ namespace doctor_actions {
   bool paired_route_allowed(std::string_view action_id,
                             bool active_owner_present,
                             bool caller_is_active_owner) {
+    static_cast<void>(active_owner_present);
     if (caller_is_active_owner) return true;
-    return action_id == "undo" && !active_owner_present;
+    // The core action resolves Undo under the caller certificate's owner UUID,
+    // so this cannot remove the active owner's or another client's record.
+    return action_id == "undo";
   }
 
   int guarded_bitrate_target(int current_bitrate_kbps,
