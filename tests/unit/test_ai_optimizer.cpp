@@ -835,6 +835,27 @@ TEST(AiOptimizerDoctorExplanation, DisabledConfigFallsBackToDeterministicEvidenc
   EXPECT_FALSE(result.at("explanation").value("destructive_action_allowed", true));
 }
 
+TEST(AiOptimizerDoctorExplanation, OpenAiSubscriptionUsesCleanExpectedDeterministicFallback) {
+  ai_optimizer::config_t config;
+  config.enabled = true;
+  config.provider = "openai";
+  config.model = "gpt-5";
+  config.auth_mode = "subscription";
+
+  const auto result = nlohmann::json::parse(ai_optimizer::explain_doctor_json_with_config(config, R"({
+    "doctor":{"simple_state":"Frame pacing","primary_issue":"frame_pacing"}
+  })"));
+
+  EXPECT_TRUE(result.value("status", false));
+  EXPECT_TRUE(result.value("fallback", false));
+  EXPECT_TRUE(result.value("provider_error", "not-empty").empty());
+  EXPECT_EQ("deterministic-fallback", result.at("source").value("kind", ""));
+  EXPECT_EQ("openai-subscription", result.at("source").value("mode", ""));
+  EXPECT_TRUE(result.at("source").value("informational", false));
+  EXPECT_EQ("deterministic-fallback", result.at("explanation").value("confidence", ""));
+  EXPECT_EQ("Frame pacing", result.at("explanation").value("likely_cause", ""));
+}
+
 TEST(AiOptimizerModeAwareCache, LegacyRequestsKeepTheirBucketAndModesGetTheirOwn) {
   const auto legacy = ai_optimizer::cache_key_for_tests(
     "anthropic", "model", "url", "RetroidPocket6", "Control Ultimate Edition", "");
