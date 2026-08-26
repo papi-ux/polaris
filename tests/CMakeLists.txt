@@ -71,6 +71,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
+    ${CMAKE_SOURCE_DIR}/src/recovery_profile.cpp
     ${CMAKE_SOURCE_DIR}/src/web_session_store.cpp
     ${CMAKE_SOURCE_DIR}/src/beat_times.cpp
     ${CMAKE_SOURCE_DIR}/src/display_planner.cpp
@@ -115,6 +116,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_private_state_file.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_profile.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_verified_action.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_web_session_store.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_beat_times.cpp
@@ -224,6 +226,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_doctor_actions.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
 )
 
