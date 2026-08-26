@@ -211,9 +211,25 @@ TEST_F(RecoveryDoctorActionTest, UndoCancelsOnlyTheMatchingQueuedRun) {
     context.state_path, context.owner_uuid, context.app_uuid
   ));
 
-  context.stats.streaming = false;
-  context.host_tuning_allowed = false;
-  context.app_uuid.clear();
+  auto other_owner = context;
+  other_owner.active_owner = false;
+  other_owner.caller_is_viewer = true;
+  other_owner.owner_uuid = "client-b";
+  const auto cross_owner = doctor_actions::execute({
+    {"action_id", "undo"}, {"run_id", run_id}
+  }, other_owner);
+  EXPECT_FALSE(cross_owner.value("status", true));
+  EXPECT_TRUE(recovery_profile::queued(
+    context.state_path, context.owner_uuid, context.app_uuid
+  ));
+
+  // The queued owner may be disconnected while another paired client owns the
+  // live stream. Exact owner scoping still lets A cancel only A's record.
+  context.active_owner = false;
+  context.caller_is_viewer = true;
+  context.stats.streaming = true;
+  context.host_tuning_allowed = true;
+  context.app_uuid = "game-b";
   const auto undone = doctor_actions::execute({
     {"action_id", "undo"}, {"run_id", run_id}
   }, context);

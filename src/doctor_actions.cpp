@@ -249,7 +249,7 @@ namespace doctor_actions {
 
       const auto run_id = request.value("run_id", std::string {});
       if (action_id == "undo") {
-        if (context.caller_is_viewer || context.state_path.empty() ||
+        if (context.state_path.empty() ||
             (context.require_owner_scope && context.owner_uuid.empty())) {
           return recovery_rejected(
             "Only the paired owner or authenticated host can undo this recovery run.",
