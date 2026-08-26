@@ -3619,7 +3619,35 @@ namespace confighttp {
       std::stringstream ss;
       ss << request->content.rdbuf();
       const auto body = nlohmann::json::parse(ss.str());
-      send_response(response, doctor_actions::execute(body));
+      const auto stats = stream_stats::get_current();
+      const auto owner_uuid = proc::proc.get_session_owner_unique_id();
+      const auto device_name = proc::proc.get_session_owner_device_name();
+      const auto app_uuid = proc::proc.get_running_app_uuid();
+      const auto app_name = proc::proc.get_last_run_app_name();
+      const bool virtual_display = proc::proc.session_uses_virtual_display();
+      const auto timing = stream_stats::get_session_timing(owner_uuid);
+      const auto health = nvhttp::build_session_health_for_action(
+        stats, virtual_display, device_name, app_name
+      );
+      doctor_actions::recovery_action_context_t recovery_context {
+        .active_owner = !owner_uuid.empty() && proc::proc.is_session_owner(owner_uuid),
+        .host_tuning_allowed = stats.streaming && !proc::proc.session_shutdown_requested(),
+        .caller_is_viewer = false,
+        .require_owner_scope = false,
+        .owner_uuid = owner_uuid,
+        .device_name = device_name,
+        .app_uuid = app_uuid,
+        .app_name = app_name,
+        .launch_instance_id = proc::proc.get_session_token(),
+        .session_generation = timing.session_generation,
+        .effective_stream_display_mode = nvhttp::effective_stream_display_mode_for_action(
+          stats, virtual_display
+        ),
+        .state_path = platf::appdata() / "recovery_profiles.json",
+        .stats = stats,
+        .health = health,
+      };
+      send_response(response, doctor_actions::execute(body, recovery_context));
     } catch (const std::exception &e) {
       send_response(response, {{"status", false}, {"changed", false}, {"error", e.what()}});
     }

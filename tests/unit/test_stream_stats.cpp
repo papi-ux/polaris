@@ -1024,6 +1024,84 @@ TEST(StreamStatsDoctorTests, CleanHistorySafeCapOffersGraduatedQualityRestore) {
   ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
 }
 
+TEST(StreamStatsDoctorTests, RelaunchFindingOffersExactDurableNextLaunchContract) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 54.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 30000;
+  stats.codec = "AV1";
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "frame_pacing"},
+      {"grade", "watch"},
+      {"relaunch_recommended", true},
+      {"safe_display_mode", "headless"},
+      {"safe_target_fps", 40},
+      {"safe_bitrate_kbps", 18000},
+      {"safe_codec", "hevc"},
+      {"safe_hdr", false}
+    },
+    "game-a"
+  );
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(action.at("id"), "apply_recovery_profile_next_launch");
+  EXPECT_EQ(action.at("kind"), "next_launch_profile");
+  EXPECT_EQ(action.at("endpoint"), "/api/doctor/action");
+  EXPECT_EQ(action.at("paired_endpoint"), "/polaris/v1/doctor/action");
+  EXPECT_EQ(action.at("method"), "POST");
+  EXPECT_TRUE(action.at("requires_confirmation"));
+  EXPECT_TRUE(action.at("requires_owner"));
+  EXPECT_TRUE(action.at("owner_tuning_allowed"));
+  EXPECT_TRUE(action.at("undo").at("supported"));
+  EXPECT_EQ(action.at("payload_preview").size(), 3);
+  EXPECT_EQ(action.at("payload_preview").at("action_id"), action.at("id"));
+  EXPECT_EQ(action.at("payload_preview").at("source_result_id"), doctor.at("result_id"));
+  EXPECT_EQ(action.at("payload_preview").at("app_uuid"), "game-a");
+  EXPECT_EQ(action.at("verification").at("mode"), "post_connect");
+  EXPECT_EQ(
+    action.at("verification").at("action_id"),
+    "verify_recovery_profile_next_launch"
+  );
+
+  const auto identical = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "frame_pacing"},
+      {"grade", "watch"},
+      {"relaunch_recommended", true},
+      {"safe_display_mode", "headless"},
+      {"safe_target_fps", 40},
+      {"safe_bitrate_kbps", 18000},
+      {"safe_codec", "hevc"},
+      {"safe_hdr", false}
+    },
+    "game-a"
+  );
+  const auto changed_profile = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "frame_pacing"},
+      {"grade", "watch"},
+      {"relaunch_recommended", true},
+      {"safe_display_mode", "headless"},
+      {"safe_target_fps", 30},
+      {"safe_bitrate_kbps", 14000},
+      {"safe_codec", "hevc"},
+      {"safe_hdr", false}
+    },
+    "game-a"
+  );
+  EXPECT_EQ(identical.at("result_id"), doctor.at("result_id"));
+  EXPECT_NE(changed_profile.at("result_id"), doctor.at("result_id"));
+}
+
 TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   stream_stats::stats_t stats {};
   stats.streaming = true;

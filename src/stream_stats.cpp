@@ -8,6 +8,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <mutex>
@@ -19,8 +20,10 @@
 // local includes
 #include "adaptive_bitrate.h"
 #include "config.h"
+#include "crypto.h"
 #include "logging.h"
 #include "stream_stats.h"
+#include "utility.h"
 #include "verified_action.h"
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
@@ -109,6 +112,42 @@ namespace stream_stats {
         case 2: return "av1";
         default: return {};
       }
+    }
+
+    std::string doctor_codec_family(std::string codec) {
+      std::transform(codec.begin(), codec.end(), codec.begin(), [](unsigned char byte) {
+        return static_cast<char>(std::tolower(byte));
+      });
+      if (codec.find("av1") != std::string::npos) return "av1";
+      if (codec.find("hevc") != std::string::npos || codec.find("h265") != std::string::npos ||
+          codec.find("h.265") != std::string::npos) return "hevc";
+      if (codec.find("h264") != std::string::npos || codec.find("h.264") != std::string::npos ||
+          codec.find("avc") != std::string::npos) return "h264";
+      return {};
+    }
+
+    std::string recovery_evidence_result_id(std::string base,
+                                            const stats_t &stats,
+                                            const nlohmann::json &health,
+                                            std::string_view app_uuid,
+                                            double target_fps,
+                                            int live_bitrate_kbps) {
+      if (!health.value("relaunch_recommended", false)) return base;
+
+      auto codec = health.value("safe_codec", doctor_codec_family(stats.codec));
+      if (codec.empty()) codec = "h264";
+      const nlohmann::json evidence = {
+        {"app_uuid", app_uuid},
+        {"stream_display_mode", health.value("safe_display_mode", std::string {})},
+        {"width", stats.width},
+        {"height", stats.height},
+        {"target_fps", health.value("safe_target_fps", static_cast<int>(std::round(target_fps)))},
+        {"target_bitrate_kbps", health.value("safe_bitrate_kbps", live_bitrate_kbps)},
+        {"preferred_codec", codec},
+        {"hdr", health.value("safe_hdr", false)}
+      };
+      const auto fingerprint = util::hex(crypto::hash(evidence.dump())).to_string();
+      return base + "-" + fingerprint.substr(0, 32);
     }
 
     void reset_hot_fields() {
@@ -843,7 +882,8 @@ namespace stream_stats {
                                       int current_bitrate_kbps,
                                       int paired_target_bitrate_kbps,
                                       bool live_bitrate_tunable,
-                                      const std::string &source_result_id) {
+                                      const std::string &source_result_id,
+                                      std::string_view app_uuid) {
       std::string id = "none";
       std::string label = "No automatic action";
       std::string kind = "none";
@@ -934,15 +974,23 @@ namespace stream_stats {
         id = "apply_recovery_profile_next_launch";
         label = "Use safer next launch";
         kind = "next_launch_profile";
-        rollback = "Restore the previous display, HDR, codec, FPS, or bitrate settings before launching again.";
-        if (health.contains("safe_display_mode")) payload["display_mode"] = health["safe_display_mode"];
-        if (health.contains("safe_bitrate_kbps")) payload["target_bitrate_kbps"] = health["safe_bitrate_kbps"];
-        if (health.contains("safe_target_fps")) payload["target_fps"] = health["safe_target_fps"];
-        if (health.contains("safe_codec")) payload["preferred_codec"] = health["safe_codec"];
-        if (health.contains("safe_hdr")) payload["hdr"] = health["safe_hdr"];
+        endpoint = "/api/doctor/action";
+        method = "POST";
+        payload["action_id"] = id;
+        payload["source_result_id"] = source_result_id;
+        if (!app_uuid.empty()) payload["app_uuid"] = app_uuid;
+        rollback = "Undo cancels only the queued, unconsumed next-launch profile. The current stream and saved host settings remain unchanged.";
+        verification = {
+          {"mode", "post_connect"},
+          {"delay_seconds", 0},
+          {"action_id", "verify_recovery_profile_next_launch"},
+          {"endpoint", "/polaris/v1/doctor/action"},
+          {"success_when", nlohmann::json::array({"matching owner and game are connected", "effective topology, resolution, FPS, bitrate, codec, and HDR match the queued safe profile"})}
+        };
       }
 
-      const bool undoable = id == "lower_bitrate" || id == "restore_quality";
+      const bool undoable = id == "lower_bitrate" || id == "restore_quality" ||
+        id == "apply_recovery_profile_next_launch";
 
       return {
         {"id", id},
@@ -958,12 +1006,17 @@ namespace stream_stats {
         {"payload_preview", payload},
         {"rollback", rollback},
         {"verification", verification},
-        {"undo", {{"supported", undoable}, {"endpoint", undoable ? "/api/doctor/action" : ""}}}
+        {"paired_endpoint", id == "apply_recovery_profile_next_launch" ? "/polaris/v1/doctor/action" : ""},
+        {"owner_tuning_allowed", id == "apply_recovery_profile_next_launch"},
+        {"undo", {{"supported", undoable}, {"endpoint", undoable ? "/api/doctor/action" : ""},
+          {"paired_endpoint", id == "apply_recovery_profile_next_launch" ? "/polaris/v1/doctor/action" : ""}}}
       };
     }
   }  // namespace
 
-  nlohmann::json build_doctor_json(const stats_t &stats, const nlohmann::json &health) {
+  nlohmann::json build_doctor_json(const stats_t &stats,
+                                   const nlohmann::json &health,
+                                   std::string_view app_uuid) {
     const auto capture_reason = capture_path_reason(stats);
     const auto capture_path = capture_path_summary(stats);
     const bool capture_cpu_copy = capture_path_uses_cpu_copy(stats);
@@ -1205,7 +1258,14 @@ namespace stream_stats {
 
     nlohmann::json doctor;
     doctor["version"] = 2;
-    doctor["result_id"] = "doctor-v2-" + status + "-" + primary_issue + "-" + capture_reason;
+    doctor["result_id"] = recovery_evidence_result_id(
+      "doctor-v2-" + status + "-" + primary_issue + "-" + capture_reason,
+      stats,
+      health,
+      app_uuid,
+      target_fps,
+      live_bitrate_kbps
+    );
     doctor["scope"] = "stream";
     doctor["status"] = status;
     doctor["traffic_light"] = traffic;
@@ -1224,7 +1284,8 @@ namespace stream_stats {
       live_bitrate_kbps,
       stats.paired_target_bitrate_kbps,
       stats.adaptive_runtime_update_supported,
-      doctor["result_id"].get<std::string>()
+      doctor["result_id"].get<std::string>(),
+      app_uuid
     );
     doctor["suppressed_findings"] = nlohmann::json::array();
     if (suppressed_stale_network_finding) {
