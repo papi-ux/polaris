@@ -248,7 +248,9 @@ namespace stream_stats {
    * @param stats Current stream statistics snapshot.
    * @param health Existing deterministic health JSON, when available.
    */
-  nlohmann::json build_doctor_json(const stats_t &stats, const nlohmann::json &health);
+  nlohmann::json build_doctor_json(const stats_t &stats,
+                                   const nlohmann::json &health,
+                                   std::string_view app_uuid = {});
 
   /**
    * @brief Effective dynamic range mode Polaris is advertising for the stream.

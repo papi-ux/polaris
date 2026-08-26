@@ -26,11 +26,9 @@
 
 using namespace std::chrono_literals;
 
-#ifdef POLARIS_TESTS
 namespace stream_stats {
   struct stats_t;
 }
-#endif
 
 #if defined(__linux__)
 namespace proc {
@@ -388,6 +386,14 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display
   );
+
+  /** Shared trusted evidence used by both authenticated Doctor action routes. */
+  nlohmann::json build_session_health_for_action(const stream_stats::stats_t &stats,
+                                                 bool current_virtual_display,
+                                                 const std::string &device_name,
+                                                 const std::string &app_name);
+  std::string effective_stream_display_mode_for_action(const stream_stats::stats_t &stats,
+                                                       bool current_virtual_display);
 
 #ifdef POLARIS_TESTS
   bool is_in_trusted_subnet_for_tests(const boost::asio::ip::address &addr);
