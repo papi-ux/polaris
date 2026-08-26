@@ -6,11 +6,13 @@
 #include "doctor_actions.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,6 +22,7 @@
 #include "adaptive_bitrate.h"
 #include "game_library_scanner.h"
 #include "logging.h"
+#include "recovery_profile.h"
 
 #ifdef __linux__
   #include "process.h"
@@ -174,11 +177,202 @@ namespace doctor_actions {
       ).count();
       return "doctor-run-" + std::to_string(ticks);
     }
+
+    std::string normalized_codec_family(std::string codec) {
+      std::transform(codec.begin(), codec.end(), codec.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+      });
+      if (codec.find("av1") != std::string::npos) return "av1";
+      if (codec.find("hevc") != std::string::npos || codec.find("h265") != std::string::npos ||
+          codec.find("h.265") != std::string::npos) return "hevc";
+      if (codec.find("h264") != std::string::npos || codec.find("h.264") != std::string::npos ||
+          codec.find("avc") != std::string::npos) return "h264";
+      return {};
+    }
+
+    int trusted_target_fps(const stream_stats::stats_t &stats) {
+      const double fps =
+        stats.encode_target_fps > 0.0 ? stats.encode_target_fps :
+        stats.session_target_fps > 0.0 ? stats.session_target_fps :
+        stats.requested_client_fps > 0.0 ? stats.requested_client_fps :
+        stats.fps;
+      return static_cast<int>(std::round(fps));
+    }
+
+    int trusted_bitrate(const stream_stats::stats_t &stats) {
+      return stats.adaptive_target_bitrate_kbps > 0 ?
+        stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    }
+
+    std::optional<recovery_profile::safe_profile_t> derive_safe_recovery_profile(
+      const recovery_action_context_t &context
+    ) {
+      recovery_profile::safe_profile_t profile;
+      const auto safe_mode = context.health.value("safe_display_mode", std::string {});
+      profile.stream_display_mode = safe_mode == "virtual_display" ? "host_virtual_display" :
+        safe_mode == "headless" ? "headless_stream" : context.effective_stream_display_mode;
+      profile.width = context.stats.width;
+      profile.height = context.stats.height;
+      profile.target_fps = context.health.value("safe_target_fps", trusted_target_fps(context.stats));
+      profile.target_bitrate_kbps = context.health.value("safe_bitrate_kbps", trusted_bitrate(context.stats));
+      profile.preferred_codec = normalized_codec_family(
+        context.health.value("safe_codec", context.stats.codec)
+      );
+      if (profile.preferred_codec.empty()) profile.preferred_codec = "h264";
+      profile.hdr = context.health.value("safe_hdr", false);
+
+      if (profile.width <= 0 || profile.height <= 0 || profile.target_fps <= 0 ||
+          profile.target_bitrate_kbps <= 0 || profile.stream_display_mode.empty()) {
+        return std::nullopt;
+      }
+      return profile;
+    }
+
+    nlohmann::json recovery_rejected(std::string error, std::string state = "rejected") {
+      return {
+        {"status", false},
+        {"changed", false},
+        {"state", state},
+        {"recovery_state", state},
+        {"error", std::move(error)}
+      };
+    }
+
+    nlohmann::json execute_recovery_action(const nlohmann::json &request,
+                                            const recovery_action_context_t &context) {
+      const auto action_id = request.value("action_id", std::string {});
+      if (action_id != "apply_recovery_profile_next_launch" &&
+          action_id != "verify_recovery_profile_next_launch" &&
+          action_id != "undo") {
+        return nlohmann::json();
+      }
+
+      const auto run_id = request.value("run_id", std::string {});
+      if (action_id == "undo") {
+        if (context.caller_is_viewer || context.state_path.empty() ||
+            (context.require_owner_scope && context.owner_uuid.empty())) {
+          return recovery_rejected(
+            "Only the paired owner or authenticated host can undo this recovery run.",
+            "evidence_changed"
+          );
+        }
+        const std::optional<std::string> owner_scope = context.require_owner_scope ?
+          std::optional<std::string> {context.owner_uuid} : std::nullopt;
+        auto result = recovery_profile::undo_run(
+          context.state_path, run_id, owner_scope
+        );
+        if (!result.value("status", false) &&
+            result.value("error", std::string {}).find("no longer available") != std::string::npos) {
+          // This was not an owned queued recovery run. Preserve the existing
+          // live-action Undo namespace for its own run identifiers.
+          return nlohmann::json();
+        }
+        return result;
+      }
+
+      if (!context.active_owner || !context.host_tuning_allowed || context.owner_uuid.empty() ||
+          context.app_uuid.empty() || context.state_path.empty() || !context.stats.streaming) {
+        return recovery_rejected(
+          "A matching active owner and game stream are required for this recovery action.",
+          "evidence_changed"
+        );
+      }
+
+      if (action_id == "verify_recovery_profile_next_launch") {
+        if (run_id.empty()) {
+          return recovery_rejected("Recovery verification requires a run_id.");
+        }
+        recovery_profile::observed_launch_t observed {
+          .streaming = context.stats.streaming,
+          .owner_uuid = context.owner_uuid,
+          .app_uuid = context.app_uuid,
+          .stream_display_mode = context.effective_stream_display_mode,
+          .width = context.stats.width,
+          .height = context.stats.height,
+          .target_fps = trusted_target_fps(context.stats),
+          .bitrate_kbps = trusted_bitrate(context.stats),
+          .codec = normalized_codec_family(context.stats.codec),
+          .hdr = context.stats.stream_hdr_enabled,
+          .launch_instance_id = context.launch_instance_id,
+          .session_generation = context.session_generation,
+        };
+        return recovery_profile::verify(
+          context.state_path, context.owner_uuid, context.app_uuid, run_id, observed
+        );
+      }
+
+      if (!request.value("confirmed", false)) {
+        return recovery_rejected(
+          "Confirm that the current stream stays unchanged and the safer profile applies only to the next launch of this game on this paired device.",
+          "confirmation_required"
+        );
+      }
+
+      const auto doctor = context.health.value("doctor", nlohmann::json::object());
+      const auto current_action = doctor.value("safe_recovery_action", nlohmann::json::object());
+      const auto source_result_id = doctor.value("result_id", std::string {});
+      const auto requested_result_id = request.value("source_result_id", std::string {});
+      const auto requested_app_uuid = request.value("app_uuid", std::string {});
+      const auto preview = current_action.value("payload_preview", nlohmann::json::object());
+      const bool exact_current_action =
+        context.health.value("relaunch_recommended", false) &&
+        current_action.value("id", std::string {}) == "apply_recovery_profile_next_launch" &&
+        current_action.value("kind", std::string {}) == "next_launch_profile" &&
+        current_action.value("requires_confirmation", false) &&
+        current_action.value("requires_owner", false) &&
+        current_action.value("owner_tuning_allowed", false) &&
+        current_action.value("undo", nlohmann::json::object()).value("supported", false) &&
+        !source_result_id.empty() && requested_result_id == source_result_id &&
+        preview.value("source_result_id", std::string {}) == source_result_id &&
+        !requested_app_uuid.empty() && requested_app_uuid == context.app_uuid &&
+        preview.value("app_uuid", std::string {}) == context.app_uuid &&
+        !context.launch_instance_id.empty() && context.session_generation > 0;
+      if (!exact_current_action) {
+        return recovery_rejected(
+          "Current Doctor evidence no longer authorizes this next-launch recovery profile.",
+          "evidence_changed"
+        );
+      }
+
+      const auto profile = derive_safe_recovery_profile(context);
+      if (!profile) {
+        return recovery_rejected("Current host evidence cannot produce a complete safe profile.");
+      }
+      auto receipt = recovery_profile::queue(
+        context.state_path,
+        context.owner_uuid,
+        context.app_uuid,
+        source_result_id,
+        *profile,
+        context.launch_instance_id,
+        context.session_generation
+      );
+      if (receipt.value("status", false)) {
+        receipt["action_id"] = "apply_recovery_profile_next_launch";
+        receipt["kind"] = "next_launch_profile";
+        receipt["message"] =
+          "The current stream is unchanged. The safer profile is queued only for the next launch of this game on this paired device.";
+        receipt["verification"] = {
+          {"mode", "post_connect"},
+          {"action_id", "verify_recovery_profile_next_launch"},
+          {"endpoint", "/polaris/v1/doctor/action"},
+          {"run_id", receipt.value("run_id", std::string {})}
+        };
+      }
+      return receipt;
+    }
   }  // namespace
 
   bool network_pressure_confirmed(const stream_stats::stats_t &stats) {
     return stats.streaming && stats.network_risk &&
       ((stats.packet_loss_available && stats.packet_loss > 2.0) || stats.latency_ms >= 45.0);
+  }
+
+  bool paired_route_allowed(std::string_view action_id,
+                            bool active_owner_present,
+                            bool caller_is_active_owner) {
+    if (caller_is_active_owner) return true;
+    return action_id == "undo" && !active_owner_present;
   }
 
   int guarded_bitrate_target(int current_bitrate_kbps,
@@ -645,6 +839,15 @@ namespace doctor_actions {
       {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run.run_id}}},
       {"evidence", evidence}
     };
+  }
+
+  nlohmann::json execute(const nlohmann::json &request,
+                         const recovery_action_context_t &recovery_context) {
+    auto recovery_result = execute_recovery_action(request, recovery_context);
+    if (!recovery_result.is_null()) {
+      return recovery_result;
+    }
+    return execute(request);
   }
 
 }  // namespace doctor_actions

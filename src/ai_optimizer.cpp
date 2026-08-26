@@ -2368,7 +2368,8 @@ namespace ai_optimizer {
   }
 
   static nlohmann::json doctor_explanation_fallback(const std::string &reason,
-                                                      const nlohmann::json &evidence = nlohmann::json::object()) {
+                                                      const nlohmann::json &evidence = nlohmann::json::object(),
+                                                      bool expected_subscription_fallback = false) {
     nlohmann::json explanation;
     const auto doctor = evidence.value("doctor", nlohmann::json::object());
     const auto checklist = evidence.value("fix_my_stream_checklist", nlohmann::json::array());
@@ -2415,8 +2416,14 @@ namespace ai_optimizer {
     explanation["destructive_action_allowed"] = false;
 
     return {
-      {"status", false},
-      {"provider_error", reason},
+      {"status", expected_subscription_fallback},
+      {"fallback", true},
+      {"provider_error", expected_subscription_fallback ? "" : reason},
+      {"source", {
+        {"kind", expected_subscription_fallback ? "deterministic-fallback" : "provider-failure"},
+        {"mode", expected_subscription_fallback ? "openai-subscription" : "error-fallback"},
+        {"informational", expected_subscription_fallback}
+      }},
       {"explanation", explanation},
     };
   }
@@ -2528,6 +2535,12 @@ namespace ai_optimizer {
     auto active_cfg = resolved_config(config);
     if (!is_config_enabled(active_cfg)) {
       return doctor_explanation_fallback("AI explanations are disabled or not fully configured.", evidence).dump();
+    }
+    if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      // Codex CLI remains the ordinary optimizer route. Doctor explanations
+      // intentionally stay deterministic in subscription mode so an expected
+      // unsupported explanation transport is informational, not provider noise.
+      return doctor_explanation_fallback(std::string {}, evidence, true).dump();
     }
 
     try {
