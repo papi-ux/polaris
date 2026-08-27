@@ -3,7 +3,9 @@
  * @brief Definitions for wlgrab capture.
  */
 // standard includes
+#include <string>
 #include <thread>
+#include <vector>
 
 // local includes
 #include "stream_runtime.h"
@@ -75,19 +77,45 @@ namespace wl {
     int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
       delay = std::chrono::nanoseconds {1s} / config.framerate;
       mem_type = hwdevice_type;
+      const auto generation_policy = wlgrab_capture_policy::resolve_generation_policy(
+        config.capture_generation,
+        config::video.linux_display.use_cage_compositor,
+        config::video.adapter_name
+      );
+      const bool generation_owned = generation_policy.owned;
+      const bool use_private_compositor = generation_policy.use_private_compositor;
 
       // If cage compositor is running, connect to cage's Wayland socket
       // for direct wlr-screencopy capture (no portal, no picker).
       const char *wayland_target = nullptr;
+      std::string wayland_socket;
 #ifdef __linux__
-      if (config::video.linux_display.use_cage_compositor && stream_runtime::labwc::is_running()) {
-        static std::string cached_socket;
-        cached_socket = stream_runtime::labwc::wayland_socket();
-        if (!cached_socket.empty()) {
-          wayland_target = cached_socket.c_str();
-          private_compositor_capture = true;
-          BOOST_LOG(info) << "wlr: Targeting cage compositor on "sv << cached_socket;
+      if (use_private_compositor) {
+        if (generation_owned) {
+          const auto live_socket = stream_runtime::labwc::wayland_socket();
+          const auto live_instance = stream_runtime::labwc::session_instance_id();
+          if (!stream_runtime::labwc::is_running() ||
+              !wlgrab_capture_policy::private_runtime_matches_generation(
+                generation_policy,
+                live_socket,
+                live_instance
+              )) {
+            BOOST_LOG(error) << "wlr: Immutable private capture generation does not match the live labwc instance; refusing host or replacement-compositor fallback"sv;
+            return -1;
+          }
+          wayland_socket = generation_policy.private_wayland_socket;
+        } else if (stream_runtime::labwc::is_running()) {
+          wayland_socket = stream_runtime::labwc::wayland_socket();
         }
+        if (!wayland_socket.empty()) {
+          wayland_target = wayland_socket.c_str();
+          private_compositor_capture = true;
+          BOOST_LOG(info) << "wlr: Targeting cage compositor on "sv << wayland_socket;
+        }
+      }
+      if (generation_owned && use_private_compositor && wayland_target == nullptr) {
+        BOOST_LOG(error) << "wlr: Immutable private capture generation has no exact labwc target; refusing host compositor fallback"sv;
+        return -1;
       }
 #endif
 
@@ -101,7 +129,7 @@ namespace wl {
       display.roundtrip();
 
       if (!interface[wl::interface_t::XDG_OUTPUT]) {
-        if (!config::video.linux_display.use_cage_compositor) {
+        if (!use_private_compositor) {
           BOOST_LOG(error) << "Missing Wayland wire for xdg_output"sv;
           return -1;
         }
@@ -111,26 +139,40 @@ namespace wl {
       if (!interface[wl::interface_t::WLR_EXPORT_DMABUF]) {
         // wlr-export-dmabuf is optional when using cage — screencopy handles frame capture.
         // Only fail if we're NOT targeting cage (i.e., capturing the desktop directly).
-        if (!config::video.linux_display.use_cage_compositor) {
+        if (!use_private_compositor) {
           BOOST_LOG(error) << "Missing Wayland wire for wlr-export-dmabuf"sv;
           return -1;
         }
         BOOST_LOG(info) << "wlr: wlr-export-dmabuf not available (cage mode — using screencopy only)"sv;
       }
 
-      auto monitor = interface.monitors[0].get();
-
-      if (!display_name.empty()) {
-        auto streamedMonitor = util::from_view(display_name);
-
-        if (streamedMonitor >= 0 && streamedMonitor < interface.monitors.size()) {
-          monitor = interface.monitors[streamedMonitor].get();
-        }
+      if (interface.monitors.empty()) {
+        BOOST_LOG(error) << "Wayland compositor advertised no capturable outputs"sv;
+        return -1;
       }
 
-      monitor->listen(interface.output_manager);
-
+      for (const auto &candidate : interface.monitors) {
+        candidate->listen(interface.output_manager);
+      }
       display.roundtrip();
+
+      std::vector<std::string> monitor_names;
+      monitor_names.reserve(interface.monitors.size());
+      for (const auto &candidate : interface.monitors) {
+        monitor_names.emplace_back(candidate->name);
+      }
+
+      const auto monitor_index = wlgrab_capture_policy::select_monitor_index(
+        display_name,
+        monitor_names
+      );
+      if (!monitor_index) {
+        BOOST_LOG(error) << "Requested Wayland output ["sv << display_name
+                         << "] was not found; refusing to capture another output"sv;
+        return -1;
+      }
+
+      auto monitor = interface.monitors[*monitor_index].get();
       reported_wayland_main_device = interface.dmabuf_feedback.main_device_path;
       stream_stats::update_wayland_main_device(reported_wayland_main_device);
       interface.consume_output_topology_dirty();
@@ -740,6 +782,14 @@ namespace platf {
       return nullptr;
     }
 
+    const auto generation_policy = wlgrab_capture_policy::resolve_generation_policy(
+      config.capture_generation,
+      config::video.linux_display.use_cage_compositor,
+      config::video.adapter_name
+    );
+    const bool use_private_compositor = generation_policy.use_private_compositor;
+    const auto &adapter_name = generation_policy.adapter_name;
+
     bool prefer_ram_capture = (hwdevice_type == platf::mem_type_e::system);
     const bool gpu_native_capture_supported = wl::supports_gpu_native_capture(hwdevice_type);
     const auto direct_capture_path = wlgrab_capture_policy::select_direct_capture_path(
@@ -751,7 +801,7 @@ namespace platf {
     bool try_headless_extcopy_dmabuf = false;
 #ifdef __linux__
     if (!prefer_ram_capture &&
-        config::video.linux_display.use_cage_compositor &&
+        use_private_compositor &&
         stream_runtime::labwc::is_running()) {
       auto runtime_state = stream_runtime::labwc::runtime_state();
       if (stream_runtime::labwc::should_attempt_gpu_native_cage_capture(runtime_state, hwdevice_type)) {
@@ -819,7 +869,7 @@ namespace platf {
 
     if (!prefer_ram_capture &&
         gpu_native_capture_supported &&
-        (!config::video.linux_display.use_cage_compositor || !stream_runtime::labwc::is_running()) &&
+        (!use_private_compositor || !stream_runtime::labwc::is_running()) &&
         direct_capture_path == wlgrab_capture_policy::direct_capture_path_e::ram) {
       prefer_ram_capture = true;
       BOOST_LOG(warning)
@@ -873,8 +923,8 @@ namespace platf {
           );
         } else {
           const auto capture_render_node = wlr->extcopy.capture_render_node();
-          const auto adapter_pairing = stream_stats::device_nodes_match(capture_render_node, config::video.adapter_name);
-          if (!config::video.adapter_name.empty() &&
+          const auto adapter_pairing = stream_stats::device_nodes_match(capture_render_node, adapter_name);
+          if (!adapter_name.empty() &&
               !capture_render_node.empty() &&
               (!adapter_pairing.has_value() || !*adapter_pairing)) {
             device_pairing_failed = true;
@@ -883,7 +933,7 @@ namespace platf {
               << "wlr: Disabling true-headless ext-image-copy-capture DMA-BUF because capture render_node=["sv
               << capture_render_node
               << (identity_resolved ? "] differs from encoder adapter=["sv : "] could not be identity-matched to encoder adapter=["sv)
-              << config::video.adapter_name
+              << adapter_name
               << "]; using SHM/system-memory fallback to avoid unsafe cross-GPU import"sv;
 #ifdef __linux__
             stream_runtime::labwc::update_headless_extcopy_dmabuf_probe_result(false);
@@ -929,19 +979,47 @@ namespace platf {
     return wlr;
   }
 
-  std::vector<std::string> wl_display_names() {
+  static std::vector<std::string> wl_display_names_for_generation(
+    const capture_generation::identity_t *generation
+  ) {
     std::vector<std::string> display_names;
+    const auto generation_policy = wlgrab_capture_policy::resolve_generation_policy(
+      generation == nullptr ? capture_generation::identity_t {} : *generation,
+      config::video.linux_display.use_cage_compositor,
+      config::video.adapter_name
+    );
+    const bool generation_owned = generation_policy.owned;
+    const bool use_private_compositor = generation_policy.use_private_compositor;
 
     // If cage is running, enumerate from cage. Otherwise use default display.
     const char *wayland_target = nullptr;
+    std::string wayland_socket;
 #ifdef __linux__
-    if (config::video.linux_display.use_cage_compositor && stream_runtime::labwc::is_running()) {
-      static std::string cached_socket;
-      cached_socket = stream_runtime::labwc::wayland_socket();
-      if (!cached_socket.empty()) {
-        wayland_target = cached_socket.c_str();
-        BOOST_LOG(info) << "wlr: Enumerating displays from cage on "sv << cached_socket;
+    if (use_private_compositor) {
+      if (generation_owned) {
+        const auto live_socket = stream_runtime::labwc::wayland_socket();
+        const auto live_instance = stream_runtime::labwc::session_instance_id();
+        if (!stream_runtime::labwc::is_running() ||
+            !wlgrab_capture_policy::private_runtime_matches_generation(
+              generation_policy,
+              live_socket,
+              live_instance
+            )) {
+          BOOST_LOG(error) << "wlr: Immutable private capture generation cannot enumerate a replacement labwc instance"sv;
+          return {};
+        }
+        wayland_socket = generation_policy.private_wayland_socket;
+      } else if (stream_runtime::labwc::is_running()) {
+        wayland_socket = stream_runtime::labwc::wayland_socket();
       }
+      if (!wayland_socket.empty()) {
+        wayland_target = wayland_socket.c_str();
+        BOOST_LOG(info) << "wlr: Enumerating displays from cage on "sv << wayland_socket;
+      }
+    }
+    if (generation_owned && use_private_compositor && wayland_target == nullptr) {
+      BOOST_LOG(error) << "wlr: Immutable private capture generation cannot enumerate without its exact labwc target"sv;
+      return {};
     }
 #endif
 
@@ -984,12 +1062,25 @@ namespace platf {
 
       BOOST_LOG(info) << "Monitor " << x << " is "sv << monitor->name << ": "sv << monitor->description;
 
-      display_names.emplace_back(std::to_string(x));
+      display_names.emplace_back(wlgrab_capture_policy::enumerated_monitor_identity(
+        static_cast<std::size_t>(x),
+        monitor->name
+      ));
     }
 
     BOOST_LOG(info) << "--------- End of Wayland monitor list ---------"sv;
 
     return display_names;
+  }
+
+  std::vector<std::string> wl_display_names() {
+    return wl_display_names_for_generation(nullptr);
+  }
+
+  std::vector<std::string> wl_display_names(
+    const capture_generation::identity_t &generation
+  ) {
+    return wl_display_names_for_generation(&generation);
   }
 
 }  // namespace platf

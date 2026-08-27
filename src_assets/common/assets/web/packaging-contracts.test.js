@@ -229,7 +229,8 @@ describe('Linux packaging contracts', () => {
       /#ifdef POLARIS_BUILD_WAYLAND\s+#include "src\/platform\/linux\/cage_screencopy\.h"\s+#include "src\/platform\/linux\/kwingrab\.h"\s+#endif/,
     )
     expect(portalGrab).toContain('std::shared_ptr<void> kwin;')
-    expect(portalGrab).toMatch(/#ifdef POLARIS_BUILD_WAYLAND[\s\S]*?kwingrab::prefer_for_current_stream_mode\(\)[\s\S]*?#endif/)
+    expect(portalGrab).toMatch(/#ifdef POLARIS_BUILD_WAYLAND[\s\S]*?kwingrab::prefer_for_generation\(generation\)[\s\S]*?#endif/)
+    expect(portalGrab).toContain('kwingrab::require_for_generation(generation)')
     expect(portalGrab).toMatch(/#ifdef POLARIS_BUILD_WAYLAND[\s\S]*?cage_screencopy::capture\([\s\S]*?#endif/)
   })
 

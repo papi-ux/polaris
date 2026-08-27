@@ -32,6 +32,15 @@ namespace stream_display_policy {
       });
     }
 
+    void normalize_host_virtual_display_state() {
+      auto &linux_display = config::video.linux_display;
+      linux_display.auto_manage_displays = false;
+      config::video.capture = capture_for_host_virtual_display_backend(
+        virtual_display::detect_backend(),
+        config::video.capture
+      );
+    }
+
   }  // namespace
 
   std::string label_for_selection(std::string_view selection) {
@@ -137,6 +146,54 @@ namespace stream_display_policy {
       booleans.prefer_gpu_native_capture = false;
     }
     return booleans;
+  }
+
+  std::string effective_session_selection_for_launch(
+    std::string_view requested_selection,
+    bool mirror_desktop,
+    bool launch_virtual_display,
+    bool app_virtual_display,
+    bool virtual_display_user_locked,
+    bool virtual_display_optimization_present
+  ) {
+    if (mirror_desktop) {
+      return std::string {k_desktop_display};
+    }
+    if (!requested_selection.empty()) {
+      return std::string {requested_selection};
+    }
+    if (launch_virtual_display) {
+      return std::string {k_host_virtual_display};
+    }
+    if (!virtual_display_optimization_present &&
+        app_virtual_display &&
+        !virtual_display_user_locked) {
+      return std::string {k_host_virtual_display};
+    }
+    return {};
+  }
+
+  std::string capture_output_name_for_virtual_display(
+    std::string_view created_output_name,
+    std::string_view mapped_output_name
+  ) {
+    return std::string {mapped_output_name.empty() ? created_output_name : mapped_output_name};
+  }
+
+  std::string capture_for_host_virtual_display_backend(
+    virtual_display::backend_e backend,
+    std::string_view current_capture
+  ) {
+    if (backend == virtual_display::backend_e::WAYLAND_WLR) {
+      return "wlr";
+    }
+
+    if (backend == virtual_display::backend_e::EVDI ||
+        backend == virtual_display::backend_e::KSCREEN_DOCTOR) {
+      return "portal";
+    }
+
+    return std::string {current_capture};
   }
 
   resolved_t resolve(const input_t &input) {
@@ -254,6 +311,16 @@ namespace stream_display_policy {
         return false;
       }
 
+      if (key == k_host_virtual_display && linux_display.auto_manage_displays) {
+        return false;
+      }
+      if (key == k_host_virtual_display &&
+          config::video.capture != capture_for_host_virtual_display_backend(
+                                     virtual_display::detect_backend(),
+                                     config::video.capture
+                                   )) {
+        return false;
+      }
       if (key == stream_path::k_gamescope_stream && config::video.capture.empty()) {
         return false;
       }
@@ -280,6 +347,10 @@ namespace stream_display_policy {
     const auto key = to_lower_copy(selection);
 
     auto &linux_display = config::video.linux_display;
+
+    if (key == k_host_virtual_display) {
+      normalize_host_virtual_display_state();
+    }
 
     if (key == stream_path::k_gamescope_stream) {
       auto caps = stream_path::probe_host_capabilities();
@@ -346,11 +417,14 @@ namespace stream_display_policy {
         linux_display.headless_mode = booleans.headless_mode;
         linux_display.use_cage_compositor = booleans.use_cage_compositor;
         linux_display.prefer_gpu_native_capture = booleans.prefer_gpu_native_capture;
-        if (path->runtime == stream_path::runtime_kind_e::LABWC) {
+        linux_display.private_runtime = std::string {
+          stream_path::runtime_kind_id(path->runtime)
+        };
+        if (linux_display.private_runtime.empty() && booleans.use_cage_compositor) {
           linux_display.private_runtime = std::string {k_runtime_labwc};
         }
-        else if (path->runtime == stream_path::runtime_kind_e::GAMESCOPE) {
-          linux_display.private_runtime = std::string {k_runtime_gamescope};
+        if (path->id == k_host_virtual_display) {
+          normalize_host_virtual_display_state();
         }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.
@@ -369,9 +443,17 @@ namespace stream_display_policy {
       linux_display.use_cage_compositor,
       linux_display.prefer_gpu_native_capture,
     });
+    if (linux_display.stream_mode == k_host_virtual_display) {
+      normalize_host_virtual_display_state();
+    }
 
-    if (linux_display.private_runtime.empty()) {
-      linux_display.private_runtime = std::string {k_runtime_labwc};
+    if (const auto *path = stream_path::find(linux_display.stream_mode)) {
+      linux_display.private_runtime = std::string {
+        stream_path::runtime_kind_id(path->runtime)
+      };
+      if (linux_display.private_runtime.empty() && linux_display.use_cage_compositor) {
+        linux_display.private_runtime = std::string {k_runtime_labwc};
+      }
     }
   }
 

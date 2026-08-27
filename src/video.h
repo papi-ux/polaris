@@ -5,6 +5,7 @@
 #pragma once
 
 // local includes
+#include "capture_generation.h"
 #include "input.h"
 #include "nvenc/nvenc_config.h"
 #include "platform/common.h"
@@ -52,6 +53,7 @@ namespace video {
 
     int encodingFramerate; // Requested display framerate
     bool input_only;
+    capture_generation::identity_t capture_generation;
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
@@ -589,6 +591,20 @@ namespace video {
   std::string current_encoder_topology_key_for_tests();
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
+
+  bool capture_fallback_allowed_for_tests(std::string_view requested_display_name);
+
+  bool display_switch_allowed_for_exact_capture_for_tests(std::string_view exact_display_name);
+
+  bool capture_generations_match_for_tests(
+    const capture_generation::identity_t &active,
+    const capture_generation::identity_t &incoming
+  );
+
+  std::optional<int> find_display_index_for_tests(
+    const std::vector<std::string> &display_names,
+    std::string_view requested_display_name
+  );
 
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count);
 

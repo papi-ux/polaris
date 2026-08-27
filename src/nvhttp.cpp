@@ -487,6 +487,8 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
+      const bool mirror_desktop_requested =
+        explicit_mirror_desktop_requested(args) || app.desktop_mirror;
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
@@ -498,7 +500,7 @@ namespace nvhttp {
       // A per-session override changes which family this launch actually is.
       std::string session_mode_reject_reason;
       const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(args), session_mode_reject_reason);
-      if (!session_mode.empty() && !explicit_mirror_desktop_requested(args)) {
+      if (!session_mode.empty() && !mirror_desktop_requested) {
         const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
         private_stream_requested = proc::streaming_launch_requests_private_family(
           session_booleans.headless_mode,
@@ -510,7 +512,7 @@ namespace nvhttp {
 #endif
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
-        explicit_mirror_desktop_requested(args),
+        mirror_desktop_requested,
         force_private_after_desktop_steam_shutdown_requested(args),
         app,
         proc::desktop_steam_client_active(),
@@ -523,6 +525,8 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
+      const bool mirror_desktop_requested =
+        explicit_mirror_desktop_requested(body) || app.desktop_mirror;
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
@@ -534,7 +538,7 @@ namespace nvhttp {
       // A per-session override changes which family this launch actually is.
       std::string session_mode_reject_reason;
       const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(body), session_mode_reject_reason);
-      if (!session_mode.empty() && !explicit_mirror_desktop_requested(body)) {
+      if (!session_mode.empty() && !mirror_desktop_requested) {
         const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
         private_stream_requested = proc::streaming_launch_requests_private_family(
           session_booleans.headless_mode,
@@ -546,7 +550,7 @@ namespace nvhttp {
 #endif
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
-        explicit_mirror_desktop_requested(body),
+        mirror_desktop_requested,
         force_private_after_desktop_steam_shutdown_requested(body),
         app,
         proc::desktop_steam_client_active(),
@@ -5858,6 +5862,7 @@ namespace nvhttp {
         }
 
 #ifdef __linux__
+        proc::apply_app_display_semantics(*app_iter, *launch_session);
         auto launch_policy = resolve_streaming_launch_safety_policy(
           args,
           *app_iter,

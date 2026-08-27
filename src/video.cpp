@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <fcntl.h>
@@ -2089,6 +2090,68 @@ namespace video {
     false
   };
 
+  bool capture_fallback_allowed(std::string_view requested_display_name) {
+    return requested_display_name.empty();
+  }
+
+  bool display_switch_allowed_for_exact_capture(std::string_view exact_display_name) {
+    return exact_display_name.empty();
+  }
+
+  bool capture_generations_match(
+    const capture_generation::identity_t &active,
+    const capture_generation::identity_t &incoming
+  ) {
+    return active == incoming;
+  }
+
+  capture_generation::identity_t current_capture_generation_identity() {
+    auto configured_output_name = config::video.output_name;
+#ifdef __linux__
+    if (configured_output_name.empty()) {
+      configured_output_name = config::video.linux_display.streaming_output;
+    }
+#endif
+    capture_generation::identity_t generation {
+      .requested_output_name = configured_output_name,
+      .capture_backend = config::video.capture,
+      .adapter_name = config::video.adapter_name,
+    };
+#ifdef __linux__
+    generation.stream_mode = config::video.linux_display.stream_mode;
+    generation.private_runtime = config::video.linux_display.private_runtime;
+    generation.headless_mode = config::video.linux_display.headless_mode;
+    generation.use_cage_compositor = config::video.linux_display.use_cage_compositor;
+#endif
+    return generation;
+  }
+
+  std::optional<int> find_display_index(
+    const std::vector<std::string> &display_names,
+    std::string_view requested_display_name
+  ) {
+    if (requested_display_name.empty()) {
+      return std::nullopt;
+    }
+
+    std::size_t requested_index = 0;
+    const auto *begin = requested_display_name.data();
+    const auto *end = begin + requested_display_name.size();
+    const auto parsed = std::from_chars(begin, end, requested_index);
+    if (parsed.ec == std::errc {} && parsed.ptr == end) {
+      return requested_index < display_names.size() ?
+               std::optional<int> {static_cast<int>(requested_index)} :
+               std::nullopt;
+    }
+
+    for (int index = 0; index < display_names.size(); ++index) {
+      if (display_names[index] == requested_display_name) {
+        return index;
+      }
+    }
+    return std::nullopt;
+  }
+
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
     constexpr int max_attempts = 3;
 
@@ -2113,10 +2176,19 @@ namespace video {
    * @param dev_type The encoder device type used for display lookup.
    * @param display_names The list of display names to repopulate.
    * @param current_display_index The current display index or -1 if not yet known.
+   * @return true when the current/preferred identity remains selectable.
    */
-  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, std::string &preferred_display_name) {
+  bool refresh_displays(
+    platf::mem_type_e dev_type,
+    std::vector<std::string> &display_names,
+    int &current_display_index,
+    std::string &preferred_display_name,
+    const config_t *capture_config
+  ) {
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
-    const auto output_name { display_device::map_output_name(config::video.output_name) };
+    const auto output_name = capture_config != nullptr ?
+      capture_config->capture_generation.requested_output_name :
+      display_device::map_output_name(config::video.output_name);
     std::string current_display_name = preferred_display_name;
 
     // If we have a current display index, let's start with that
@@ -2126,13 +2198,20 @@ namespace video {
 
     // Refresh the display names
     auto old_display_names = std::move(display_names);
+#ifdef __linux__
+    display_names = capture_config != nullptr ?
+      platf::display_names(dev_type, *capture_config) :
+      platf::display_names(dev_type);
+#else
     display_names = platf::display_names(dev_type);
+#endif
 
     // If we now have no displays, let's put the old display array back and fail
     if (display_names.empty() && !old_display_names.empty()) {
       BOOST_LOG(error) << "No displays were found after reenumeration!"sv;
       display_names = std::move(old_display_names);
-      return;
+      current_display_index = -1;
+      return false;
     } else if (display_names.empty()) {
       display_names.emplace_back(output_name);
     }
@@ -2141,33 +2220,38 @@ namespace video {
     current_display_index = 0;
 
     if (current_display_name.empty()) {
-      current_display_name = display_device::map_output_name(config::video.output_name);
+      current_display_name = output_name;
     }
 
-    // If we had a name previously, let's try to find it in the new list
+    // Exact prior identity is authoritative. A miss cannot become display 0.
     if (!current_display_name.empty()) {
-      for (int x = 0; x < display_names.size(); ++x) {
-        if (display_names[x] == current_display_name) {
-          current_display_index = x;
-          return;
-        }
+      if (const auto index = find_display_index(display_names, current_display_name)) {
+        current_display_index = *index;
+        return true;
       }
 
-      // The old display was removed, so we'll start back at the first display again
-      BOOST_LOG(warning) << "Previous active display ["sv << current_display_name << "] is no longer present"sv;
-    } else {
-      for (int x = 0; x < display_names.size(); ++x) {
-        if (display_names[x] == output_name) {
-          current_display_index = x;
-          return;
-        }
-      }
+      current_display_index = -1;
+      BOOST_LOG(error) << "Previous active display ["sv << current_display_name
+                       << "] is no longer present; refusing another output"sv;
+      return false;
     }
+
+    if (const auto index = find_display_index(display_names, output_name)) {
+      current_display_index = *index;
+    }
+    return !display_names.empty();
   }
 
-  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
+  void refresh_displays(
+    platf::mem_type_e dev_type,
+    std::vector<std::string> &display_names,
+    int &current_display_index,
+    const config_t *capture_config = nullptr
+  ) {
     static std::string empty_str = "";
-    refresh_displays(dev_type, display_names, current_display_index, empty_str);
+    if (!refresh_displays(dev_type, display_names, current_display_index, empty_str, capture_config)) {
+      current_display_index = display_names.empty() ? -1 : 0;
+    }
   }
 
   void captureThread(
@@ -2203,19 +2287,31 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
+    const auto active_generation = capture_ctxs.front().config.capture_generation;
+    const auto &exact_display_name = active_generation.exact_display_name;
     {
 #ifdef __linux__
     session_media::pending_start_owner_scope_t initial_owner_scope {
       capture_ctxs.front().channel_data
     };
 #endif
-    if (!proc::proc.display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
+    if (!exact_display_name.empty()) {
+      disp = platf::display(encoder.platform_formats->dev_type, exact_display_name, capture_ctxs.front().config);
+    }
+    if (!disp && !capture_fallback_allowed(exact_display_name)) {
+      BOOST_LOG(error) << "Requested display ["sv << exact_display_name
+                       << "] could not be initialized; refusing another output"sv;
+      return;
     }
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      refresh_displays(
+        encoder.platform_formats->dev_type,
+        display_names,
+        display_p,
+        &capture_ctxs.front().config
+      );
       if (display_names.empty()) {
         BOOST_LOG(error) << "No displays were found for initial capture setup"sv;
         return;
@@ -2354,12 +2450,35 @@ namespace video {
         }
 
         while (capture_ctx_queue->peek()) {
-          capture_ctxs.emplace_back(std::move(*capture_ctx_queue->pop()));
+          auto incoming_capture_ctx = capture_ctx_queue->pop();
+          if (!incoming_capture_ctx) {
+            return false;
+          }
+          if (!capture_generations_match(
+                active_generation,
+                incoming_capture_ctx->config.capture_generation
+              )) {
+            BOOST_LOG(error) << "Rejecting capture context from generation ["sv
+                             << incoming_capture_ctx->config.capture_generation.exact_display_name
+                             << "/"sv << incoming_capture_ctx->config.capture_generation.stream_mode
+                             << "] while generation ["sv << exact_display_name
+                             << "/"sv << active_generation.stream_mode << "] is active"sv;
+            incoming_capture_ctx->images->stop();
+            continue;
+          }
+          capture_ctxs.emplace_back(std::move(*incoming_capture_ctx));
         }
 
         if (switch_display_event->peek()) {
-          artificial_reinit = true;
-          return false;
+          if (!display_switch_allowed_for_exact_capture(exact_display_name)) {
+            const auto requested_display = *switch_display_event->pop();
+            BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                               << requested_display << "] while exact display ["sv
+                               << exact_display_name << "] is owned"sv;
+          } else {
+            artificial_reinit = true;
+            return false;
+          }
         }
 
         if (reinit_request_event.peek()) {
@@ -2417,8 +2536,42 @@ namespace video {
               // only support a single display session per device/application.
               disp.reset();
 
-              // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, proc::proc.display_name);
+              if (!exact_display_name.empty()) {
+                if (switch_display_event->peek() &&
+                    !display_switch_allowed_for_exact_capture(exact_display_name)) {
+                  const auto requested_display = *switch_display_event->pop();
+                  BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                                     << requested_display << "] while exact display ["sv
+                                     << exact_display_name << "] is owned"sv;
+                }
+                {
+#ifdef __linux__
+                  session_media::pending_start_owner_scope_t owner_scope {
+                    capture_ctxs.front().channel_data
+                  };
+#endif
+                  reset_display(
+                    disp,
+                    encoder.platform_formats->dev_type,
+                    exact_display_name,
+                    capture_ctxs.front().config
+                  );
+                }
+                if (!disp) {
+                  BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
+                                   << "] could not be reopened; refusing another output"sv;
+                  return;
+                }
+                break;
+              }
+
+              // Only an explicit switch or an unnamed legacy session may enumerate.
+              refresh_displays(
+                encoder.platform_formats->dev_type,
+                display_names,
+                display_p,
+                &capture_ctxs.front().config
+              );
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
@@ -3627,9 +3780,46 @@ namespace video {
       synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*ctx)));
     }
 
+    const auto active_generation = synced_session_ctxs.front()->config.capture_generation;
+    const auto &exact_display_name = active_generation.exact_display_name;
+
     while (encode_session_ctx_queue.running()) {
+      if (!exact_display_name.empty()) {
+        if (switch_display_event->peek() &&
+            !display_switch_allowed_for_exact_capture(exact_display_name)) {
+          const auto requested_display = *switch_display_event->pop();
+          BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                             << requested_display << "] while exact display ["sv
+                             << exact_display_name << "] is owned"sv;
+        }
+        {
+#ifdef __linux__
+          session_media::pending_start_owner_scope_t owner_scope {
+            synced_session_ctxs.front()->channel_data
+          };
+#endif
+          reset_display(
+            disp,
+            encoder.platform_formats->dev_type,
+            exact_display_name,
+            synced_session_ctxs.front()->config
+          );
+        }
+        if (!disp) {
+          BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
+                           << "] could not be opened; refusing another output"sv;
+          return encode_e::error;
+        }
+        break;
+      }
+
       // Refresh display names since a display removal might have caused the reinitialization
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      refresh_displays(
+        encoder.platform_formats->dev_type,
+        display_names,
+        display_p,
+        &synced_session_ctxs.front()->config
+      );
 
       // Process any pending display switch with the new list of displays
       if (switch_display_event->peek()) {
@@ -3691,12 +3881,25 @@ namespace video {
         auto frame = make_frame(std::move(img));
 
         while (encode_session_ctx_queue.peek()) {
-          auto encode_session_ctx = encode_session_ctx_queue.pop();
-          if (!encode_session_ctx) {
+          auto incoming_sync_ctx = encode_session_ctx_queue.pop();
+          if (!incoming_sync_ctx) {
             return false;
           }
+          if (!capture_generations_match(
+                active_generation,
+                incoming_sync_ctx->config.capture_generation
+              )) {
+            BOOST_LOG(error) << "Rejecting synchronized capture context from generation ["sv
+                             << incoming_sync_ctx->config.capture_generation.exact_display_name
+                             << "/"sv << incoming_sync_ctx->config.capture_generation.stream_mode
+                             << "] while generation ["sv << exact_display_name
+                             << "/"sv << active_generation.stream_mode << "] is active"sv;
+            incoming_sync_ctx->shutdown_event->raise(true);
+            incoming_sync_ctx->join_event->raise(true);
+            continue;
+          }
 
-          synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*encode_session_ctx)));
+          synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*incoming_sync_ctx)));
 
           bool retired_gpu_native_route = false;
           auto encode_session = make_synced_session(disp.get(), encoder, frame, *synced_session_ctxs.back(), retired_gpu_native_route);
@@ -3762,8 +3965,15 @@ namespace video {
         })
 
         if (switch_display_event->peek()) {
-          ec = platf::capture_e::reinit;
-          return false;
+          if (!display_switch_allowed_for_exact_capture(exact_display_name)) {
+            const auto requested_display = *switch_display_event->pop();
+            BOOST_LOG(warning) << "Ignoring display switch request ["sv
+                               << requested_display << "] while exact display ["sv
+                               << exact_display_name << "] is owned"sv;
+          } else {
+            ec = platf::capture_e::reinit;
+            return false;
+          }
         }
 
         return true;
@@ -3836,7 +4046,11 @@ namespace video {
       return;
     }
 
-    ref->capture_ctx_queue->raise(capture_ctx_t {images, config, channel_data});
+    ref->capture_ctx_queue->raise(capture_ctx_t {
+      images,
+      config,
+      channel_data,
+    });
 
     if (!ref->capture_ctx_queue->running()) {
       return;
@@ -3924,8 +4138,17 @@ namespace video {
     auto idr_events = mail->event<bool>(mail::idr);
 
     idr_events->raise(true);
+    config.capture_generation = proc::proc.capture_generation;
+    if (config.capture_generation.empty()) {
+      config.capture_generation = current_capture_generation_identity();
+    }
     if (chosen_encoder->flags & PARALLEL_ENCODING) {
-      capture_async(std::move(mail), config, channel_data, std::move(packets));
+      capture_async(
+        std::move(mail),
+        config,
+        channel_data,
+        std::move(packets)
+      );
     } else {
       safe::signal_t join_event;
       auto ref = capture_thread_sync.ref();
@@ -5088,6 +5311,28 @@ namespace video {
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt) {
     return reset_display_retry_delay(attempt);
+  }
+
+  bool capture_fallback_allowed_for_tests(std::string_view requested_display_name) {
+    return capture_fallback_allowed(requested_display_name);
+  }
+
+  bool display_switch_allowed_for_exact_capture_for_tests(std::string_view exact_display_name) {
+    return display_switch_allowed_for_exact_capture(exact_display_name);
+  }
+
+  bool capture_generations_match_for_tests(
+    const capture_generation::identity_t &active,
+    const capture_generation::identity_t &incoming
+  ) {
+    return capture_generations_match(active, incoming);
+  }
+
+  std::optional<int> find_display_index_for_tests(
+    const std::vector<std::string> &display_names,
+    std::string_view requested_display_name
+  ) {
+    return find_display_index(display_names, requested_display_name);
   }
 
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count) {

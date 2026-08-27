@@ -13,6 +13,10 @@
 #include <string_view>
 #include <vector>
 
+namespace virtual_display {
+  enum class backend_e;
+}
+
 namespace stream_display_policy {
 
   struct input_t {
@@ -41,6 +45,43 @@ namespace stream_display_policy {
     bool use_cage_compositor = false;
     bool prefer_gpu_native_capture = false;
   };
+
+  /**
+   * @brief Derive a session mode for legacy Virtual Display launches.
+   *
+   * Explicit accepted streamMode and mirrorDesktop remain authoritative. An
+   * app default is used only when the client did not explicitly lock the
+   * virtual-display choice.
+   */
+  std::string effective_session_selection_for_launch(
+    std::string_view requested_selection,
+    bool mirror_desktop,
+    bool launch_virtual_display,
+    bool app_virtual_display,
+    bool virtual_display_user_locked,
+    bool virtual_display_optimization_present = false
+  );
+
+  /**
+   * @brief Keep the created virtual connector name when display mapping cannot
+   *        produce a backend-specific identifier.
+   */
+  std::string capture_output_name_for_virtual_display(
+    std::string_view created_output_name,
+    std::string_view mapped_output_name
+  );
+
+  /**
+   * @brief Resolve the capture backend required by a host virtual display.
+   *
+   * Native wlroots headless outputs are capturable directly by output name.
+   * EVDI/KScreen outputs remain on the portal/KWin path unless an operator
+   * explicitly selected another backend.
+   */
+  std::string capture_for_host_virtual_display_backend(
+    virtual_display::backend_e backend,
+    std::string_view current_capture
+  );
 
   /** Stable selection ids — SoT is stream_path (no dual string tables). */
   constexpr std::string_view k_headless_stream = stream_path::k_headless_stream;
