@@ -100,7 +100,9 @@ TEST(LutrisLibraryScannerTests, ScansMultipleXdgDirectories) {
     "slug: data-game\n"
     "runner: wine\n");
 
-  const auto games = game_library::scan_lutris_games({config_dir, data_dir});
+  const auto games = game_library::scan_lutris_games(
+    std::vector<std::filesystem::path> {config_dir, data_dir}
+  );
   ASSERT_EQ(games.size(), 2);
   EXPECT_EQ(games[0].slug, "config-game");
   EXPECT_EQ(games[1].slug, "data-game");
@@ -543,7 +545,7 @@ TEST(HeroicLibraryScannerTests, ListsBothInstallsForEveryStoreFile) {
 
   ASSERT_EQ(cached.size(), 4u);
   EXPECT_EQ(cached[0].path, home / ".config/heroic/store_cache/gog_library.json");
-  EXPECT_EQ(cached[1].path, home / ".config/heroic/store_cache/egs_library.json");
+  EXPECT_EQ(cached[1].path, home / ".config/heroic/store_cache/legendary_library.json");
   EXPECT_EQ(cached[2].path, home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache/gog_library.json");
   EXPECT_EQ(cached[2].install, game_library::launcher_install_t::flatpak);
 }
@@ -551,15 +553,131 @@ TEST(HeroicLibraryScannerTests, ListsBothInstallsForEveryStoreFile) {
 TEST(HeroicLibraryScannerTests, BuildsTheCommandForTheInstallThatHasTheTitle) {
   EXPECT_EQ(
     game_library::heroic_launch_command("gog", "1207658930", game_library::launcher_install_t::native),
-    "setsid heroic heroic://launch/gog/1207658930");
+    "setsid heroic --no-gui --no-sandbox 'heroic://launch?appName=1207658930&runner=gog'");
   EXPECT_EQ(
     game_library::heroic_launch_command("gog", "1207658930", game_library::launcher_install_t::flatpak),
-    "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/gog/1207658930");
+    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "'heroic://launch?appName=1207658930&runner=gog'");
 
   const auto both = game_library::heroic_launch_commands("epic", "Snow");
-  ASSERT_EQ(both.size(), 2u);
-  EXPECT_EQ(both[0], "setsid heroic heroic://launch/epic/Snow");
-  EXPECT_EQ(both[1], "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/epic/Snow");
+  ASSERT_EQ(both.size(), 4u);
+  EXPECT_EQ(
+    both[0],
+    "setsid heroic --no-gui --no-sandbox 'heroic://launch?appName=Snow&runner=legendary'");
+  EXPECT_EQ(
+    both[1],
+    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "'heroic://launch?appName=Snow&runner=legendary'");
+  EXPECT_EQ(both[2], "setsid heroic heroic://launch/epic/Snow");
+  EXPECT_EQ(both[3], "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/epic/Snow");
+}
+
+TEST(HeroicLibraryScannerTests, MapsOnlySupportedStoresAndInstallNames) {
+  EXPECT_EQ(game_library::heroic_runner_for_store("gog"), "gog");
+  EXPECT_EQ(game_library::heroic_runner_for_store("epic"), "legendary");
+  EXPECT_TRUE(game_library::heroic_runner_for_store("amazon").empty());
+  EXPECT_TRUE(game_library::heroic_runner_for_store("legendary").empty());
+
+  EXPECT_EQ(game_library::heroic_install_name(game_library::launcher_install_t::native), "native");
+  EXPECT_EQ(game_library::heroic_install_name(game_library::launcher_install_t::flatpak), "flatpak");
+  EXPECT_EQ(
+    game_library::heroic_install_from_name("native"),
+    game_library::launcher_install_t::native);
+  EXPECT_EQ(
+    game_library::heroic_install_from_name("flatpak"),
+    game_library::launcher_install_t::flatpak);
+  EXPECT_FALSE(game_library::heroic_install_from_name("system").has_value());
+}
+
+TEST(HeroicLibraryScannerTests, RebuildsImportsFromExactMetadataAndRejectsTampering) {
+  const auto epic = game_library::heroic_game_from_metadata("Snow", "epic", "legendary", "flatpak");
+  ASSERT_TRUE(epic.has_value());
+  EXPECT_EQ(epic->runner, "legendary");
+  EXPECT_EQ(epic->install, game_library::launcher_install_t::flatpak);
+  EXPECT_EQ(
+    epic->command,
+    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "'heroic://launch?appName=Snow&runner=legendary'");
+
+  EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "epic", "epic", "flatpak").has_value());
+  EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "gog", "gog", "system").has_value());
+  EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow;id", "gog", "gog", "native").has_value());
+  EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "amazon", "nile", "native").has_value());
+}
+
+TEST(HeroicLibraryScannerTests, ParsesOnlyExactLegacyPolarisCommands) {
+  const auto native = game_library::parse_legacy_heroic_launch_command(
+    "setsid heroic heroic://launch/epic/Snow");
+  ASSERT_TRUE(native.has_value());
+  EXPECT_EQ(native->store, "epic");
+  EXPECT_EQ(native->runner, "legendary");
+  EXPECT_EQ(native->app_name, "Snow");
+  EXPECT_EQ(native->install, game_library::launcher_install_t::native);
+
+  const auto flatpak = game_library::parse_legacy_heroic_launch_command(
+    "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/gog/1207658930");
+  ASSERT_TRUE(flatpak.has_value());
+  EXPECT_EQ(flatpak->install, game_library::launcher_install_t::flatpak);
+  EXPECT_EQ(flatpak->command,
+    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "'heroic://launch?appName=1207658930&runner=gog'");
+
+  EXPECT_FALSE(game_library::parse_legacy_heroic_launch_command(
+    "setsid heroic heroic://launch/epic/Snow/extra").has_value());
+  EXPECT_FALSE(game_library::parse_legacy_heroic_launch_command(
+    "heroic heroic://launch/epic/Snow").has_value());
+  EXPECT_FALSE(game_library::parse_legacy_heroic_launch_command(
+    "setsid heroic heroic://launch/amazon/Snow").has_value());
+}
+
+TEST(HeroicLibraryScannerTests, ParsesLegendaryInstalledFixture) {
+  const auto legendary = game_library::parse_heroic_installed_json(R"json({
+    "Snow": {"app_name":"Snow","title":"An Epic Game","is_dlc":false},
+    "Tool": {"app_name":"Tool","title":"Tool","is_dlc":true},
+    "MissingAppName": {"title":"Missing App Name","is_dlc":false},
+    "MissingDlcState": {"app_name":"MissingDlcState","title":"Missing DLC State"},
+    "WrongDlcState": {"app_name":"WrongDlcState","title":"Wrong DLC State","is_dlc":"no"},
+    "MismatchedIdentity": {"app_name":"OtherIdentity","title":"Mismatched Identity","is_dlc":false},
+    "metadata": {"last_updated":1234}
+  })json", "epic", game_library::launcher_install_t::flatpak);
+  ASSERT_EQ(legendary.size(), 1u);
+  EXPECT_EQ(legendary[0].app_name, "Snow");
+  EXPECT_EQ(legendary[0].runner, "legendary");
+  EXPECT_EQ(legendary[0].install, game_library::launcher_install_t::flatpak);
+}
+
+TEST(HeroicLibraryScannerTests, JoinsRealGogInstalledAndCacheShapes) {
+  const auto games = game_library::parse_heroic_gog_library_json(R"json({
+    "installed": [
+      {"appName":"1207658930","install_path":"/games/Alpha","is_dlc":false},
+      {"appName":"installed-dlc","install_path":"/games/DLC","is_dlc":true},
+      {"appName":"missing-metadata","install_path":"/games/Missing","is_dlc":false},
+      {"appName":"bad;id","install_path":"/games/Unsafe","is_dlc":false}
+    ]
+  })json", R"json({"games":[
+    {"app_name":"1207658930","title":"A GOG Game","is_installed":false,"install":{"is_dlc":false}},
+    {"app_name":"installed-dlc","title":"Installed DLC","is_installed":false,"install":{"is_dlc":true}},
+    {"app_name":"cloud-only","title":"Uninstalled Game","is_installed":false,"install":{"is_dlc":false}},
+    {"app_name":"gog-redist","title":"Galaxy Common Redistributables","is_installed":true,"install":{"is_dlc":true}}
+  ]})json", game_library::launcher_install_t::native);
+
+  ASSERT_EQ(games.size(), 1u);
+  EXPECT_EQ(games[0].name, "A GOG Game");
+  EXPECT_EQ(games[0].app_name, "1207658930");
+  EXPECT_EQ(games[0].runner, "gog");
+}
+
+TEST(HeroicLibraryScannerTests, ParsesOnlyInstalledNonDlcLegendaryCacheEntries) {
+  const auto games = game_library::parse_heroic_cache_json(R"json({"library":[
+    {"app_name":"Installed","title":"Installed Game","is_installed":true,"install":{"is_dlc":false}},
+    {"app_name":"InstalledDlc","title":"Installed DLC","is_installed":true,"install":{"is_dlc":true}},
+    {"app_name":"CloudOnly","title":"Cloud Game","is_installed":false,"install":{"is_dlc":false}},
+    {"app_name":"WrongShape","title":"Wrong Shape","is_installed":"yes","install":{"is_dlc":false}}
+  ]})json", "epic", game_library::launcher_install_t::native);
+
+  ASSERT_EQ(games.size(), 1u);
+  EXPECT_EQ(games[0].app_name, "Installed");
+  EXPECT_EQ(games[0].runner, "legendary");
 }
 
 TEST(HeroicLibraryScannerTests, RefusesAppNamesThatWouldReachTheShell) {
@@ -570,5 +688,6 @@ TEST(HeroicLibraryScannerTests, RefusesAppNamesThatWouldReachTheShell) {
 
   EXPECT_TRUE(game_library::heroic_launch_command("gog", "app; rm -rf ~", game_library::launcher_install_t::native).empty());
   EXPECT_TRUE(game_library::heroic_launch_command("gog && id", "1207658930", game_library::launcher_install_t::native).empty());
+  EXPECT_TRUE(game_library::heroic_launch_command("legendary", "Snow", game_library::launcher_install_t::native).empty());
   EXPECT_TRUE(game_library::heroic_launch_commands("gog", "app; rm -rf ~").empty());
 }
