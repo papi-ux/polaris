@@ -33,6 +33,12 @@
 #include <boost/program_options/parsers.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#ifdef __linux__
+  #include <boost/process/v1/env.hpp>
+  #include <boost/process/v1/handles.hpp>
+  #include <boost/process/v1/io.hpp>
+  #include <boost/process/v1/start_dir.hpp>
+#endif
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
@@ -3097,6 +3103,25 @@ namespace proc {
       return (std::filesystem::path(*home) / ".steam/steam.pipe").string();
     }
 
+    std::optional<std::string> steam_remote_command_path(
+      const std::optional<std::string> &home_env,
+      const std::optional<std::string> &account_home
+    ) {
+      const std::string *home = nullptr;
+      if (home_env && !home_env->empty()) {
+        home = &*home_env;
+      } else if (account_home && !account_home->empty()) {
+        home = &*account_home;
+      }
+      if (home == nullptr) {
+        return std::nullopt;
+      }
+      return (
+        std::filesystem::path(*home) /
+        ".steam/root/ubuntu12_32/steam-runtime/amd64/usr/bin/steam-runtime-steam-remote"
+      ).string();
+    }
+
     std::optional<std::string> steam_instance_pipe_path() {
       const char *home = getenv("HOME");
       std::optional<std::string> home_env;
@@ -3285,11 +3310,118 @@ namespace proc {
       return policy;
     }
 
-    bool should_skip_steam_shutdown_undo_after_cage_cleanup(const proc::ctx_t &,
-                                                            const proc::cmd_t &cmd,
-                                                            bool session_owned_cage) {
+    bool should_skip_steam_shutdown_undo_after_cage_cleanup(
+      const proc::cmd_t &cmd,
+      bool session_owned_cage
+    ) {
       return session_owned_cage &&
              command_requests_steam_shutdown(cmd.undo_cmd);
+    }
+
+    bool should_forward_steam_shutdown_undo_without_launch(
+      const proc::ctx_t &app,
+      const proc::cmd_t &cmd,
+      bool session_owned_cage
+    ) {
+      // Never invoke the Steam bootstrap during isolated cleanup. The dedicated
+      // steam-runtime-steam-remote executable forwards to whichever singleton
+      // owns the FIFO and exits nonzero when no reader remains; unlike `steam
+      // -shutdown`, it cannot start a replacement client. This covers desktop
+      // handoff and stale private generations without trusting their marker.
+      const auto configured = boost::trim_copy(cmd.undo_cmd);
+      const auto canonical = canonical_steam_shutdown_command(configured);
+      return !session_owned_cage &&
+             command_requests_steam_shutdown(cmd.undo_cmd) &&
+             cmd.do_cmd.empty() &&
+             !cmd.elevated &&
+             boost::iequals(configured, canonical) &&
+             context_uses_steam(app) &&
+             isolated_session_requires_exact_generation_cleanup(
+               session_owned_cage,
+               !app.detached.empty(),
+               !app.cmd.empty()
+             );
+    }
+
+    boost::process::v1::child run_steam_remote_shutdown_without_launch(
+      const std::string &remote_path,
+      boost::filesystem::path &working_dir,
+      const boost::process::v1::environment &env,
+      FILE *output,
+      std::error_code &ec
+    ) {
+      // Execute the forwarding client directly. Going through `/usr/bin/steam`
+      // is forbidden here because its fallback path bootstraps a new client.
+      if (output != nullptr) {
+        return boost::process::v1::child(
+          remote_path,
+          "-shutdown",
+          env,
+          boost::process::v1::start_dir(working_dir),
+          boost::process::v1::std_in < boost::process::v1::null,
+          boost::process::v1::std_out > output,
+          boost::process::v1::std_err > output,
+          boost::process::v1::limit_handles,
+          ec
+        );
+      }
+      return boost::process::v1::child(
+        remote_path,
+        "-shutdown",
+        env,
+        boost::process::v1::start_dir(working_dir),
+        boost::process::v1::std_in < boost::process::v1::null,
+        boost::process::v1::std_out > boost::process::v1::null,
+        boost::process::v1::std_err > boost::process::v1::null,
+        boost::process::v1::limit_handles,
+        ec
+      );
+    }
+
+    struct steam_remote_shutdown_dispatch_result_t {
+      bool launch_error = false;
+      bool timed_out = false;
+      int exit_code = 0;
+    };
+
+    bool resolve_retained_steam_shutdown_claim(
+      std::optional<proc::retained_steam_shutdown_t> &claim,
+      const std::function<bool(const std::string &)> &listener_active,
+      const std::function<bool(const std::string &)> &remote_available,
+      const std::function<steam_remote_shutdown_dispatch_result_t(const proc::retained_steam_shutdown_t &)> &dispatch,
+      const std::function<bool(const std::string &)> &wait_for_release
+    ) {
+      if (!claim) {
+        return true;
+      }
+      if (claim->pipe_path.empty()) {
+        return false;
+      }
+      if (!listener_active(claim->pipe_path)) {
+        claim.reset();
+        return true;
+      }
+      if (claim->remote_path.empty() || !remote_available(claim->remote_path)) {
+        return false;
+      }
+
+      const auto result = dispatch(*claim);
+      if (result.launch_error || result.timed_out) {
+        return false;
+      }
+      if (result.exit_code != 0) {
+        if (listener_active(claim->pipe_path)) {
+          return false;
+        }
+        claim.reset();
+        return true;
+      }
+      if (!wait_for_release(claim->pipe_path)) {
+        return false;
+      }
+
+      claim.reset();
+      return true;
     }
 
 #endif
@@ -5110,6 +5242,99 @@ namespace proc {
     return result;
   }
 
+  retained_steam_shutdown_test_result_t run_retained_steam_shutdown_scenario_for_tests(
+    retained_steam_shutdown_scenario_e scenario
+  ) {
+    retained_steam_shutdown_test_result_t result;
+    auto env = boost::this_process::environment();
+    std::optional<retained_steam_shutdown_t> claim {retained_steam_shutdown_t {
+      .command = "steam -shutdown",
+      .pipe_path = "/tmp/polaris-test-steam.pipe",
+      .remote_path = "/tmp/polaris-test-steam-remote",
+      .working_dir = "/tmp",
+      .env = std::move(env),
+      .timeout = 1s,
+    }};
+
+    std::vector<bool> listener_observations;
+    bool remote_available = true;
+    steam_remote_shutdown_dispatch_result_t dispatch_result;
+    bool released = true;
+    bool retry_after_failure = false;
+
+    switch (scenario) {
+      case retained_steam_shutdown_scenario_e::listener_absent:
+        listener_observations = {false};
+        break;
+      case retained_steam_shutdown_scenario_e::helper_missing:
+        listener_observations = {true};
+        remote_available = false;
+        break;
+      case retained_steam_shutdown_scenario_e::dispatch_error:
+        listener_observations = {true};
+        dispatch_result.launch_error = true;
+        break;
+      case retained_steam_shutdown_scenario_e::dispatch_timeout:
+        listener_observations = {true};
+        dispatch_result.timed_out = true;
+        break;
+      case retained_steam_shutdown_scenario_e::delivery_failed_listener_retained:
+        listener_observations = {true, true};
+        dispatch_result.exit_code = 1;
+        break;
+      case retained_steam_shutdown_scenario_e::target_exited_during_delivery:
+        listener_observations = {true, false};
+        dispatch_result.exit_code = 1;
+        break;
+      case retained_steam_shutdown_scenario_e::delivered_and_released:
+        listener_observations = {true};
+        break;
+      case retained_steam_shutdown_scenario_e::delivered_release_timeout:
+        listener_observations = {true};
+        released = false;
+        break;
+      case retained_steam_shutdown_scenario_e::retry_after_helper_failure_then_listener_released:
+        listener_observations = {true, false};
+        remote_available = false;
+        retry_after_failure = true;
+        break;
+    }
+
+    std::size_t listener_index = 0;
+    const auto listener_active = [&](const std::string &) {
+      ++result.listener_checks;
+      const auto index = std::min(listener_index, listener_observations.size() - 1);
+      ++listener_index;
+      return listener_observations[index];
+    };
+    const auto attempt = [&]() {
+      ++result.attempts;
+      return resolve_retained_steam_shutdown_claim(
+        claim,
+        listener_active,
+        [&](const std::string &) {
+          return remote_available;
+        },
+        [&](const retained_steam_shutdown_t &) {
+          ++result.dispatch_calls;
+          return dispatch_result;
+        },
+        [&](const std::string &) {
+          ++result.release_waits;
+          return released;
+        }
+      );
+    };
+
+    result.complete = attempt();
+    if (retry_after_failure) {
+      remote_available = true;
+      result.complete = attempt();
+    }
+    result.retained = claim.has_value();
+    return result;
+  }
+
   private_steam_graceful_shutdown_test_result_t run_private_steam_graceful_shutdown_scenario_for_tests(
     bool app_stop_dispatched,
     bool app_quiescent,
@@ -5157,6 +5382,13 @@ namespace proc {
     const std::optional<std::string> &account_home
   ) {
     return steam_instance_pipe_path(home_env, account_home);
+  }
+
+  std::optional<std::string> steam_remote_command_path_for_tests(
+    const std::optional<std::string> &home_env,
+    const std::optional<std::string> &account_home
+  ) {
+    return steam_remote_command_path(home_env, account_home);
   }
 
   bool desktop_steam_client_process_for_tests(std::string_view comm,
@@ -5229,10 +5461,23 @@ namespace proc {
     return cage_mangohud_allowed_for_session(app, use_cage_compositor, requested_headless);
   }
 
-  bool should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(const proc::ctx_t &app,
-                                                                   const proc::cmd_t &cmd,
-                                                                   bool use_cage_compositor) {
-    return should_skip_steam_shutdown_undo_after_cage_cleanup(app, cmd, use_cage_compositor);
+  bool should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(
+    const proc::cmd_t &cmd,
+    bool use_cage_compositor
+  ) {
+    return should_skip_steam_shutdown_undo_after_cage_cleanup(cmd, use_cage_compositor);
+  }
+
+  bool should_forward_steam_shutdown_undo_without_launch_for_tests(
+    const proc::ctx_t &app,
+    const proc::cmd_t &cmd,
+    bool use_cage_compositor
+  ) {
+    return should_forward_steam_shutdown_undo_without_launch(
+      app,
+      cmd,
+      use_cage_compositor
+    );
   }
 
   bool should_terminate_session_owned_steam_before_cage_stop_for_tests(
@@ -6460,6 +6705,10 @@ namespace proc {
     }
 
 #ifdef __linux__
+    if (_retained_steam_shutdown) {
+      BOOST_LOG(error) << "process: refusing launch while a retained Steam singleton shutdown remains incomplete"sv;
+      return 503;
+    }
     if (isolated_session_generation_blocks_launch(
           _session_used_cage_compositor,
           !_session_instance_id.empty()
@@ -8908,6 +9157,93 @@ namespace proc {
   }
 
 #ifdef __linux__
+  bool proc_t::retry_retained_steam_shutdown() {
+    if (!_retained_steam_shutdown) {
+      return true;
+    }
+
+    bool dispatch_attempted = false;
+    const auto command = _retained_steam_shutdown->command;
+    const bool complete = resolve_retained_steam_shutdown_claim(
+      _retained_steam_shutdown,
+      [](const std::string &pipe_path) {
+        return steam_instance_pipe_listener_active(pipe_path);
+      },
+      [](const std::string &remote_path) {
+        std::error_code path_ec;
+        const bool available = std::filesystem::is_regular_file(remote_path, path_ec) &&
+                               !path_ec &&
+                               access(remote_path.c_str(), X_OK) == 0;
+        if (!available) {
+          BOOST_LOG(error) << "process: Steam singleton is active but the no-launch remote client is unavailable; retaining shutdown claim"sv;
+        }
+        return available;
+      },
+      [this, &dispatch_attempted](const retained_steam_shutdown_t &claim) {
+        dispatch_attempted = true;
+        BOOST_LOG(info) << "Forwarding retained Steam shutdown without bootstrap via ["sv
+                        << claim.remote_path << " -shutdown]"sv;
+        std::error_code dispatch_ec;
+        auto working_dir = boost::filesystem::path(claim.working_dir);
+        auto child = run_steam_remote_shutdown_without_launch(
+          claim.remote_path,
+          working_dir,
+          claim.env,
+          _pipe.get(),
+          dispatch_ec
+        );
+        if (dispatch_ec) {
+          BOOST_LOG(error) << "process: no-launch Steam shutdown dispatch failed; retaining shutdown claim: "sv
+                           << dispatch_ec.message();
+          return steam_remote_shutdown_dispatch_result_t {.launch_error = true};
+        }
+
+        const bool timed_out = wait_for_configured_command(
+          child,
+          claim.remote_path + " -shutdown",
+          claim.timeout
+        );
+        if (timed_out) {
+          BOOST_LOG(error) << "process: no-launch Steam shutdown dispatch timed out; retaining shutdown claim"sv;
+        }
+        return steam_remote_shutdown_dispatch_result_t {
+          .timed_out = timed_out,
+          .exit_code = child.exit_code(),
+        };
+      },
+      [](const std::string &pipe_path) {
+        const bool released = wait_for_desktop_steam_quiescence(
+          []() {
+            return false;
+          },
+          [&pipe_path]() {
+            return steam_instance_singleton_released(pipe_path);
+          },
+          []() {
+            return steam_shutdown_clock_t::now();
+          },
+          [](steam_shutdown_clock_t::duration duration) {
+            std::this_thread::sleep_for(duration);
+          },
+          private_steam_native_shutdown_timeout,
+          100ms
+        );
+        if (!released) {
+          BOOST_LOG(error) << "process: Steam singleton retained its FIFO after no-launch shutdown; retaining shutdown claim"sv;
+        }
+        return released;
+      }
+    );
+
+    if (complete) {
+      BOOST_LOG(info) << (dispatch_attempted ?
+                            "process: retained Steam shutdown completed"sv :
+                            "process: retained Steam shutdown target is already absent"sv)
+                      << " ["sv << command << ']';
+    }
+    return complete;
+  }
+
   bool proc_t::request_session_owned_steam_graceful_shutdown_before_cage_stop() {
     std::optional<std::string> session_home;
     if (const auto home = _env.find("HOME"); home != _env.end() && !home->to_string().empty()) {
@@ -9151,6 +9487,10 @@ namespace proc {
     // ancestry above, then terminate every exact-generation process via pidfds.
     terminate_isolated_session_generation();
 
+    if (_retained_steam_shutdown && !retry_retained_steam_shutdown()) {
+      BOOST_LOG(error) << "process: retained Steam singleton shutdown remains incomplete"sv;
+    }
+
     if (isolated_session_uses_legacy_group_termination(
           _session_used_cage_compositor,
           immediate
@@ -9218,7 +9558,6 @@ namespace proc {
 
 #ifdef __linux__
       if (should_skip_steam_shutdown_undo_after_cage_cleanup(
-            _app,
             cmd,
             _session_used_cage_compositor
           )) {
@@ -9230,6 +9569,49 @@ namespace proc {
       if (gamescope_session_stop_undo && command_requests_steam_shutdown(cmd.undo_cmd)) {
         BOOST_LOG(info) << "Skipping Steam -shutdown undo; polaris-gamescope-session stop owns nested Steam cleanup ["sv
                         << cmd.undo_cmd << ']';
+        continue;
+      }
+
+      if (should_forward_steam_shutdown_undo_without_launch(
+            _app,
+            cmd,
+            _session_used_cage_compositor
+          )) {
+        std::optional<std::string> session_home;
+        if (const auto home = _env.find("HOME"); home != _env.end() && !home->to_string().empty()) {
+          session_home = home->to_string();
+        }
+        const auto account_home = account_home_directory();
+        const auto account_home_value = account_home.empty() ?
+          std::nullopt :
+          std::optional<std::string> {account_home};
+        const auto pipe_path = steam_instance_pipe_path(session_home, account_home_value);
+
+        // No listener means the shutdown goal is already satisfied. Any probe
+        // error is reported as active, so it cannot take this success branch.
+        if (pipe_path && !steam_instance_pipe_listener_active(*pipe_path)) {
+          BOOST_LOG(info) << "Skipping Steam shutdown undo because the exact generation is empty and no singleton listener remains ["sv
+                          << cmd.undo_cmd << ']';
+          continue;
+        }
+
+        const auto remote_path = steam_remote_command_path(session_home, account_home_value);
+        const auto shutdown_home = session_home ? session_home : account_home_value;
+        auto retained_env = _env;
+        if (shutdown_home) {
+          retained_env["HOME"] = *shutdown_home;
+        }
+        _retained_steam_shutdown.emplace(retained_steam_shutdown_t {
+          .command = cmd.undo_cmd,
+          .pipe_path = pipe_path.value_or(std::string {}),
+          .remote_path = remote_path.value_or(std::string {}),
+          .working_dir = shutdown_home.value_or(std::string {}),
+          .env = std::move(retained_env),
+          .timeout = _app.exit_timeout,
+        });
+        if (!retry_retained_steam_shutdown()) {
+          BOOST_LOG(error) << "process: Steam singleton shutdown remains retained for the next stop or launch attempt"sv;
+        }
         continue;
       }
 #endif

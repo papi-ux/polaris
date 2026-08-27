@@ -156,9 +156,14 @@ TEST(SteamShutdownStateMachineTests, ProcessScanErrorsRemainFailClosed) {
 TEST(SteamShutdownStateMachineTests, EmptyOrUnsetHomeFallsBackToAccountHome) {
   const std::optional<std::string> account_home {"/srv/polaris-user"};
   const std::optional<std::string> expected {"/srv/polaris-user/.steam/steam.pipe"};
+  const std::optional<std::string> expected_remote {
+    "/srv/polaris-user/.steam/root/ubuntu12_32/steam-runtime/amd64/usr/bin/steam-runtime-steam-remote"
+  };
 
   EXPECT_EQ(proc::steam_instance_pipe_path_for_tests(std::nullopt, account_home), expected);
   EXPECT_EQ(proc::steam_instance_pipe_path_for_tests(std::string {}, account_home), expected);
+  EXPECT_EQ(proc::steam_remote_command_path_for_tests(std::nullopt, account_home), expected_remote);
+  EXPECT_EQ(proc::steam_remote_command_path_for_tests(std::string {}, account_home), expected_remote);
 }
 
 TEST(SteamShutdownStateMachineTests, EnvironmentHomeTakesPrecedence) {
@@ -230,6 +235,79 @@ TEST(SteamShutdownStateMachineTests, ProductionShutdownUsesSingleMonotonicQuiesc
   EXPECT_LT(fail_closed, shutdown_command);
   EXPECT_NE(shutdown.find("wait_for_desktop_steam_quiescence("), std::string::npos);
   EXPECT_EQ(shutdown.find("for (int i = 0; i < 50; ++i)"), std::string::npos);
+}
+
+TEST(SteamShutdownStateMachineTests, ExactGenerationUndoUsesNoBootstrapRemoteExecutable) {
+  const auto source = read_source_file("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto forwarder = source_between(
+    source,
+    "boost::process::v1::child run_steam_remote_shutdown_without_launch(",
+    "#endif\n\n    void normalize_steam_big_picture_app("
+  );
+  ASSERT_FALSE(forwarder.empty());
+  EXPECT_NE(forwarder.find("boost::process::v1::child("), std::string::npos);
+  EXPECT_NE(forwarder.find("remote_path"), std::string::npos);
+  EXPECT_NE(forwarder.find("\"-shutdown\""), std::string::npos);
+  EXPECT_EQ(forwarder.find("platf::run_command"), std::string::npos);
+  EXPECT_EQ(forwarder.find("canonical_steam_shutdown_command"), std::string::npos);
+}
+
+TEST(SteamShutdownStateMachineTests, RetainedShutdownClearsOnlyAfterVerifiedCompletion) {
+  using scenario = proc::retained_steam_shutdown_scenario_e;
+
+  const auto absent = proc::run_retained_steam_shutdown_scenario_for_tests(
+    scenario::listener_absent
+  );
+  EXPECT_TRUE(absent.complete);
+  EXPECT_FALSE(absent.retained);
+  EXPECT_EQ(absent.listener_checks, 1u);
+  EXPECT_EQ(absent.dispatch_calls, 0u);
+
+  const auto delivered = proc::run_retained_steam_shutdown_scenario_for_tests(
+    scenario::delivered_and_released
+  );
+  EXPECT_TRUE(delivered.complete);
+  EXPECT_FALSE(delivered.retained);
+  EXPECT_EQ(delivered.dispatch_calls, 1u);
+  EXPECT_EQ(delivered.release_waits, 1u);
+
+  const auto vanished = proc::run_retained_steam_shutdown_scenario_for_tests(
+    scenario::target_exited_during_delivery
+  );
+  EXPECT_TRUE(vanished.complete);
+  EXPECT_FALSE(vanished.retained);
+  EXPECT_EQ(vanished.listener_checks, 2u);
+  EXPECT_EQ(vanished.dispatch_calls, 1u);
+  EXPECT_EQ(vanished.release_waits, 0u);
+}
+
+TEST(SteamShutdownStateMachineTests, RetainedShutdownFailuresStayFailClosed) {
+  using scenario = proc::retained_steam_shutdown_scenario_e;
+  for (const auto value : {
+         scenario::helper_missing,
+         scenario::dispatch_error,
+         scenario::dispatch_timeout,
+         scenario::delivery_failed_listener_retained,
+         scenario::delivered_release_timeout,
+       }) {
+    const auto result = proc::run_retained_steam_shutdown_scenario_for_tests(value);
+    EXPECT_FALSE(result.complete);
+    EXPECT_TRUE(result.retained);
+    EXPECT_EQ(result.attempts, 1u);
+  }
+}
+
+TEST(SteamShutdownStateMachineTests, RetainedShutdownRetriesOnTheNextLifecycleAttempt) {
+  const auto result = proc::run_retained_steam_shutdown_scenario_for_tests(
+    proc::retained_steam_shutdown_scenario_e::retry_after_helper_failure_then_listener_released
+  );
+
+  EXPECT_TRUE(result.complete);
+  EXPECT_FALSE(result.retained);
+  EXPECT_EQ(result.attempts, 2u);
+  EXPECT_EQ(result.listener_checks, 2u);
+  EXPECT_EQ(result.dispatch_calls, 0u);
 }
 
 TEST(SteamShutdownStateMachineTests, PrivateCageGracefulShutdownRequiresCompleteSoloExactOwnership) {
