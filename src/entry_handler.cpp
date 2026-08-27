@@ -10,6 +10,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 // local includes
 #include "config.h"
@@ -27,6 +28,7 @@
 
 extern "C" {
 #ifdef __linux__
+  #include <pwd.h>
   #include <unistd.h>
 #endif
 #ifdef _WIN32
@@ -196,9 +198,152 @@ namespace {
     return true;
   }
 
+  struct headless_boot_account_t {
+    std::string name;
+    uid_t uid;
+    gid_t gid;
+    fs::path home;
+  };
+
+  /**
+   * @brief Resolve the account headless boot should apply to.
+   *
+   * Host setup runs as root, but lingering and the default.target hook belong
+   * to the account that streams. SUDO_USER identifies it when the command is
+   * run the documented way; a bare root login cannot name it, and this command
+   * deliberately never guesses which account streams.
+   */
+  std::optional<headless_boot_account_t> resolve_headless_boot_account() {
+    const auto user = platf::input_access::setup_host_target_user();
+    if (user.empty() || user == "root") {
+      BOOST_LOG(error) << "Headless boot applies to the account that streams, and root is not it. "
+                          "Run this via [sudo -H] from that account so SUDO_USER identifies it."sv;
+      return std::nullopt;
+    }
+
+    const auto *pw = getpwnam(user.c_str());
+    if (!pw || !pw->pw_dir || pw->pw_dir[0] == '\0') {
+      BOOST_LOG(error) << "Headless boot could not resolve a home directory for ["sv << user << ']';
+      return std::nullopt;
+    }
+
+    return headless_boot_account_t {user, pw->pw_uid, pw->pw_gid, fs::path(pw->pw_dir)};
+  }
+
+  std::optional<fs::path> installed_user_unit_path() {
+    for (const auto *candidate : {"/usr/lib/systemd/user/polaris.service", "/usr/local/lib/systemd/user/polaris.service", "/etc/systemd/user/polaris.service"}) {
+      std::error_code ec;
+      if (fs::exists(candidate, ec)) {
+        return fs::path(candidate);
+      }
+    }
+    return std::nullopt;
+  }
+
+  fs::path headless_boot_wants_link(const headless_boot_account_t &account) {
+    return account.home / ".config/systemd/user/default.target.wants/polaris.service";
+  }
+
+  /**
+   * @brief Start the account's Polaris user service at boot.
+   *
+   * Two pieces, both explicit: lingering, so the account's user manager runs
+   * from boot without a login, and a default.target want for the packaged unit.
+   * The want is the same symlink `systemctl --user add-wants` would create,
+   * written directly because a root process cannot reliably talk to another
+   * account's user manager. The packaged [Install] section stays pointed at
+   * xdg-desktop-autostart.target on purpose: desktop hosts get the late,
+   * environment-complete start they have today, and only hosts that opt in
+   * here start at boot.
+   */
+  bool enable_headless_boot_for(const headless_boot_account_t &account) {
+    const auto unit = installed_user_unit_path();
+    if (!unit) {
+      BOOST_LOG(error) << "Headless boot needs the packaged user unit (usr/lib/systemd/user/polaris.service), which was not found. Install the Polaris package first."sv;
+      return false;
+    }
+
+    if (!run_host_command(std::format("enable lingering for {}", account.name), std::format("loginctl enable-linger {}", account.name))) {
+      return false;
+    }
+
+    const auto link_path = headless_boot_wants_link(account);
+    const auto wants_dir = link_path.parent_path();
+
+    // Track which directories are about to be created so ownership can be
+    // handed to the account; root-owned directories inside the home would
+    // break the account's own later `systemctl --user` edits.
+    std::vector<fs::path> created_dirs;
+    std::error_code ec;
+    for (auto dir = wants_dir; !fs::exists(dir, ec) && dir != account.home && !dir.empty(); dir = dir.parent_path()) {
+      created_dirs.push_back(dir);
+    }
+    fs::create_directories(wants_dir, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Headless boot could not create ["sv << wants_dir << "]: "sv << ec.message();
+      return false;
+    }
+    for (auto it = created_dirs.rbegin(); it != created_dirs.rend(); ++it) {
+      if (chown(it->c_str(), account.uid, account.gid) != 0) {
+        BOOST_LOG(warning) << "Headless boot could not hand ["sv << *it << "] to "sv << account.name;
+      }
+    }
+
+    if (fs::is_symlink(link_path, ec)) {
+      if (fs::read_symlink(link_path, ec) == *unit) {
+        BOOST_LOG(info) << "Headless boot: the default.target want already points at ["sv << *unit << ']';
+        return true;
+      }
+      fs::remove(link_path, ec);
+    } else if (fs::exists(link_path, ec)) {
+      BOOST_LOG(error) << "Headless boot: ["sv << link_path << "] exists and is not a symlink; refusing to replace it"sv;
+      return false;
+    }
+
+    fs::create_symlink(*unit, link_path, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Headless boot could not create ["sv << link_path << "]: "sv << ec.message();
+      return false;
+    }
+    if (lchown(link_path.c_str(), account.uid, account.gid) != 0) {
+      BOOST_LOG(warning) << "Headless boot could not hand ["sv << link_path << "] to "sv << account.name;
+    }
+
+    std::cout
+      << "Headless boot enabled for "sv << account.name << '.' << std::endl
+      << "Polaris now starts at boot with no monitor, desktop login, or Game Mode session."sv << std::endl
+      << "Verify after the next reboot with: systemctl --user is-active polaris"sv << std::endl
+      << "To start it right now without rebooting, run as "sv << account.name << ':' << std::endl
+      << "  systemctl --user daemon-reload && systemctl --user start polaris"sv << std::endl
+      << "Note: Private Stream and Gamescope Stream need no desktop. Streaming the visible"sv << std::endl
+      << "desktop (Mirror Desktop, Host Virtual Display) still needs a desktop login, and"sv << std::endl
+      << "Polaris must be restarted after that login to see it."sv << std::endl;
+    return true;
+  }
+
+  bool disable_headless_boot_for(const headless_boot_account_t &account) {
+    const auto link_path = headless_boot_wants_link(account);
+    std::error_code ec;
+    if (!fs::is_symlink(link_path, ec) && !fs::exists(link_path, ec)) {
+      std::cout << "Headless boot was not enabled for "sv << account.name << "; nothing to remove."sv << std::endl;
+      return true;
+    }
+
+    if (!fs::remove(link_path, ec) || ec) {
+      BOOST_LOG(error) << "Headless boot could not remove ["sv << link_path << "]: "sv << ec.message();
+      return false;
+    }
+
+    std::cout
+      << "Headless boot disabled for "sv << account.name << "; the user service returns to starting with the desktop session."sv << std::endl
+      << "Lingering was left enabled because other user services may rely on it. If nothing"sv << std::endl
+      << "else needs it: loginctl disable-linger "sv << account.name << std::endl;
+    return true;
+  }
+
   void print_setup_host_help(const char *name) {
     std::cout
-      << "Usage: "sv << name << " --setup-host [--enable-kms]"sv << std::endl
+      << "Usage: "sv << name << " --setup-host [--enable-kms] [--enable-headless-boot | --disable-headless-boot]"sv << std::endl
       << std::endl
       << "  Applies Linux host integration explicitly instead of relying on package scripts."sv << std::endl
       << "  Steps:"sv << std::endl
@@ -211,10 +356,17 @@ namespace {
       << "    - load uinput and uhid now via modprobe"sv << std::endl
       << "    - report whether the calling account is in the input group, which seat isolation needs"sv << std::endl
       << "    - optionally apply cap_sys_admin for DRM/KMS capture"sv << std::endl
+      << "    - optionally make the invoking account's Polaris user service start at boot,"sv << std::endl
+      << "      with no monitor, desktop login, or Game Mode session required"sv << std::endl
       << std::endl
       << "  Options:"sv << std::endl
-      << "    --enable-kms  Also run setcap cap_sys_admin+ep on the Polaris binary"sv << std::endl
-      << "    help          Print this help"sv << std::endl;
+      << "    --enable-kms            Also run setcap cap_sys_admin+ep on the Polaris binary"sv << std::endl
+      << "    --enable-headless-boot  Enable lingering for the invoking account and hook the"sv << std::endl
+      << "                            Polaris user service into default.target, so it starts at"sv << std::endl
+      << "                            boot before anyone logs in"sv << std::endl
+      << "    --disable-headless-boot Remove the boot-start hook again; lingering is left as"sv << std::endl
+      << "                            configured because other user services may rely on it"sv << std::endl
+      << "    help                    Print this help"sv << std::endl;
   }
 }  // namespace
 #endif
@@ -261,6 +413,8 @@ namespace args {
 #ifdef __linux__
   int setup_host(const char *name, int argc, char *argv[]) {
     bool enable_kms = false;
+    bool enable_headless_boot = false;
+    bool disable_headless_boot = false;
 
     for (int i = 0; i < argc; ++i) {
       const auto arg = std::string_view(argv[i]);
@@ -272,8 +426,22 @@ namespace args {
         enable_kms = true;
         continue;
       }
+      if (arg == "--enable-headless-boot"sv || arg == "enable-headless-boot"sv) {
+        enable_headless_boot = true;
+        continue;
+      }
+      if (arg == "--disable-headless-boot"sv || arg == "disable-headless-boot"sv) {
+        disable_headless_boot = true;
+        continue;
+      }
 
       BOOST_LOG(error) << "Unknown --setup-host option: "sv << arg;
+      print_setup_host_help(name);
+      return 1;
+    }
+
+    if (enable_headless_boot && disable_headless_boot) {
+      BOOST_LOG(error) << "--enable-headless-boot and --disable-headless-boot are mutually exclusive"sv;
       print_setup_host_help(name);
       return 1;
     }
@@ -306,7 +474,8 @@ namespace args {
     // rather than from a controller that silently never appears.
     const auto input_group_advice = platf::input_access::setup_host_input_group_advice();
 
-    if (!enable_kms && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
+    const bool headless_boot_requested = enable_headless_boot || disable_headless_boot;
+    if (!enable_kms && !headless_boot_requested && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
       std::cout
         << "Linux host setup: nothing to do."sv << std::endl
         << "The package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
@@ -327,6 +496,12 @@ namespace args {
         << "  sudo -H "sv << exe_path->string() << " --setup-host"sv;
       if (enable_kms) {
         std::cout << " --enable-kms"sv;
+      }
+      if (enable_headless_boot) {
+        std::cout << " --enable-headless-boot"sv;
+      }
+      if (disable_headless_boot) {
+        std::cout << " --disable-headless-boot"sv;
       }
       std::cout << std::endl;
       return 1;
@@ -355,6 +530,17 @@ namespace args {
       BOOST_LOG(info) << "Linux host setup: skipping cap_sys_admin. Re-run with --enable-kms only if you need DRM/KMS capture."sv;
     }
 
+    if (headless_boot_requested) {
+      const auto account = resolve_headless_boot_account();
+      if (!account) {
+        ok = false;
+      } else if (enable_headless_boot) {
+        ok &= enable_headless_boot_for(*account);
+      } else {
+        ok &= disable_headless_boot_for(*account);
+      }
+    }
+
     if (!ok) {
       BOOST_LOG(error) << "Linux host setup did not complete successfully"sv;
       return 1;
@@ -369,7 +555,8 @@ namespace args {
     }
     std::cout
       << "Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation."sv << std::endl
-      << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl;
+      << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl
+      << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl;
     if (!input_group_advice.empty()) {
       std::cout << std::endl
                 << input_group_advice << std::endl;

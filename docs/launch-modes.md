@@ -26,7 +26,7 @@ Every card under **Configuration → Audio/Video → Launch mode and capture pat
 
 ### Private Stream
 
-Your game runs in its own invisible session. Your desktop never flickers, resizes, or shows the game, and nothing you do on the desktop leaks into the stream.
+Your game runs in its own invisible session. Your desktop never flickers, resizes, or shows the game, and nothing you do on the desktop leaks into the stream. It even works on a host with no monitor attached and nobody logged in: pair it with `sudo -H polaris --setup-host --enable-headless-boot` for a console-style box that streams straight from power-on ([Bazzite guide](bazzite.md#headless-boot-and-deck-images) has the walkthrough).
 
 - **Best for:** most setups, and the preferred path when you stream to a handheld.
 - **One caveat:** the built-in Desktop entry looks like an empty screen until you launch something into it. That is normal, not broken. Right-click the empty screen to open the session menu, or use Mirror Desktop if you actually wanted your desktop.
