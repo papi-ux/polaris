@@ -17,6 +17,7 @@ export POLARIS_PROC_ROOT="$work/proc"
 export POLARIS_PROC_NET_UNIX="$work/proc/net/unix"
 export POLARIS_X11_SOCKET_DIR="$work/tmp/.X11-unix"
 export POLARIS_STOP_WAIT_STEPS=2
+export POLARIS_FREEZE_WAIT_STEPS=2
 mkdir -p "$POLARIS_PROC_ROOT/net" "$POLARIS_X11_SOCKET_DIR" "$work/run" "$work/bin"
 cat >"$work/bin/flock" <<'EOF'
 #!/usr/bin/env bash
@@ -54,6 +55,49 @@ write_unix_header() {
   printf 'Num RefCount Protocol Flags Type St Inode Path\n' >"$POLARIS_PROC_NET_UNIX"
 }
 
+# Model Linux's asynchronous group stop becoming visible in /proc. Production
+# waits for the exact leader and marked compositor to report T/t; a signal-call
+# ordering assertion alone would not exercise that contract.
+cat >"$work/bin/fake-stop-state" <<'EOF'
+#!/usr/bin/env python3
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+target = sys.argv[2]
+if not target.startswith("-"):
+    raise SystemExit(0)
+group = int(target[1:])
+for stat_path in root.glob("[0-9]*/stat"):
+    line = stat_path.read_text()
+    marker = line.rfind(") ")
+    if marker < 0:
+        continue
+    fields = line[marker + 2 :].split()
+    if len(fields) < 4 or int(fields[2]) != group:
+        continue
+    if fields[0] == "Z":
+        continue
+    fields[0] = "T"
+    stat_path.write_text(line[: marker + 2] + " ".join(fields) + "\n")
+EOF
+chmod +x "$work/bin/fake-stop-state"
+cat >"$work/bin/fake-pid-state" <<'EOF'
+#!/usr/bin/env python3
+import pathlib
+import sys
+
+stat_path = pathlib.Path(sys.argv[1]) / sys.argv[2] / "stat"
+line = stat_path.read_text()
+marker = line.rfind(") ")
+if marker < 0:
+    raise SystemExit(1)
+fields = line[marker + 2 :].split()
+fields[0] = sys.argv[3]
+stat_path.write_text(line[: marker + 2] + " ".join(fields) + "\n")
+EOF
+chmod +x "$work/bin/fake-pid-state"
+
 # Rename failure must fail marker publication and leave neither authority nor
 # a stale temporary file behind.
 write_process 410 1 9001 /usr/bin/gamescope --backend headless
@@ -84,7 +128,9 @@ printf 'DISPLAY=:9\nPOLARIS_GAMESCOPE_PID=410\nPOLARIS_GAMESCOPE_START_TIME=9000
 cat >"$work/bin/kill" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >>"$work/kills"
-if [ "\${1:-}" = -TERM ] && [ "\${2:-}" = -410 ]; then
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -410 ]; then
   rm -rf "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/411"
   rm -f "$work/run/gamescope-0"
 fi
@@ -118,27 +164,76 @@ cp "$work/bin/kill" "$work/bin/kill.default"
 cat >"$work/bin/kill" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >>"$work/kills"
-if [ "\${1:-}" = -TERM ] && [ "\${2:-}" = -400 ]; then
-  rm -rf "$POLARIS_PROC_ROOT/410"
-  rm -f "$work/run/gamescope-0"
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
 elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -400 ]; then
-  rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/411"
+  if [ "\$(awk '{ print \$3 }' "$POLARIS_PROC_ROOT/410/stat")" != T ]; then
+    : >"$work/gamescope-abort"
+  fi
+  rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/411"
+  rm -f "$work/run/gamescope-0"
 fi
 EOF
 chmod +x "$work/bin/kill"
 polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
   fail "private child compositor group did not stop"
-grep -qx -- '-STOP 400' "$work/kills" || fail "private-session leader was not pinned before TERM"
-grep -qx -- '-TERM -400' "$work/kills" || fail "validated PGID was not signalled"
-grep -qx -- '-KILL -400' "$work/kills" || fail "TERM-resistant group sibling was not escalated"
+grep -qx -- '-STOP -400' "$work/kills" || fail "private process group was not frozen"
+grep -qx -- '-KILL -400' "$work/kills" || fail "validated frozen PGID was not killed"
+[ ! -e "$work/gamescope-abort" ] || fail "group teardown reached a running wrapped Gamescope"
 if grep -q -- '-410' "$work/kills"; then
   fail "compositor PID was used as a process group"
 fi
 mv "$work/bin/kill.default" "$work/bin/kill"
 chmod +x "$work/bin/kill"
 
-# A descendant that moved to another PGID but retained the private SID must
-# prevent marker/environment deletion after the original group is drained.
+# Signal delivery is not the freeze boundary. If the exact leader/compositor do
+# not actually report T/t, fail before KILL and resume only the validated group.
+write_process_with_group 400 1 400 400 9150 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 9151 /usr/bin/gamescope --backend headless
+printf '410 9151 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+cat >"$work/bin/kill-no-freeze" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+EOF
+chmod +x "$work/bin/kill-no-freeze"
+: >"$work/kills"
+if POLARIS_KILL_BIN="$work/bin/kill-no-freeze" POLARIS_FREEZE_WAIT_STEPS=1 \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "unobserved group stop advanced to destructive teardown"
+fi
+grep -qx -- '-STOP -400' "$work/kills" || fail "freeze-timeout fixture did not request group stop"
+! grep -q -- '-KILL' "$work/kills" || fail "unobserved group stop sent a destructive signal"
+grep -qx -- '-CONT -400' "$work/kills" || fail "pre-commit freeze failure did not resume the exact group"
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "freeze-timeout failure cleared marker authority"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+
+# Seeing only the leader and marked compositor stop is insufficient: every
+# live group member must reach T/t before the commit boundary.
+write_process_with_group 400 1 400 400 9170 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 9171 /usr/bin/gamescope --backend headless
+write_process_with_group 411 410 400 400 9172 /usr/bin/Xwayland :2
+printf '410 9171 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+cat >"$work/bin/kill-partial-freeze" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -STOP ] && [ "\${2:-}" = -400 ]; then
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 400 T
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 410 T
+fi
+EOF
+chmod +x "$work/bin/kill-partial-freeze"
+: >"$work/kills"
+if POLARIS_KILL_BIN="$work/bin/kill-partial-freeze" POLARIS_FREEZE_WAIT_STEPS=1 \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "running group member advanced to destructive teardown"
+fi
+! grep -q -- '-KILL' "$work/kills" || fail "running group member was present before KILL"
+grep -qx -- '-CONT -400' "$work/kills" || fail "partial pre-commit freeze did not resume the exact group"
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "partial freeze cleared marker authority"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/411"
+
+# A descendant that moved to another PGID but retained the private SID must be
+# drained through its separately frozen and revalidated group leader.
 write_process_with_group 400 1 400 400 9200 /usr/bin/sleep infinity
 write_process_with_group 410 400 400 400 9201 /usr/bin/gamescope --backend headless
 write_process_with_group 420 410 420 400 9202 /usr/bin/sleep infinity
@@ -150,23 +245,99 @@ printf '410 9201 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
 printf 'DISPLAY=:2\n' >"$work/run/polaris-gamescope.env"
 cat >"$work/bin/kill-escaped-sid" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = -TERM ]; then
-  rm -rf "$POLARIS_PROC_ROOT/410"
-elif [ "\${1:-}" = -KILL ]; then
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -400 ]; then
   rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+  rm -f "$work/run/gamescope-0"
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -420 ]; then
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 420 Z
 fi
 EOF
 chmod +x "$work/bin/kill-escaped-sid"
-if POLARIS_KILL_BIN="$work/bin/kill-escaped-sid" POLARIS_STOP_WAIT_STEPS=1 POLARIS_KILL_WAIT_STEPS=1 \
-    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
-  fail "separate-PGID private-session descendant was reported drained"
-fi
-[ -e "$work/run/polaris-gamescope.pid" ] || fail "escaped SID descendant allowed marker deletion"
-[ -e "$work/run/polaris-gamescope.env" ] || fail "escaped SID descendant allowed env deletion"
+: >"$work/kills"
+POLARIS_KILL_BIN="$work/bin/kill-escaped-sid" POLARIS_STOP_WAIT_STEPS=1 POLARIS_KILL_WAIT_STEPS=1 \
+  polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
+  fail "separate-PGID private-session descendant did not drain"
+grep -qx -- '-STOP -420' "$work/kills" || fail "escaped SID process group was not frozen"
+grep -qx -- '-KILL -420' "$work/kills" || fail "escaped SID process group was not killed"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/420/stat")" = Z ] || fail "zombie fixture was not retained for terminal-state proof"
+[ ! -e "$work/run/polaris-gamescope.pid" ] || fail "drained escaped SID retained marker authority"
 rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/420"
 
-# If the private-session leader generation changes after TERM, numeric PGID
-# escalation loses its immutable reuse barrier and must fail closed.
+# A zombie group leader still pins its numeric PGID even though /proc/<pid>/exe
+# is unavailable. Freeze and kill a live member through that exact Z leader;
+# the stopped original parent must not make this state permanently unretryable.
+write_process_with_group 400 1 400 400 9230 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 9231 /usr/bin/gamescope --backend headless
+write_process_with_group 420 410 420 400 9232 /usr/bin/sleep infinity
+write_process_with_group 421 420 420 400 9233 /usr/bin/sleep infinity
+"$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 420 Z
+rm -f "$POLARIS_PROC_ROOT/420/exe"
+printf '410 9231 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+cat >"$work/bin/kill-zombie-leader-sid" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -420 ]; then
+  rm -rf "$POLARIS_PROC_ROOT/421"
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -400 ]; then
+  rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+fi
+EOF
+chmod +x "$work/bin/kill-zombie-leader-sid"
+: >"$work/kills"
+POLARIS_KILL_BIN="$work/bin/kill-zombie-leader-sid" POLARIS_FREEZE_WAIT_STEPS=1 POLARIS_KILL_WAIT_STEPS=1 \
+  polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
+  fail "zombie-led escaped process group did not drain"
+grep -qx -- '-STOP -420' "$work/kills" || fail "zombie-led group was not frozen"
+grep -qx -- '-KILL -420' "$work/kills" || fail "zombie-led group was not killed"
+[ -e "$POLARIS_PROC_ROOT/420/stat" ] || fail "zombie leader fixture did not remain unreaped"
+[ ! -e "$work/run/polaris-gamescope.pid" ] || fail "zombie-led drain retained marker authority"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/420" "$POLARIS_PROC_ROOT/421"
+
+# A sibling process group without its leader has no immutable PGID reuse
+# barrier. Keep the marker rather than signal that ambiguous numeric group.
+write_process_with_group 400 1 400 400 9250 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 9251 /usr/bin/gamescope --backend headless
+write_process_with_group 421 410 420 400 9252 /usr/bin/sleep infinity
+: >"$work/run/gamescope-0"
+write_unix_header
+printf 'row row row row row row 803 %s\n' "$work/run/gamescope-0" >>"$POLARIS_PROC_NET_UNIX"
+ln -sfn 'socket:[803]' "$POLARIS_PROC_ROOT/410/fd/3"
+printf '410 9251 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+cat >"$work/bin/kill-leaderless-sid" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -400 ]; then
+  rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+  rm -f "$work/run/gamescope-0"
+fi
+EOF
+chmod +x "$work/bin/kill-leaderless-sid"
+: >"$work/kills"
+if POLARIS_KILL_BIN="$work/bin/kill-leaderless-sid" POLARIS_STOP_WAIT_STEPS=1 POLARIS_KILL_WAIT_STEPS=1 \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "leaderless escaped SID process group was reported drained"
+fi
+! grep -qx -- '-KILL -420' "$work/kills" || fail "leaderless escaped SID process group was signalled"
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "leaderless escaped SID failure cleared marker authority"
+! grep -qx -- '-KILL -400' "$work/kills" || fail "leaderless sibling failure destroyed retry authority"
+rm -rf "$POLARIS_PROC_ROOT/421"
+: >"$work/kills"
+POLARIS_KILL_BIN="$work/bin/kill-leaderless-sid" POLARIS_FREEZE_WAIT_STEPS=1 POLARIS_KILL_WAIT_STEPS=1 \
+  polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
+  fail "leaderless escaped SID cleanup did not recover after the survivor exited"
+grep -qx -- '-KILL -400' "$work/kills" || fail "retry did not terminate the retained exact group"
+[ ! -e "$work/run/polaris-gamescope.pid" ] || fail "successful retry retained marker authority"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+
+# If the private-session leader generation changes after the destructive group
+# signal, numeric PGID authority is lost and cleanup must fail closed.
 write_process_with_group 400 1 400 400 9300 /usr/bin/sleep infinity
 write_process_with_group 410 400 400 400 9301 /usr/bin/gamescope --backend headless
 write_process_with_group 411 410 400 400 9302 /usr/bin/tail -f /dev/null
@@ -179,7 +350,9 @@ printf '410 9301 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
 cat >"$work/bin/kill-reused-leader" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >>"$work/kills"
-if [ "\${1:-}" = -TERM ]; then
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
+elif [ "\${1:-}" = -KILL ]; then
   printf '400 (sleep) S 1 400 400 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 9400\n' >"$POLARIS_PROC_ROOT/400/stat"
   rm -rf "$POLARIS_PROC_ROOT/410"
 fi
@@ -189,7 +362,8 @@ if POLARIS_KILL_BIN="$work/bin/kill-reused-leader" \
     polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
   fail "recycled private-session leader authorized PGID escalation"
 fi
-! grep -q -- '-KILL' "$work/kills" || fail "recycled PGID received KILL"
+grep -qx -- '-KILL -400' "$work/kills" || fail "ambiguous destructive signal was not exercised"
+! grep -q -- '-CONT' "$work/kills" || fail "ambiguous destructive signal resumed a partial generation"
 [ -e "$work/run/polaris-gamescope.pid" ] || fail "leader-reuse failure cleared marker authority"
 rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/411"
 
@@ -310,13 +484,13 @@ mv "$work/unix.unique" "$POLARIS_PROC_NET_UNIX"
 # metadata/socket are removed. The unrelated host X display survives.
 polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run" ||
   fail "valid marked generation did not stop"
-grep -qx -- '-TERM -410' "$work/kills" || fail "exact marked process group was not signalled"
+grep -qx -- '-KILL -410' "$work/kills" || fail "exact frozen process group was not killed"
 [ ! -e "$work/run/polaris-gamescope.pid" ] || fail "owned marker survived terminal stop"
 [ ! -e "$work/run/polaris-gamescope.env" ] || fail "owned runtime env survived terminal stop"
 [ -e "$POLARIS_X11_SOCKET_DIR/X0" ] || fail "host X0 was removed during owned stop"
 
-# A same-role successor replacing the PID generation during TERM must never
-# receive the predecessor's escalation or lose its socket/marker.
+# A same-role successor replacing the PID generation during an ambiguous KILL
+# result must never receive a repeated signal or lose its socket/marker.
 write_process 410 1 9100 /usr/bin/gamescope --backend headless
 : >"$work/run/gamescope-0"
 ln -s 'socket:[700]' "$POLARIS_PROC_ROOT/410/fd/3"
@@ -328,7 +502,9 @@ printf '410 9100 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
 cat >"$work/bin/kill-successor" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >>"$work/kills"
-if [ "\${1:-}" = -TERM ]; then
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
+elif [ "\${1:-}" = -KILL ]; then
   printf '410 (gamescope) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 9101\n' \
     >"$POLARIS_PROC_ROOT/410/stat"
   printf '410 9101 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
@@ -339,9 +515,8 @@ if POLARIS_KILL_BIN="$work/bin/kill-successor" \
     polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run"; then
   fail "predecessor stop accepted a replacement marker as terminal cleanup authority"
 fi
-if grep -q -- '-KILL' "$work/kills"; then
-  fail "same-role successor received predecessor escalation"
-fi
+[ "$(grep -cFx -- '-KILL -410' "$work/kills")" = 1 ] || fail "predecessor teardown repeated destructive signaling"
+! grep -q -- '-CONT' "$work/kills" || fail "predecessor teardown resumed a successor group"
 [ "$(<"$work/run/polaris-gamescope.pid")" = '410 9101 idle /usr/bin/gamescope' ] ||
   fail "same-role successor marker was removed"
 [ -e "$work/run/gamescope-0" ] || fail "same-role successor socket was removed"
@@ -354,7 +529,7 @@ if polaris_marker_owns_socket "$work/run/polaris-gamescope.pid" "$work/run/games
   fail "duplicate socket pathname was accepted as owned"
 fi
 
-# A marker removed after TERM also revokes all cleanup authority. Environment
+# A marker removed after KILL also revokes all cleanup authority. Environment
 # and socket state must remain untouched because no exact generation is current.
 write_process 410 1 9200 /usr/bin/gamescope --backend headless
 rm -f "$POLARIS_PROC_ROOT/410/fd/3"
@@ -369,7 +544,9 @@ printf 'POLARIS_GAMESCOPE_PID=410\nPOLARIS_GAMESCOPE_START_TIME=9200\nPOLARIS_GA
 cat >"$work/bin/kill-missing-marker" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >>"$work/kills"
-if [ "\${1:-}" = -TERM ]; then
+if [ "\${1:-}" = -STOP ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" "\${2:-}"
+elif [ "\${1:-}" = -KILL ]; then
   rm -f "$work/run/polaris-gamescope.pid"
 fi
 EOF

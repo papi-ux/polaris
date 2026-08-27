@@ -321,6 +321,63 @@ TEST(SessionStopContractTests, UnclassifiedNestedLaunchHasNoNumericGroupKillFall
   ASSERT_NE(recover, std::string::npos);
 }
 
+TEST(SessionStopContractTests, WrappedGamescopeIsFrozenBeforeXwaylandGroupTeardown) {
+  const auto source = read_source_for_contract("nix/modules/polaris-gamescope-runtime-lib.sh");
+  ASSERT_FALSE(source.empty());
+  const auto stop_start = source.find("polaris_stop_marked_gamescope() (");
+  ASSERT_NE(stop_start, std::string::npos);
+  const auto body = source.substr(stop_start);
+  const auto freeze_group = body.find("\"$kill_bin\" -STOP \"-$pgid\"");
+  const auto leader_stopped = body.find("polaris_wait_group_leader_stopped", freeze_group);
+  const auto compositor_stopped = body.find("polaris_wait_gamescope_stopped", leader_stopped);
+  const auto all_original_stopped = body.find("polaris_wait_process_group_stopped", compositor_stopped);
+  const auto arm_destructive = body.find("destructive_signal_armed=1", all_original_stopped);
+  const auto drain_siblings = body.find("polaris_kill_private_session_groups \"$pgid\"", arm_destructive);
+  const auto final_sibling_scan = body.find("polaris_private_session_has_no_live_siblings", drain_siblings);
+  const auto kill_group = body.find("\"$kill_bin\" -KILL \"-$pgid\"", drain_siblings);
+  const auto clear_marker = body.rfind("rm -f \"$marker\"");
+  ASSERT_NE(freeze_group, std::string::npos);
+  ASSERT_NE(leader_stopped, std::string::npos);
+  ASSERT_NE(compositor_stopped, std::string::npos);
+  ASSERT_NE(all_original_stopped, std::string::npos);
+  ASSERT_NE(arm_destructive, std::string::npos);
+  ASSERT_NE(drain_siblings, std::string::npos);
+  ASSERT_NE(final_sibling_scan, std::string::npos);
+  ASSERT_NE(kill_group, std::string::npos);
+  ASSERT_NE(clear_marker, std::string::npos);
+  EXPECT_LT(freeze_group, leader_stopped);
+  EXPECT_LT(leader_stopped, compositor_stopped);
+  EXPECT_LT(compositor_stopped, all_original_stopped);
+  EXPECT_LT(all_original_stopped, arm_destructive);
+  EXPECT_LT(arm_destructive, drain_siblings);
+  EXPECT_LT(drain_siblings, final_sibling_scan);
+  EXPECT_LT(final_sibling_scan, kill_group);
+  EXPECT_LT(drain_siblings, kill_group);
+  EXPECT_LT(kill_group, clear_marker);
+  EXPECT_EQ(body.find("-TERM \"-$pgid\""), std::string::npos);
+  EXPECT_NE(body.find("[ \"$destructive_signal_armed\" = 0 ]"), std::string::npos);
+
+  const auto sibling_start = source.find("polaris_kill_private_session_groups() {");
+  ASSERT_NE(sibling_start, std::string::npos);
+  const auto sibling_end = source.find("polaris_stop_marked_gamescope() (", sibling_start);
+  ASSERT_NE(sibling_end, std::string::npos);
+  const auto sibling_body = source.substr(sibling_start, sibling_end - sibling_start);
+  const auto sibling_freeze = sibling_body.find("\"$kill_bin\" -STOP \"-$group\"");
+  const auto sibling_stopped = sibling_body.find("polaris_wait_group_leader_stopped", sibling_freeze);
+  const auto all_siblings_stopped = sibling_body.find("polaris_wait_process_group_stopped", sibling_stopped);
+  const auto sibling_kill = sibling_body.find("\"$kill_bin\" -KILL \"-$group\"", sibling_freeze);
+  ASSERT_NE(sibling_freeze, std::string::npos);
+  ASSERT_NE(sibling_stopped, std::string::npos);
+  ASSERT_NE(all_siblings_stopped, std::string::npos);
+  ASSERT_NE(sibling_kill, std::string::npos);
+  EXPECT_LT(sibling_freeze, sibling_stopped);
+  EXPECT_LT(sibling_stopped, all_siblings_stopped);
+  EXPECT_LT(all_siblings_stopped, sibling_kill);
+  EXPECT_NE(sibling_body.find("[ \"$POLARIS_PROCESS_STATE\" = Z ] && continue"), std::string::npos);
+  EXPECT_NE(sibling_body.find("if [ \"$POLARIS_PROCESS_STATE\" = Z ]; then"), std::string::npos);
+  EXPECT_NE(source.find("[ -z \"$executable\" ]"), std::string::npos);
+}
+
 TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebind) {
   const auto recovery = read_source_for_contract("nix/modules/session-lib.nix");
   const auto session = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
