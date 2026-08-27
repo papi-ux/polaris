@@ -3675,15 +3675,50 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsStartedAndStoppedInsi
   EXPECT_LT(first_main_launch, launch_committed);
   const auto stop_guard = terminate.find("stop_steam_big_picture_input_guard()");
   const auto cleanup_generation = terminate.find("terminate_isolated_session_generation();");
+  const auto retry_retained_shutdown = terminate.find(
+    "retry_retained_steam_shutdown()",
+    cleanup_generation
+  );
+  const auto forward_policy = terminate.find(
+    "should_forward_steam_shutdown_undo_without_launch(",
+    cleanup_generation
+  );
+  const auto retain_shutdown_claim = terminate.find(
+    "_retained_steam_shutdown.emplace(",
+    forward_policy
+  );
+  const auto generic_undo_dispatch = terminate.find(
+    "auto child = platf::run_command(cmd.elevated, true, cmd.undo_cmd",
+    forward_policy
+  );
   const auto finish_generation = terminate.find("finish_isolated_session_generation_cleanup();");
   ASSERT_NE(stop_guard, std::string::npos);
   ASSERT_NE(cleanup_generation, std::string::npos);
+  ASSERT_NE(retry_retained_shutdown, std::string::npos);
+  ASSERT_NE(forward_policy, std::string::npos);
+  ASSERT_NE(retain_shutdown_claim, std::string::npos);
+  ASSERT_NE(generic_undo_dispatch, std::string::npos);
   ASSERT_NE(finish_generation, std::string::npos);
   EXPECT_LT(stop_guard, cleanup_generation);
+  EXPECT_LT(cleanup_generation, retry_retained_shutdown);
+  EXPECT_LT(retry_retained_shutdown, forward_policy);
+  EXPECT_LT(cleanup_generation, forward_policy);
+  EXPECT_LT(forward_policy, retain_shutdown_claim);
+  EXPECT_LT(retain_shutdown_claim, generic_undo_dispatch);
+  EXPECT_LT(generic_undo_dispatch, finish_generation);
   EXPECT_LT(cleanup_generation, finish_generation);
+
+  const auto retained_launch_gate = execute.find("if (_retained_steam_shutdown)");
+  const auto retained_generation_revalidation = execute.find(
+    "isolated_session_generation_blocks_launch("
+  );
+  ASSERT_NE(retained_launch_gate, std::string::npos);
+  ASSERT_NE(retained_generation_revalidation, std::string::npos);
+  EXPECT_LT(retained_launch_gate, retained_generation_revalidation)
+    << "a pending singleton claim must block launch before generation revalidation can clear other retained state";
 }
 
-TEST(ProcessRuntimeConfigTests, HeadlessCageSteamBigPictureSkipsHostShutdownUndo) {
+TEST(ProcessRuntimeConfigTests, IsolatedSteamCleanupUsesNoLaunchForwarder) {
   proc::ctx_t app {};
   app.name = "Steam Big Picture";
   app.detached = {"setsid steam -gamepadui"};
@@ -3694,15 +3729,43 @@ TEST(ProcessRuntimeConfigTests, HeadlessCageSteamBigPictureSkipsHostShutdownUndo
     false
   };
 
-  EXPECT_TRUE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, true));
-  EXPECT_FALSE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(app, shutdown_undo, false));
+  EXPECT_TRUE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(
+    shutdown_undo, true
+  )) << "cage cleanup owns Steam shutdown even when exact capture failed closed";
+  EXPECT_FALSE(proc::should_forward_steam_shutdown_undo_without_launch_for_tests(
+    app, shutdown_undo, true
+  ));
+  EXPECT_TRUE(proc::should_forward_steam_shutdown_undo_without_launch_for_tests(
+    app, shutdown_undo, false
+  )) << "non-cage detached generation cleanup must use the no-bootstrap forwarder";
 
   proc::ctx_t unclassified_app {};
   unclassified_app.name = "Custom Cage App";
   unclassified_app.cmd = "/usr/bin/custom-launcher";
   EXPECT_TRUE(proc::should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(
-    unclassified_app, shutdown_undo, true
+    shutdown_undo, true
   )) << "immutable cage ownership plus an explicit Steam shutdown undo must fail closed";
+  EXPECT_FALSE(proc::should_forward_steam_shutdown_undo_without_launch_for_tests(
+    unclassified_app, shutdown_undo, false
+  )) << "unrelated non-cage apps keep their explicitly configured undo";
+
+  proc::cmd_t unrelated_undo {
+    std::string {},
+    std::string {"true"},
+    false
+  };
+  EXPECT_FALSE(proc::should_forward_steam_shutdown_undo_without_launch_for_tests(
+    app, unrelated_undo, false
+  ));
+
+  proc::cmd_t elevated_shutdown {
+    std::string {},
+    std::string {"setsid -f steam -shutdown"},
+    true
+  };
+  EXPECT_FALSE(proc::should_forward_steam_shutdown_undo_without_launch_for_tests(
+    app, elevated_shutdown, false
+  )) << "explicit elevated commands are not replaced with a user-session forwarder";
 }
 
 
