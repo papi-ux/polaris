@@ -10470,6 +10470,62 @@ namespace proc {
     }
   }
 
+  std::size_t migrate_legacy_bundled_desktop(nlohmann::json &fileTree) {
+    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+      return 0;
+    }
+
+    std::size_t migrated = 0;
+    for (auto &app : fileTree["apps"]) {
+      if (!app.is_object() || app.contains("desktop-mirror")) {
+        continue;
+      }
+
+      const auto absent_or_empty_string = [&app](const char *key) {
+        return !app.contains(key) || (app[key].is_string() && app[key].get<std::string>().empty());
+      };
+      const auto absent_or_empty_array = [&app](const char *key) {
+        return !app.contains(key) || (app[key].is_array() && app[key].empty());
+      };
+      const auto absent_or_false = [&app](const char *key) {
+        return !app.contains(key) || (app[key].is_boolean() && !app[key].get<bool>());
+      };
+      const bool manual_source = !app.contains("source") ||
+                                 (app["source"].is_string() && boost::iequals(app["source"].get<std::string>(), "manual"));
+
+      const bool legacy_desktop_identity =
+        app.contains("name") && app["name"].is_string() && app["name"].get<std::string>() == "Desktop" &&
+        app.contains("image-path") && app["image-path"].is_string() && app["image-path"].get<std::string>() == "desktop.png" &&
+        manual_source &&
+        absent_or_empty_string("cmd") &&
+        absent_or_empty_string("steam-appid") &&
+        absent_or_empty_array("detached") &&
+        absent_or_empty_array("prep-cmd") &&
+        absent_or_empty_array("state-cmd");
+      const bool malformed_virtual_display = app.contains("virtual-display") && !app["virtual-display"].is_boolean();
+      const bool malformed_client_commands = app.contains("allow-client-commands") && !app["allow-client-commands"].is_boolean();
+      if (legacy_desktop_identity && (malformed_virtual_display || malformed_client_commands)) {
+        // The parser's legacy recovery pass coerces string booleans. Record an
+        // explicit non-mirror decision first so malformed modern fields cannot
+        // become eligible after that retry.
+        app["desktop-mirror"] = false;
+        continue;
+      }
+
+      const bool exact_legacy_desktop =
+        legacy_desktop_identity &&
+        absent_or_false("virtual-display") &&
+        absent_or_false("allow-client-commands");
+      if (exact_legacy_desktop) {
+        app["desktop-mirror"] = true;
+        BOOST_LOG(info) << "Migrated the bundled legacy Desktop app to explicit desktop-mirror launch semantics.";
+        ++migrated;
+      }
+    }
+
+    return migrated;
+  }
+
   void migration_v6(nlohmann::json &fileTree) {
     // The bundled Desktop app predates an explicit launch semantic. Preserve
     // that exact legacy entry as a desktop mirror without inferring behavior
@@ -10480,48 +10536,7 @@ namespace proc {
       return;
     }
 
-    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
-      fileTree["version"] = this_version;
-      return;
-    }
-
-    for (auto &app : fileTree["apps"]) {
-      if (!app.is_object() || app.contains("desktop-mirror")) {
-        continue;
-      }
-
-      const auto name = json_string_member_or(app, "name");
-      const auto image_path = json_string_member_or(app, "image-path");
-      const auto source = json_string_member_or(app, "source", "manual");
-      const auto cmd = json_string_member_or(app, "cmd");
-      const auto steam_appid = json_string_member_or(app, "steam-appid");
-      const bool no_detached = !app.contains("detached") ||
-                               (app["detached"].is_array() && app["detached"].empty());
-      const bool no_prep = !app.contains("prep-cmd") ||
-                           (app["prep-cmd"].is_array() && app["prep-cmd"].empty());
-      const bool no_state = !app.contains("state-cmd") ||
-                            (app["state-cmd"].is_array() && app["state-cmd"].empty());
-      const bool virtual_display = app.contains("virtual-display") &&
-                                   coerce_json_bool(app["virtual-display"], false);
-      const bool client_commands = !app.contains("allow-client-commands") ||
-                                   coerce_json_bool(app["allow-client-commands"], true);
-
-      const bool exact_legacy_desktop =
-        name == "Desktop" &&
-        image_path == "desktop.png" &&
-        boost::iequals(source, "manual") &&
-        cmd.empty() &&
-        steam_appid.empty() &&
-        no_detached &&
-        no_prep &&
-        no_state &&
-        !virtual_display &&
-        !client_commands;
-      if (exact_legacy_desktop) {
-        app["desktop-mirror"] = true;
-        BOOST_LOG(info) << "Migrated the bundled legacy Desktop app to explicit desktop-mirror launch semantics.";
-      }
-    }
+    migrate_legacy_bundled_desktop(fileTree);
 
     fileTree["version"] = this_version;
   }
@@ -10569,8 +10584,25 @@ namespace proc {
     }
   }
 
+  void migration_v8(nlohmann::json &fileTree) {
+    // v10 introduced the Desktop semantic, but v11 catalogs already written by
+    // Polaris skipped that migration. Re-run only the exact legacy bundled
+    // identity so those catalogs cannot inherit a paired virtual-display mode.
+    static const int this_version = 12;
+    const int file_version = json_int_member_or(fileTree, "version", 0);
+    if (file_version >= this_version) {
+      return;
+    }
+
+    const auto migrated = migrate_legacy_bundled_desktop(fileTree);
+    fileTree["version"] = this_version;
+    if (migrated > 0) {
+      BOOST_LOG(info) << "Migrated " << migrated << " bundled legacy Desktop app(s) to explicit desktop-mirror launch semantics (v12).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 11;
+    int last_version = 12;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -10584,6 +10616,7 @@ namespace proc {
       migration_v5(fileTree);
       migration_v6(fileTree);
       migration_v7(fileTree);
+      migration_v8(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
