@@ -205,6 +205,25 @@ const shellBlockDepths = (commands) => {
 }
 
 describe('Linux packaging contracts', () => {
+  it('lets the user service outlive the desktop session', () => {
+    // A streaming host must keep serving when the desktop session ends: a
+    // headless-boot host never has one, and PartOf= stop propagation would end
+    // an active remote stream on desktop logout. Ordering (After=) stays, and
+    // the desktop-autostart install target stays so desktop hosts keep the
+    // late, environment-complete start; boot start is the explicit
+    // --setup-host --enable-headless-boot opt-in.
+    const unit = readSource('packaging/linux/polaris.service.in')
+    expect(unit).toMatch(/^After=graphical-session\.target$/m)
+    expect(unit).not.toMatch(/^PartOf=/m)
+    expect(unit).toMatch(/^WantedBy=xdg-desktop-autostart\.target$/m)
+
+    const entryHandler = readSource('src/entry_handler.cpp')
+    expect(entryHandler).toContain('--enable-headless-boot')
+    expect(entryHandler).toContain('--disable-headless-boot')
+    expect(entryHandler).toContain('default.target.wants/polaris.service')
+    expect(entryHandler).toContain('loginctl enable-linger')
+  })
+
   it('keeps portal/PipeWire capture independent while gating Wayland helpers', () => {
     const cmake = readSource('cmake/compile_definitions/linux.cmake')
     const portalGrab = readSource('src/platform/linux/portal_grab.cpp')
