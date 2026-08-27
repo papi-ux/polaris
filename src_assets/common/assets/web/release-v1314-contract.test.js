@@ -103,7 +103,7 @@ describe('v1.3.14 release contract', () => {
       .map((name) => read(`docs/release-notes/${name}`))
       .join('\n')
 
-    expect(releaseNotes).not.toMatch(/\]\(\.\.\/(?:bazzite|steamos)\.md\)/)
+    expect(releaseNotes).not.toMatch(/\]\(\.\.\/(?:bazzite|steamos)\.md(?:[?#][^)]*)?\)/)
     expect(releaseNotes).toContain('[Bazzite guide](https://papi-ux.com/docs/bazzite/)')
     expect(releaseNotes).toContain('[SteamOS guide](https://papi-ux.com/docs/steamos/)')
   })
