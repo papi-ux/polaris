@@ -153,6 +153,10 @@ namespace proc {
   bool desktop_steam_client_active();
   bool request_desktop_steam_shutdown_for_private_stream();
   bool ensure_steam_client_quiescent_for_doctor();
+  void apply_app_display_semantics(
+    const struct ctx_t &app,
+    rtsp_stream::launch_session_t &launch_session
+  );
 #endif
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
@@ -543,6 +547,7 @@ namespace proc {
     bool wait_all;
     bool virtual_display;
     bool virtual_display_primary;
+    bool desktop_mirror = false;
     bool use_app_identity;
     bool per_client_app_identity;
     bool allow_client_commands;

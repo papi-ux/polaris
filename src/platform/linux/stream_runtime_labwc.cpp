@@ -68,6 +68,10 @@ namespace stream_runtime {
       return cage_display_router::get_wayland_socket();
     }
 
+    std::string session_instance_id() {
+      return cage_display_router::get_session_instance_id();
+    }
+
     std::string x11_display() {
       return cage_display_router::get_x11_display();
     }

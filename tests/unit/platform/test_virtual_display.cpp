@@ -59,6 +59,31 @@ TEST(VirtualDisplayTests, HyprlandMonitorModeRefusesAbsentOutputsAndUnusableGeom
   EXPECT_FALSE(virtual_display::hyprland_monitor_mode("", "X").has_value());
 }
 
+TEST(VirtualDisplayTests, KscreenJsonSnapshotCarriesExactRestoreFields) {
+  constexpr auto output_json = R"json({
+    "outputs": [
+      {"name":"DP-1","enabled":true,"currentModeId":"7","priority":1},
+      {"name":"HDMI-A-1","enabled":false,"currentModeId":"12","priority":0}
+    ]
+  })json";
+
+  const auto state = virtual_display::kscreen_output_state_from_json(output_json, "HDMI-A-1");
+  ASSERT_TRUE(state.has_value());
+  EXPECT_EQ(state->name, "HDMI-A-1");
+  EXPECT_FALSE(state->enabled);
+  EXPECT_EQ(state->current_mode_id, "12");
+  EXPECT_EQ(state->priority, 0);
+  EXPECT_FALSE(virtual_display::kscreen_output_state_from_json(output_json, "DP-9").has_value());
+  EXPECT_FALSE(virtual_display::kscreen_output_state_from_json("not json", "DP-1").has_value());
+}
+
+TEST(VirtualDisplayTests, FailedOrStillActiveTeardownRetainsRecoveryAuthority) {
+  EXPECT_TRUE(virtual_display::teardown_is_verified(true, false));
+  EXPECT_FALSE(virtual_display::teardown_is_verified(false, false));
+  EXPECT_FALSE(virtual_display::teardown_is_verified(true, true));
+  EXPECT_FALSE(virtual_display::teardown_is_verified(false, true));
+}
+
 TEST(VirtualDisplayTests, OnlyNamedWaylandCreationIsAdvertised) {
   EXPECT_TRUE(virtual_display::wayland_compositor_supports_exact_output_creation("hyprland"));
   EXPECT_FALSE(virtual_display::wayland_compositor_supports_exact_output_creation("sway"));
@@ -189,22 +214,39 @@ TEST(VirtualDisplayTests, HyprlandMonitorLookupDoesNotSelectExistingHeadlessOutp
     {"name":"POLARIS-HEADLESS-4242-0"}
   ])json";
 
-  EXPECT_TRUE(virtual_display::hyprland_monitors_contain_output(
-    monitors,
-    "POLARIS-HEADLESS-4242-0"
-  ));
-  EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
-    monitors,
-    "POLARIS-HEADLESS-4242-1"
-  ));
-  EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
-    monitors,
-    "POLARIS-HEADLESS-9999-0"
-  ));
+  EXPECT_EQ(
+    virtual_display::hyprland_monitors_contain_output(monitors, "POLARIS-HEADLESS-4242-0"),
+    std::optional<bool> {true}
+  );
+  EXPECT_EQ(
+    virtual_display::hyprland_monitors_contain_output(monitors, "POLARIS-HEADLESS-4242-1"),
+    std::optional<bool> {false}
+  );
+  EXPECT_EQ(
+    virtual_display::hyprland_monitors_contain_output(monitors, "POLARIS-HEADLESS-9999-0"),
+    std::optional<bool> {false}
+  );
   EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
     "not json",
     "POLARIS-HEADLESS-4242-0"
-  ));
+  ).has_value());
+  EXPECT_FALSE(virtual_display::hyprland_monitors_contain_output(
+    R"json([{"description":"missing name"}])json",
+    "POLARIS-HEADLESS-4242-0"
+  ).has_value());
+}
+
+TEST(VirtualDisplayTests, EvdiConnectorStatusRequiresPositiveAbsenceProof) {
+  EXPECT_EQ(
+    virtual_display::evdi_connector_status_is_connected("connected"),
+    std::optional<bool> {true}
+  );
+  EXPECT_EQ(
+    virtual_display::evdi_connector_status_is_connected("disconnected"),
+    std::optional<bool> {false}
+  );
+  EXPECT_FALSE(virtual_display::evdi_connector_status_is_connected("").has_value());
+  EXPECT_FALSE(virtual_display::evdi_connector_status_is_connected("unknown").has_value());
 }
 
 TEST(VirtualDisplayTests, PersistedStateTracksEveryConcurrentDisplay) {
@@ -214,8 +256,10 @@ TEST(VirtualDisplayTests, PersistedStateTracksEveryConcurrentDisplay) {
     "displays": [
       {"pid":4242,"output_name":"POLARIS-HEADLESS-4242-0","width":1920,"height":1080,
        "fps":60,"active":true,"backend":"wayland_wlr","device_path":""},
-      {"pid":4242,"output_name":"POLARIS-HEADLESS-4242-1","width":2560,"height":1440,
-       "fps":120,"active":true,"backend":"wayland_wlr","device_path":""}
+      {"pid":4242,"output_name":"HDMI-A-1","width":2560,"height":1440,
+       "fps":120,"active":true,"backend":"kscreen_doctor","device_path":"",
+       "kscreen_output_before":{"name":"HDMI-A-1","enabled":false,"current_mode_id":"12","priority":0},
+       "kscreen_primary_before":{"name":"DP-1","enabled":true,"current_mode_id":"7","priority":1}}
     ]
   })json";
 
@@ -225,8 +269,13 @@ TEST(VirtualDisplayTests, PersistedStateTracksEveryConcurrentDisplay) {
   EXPECT_EQ(displays[0].display.output_name, "POLARIS-HEADLESS-4242-0");
   EXPECT_EQ(displays[0].display.width, 1920);
   EXPECT_EQ(displays[0].display.backend, virtual_display::backend_e::WAYLAND_WLR);
-  EXPECT_EQ(displays[1].display.output_name, "POLARIS-HEADLESS-4242-1");
+  EXPECT_EQ(displays[1].display.output_name, "HDMI-A-1");
   EXPECT_EQ(displays[1].display.fps, 120);
+  ASSERT_TRUE(displays[1].display.kscreen_output_before.has_value());
+  EXPECT_FALSE(displays[1].display.kscreen_output_before->enabled);
+  EXPECT_EQ(displays[1].display.kscreen_output_before->current_mode_id, "12");
+  ASSERT_TRUE(displays[1].display.kscreen_primary_before.has_value());
+  EXPECT_EQ(displays[1].display.kscreen_primary_before->priority, 1);
 }
 
 TEST(VirtualDisplayTests, PersistedStateStillReadsPreListSingleDisplayDocument) {

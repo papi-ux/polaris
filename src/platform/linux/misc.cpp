@@ -1362,6 +1362,7 @@ std::string get_local_ip_for_gateway() {
 
 #ifdef POLARIS_BUILD_WAYLAND
   std::vector<std::string> wl_display_names();
+  std::vector<std::string> wl_display_names(const capture_generation::identity_t &generation);
   std::shared_ptr<display_t> wl_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
   bool verify_wl() {
@@ -1423,6 +1424,74 @@ std::string get_local_ip_for_gateway() {
       return x11_display_names();
     }
 #endif
+    return {};
+  }
+
+  std::vector<std::string> display_names(
+    mem_type_e hwdevice_type,
+    const video::config_t &config
+  ) {
+    bool nvfbc_available = false;
+    bool wayland_available = false;
+    bool portal_available = false;
+    bool kms_available = false;
+    bool x11_available = false;
+#ifdef POLARIS_BUILD_CUDA
+    nvfbc_available = sources[source::NVFBC];
+#endif
+#ifdef POLARIS_BUILD_WAYLAND
+    wayland_available = sources[source::WAYLAND];
+#endif
+#ifdef POLARIS_BUILD_PORTAL
+    portal_available = sources[source::PORTAL];
+#endif
+#ifdef POLARIS_BUILD_DRM
+    kms_available = sources[source::KMS];
+#endif
+#ifdef POLARIS_BUILD_X11
+    x11_available = sources[source::X11];
+#endif
+
+    const auto &generation = config.capture_generation;
+    const auto backend = choose_display_backend(
+      generation.capture_backend,
+      !generation.exact_display_name.empty(),
+      nvfbc_available,
+      wayland_available,
+      portal_available,
+      kms_available,
+      x11_available,
+      hwdevice_type == mem_type_e::cuda
+    );
+    switch (backend) {
+      case display_backend_e::nvfbc:
+#ifdef POLARIS_BUILD_CUDA
+        return nvfbc_display_names();
+#endif
+        break;
+      case display_backend_e::wayland:
+#ifdef POLARIS_BUILD_WAYLAND
+        return wl_display_names(generation);
+#endif
+        break;
+      case display_backend_e::portal:
+#ifdef POLARIS_BUILD_PORTAL
+        return portal_display_names();
+#endif
+        break;
+      case display_backend_e::kms:
+#ifdef POLARIS_BUILD_DRM
+        return kms_display_names(hwdevice_type);
+#endif
+        break;
+      case display_backend_e::x11:
+#ifdef POLARIS_BUILD_X11
+        return x11_display_names();
+#endif
+        break;
+      default:
+        break;
+    }
     return {};
   }
 

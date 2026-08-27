@@ -6,6 +6,7 @@
     {
       "name": "Desktop",
       "image-path": "desktop.png",
+      "desktop-mirror": true,
       "allow-client-commands": false
     },
     {

@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "src/capture_generation.h"
 #include "src/platform/common.h"
 
 #include <charconv>
@@ -15,6 +16,48 @@
 #include <vector>
 
 namespace wlgrab_capture_policy {
+  struct generation_policy_t {
+    bool owned = false;
+    bool use_private_compositor = false;
+    std::string adapter_name;
+    std::string private_wayland_socket;
+    std::string private_runtime_instance_id;
+  };
+
+  inline generation_policy_t resolve_generation_policy(
+    const capture_generation::identity_t &generation,
+    bool global_use_private_compositor,
+    std::string_view global_adapter_name
+  ) {
+    if (!generation.empty()) {
+      return {
+        .owned = true,
+        .use_private_compositor = generation.use_cage_compositor,
+        .adapter_name = generation.adapter_name,
+        .private_wayland_socket = generation.private_wayland_socket,
+        .private_runtime_instance_id = generation.private_runtime_instance_id,
+      };
+    }
+    return {
+      .owned = false,
+      .use_private_compositor = global_use_private_compositor,
+      .adapter_name = std::string {global_adapter_name},
+    };
+  }
+
+  inline bool private_runtime_matches_generation(
+    const generation_policy_t &policy,
+    std::string_view live_socket,
+    std::string_view live_instance_id
+  ) {
+    return policy.owned &&
+           policy.use_private_compositor &&
+           !policy.private_wayland_socket.empty() &&
+           !policy.private_runtime_instance_id.empty() &&
+           policy.private_wayland_socket == live_socket &&
+           policy.private_runtime_instance_id == live_instance_id;
+  }
+
   enum class gpu_native_capture_route_e {
     headless_extcopy,
     windowed_nested,

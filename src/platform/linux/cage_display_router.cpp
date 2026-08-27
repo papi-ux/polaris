@@ -77,6 +77,7 @@ namespace cage_display_router {
 
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
   static std::string cage_x11_display;  // e.g., ":1"
+  static std::string cage_session_instance_id;
 
   // The output mode most recently requested of the running compositor. A
   // resume can carry a different refresh than the launch that started the
@@ -1122,6 +1123,7 @@ namespace cage_display_router {
     cage_pid = 0;
     cage_wayland_socket.clear();
     cage_x11_display.clear();
+    cage_session_instance_id.clear();
     // The mode is unrecorded until this startup settles: a resume racing the
     // launch must see "no recorded mode" and report failure, not silently
     // claim the refresh was applied.
@@ -1390,6 +1392,7 @@ namespace cage_display_router {
                     << std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now() - startup_begin
                        ).count();
+    cage_session_instance_id = session_instance_id;
     return true;
   }
 
@@ -1505,6 +1508,7 @@ namespace cage_display_router {
       cage_pid = 0;
       cage_wayland_socket.clear();
       cage_x11_display.clear();
+      cage_session_instance_id.clear();
       cage_runtime_state = {
         .requested_headless = false,
         .effective_headless = false,
@@ -1551,6 +1555,7 @@ namespace cage_display_router {
     cage_pid = 0;
     cage_wayland_socket.clear();
     cage_x11_display.clear();
+    cage_session_instance_id.clear();
     cage_runtime_state = {
       .requested_headless = false,
       .effective_headless = false,
@@ -1568,6 +1573,7 @@ namespace cage_display_router {
     cage_pid = 0;
     cage_wayland_socket.clear();
     cage_x11_display.clear();
+    cage_session_instance_id.clear();
     cage_runtime_state = {
       .requested_headless = false,
       .effective_headless = false,
@@ -1601,6 +1607,10 @@ namespace cage_display_router {
 
   std::string get_wayland_socket() {
     return cage_wayland_socket;
+  }
+
+  std::string get_session_instance_id() {
+    return cage_session_instance_id;
   }
 
   std::string get_x11_display() {

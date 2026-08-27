@@ -19,6 +19,46 @@ TEST(WlgrabCapturePolicy, EnumeratedOutputsPreferStableConnectorIdentity) {
   EXPECT_EQ(wlgrab_capture_policy::enumerated_monitor_identity(1, ""), "1");
 }
 
+TEST(WlgrabCapturePolicy, ImmutableGenerationWinsAfterGlobalConfigDrift) {
+  const capture_generation::identity_t generation {
+    .generation_id = 41,
+    .stream_mode = "headless_stream",
+    .capture_backend = "wlr",
+    .private_wayland_socket = "wayland-polaris-41",
+    .private_runtime_instance_id = "session-41",
+    .adapter_name = "/dev/dri/renderD128",
+    .headless_mode = true,
+    .use_cage_compositor = true,
+  };
+
+  const auto policy = wlgrab_capture_policy::resolve_generation_policy(
+    generation,
+    false,
+    "/dev/dri/renderD129"
+  );
+
+  EXPECT_TRUE(policy.owned);
+  EXPECT_TRUE(policy.use_private_compositor);
+  EXPECT_EQ(policy.adapter_name, "/dev/dri/renderD128");
+  EXPECT_EQ(policy.private_wayland_socket, "wayland-polaris-41");
+  EXPECT_EQ(policy.private_runtime_instance_id, "session-41");
+  EXPECT_TRUE(wlgrab_capture_policy::private_runtime_matches_generation(
+    policy,
+    "wayland-polaris-41",
+    "session-41"
+  ));
+  EXPECT_FALSE(wlgrab_capture_policy::private_runtime_matches_generation(
+    policy,
+    "wayland-polaris-42",
+    "session-41"
+  ));
+  EXPECT_FALSE(wlgrab_capture_policy::private_runtime_matches_generation(
+    policy,
+    "wayland-polaris-41",
+    "session-42"
+  ));
+}
+
 TEST(WlgrabCapturePolicy, RequestedMonitorSelectionIsExactAndFailClosed) {
   const std::vector<std::string> monitors {
     "POLARIS-HEADLESS-512536-0",

@@ -136,6 +136,7 @@ namespace cage_display_router {
    * Empty string if cage is not running.
    */
   std::string get_wayland_socket();
+  std::string get_session_instance_id();
 
   /**
    * @brief Returns the XWayland display exposed by cage (e.g., ":1").

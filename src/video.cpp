@@ -2178,9 +2178,17 @@ namespace video {
    * @param current_display_index The current display index or -1 if not yet known.
    * @return true when the current/preferred identity remains selectable.
    */
-  bool refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, std::string &preferred_display_name) {
+  bool refresh_displays(
+    platf::mem_type_e dev_type,
+    std::vector<std::string> &display_names,
+    int &current_display_index,
+    std::string &preferred_display_name,
+    const config_t *capture_config
+  ) {
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
-    const auto output_name { display_device::map_output_name(config::video.output_name) };
+    const auto output_name = capture_config != nullptr ?
+      capture_config->capture_generation.requested_output_name :
+      display_device::map_output_name(config::video.output_name);
     std::string current_display_name = preferred_display_name;
 
     // If we have a current display index, let's start with that
@@ -2190,7 +2198,13 @@ namespace video {
 
     // Refresh the display names
     auto old_display_names = std::move(display_names);
+#ifdef __linux__
+    display_names = capture_config != nullptr ?
+      platf::display_names(dev_type, *capture_config) :
+      platf::display_names(dev_type);
+#else
     display_names = platf::display_names(dev_type);
+#endif
 
     // If we now have no displays, let's put the old display array back and fail
     if (display_names.empty() && !old_display_names.empty()) {
@@ -2206,7 +2220,7 @@ namespace video {
     current_display_index = 0;
 
     if (current_display_name.empty()) {
-      current_display_name = display_device::map_output_name(config::video.output_name);
+      current_display_name = output_name;
     }
 
     // Exact prior identity is authoritative. A miss cannot become display 0.
@@ -2228,9 +2242,14 @@ namespace video {
     return !display_names.empty();
   }
 
-  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
+  void refresh_displays(
+    platf::mem_type_e dev_type,
+    std::vector<std::string> &display_names,
+    int &current_display_index,
+    const config_t *capture_config = nullptr
+  ) {
     static std::string empty_str = "";
-    if (!refresh_displays(dev_type, display_names, current_display_index, empty_str)) {
+    if (!refresh_displays(dev_type, display_names, current_display_index, empty_str, capture_config)) {
       current_display_index = display_names.empty() ? -1 : 0;
     }
   }
@@ -2287,7 +2306,12 @@ namespace video {
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      refresh_displays(
+        encoder.platform_formats->dev_type,
+        display_names,
+        display_p,
+        &capture_ctxs.front().config
+      );
       if (display_names.empty()) {
         BOOST_LOG(error) << "No displays were found for initial capture setup"sv;
         return;
@@ -2542,7 +2566,12 @@ namespace video {
               }
 
               // Only an explicit switch or an unnamed legacy session may enumerate.
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+              refresh_displays(
+                encoder.platform_formats->dev_type,
+                display_names,
+                display_p,
+                &capture_ctxs.front().config
+              );
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
@@ -3785,7 +3814,12 @@ namespace video {
       }
 
       // Refresh display names since a display removal might have caused the reinitialization
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      refresh_displays(
+        encoder.platform_formats->dev_type,
+        display_names,
+        display_p,
+        &synced_session_ctxs.front()->config
+      );
 
       // Process any pending display switch with the new list of displays
       if (switch_display_event->peek()) {
