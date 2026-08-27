@@ -35,13 +35,8 @@ These are the settings behind the recommended Headless Stream mode on a Linux ho
 
 ## Linux display modes
 
-Headless Stream starts apps inside Polaris' private labwc compositor. It is intentionally isolated
-from your normal KDE, GNOME, or wlroots desktop, so the built-in Desktop entry can be empty if no
-desktop shell or app is launched inside that runtime — right-clicking that empty screen opens the
-generated session menu, which says exactly this.
-
-Use Desktop Display mode when you want to stream the visible host desktop session. Use Headless
-Stream when you want a stream-only runtime that leaves the host desktop layout alone.
+This is the config-file summary. For choosing a mode, what each one feels like in practice, and
+AMD/NVIDIA guidance, see [Launch modes and capture paths](launch-modes.md).
 
 | I want | Set `linux_stream_mode` to |
 | --- | --- |
@@ -60,7 +55,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `headless_mode` | `enabled` | Request a stream-only session instead of the visible desktop |
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
 | `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
-| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [stream paths](stream-paths.md) |
+| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
 | `linux_private_runtime` | `labwc` | Private compositor used by paths that host the session themselves: `labwc` or `gamescope`. Ignored on host paths |
 | `headless_swap_mode` | `privacy` | Headless Dongle path only: `privacy` makes the dongle primary and blanks the panel, `off` extends onto the dongle and leaves the panel primary |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |

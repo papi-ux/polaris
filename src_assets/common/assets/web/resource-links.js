@@ -13,6 +13,7 @@
 export const resources = [
   { href: 'https://papi-ux.com/', labelKey: 'resource_card.website' },
   { href: 'https://papi-ux.com/docs/', labelKey: 'resource_card.documentation' },
+  { href: 'https://papi-ux.com/docs/launch-modes/', labelKey: 'resource_card.launch_mode_guide' },
   { href: 'https://papi-ux.com/docs/troubleshooting/', labelKey: 'resource_card.troubleshooting_guide' },
   { href: 'https://github.com/papi-ux/polaris', labelKey: 'resource_card.github' },
   { href: 'https://github.com/papi-ux/polaris/releases', labelKey: 'resource_card.releases' },
