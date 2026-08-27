@@ -439,7 +439,7 @@ namespace logging {
       << "    --help                    | print help"sv << std::endl
       << "    --creds username password | set Web UI credentials; restart Polaris afterwards"sv << std::endl
 #ifdef __linux__
-      << "    --setup-host [--enable-kms] | apply Linux udev/modules setup explicitly"sv << std::endl
+      << "    --setup-host [--enable-kms] [--enable-headless-boot] | apply Linux udev/modules setup explicitly; optionally start at boot with no desktop login"sv << std::endl
 #endif
       << "    --version                 | print the version of sunshine"sv << std::endl
       << std::endl

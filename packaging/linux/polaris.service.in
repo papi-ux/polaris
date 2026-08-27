@@ -1,7 +1,11 @@
 [Unit]
 Description=@PROJECT_DESCRIPTION@
+# Ordering only, deliberately without PartOf=graphical-session.target: a
+# streaming host must outlive the desktop session. With lingering enabled
+# (--setup-host --enable-headless-boot) there may be no graphical session at
+# all, and stop propagation would end an active remote stream on desktop
+# logout even though Private Stream never needed the desktop.
 After=graphical-session.target
-PartOf=graphical-session.target
 StartLimitIntervalSec=500
 StartLimitBurst=5
 
