@@ -2764,6 +2764,7 @@ namespace confighttp {
     // Get existing apps to check for duplicates
     std::set<std::string> existing_cmds;
     std::set<std::string> existing_lutris_slugs;
+    std::set<std::string> existing_heroic_keys;
     try {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       auto apps_tree = nlohmann::json::parse(content);
@@ -2782,6 +2783,15 @@ namespace confighttp {
             const auto slug = app.contains("lutris-slug") && app["lutris-slug"].is_string() ? app["lutris-slug"].get<std::string>() : "";
             if (!slug.empty()) {
               existing_lutris_slugs.insert(slug);
+            }
+          } else if (boost::iequals(app_source, "heroic")) {
+            const auto store = app.contains("heroic-store") && app["heroic-store"].is_string() ?
+              app["heroic-store"].get<std::string>() : "";
+            const auto app_name = app.contains("heroic-app-name") && app["heroic-app-name"].is_string() ?
+              app["heroic-app-name"].get<std::string>() : "";
+            if (!game_library::heroic_runner_for_store(store).empty() &&
+                game_library::is_heroic_app_name_safe(app_name)) {
+              existing_heroic_keys.insert(store + "/" + app_name);
             }
           }
         }
@@ -2918,7 +2928,14 @@ namespace confighttp {
     // Scan Heroic Games Launcher (GOG + Epic via Legendary), native and Flatpak installs
     nlohmann::json heroic_games = nlohmann::json::array();
     std::set<std::string> seen_heroic_keys;
-    const auto heroic_already_imported = [&existing_cmds](const std::string &store, const std::string &app_name) {
+    const auto heroic_already_imported = [&existing_cmds, &existing_heroic_keys](
+                                           const std::string &store,
+                                           const std::string &app_name
+                                         ) {
+      if (existing_heroic_keys.count(store + "/" + app_name) > 0) {
+        return true;
+      }
+
       // A title can already be published under either install's command form, including one
       // a user typed by hand before this scan could find their Flatpak.
       for (const auto &candidate : game_library::heroic_launch_commands(store, app_name)) {
@@ -2934,46 +2951,37 @@ namespace confighttp {
       for (const auto &[library_path, store, install] : game_library::heroic_installed_files(home_roots)) {
         if (!std::filesystem::exists(library_path)) continue;
         try {
-          std::ifstream f(library_path);
-          auto data = nlohmann::json::parse(f);
-
-          // Heroic installed.json: { "installed": [ { "app_name": "...", "title": "...", ... } ] }
-          // OR for Legendary: object keyed by app_name
-          nlohmann::json game_list;
-          if (data.contains("installed") && data["installed"].is_array()) {
-            game_list = data["installed"];
-          } else if (data.is_object()) {
-            // Legendary format: { "app_name": { ... }, ... }
-            for (auto &[key, val] : data.items()) {
-              if (val.is_object()) game_list.push_back(val);
-            }
+          std::ifstream file(library_path);
+          std::stringstream payload;
+          payload << file.rdbuf();
+          std::vector<game_library::heroic_game_t> entries;
+          if (store == "gog") {
+            // GOG's installed electron-store contains identities but no titles. Join it to
+            // the pre-install-overlay games cache from the same Heroic installation.
+            const auto cache_path = library_path.parent_path().parent_path() / "store_cache" / "gog_library.json";
+            if (!std::filesystem::exists(cache_path)) continue;
+            std::ifstream cache_file(cache_path);
+            std::stringstream cache_payload;
+            cache_payload << cache_file.rdbuf();
+            entries = game_library::parse_heroic_gog_library_json(payload.str(), cache_payload.str(), install);
+          } else {
+            entries = game_library::parse_heroic_installed_json(payload.str(), store, install);
           }
 
-          for (const auto &entry : game_list) {
-            std::string app_name = entry.value("app_name", "");
-            std::string title = entry.value("title", entry.value("app_name", ""));
-            if (title.empty() || app_name.empty()) continue;
-
-            // Skip DLC / tools
-            if (entry.contains("is_dlc") && entry["is_dlc"].get<bool>()) continue;
-
+          for (const auto &entry : entries) {
             // Both installs can hold the same title, and the launch command follows the
             // install this entry came from.
-            if (!seen_heroic_keys.insert(store + "/" + app_name).second) continue;
-
-            std::string launch_cmd = game_library::heroic_launch_command(store, app_name, install);
-            if (launch_cmd.empty()) {
-              BOOST_LOG(warning) << "Skipped Heroic title [" << title << "]: app name is not safe to launch";
-              continue;
-            }
+            if (!seen_heroic_keys.insert(entry.store + "/" + entry.app_name).second) continue;
 
             nlohmann::json game;
-            game["name"] = title;
-            game["app_name"] = app_name;
-            game["store"] = store;
-            game["cmd"] = launch_cmd;
+            game["name"] = entry.name;
+            game["app_name"] = entry.app_name;
+            game["store"] = entry.store;
+            game["runner"] = entry.runner;
+            game["install"] = game_library::heroic_install_name(entry.install);
+            game["cmd"] = entry.command;
             game["source"] = "heroic";
-            game["already_imported"] = heroic_already_imported(store, app_name);
+            game["already_imported"] = heroic_already_imported(entry.store, entry.app_name);
             heroic_games.push_back(game);
           }
         } catch (const std::exception &e) {
@@ -2983,33 +2991,27 @@ namespace confighttp {
 
       // Also check Heroic library.json (a combined library cache)
       for (const auto &[library_path, store, install] : game_library::heroic_cache_files(home_roots)) {
+        // GOG cache entries are deliberately not marked installed. They were joined to
+        // gog_store/installed.json above and must never be imported independently.
+        if (store == "gog") continue;
         if (!std::filesystem::exists(library_path)) continue;
         try {
-          std::ifstream f(library_path);
-          auto data = nlohmann::json::parse(f);
-          auto &lib = data.contains("library") ? data["library"] : data;
-          if (!lib.is_array()) continue;
-          for (const auto &entry : lib) {
-            std::string app_name = entry.value("app_name", "");
-            std::string title = entry.value("title", entry.value("app_name", ""));
-            if (title.empty() || app_name.empty()) continue;
-            if (!entry.value("is_installed", false)) continue;
+          std::ifstream file(library_path);
+          std::stringstream payload;
+          payload << file.rdbuf();
+          for (const auto &entry : game_library::parse_heroic_cache_json(payload.str(), store, install)) {
             // Skip what installed.json or the other install already provided
-            if (!seen_heroic_keys.insert(store + "/" + app_name).second) continue;
-
-            std::string launch_cmd = game_library::heroic_launch_command(store, app_name, install);
-            if (launch_cmd.empty()) {
-              BOOST_LOG(warning) << "Skipped Heroic title [" << title << "]: app name is not safe to launch";
-              continue;
-            }
+            if (!seen_heroic_keys.insert(entry.store + "/" + entry.app_name).second) continue;
 
             nlohmann::json game;
-            game["name"] = title;
-            game["app_name"] = app_name;
-            game["store"] = store;
-            game["cmd"] = launch_cmd;
+            game["name"] = entry.name;
+            game["app_name"] = entry.app_name;
+            game["store"] = entry.store;
+            game["runner"] = entry.runner;
+            game["install"] = game_library::heroic_install_name(entry.install);
+            game["cmd"] = entry.command;
             game["source"] = "heroic";
-            game["already_imported"] = heroic_already_imported(store, app_name);
+            game["already_imported"] = heroic_already_imported(entry.store, entry.app_name);
             heroic_games.push_back(game);
           }
         } catch (...) {}
@@ -3135,11 +3137,63 @@ namespace confighttp {
           }
           imported_lutris_game = true;
         } else if (source == "heroic") {
-          // Use the launch command provided by the scanner
-          std::string cmd = game.value("cmd", "");
-          if (!cmd.empty()) {
-            app["detached"] = nlohmann::json::array({ cmd });
+          // Heroic launch data crosses an authenticated browser boundary. Treat the
+          // browser's free-form cmd as display-only and rebuild from exact scanner metadata.
+          const auto app_name = game.contains("app_name") && game["app_name"].is_string() ?
+            game["app_name"].get<std::string>() : "";
+          const auto store = game.contains("store") && game["store"].is_string() ?
+            game["store"].get<std::string>() : "";
+          const auto runner = game.contains("runner") && game["runner"].is_string() ?
+            game["runner"].get<std::string>() : "";
+          const auto install_name = game.contains("install") && game["install"].is_string() ?
+            game["install"].get<std::string>() : "";
+          const auto heroic = game_library::heroic_game_from_metadata(app_name, store, runner, install_name);
+          if (!heroic) {
+            bad_request(response, request, "Heroic import metadata is missing or invalid");
+            return;
           }
+
+          const auto &command = heroic->command;
+
+          bool already_imported = false;
+          if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
+            const auto candidates = game_library::heroic_launch_commands(store, app_name);
+            for (const auto &existing : fileTree["apps"]) {
+              if (!existing.is_object()) continue;
+              const auto string_field = [&existing](std::string_view key) {
+                const auto value = existing.find(key);
+                return value != existing.end() && value->is_string() ? value->get<std::string>() : "";
+              };
+              const auto existing_source = string_field("source");
+              const auto existing_store = string_field("heroic-store");
+              const auto existing_app_name = string_field("heroic-app-name");
+              if (boost::iequals(existing_source, "heroic") &&
+                  existing_store == store && existing_app_name == app_name) {
+                already_imported = true;
+                break;
+              }
+
+              const auto command_matches = [&candidates](const nlohmann::json &value) {
+                return value.is_string() &&
+                       std::find(candidates.begin(), candidates.end(), value.get<std::string>()) != candidates.end();
+              };
+              if ((existing.contains("cmd") && command_matches(existing["cmd"])) ||
+                  (existing.contains("detached") && existing["detached"].is_array() &&
+                   std::any_of(existing["detached"].begin(), existing["detached"].end(), command_matches))) {
+                already_imported = true;
+                break;
+              }
+            }
+          }
+          if (already_imported) {
+            continue;
+          }
+
+          app["detached"] = nlohmann::json::array({command});
+          app["heroic-app-name"] = app_name;
+          app["heroic-store"] = store;
+          app["heroic-runner"] = heroic->runner;
+          app["heroic-install"] = install_name;
         }
 
         // Persist game classification metadata

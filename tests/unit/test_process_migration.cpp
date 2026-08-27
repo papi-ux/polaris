@@ -4120,7 +4120,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 10);
+  EXPECT_EQ(migrated_tree["version"], 11);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -4185,7 +4185,7 @@ TEST(ProcessMigrationTests, LegacyBundledDesktopGetsExplicitMirrorSemanticOnlyFo
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 10);
+  EXPECT_EQ(migrated_tree["version"], 11);
   EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
   EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
 
@@ -4200,6 +4200,93 @@ TEST(ProcessMigrationTests, LegacyBundledDesktopGetsExplicitMirrorSemanticOnlyFo
   ASSERT_NE(custom, apps.end());
   EXPECT_TRUE(stock->desktop_mirror);
   EXPECT_FALSE(custom->desktop_mirror);
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent) {
+  const auto file_path = test_paths::root() / "legacy_heroic_launch_migration.json";
+  const nlohmann::json legacy_apps = {
+    {"version", 10},
+    {"apps", {
+      {
+        {"name", "Epic Title"},
+        {"uuid", "11111111-1111-4111-8111-111111111111"},
+        {"source", "heroic"},
+        {"detached", {"setsid heroic heroic://launch/epic/Snow"}},
+        {"image-path", "/preserved/epic.png"},
+        {"game-category", "cinematic"},
+        {"virtual-display", true}
+      },
+      {
+        {"name", "GOG Title"},
+        {"uuid", "22222222-2222-4222-8222-222222222222"},
+        {"source", "heroic"},
+        {"detached", {"setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/gog/1207658930"}},
+        {"custom-field", "preserved"}
+      },
+      {
+        {"name", "Manual Lookalike"},
+        {"uuid", "33333333-3333-4333-8333-333333333333"},
+        {"source", "manual"},
+        {"detached", {"setsid heroic heroic://launch/epic/Manual"}}
+      },
+      {
+        {"name", "Mixed Heroic Commands"},
+        {"uuid", "44444444-4444-4444-8444-444444444444"},
+        {"source", "heroic"},
+        {"detached", {
+          "setsid heroic heroic://launch/epic/Mixed",
+          "notify-send preserved"
+        }}
+      },
+      {
+        {"name", "Custom Heroic Command"},
+        {"uuid", "55555555-5555-4555-8555-555555555555"},
+        {"source", "heroic"},
+        {"detached", {"heroic heroic://launch/epic/Custom"}}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), legacy_apps.dump(2)), 0);
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto first_payload = file_handler::read_file(file_path.string().c_str());
+  const auto migrated_tree = nlohmann::json::parse(first_payload);
+  EXPECT_EQ(migrated_tree["version"], 11);
+  ASSERT_EQ(migrated_tree["apps"].size(), 5u);
+
+  const auto &epic = migrated_tree["apps"][0];
+  EXPECT_EQ(epic["uuid"], "11111111-1111-4111-8111-111111111111");
+  EXPECT_EQ(epic["image-path"], "/preserved/epic.png");
+  EXPECT_EQ(epic["game-category"], "cinematic");
+  EXPECT_TRUE(epic["virtual-display"].get<bool>());
+  EXPECT_EQ(epic["detached"][0],
+    "setsid heroic --no-gui --no-sandbox 'heroic://launch?appName=Snow&runner=legendary'");
+  EXPECT_EQ(epic["heroic-app-name"], "Snow");
+  EXPECT_EQ(epic["heroic-store"], "epic");
+  EXPECT_EQ(epic["heroic-runner"], "legendary");
+  EXPECT_EQ(epic["heroic-install"], "native");
+
+  const auto &gog = migrated_tree["apps"][1];
+  EXPECT_EQ(gog["custom-field"], "preserved");
+  EXPECT_EQ(gog["detached"][0],
+    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "'heroic://launch?appName=1207658930&runner=gog'");
+  EXPECT_EQ(gog["heroic-install"], "flatpak");
+
+  EXPECT_EQ(migrated_tree["apps"][2]["detached"], legacy_apps["apps"][2]["detached"]);
+  EXPECT_FALSE(migrated_tree["apps"][2].contains("heroic-app-name"));
+  EXPECT_EQ(migrated_tree["apps"][3]["detached"], legacy_apps["apps"][3]["detached"]);
+  EXPECT_FALSE(migrated_tree["apps"][3].contains("heroic-app-name"));
+  EXPECT_EQ(migrated_tree["apps"][4]["detached"], legacy_apps["apps"][4]["detached"]);
+  EXPECT_FALSE(migrated_tree["apps"][4].contains("heroic-app-name"));
+
+  auto parsed_again = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_again.has_value());
+  EXPECT_EQ(file_handler::read_file(file_path.string().c_str()), first_payload);
 
   std::filesystem::remove(file_path);
 }
@@ -4381,7 +4468,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 10);
+  EXPECT_EQ(migrated_tree["version"], 11);
 
   std::filesystem::remove(file_path);
 }
@@ -4432,7 +4519,7 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(parsed_tree["version"], 10);
+  EXPECT_EQ(parsed_tree["version"], 11);
 
   std::filesystem::remove(file_path);
 }
@@ -4645,7 +4732,7 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 10);
+  EXPECT_EQ(migrated_tree["version"], 11);
   ASSERT_TRUE(migrated_tree.contains("apps"));
 
   const auto &migrated_apps = migrated_tree["apps"];
@@ -4711,7 +4798,7 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 10);
+  EXPECT_EQ(migrated_tree["version"], 11);
 
   const auto &migrated_apps = migrated_tree["apps"];
   const auto lib_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {

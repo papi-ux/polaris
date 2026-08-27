@@ -75,22 +75,44 @@ namespace game_library {
   /** @brief One Heroic library file, and the install it belongs to. */
   struct heroic_library_file_t {
     std::filesystem::path path;
-    std::string store;  // the segment Heroic expects in heroic://launch/<store>/<app_name>
+    std::string store;  // Polaris-facing store name: gog or epic
     launcher_install_t install = launcher_install_t::native;
   };
+
+  /** @brief One validated, launchable Heroic library entry. */
+  struct heroic_game_t {
+    std::string name;
+    std::string app_name;
+    std::string store;
+    std::string runner;
+    launcher_install_t install = launcher_install_t::native;
+    std::string command;
+  };
+
+  /** @brief The stable API/storage name for a launcher installation. */
+  std::string heroic_install_name(launcher_install_t install);
+
+  /** @brief Parse a stable API/storage installation name. */
+  std::optional<launcher_install_t> heroic_install_from_name(std::string_view install);
+
+  /** @brief Map a Polaris-facing Heroic store to Heroic's protocol runner. */
+  std::string heroic_runner_for_store(std::string_view store);
+
+  /** @brief Validate scanner/import metadata and derive its command without trusting the browser. */
+  std::optional<heroic_game_t> heroic_game_from_metadata(
+    const std::string &app_name,
+    const std::string &store,
+    const std::string &runner,
+    std::string_view install
+  );
 
   /** @brief Heroic's installed-games manifests, native install first. */
   std::vector<heroic_library_file_t> heroic_installed_files(const std::vector<std::filesystem::path> &home_roots);
 
-  /** @brief Heroic's cached store libraries, used when a manifest is missing. */
+  /** @brief Heroic's cached store libraries, used to recover installed-game metadata. */
   std::vector<heroic_library_file_t> heroic_cache_files(const std::vector<std::filesystem::path> &home_roots);
 
-  /**
-   * @brief True when a Heroic app name or store is safe to place in a launch command.
-   *
-   * Both come out of a file on disk and end up in a shell command, the same exposure the
-   * Steam app id and the Lutris slug are already checked for.
-   */
+  /** @brief True when a Heroic app name is safe to place in a launch command. */
   bool is_heroic_app_name_safe(const std::string &app_name);
 
   /** @brief The `heroic://launch` command for one title, for the install that has it. */
@@ -98,6 +120,30 @@ namespace game_library {
 
   /** @brief Every command form that could launch one Heroic title, for import dedup. */
   std::vector<std::string> heroic_launch_commands(const std::string &store, const std::string &app_name);
+
+  /** @brief Parse only the exact Heroic command form emitted by older Polaris releases. */
+  std::optional<heroic_game_t> parse_legacy_heroic_launch_command(std::string_view command);
+
+  /** @brief Parse Legendary's installed-games manifest into validated launchable entries. */
+  std::vector<heroic_game_t> parse_heroic_installed_json(
+    std::string_view json_payload,
+    const std::string &store,
+    launcher_install_t install
+  );
+
+  /** @brief Join GOG's installed identities to its cached game metadata. */
+  std::vector<heroic_game_t> parse_heroic_gog_library_json(
+    std::string_view installed_json_payload,
+    std::string_view library_json_payload,
+    launcher_install_t install
+  );
+
+  /** @brief Parse Legendary's installed store-cache entries into validated launchable entries. */
+  std::vector<heroic_game_t> parse_heroic_cache_json(
+    std::string_view json_payload,
+    const std::string &store,
+    launcher_install_t install
+  );
 
   /**
    * @brief Steam app id to playtime, read from one localconfig.vdf payload.
