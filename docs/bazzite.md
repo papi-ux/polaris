@@ -201,6 +201,46 @@ Resolution: 7680x2160
 This is expected for the Desktop image before a client launches a headless labwc
 stream.
 
+## Headless Boot and Deck Images
+
+The packaged service enables into `xdg-desktop-autostart.target`, which only a
+full desktop session fires. Two common Bazzite setups never fire it:
+
+- Deck images that boot straight into the gamescope Steam session. The gamescope
+  session does not run XDG autostart, so Polaris only starts once you visit
+  Desktop Mode.
+- A monitor-less host (dedicated streaming box, dummy plug removed). With no
+  graphical session at all, nothing starts the service after a reboot.
+
+For both, make Polaris boot-independent explicitly:
+
+```bash
+sudo -H polaris --setup-host --enable-headless-boot
+```
+
+This enables lingering for your account (your user services start at boot,
+before any login) and hooks the Polaris user service into `default.target`. Run
+it from Desktop Mode's terminal or over SSH, as your normal user via sudo. Undo
+it later with `--disable-headless-boot`.
+
+Verify after a reboot, over SSH if there is no display:
+
+```bash
+systemctl --user is-active polaris
+journalctl --user -u polaris --since "10 minutes ago" --no-pager
+```
+
+Two honest notes:
+
+- Private Stream and Gamescope Stream need no desktop session, so streaming
+  works on a fully headless boot. Streaming the visible desktop (Mirror
+  Desktop, Host Virtual Display) still needs a desktop login, and Polaris must
+  be restarted after that login to see it.
+- You do not need the host to boot into Big Picture to play Big Picture. With
+  Private Stream, launching Steam Big Picture from the client starts it inside
+  the private session at the client's resolution; the host can sit at a black
+  screen. See [Launch modes and capture paths](launch-modes.md).
+
 ## Game Mode Validation
 
 Game Mode remains pending for `bazzite-nvidia-open:stable` Desktop images. A

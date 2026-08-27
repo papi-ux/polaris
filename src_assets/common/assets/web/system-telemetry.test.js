@@ -14,4 +14,20 @@ describe('System telemetry display-session guidance', () => {
     expect(home).toContain('missing_display_environment')
     expect(home).toContain('Restart Polaris from the desktop session')
   })
+
+  it('reports boot readiness and keeps headless-boot hosts off the restart-from-desktop advice', () => {
+    // /api/stats/system must say whether this host survives a reboot with no
+    // desktop login, and a host that deliberately boots headless must not be
+    // told its missing desktop environment is a problem to fix by restarting
+    // from the desktop.
+    const confighttp = readFileSync(join(process.cwd(), 'src/confighttp.cpp'), 'utf8')
+
+    expect(confighttp).toContain('boot_readiness')
+    expect(confighttp).toContain('boot_independent')
+    expect(confighttp).toContain('session_bound')
+    expect(confighttp).toContain('/var/lib/systemd/linger')
+    expect(confighttp).toContain('default.target.wants/polaris.service')
+    expect(confighttp).toContain('sudo -H polaris --setup-host --enable-headless-boot')
+    expect(confighttp).toContain('expected on a headless-boot host')
+  })
 })

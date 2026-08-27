@@ -82,6 +82,7 @@
   #include <Windows.h>
 #elif __linux__
   #include "platform/linux/session_media.h"
+  #include <pwd.h>
   #include <sys/stat.h>
   #include <unistd.h>
 #elif __APPLE__
@@ -6166,14 +6167,56 @@ namespace confighttp {
     const char *session_type = std::getenv("XDG_SESSION_TYPE");
     const bool has_wayland_display = wayland_display && wayland_display[0] != '\0';
     const bool has_x11_display = x11_display && x11_display[0] != '\0';
-    output["display_session"]["status"] = has_wayland_display || has_x11_display ? "healthy" : "missing_display_environment";
-    output["display_session"]["summary"] = has_wayland_display ?
-      "Wayland desktop environment is available to Polaris." :
-      (has_x11_display ? "X11 desktop environment is available to Polaris." :
-                         "Polaris could not find WAYLAND_DISPLAY or DISPLAY for desktop previews.");
-    output["display_session"]["action"] = has_wayland_display || has_x11_display ?
+
+    // Boot readiness: whether this account's Polaris survives a reboot with no
+    // monitor or desktop login. Lingering plus a default.target want is what
+    // `--setup-host --enable-headless-boot` arranges; either alone is not
+    // enough, so both are reported.
+    bool linger_enabled = false;
+    bool boot_start_linked = false;
+    {
+      std::error_code boot_ec;
+      const auto *pw = getpwuid(geteuid());
+      if (pw && pw->pw_name && pw->pw_name[0] != '\0') {
+        linger_enabled = fs::exists(fs::path("/var/lib/systemd/linger") / pw->pw_name, boot_ec);
+      }
+      fs::path config_home;
+      if (const char *xdg_config = std::getenv("XDG_CONFIG_HOME"); xdg_config && *xdg_config) {
+        config_home = xdg_config;
+      } else if (const char *home = std::getenv("HOME"); home && *home) {
+        config_home = fs::path(home) / ".config";
+      } else if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
+        config_home = fs::path(pw->pw_dir) / ".config";
+      }
+      boot_start_linked = (!config_home.empty() && fs::exists(config_home / "systemd/user/default.target.wants/polaris.service", boot_ec)) ||
+                          fs::exists("/etc/systemd/user/default.target.wants/polaris.service", boot_ec);
+    }
+    const bool boot_independent = linger_enabled && boot_start_linked;
+    output["boot_readiness"]["linger_enabled"] = linger_enabled;
+    output["boot_readiness"]["boot_start_linked"] = boot_start_linked;
+    output["boot_readiness"]["status"] = boot_independent ? "boot_independent" : "session_bound";
+    output["boot_readiness"]["summary"] = boot_independent ?
+      "Polaris starts at boot with no monitor or desktop login." :
+      "Polaris starts with the desktop session, so after a reboot it is unavailable until someone logs in.";
+    output["boot_readiness"]["action"] = boot_independent ?
       "No action needed." :
-      "Restart Polaris from the desktop session or run the user service so it inherits the graphical environment.";
+      "For a monitor-less or Game Mode host, run: sudo -H polaris --setup-host --enable-headless-boot";
+
+    output["display_session"]["status"] = has_wayland_display || has_x11_display ? "healthy" : "missing_display_environment";
+    if (has_wayland_display || has_x11_display) {
+      output["display_session"]["summary"] = has_wayland_display ?
+        "Wayland desktop environment is available to Polaris." :
+        "X11 desktop environment is available to Polaris.";
+      output["display_session"]["action"] = "No action needed.";
+    } else if (boot_independent) {
+      // A headless-boot host has no desktop on purpose; telling it to restart
+      // from the desktop session would be wrong advice.
+      output["display_session"]["summary"] = "No desktop environment is attached, which is expected on a headless-boot host. Private Stream is unaffected.";
+      output["display_session"]["action"] = "To stream the visible desktop instead, log into the desktop and restart Polaris so it inherits the graphical environment.";
+    } else {
+      output["display_session"]["summary"] = "Polaris could not find WAYLAND_DISPLAY or DISPLAY for desktop previews.";
+      output["display_session"]["action"] = "Restart Polaris from the desktop session or run the user service so it inherits the graphical environment.";
+    }
     output["display_session"]["environment_repaired"] = display_environment_repaired;
     output["display_session"]["session_type"] = session_type && session_type[0] ? std::string(session_type) : "unknown";
     output["display_session"]["desktop"] = desktop_name && desktop_name[0] ? std::string(desktop_name) : "unknown";
