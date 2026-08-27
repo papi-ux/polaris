@@ -392,8 +392,12 @@ TEST(SessionStopContractTests, StartupRecoveryUsesCredentialedStopAndPortalRebin
   EXPECT_NE(session.find("publish_nested_claim transition absent"), std::string::npos);
   EXPECT_NE(session.find("polaris-gamescope-session-mode"), std::string::npos);
   EXPECT_NE(session.find("polaris-gamescope-session-state"), std::string::npos);
-  EXPECT_NE(session.find("printf '%s %s\\n' \"$POLARIS_SESSION_INSTANCE_ID\" \"$mode\""), std::string::npos);
+  EXPECT_NE(session.find("printf '%s %s %s\\n' \"$POLARIS_SESSION_INSTANCE_ID\" \"$mode\" \"$service_mode\""), std::string::npos);
   EXPECT_NE(session.find("mv -f -- \"$tmp\" \"$session_state_file\""), std::string::npos);
+  EXPECT_NE(session.find("runtime services=$service_mode"), std::string::npos);
+  EXPECT_NE(session.find("standalone package runtime restored with no idle gamescope"), std::string::npos);
+  EXPECT_NE(session.find("prior session recovery failed; retaining its exact claim"), std::string::npos);
+  EXPECT_EQ(session.find("forcing clean slate"), std::string::npos);
   EXPECT_NE(session.find("attach recovery could not terminate exact-session Steam"), std::string::npos);
   const auto idle = read_source_for_contract("scripts/install/lib/polaris-gamescope-idle.sh");
   ASSERT_FALSE(idle.empty());
@@ -591,6 +595,21 @@ TEST(SessionStopContractTests, RuntimeAcquisitionRejectsNestedOrIncompleteDurabl
     state << "session-A attach\n";
   }
   EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A attach standalone\n";
+  }
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A attach managed\n";
+  }
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A attach unknown\n";
+  }
+  EXPECT_FALSE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
   {
     std::ofstream claim(dir / "polaris-gamescope-wsi-nested");
     claim << "transition\n";

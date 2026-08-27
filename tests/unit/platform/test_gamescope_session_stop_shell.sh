@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  if [ -n "${actions:-}" ] && [ -f "$actions" ]; then
+    sed 's/^/  action: /' "$actions" >&2
+  fi
+  exit 1
+}
 work="$(mktemp -d "${TMPDIR:-/tmp}/polaris-gamescope-session-stop.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/run" "$work/proc"
@@ -45,6 +51,8 @@ cat >"$work/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$POLARIS_ACTIONS"
 case "$*" in
+  *'show -p LoadState --value polaris-gamescope-idle.service'*) printf '%s\n' "${IDLE_LOAD_STATE:-loaded}" ;;
+  *'show -p LoadState --value polaris-portal-gamescope.service'*) printf '%s\n' "${PORTAL_LOAD_STATE:-loaded}" ;;
   *'start polaris-gamescope-idle.service'*) [ "${IDLE_START_OK:-1}" = 1 ] ;;
   *'restart polaris-portal-gamescope.service'*) [ "${PORTAL_RESTART_OK:-1}" = 1 ] ;;
   *) exit 0 ;;
@@ -92,6 +100,8 @@ run_stop() {
     IDLE_OWNS_SOCKET="${IDLE_OWNS_SOCKET:-0}" WRITE_ENV_OK="${WRITE_ENV_OK:-0}" \
     IDLE_START_OK="${IDLE_START_OK:-1}" PORTAL_RESTART_OK="${PORTAL_RESTART_OK:-1}" \
     PORTAL_READY="${PORTAL_READY:-1}" \
+    IDLE_LOAD_STATE="${IDLE_LOAD_STATE:-loaded}" \
+    PORTAL_LOAD_STATE="${PORTAL_LOAD_STATE:-loaded}" \
     bash "$script" stop
 }
 reset_state() {
@@ -154,6 +164,79 @@ NESTED_VALID=0 STOP_OK=0 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
 ! grep -qx 'stop-nested' "$actions" || fail "restore-idle retry repeated nested stop"
 grep -qx 'write-idle-env' "$actions" || fail "idle runtime environment was not committed"
 grep -q 'restart polaris-portal-gamescope.service' "$actions" || fail "portal was not rebound"
+
+# Distro packages intentionally lack the Nix-only idle and private-portal
+# units. Once the exact nested owner is gone and sockets are reclaimable, stop
+# must remove only its durable state and return to an empty compositor baseline.
+reset_state
+printf 'session-A nested standalone\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+printf '1929404 30063385 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+printf 'DISPLAY=:1\n' >"$work/run/polaris-gamescope.env"
+IDLE_LOAD_STATE=not-found PORTAL_LOAD_STATE=not-found \
+  POLARIS_SESSION_INSTANCE_ID= NESTED_VALID=0 RECLAIM_OK=1 run_stop >/dev/null 2>&1 ||
+  fail "standalone package cleanup failed"
+[ ! -e "$work/run/polaris-gamescope-wsi-nested" ] || fail "standalone cleanup retained claim"
+[ ! -e "$work/run/polaris-gamescope-session-state" ] || fail "standalone cleanup retained session state"
+[ ! -e "$work/run/polaris-gamescope.pid" ] || fail "standalone cleanup retained dead marker"
+[ ! -e "$work/run/polaris-gamescope.env" ] || fail "standalone cleanup retained runtime env"
+grep -qx 'unmask-idle' "$actions" || fail "standalone cleanup retained runtime mask"
+! grep -Eq 'start polaris-gamescope-idle|restart polaris-portal|busctl' "$actions" ||
+  fail "standalone cleanup tried to start absent Nix services"
+
+# If the installed service model changes during a launch, do not reinterpret
+# that generation. Keep its exact recovery claim for operator remediation.
+reset_state
+printf 'session-A nested standalone\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+if POLARIS_SESSION_INSTANCE_ID= IDLE_LOAD_STATE=loaded PORTAL_LOAD_STATE=loaded \
+    NESTED_VALID=0 RECLAIM_OK=1 run_stop >/dev/null 2>&1; then
+  fail "changed gamescope service model returned success"
+fi
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = restore-idle ] ||
+  fail "changed gamescope service model cleared recovery claim"
+
+# A crash after the standalone cleanup commit but before the outer credential
+# removal leaves only the atomic state record. Retry must reconstruct the claim
+# and finish without inventing a managed idle generation.
+reset_state
+rm -f "$work/run/polaris-gamescope-wsi-nested" "$work/run/polaris-gamescope.pid"
+printf 'session-A nested standalone\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+POLARIS_SESSION_INSTANCE_ID= IDLE_LOAD_STATE=not-found PORTAL_LOAD_STATE=not-found \
+  NESTED_VALID=0 RECLAIM_OK=1 run_stop >/dev/null 2>&1 ||
+  fail "standalone post-commit retry failed"
+[ ! -e "$work/run/polaris-gamescope-session-state" ] ||
+  fail "standalone post-commit retry retained session state"
+[ ! -e "$work/run/polaris-gamescope-wsi-nested" ] ||
+  fail "standalone post-commit retry retained reconstructed claim"
+
+# Standalone cleanup never follows or unlinks an untrusted marker symlink.
+reset_state
+foreign_marker="$work/foreign-marker"
+printf 'foreign\n' >"$foreign_marker"
+rm -f "$work/run/polaris-gamescope.pid"
+ln -s "$foreign_marker" "$work/run/polaris-gamescope.pid"
+printf 'session-A nested standalone\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+if POLARIS_SESSION_INSTANCE_ID= IDLE_LOAD_STATE=not-found PORTAL_LOAD_STATE=not-found \
+    NESTED_VALID=0 RECLAIM_OK=1 run_stop >/dev/null 2>&1; then
+  fail "standalone cleanup accepted a marker symlink"
+fi
+[ "$(<"$foreign_marker")" = foreign ] || fail "standalone cleanup changed symlink target"
+[ -L "$work/run/polaris-gamescope.pid" ] || fail "standalone cleanup removed marker symlink"
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = restore-idle ] ||
+  fail "standalone symlink rejection cleared recovery claim"
+
+# A partial unit deployment is neither a managed Nix runtime nor a standalone
+# package runtime. Keep the recovery claim instead of guessing a baseline.
+reset_state
+if IDLE_LOAD_STATE=loaded PORTAL_LOAD_STATE=not-found \
+    NESTED_VALID=0 RECLAIM_OK=1 run_stop >/dev/null 2>&1; then
+  fail "partial gamescope service deployment returned success"
+fi
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = restore-idle ] ||
+  fail "partial service deployment cleared recovery claim"
 
 # Enumeration and procfs failures are unknown ownership, never "no Steam".
 reset_state
@@ -345,8 +428,12 @@ grep -Fq 'run_without_session_operation_lock setsid env' "$script" ||
 grep -Fq 'run_without_session_operation_lock setsid -f env' "$script" ||
   fail "attach Steam launch does not drop the operation lock"
 (
+  export PATH="$work/bin:$PATH"
   export XDG_RUNTIME_DIR="$work/run"
   export POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh"
+  export POLARIS_ACTIONS="$actions"
+  export IDLE_LOAD_STATE=loaded
+  export PORTAL_LOAD_STATE=loaded
   export POLARIS_SESSION_INSTANCE_ID=session-B
   rm -f "$work/run/polaris-gamescope-session-state" \
     "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
@@ -360,10 +447,32 @@ grep -Fq 'run_without_session_operation_lock setsid -f env' "$script" ||
     fail "interrupted publication retained a temporary credential"
   fi
   publish_session_mode nested || fail "atomic session publication retry failed"
-  [ "$(<"$session_state_file")" = 'session-B nested' ] ||
+  [ "$(<"$session_state_file")" = 'session-B nested managed' ] ||
     fail "atomic session record did not contain exact ID and mode"
 )
 rm -f "$work/run/polaris-gamescope-session-state"
+
+# Failed startup recovery is fail-closed. It may not erase the prior claim,
+# marker, socket paths, or credential and continue with a replacement launch.
+reset_state
+printf 'session-old nested\n' >"$work/run/polaris-gamescope-session-state"
+printf 'sentinel\n' >"$work/run/gamescope-0"
+before_state="$(sha256sum "$work/run/polaris-gamescope-session-state" | cut -d' ' -f1)"
+before_claim="$(sha256sum "$work/run/polaris-gamescope-wsi-nested" | cut -d' ' -f1)"
+if env PATH="$work/bin:$PATH" XDG_RUNTIME_DIR="$work/run" \
+    POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh" POLARIS_PROC_ROOT="$work/proc" \
+    POLARIS_ACTIONS="$actions" POLARIS_SESSION_INSTANCE_ID=session-new \
+    POLARIS_PGREP_STATUS=0 POLARIS_PGREP_OUTPUT= NESTED_VALID=0 RECLAIM_OK=0 \
+    IDLE_LOAD_STATE=loaded PORTAL_LOAD_STATE=loaded \
+    bash "$script" start 870780 >/dev/null 2>&1; then
+  fail "startup continued after failed prior recovery"
+fi
+[ "$(sha256sum "$work/run/polaris-gamescope-session-state" | cut -d' ' -f1)" = "$before_state" ] ||
+  fail "failed startup recovery rewrote prior credential"
+[ "$(sha256sum "$work/run/polaris-gamescope-wsi-nested" | cut -d' ' -f1)" = "$before_claim" ] ||
+  fail "failed startup recovery rewrote prior claim"
+[ "$(<"$work/run/gamescope-0")" = sentinel ] || fail "failed startup recovery removed socket path"
+! grep -q 'mask' "$actions" || fail "failed startup recovery reached replacement launch"
 
 # A crash after nested mode publication but before transition publication is
 # recoverable only while exact idle ownership proves destruction never began.
@@ -387,8 +496,8 @@ fi
 
 grep -Fq 'if [ -e "$session_state_file" ] || [ -s "$session_id_file" ] || [ -f "$rt/polaris-gamescope-wsi-nested" ]; then' "$script" ||
   fail "start does not recover every atomic or legacy credential before replacement"
-grep -Fq 'stop recovery failed — forcing clean slate' "$script" ||
-  fail "start does not fail-open when prior stop recovery fails"
+grep -Fq 'prior session recovery failed; retaining its exact claim' "$script" ||
+  fail "start does not fail closed when prior stop recovery fails"
 grep -Fq "POLARIS_SESSION_INSTANCE_ID='' bash \"\$0\" stop" "$script" ||
   fail "start does not route persisted attach/nested recovery through credentialed stop"
 transition_line="$(grep -nF 'publish_nested_claim transition absent' "$script" | head -n1 | cut -d: -f1)"
@@ -402,7 +511,7 @@ grep -Fq 'publish_nested_claim nested nested' "$script" ||
 if grep -Eq '^[[:space:]]*publish_nested_claim[[:space:]]*$' "$script"; then
   fail "nested claim helper was called without CAS arguments"
 fi
-grep -Fq "printf '%s %s\\n' \"\$POLARIS_SESSION_INSTANCE_ID\" \"\$mode\" >\"\$tmp\"" "$script" ||
+grep -Fq "printf '%s %s %s\\n' \"\$POLARIS_SESSION_INSTANCE_ID\" \"\$mode\" \"\$service_mode\" >\"\$tmp\"" "$script" ||
   fail "session ID and mode are not assembled into one atomic record"
 grep -Fq 'mv -f -- "$tmp" "$session_state_file"' "$script" ||
   fail "atomic session record is not committed by one rename"
