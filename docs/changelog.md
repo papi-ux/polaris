@@ -1,5 +1,7 @@
 # Changelog
 
+- Fixed Gamescope session recovery on distro-package hosts by restoring their empty compositor baseline without requiring Nix-only idle/portal units, and made failed prior-session recovery retain its exact claim instead of forcing unsafe socket cleanup.
+
 This file tracks the public Polaris release line.
 
 Older historical tags remain in the repository for continuity, but the current public product line
