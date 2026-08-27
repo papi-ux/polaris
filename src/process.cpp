@@ -10526,8 +10526,51 @@ namespace proc {
     fileTree["version"] = this_version;
   }
 
+  void migration_v7(nlohmann::json &fileTree) {
+    // Polaris v1.3.13 and earlier imported Heroic titles as one exact detached
+    // path-style URI. Rewrite only that proven Polaris shape; arbitrary user commands,
+    // mixed detached lists, and non-Heroic apps are deliberately left untouched.
+    static const int this_version = 11;
+    const int file_version = json_int_member_or(fileTree, "version", 0);
+    if (file_version >= this_version) {
+      return;
+    }
+
+    std::size_t migrated = 0;
+    if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
+      for (auto &app : fileTree["apps"]) {
+        if (!app.is_object() || !boost::iequals(json_string_member_or(app, "source"), "heroic") ||
+            !json_string_member_or(app, "cmd").empty() ||
+            !app.contains("detached") || !app["detached"].is_array() || app["detached"].size() != 1 ||
+            !app["detached"][0].is_string()) {
+          continue;
+        }
+
+        const auto legacy = game_library::parse_legacy_heroic_launch_command(
+          app["detached"][0].get<std::string>()
+        );
+        if (!legacy) {
+          continue;
+        }
+
+        app["detached"][0] = legacy->command;
+        app["source"] = "heroic";
+        app["heroic-app-name"] = legacy->app_name;
+        app["heroic-store"] = legacy->store;
+        app["heroic-runner"] = legacy->runner;
+        app["heroic-install"] = game_library::heroic_install_name(legacy->install);
+        ++migrated;
+      }
+    }
+
+    fileTree["version"] = this_version;
+    if (migrated > 0) {
+      BOOST_LOG(info) << "Migrated " << migrated << " Heroic library app(s) to the canonical launch contract (v11).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 10;
+    int last_version = 11;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -10540,6 +10583,7 @@ namespace proc {
       migration_v4(fileTree);
       migration_v5(fileTree);
       migration_v6(fileTree);
+      migration_v7(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }

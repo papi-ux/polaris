@@ -422,10 +422,61 @@ namespace game_library {
     std::vector<heroic_library_file_t> files;
     for (const auto &root : heroic_config_roots(home_roots)) {
       files.push_back(heroic_library_file_t {root.path / "store_cache" / "gog_library.json", "gog", root.install});
-      files.push_back(heroic_library_file_t {root.path / "store_cache" / "egs_library.json", "epic", root.install});
+      files.push_back(heroic_library_file_t {root.path / "store_cache" / "legendary_library.json", "epic", root.install});
     }
 
     return files;
+  }
+
+  std::string heroic_install_name(launcher_install_t install) {
+    return install == launcher_install_t::flatpak ? "flatpak" : "native";
+  }
+
+  std::optional<launcher_install_t> heroic_install_from_name(std::string_view install) {
+    if (install == "native") {
+      return launcher_install_t::native;
+    }
+    if (install == "flatpak") {
+      return launcher_install_t::flatpak;
+    }
+    return std::nullopt;
+  }
+
+  std::string heroic_runner_for_store(std::string_view store) {
+    if (store == "gog") {
+      return "gog";
+    }
+    if (store == "epic") {
+      return "legendary";
+    }
+    return {};
+  }
+
+  std::optional<heroic_game_t> heroic_game_from_metadata(
+    const std::string &app_name,
+    const std::string &store,
+    const std::string &runner,
+    std::string_view install_name
+  ) {
+    const auto install = heroic_install_from_name(install_name);
+    const auto expected_runner = heroic_runner_for_store(store);
+    if (!install || expected_runner.empty() || runner != expected_runner ||
+        !is_heroic_app_name_safe(app_name)) {
+      return std::nullopt;
+    }
+
+    const auto command = heroic_launch_command(store, app_name, *install);
+    if (command.empty()) {
+      return std::nullopt;
+    }
+
+    return heroic_game_t {
+      .app_name = app_name,
+      .store = store,
+      .runner = runner,
+      .install = *install,
+      .command = command,
+    };
   }
 
   bool is_heroic_app_name_safe(const std::string &app_name) {
@@ -439,18 +490,22 @@ namespace game_library {
   }
 
   std::string heroic_launch_command(const std::string &store, const std::string &app_name, launcher_install_t install) {
-    // Both halves reach a shell through the app's launch command, the same exposure the
-    // Steam app id and the Lutris slug are already checked for.
-    if (!is_heroic_app_name_safe(store) || !is_heroic_app_name_safe(app_name)) {
+    // appName reaches a shell through the app's launch command. The store is never
+    // interpolated: only the explicit Polaris store-to-Heroic-runner mapping is accepted.
+    const auto runner = heroic_runner_for_store(store);
+    if (runner.empty() || !is_heroic_app_name_safe(app_name)) {
       return {};
     }
 
-    const auto uri = "heroic://launch/" + store + "/" + app_name;
+    // Heroic's current shortcut contract is a query URI. Quote it because '&' is a shell
+    // operator; the strict app-name and runner alphabets make the single quotes final.
+    const auto uri = "'heroic://launch?appName=" + app_name + "&runner=" + runner + "'";
     if (install == launcher_install_t::flatpak) {
-      return "setsid flatpak run " + std::string(heroic_flatpak_app_id) + " " + uri;
+      return "setsid flatpak run " + std::string(heroic_flatpak_app_id) +
+             " --no-gui --no-sandbox " + uri;
     }
 
-    return "setsid heroic " + uri;
+    return "setsid heroic --no-gui --no-sandbox " + uri;
   }
 
   std::vector<std::string> heroic_launch_commands(const std::string &store, const std::string &app_name) {
@@ -462,7 +517,227 @@ namespace game_library {
       }
     }
 
+    // Older Polaris releases emitted Heroic's path-style URI. Keep these exact strings
+    // solely for deduplication/migration; all new launches use the canonical query URI.
+    if (!heroic_runner_for_store(store).empty() && is_heroic_app_name_safe(app_name)) {
+      const auto legacy_uri = "heroic://launch/" + store + "/" + app_name;
+      commands.push_back("setsid heroic " + legacy_uri);
+      commands.push_back("setsid flatpak run " + std::string(heroic_flatpak_app_id) + " " + legacy_uri);
+    }
+
     return commands;
+  }
+
+  std::optional<heroic_game_t> parse_legacy_heroic_launch_command(std::string_view command) {
+    constexpr std::string_view native_prefix = "setsid heroic heroic://launch/";
+    constexpr std::string_view flatpak_prefix =
+      "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/";
+
+    launcher_install_t install;
+    if (command.starts_with(native_prefix)) {
+      install = launcher_install_t::native;
+      command.remove_prefix(native_prefix.size());
+    } else if (command.starts_with(flatpak_prefix)) {
+      install = launcher_install_t::flatpak;
+      command.remove_prefix(flatpak_prefix.size());
+    } else {
+      return std::nullopt;
+    }
+
+    const auto separator = command.find('/');
+    if (separator == std::string_view::npos || command.find('/', separator + 1) != std::string_view::npos) {
+      return std::nullopt;
+    }
+
+    const std::string store {command.substr(0, separator)};
+    const std::string app_name {command.substr(separator + 1)};
+    const auto runner = heroic_runner_for_store(store);
+    if (runner.empty() || !is_heroic_app_name_safe(app_name)) {
+      return std::nullopt;
+    }
+
+    return heroic_game_t {
+      .app_name = app_name,
+      .store = store,
+      .runner = runner,
+      .install = install,
+      .command = heroic_launch_command(store, app_name, install),
+    };
+  }
+
+  namespace {
+    std::optional<heroic_game_t> make_heroic_game(
+      const std::string &app_name,
+      const std::string &title,
+      const std::string &store,
+      launcher_install_t install
+    ) {
+      const auto runner = heroic_runner_for_store(store);
+      const auto command = heroic_launch_command(store, app_name, install);
+      if (title.empty() || runner.empty() || command.empty()) {
+        return std::nullopt;
+      }
+
+      return heroic_game_t {
+        .name = title,
+        .app_name = app_name,
+        .store = store,
+        .runner = runner,
+        .install = install,
+        .command = command,
+      };
+    }
+
+    std::optional<heroic_game_t> parse_legendary_entry(
+      const nlohmann::json &entry,
+      const std::string &fallback_app_name,
+      launcher_install_t install,
+      bool from_cache
+    ) {
+      if (!entry.is_object()) {
+        return std::nullopt;
+      }
+
+      if (from_cache && (!entry.contains("is_installed") ||
+                         !entry["is_installed"].is_boolean() ||
+                         !entry["is_installed"].get<bool>())) {
+        return std::nullopt;
+      }
+      if (!entry.contains("app_name") || !entry["app_name"].is_string() ||
+          !entry.contains("title") || !entry["title"].is_string() ||
+          (entry.contains("is_dlc") && !entry["is_dlc"].is_boolean())) {
+        return std::nullopt;
+      }
+      if (entry.contains("is_dlc") && entry["is_dlc"].get<bool>()) {
+        return std::nullopt;
+      }
+      if (!from_cache && !entry.contains("is_dlc")) {
+        return std::nullopt;
+      }
+      if (from_cache) {
+        if (!entry.contains("install") || !entry["install"].is_object() ||
+            !entry["install"].contains("is_dlc") || !entry["install"]["is_dlc"].is_boolean() ||
+            entry["install"]["is_dlc"].get<bool>()) {
+          return std::nullopt;
+        }
+      }
+      const auto app_name = entry["app_name"].get<std::string>();
+      if (!fallback_app_name.empty() && app_name != fallback_app_name) {
+        return std::nullopt;
+      }
+
+      return make_heroic_game(app_name, entry["title"].get<std::string>(), "epic", install);
+    }
+  }  // namespace
+
+  std::vector<heroic_game_t> parse_heroic_installed_json(
+    std::string_view json_payload,
+    const std::string &store,
+    launcher_install_t install
+  ) {
+    std::vector<heroic_game_t> games;
+    if (store != "epic") {
+      return games;
+    }
+
+    try {
+      const auto data = nlohmann::json::parse(json_payload);
+      if (data.is_object()) {
+        // Legendary keys its installed object by app name and repeats that identity in
+        // each current InstalledJsonMetadata value. Require both to match.
+        for (const auto &[app_name, entry] : data.items()) {
+          if (auto game = parse_legendary_entry(entry, app_name, install, false)) {
+            games.push_back(std::move(*game));
+          }
+        }
+      }
+    } catch (...) {
+      games.clear();
+    }
+    return games;
+  }
+
+  std::vector<heroic_game_t> parse_heroic_gog_library_json(
+    std::string_view installed_json_payload,
+    std::string_view library_json_payload,
+    launcher_install_t install
+  ) {
+    std::vector<heroic_game_t> games;
+    try {
+      const auto installed_data = nlohmann::json::parse(installed_json_payload);
+      if (!installed_data.is_object() || !installed_data.contains("installed") ||
+          !installed_data["installed"].is_array()) {
+        return games;
+      }
+
+      std::set<std::string> installed_app_names;
+      for (const auto &entry : installed_data["installed"]) {
+        if (!entry.is_object() || !entry.contains("appName") || !entry["appName"].is_string() ||
+            !entry.contains("is_dlc") || !entry["is_dlc"].is_boolean() || entry["is_dlc"].get<bool>()) {
+          continue;
+        }
+
+        auto app_name = entry["appName"].get<std::string>();
+        if (is_heroic_app_name_safe(app_name)) {
+          installed_app_names.insert(std::move(app_name));
+        }
+      }
+
+      const auto library_data = nlohmann::json::parse(library_json_payload);
+      if (!library_data.is_object() || !library_data.contains("games") || !library_data["games"].is_array()) {
+        return games;
+      }
+
+      std::set<std::string> emitted_app_names;
+      for (const auto &entry : library_data["games"]) {
+        if (!entry.is_object() || !entry.contains("app_name") || !entry["app_name"].is_string() ||
+            !entry.contains("title") || !entry["title"].is_string() ||
+            !entry.contains("install") || !entry["install"].is_object() ||
+            !entry["install"].contains("is_dlc") || !entry["install"]["is_dlc"].is_boolean() ||
+            entry["install"]["is_dlc"].get<bool>()) {
+          continue;
+        }
+
+        const auto app_name = entry["app_name"].get<std::string>();
+        if (installed_app_names.count(app_name) == 0 || !emitted_app_names.insert(app_name).second) {
+          continue;
+        }
+
+        if (auto game = make_heroic_game(app_name, entry["title"].get<std::string>(), "gog", install)) {
+          games.push_back(std::move(*game));
+        }
+      }
+    } catch (...) {
+      games.clear();
+    }
+    return games;
+  }
+
+  std::vector<heroic_game_t> parse_heroic_cache_json(
+    std::string_view json_payload,
+    const std::string &store,
+    launcher_install_t install
+  ) {
+    std::vector<heroic_game_t> games;
+    if (store != "epic") {
+      return games;
+    }
+
+    try {
+      const auto data = nlohmann::json::parse(json_payload);
+      if (!data.is_object() || !data.contains("library") || !data["library"].is_array()) {
+        return games;
+      }
+
+      for (const auto &entry : data["library"]) {
+        if (auto game = parse_legendary_entry(entry, "", install, true)) {
+          games.push_back(std::move(*game));
+        }
+      }
+    } catch (...) {
+      games.clear();
+    }
+    return games;
   }
 
   std::string find_lutris_image_path(const std::string &slug, const std::vector<std::filesystem::path> &lutris_roots) {
