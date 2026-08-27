@@ -13,6 +13,8 @@ namespace capture_generation {
     std::string stream_mode;
     std::string capture_backend;
     std::string private_runtime;
+    std::string private_wayland_socket;
+    std::string private_runtime_instance_id;
     std::string adapter_name;
     bool headless_mode = false;
     bool use_cage_compositor = false;
@@ -24,6 +26,8 @@ namespace capture_generation {
              stream_mode.empty() &&
              capture_backend.empty() &&
              private_runtime.empty() &&
+             private_wayland_socket.empty() &&
+             private_runtime_instance_id.empty() &&
              adapter_name.empty() &&
              !headless_mode &&
              !use_cage_compositor;

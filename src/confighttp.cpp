@@ -5762,10 +5762,13 @@ namespace confighttp {
       return;
     }
 
-    virtual_display::destroy(*ui_vdisplay);
-    ui_vdisplay.reset();
-
-    output_tree["status"] = true;
+    if (virtual_display::destroy(*ui_vdisplay)) {
+      ui_vdisplay.reset();
+      output_tree["status"] = true;
+    } else {
+      output_tree["status"] = false;
+      output_tree["error"] = "Virtual display teardown could not be verified; recovery state was retained";
+    }
     send_response(response, output_tree);
   }
 #endif  // __linux__

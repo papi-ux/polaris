@@ -379,7 +379,7 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   EXPECT_LT(reinit_reject, fallback_refresh);
 
   const auto generic_refresh = source.find(
-    "void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index)"
+    "void refresh_displays(\n    platf::mem_type_e dev_type"
   );
   const auto capture_thread = source.find("void captureThread(", generic_refresh);
   ASSERT_NE(generic_refresh, std::string::npos);
@@ -589,7 +589,8 @@ TEST(SourceSafetyContracts, CaptureGenerationIdentityIsOwnedFromLaunchThroughVid
 
   EXPECT_NE(identity.find("struct identity_t"), std::string::npos);
   for (const auto field : {"generation_id", "exact_display_name", "requested_output_name", "stream_mode",
-                           "capture_backend", "private_runtime", "adapter_name",
+                           "capture_backend", "private_runtime", "private_wayland_socket",
+                           "private_runtime_instance_id", "adapter_name",
                            "headless_mode", "use_cage_compositor"}) {
     EXPECT_NE(identity.find(field), std::string::npos) << field;
   }
@@ -597,6 +598,8 @@ TEST(SourceSafetyContracts, CaptureGenerationIdentityIsOwnedFromLaunchThroughVid
   EXPECT_EQ(process_header.find("std::string exact_display_name;"), std::string::npos);
   EXPECT_NE(process.find("capture_generation.generation_id = _session_generation;"), std::string::npos);
   EXPECT_NE(process.find("capture_generation = capture_generation::identity_t {"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation.private_wayland_socket = private_runtime->wayland_socket()"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation.private_runtime_instance_id = _session_instance_id"), std::string::npos);
   EXPECT_NE(video_header.find("capture_generation::identity_t capture_generation;"), std::string::npos);
   EXPECT_NE(video.find("config.capture_generation = proc::proc.capture_generation;"), std::string::npos);
 }
@@ -910,7 +913,7 @@ TEST(SourceSafetyContracts, VirtualDisplayCreateSerializesCleanupCreationAndPers
   const auto cleanup_body = source.substr(cleanup_entry, cleanup_end - cleanup_entry);
   const auto cleanup_lock = cleanup_body.find("std::lock_guard creation_lock {creation_mutex}");
   const auto create = source.find("std::optional<vdisplay_t> create(int width, int height, int fps)", cleanup_entry);
-  const auto create_end = source.find("void destroy(vdisplay_t &display)", create);
+  const auto create_end = source.find("bool destroy(vdisplay_t &display)", create);
   const auto destroy_lock = source.find("std::lock_guard creation_lock {creation_mutex}", create_end);
   ASSERT_NE(mutex, std::string::npos);
   ASSERT_NE(cleanup_entry, std::string::npos);
@@ -922,13 +925,17 @@ TEST(SourceSafetyContracts, VirtualDisplayCreateSerializesCleanupCreationAndPers
   const auto body = source.substr(create, create_end - create);
   const auto lock = body.find("std::lock_guard creation_lock {creation_mutex}");
   const auto cleanup = body.find("cleanup_stale_unlocked()");
+  const auto cleanup_refusal = body.find("if (!cleanup.succeeded)", cleanup);
   const auto backend = body.find("detect_backend()");
   const auto persistence = body.find("record_persisted_display(");
   ASSERT_NE(lock, std::string::npos);
   ASSERT_NE(cleanup, std::string::npos);
+  ASSERT_NE(cleanup_refusal, std::string::npos);
   ASSERT_NE(backend, std::string::npos);
   ASSERT_NE(persistence, std::string::npos);
   EXPECT_LT(lock, cleanup);
+  EXPECT_LT(cleanup, cleanup_refusal);
+  EXPECT_LT(cleanup_refusal, backend);
   EXPECT_LT(cleanup, backend);
   EXPECT_LT(backend, persistence);
 
@@ -942,6 +949,106 @@ TEST(SourceSafetyContracts, VirtualDisplayCreateSerializesCleanupCreationAndPers
   confighttp_contents << confighttp_input.rdbuf();
   EXPECT_NE(process_contents.str().find("virtual_display::create("), std::string::npos);
   EXPECT_NE(confighttp_contents.str().find("virtual_display::create("), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayTeardownKeepsRecoveryUntilExactReadback) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream virtual_display_in(root / "src/platform/linux/virtual_display.cpp");
+  std::ifstream process_in(root / "src/process.cpp");
+  ASSERT_TRUE(virtual_display_in.is_open());
+  ASSERT_TRUE(process_in.is_open());
+  std::ostringstream virtual_display_out, process_out;
+  virtual_display_out << virtual_display_in.rdbuf();
+  process_out << process_in.rdbuf();
+  const auto source = virtual_display_out.str();
+  const auto process = process_out.str();
+
+  const auto destroy = source.find("static bool destroy_unlocked(vdisplay_t &display)");
+  const auto public_destroy = source.find("bool destroy(vdisplay_t &display)", destroy);
+  ASSERT_NE(destroy, std::string::npos);
+  ASSERT_NE(public_destroy, std::string::npos);
+  const auto body = source.substr(destroy, public_destroy - destroy);
+  const auto verify = body.find("teardown_is_verified(destroyed, display.active)");
+  const auto retain = body.find("persisted recovery record retained", verify);
+  const auto forget = body.find("forget_persisted_display(display)", retain);
+  ASSERT_NE(verify, std::string::npos);
+  ASSERT_NE(retain, std::string::npos);
+  ASSERT_NE(forget, std::string::npos);
+  EXPECT_LT(verify, retain);
+  EXPECT_LT(retain, forget);
+
+  const auto kscreen = source.find("namespace kscreen");
+  const auto kscreen_end = source.find("}  // namespace kscreen", kscreen);
+  ASSERT_NE(kscreen, std::string::npos);
+  ASSERT_NE(kscreen_end, std::string::npos);
+  const auto kscreen_body = source.substr(kscreen, kscreen_end - kscreen);
+  EXPECT_NE(kscreen_body.find("kscreen-doctor --json"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("kscreen_output_before"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("kscreen_primary_before"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("*output_after == *display.kscreen_output_before"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("*primary_after == *display.kscreen_primary_before"), std::string::npos);
+  const auto kscreen_record = kscreen_body.find("record_persisted_display(display, 0)");
+  const auto kscreen_mutation = kscreen_body.find("platf::run_process_argv(args)", kscreen_record);
+  ASSERT_NE(kscreen_record, std::string::npos);
+  ASSERT_NE(kscreen_mutation, std::string::npos);
+  EXPECT_LT(kscreen_record, kscreen_mutation);
+
+  const auto durable_write = source.find("bool write_persisted_entries(");
+  const auto file_sync = source.find("::fsync(fd)", durable_write);
+  const auto rename = source.find("fs::rename(temp_path, path", file_sync);
+  const auto directory_sync = source.find("sync_parent()", rename);
+  ASSERT_NE(durable_write, std::string::npos);
+  ASSERT_NE(file_sync, std::string::npos);
+  ASSERT_NE(rename, std::string::npos);
+  ASSERT_NE(directory_sync, std::string::npos);
+  EXPECT_LT(file_sync, rename);
+  EXPECT_LT(rename, directory_sync);
+
+  EXPECT_NE(source.find("const auto connected = output_is_connected(display)"), std::string::npos);
+  EXPECT_NE(source.find("if (connected && !*connected)"), std::string::npos);
+  EXPECT_NE(source.find("if (present && !*present)"), std::string::npos);
+  const auto hypr_destroy = source.find("static bool destroy(vdisplay_t &display)", source.find("namespace wayland_wlr"));
+  const auto stable_absence = source.find("std::optional<std::chrono::steady_clock::time_point> absent_since", hypr_destroy);
+  const auto stable_window = source.find("now - *absent_since >= 500ms", stable_absence);
+  const auto mark_inactive = source.find("display.active = false", stable_window);
+  ASSERT_NE(hypr_destroy, std::string::npos);
+  ASSERT_NE(stable_absence, std::string::npos);
+  ASSERT_NE(stable_window, std::string::npos);
+  ASSERT_NE(mark_inactive, std::string::npos);
+  EXPECT_LT(stable_absence, stable_window);
+  EXPECT_LT(stable_window, mark_inactive);
+
+  const auto process_destroy = process.find("if (virtual_display::destroy(*linux_vdisplay))");
+  const auto process_reset = process.find("linux_vdisplay.reset()", process_destroy);
+  ASSERT_NE(process_destroy, std::string::npos);
+  ASSERT_NE(process_reset, std::string::npos);
+  EXPECT_LT(process_destroy, process_reset);
+}
+
+TEST(SourceSafetyContracts, WlgrabReinitEnumeratesFromImmutableCaptureGeneration) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream wlgrab_in(root / "src/platform/linux/wlgrab.cpp");
+  std::ifstream linux_misc_in(root / "src/platform/linux/misc.cpp");
+  std::ifstream video_in(root / "src/video.cpp");
+  ASSERT_TRUE(wlgrab_in.is_open());
+  ASSERT_TRUE(linux_misc_in.is_open());
+  ASSERT_TRUE(video_in.is_open());
+  std::ostringstream wlgrab_out, linux_misc_out, video_out;
+  wlgrab_out << wlgrab_in.rdbuf();
+  linux_misc_out << linux_misc_in.rdbuf();
+  video_out << video_in.rdbuf();
+  const auto wlgrab = wlgrab_out.str();
+  const auto linux_misc = linux_misc_out.str();
+  const auto video = video_out.str();
+
+  EXPECT_NE(wlgrab.find("resolve_generation_policy("), std::string::npos);
+  EXPECT_NE(wlgrab.find("private_runtime_matches_generation("), std::string::npos);
+  EXPECT_NE(wlgrab.find("wl_display_names_for_generation("), std::string::npos);
+  EXPECT_NE(wlgrab.find("Immutable private capture generation cannot enumerate a replacement labwc instance"), std::string::npos);
+  EXPECT_NE(linux_misc.find("wl_display_names(generation)"), std::string::npos);
+  EXPECT_NE(video.find("platf::display_names(dev_type, *capture_config)"), std::string::npos);
+  EXPECT_NE(video.find("&capture_ctxs.front().config"), std::string::npos);
+  EXPECT_NE(video.find("&synced_session_ctxs.front()->config"), std::string::npos);
 }
 
 TEST(SourceSafetyContracts, WlgrabRequestedOutputSelectionFailsClosed) {

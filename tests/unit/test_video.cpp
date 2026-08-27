@@ -194,6 +194,8 @@ TEST(VideoDisplaySelectionTests, CaptureContextsMustShareTheWholeGeneration) {
     .requested_output_name = "POLARIS-HEADLESS-512536-0",
     .stream_mode = "host_virtual_display",
     .capture_backend = "portal",
+    .private_wayland_socket = "wayland-polaris-42",
+    .private_runtime_instance_id = "session-42",
     .adapter_name = "/dev/dri/renderD128",
     .headless_mode = true,
   };
@@ -204,6 +206,12 @@ TEST(VideoDisplaySelectionTests, CaptureContextsMustShareTheWholeGeneration) {
   EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
   changed = generation;
   changed.stream_mode = "desktop_display";
+  EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
+  changed = generation;
+  changed.private_wayland_socket = "wayland-polaris-43";
+  EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
+  changed = generation;
+  changed.private_runtime_instance_id = "session-43";
   EXPECT_FALSE(video::capture_generations_match_for_tests(generation, changed));
   changed = generation;
   changed.adapter_name = "/dev/dri/renderD129";

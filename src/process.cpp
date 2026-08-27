@@ -4859,6 +4859,17 @@ namespace proc {
 #endif
 
 #if defined(__linux__)
+  void apply_app_display_semantics(
+    const proc::ctx_t &app,
+    rtsp_stream::launch_session_t &launch_session
+  ) {
+    if (!app.desktop_mirror) {
+      return;
+    }
+    launch_session.mirror_desktop = true;
+    launch_session.virtual_display = false;
+  }
+
   bool streaming_launch_requests_private_family(
     bool headless_mode,
     bool use_cage_compositor,
@@ -6774,6 +6785,14 @@ namespace proc {
     }
 
 #ifdef __linux__
+    if (_app.desktop_mirror) {
+      if (!launch_session->mirror_desktop || launch_session->virtual_display) {
+        BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
+                        << _app.name << "]; ignoring virtual-display preference for this session"sv;
+      }
+      apply_app_display_semantics(_app, *launch_session);
+    }
+
     // Apply the session display policy only after device/AI optimization has
     // finalized virtual_display. This generation then owns runtime topology,
     // capture policy, and the creation decision together.
@@ -7885,6 +7904,20 @@ namespace proc {
       };
       if (!private_runtime->start(start_params)) {
         return false;
+      }
+
+      if (private_runtime->backend_id() == stream_display_policy::k_runtime_labwc) {
+        capture_generation.private_wayland_socket = private_runtime->wayland_socket();
+        capture_generation.private_runtime_instance_id = _session_instance_id;
+        if (capture_generation.private_wayland_socket.empty() ||
+            stream_runtime::labwc::session_instance_id() != _session_instance_id) {
+          BOOST_LOG(error) << "session_manager: Private labwc generation identity was not published exactly"sv;
+          private_runtime->stop();
+          return false;
+        }
+      } else {
+        capture_generation.private_wayland_socket.clear();
+        capture_generation.private_runtime_instance_id.clear();
       }
 
       if (!reprobe_encoders_for_cage(strict_configured_encoder, save_successful_cache)) {
@@ -9301,16 +9334,23 @@ namespace proc {
       }
 #elif __linux__
     // Destroy Linux virtual display if one was created
-    bool used_linux_vdisplay = linux_vdisplay.has_value() && linux_vdisplay->active;
-    if (used_linux_vdisplay) {
-      virtual_display::destroy(*linux_vdisplay);
-      linux_vdisplay.reset();
-      BOOST_LOG(info) << "Linux Virtual Display removed successfully"sv;
+    const bool had_linux_vdisplay = linux_vdisplay.has_value();
+    if (had_linux_vdisplay) {
+      if (virtual_display::destroy(*linux_vdisplay)) {
+        linux_vdisplay.reset();
+        BOOST_LOG(info) << "Linux Virtual Display teardown verified"sv;
+      } else {
+        BOOST_LOG(error) << "Linux Virtual Display teardown not verified; retaining handle for retry"sv;
+      }
     }
 
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
-      if (used_linux_vdisplay) {
-        display_device::reset_persistence();
+      if (had_linux_vdisplay) {
+        if (!linux_vdisplay.has_value()) {
+          display_device::reset_persistence();
+        } else {
+          BOOST_LOG(error) << "Linux Virtual Display recovery remains pending; skipping unrelated display reconfiguration"sv;
+        }
       } else {
         display_device::revert_configuration();
       }
@@ -9974,7 +10014,7 @@ namespace proc {
    * Legacy versions of Sunshine/Apollo stored boolean and integer values as strings.
    * The following keys are converted:
    *   - Boolean keys: "exclude-global-prep-cmd", "elevated", "auto-detach", "wait-all",
-   *                     "use-app-identity", "per-client-app-identity", "virtual-display"
+   *                     "use-app-identity", "per-client-app-identity", "desktop-mirror", "virtual-display"
    *   - Integer keys: "exit-timeout"
    *
    * A migration version is stored in the file tree (under "version") so that future changes can be applied.
@@ -10063,6 +10103,7 @@ namespace proc {
         {"wait-all", true},
         {"use-app-identity", false},
         {"per-client-app-identity", false},
+        {"desktop-mirror", false},
         {"virtual-display", false},
         {"virtual-display-primary", false},
         {"terminate-on-pause", false}
@@ -10429,8 +10470,64 @@ namespace proc {
     }
   }
 
+  void migration_v6(nlohmann::json &fileTree) {
+    // The bundled Desktop app predates an explicit launch semantic. Preserve
+    // that exact legacy entry as a desktop mirror without inferring behavior
+    // from the display name alone: a user app is allowed to be named Desktop.
+    static const int this_version = 10;
+    const int file_version = json_int_member_or(fileTree, "version", 0);
+    if (file_version >= this_version) {
+      return;
+    }
+
+    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+      fileTree["version"] = this_version;
+      return;
+    }
+
+    for (auto &app : fileTree["apps"]) {
+      if (!app.is_object() || app.contains("desktop-mirror")) {
+        continue;
+      }
+
+      const auto name = json_string_member_or(app, "name");
+      const auto image_path = json_string_member_or(app, "image-path");
+      const auto source = json_string_member_or(app, "source", "manual");
+      const auto cmd = json_string_member_or(app, "cmd");
+      const auto steam_appid = json_string_member_or(app, "steam-appid");
+      const bool no_detached = !app.contains("detached") ||
+                               (app["detached"].is_array() && app["detached"].empty());
+      const bool no_prep = !app.contains("prep-cmd") ||
+                           (app["prep-cmd"].is_array() && app["prep-cmd"].empty());
+      const bool no_state = !app.contains("state-cmd") ||
+                            (app["state-cmd"].is_array() && app["state-cmd"].empty());
+      const bool virtual_display = app.contains("virtual-display") &&
+                                   coerce_json_bool(app["virtual-display"], false);
+      const bool client_commands = !app.contains("allow-client-commands") ||
+                                   coerce_json_bool(app["allow-client-commands"], true);
+
+      const bool exact_legacy_desktop =
+        name == "Desktop" &&
+        image_path == "desktop.png" &&
+        boost::iequals(source, "manual") &&
+        cmd.empty() &&
+        steam_appid.empty() &&
+        no_detached &&
+        no_prep &&
+        no_state &&
+        !virtual_display &&
+        !client_commands;
+      if (exact_legacy_desktop) {
+        app["desktop-mirror"] = true;
+        BOOST_LOG(info) << "Migrated the bundled legacy Desktop app to explicit desktop-mirror launch semantics.";
+      }
+    }
+
+    fileTree["version"] = this_version;
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 9;
+    int last_version = 10;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -10442,6 +10539,7 @@ namespace proc {
       migration_v3(fileTree);
       migration_v4(fileTree);
       migration_v5(fileTree);
+      migration_v6(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
@@ -10574,6 +10672,7 @@ namespace proc {
           ctx.wait_all = app_node.value("wait-all", true);
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           ctx.virtual_display = app_node.value("virtual-display", false);
+          ctx.desktop_mirror = app_node.value("desktop-mirror", false);
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
           ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);
@@ -10659,6 +10758,7 @@ namespace proc {
       ctx.name = "Desktop (fallback)";
       ctx.image_path = parse_env_val(this_env, "desktop-alt.png");
       ctx.virtual_display = false;
+      ctx.desktop_mirror = true;
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
