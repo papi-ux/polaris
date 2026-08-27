@@ -14,6 +14,7 @@ A matched Doctor-safety and stream-classification patch for Nova v1.3.9. Polaris
 - Preserves paired resolution while enforcing safe FPS, bitrate, codec, HDR, topology, and a verified fresh launch; previews never consume the one-shot record
 - Binds confirmations to exact Doctor evidence so safe-profile drift requires a new confirmation, and consumes a run only after trusted post-connect settings match
 - Keeps Steam Input recovery manual and read-only without changing VDF files, Steam state, live streams, or unrelated optimizer history
+- Prevents wrapped nested Gamescope teardown from killing Xwayland under a still-running compositor by verifying whole-group kernel stop state first, and drains separately grouped private-session helpers while the original marker remains retry authority
 - Treats OpenAI subscription Doctor explanations as a clean informational `deterministic-fallback` source while regular optimizer requests retain the Codex CLI route
 - Retains the GCC 16, Ubuntu snapshot, exact release-source, sanitizer, Arch, public-hygiene, and CodeQL gates from the protected release base
 - Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
