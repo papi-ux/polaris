@@ -1,6 +1,7 @@
 # Changelog
 
 - Fixed Gamescope session recovery on distro-package hosts by restoring their empty compositor baseline without requiring Nix-only idle/portal units, and made failed prior-session recovery retain its exact claim instead of forcing unsafe socket cleanup.
+- Fixed Linux host-virtual-display capture so each launch is bound to the exact output it created, while Desktop mirror launches stay on the desktop path even when an app or optimizer prefers a virtual display. Capture now fails closed instead of silently selecting another monitor.
 
 This file tracks the public Polaris release line.
 
