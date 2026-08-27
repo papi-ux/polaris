@@ -29,9 +29,11 @@ linux_use_cage_compositor = enabled
 | `headless_dongle` | Swap desktop onto a dummy-plug connector for KMS capture (needs streaming + primary outputs) |
 | `family_isolated` / `headless_evdi` | Reserved slots for community Family Mode + EVDI-as-primary |
 
+Picking a mode by setup, in plain language, is covered in [Launch modes and capture paths](launch-modes.md); this page is the technical model behind it.
+
 - `linux_stream_mode` is the source of truth when set; otherwise Polaris derives the mode from the legacy booleans.
 - `linux_private_runtime` selects the nested compositor for private modes (`labwc` or `gamescope`).
-- `linux_prefer_gpu_native_capture = enabled` asks Polaris to prefer DMA-BUF/GPU-resident capture on capable NVIDIA and AMD/Mesa stacks. If a compositor or driver cannot provide it, Polaris should report the real SHM/system-memory fallback instead of pretending the stream is GPU-native.
+- `linux_prefer_gpu_native_capture = enabled` asks Polaris to prefer DMA-BUF/GPU-resident capture where the driver stack is proven safe (see [Capture and Encode](#capture-and-encode) for how that is gated today). If a compositor or driver cannot provide it, Polaris should report the real SHM/system-memory fallback instead of pretending the stream is GPU-native.
 - Capture (wlroots screencopy, portal, KMS) stays orthogonal to which private runtime owns the session.
 
 See [Stream paths (plugin contract)](stream-paths.md) for how to add a new mode (runtime × capture × topology) without more boolean soup.
@@ -75,11 +77,13 @@ Important runtime fields:
 | Frame format | The captured pixel format |
 | Encoder | The active backend, such as NVENC, VAAPI, or software |
 
+How the GPU-native DMA-BUF path is granted today: automatic DMA-BUF capture is limited to CUDA/NVENC hosts. VAAPI routes (AMD and Intel) deliberately stay on the SHM/system-memory copy path until the DMA-BUF import boundary has proof from affected hosts, because re-enabling it has previously crashed real RDNA machines (issues #367 and #409 track this). Portal/PipeWire capture applies the same vendor gate; `POLARIS_PORTAL_DMABUF=1` is an explicit, unvalidated expert opt-in for testing that boundary, and `POLARIS_PORTAL_DMABUF=0` forces the CPU path. When a GPU-native path is requested but cannot be granted, `capture.reason` reports the real fallback (for example `gpu_native_requested_shm_fallback`) rather than pretending.
+
 Deferred headless encoder capabilities are primed before first launch negotiation so Main10 support is advertised correctly on the first real launch. On Linux, Polaris uses RealtimeKit when available so thread-priority elevation can still succeed when the user service inherits conservative limits.
 
 ## Linux LTS Headless Fallback Matrix
 
-The 1.1.x validation target is the existing labwc Headless Stream architecture, not an Xvfb or gamescope replacement. Use Xvfb/gamescope only as investigation tools if this matrix exposes a real target environment that the current path cannot cover.
+This matrix validates the labwc Headless Stream architecture on long-term-support distributions; it is not an Xvfb or gamescope replacement. Use Xvfb/gamescope only as investigation tools if this matrix exposes a real target environment that the current path cannot cover.
 
 | Environment | Expected runtime | Expected capture decision | Required packages / caveats |
 |---|---|---|---|

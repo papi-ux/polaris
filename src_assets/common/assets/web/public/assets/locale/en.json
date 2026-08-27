@@ -1086,6 +1086,7 @@
   "resource_card": {
     "website": "Website",
     "documentation": "Documentation",
+    "launch_mode_guide": "Launch Mode Guide",
     "troubleshooting_guide": "Troubleshooting Guide",
     "github": "GitHub",
     "releases": "Releases",

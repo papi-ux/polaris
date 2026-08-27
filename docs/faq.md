@@ -11,7 +11,7 @@ hosts, HDR, and the optional AI features. If your question is about a specific f
 No. NVIDIA and NVENC are the most heavily tested path today, but AMD and Intel Mesa VAAPI and
 software encode are supported. GPU-native DMA-BUF capture is an optimization request on both NVIDIA
 and AMD-capable stacks, and Polaris reports the actual path when a host falls back to SHM or system
-memory.
+memory. [Launch modes and capture paths](launch-modes.md) has per-vendor recommendations.
 
 ### Can Polaris stream 10-bit to an SDR handheld screen?
 

@@ -411,7 +411,10 @@ function updateDisplayPlannerSource(event) {
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
               <div class="section-kicker">Stream Display Mode</div>
-              <div class="mt-2 text-sm text-storm">Choose where Polaris starts and captures Linux sessions.</div>
+              <div class="mt-2 text-sm text-storm">
+                Choose where Polaris starts and captures Linux sessions.
+                <a href="https://papi-ux.com/docs/launch-modes/" target="_blank" class="focus-ring text-ice hover:underline">Launch mode guide</a>
+              </div>
             </div>
             <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-ice">
               {{ selectedStreamDisplayMode.title }}

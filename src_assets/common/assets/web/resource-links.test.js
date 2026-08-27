@@ -6,10 +6,11 @@ const all = [...resources, ...legalDocs]
 
 describe('resource links', () => {
   it('offers the docs site for the pages it actually renders', () => {
-    // papi-ux.com renders the repository's own docs/, so these two are the
+    // papi-ux.com renders the repository's own docs/, so these are the
     // better destination than the wiki for the same subjects.
     const hrefs = resources.map((entry) => entry.href)
     expect(hrefs).toContain('https://papi-ux.com/docs/')
+    expect(hrefs).toContain('https://papi-ux.com/docs/launch-modes/')
     expect(hrefs).toContain('https://papi-ux.com/docs/troubleshooting/')
   })
 
