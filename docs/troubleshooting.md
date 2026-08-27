@@ -70,6 +70,21 @@ private compositor. If the client connects but shows an empty or black desktop w
 that usually means the headless runtime is alive but nothing visible has been launched in it. Use
 Desktop Display mode when you want to stream the already-running host desktop session.
 
+Unsure which mode you should be running in the first place? Start with
+[Launch modes and capture paths](launch-modes.md).
+
+### NVIDIA true-headless first launch fails with 503
+
+On NVIDIA/NVENC hosts running true-headless labwc with GPU-native capture disabled, the very first
+launch can fail with a 503 encoder-initialization error even though NVENC is healthy. On headless
+paths the encoder probe is deferred and served from an on-disk cache; when that cache is cold or
+missing, priming it can fail and the launch is refused. The host configuration warnings surface this
+as `nvidia_headless_gpu_native_disabled`.
+
+The fix matches the warning's own advice: set `linux_prefer_gpu_native_capture = enabled` (or pick
+the **Private Stream (GPU-native)** card in the web UI), restart Polaris, and retry, before chasing
+CUDA or NVENC driver issues.
+
 ## Fullscreen Proton or Wine game renders on the physical monitor
 
 The stream connects, audio and input reach the private session correctly, and the client shows an
@@ -288,7 +303,9 @@ stream capture path. Repeated failures are rate-limited in the log, and the dash
 preview refreshes after failed captures. If the preview is missing, confirm `grim` is installed with
 `command -v grim`.
 
-For capture performance, check `/polaris/v1/session/status`; its `capture` object includes
+For what the capture paths mean in plain terms and which mode fits your GPU, see
+[Launch modes and capture paths](launch-modes.md). For capture performance, check
+`/polaris/v1/session/status`; its `capture` object includes
 `path`, `reason`, `reason_message`, `cpu_copy`, `gpu_native`, and nested `decision` fields.
 `/polaris/v1/stream-policy` exposes the same data as `capture_path`, `capture_path_reason`,
 `capture_path_reason_message`, `capture_cpu_copy`, `capture_gpu_native`, and `capture_decision`.
