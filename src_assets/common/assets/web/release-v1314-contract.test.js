@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
@@ -94,6 +94,18 @@ describe('v1.3.14 release contract', () => {
     const notes = read('docs/release-notes/v1.3.14.md')
     const listed = [...new Set(notes.match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? [])]
     expect(listed.sort()).toEqual(expectedAssets)
+  })
+
+  it('publishes release-note guide links that work outside the source tree', () => {
+    const releaseNotesDir = join(process.cwd(), 'docs/release-notes')
+    const releaseNotes = readdirSync(releaseNotesDir)
+      .filter((name) => /^v\d+\.\d+\.\d+\.md$/.test(name))
+      .map((name) => read(`docs/release-notes/${name}`))
+      .join('\n')
+
+    expect(releaseNotes).not.toMatch(/\]\(\.\.\/(?:bazzite|steamos)\.md(?:[?#][^)]*)?\)/)
+    expect(releaseNotes).toContain('[Bazzite guide](https://papi-ux.com/docs/bazzite/)')
+    expect(releaseNotes).toContain('[SteamOS guide](https://papi-ux.com/docs/steamos/)')
   })
 
   it('keeps publication bound to one verified immutable source', () => {
