@@ -1067,9 +1067,6 @@
               </div>
             </template>
 
-            <a href="https://docs.lizardbyte.dev/projects/polaris/latest/md_docs_2app__examples.html" target="_blank" class="text-sm text-ice hover:text-ice/80 no-underline">
-              {{ $t('_common.see_more') }}
-            </a>
           </div>
         </details>
       </div>
