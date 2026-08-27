@@ -128,9 +128,18 @@ namespace stream_runtime {
         std::ifstream state(state_path);
         std::string session_id;
         std::string mode;
+        std::string service_mode;
         std::string extra;
-        if (!(state >> session_id >> mode) || (state >> extra) || session_id.empty()) {
+        if (!(state >> session_id >> mode) || session_id.empty()) {
           return false;
+        }
+        if (state >> service_mode) {
+          if (service_mode != "managed" && service_mode != "standalone") {
+            return false;
+          }
+          if (state >> extra) {
+            return false;
+          }
         }
         return mode == "attach";
       }
