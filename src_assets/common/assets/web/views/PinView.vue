@@ -613,7 +613,7 @@
                       />
                       <div class="mt-1 text-sm text-storm">
                         {{ $t('pin.display_mode_override_desc') }}
-                        <a href="https://github.com/papi-ux/polaris/wiki/Display-Mode-Override" target="_blank" class="text-ice hover:text-ice/80">
+                        <a href="https://github.com/ClassicOldSong/Apollo/wiki/Display-Mode-Override" target="_blank" class="text-ice hover:text-ice/80">
                           {{ $t('_common.learn_more') }}
                         </a>
                       </div>
@@ -672,7 +672,7 @@
                     <label class="block text-sm font-medium text-storm mb-1">{{ $t(`pin.client_${cmdType}_cmd`) }}</label>
                     <div class="text-sm text-storm">
                       {{ $t(`pin.client_${cmdType}_cmd_desc`) }}
-                      <a href="https://github.com/papi-ux/polaris/wiki/Client-Commands" target="_blank" class="text-ice hover:text-ice/80">
+                      <a href="https://github.com/ClassicOldSong/Apollo/wiki/Client-Commands" target="_blank" class="text-ice hover:text-ice/80">
                         {{ $t('_common.learn_more') }}
                       </a>
                     </div>
