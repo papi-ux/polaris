@@ -23,13 +23,15 @@ describe('resource links', () => {
   })
 
   it('keeps the destinations that only exist on GitHub', () => {
-    // Discussions is where the discussion is, and these wiki pages have no
-    // equivalent on the docs site. Repointing them would break them, so this
-    // pins that a future sweep does not "modernise" them into 404s.
+    // Discussions is where the discussion is. The wiki pages live on upstream
+    // Apollo's wiki: this repository has no wiki (has_wiki is false), so the
+    // former papi-ux/polaris/wiki targets were dead links. This pins the
+    // working upstream destinations so a sweep does not "repatriate" them
+    // into 404s.
     const hrefs = resources.map((entry) => entry.href)
     expect(hrefs).toContain('https://github.com/papi-ux/polaris/discussions')
-    expect(hrefs).toContain('https://github.com/papi-ux/polaris/wiki')
-    expect(hrefs).toContain('https://github.com/papi-ux/polaris/wiki/Stuttering-Clinic')
+    expect(hrefs).toContain('https://github.com/ClassicOldSong/Apollo/wiki')
+    expect(hrefs).toContain('https://github.com/ClassicOldSong/Apollo/wiki/Stuttering-Clinic')
   })
 
   it('gives every link a label key and an absolute https target', () => {

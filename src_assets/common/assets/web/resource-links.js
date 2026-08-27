@@ -6,8 +6,9 @@
  *
  * Where a link points is a judgement, not a preference. papi-ux.com renders the
  * repository's own docs/, so it is the better destination for the pages that
- * exist there. The wiki keeps the pages that live only in the wiki, and
- * Discussions stays on GitHub because that is where the discussion is.
+ * exist there. This repository has no wiki: the wiki pages worth linking live
+ * on upstream Apollo's wiki and are labeled as such. Discussions stays on
+ * GitHub because that is where the discussion is.
  */
 
 export const resources = [
@@ -19,8 +20,8 @@ export const resources = [
   { href: 'https://github.com/papi-ux/polaris/releases', labelKey: 'resource_card.releases' },
   { href: 'https://matrix.to/#/#papi-ux:papi-ux.com', labelKey: 'resource_card.matrix_community' },
   { href: 'https://github.com/papi-ux/polaris/discussions', labelKey: 'resource_card.github_discussions' },
-  { href: 'https://github.com/papi-ux/polaris/wiki', labelKey: 'resource_card.github_wiki' },
-  { href: 'https://github.com/papi-ux/polaris/wiki/Stuttering-Clinic', labelKey: 'resource_card.github_stuttering_clinic' }
+  { href: 'https://github.com/ClassicOldSong/Apollo/wiki', labelKey: 'resource_card.github_wiki' },
+  { href: 'https://github.com/ClassicOldSong/Apollo/wiki/Stuttering-Clinic', labelKey: 'resource_card.github_stuttering_clinic' }
 ]
 
 // Sponsorship is deliberately not a primary resource button. It belongs in the
